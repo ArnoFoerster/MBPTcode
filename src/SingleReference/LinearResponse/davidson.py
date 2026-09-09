@@ -61,6 +61,7 @@ from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
                                               separable_factors,
                                                solve_qp_diagonal_space_time)
+from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 
@@ -427,7 +428,9 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     f_osc, trans_dip = oscillator_strengths(mf, mol, nocc, omega, X, Y)
     info = dict(eps=eps, eps_mf=eps_mf, factors=factors, W_aux=W_aux,
                 min_eig_amb=amb, oscillator_strength=f_osc,
-                transition_dipole=trans_dip, timings=t, stats=stats)
+                transition_dipole=trans_dip,
+                exciton_descriptors=exciton_descriptors(mf, mol, nocc, X, Y),
+                timings=t, stats=stats)
     return omega, X, Y, info
 
 
