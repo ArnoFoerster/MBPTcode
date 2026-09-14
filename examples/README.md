@@ -17,6 +17,7 @@ All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
 | `11_bse_davidson_vs_dense.py` | BSE two ways (Davidson, dense) on three integral flavours (ISDF, DF, full ERIs) |
 | `12_evgw.py` | the eigenvalue-self-consistent loop: cycle 1 is G0W0, the fixed point sits above it |
 | `13_solvated_gw_bse.py` | GW and BSE in a continuum, with the ground-state and response halves separated |
+| `12_cp2k_aug_molopt.py` | CP2K's aug-SZV-MOLOPT-ae basis with its RI tier, read from CP2K at run time; G0W0 and dense BSE |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE
@@ -74,6 +75,8 @@ only valid for the bare amplitude.
 11  BSE@G0W0 = 8.492, 10.540, 10.966, 13.024 eV  (cc-pVTZ, cc-pVTZ-JKFIT)
     all five routes within 2 meV: Davidson == dense exactly, ISDF-DF 1 meV,
     DF-full 2 meV
+12  G0W0 HOMO = -9.754 eV   LUMO = 1.659 eV   BSE@G0W0 = 2.733, 6.158, 7.199 eV
+    (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4)
 ```
 
 ## Large systems
