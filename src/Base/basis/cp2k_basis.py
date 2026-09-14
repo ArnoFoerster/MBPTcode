@@ -8,13 +8,14 @@ copies nothing: it downloads the two files from the CP2K repository at a pinned
 commit into a per-user cache (or reads a local CP2K checkout), verifies them, and
 prints a notice naming the source, its license and the paper to cite on first use.
 
-    basis = load_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
-    aux = load_ri_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'], max_error=1e-4)
+    basis, aux = register('aug-SZV-MOLOPT-ae', max_error=1e-4)
     mol = gto.M(atom=..., basis=basis)
     mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux)
 
-Always pass the auxiliary basis explicitly: the ISDF and DF defaults in this tree
-form `str(mol.basis) + '-ri'`, which is meaningless for a dict.
+`register` makes the sets PySCF basis names, so the defaults of this tree that
+form `str(mol.basis) + '-ri'` and the name-keyed ISDF radii cache work as for any
+named basis. `load_basis` and `load_ri_basis` return the same sets as dicts; a
+dict has no name, so pass its auxiliary basis explicitly.
 
 `pyscf.gto.basis.parse_cp2k.parse` reads the block format; its `load` and
 `search_seg` split a file on `# BASIS SET` delimiters, which these files do not
@@ -49,6 +50,7 @@ import urllib.error
 import urllib.request
 import warnings
 
+from pyscf.gto import basis as pyscf_basis
 from pyscf.gto.basis.parse_cp2k import parse
 
 CP2K_REPO = 'https://github.com/cp2k/cp2k'
@@ -88,6 +90,12 @@ def _notice(kind, path, commit):
           f'we would kindly ask you to cite {CITATION}.')
 
 
+def _cache_dir(commit):
+    root = os.environ.get('MBPT_CP2K_CACHE', os.path.join(os.path.expanduser('~'),
+                                                          '.cache', 'mbptcode', 'cp2k'))
+    return os.path.join(root, commit)
+
+
 def data_file(kind, commit=CP2K_COMMIT, download=True):
     """Path of the orbital or RI file: MBPT_CP2K_DATA, the cache, or a download.
 
@@ -107,9 +115,7 @@ def data_file(kind, commit=CP2K_COMMIT, download=True):
             raise FileNotFoundError(f'MBPT_CP2K_DATA={local} has no {FILES[kind]}')
         _notice(kind, path, None)
         return path
-    root = os.environ.get('MBPT_CP2K_CACHE', os.path.join(os.path.expanduser('~'),
-                                                          '.cache', 'mbptcode', 'cp2k'))
-    path = os.path.join(root, commit, FILES[kind])
+    path = os.path.join(_cache_dir(commit), FILES[kind])
     if not os.path.exists(path):
         url = f'https://raw.githubusercontent.com/cp2k/cp2k/{commit}/data/{FILES[kind]}'
         if not download:
@@ -279,6 +285,73 @@ def load_ri_basis(basis_name, elements, max_error=None, min_lmax=None, path=None
     return {el: parse('\n'.join(basis_block(
                 pick_ri_tier(basis_name, el, max_error, min_lmax, path)[0], el, path)))
             for el in elements}
+
+
+def _write_nwchem(path, table):
+    """{element: PySCF internal basis} as NWChem text PySCF reads back bit for bit."""
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as fh:
+        for el, shells in table.items():
+            fh.write(f'#BASIS SET: {el}\n')
+            for shell in shells:
+                fh.write(f'{el}    {SPDF[shell[0]].upper()}\n')
+                for row in shell[1:]:
+                    fh.write('  '.join(repr(float(x)) for x in row) + '\n')
+    os.replace(tmp, path)
+
+
+def register(name, max_error=None):
+    """Make an orbital set and its RI tiers PySCF basis names, for this process.
+
+    Both sets are written, for every element CP2K has them for, into the cache
+    beside the CP2K files, and added to `pyscf.gto.basis.USER_BASIS_ALIAS`. That
+    table lives in the running process only, so call this once per script before
+    building a Mole. The RI name encodes its tier rule, `<name>-ri` for the
+    tightest tiers and `<name>-ri-<max_error>` for a threshold, so one name means
+    one set in every process: the ISDF radii cache is keyed on it. `min_lmax` has
+    no name; use the dict of `load_ri_basis` for it.
+
+    Parameters
+    ----------
+    name : str
+        One of `BASIS_NAMES`.
+    max_error : float, optional
+        Delta-I threshold as in `pick_ri_tier`; None, the tightest tiers.
+
+    Returns
+    -------
+    (basis_name, ri_name) : the names to pass as `basis=` and `auxbasis=`. The RI
+        name covers the elements that have RI tiers for `name`.
+    """
+    if name not in BASIS_NAMES:
+        raise ValueError(f'{name} is not one of {BASIS_NAMES}')
+    if max_error is not None and not 0 < max_error < 1:
+        raise ValueError(f'max_error={max_error} is not a Delta-I threshold in (0, 1)')
+    # repr is exact, so thresholds that select different tiers never share a name
+    ri_name = f'{name}-ri' if max_error is None else f'{name}-ri-{float(max_error)!r}'
+    orbital, ri = data_file('orbital'), data_file('ri')
+    # Other data would put a second set under the same name, and a cached ISDF
+    # grid keyed on that name would silently serve the wrong one.
+    for kind, path in (('orbital', orbital), ('ri', ri)):
+        if provenance(kind, path)['commit'] is None:
+            raise ValueError(f'{path} is not the file of the pinned CP2K commit '
+                             f'{CP2K_COMMIT[:10]}; names are reserved for that data, '
+                             'use load_basis and load_ri_basis instead')
+    elements = sorted({el for el, names, _ in _blocks(orbital) if name in names})
+    sets = {name: load_basis(name, elements, orbital),
+            ri_name: load_ri_basis(name, [el for el in elements
+                                          if ri_tiers(name, el, ri)], max_error,
+                                   path=ri)}
+    out = os.path.join(_cache_dir(CP2K_COMMIT), 'pyscf')
+    os.makedirs(out, exist_ok=True)
+    for alias, table in sets.items():
+        key = pyscf_basis._format_basis_name(alias)
+        if key in pyscf_basis.ALIAS or key in pyscf_basis.GTH_ALIAS:
+            raise ValueError(f'{alias} collides with a basis name PySCF ships')
+        path = os.path.join(out, f'{alias}.dat')
+        _write_nwchem(path, table)
+        pyscf_basis.USER_BASIS_ALIAS[key] = path
+    return name, ri_name
 
 
 def available(element, orbital_path=None, ri_path=None):

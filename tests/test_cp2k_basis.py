@@ -7,8 +7,12 @@ Counts: sum over sets and l of contractions times 2l + 1, and the header's own
 recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
 """
 import os
+import shutil
 import sys
+import tempfile
 import warnings
+
+import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -121,6 +125,47 @@ if __name__ == '__main__':
     except ValueError:
         raised = True
     all_ok &= check(raised, 'an element without a block raises ValueError')
+
+    # A registered name must build exactly what the dict builds, element by element.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')                # S has no tier within 1e-4
+        basis_name, ri_name = cb.register('aug-SZV-MOLOPT-ae')
+        _, ri_loose = cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
+        same, nel = True, 0
+        for el in elements_in(ri):
+            spin = gto.charge(el) % 2
+            for name, bas in (
+                    (basis_name, cb.load_basis(basis_name, [el], orbital)[el]),
+                    (ri_name, cb.load_ri_basis(basis_name, [el], path=ri)[el]),
+                    (ri_loose, cb.load_ri_basis(basis_name, [el], 1e-4, path=ri)[el])):
+                a = gto.M(atom=f'{el} 0 0 0', basis=name, spin=spin, verbose=0)
+                b = gto.M(atom=f'{el} 0 0 0', basis={el: bas}, spin=spin, verbose=0)
+                same &= (np.array_equal(a._env, b._env)
+                         and np.array_equal(a._bas, b._bas))
+            nel += 1
+    all_ok &= check(same and nel == 17,
+                    'registered names build the same basis as the dicts, bit for bit',
+                    f'{nel} elements, 3 names')
+    all_ok &= check(ri_name == 'aug-SZV-MOLOPT-ae-ri'
+                    and ri_loose == 'aug-SZV-MOLOPT-ae-ri-0.0001',
+                    'the RI name encodes its tier rule', f'{ri_name}, {ri_loose}')
+    saved = os.environ.get('MBPT_CP2K_DATA')
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(orbital, tmp)
+        with open(ri) as src, open(os.path.join(tmp, cb.FILES['ri']), 'w') as dst:
+            dst.write(src.read() + '# not the pinned file\n')
+        os.environ['MBPT_CP2K_DATA'] = tmp
+        try:
+            cb.register('aug-SZV-MOLOPT-ae')
+            refused = False
+        except ValueError:
+            refused = True
+        finally:
+            if saved is None:
+                del os.environ['MBPT_CP2K_DATA']
+            else:
+                os.environ['MBPT_CP2K_DATA'] = saved
+    all_ok &= check(refused, 'register refuses data other than the pinned commit')
     prov = cb.provenance('orbital', orbital)
     local = bool(os.environ.get('MBPT_CP2K_DATA'))
     all_ok &= check(prov['commit'] is not None or local,
