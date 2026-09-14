@@ -76,7 +76,8 @@ only valid for the bare amplitude.
     all five routes within 2 meV: Davidson == dense exactly, ISDF-DF 1 meV,
     DF-full 2 meV
 12  G0W0 HOMO = -9.754 eV   LUMO = 1.659 eV   BSE@G0W0 = 2.733, 6.158, 7.199 eV
-    (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4)
+    (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4;
+    that tier is 27 meV from the exact tensor on the singlets, the tightest 1.6 meV)
 ```
 
 ## Large systems

@@ -24,8 +24,14 @@ A header is `<El> <name> [<alias>]` and the wanted name must be one of its
 tokens: H's `aug-SZV-MOLOPT-ae` header also carries `aug-SZV-MOLOPT-ae-mini`. An
 RI header is `RI_<basis>_N_RI_<nfunc>_s_p_d_f_g_h_i_<n_s>_.._<n_i>_error_<err>`,
 where `err` is the tier's relative Delta-I of the paper's eq 29, an atomic RI-MP2
-amplitude error: it predicts the (ia|jb) class of integrals, not the (ij|ab) class
-the BSE direct term and the GW self-energy contract.
+amplitude error. It predicts the (ia|jb) class of integrals; the (ij|ab) class
+that the BSE direct term and the GW self-energy contract is governed by the tier's
+angular momenta instead: a product of two orbital functions needs auxiliary
+functions up to twice the orbital l_max. Measured on formaldehyde against the
+exact four-center tensor, the Delta-I 1e-4 tiers (no g on C, N, O) leave 27 meV on
+the lowest BSE singlets and 6 meV on HOMO and LUMO; the tightest tiers, with g on
+C and O, leave 1.6 meV and under 1 meV. `min_lmax` in `pick_ri_tier` asks for
+that completeness explicitly.
 
 Command line: `python -m src.Base.cp2k_basis scout [ELEMENT ...]` lists, per
 element, the orbital sets with their function counts and the RI tiers with size
@@ -40,6 +46,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import warnings
 
 from pyscf.gto.basis.parse_cp2k import parse
 
@@ -228,23 +235,45 @@ def ri_tiers(basis_name, element, path=None):
     return sorted(tiers, key=lambda t: -t[2])
 
 
-def pick_ri_tier(basis_name, element, max_error=1e-4, path=None):
-    """The smallest tier whose Delta-I is at most `max_error`, else the tightest one.
+def _lmax(pat):
+    return max(SPDF.index(c) for c in pat if c in SPDF)
 
-    1e-4 is the paper's recommendation (Section 3.2); `None` asks for the tightest.
+
+def pick_ri_tier(basis_name, element, max_error=1e-4, min_lmax=None, path=None):
+    """The smallest tier within `max_error` and with l_max >= `min_lmax`.
+
+    1e-4 is the paper's recommendation (Section 3.2) and an MP2 criterion; see the
+    module docstring for what it leaves on BSE energies. `min_lmax` adds the
+    angular condition, twice the orbital l_max for a complete product space.
+    `max_error=None` asks for the tightest tier. When no tier satisfies both
+    conditions the tightest one is returned with a warning.
+
+    Returns
+    -------
+    (ri_name, nfunc, delta_i, pattern)
     """
     tiers = ri_tiers(basis_name, element, path)
     if not tiers:
         raise ValueError(f'no RI tier for {basis_name}, {element} in {path}')
-    within = [t for t in tiers if max_error is not None and t[2] <= max_error]
-    return min(within, key=lambda t: t[1]) if within else min(tiers, key=lambda t: t[2])
+    within = [t for t in tiers
+              if (max_error is None or t[2] <= max_error)
+              and (min_lmax is None or _lmax(t[3]) >= min_lmax)]
+    if max_error is None and within:
+        return min(within, key=lambda t: t[2])
+    if within:
+        return min(within, key=lambda t: t[1])
+    tightest = min(tiers, key=lambda t: t[2])
+    warnings.warn(f'no RI tier for {basis_name} {element} has Delta-I <= {max_error} '
+                  f'and l_max >= {min_lmax}; using the tightest, {tightest[0]}',
+                  stacklevel=2)
+    return tightest
 
 
-def load_ri_basis(basis_name, elements, max_error=1e-4, path=None):
+def load_ri_basis(basis_name, elements, max_error=1e-4, min_lmax=None, path=None):
     """{element: PySCF internal basis}, one RI tier per element; see `pick_ri_tier`."""
     path = path or data_file('ri')
     return {el: parse('\n'.join(basis_block(
-                pick_ri_tier(basis_name, el, max_error, path)[0], el, path)))
+                pick_ri_tier(basis_name, el, max_error, min_lmax, path)[0], el, path)))
             for el in elements}
 
 

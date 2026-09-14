@@ -7,6 +7,7 @@ recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
 """
 import os
 import sys
+import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -78,10 +79,20 @@ if __name__ == '__main__':
                 ntiers += 1
     all_ok &= check(bad == 0, 'every RI tier builds with the count in its name',
                     f'{ntiers} tiers, {bad} mismatches')
-    tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', 1e-4, ri)
+    tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', 1e-4, path=ri)
     all_ok &= check(tier[1] == 48 and tier[2] <= 1e-4,
                     'C aug-SZV-MOLOPT-ae tier at Delta-I 1e-4 is the 48-function set',
                     f'{tier[1]} functions, Delta-I {tier[2]:.1e}')
+    tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'H', 1e-4, min_lmax=2, path=ri)
+    all_ok &= check(tier[1] == 20 and 'd' in tier[3],
+                    'H tier at Delta-I 1e-4 with l_max >= 2 is the 20-function set',
+                    f'{tier[1]} functions, {tier[3]}')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'N', 1e-4, min_lmax=4, path=ri)
+    all_ok &= check(tier[1] == 78 and len(caught) == 1,
+                    'N has no g tier: the tightest one is returned with a warning',
+                    f'{tier[1]} functions, {len(caught)} warning')
     prov = cb.provenance('orbital', orbital)
     all_ok &= check(prov['commit'] is not None or os.environ.get('MBPT_CP2K_DATA'),
                     'orbital file matches the pinned CP2K commit', prov['sha256'][:12])
