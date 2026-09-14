@@ -73,10 +73,10 @@ def _notice(kind, path, commit):
     if path in _noticed:
         return
     _noticed.add(path)
-    print(f'NOTE: basis set data read from CP2K: data/{FILES[kind]} at {CP2K_REPO} '
-          f'commit {commit[:10]}, distributed by CP2K under GPL-2.0-or-later; '
-          f'the sets are by {CITATION}. MBPTcode does not redistribute this file '
-          f'(local copy: {path}).')
+    source = f'commit {commit[:10]}' if commit else 'a local checkout'
+    print(f'NOTE: basis set data read from CP2K: data/{FILES[kind]} at {CP2K_REPO}, '
+          f'{source}, distributed by CP2K under GPL-2.0-or-later; the sets are by '
+          f'{CITATION}. MBPTcode does not redistribute this file (local copy: {path}).')
 
 
 def data_file(kind, commit=CP2K_COMMIT, download=True):
@@ -96,7 +96,7 @@ def data_file(kind, commit=CP2K_COMMIT, download=True):
         path = os.path.join(local, FILES[kind])
         if not os.path.exists(path):
             raise FileNotFoundError(f'MBPT_CP2K_DATA={local} has no {FILES[kind]}')
-        _notice(kind, path, 'of the local checkout')
+        _notice(kind, path, None)
         return path
     root = os.environ.get('MBPT_CP2K_CACHE', os.path.join(os.path.expanduser('~'),
                                                           '.cache', 'mbptcode', 'cp2k'))
