@@ -241,14 +241,15 @@ def _lmax(pat):
     return max(SPDF.index(c) for c in pat if c in SPDF)
 
 
-def pick_ri_tier(basis_name, element, max_error=1e-4, min_lmax=None, path=None):
+def pick_ri_tier(basis_name, element, max_error=None, min_lmax=None, path=None):
     """The smallest tier within `max_error` and with l_max >= `min_lmax`.
 
-    1e-4 is the paper's recommendation (Section 3.2) and an MP2 criterion; see the
-    module docstring for what it leaves on BSE energies. `min_lmax` adds the
-    angular condition, twice the orbital l_max for a complete product space.
-    `max_error=None` asks for the tightest tier. When no tier satisfies both
-    conditions the tightest one is returned with a warning.
+    The default, `max_error=None`, is the tightest tier: converged, and the most
+    expensive. 1e-4 is the paper's recommendation (Section 3.2) and an MP2
+    criterion; see the module docstring for what it leaves on BSE energies.
+    `min_lmax` adds the angular condition, twice the orbital l_max for a complete
+    product space. When no tier satisfies both conditions the tightest one is
+    returned with a warning.
 
     Returns
     -------
@@ -265,13 +266,14 @@ def pick_ri_tier(basis_name, element, max_error=1e-4, min_lmax=None, path=None):
     if within:
         return min(within, key=lambda t: t[1])
     tightest = min(tiers, key=lambda t: t[2])
-    warnings.warn(f'no RI tier for {basis_name} {element} has Delta-I <= {max_error} '
-                  f'and l_max >= {min_lmax}; using the tightest, {tightest[0]}',
-                  stacklevel=2)
+    wanted = [f'Delta-I <= {max_error}'] if max_error is not None else []
+    wanted += [f'l_max >= {min_lmax}'] if min_lmax is not None else []
+    warnings.warn(f"no RI tier for {basis_name} {element} has {' and '.join(wanted)}; "
+                  f'using the tightest, {tightest[0]}', stacklevel=2)
     return tightest
 
 
-def load_ri_basis(basis_name, elements, max_error=1e-4, min_lmax=None, path=None):
+def load_ri_basis(basis_name, elements, max_error=None, min_lmax=None, path=None):
     """{element: PySCF internal basis}, one RI tier per element; see `pick_ri_tier`."""
     path = path or data_file('ri')
     return {el: parse('\n'.join(basis_block(

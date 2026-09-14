@@ -67,12 +67,16 @@ size and Delta-I; `available(element)` returns the same as a dict.
 
 ## Choosing the RI tier
 
+The tier is your choice, and it is worth making deliberately. Without one you get
+the tightest tier of every element: converged, but the auxiliary set can be twice
+the size it needs to be, and every density-fitted and ISDF step pays for that.
+
 A tier's name carries its Delta-I, the atomic RI-MP2 error of eq 29 in the paper.
 
 | call | tier per element |
 |---|---|
-| `load_ri_basis(name, elements)` | the smallest with Delta-I <= 1e-4, the paper's recommendation |
-| `max_error=None` | the tightest |
+| `load_ri_basis(name, elements)` | the tightest |
+| `max_error=1e-4` | the smallest with Delta-I <= 1e-4, the paper's recommendation |
 | `min_lmax=L` | also requires auxiliary l_max >= L; if no tier qualifies, the tightest, with a warning |
 
 `pick_ri_tier` takes the same arguments for one element and returns the tier's
@@ -80,7 +84,8 @@ name, size, Delta-I and pattern.
 
 Delta-I is an MP2 criterion: it measures the (ia|jb) integrals. The BSE direct
 term and the GW self-energy contract (ij|ab), and a product of two orbital
-functions needs auxiliary functions up to twice the orbital l_max. Measured on
+functions needs auxiliary functions up to twice the orbital l_max. So a tier
+within 1e-4 can still miss the angular momenta these routes need. Measured on
 formaldehyde in `aug-SZV-MOLOPT-ae`, density fitting against the exact four-center
 tensor:
 
@@ -88,6 +93,10 @@ tensor:
 |---|---|---|---|
 | Delta-I 1e-4 (no d on H, no g on O) | 116 | up to 27 meV | up to 6.2 meV |
 | tightest | 226 | up to 1.6 meV | under 1 meV |
+
+Check the tier for your own system the same way before a production run: one
+calculation against the exact tensor, or against the tightest tier where the
+exact tensor does not fit, on the quantity you report.
 
 ## License
 

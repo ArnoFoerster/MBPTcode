@@ -100,6 +100,11 @@ if __name__ == '__main__':
     all_ok &= check(tier[1] == 48 and tier[2] <= 1e-4,
                     'C aug-SZV-MOLOPT-ae tier at Delta-I 1e-4 is the 48-function set',
                     f'{tier[1]} functions, Delta-I {tier[2]:.1e}')
+    tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'O', path=ri)
+    tightest = min(cb.ri_tiers('aug-SZV-MOLOPT-ae', 'O', ri), key=lambda t: t[2])
+    all_ok &= check(tier == tightest and tier[1] == 108,
+                    'O aug-SZV-MOLOPT-ae default tier is the tightest, 108 functions',
+                    f'{tier[1]} functions, Delta-I {tier[2]:.1e}')
     tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'H', 1e-4, min_lmax=2, path=ri)
     all_ok &= check(tier[1] == 20 and 'd' in tier[3],
                     'H tier at Delta-I 1e-4 with l_max >= 2 is the 20-function set',
