@@ -1,7 +1,7 @@
 """cp2k_basis: every aug-MOLOPT block PySCF builds has the count its header implies.
 
-Reads the CP2K files through src.Base.cp2k_basis (MBPT_CP2K_DATA, the cache, or a
-download); without any of these it prints SKIPPED and exits 0 with no verdict.
+Reads the CP2K files through src.Base.cp2k_basis from MBPT_CP2K_DATA or the cache,
+never downloading; without either it prints SKIPPED and exits 0 with no verdict.
 Counts: sum over sets and l of contractions times 2l + 1, and the header's own
 recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
 """
@@ -30,9 +30,11 @@ def nao(element, basis):
 
 if __name__ == '__main__':
     try:
-        orbital, ri = cb.data_file('orbital'), cb.data_file('ri')
+        orbital = cb.data_file('orbital', download=False)
+        ri = cb.data_file('ri', download=False)
     except (OSError, ValueError) as exc:
-        print(f'SKIPPED: no CP2K data ({exc}); set MBPT_CP2K_DATA or allow a download')
+        print(f'SKIPPED: no CP2K data ({exc}); set MBPT_CP2K_DATA or run '
+              '"python -m src.Base.cp2k_basis fetch" once')
         sys.exit(0)
     elements = ['H', 'C', 'N', 'O']
     all_ok = True

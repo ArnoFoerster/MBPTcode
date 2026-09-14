@@ -38,6 +38,7 @@ import hashlib
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 from pyscf.gto.basis.parse_cp2k import parse
@@ -78,7 +79,7 @@ def _notice(kind, path, commit):
           f'(local copy: {path}).')
 
 
-def data_file(kind, commit=CP2K_COMMIT):
+def data_file(kind, commit=CP2K_COMMIT, download=True):
     """Path of the orbital or RI file: MBPT_CP2K_DATA, the cache, or a download.
 
     Parameters
@@ -87,6 +88,8 @@ def data_file(kind, commit=CP2K_COMMIT):
     commit : str
         CP2K commit to fetch from. The pinned default is verified by sha256; any
         other commit is read unverified and its digest is left to `provenance`.
+    download : bool
+        False raises FileNotFoundError instead of fetching, for offline use.
     """
     local = os.environ.get('MBPT_CP2K_DATA')
     if local:
@@ -100,10 +103,19 @@ def data_file(kind, commit=CP2K_COMMIT):
     path = os.path.join(root, commit, FILES[kind])
     if not os.path.exists(path):
         url = f'https://raw.githubusercontent.com/cp2k/cp2k/{commit}/data/{FILES[kind]}'
+        if not download:
+            raise FileNotFoundError(f'{path} is not cached and download=False')
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f'{path}.{os.getpid()}.tmp'
-        with urllib.request.urlopen(url, timeout=60) as resp, open(tmp, 'wb') as out:
-            out.write(resp.read())
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                with open(tmp, 'wb') as out:
+                    out.write(resp.read())
+        except (urllib.error.URLError, OSError) as exc:
+            raise OSError(f'could not download {url} ({exc}); point MBPT_CP2K_DATA '
+                          'at a CP2K data directory, or run "python -m '
+                          'src.Base.cp2k_basis fetch" where the network is '
+                          'reachable') from exc
         os.replace(tmp, path)
     if commit == CP2K_COMMIT and _sha256(path) != SHA256[kind]:
         raise ValueError(f'{path} does not match the pinned CP2K commit {commit[:10]}; '
