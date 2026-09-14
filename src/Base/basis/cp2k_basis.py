@@ -338,10 +338,16 @@ def register(name, max_error=None):
                              f'{CP2K_COMMIT[:10]}; names are reserved for that data, '
                              'use load_basis and load_ri_basis instead')
     elements = sorted({el for el, names, _ in _blocks(orbital) if name in names})
-    sets = {name: load_basis(name, elements, orbital),
-            ri_name: load_ri_basis(name, [el for el in elements
-                                          if ri_tiers(name, el, ri)], max_error,
-                                   path=ri)}
+    ri_elements = [el for el in elements if ri_tiers(name, el, ri)]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')        # one warning below, not one per element
+        sets = {name: load_basis(name, elements, orbital),
+                ri_name: load_ri_basis(name, ri_elements, max_error, path=ri)}
+        loose = [el for el in ri_elements if max_error is not None
+                 and pick_ri_tier(name, el, max_error, path=ri)[2] > max_error]
+    if loose:
+        warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}, '
+                      'which get their tightest tier', stacklevel=2)
     out = os.path.join(_cache_dir(CP2K_COMMIT), 'pyscf')
     os.makedirs(out, exist_ok=True)
     for alias, table in sets.items():

@@ -149,6 +149,12 @@ if __name__ == '__main__':
     all_ok &= check(ri_name == 'aug-SZV-MOLOPT-ae-ri'
                     and ri_loose == 'aug-SZV-MOLOPT-ae-ri-0.0001',
                     'the RI name encodes its tier rule', f'{ri_name}, {ri_loose}')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
+    msg = str(caught[0].message) if caught else 'no warning'
+    all_ok &= check(len(caught) == 1 and 'for S,' in msg,
+                    'register warns once, naming the elements outside max_error', msg)
     saved = os.environ.get('MBPT_CP2K_DATA')
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(orbital, tmp)
