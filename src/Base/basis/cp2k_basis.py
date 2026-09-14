@@ -36,6 +36,7 @@ that completeness explicitly.
 Command line: `python -m src.Base.basis.cp2k_basis scout [ELEMENT ...]` lists,
 per element, the orbital sets with their function counts and the RI tiers with
 size and Delta-I; `fetch` only fills the cache, for a node without network later.
+Usage, sources and the choice of RI tier: README.md beside this file.
 Environment: MBPT_CP2K_DATA, a CP2K `data/` directory to read instead of
 downloading; MBPT_CP2K_CACHE, the cache root (default ~/.cache/mbptcode/cp2k).
 """
