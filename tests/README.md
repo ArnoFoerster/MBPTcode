@@ -22,6 +22,7 @@ optional third-party one.
 | area | tests |
 |---|---|
 | imports, constants, interfaces | `test_imports`, `test_constants_registry`, `test_base` |
+| basis sets read from CP2K | `test_cp2k_basis` |
 | ADC solvers | `test_adc3`, `test_adc3_restricted`, `test_adc2x_df`, `test_adc3_df_memory_fix`, `test_spin_adapt`, `test_screened_adc2x`, `test_downfolded_seeds`, `test_unrestricted_neon`, `test_bn_unrestricted_excitations` |
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |

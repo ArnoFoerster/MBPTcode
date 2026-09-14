@@ -133,6 +133,21 @@ print(f"ADC(3) IP = {-e[0] * 27.2114:.3f} eV   Z = {Z[0]:.3f}")
 See `examples/` for density fitting, Epstein-Nesbet variants, open-shell
 references, several ionization states, and screened singles.
 
+## Basis sets from CP2K
+
+CP2K's aug-MOLOPT families, all-electron bases with tiered RI sets built for GW
+and BSE, are read from CP2K at run time and returned as PySCF basis dicts:
+
+```python
+from src.Base.basis.cp2k_basis import load_basis, load_ri_basis
+
+basis = load_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
+aux = load_ri_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
+```
+
+Pass `aux` explicitly to every route that takes an auxiliary basis. Data sources,
+offline use and the choice of RI tier are in `src/Base/basis/README.md`.
+
 ## Tests
 
 The tests are standalone scripts that print their own verdicts and exit
@@ -154,6 +169,7 @@ src/Base/               PySCF interface, constants, linear algebra
     isdf_jk.py          ISDF Coulomb and exchange for the SCF
     environment.py      what the surroundings do, in one contract
     solvent_screening.py  PCM reaction field
+    basis/cp2k_basis.py CP2K's aug-MOLOPT orbital and RI sets, read at run time
     utils/grids.py      minimax and Gauss-Legendre imaginary-axis grids
     utils/time_frequency.py  one grid object carrying both axes
     utils/matsubara.py  finite-temperature (IR) grids
