@@ -28,8 +28,8 @@ amplitude error. It predicts the (ia|jb) class of integrals; the (ij|ab) class
 that the BSE direct term and the GW self-energy contract is governed by the tier's
 angular momenta instead: a product of two orbital functions needs auxiliary
 functions up to twice the orbital l_max. Measured on formaldehyde against the
-exact four-center tensor, the Delta-I 1e-4 tiers (no g on C, N, O) leave 27 meV on
-the lowest BSE singlets and 6 meV on HOMO and LUMO; the tightest tiers, with g on
+exact four-center tensor, the Delta-I 1e-4 tiers (no d on H, no g on O) leave 27 meV
+on the lowest BSE singlets and 6 meV on HOMO and LUMO; the tightest tiers, with g on
 C and O, leave 1.6 meV and under 1 meV. `min_lmax` in `pick_ri_tier` asks for
 that completeness explicitly.
 
