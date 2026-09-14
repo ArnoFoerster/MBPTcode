@@ -34,6 +34,14 @@ Licensed under the Apache License, Version 2.0.
     Minimax quadrature grid tables derived from the GreenX library, loaded
     by src/Base/utils/grids.py.
 
+  * src/Base/utils/grids.py
+    The table lookup follows GreenX's GX-TimeFrequency/src/minimax_utils.F90:
+    the energy-range column selection of find_erange and the narrow-range
+    stretch of coeffs_and_weights, applied with the sign each axis carries
+    (minimax_omega.F90 divides, minimax_tau.F90 multiplies). Modifications:
+    written as one shared helper serving both axes, and the grids are returned
+    in atomic units rather than accumulated into a quadrature in place.
+
   * src/Base/utils/time_frequency.py
     Python port of the imaginary time <-> imaginary frequency transformation
     weights from GreenX's GX-TimeFrequency/src/minimax_grids.F90, namely the

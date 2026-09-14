@@ -58,11 +58,19 @@ Gauss-Legendre discretization of the kernel and a dense SVD. GreenX, which
 supplies the T = 0 minimax tables this repo already uses, has no
 finite-temperature grids to borrow.
 """
+import warnings
+
 import numpy as np
 from scipy.special import spherical_jn
 
 #: Matsubara statistics -> the zeta in omega_n = (2n + zeta) pi / beta.
 _ZETA = {'fermion': 1, 'boson': 0}
+
+#: Largest design-matrix condition number a Matsubara sampling set may carry
+#: before `default_matsubara_sampling` adds the next basis function's peaks,
+#: and the value past which adding more of them has stopped helping.
+_COND_MAX = 1e6
+_COND_WARN = 1e8
 
 
 def thermal_e_min(beta, gap=0.0, statistics='fermion'):
@@ -308,38 +316,129 @@ class IRBasis:
         edges = np.concatenate([[-1.0], roots, [1.0]])
         return 0.5 * (edges[:-1] + edges[1:])
 
-    def default_matsubara_sampling(self, n_max_factor=4, positive_only=True):
+    @staticmethod
+    def _sampling_part(row):
+        """The non-vanishing part of one uhat_l row, chosen by MEASURED size.
+
+        uhat_l is purely real for even l and purely imaginary for odd l (Li et
+        al. 2020 Sec. II C), so which part carries the function ALTERNATES with
+        l. It is not fixed by the statistics, and reading the other part reads
+        the truncation floor: measured |Re| = 5e-12 .. 7e-6 against
+        |Im| = 0.23 .. 0.47 (and the reverse), so the "sign changes" are then
+        round-off. That is not a small effect -- it puts the sampling points in
+        the far tail where uhat carries nothing, and it took the design matrix
+        to cond 7e7 .. 2e10 in 12 of 24 bases over lambda = 100 .. 1e4,
+        eps = 1e-6 .. 1e-12, for round-trip errors of 1e-8 .. 4e-5 on O(1)
+        coefficients.
+
+        Choosing by magnitude needs no parity rule and so cannot fall out of
+        step with one.
+        """
+        return (row.real if np.abs(row.real).max() > np.abs(row.imag).max()
+                else row.imag)
+
+    def _peaks_per_group(self, n, row):
+        """The n of largest |uhat_l| in each interval between its sign changes.
+
+        Li et al. (2020) Sec. II C: the sign changes of uhat_l partition the
+        Matsubara axis into groups, and the sampling point of each group is the
+        n that MAXIMIZES |uhat_l| there. One point per group, at the peak --
+        not at the zeros (which give near-null rows, cond ~1e13) and not every
+        local maximum on the axis (which sweeps up thousands of far-tail peaks
+        of vanishing magnitude).
+        """
+        part = self._sampling_part(row)
+        groups = np.concatenate([[0], np.cumsum(np.sign(part[:-1])
+                                                != np.sign(part[1:]))])
+        return [int(n[groups == g][np.argmax(np.abs(part[groups == g]))])
+                for g in range(groups[-1] + 1)]
+
+    def sampling_is_determined(self, n, real=True, cond_max=_COND_MAX):
+        """Whether a fit at `n` pins all `size` coefficients: (ok, nrows, cond).
+
+        `real` selects the convention `fit_matsubara` will use, and it sets the
+        ROW COUNT rather than merely the arithmetic. real=True stacks the real
+        and imaginary parts of each equation, so len(n) points give 2 len(n)
+        rows; a complex fit gives len(n).
+
+        Check the row count BEFORE the conditioning, which is the trap here: on
+        a WIDE matrix (fewer rows than `size`) numpy's `cond` is the ratio over
+        only the min(nrows, size) singular values, all of which are healthy, so
+        an underdetermined fit reports cond ~1e1 while returning coefficients
+        wrong by O(1). Measured cond 1.3e1 at lambda = 1600, eps = 1e-12, on a
+        fit whose worst coefficient was out by 0.89.
+        """
+        n = np.atleast_1d(np.asarray(n))
+        nrows = (2 if real else 1) * len(n)
+        if nrows < self.size:
+            return False, nrows, np.inf
+        cond = self.condition_number(n, real=real)
+        return bool(cond < cond_max), nrows, float(cond)
+
+    def default_matsubara_sampling(self, n_max_factor=4, positive_only=True,
+                                   real=None, cond_max=_COND_MAX):
         """Sparse sampling indices n on the Matsubara axis.
 
         One point per sign change of the highest retained uhat_{L-1} (Li,
-        Wallerberger, Chikano, Yeh, Gull, Shinaoka, PRB 101, 035144 (2020)):
-        uhat_{L-1} is purely real for even L-1 and purely imaginary for odd
-        L-1 (their Sec. II C, and reproducible here to ~1e-15), so its "sign"
-        means the sign of whichever part is non-zero.
+        Wallerberger, Chikano, Yeh, Gull, Shinaoka, PRB 101, 035144 (2020)),
+        AUGMENTED with the sign-change groups of uhat_{L-2}, uhat_{L-3}, ...
+        until the set determines all `size` coefficients and is conditioned
+        (`sampling_is_determined`). Both halves of that matter:
 
-        positive_only keeps the n >= 0 half: uhat_l(-n-1) = conj(uhat_l(n)),
-        so for the real-coefficient fit `fit_matsubara` performs by default the
-        negative half is redundant and only doubles the number of self-energy
+        * The paper's own count is MARGINAL BY CONSTRUCTION for a one-sided
+          set. The number of groups of uhat_{L-1} is ~L, `positive_only` keeps
+          half, and a real-coefficient fit needs 2 n_pos >= L -- so the
+          criterion sits exactly on 2 (L/2) = L and tips either way depending
+          on where the crossings land. Measured over lambda = 100 .. 1600 and
+          eps = 1e-6 .. 1e-12, the unaugmented one-sided set left 10 of 20
+          bases underdetermined, returning coefficients wrong by 0.05 .. 0.89
+          with no warning.
+        * The augmentation is not the same thing as more points from the same
+          function. The negative half is genuinely redundant -- uhat_l(-n-1) =
+          conj(uhat_l(n)) makes those rows duplicates up to a sign -- so
+          positive_only=False does NOT repair a real fit: measured rank 54 for
+          both halves where `size` is 57, and an IDENTICAL error of 0.46. Only
+          new n carry new rows, and the next basis function's crossings
+          interleave with this one's, which is why one extra round suffices in
+          almost every case (three at lambda = 1e4, eps = 1e-12).
+
+        positive_only keeps the n >= 0 half, which for the real-coefficient fit
+        `fit_matsubara` performs by default halves the number of self-energy
         evaluations. Pass positive_only=False for the paper's symmetric set,
         which a complex-valued fit needs.
+
+        `real` defaults to `positive_only`, pairing each set with the fit it is
+        meant for -- one-sided with the real stacking, symmetric with the
+        complex solve, which is the pairing the two docstrings describe. Pass
+        it explicitly to size a set for the other convention. The symmetric set
+        is marginal for the COMPLEX fit in exactly the same way (its ~L points
+        against L unknowns), so this augmentation is what makes the
+        `positive_only=False` path sound too: measured 8.6e-01 -> 9.6e-13.
         """
+        real = positive_only if real is None else real
         n_max = int(n_max_factor * max(self.size, 4) + self.lambda_ / (2 * np.pi))
         n = np.arange(-n_max, n_max + 1)
-        top = self.uhat(n)[-1]
-        part = top.imag if _ZETA[self.statistics] else top.real
-        # Ignore crossings in the numerical tail: uhat decays like 1/n, so far
-        # out the sign of `part` is set by truncation noise, and sampling there
-        # would add far-field points that carry nothing.
-        # Li et al. (2020) Sec. II C: the sign changes of uhat_{L-1} partition
-        # the Matsubara axis into groups, and the sampling point of each group
-        # is the n that MAXIMIZES |uhat_{L-1}| there. One point per group, at
-        # the peak -- not at the zeros (which give near-null rows, cond ~1e13)
-        # and not every local maximum on the axis (which sweeps up thousands of
-        # far-tail peaks of vanishing magnitude).
-        groups = np.concatenate([[0], np.cumsum(np.sign(part[:-1]) != np.sign(part[1:]))])
-        picked = np.array([n[groups == g][np.argmax(np.abs(part[groups == g]))]
-                           for g in range(groups[-1] + 1)])
-        return picked[picked >= 0] if positive_only else picked
+        rows = self.uhat(n)
+
+        picked = []
+        for l in range(self.size - 1, -1, -1):
+            picked = sorted(set(picked) | set(self._peaks_per_group(n, rows[l])))
+            out = np.array([p for p in picked if p >= 0]) if positive_only \
+                else np.array(picked)
+            ok, nrows, cond = self.sampling_is_determined(out, real=real,
+                                                          cond_max=cond_max)
+            if ok:
+                return out
+            if cond > _COND_WARN and nrows >= self.size:
+                break
+        warnings.warn(
+            f'Matsubara sampling for lambda = {self.lambda_:.4g}, '
+            f'eps = {self.eps:.0e} did not become determined: {len(out)} '
+            f'points give {nrows} rows for {self.size} coefficients at '
+            f'condition {cond:.2e}. Raise n_max_factor, or loosen eps so the '
+            f'basis stops before the functions the quadrature cannot resolve.',
+            RuntimeWarning, stacklevel=2)
+        return out
 
     def fit_matsubara(self, n, values, rcond=1e-12, real=True):
         """Least-squares IR coefficients from values sampled at Matsubara n.

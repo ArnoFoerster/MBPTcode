@@ -30,10 +30,20 @@ or hole is a fast excitation, so only the solvent's electronic degrees of
 freedom follow it (eps_infinity = n^2 ~ 1.78 for water), not its nuclear
 reorientation (eps ~ 78.36).  `eps` here therefore defaults to n^2 looked up
 from pyscf's SMD solvent table, and a value large enough to be a static
-constant is rejected unless `allow_static_eps=True`.  The paper's
-non-equilibrium recipe is: SCF inside PCM(eps_static) -- pyscf's own
-`solvent.PCM` -- then self-energies with v + vtilde(eps_optical), which is
-what this module supplies.  See examples/09_solvated_gw_adc.py.
+constant is rejected unless `allow_static_eps=True`.
+
+The GROUND STATE is the other half of the same recipe, and it is not optional
+for either kind of excitation: it relaxes inside PCM(eps_static), because the
+solvent nuclei have had time to reorient around a state that is already there.
+`mean_field` applies it, so an environment attached to a calculation carries
+both constants and a caller cannot take one without the other.  Duchemin,
+Guido, Jacquemin and Blase, Chem. Sci. 9, 4430 (2018) split a solvatochromic
+shift into a ground-state part, obtained by freezing the polarization
+(eps_infinity -> 1) while keeping eps_static, and a response part; for a LOCAL
+excitation the ground-state part dominates, +0.232 eV of the +0.252 eV that
+water puts on acrolein's n->pi*.  It is small for a charged excitation instead
+-- water moves its own HOMO by 2.4 meV -- which is why an IP is insensitive to
+it and a neutral excitation is not.
 
 Discretization
 --------------
@@ -54,8 +64,13 @@ import scipy.linalg
 
 from pyscf import df as pyscf_df
 from pyscf import gto
+from pyscf import solvent as pyscf_solvent
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
+
+from src.Base.constants import ISDF_TILE_GB
+from src.Base.environment import attach_environment, environment_of
+from src.Base.separable_ri import auxmol_key
 
 # n^2 below this is not a plausible optical dielectric constant for a
 # condensed phase; above it the caller almost certainly passed a static eps by
@@ -120,38 +135,57 @@ class SolventScreening:
       * `whitened_transform` -- the (naux, naux) matrix T with
                             B -> T B turning a Coulomb-metric RI factor into
                             one that reproduces (pq|v + vtilde|rs), for the DF
-                            route.
+                            route;
+      * `aux_kernel`     -- vtilde_PQ itself, which dresses the metric of a
+                            separable factorization.
 
-    Both come from the same surface response, so the two routes agree to the
-    RI error of the underlying B (tests/test_solvent_screening.py pins this).
+    All come from the same surface response, so the routes agree to the RI
+    error of the underlying B (tests/test_solvent_screening.py pins this). The
+    class satisfies `src.Base.environment.Environment`: `for_geometry` rebuilds
+    the cavity around displaced atoms and `static_self_energy` is the static
+    COHSEX operator of `cohsex_correction`.
     """
 
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
                  lebedev_order=29, vdw_scale=1.2, r_probe=0.0,
-                 radii_table=None, allow_static_eps=False, static_cohsex=True):
+                 radii_table=None, allow_static_eps=False, eps_static=None):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
         pyscf's SMD table, whose refractive index sets eps = n^2), not both.
         method/lebedev_order/vdw_scale/r_probe/radii_table are handed straight
         to pyscf's PCM and carry its meanings and defaults.
 
-        static_cohsex: also apply the first-order reaction-field operator
-        `cohsex_correction` wherever a consumer builds a static self-energy.
-        On by default -- see that method for why the v -> v + vtilde
-        substitution alone loses the polarization energy. Set False only to
-        study the substitution in isolation.
+        eps_static: the constant the GROUND STATE relaxes in, which `mean_field`
+        puts the SCF inside. A solvent name supplies it; an explicit optical eps
+        needs it explicitly, and without one the ground state stays bare -- the
+        frozen-polarization limit rather than a solvated calculation.
+
+        THE STATIC ONE-BODY TERM IS NOT OPTIONAL. A continuum acts through two
+        channels -- the reaction field of the transition density, which reaches
+        a response kernel through the dressed metric, and the reaction field of
+        the density DIFFERENCE, which shifts the one-body energies -- and
+        neither is meaningful alone: the first misses charge transfer entirely,
+        the second misses a bright local excitation. So there is no switch.
         """
         if hasattr(mol, 'lattice_vectors'):
             raise NotImplementedError(
                 "PCM screening is molecular only -- a periodic Cell has no "
                 "cavity to carve.")
-        eps, eps_static = resolve_optical_eps(eps, solvent, allow_static_eps)
+        eps, named_static = resolve_optical_eps(eps, solvent, allow_static_eps)
+        if eps_static is None:
+            eps_static = named_static
+        elif eps_static < eps:
+            raise ValueError(
+                f"eps_static = {eps_static} below the optical eps = {eps}: the "
+                f"static constant contains the solvent's nuclear reorientation "
+                f"on top of its electronic response and cannot be the smaller.")
 
         self.mol = mol
         self.eps = eps
         self.eps_static = eps_static
         self.solvent = solvent
         self.method = method
-        self.static_cohsex = static_cohsex
+        self._cavity = dict(lebedev_order=lebedev_order, vdw_scale=vdw_scale,
+                            r_probe=r_probe, radii_table=radii_table)
 
         self._pcm = pyscf_pcm.PCM(mol)
         self._pcm.eps = eps
@@ -190,30 +224,73 @@ class SolventScreening:
             self._response = 0.5 * (KiR + KiR.T)
         return self._response
 
-    def _fakemol(self):
+    def _fakemol(self, grids=None):
         """Gaussian-smeared surface point charges -- the same regularized
         charges pyscf's PCM uses in _get_v/_get_vmat, so our grid potentials
-        and its K/R matrices refer to one and the same discretization."""
+        and its K/R matrices refer to one and the same discretization.
+
+        `grids` restricts it to a slice of the surface: each grid point is one
+        s-function, so slicing the points slices the third index of every
+        potential below exactly.
+        """
         surface = self._pcm.surface
-        return gto.fakemol_for_charges(surface['grid_coords'],
-                                       expnt=surface['charge_exp'] ** 2)
+        crd, expnt = surface['grid_coords'], surface['charge_exp']
+        if grids is not None:
+            crd, expnt = crd[grids], expnt[grids]
+        return gto.fakemol_for_charges(crd, expnt=expnt ** 2)
 
     # ---- grid potentials of the source distributions ----------------------
 
-    def ao_grid_potential(self, mol):
-        """v_k[phi_mu phi_nu], shape (nao, nao, ngrids). Cached: this is the
-        one genuinely expensive integral in the module."""
+    def grid_blocks(self, nbasis, live=3, budget_gb=ISDF_TILE_GB):
+        """Slices of the surface grid whose (nbasis, nbasis, nk) potentials fit.
+
+        The grid potential is the one object in this module that scales as
+        nao^2 ngrids -- ~10 GB at 100 atoms in a double-zeta basis -- and the
+        COHSEX correction wants three of them at once. `live` is how many are
+        held per block.
+        """
+        per = 8.0 * nbasis * nbasis * max(live, 1)
+        nk = max(1, int(budget_gb * 1024 ** 3 / per))
+        return [(k0, min(k0 + nk, self.ngrids))
+                for k0 in range(0, self.ngrids, nk)]
+
+    def ao_grid_potential(self, mol, grids=None):
+        """v_k[phi_mu phi_nu], shape (nao, nao, ngrids).
+
+        The WHOLE grid is cached: this is the one genuinely expensive integral
+        in the module. `grids` asks for one slice of it instead, which is what
+        a streamed consumer wants -- a slice of the cache when the whole thing
+        already exists, and otherwise the integrals of that slice alone, so the
+        dense array is never built for a caller that does not need it.
+        """
+        if grids is not None:
+            if self._v_ao is not None:
+                return self._v_ao[:, :, grids]
+            self._check_mol(mol)
+            return pyscf_df.incore.aux_e2(mol, self._fakemol(grids),
+                                          intor='int3c2e', aosym='s1')
         if self._v_ao is None:
             self._check_mol(mol)
             self._v_ao = pyscf_df.incore.aux_e2(
                 mol, self._fakemol(), intor='int3c2e', aosym='s1')
         return self._v_ao
 
-    def mo_grid_potential(self, mol, mo_coeff):
-        """v_k[phi_p phi_q], shape (nmo, nmo, ngrids)."""
-        v_ao = self.ao_grid_potential(mol)
-        half = np.tensordot(mo_coeff, v_ao, axes=(0, 0))        # (p, nu, k)
-        return np.tensordot(mo_coeff, half, axes=(0, 1)).transpose(1, 0, 2)
+    def mo_grid_potential(self, mol, mo_coeff, budget_gb=ISDF_TILE_GB):
+        """v_k[phi_p phi_q], shape (nmo, nmo, ngrids).
+
+        Transformed grid block by grid block, so the AO potential -- the same
+        size, and a second copy of it -- never has to exist beside the answer.
+        """
+        mo_coeff = np.asarray(mo_coeff, float)
+        nmo = mo_coeff.shape[1]
+        out = np.empty((nmo, nmo, self.ngrids))
+        for k0, k1 in self.grid_blocks(max(nmo, mo_coeff.shape[0]),
+                                       budget_gb=budget_gb):
+            v_ao = self.ao_grid_potential(mol, grids=slice(k0, k1))
+            half = np.tensordot(mo_coeff, v_ao, axes=(0, 0))    # (p, nu, k)
+            out[:, :, k0:k1] = np.tensordot(mo_coeff, half,
+                                            axes=(0, 1)).transpose(1, 0, 2)
+        return out
 
     def aux_grid_potential(self, auxmol):
         """v_k[chi_P] for auxiliary basis functions, shape (naux, ngrids) --
@@ -243,7 +320,8 @@ class SolventScreening:
         screened = v_ao.reshape(-1, ng) @ self.response_matrix()
         return (screened @ v_ao.reshape(-1, ng).T).reshape(nao, nao, nao, nao)
 
-    def cohsex_correction(self, mol, mo_coeff, nocc):
+    def cohsex_correction(self, mol, mo_coeff, nocc,
+                          budget_gb=ISDF_TILE_GB):
         """Static COHSEX self-energy of the reaction field, (nmo, nmo) in the MO
         basis of `mo_coeff` -- the *first order in vtilde* term that the
         v -> v + vtilde substitution cannot generate by itself.
@@ -281,21 +359,30 @@ class SolventScreening:
         nocc: occupied orbital count *in this spin channel* (for a closed-shell
         restricted reference, the doubly-occupied count -- exchange is
         same-spin, so there is no factor of two).
+
+        The response matrix couples every grid point to every other, so the MO
+        potential is held whole; what is streamed is the potential it is built
+        from and the responded copy, which is the difference between three
+        (nmo, nmo, ngrids) arrays at once and one plus a block.
         """
-        v_mo = self.mo_grid_potential(mol, mo_coeff)
+        v_mo = self.mo_grid_potential(mol, mo_coeff, budget_gb=budget_gb)
         nmo = v_mo.shape[0]
         if not 0 <= nocc <= nmo:
             raise ValueError(f"nocc={nocc} outside [0, {nmo}]")
-        responded = np.tensordot(v_mo, self.response_matrix(), axes=(2, 1))
-        virt = np.einsum('pak,aqk->pq', responded[:, nocc:], v_mo[nocc:],
-                         optimize=True)
-        occ = np.einsum('pik,iqk->pq', responded[:, :nocc], v_mo[:nocc],
-                        optimize=True)
+        Q = self.response_matrix()
+        virt = np.zeros((nmo, nmo))
+        occ = np.zeros((nmo, nmo))
+        for k0, k1 in self.grid_blocks(nmo, live=1, budget_gb=budget_gb):
+            responded = np.tensordot(v_mo, Q[k0:k1], axes=(2, 1))
+            virt += np.einsum('pak,aqk->pq', responded[:, nocc:],
+                              v_mo[nocc:, :, k0:k1], optimize=True)
+            occ += np.einsum('pik,iqk->pq', responded[:, :nocc],
+                             v_mo[:nocc, :, k0:k1], optimize=True)
         return 0.5 * (virt - occ)
 
     def aux_kernel(self, auxmol):
         """vtilde_{PQ} between auxiliary functions -- the paper's Eq. (16)."""
-        key = _auxmol_key(auxmol)
+        key = auxmol_key(auxmol)
         if key not in self._aux_cache:
             v_aux = self.aux_grid_potential(auxmol)
             self._aux_cache[key] = v_aux @ self.response_matrix() @ v_aux.T
@@ -323,7 +410,7 @@ class SolventScreening:
         plain three-index factor whose square is the interaction.
         """
         auxmol = auxmol_of(mf, mol)
-        key = _auxmol_key(auxmol)
+        key = auxmol_key(auxmol)
         if key in self._transform_cache:
             return self._transform_cache[key]
 
@@ -356,6 +443,87 @@ class SolventScreening:
         self._transform_cache[key] = transform
         return transform
 
+    # ---- the Environment contract -----------------------------------------
+
+    screens = True
+
+    def for_geometry(self, mol):
+        """The same continuum around the atoms of `mol`.
+
+        The cavity moves with the atoms, so a displaced geometry needs its own
+        surface; `_check_mol` compares only natm and nao and would let the
+        reference cavity pass silently. The same molecule object gets itself.
+        """
+        if mol is self.mol:
+            return self
+        dielectric = (dict(solvent=self.solvent) if self.solvent is not None
+                      else dict(eps=self.eps, allow_static_eps=True,
+                                eps_static=self.eps_static))
+        return SolventScreening(mol, method=self.method,
+                                **dielectric, **self._cavity)
+
+    def mean_field(self, mol, scf_factory):
+        """The factory's mean field inside the ground-state reaction field.
+
+        Non-equilibrium solvation is two dielectric constants, not one. The
+        ground state relaxes in a continuum at eps_static, because the solvent
+        nuclei have had time to reorient around it; only the RESPONSE to a fast
+        excitation is optical, and that is the vtilde this class hands out
+        everywhere else. Duchemin, Guido, Jacquemin and Blase, Chem. Sci. 9,
+        4430 (2018) split a solvatochromic shift into those two, and for a
+        local excitation the ground-state half is the larger one: of the
+        +0.252 eV water puts on acrolein's n->pi*, their BSE assigns +0.232 to
+        it. Leaving it out is their frozen-polarization Omega_0, not Omega.
+
+        A factory that already converged its own PCM at eps_static is returned
+        as it is, so the reaction field is applied once; one at any other
+        constant relaxed a DIFFERENT ground state and raises. Otherwise the mean
+        field is wrapped and re-converged from its own density.
+        """
+        mf = scf_factory(mol)
+        if hasattr(mf, 'with_solvent'):
+            if (self.eps_static is not None
+                    and abs(mf.with_solvent.eps - self.eps_static) > 1e-8):
+                raise ValueError(
+                    f'the factory converged its SCF inside PCM(eps = '
+                    f'{mf.with_solvent.eps}) but this environment relaxes the '
+                    f'ground state at eps_static = {self.eps_static}: those '
+                    f'are two different ground states, and keeping the '
+                    f'factory one would put the optical response at eps = '
+                    f'{self.eps} on top of the wrong reaction field.')
+            return mf
+        if self.eps_static is None:
+            return mf
+        wrapped = pyscf_solvent.PCM(mf)
+        wrapped.with_solvent.method = self.method
+        wrapped.with_solvent.eps = self.eps_static
+        wrapped.with_solvent.lebedev_order = self._cavity['lebedev_order']
+        wrapped.with_solvent.vdw_scale = self._cavity['vdw_scale']
+        wrapped.with_solvent.r_probe = self._cavity['r_probe']
+        wrapped.with_solvent.radii_table = self._cavity['radii_table']
+        wrapped.kernel(dm0=mf.make_rdm1())
+        if not wrapped.converged:
+            raise RuntimeError(
+                f'the SCF did not re-converge inside PCM(eps = '
+                f'{self.eps_static}); no ground state follows from it')
+        return wrapped
+
+    def static_self_energy(self, mf, mol=None):
+        """Sigma^solv of `cohsex_correction` in the MO basis of `mf`.
+
+        RHF: one (nmo, nmo) array. UHF: an (alpha, beta) pair, each from its
+        own coefficients and occupation. Never None for a continuum: the term
+        is not optional (see __init__).
+        """
+        mol = mol if mol is not None else mf.mol
+        mo_coeff = mf.mo_coeff
+        if isinstance(mo_coeff, (tuple, list)) or np.asarray(mo_coeff).ndim == 3:
+            mo_a, mo_b = mo_coeff
+            nocc_a, nocc_b = mf.nelec
+            return (self.cohsex_correction(mol, mo_a, nocc_a),
+                    self.cohsex_correction(mol, mo_b, nocc_b))
+        return self.cohsex_correction(mol, mo_coeff, mol.nelectron // 2)
+
     # ---- housekeeping -----------------------------------------------------
 
     def _check_mol(self, mol):
@@ -382,11 +550,6 @@ def auxmol_of(mf, mol=None):
         return with_df.auxmol
     return pyscf_df.addons.make_auxmol(mol if mol is not None else mf.mol,
                                        with_df.auxbasis)
-
-
-def _auxmol_key(auxmol):
-    return (auxmol.nbas, auxmol.nao,
-            auxmol._bas.tobytes(), auxmol._env.tobytes())
 
 
 def _verify_cderi_is_cholesky(mol, mf, auxmol, low):
@@ -446,18 +609,12 @@ def attach_solvent_screening(mf, eps=None, solvent=None, method='IEF-PCM',
     response of the solvent to the correlated part, which is exactly the
     non-equilibrium split of the paper (its Section II D).
 
-    Keyword arguments go to SolventScreening; `static_cohsex=False` there
-    turns off the first-order reaction-field operator that consumers add to
-    their static self-energy (see SolventScreening.cohsex_correction).
+    Keyword arguments go to SolventScreening.
     """
     screening = SolventScreening(mol if mol is not None else mf.mol,
                                  eps=eps, solvent=solvent, method=method,
                                  **kwargs)
-    mf.with_screening = screening
-    keys = getattr(mf, '_keys', None)
-    if keys is not None:
-        keys.add('with_screening')      # keep pyscf's check_sanity quiet
-    return mf
+    return attach_environment(mf, screening)
 
 
 def detach_solvent_screening(mf):
@@ -467,28 +624,8 @@ def detach_solvent_screening(mf):
 
 
 def solvent_static_selfenergy(mf, mol=None):
-    """Static COHSEX reaction-field self-energy of the screening attached to
-    `mf`, in that mean field's own spatial MO basis, or None.
+    """The static one-body term of the environment attached to `mf`, in that
+    mean field's own MO basis, or None in the gas phase (so callers add it
+    unconditionally, the way build_ks_static_correction is added)."""
+    return environment_of(mf).static_self_energy(mf, mol)
 
-    RHF: one (nmo, nmo) array. UHF: an (alpha, beta) pair, each built from its
-    own MO coefficients and occupation. Returns None when no screening is
-    attached, or when it was created with static_cohsex=False -- so callers can
-    add it unconditionally, the way build_ks_static_correction is added.
-    """
-    screening = get_solvent_screening(mf)
-    if screening is None or not screening.static_cohsex:
-        return None
-    mol = mol if mol is not None else mf.mol
-    mo_coeff = mf.mo_coeff
-    if isinstance(mo_coeff, (tuple, list)) or np.asarray(mo_coeff).ndim == 3:
-        mo_a, mo_b = mo_coeff
-        nocc_a, nocc_b = mf.nelec
-        return (screening.cohsex_correction(mol, mo_a, nocc_a),
-                screening.cohsex_correction(mol, mo_b, nocc_b))
-    return screening.cohsex_correction(mol, mo_coeff, mol.nelectron // 2)
-
-
-def get_solvent_screening(mf):
-    """The SolventScreening attached to mf, or None. The hook every integral
-    chokepoint calls -- gas-phase callers pay one getattr."""
-    return getattr(mf, 'with_screening', None)

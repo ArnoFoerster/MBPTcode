@@ -69,14 +69,17 @@ def test_transform_matrices_are_not_inverses():
     return ok
 
 
-def test_minimax_usable_window():
-    """The usable n is set by the ENERGY RANGE, not by n alone.
+def test_minimax_more_points_never_hurt():
+    """A transform that misses is UNDER-resolved: more points, never fewer.
 
-    GreenX's Remez generator only converges once the window is wide enough --
-    its own tables record the floor climbing from e_max/e_min = 10 at n=14 to
-    9649 at n=34, with the number of convergent windows collapsing after n=24.
-    The downstream transform fit hits the same wall, so a grid can be too DENSE
-    for a narrow range as easily as too sparse for a wide one.
+    Below the narrowest tabulated Remez column GreenX slides that column onto
+    the requested range, (tau, omega) -> (tau e_ratio, omega / e_ratio), and
+    the two axes carry OPPOSITE powers of e_ratio (`grids._table_row`).
+    Dividing on both -- which is what copying the frequency grid's rescaling
+    onto the tau one does -- scales every product tau*omega by 1/e_ratio^2 and
+    the fit collapses above 20 points instead of saturating. It is silent: the
+    units still look right and only the residual moves. So the property gated
+    here is monotonicity, at the narrow ranges where the stretch is active.
     """
     import warnings
     from src.Base.utils.time_frequency import minimax_convergence_floor
@@ -87,11 +90,24 @@ def test_minimax_usable_window():
                 'the tabulated Remez floor rises monotonically with n',
                 ' -> '.join(f'{f:g}' for f in floors))
 
-    # too dense for a narrow range, and too sparse for a wide one, both caught
-    cases = [(14, 1e2, False), (20, 1e2, False),      # good
-             (24, 1e2, True),  (30, 1e2, True),       # too dense for 1e2
-             (14, 1e4, True),                          # too sparse for 1e4
-             (24, 1e3, False), (30, 1e4, False)]       # good again
+    for rng in (1e2, 1e3, 1e4):
+        errs = []
+        for n in (14, 20, 24, 30, 34):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                errs.append(TimeFrequencyGrid.minimax(
+                    n, E_MIN, E_MIN * rng).fit_errors['cosft_wt'])
+        # Past ~1e-6 the fit sits on the tabulated coefficients' own precision
+        # and stops improving, so the claim is that it never DEGRADES by more
+        # than that floor -- not that the sequence is strictly decreasing.
+        ok &= check(max(errs[1:]) < max(errs[0], 1e-6),
+                    f'range={rng:.0e}: no point count above 14 is worse',
+                    ' '.join(f'n={n}:{e:.1e}'
+                             for n, e in zip((14, 20, 24, 30, 34), errs)))
+
+    # ... and too FEW points for a wide range is still flagged
+    cases = [(14, 1e2, False), (20, 1e2, False), (30, 1e4, False),
+             (14, 1e4, True)]
     for n, rng, want_warn in cases:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -156,8 +172,8 @@ if __name__ == '__main__':
     all_ok &= test_minimax_transforms_the_model_pair()
     print('\n-- 2. matrices are not inverses, but the round trip works')
     all_ok &= test_transform_matrices_are_not_inverses()
-    print('\n-- 2b. the usable n depends on the energy range')
-    all_ok &= test_minimax_usable_window()
+    print('\n-- 2b. more points never hurt the transform fit')
+    all_ok &= test_minimax_more_points_never_hurt()
     print('\n-- 3. IR does round-trip')
     all_ok &= test_ir_does_round_trip()
     print('\n-- 4. gauss_legendre is frequency-only')

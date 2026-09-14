@@ -15,6 +15,8 @@ All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
 | `09_isdf_gw_space_time.py` | cubic-scaling GW: an ISDF SCF, then the space-time self-energy on its factors |
 | `10_gw_routes.py` | the four routes to one G0W0 energy: Casida (full ERIs / DF), imaginary frequency, space-time |
 | `11_bse_davidson_vs_dense.py` | BSE two ways (Davidson, dense) on three integral flavours (ISDF, DF, full ERIs) |
+| `12_evgw.py` | the eigenvalue-self-consistent loop: cycle 1 is G0W0, the fixed point sits above it |
+| `13_solvated_gw_bse.py` | GW and BSE in a continuum, with the ground-state and response halves separated |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE

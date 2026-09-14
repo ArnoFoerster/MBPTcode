@@ -17,6 +17,7 @@ import os
 
 import numpy as np
 
+from src.Base.constants import ISDF_TILE_GB
 from src.Base.utils.time_frequency import (minimax_transform_weights,
                                           minimax_points_for_accuracy,
                                           COSINE_TW, COSINE_WT, SINE_TW)
@@ -157,8 +158,9 @@ def _transform_screened(Ctw, W_omega, chunk_bytes=2 << 30):
 
 def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                                      freq_block=None, scratch_dir=None,
-                                     tile_memory_gb=4.0, wt_scratch=None,
-                                     static_index=None, static_out=None):
+                                     tile_memory_gb=ISDF_TILE_GB,
+                                     wt_scratch=None, static_index=None,
+                                     static_out=None, transform=None):
     """
     Wt(i.tau) = sum_w Ctw[.,w] ( [I - chi0(i.w)]^-1 - I ), in one blocked pass.
 
@@ -168,6 +170,13 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     The catch is that every block needs all of proj(tau) again, and rebuilding
     those IS the N^3 cost of the method -- so recomputing them costs a factor
     nfreq/freq_block in time. `scratch_dir` avoids that by caching them.
+
+    transform: `bare_gauge_transform`, when a reaction field dresses the
+    factors. Wt is then the BARE screening -- the self-energy takes the
+    continuum as Duchemin et al.'s static Eq. (18) shift instead, and screening
+    it dynamically as well would count the same polarization twice. The
+    captured `static_out['w_static']` stays DRESSED, because the BSE kernel it
+    is carried for is built in the dressed gauge with the dressed factors.
 
     Returns Wt(i.tau) with shape (Ctw.shape[0], naux, naux), matching what
     `self_energy_matrix_imaginary_time` builds internally when Wt_tau is None.
@@ -217,9 +226,11 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                 cached = True
             for m in range(k1 - k0):
                 b = blk[m]
-                b[:] = np.linalg.inv(eye - b)
                 if static_index is not None and k0 + m == static_index:
-                    static_out['w_static'] = b.copy()      # before -I
+                    static_out['w_static'] = np.linalg.inv(eye - b)   # dressed
+                if transform is not None:
+                    b[:] = transform.T @ b @ transform     # chi0 into the bare gauge
+                b[:] = np.linalg.inv(eye - b)
                 b[dg] -= 1.0                  # the correlation part, W - I
                 
             # ONE OUTPUT TAU AT A TIME. `Wt += tensordot(Ctw[:, k0:k1], blk)`

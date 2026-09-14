@@ -25,7 +25,8 @@ from src.Base.utils.analyticalContinuation import (greedy_pade_order,
 from src.Solvers.qp_equation import solve_qp_equation
 
 
-def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf'):
+def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
+                           reaction_field=None):
     """
     <p| Sigma_x - v_xc |q> over the whole MO basis.
     Zero by construction on a Hartree-Fock reference
@@ -44,10 +45,21 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf'):
         came from it, and replacing it would break that cancellation.
 
     An attached solvent screening adds its first-order reaction-field
-    (static COHSEX) operator here: the static self-energy is where the
-    polarization energy lives, Sigma_c being second order in vtilde, and
-    this matrix is the one static object every imaginary-axis route shares.
-    None attached (gas phase) adds nothing.
+    (static COHSEX) operator here: the static self-energy is where the Born
+    polarization energy lives, and this matrix is the one static object every
+    imaginary-axis route shares. None attached (gas phase) adds nothing.
+
+    Sigma_c is NOT negligible next to it. Its leading vtilde dependence is
+    v chi0 vtilde, first order in each and not second order in vtilde, and it
+    OPPOSES the Born term: on pyridine/cc-pVDZ in toluene it gives back 0.75 eV
+    of the 3.08 eV that Sigma^solv closes the quasiparticle gap by, off a B3LYP
+    starting point, and less off Hartree-Fock, since the size of the term
+    follows chi0. Nothing double counts -- Sigma_c is built from W - (v +
+    vtilde), so the instantaneous reaction field is counted once, here -- but
+    the split is not a large term plus a small one.
+
+    reaction_field REPLACES that operator when given; see
+    `static_exchange_diagonal`.
     """
     dm = mf.make_rdm1()
     dm_for_hx = dm if dm_correction is None else dm_correction
@@ -65,6 +77,8 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf'):
     v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
     mo = mf.mo_coeff
     out = mo.T @ (sig_x - v_xc) @ mo
+    if reaction_field is not None:
+        return out + np.diag(np.asarray(reaction_field, float))
     sigma_solvent = solvent_static_selfenergy(mf, mol)
     if sigma_solvent is not None:
         if isinstance(sigma_solvent, tuple):
@@ -119,8 +133,18 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
 
 
 def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
-                             block_memory_gb=None):
+                             block_memory_gb=None, reaction_field=None):
     """<p| Sigma_x - v_xc |p> for the requested states only.
+
+    reaction_field REPLACES the continuum's static term, it does not add to it.
+    A route that has built W can form Duchemin et al.'s Eq. (18) shift, the
+    self-polarization of the orbital carrying the added charge in the SCREENED
+    reaction field; a route that has not (ADC, whose secular matrix starts at
+    Sigma^(2) and never forms W) falls back to `cohsex_correction`, which is
+    the same physics with the BARE vtilde summed over every orbital. Passing
+    one while the other is also applied counts the polarization energy twice --
+    on acrolein in water that is 2.65 + 2.35 eV of gap closure where 2.3 is
+    right, which reads as plausible over-screening rather than as a bug.
 
     Every consumer of the static exchange on the QP routes needs diagonals for
     a few states, and that is what makes an exchange build that scales
@@ -134,8 +158,9 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     """
     states = np.atleast_1d(states).astype(int)
     if exchange != 'df-direct':
-        return np.diag(static_exchange_matrix(mf, mol, dm_correction=dm_correction,
-                                              exchange=exchange))[states]
+        return np.diag(static_exchange_matrix(
+            mf, mol, dm_correction=dm_correction, exchange=exchange,
+            reaction_field=reaction_field))[states]
     dm = mf.make_rdm1()
     dm_for_hx = dm if dm_correction is None else dm_correction
     mo = mf.mo_coeff[:, states]
@@ -145,6 +170,8 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx, block_memory_gb)
     v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
     out = -0.5 * k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
+    if reaction_field is not None:
+        return out + np.asarray(reaction_field, float)[states]
     sigma_solvent = solvent_static_selfenergy(mf, mol)
     if sigma_solvent is not None:
         if isinstance(sigma_solvent, tuple):

@@ -31,13 +31,14 @@ fitted for, e^{-x tau} <-> 2x/(x^2 + w^2); "roundtrip" is to_tau(to_omega(f))
 against f on that same family:
 
     n     model      roundtrip   max|A B - I|   cond(A)
-    6     1.1e-01    -           1.1e-03        1.4e+02
-    10    1.4e-02    3.9e-05     1.3e-01        3.7e+02
-    14    1.1e-04    6.2e-08     1.5e-02        6.1e+02
-    18    5.2e-06    8.7e-09     5.0e-01        1.1e+03
-    20    1.2e-06    -           9.6e+00        1.4e+03
-    24    3.7e-02    -           6.1e+04        1.2e+08   <- past the window
-    30    5.7e-01    -           4.6e+07        1.6e+10
+    6     1.1e-01    2.9e-05     1.1e-03        1.4e+02
+    10    2.6e-03    3.9e-05     1.3e-01        3.7e+02
+    14    1.4e-04    6.2e-08     1.5e-02        6.1e+02
+    18    1.0e-05    8.7e-09     5.0e-01        1.1e+03
+    20    2.4e-06    8.9e-08     9.6e+00        1.2e+03
+    24    2.1e-06    6.4e-09     1.5e+00        5.7e+11
+    30    1.2e-06    5.1e-09     8.9e-01        1.2e+63
+    34    1.6e-06    2.1e-08     1.2e+00        5.8e+223
 
 Read the last two columns together. `max|A B - I|` is LARGE and does not shrink
 with n -- A and B are mutual inverses only on the model subspace, not on all of
@@ -45,15 +46,21 @@ R^n -- and the transform is not orthogonal either (`max|A^T A - I| = 1.2e4`,
 singular values 0.023 .. 14). But every physical Pi(i.tau) IS in that subspace,
 being a sum of exponentials with x in [e_min, e_max], so the round trip on real
 data is fine: 6e-8 at n = 14. Use `roundtrip_error()` to compare methods and
-treat `duality_error()` as the raw matrix diagnostic it is; judging minimax by
-`|A B - I|` alone rejects a transform that works.
+treat `duality_error()` as the raw matrix diagnostic it is HERE; judging
+minimax by `|A B - I|` alone rejects a transform that works. On an IR grid
+`duality_error` is not that product at all but the round trip over the
+represented subspace -- see its own docstring for why the raw product is
+unusable there.
 
-The real constraint on minimax is the WINDOW, not duality: the forward fit is
-excellent at n = 14..20 and then collapses, because the per-point solve loses
-conditioning. Above ~20 points more points make the transform worse, and
-Tikhonov regularization (applied automatically there) softens the blow-up
-without restoring accuracy. Treat n > 20 as unavailable and use method='IR' if
-a denser grid is needed; a warning fires.
+The real constraint on minimax is CONDITIONING, not duality. A sum of
+exponentials is an exponentially ill-conditioned basis, so cond(A) climbs
+without bound in n -- 6e11 at 24 points and 6e223 at 34 -- and the fit is only
+obtainable at all because a Tikhonov term is applied automatically above
+`_REGULARIZATION_ABOVE`. With it the forward error does not turn over: it falls
+to ~2e-06 and then sits on the tabulated coefficients' own precision. What does
+bite is too FEW points for a wide range, where the fit is genuinely
+under-resolved and the warning fires; the answer there is always more points.
+Use method='IR' for a finite-temperature grid, not to escape a point count.
 
 Both directions are still carried as separate matrices, since neither is the
 other's inverse as a matrix and inverting one would throw away the fit that was
@@ -104,35 +111,32 @@ _FIT_ERROR_WARN = 1e-3
 
 
 def minimax_convergence_floor(npoints):
-    """Smallest e_max/e_min for which GreenX's Remez generator actually
-    converged at this many points, read from the tabulated data itself.
+    """Narrowest e_max/e_min GreenX tabulated a Remez column for at this size.
 
-    This is the honest bound, and it is not a constant: approximating with a
-    sum of exponentials over a NARROW range is exponentially ill-conditioned in
-    the number of terms, so the generator only converges once the window is
-    wide enough. GreenX's own tables record where it gave up --
+    Approximating 1/x by a sum of exponentials over a NARROW range is
+    exponentially ill-conditioned in the number of terms, so the generator was
+    only run once the window was wide enough; the floor climbs with n while the
+    number of tabulated windows thins out --
 
         n      6     8    14    16    20     24     28     30     32     34
         floor  1.6   10    10   100   200    700   1545   2906   4862   9649
         rows    13   13    21    36    39     40     28     28     18      7
 
-    -- the floor climbing monotonically while the number of convergent windows
-    collapses after n = 24. Below the floor `minimax_frequency_grid` silently
-    reuses the first tabulated row, and the downstream transform fit in this
-    module hits the SAME ill-conditioning from the other side.
-
-    Consequence for callers: there is no single usable n. There is an optimal n
-    for each energy range, and both more and fewer points are worse. Measured
-    forward-transform relative error (tests/test_time_frequency_grid.py):
+    This is NOT an accuracy limit. Below the floor the lookup takes the widest
+    column, which is a valid fit on any sub-range of its own, and above 20
+    points GreenX slides that column onto the requested range exactly
+    (`grids._table_row`). Measured tau -> omega cosine fit error, which falls
+    with n at every range (tests/test_time_frequency_grid.py):
 
         range     n=14     n=20     n=24     n=30     n=34
-        1e2       1.1e-4   1.2e-6   3.7e-2   5.7e-1   1.8e+0
-        1e3       1.9e-2   2.8e-4   2.6e-5   4.5e-4   1.0e-1
-        1e4       6.5e-1   4.0e-2   4.5e-3   1.8e-4   2.6e-5
-        1e5       6.5e+0   2.7e+0   1.9e-1   1.1e-2   2.0e-3
+        1e2       1.2e-5   1.0e-7   7.7e-7   5.0e-7   6.1e-7
+        1e3       6.2e-5   2.4e-6   1.3e-7   5.2e-8   6.4e-8
+        1e4       8.0e-5   1.7e-5   2.1e-6   1.1e-7   1.9e-8
+        1e5       9.0e-5   3.8e-5   9.3e-6   2.5e-7   5.3e-8
 
-    A molecular gap-to-spread ratio is typically 1e1..1e2, which puts the sweet
-    spot at n = 14..20 -- but a small-gap or core-including window moves it.
+    What the floor is good for is naming the direction of a failed fit: a
+    transform that misses is under-resolved for its range, and the cure is more
+    points, never fewer.
     """
     from src.Base.utils.grids import _load_minimax_tau_data
     data = _load_minimax_tau_data()
@@ -310,10 +314,10 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
         floor = minimax_convergence_floor(n)
         hint = ''
         if floor is not None:
-            hint = (f" GreenX's generator converged at n={n} only down to "
-                    f"e_max/e_min = {floor:.3g}, against the {e_max/e_min:.3g} "
-                    f"requested; the usable n RISES with the energy range, so "
-                    f"try {'fewer' if e_max/e_min < floor else 'more'} points.")
+            hint = (f" The usable n RISES with the energy range and this fit "
+                    f"is under-resolved at e_max/e_min = {e_max/e_min:.3g}, so "
+                    f"use MORE points; n={n} is tabulated down to "
+                    f"e_max/e_min = {floor:.3g} and stretched below that.")
         warnings.warn(
             f"minimax transform fit reached only {max_error:.2e} at {n} points "
             f"over e_max/e_min = {e_max/e_min:.3g}.{hint}",
@@ -382,10 +386,9 @@ class TimeFrequencyGrid:
         #     n=10   1/e_min 4.7e-01   vs   1/(2 e_min) 1.4e-02
         #     n=14   1/e_min 4.5e-02   vs   1/(2 e_min) 1.1e-04
         #     n=18   1/e_min 1.5e-03   vs   1/(2 e_min) 5.2e-06
-        # so use GreenX's. (For npoints > 20 at a very narrow energy range
-        # `minimax_time_grid` also applies an e_ratio damping that GreenX does
-        # not; the resulting grid is still fitted consistently, and any loss
-        # shows up in `fit_errors`.)
+        # so use GreenX's. The narrow-range e_ratio stretch is orthogonal to
+        # this factor and cancels against the frequency axis, so it does not
+        # enter here; any residual loss shows up in `fit_errors`.
         tau_points = 0.5 * tau_points
         tau_weights = 0.5 * tau_weights
 
@@ -411,15 +414,16 @@ class TimeFrequencyGrid:
         frequency grid supplied by the caller.
 
         `TimeFrequencyGrid.minimax` ties n_omega to n_tau, which conflates two
-        unrelated jobs: the tau->omega transform wants a small, well-conditioned
-        pair (the Remez window closes above ~20 points at molecular energy
-        ranges), while the self-energy convolution wants many frequency points
-        to converge. Tying them caps the space-time GW routes at ~2 meV and
-        makes them DIVERGE beyond ntau ~ 20 as the transform fit collapses.
+        unrelated jobs: the tau->omega transform is a fit, and n_tau is set by
+        how many exponentials the energy range needs, while the self-energy
+        convolution is a quadrature that wants many frequency points to
+        converge. Tying them caps the space-time GW routes at ~2 meV, because
+        buying frequency points means paying for time points that the fit does
+        not need and whose design matrix is exponentially ill-conditioned.
 
-        Splitting them keeps the transform inside its window while the
-        frequency quadrature converges independently -- pass e.g. a 26-point
-        minimax or 40-point Gauss-Legendre frequency grid here.
+        Splitting them lets the frequency quadrature converge on its own --
+        pass e.g. a 26-point minimax or 40-point Gauss-Legendre frequency grid
+        here.
 
         with_inverse=False skips the omega -> tau matrices. A caller that wants
         only chi0 on the frequency axis -- a STATIC screening, say, which is one
@@ -495,9 +499,36 @@ class TimeFrequencyGrid:
         # rule so this stays correct if the sign convention ever moves. The
         # real half carries the even-in-tau (cosine-like) sector -- the one a
         # polarizability lives in -- and the imaginary half the odd sector.
-        scale = np.abs(U_mat).max()
-        real_l = np.abs(U_mat.real).max(axis=1) > 1e-8 * scale
+        #
+        # Each function against its OWN two parts, not against an absolute cut:
+        # the vanishing part is that u_l's truncation floor, which grows with l
+        # and with eps (5e-12 at eps=1e-6 up to 7e-6 at 1e-12), so a cut read
+        # off the largest |u| misassigns the high-l functions. One misassigned
+        # function gives its sector more unknowns than there are sampling
+        # points -- at beta = 100, omega_max = 2, eps = 1e-10 that was 20 on
+        # 19, a rank-deficient omega -> tau fit and `duality_error` 5.8e-01.
+        # The ratio is also scale free, so no threshold is left to go stale.
+        real_l = np.abs(U_mat.real).max(axis=1) > np.abs(U_mat.imag).max(axis=1)
         imag_l = ~real_l
+
+        # Each sector's omega -> tau pinv fits L_s coefficients from nfreq
+        # points, so it needs nfreq >= max(L_even, L_odd), where
+        # `default_matsubara_sampling` sizes for the stacked real fit's
+        # 2 nfreq >= L. The two coincide while the parity split is even to
+        # within one function, which the ratio test above buys, so this does
+        # not fire; it is here because the failure is silent -- a rank-deficient
+        # sector fit is wrong by 0.2 to 0.5 with every other diagnostic clean.
+        biggest = max(int(real_l.sum()), int(imag_l.sum()))
+        if biggest > len(n_mats):
+            raise ValueError(
+                f"TimeFrequencyGrid.ir: the {statistics} basis at "
+                f"Lambda = {beta * omega_max:.4g}, eps = {eps:.0e} splits "
+                f"{int(real_l.sum())}/{int(imag_l.sum())} over the even/odd "
+                f"sectors, and the larger needs more than the {len(n_mats)} "
+                f"Matsubara sampling points available, so its omega -> tau fit "
+                f"would be underdetermined. Raise n_matsubara_factor, or loosen "
+                f"eps so the basis stops before the functions whose parity the "
+                f"quadrature no longer resolves.")
 
         def _pair(mask, part):
             """(tau->omega, omega->tau) through the coefficients of one sector."""
@@ -511,6 +542,12 @@ class TimeFrequencyGrid:
 
         cosft_wt, cosft_tw = _pair(real_l, lambda m: m.real)
         sinft_wt, sinft_tw = _pair(imag_l, lambda m: m.imag)
+
+        # The tau-axis basis of each sector, kept because it is what makes the
+        # round trip checkable: `duality_error` has to know which subspace the
+        # transforms are a two-sided representation OF, and recomputing the
+        # split there would put the parity test in two places.
+        sector_u_tau = {'even': U_tau[real_l], 'odd': U_tau[imag_l]}
 
         # dtau/dx Jacobian. uhat_l(n) integrates over the DIMENSIONLESS
         # x in [-1, 1], not over tau in [0, beta], so the coefficient map above
@@ -539,7 +576,8 @@ class TimeFrequencyGrid:
                          'statistics': statistics, 'basis': basis,
                          'lambda': beta * omega_max, 'size': basis.size,
                          'n_matsubara': n_mats,
-                         'n_even_sector': int(real_l.sum())})
+                         'n_even_sector': int(real_l.sum()),
+                         'sector_u_tau': sector_u_tau})
 
     # ---- use --------------------------------------------------------------
 
@@ -564,15 +602,43 @@ class TimeFrequencyGrid:
         return np.asarray(f_omega) @ mat.T
 
     def duality_error(self, parity='even'):
-        """max|A B - I| for this grid's forward/backward pair.
+        """How far this grid's forward/backward pair is from a two-sided map.
 
-        For 'minimax' this is GreenX's own `cosft_duality_error` and is O(1) or
-        worse -- see the module docstring. For 'IR' it is the round-trip error
-        of the basis fit and is small. Check it before writing any algorithm
-        that transforms both ways.
+        For 'minimax' this is max|A B - I|, GreenX's own `cosft_duality_error`,
+        and it is O(1) or worse -- see the module docstring.
+
+        For 'IR' it is the round-trip error of the basis fit, measured ON THE
+        SUBSPACE THE BASIS REPRESENTS: worst |u_l - u_l A^T B^T| over the
+        sector's tau-axis basis, relative to max|u_l|. Check it before writing
+        any algorithm that transforms both ways.
+
+        Why IR cannot use max|A B - I|
+        ------------------------------
+        Because A B is not a candidate for the identity there. The IR
+        transforms factor through the sector's L_s coefficients, so A B is
+        (pinv(Um) Um)^T -- an orthogonal projector of rank min(L_s, nfreq).
+        Whenever the sampling set is larger than the sector, which is the
+        normal case, max|A B - I| >= 1 - L_s/nfreq no matter how good the grid
+        is, and the raw product is ANTI-CORRELATED with the grid's health: the
+        one way to make it the identity is to starve the sampling set until
+        nfreq <= L_s, which is exactly where the omega -> tau fit becomes
+        underdetermined. Measured over beta = 100 .. 800, omega_max = 2 .. 4,
+        eps = 1e-8 .. 1e-10, the raw product reads 1.9e-14 on a grid whose
+        round trip is 4.8e-01, and 9.1e-01 on one whose round trip is 8.6e-10.
+        The restricted quantity returns 1.03e+00 and 2.35e-09 on that pair.
+
+        For a boson omega_0 = 0 and every odd u_l integrates to zero there, so
+        the n = 0 column is structurally zero, Um is rank deficient, and
+        (pinv(Um) Um)[0, 0] = 0 puts the raw product at exactly 1.0. The point
+        carries nothing for the odd sector and `pinv` is right to discard it,
+        so the restricted quantity is unaffected.
         """
         A = self._require(self.cosft_wt if parity == 'even' else self.sinft_wt, parity)
         B = self._require(self.cosft_tw if parity == 'even' else self.sinft_tw, parity)
+        if self.method == 'IR':
+            u = self.meta['sector_u_tau'][parity]
+            # f_tau = c u  ->  to_omega  ->  to_tau  =  c u (B A)^T
+            return float(np.abs(u @ (B @ A).T - u).max() / np.abs(u).max())
         n = A.shape[0]
         return float(np.abs(A @ B - np.eye(n)).max())
 
@@ -583,11 +649,16 @@ class TimeFrequencyGrid:
         The probe is the family the imaginary-time route actually carries: a
         particle-hole bubble is a sum of exponentials e^{-x tau} with x the
         transition energies (mirrored to tau -> beta - tau for the periodic IR
-        case). Prefer this over `duality_error` when comparing methods -- for IR
-        with more Matsubara sampling points than basis functions in the sector,
-        `A B` CANNOT be the identity on the larger space even though every
-        representable function round-trips exactly, so the raw matrix
-        diagnostic understates it.
+        case). Prefer this over `duality_error` when comparing METHODS, since
+        it is the same probe on both and minimax has no basis to restrict to.
+
+        Within IR, `duality_error` is the stricter of the two and the one to
+        trust: it sweeps the whole represented subspace, where this sweeps a
+        handful of exponentials that may sit in the part of it that survives.
+        Measured at beta = 100, omega_max = 2, eps = 1e-10, where the sampling
+        set was one point short of the even sector (nfreq = 19, L_even = 20):
+        this returns 4.1e-08 and `duality_error` 5.8e-01, and the sector fit
+        really is rank deficient. A four-exponential probe is not a basis.
         """
         if self.ntau == 0:
             raise ValueError(f"{self.method!r} grid has no imaginary-time axis")

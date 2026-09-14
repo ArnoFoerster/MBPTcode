@@ -1,5 +1,9 @@
 """Matrix-free Casida/RPA/BSE Davidson, with two ways of applying the same A/B.
 
+`solve_bse_isdf` and `solve_bse_df` are the two production drivers on them --
+mean field in, excitations out -- and share every convention, so they differ
+only in how the interaction is represented.
+
 The DF route contracts pyscf's three-index factor directly. What sets its cost
 is `apply_exchange_direct`, which needs a (naux, nvirt, nvirt) intermediate --
 the array that caps system size.
@@ -53,22 +57,24 @@ from pyscf.lib import logger
 from pyscf.tdscf._lr_eig import real_eig
 from scipy.sparse.linalg import LinearOperator, eigsh
 
-from src.Base.pyscf_interface import get_orbital_energies
+from src.Base.constants import HARTREE_TO_EV, ISDF_TILE_GB, KAPPA
+from src.Base.pyscf_interface import (get_density_fitting_coefficients,
+                                      get_orbital_energies)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
+from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
                                               separable_factors,
                                                solve_qp_diagonal_space_time)
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse.linear_response import (
+    LinearResponseSolver, check_normalization)
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 
-
-#: Budget for the ISDF block action's row tiles. Only the (rows, M) buffer is
-#: sized by it; Zt and the (M, n_occ) accumulators are not tileable.
-DEFAULT_TILE_MEMORY_GB = 4.0
 
 #: Unit-vector guesses per requested root. One each is what a diagonal-dominant
 #: argument suggests, and it silently returns the WRONG STATES whenever the
@@ -100,7 +106,7 @@ GUESS_DEG_TOL = 1e-3
 def solve_casida_davidson(lr_solver, nocc, nroots=3, polarizability='RPA',
                            W_aux=None, conv_tol=1e-5, max_cycle=100, orbsym=None,
                            isdf_factors=None, guess_factor=GUESS_FACTOR,
-                           stats=None):
+                           stats=None, spin='singlet'):
     """Matrix-free Davidson solver for the `nroots` lowest Casida excitation energies (never forms dense A/B).
 
     For a handful of low-lying states; vertex-correction sums still need the
@@ -118,18 +124,23 @@ def solve_casida_davidson(lr_solver, nocc, nroots=3, polarizability='RPA',
     guess_factor: guess vectors per requested root. The default spans enough
     symmetry blocks on everything tested here; raise it and check the roots stop
     moving when a spectrum is dense or highly degenerate. See GUESS_FACTOR.
+    spin: 'singlet' (kappa = 2) or 'triplet' (kappa = 0, the bare-exchange
+    term absent). The screened term is spin-independent.
     Returns (omega, X, Y) normalized <X|X>-<Y|Y>=1.
     """
     apply_AB, diag_d = _block_action(lr_solver, nocc, polarizability, W_aux,
-                                     isdf_factors)
+                                     isdf_factors, spin=spin)
     occ, virt = get_occ_virt_indices(lr_solver.eps, nocc)
     return _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle,
                          _pair_symmetry(orbsym, occ, virt), guess_factor,
                          stats=stats)
 
 
-def _block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors):
+def _block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
+                  spin='singlet'):
     """Mode dispatch shared by the solver and the (A-B) instability probe."""
+    if spin not in KAPPA:
+        raise ValueError(f"spin {spin!r}: one of {', '.join(sorted(KAPPA))}")
     mode = polarizability.upper()
     if mode == 'RPA':
         lBSE, w = False, None
@@ -143,8 +154,8 @@ def _block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors):
         raise ValueError(f"Unknown polarizability '{polarizability}'; choose 'RPA', 'TDHF', or 'BSE'.")
 
     if isdf_factors is None:
-        return df_block_action(lr_solver, nocc, lBSE, w)
-    return isdf_block_action(lr_solver, nocc, lBSE, w, isdf_factors)
+        return df_block_action(lr_solver, nocc, lBSE, w, spin=spin)
+    return isdf_block_action(lr_solver, nocc, lBSE, w, isdf_factors, spin=spin)
 
 
 def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
@@ -180,6 +191,9 @@ def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
     the kernel you will actually use; and if the probe comes back negative,
     establish that the SCF is the lowest solution before concluding the
     system itself is unstable.
+
+    Spin does not enter: kappa (ia|jb) is the same term in A and B, so it cancels
+    out of the difference and a triplet has the same (A - B) as its singlet.
     """
     apply_AB, diag_d = _block_action(lr_solver, nocc, polarizability, W_aux,
                                      isdf_factors)
@@ -268,7 +282,12 @@ def oscillator_strengths(mf, mol, nocc, omega, X, Y):
     origin is fixed at zero only for definiteness.
 
     Returns (f, dip) with shapes (nroots,) and (nroots, 3), atomic units.
+
+    The normalization is CHECKED, not assumed: the sqrt(2) above belongs to
+    <X|X> - <Y|Y> = 1, pySCF returns 1/2, and f is quadratic in the vector, so
+    the mismatch is a silent factor of two in every oscillator strength.
     """
+    X, Y = check_normalization(X, Y)
     eps = get_orbital_energies(mf, representation='spatial')
     occ, virt = get_occ_virt_indices(eps, nocc)
     with mol.with_common_orig((0.0, 0.0, 0.0)):
@@ -284,7 +303,8 @@ def oscillator_strengths(mf, mol, nocc, omega, X, Y):
 def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
                    auxbasis=None, radii=None, counts=None, probe=True,
                    conv_tol=1e-5, max_cycle=100, guess_factor=GUESS_FACTOR,
-                   gw_kwargs=None, progress=None, n_start=1):
+                   gw_kwargs=None, progress=None, n_start=1,
+                   self_consistency='G0W0', screen_at='mean-field', spin='singlet'):
     """BSE by the ISDF matrix-free Davidson: mean field in, excitations out.
 
     The production calling sequence is three lines --
@@ -294,15 +314,47 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
 
     -- and the discipline the pieces demand lives HERE so the caller cannot
     violate it: one ISDF fit is built (or taken from `factors`) and shared by
-    the GW and BSE stages; the static W is always built from that fit at the
-    MEAN-FIELD energies while the BSE diagonal carries `qp` -- the standard
-    G0W0-BSE split; and W and the block action can never mix auxiliary gauges.
+    the GW and BSE stages; the static W comes from that fit at the eigenvalues
+    the LEVEL OF THEORY screens with -- the mean field's for G0W0, which is the
+    standard split, and the converged ones under evGW -- and W and the block
+    action can never mix auxiliary gauges.
+
+    self_consistency: 'G0W0' (default) evaluates the self-energy once on the
+        mean field's eigenvalues. 'evGW' runs the eigenvalue-self-consistent
+        loop first -- all eigenvalues updated, DIIS, convergence on the HOMO
+        and LUMO -- puts its fixed point on the BSE diagonal AND builds the
+        static W from it, so the kernel screens with the same spectrum the
+        self-energy did. It overrides `qp`, and it shares the ISDF fit, so the
+        factorization is built once for both stages.
+    screen_at: which spectrum builds the static W when `qp` is an explicit
+        ENERGY ARRAY. THE CONVENTION IS THE LEVEL OF THEORY, not the diagonal:
+        G0W0 screens W0 at the MEAN-FIELD eigenvalues and evGW at the converged
+        ones. 'mean-field' (default) is therefore the standard G0W0-BSE split,
+        and is what an array of G0W0 energies computed elsewhere wants. 'qp'
+        screens at the array instead, for an array that IS a self-consistent
+        spectrum -- evGW energies obtained from a separate loop, say, where
+        `self_consistency='evGW'` was not used. The two differ: on water
+        /cc-pVDZ the full-integral and DF routes agree to +0.6 meV when the
+        screening and the diagonal match and drift -65 meV when they do not,
+        which is the size of the choice.
+
+        QUASIPARTICLE ENERGIES PLUS A FURTHER SHIFT are neither, and are the
+        easier mistake: evGW energies carrying a static reaction-field
+        correction on top are not the evGW spectrum, so screening at them
+        satisfies no convention -- 119 meV on acrolein's n->pi*. Leave the
+        default and let the reference object carry the spectrum.
+
+        Neither value touches `qp='G0W0'`, whose W comes from the GW step's own
+        chi0 at mean-field energies, nor `self_consistency='evGW'`, which always
+        screens at its fixed point.
 
     qp: 'G0W0' (default) puts every quasiparticle energy from ONE space-time
     self-energy on the BSE diagonal (`solve_qp_diagonal_space_time`, which
     applies <Sigma_x - v_xc> per state for a KS reference); an ARRAY of
     energies is used as the diagonal directly (an evGW result, say);
     False/None solves BSE@mean-field.
+    spin: 'singlet' (kappa = 2) or 'triplet' (kappa = 0); the screened term is
+    spin-independent, so both read the same W.
     probe: measure min eig(A-B) first and refuse the solve while it is
     negative -- the instability regime, diagnosed before the node-hours are
     spent rather than inside the eigensolver. True converges the eigenvalue;
@@ -356,6 +408,25 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
             print(f'[bse {time.strftime("%H:%M:%S")}] ISDF M={factors[1].shape[0]} '
                   f'({factors[1].shape[0] // mol.natm}/atom)', flush=True)
 
+    evgw_info = None
+    if str(self_consistency).lower() in ('evgw', 'ev'):
+        t0 = _begin('evgw')
+        # The fit is geometry-only, so the loop reuses the one above rather
+        # than rebuilding it every cycle.
+        qp, evgw_info = evgw_eigenvalues(mf, mol, mode='space-time',
+                                         factors=factors, **(gw_kwargs or {}))
+        # W must screen with the spectrum the self-energy converged on, not the
+        # mean field's; shifting the reference is what carries that downstream.
+        mf = shifted_mean_field(mf, qp)
+        _end('evgw', t0)
+        if progress:
+            print(f'[bse {time.strftime("%H:%M:%S")}] evGW '
+                  f'{"converged" if evgw_info["converged"] else "NOT converged"}'
+                  f' in {evgw_info["cycles"]} cycles', flush=True)
+    elif str(self_consistency).lower() not in ('g0w0', 'none'):
+        raise ValueError(f"self_consistency={self_consistency!r}; choose "
+                         f"'G0W0' or 'evGW'.")
+
     eps_mf = get_orbital_energies(mf, representation='spatial')
     gw_extras = {}
     if qp is None or qp is False:
@@ -374,6 +445,13 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
         if eps.shape != eps_mf.shape:
             raise ValueError(f'qp energies have shape {eps.shape}, the mean '
                              f'field has {eps_mf.shape}.')
+        if screen_at not in ('qp', 'mean-field'):
+            raise ValueError(f"screen_at={screen_at!r}; choose 'qp' or "
+                             f"'mean-field'.")
+        if screen_at == 'qp':
+            # An array that IS a self-consistent spectrum: W follows it, the
+            # way evGW's does. The standard G0W0 split is the default above.
+            mf = shifted_mean_field(mf, eps)
 
     t0 = _begin('W')
     # The GW route already inverted [1 - chi0] at every frequency it needed; if
@@ -419,7 +497,8 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
                                         polarizability='BSE', W_aux=W_aux,
                                         isdf_factors=factors,
                                         conv_tol=conv_tol, max_cycle=max_cycle,
-                                        guess_factor=guess_factor, stats=stats)
+                                        guess_factor=guess_factor, stats=stats,
+                                        spin=spin)
     _end('davidson', t0)
     if progress and stats:
         print(f'[bse {time.strftime("%H:%M:%S")}] ' + '  '.join(
@@ -430,7 +509,146 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
                 min_eig_amb=amb, oscillator_strength=f_osc,
                 transition_dipole=trans_dip,
                 exciton_descriptors=exciton_descriptors(mf, mol, nocc, X, Y),
-                timings=t, stats=stats)
+                timings=t, stats=stats,evgw=evgw_info)
+    return omega, X, Y, info
+
+
+def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
+                 max_cycle=100, guess_factor=GUESS_FACTOR, gw_kwargs=None,
+                 progress=None, self_consistency='G0W0', screen_at='mean-field',
+                 spin='singlet'):
+    """BSE by the density-fitted matrix-free Davidson: mean field in, excitations out.
+
+    The twin of `solve_bse_isdf` on pyscf's OWN Coulomb-fitted three-index
+    factor, so the two production routes share every convention and differ
+    only in how the interaction is represented:
+
+        mf = dft.RKS(mol, xc=...).density_fit(auxbasis=...); mf.kernel()
+        omega, X, Y, info = solve_bse_df(mf, mol, nocc, nroots=5)
+
+    The quasiparticle diagonal comes from the Casida GW route -- the dense RPA
+    spectrum in the same auxiliary basis, `calc_qp_energy(mode='casida')` for
+    every orbital -- and `self_consistency='evGW'` drives that route through
+    the eigenvalue loop. The static W is built from the same three-index
+    factor: at the MEAN-FIELD spectrum for `qp='G0W0'`, the standard G0W0-BSE
+    split, and at the fixed point under evGW, since that is the spectrum the
+    self-energy was built with. `qp` as an ENERGY ARRAY and `screen_at` follow
+    the ISDF twin's rules exactly (see there).
+
+    An attached environment reaches the kernel through the dressed factor
+    (`SolventScreening.whitened_transform`, v -> v + vtilde) and the diagonal
+    through Duchemin, Guido, Jacquemin and Blase, Chem. Sci. 9, 4430 (2018)
+    Eq. (18) inside the GW route, whose self-energy screens with the bare
+    interaction. Both halves of the reaction field, the ground-state one at
+    eps_static and the response at eps_inf, are the caller's two calls on one
+    environment object: `env.mean_field(mol, factory)` then
+    `attach_environment(mf, env)`.
+
+    Returns (omega, X, Y, info) with the ISDF twin's fields: eps / eps_mf /
+    coeff_df / W_aux / min_eig_amb, length-gauge oscillator_strength and
+    transition_dipole per root, per-stage timings, and the evGW record.
+    """
+    t = {}
+    stats = {}
+    if progress is None:
+        progress = getattr(mol, 'verbose', 0) > 0
+    if getattr(mf, 'with_df', None) is None:
+        raise ValueError('solve_bse_df reads the mean field\'s own density '
+                         'fitting: build it with mf.density_fit(auxbasis=...) '
+                         'or use solve_bse_isdf, which fits for itself')
+    if np.asarray(mf.mo_coeff).ndim == 3:
+        raise NotImplementedError('solve_bse_df is restricted-spin only, like '
+                                  'the Casida GW route that feeds its diagonal')
+
+    def _begin(name):
+        if progress:
+            print(f'[bse-df {time.strftime("%H:%M:%S")}] {name} ...', flush=True)
+        return time.time()
+
+    def _end(name, t0):
+        t[name] = time.time() - t0
+        if progress:
+            print(f'[bse-df {time.strftime("%H:%M:%S")}] {name} done, '
+                  f'{t[name]:.1f} s', flush=True)
+
+    if progress:
+        print(f'[bse-df {time.strftime("%H:%M:%S")}] natm={mol.natm} '
+              f'nao={mol.nao_nr()} nocc={nocc} nroots={nroots} qp={qp}',
+              flush=True)
+
+    evgw_info = None
+    if str(self_consistency).lower() in ('evgw', 'ev'):
+        t0 = _begin('evgw')
+        qp, evgw_info = evgw_eigenvalues(mf, mol, mode='casida',
+                                         **(gw_kwargs or {}))
+        mf = shifted_mean_field(mf, qp)
+        _end('evgw', t0)
+        if progress:
+            print(f'[bse-df {time.strftime("%H:%M:%S")}] evGW '
+                  f'{"converged" if evgw_info["converged"] else "NOT converged"}'
+                  f' in {evgw_info["cycles"]} cycles', flush=True)
+    elif str(self_consistency).lower() not in ('g0w0', 'none'):
+        raise ValueError(f"self_consistency={self_consistency!r}; choose "
+                         f"'G0W0' or 'evGW'.")
+
+    eps_mf = get_orbital_energies(mf, representation='spatial')
+    if qp is None or qp is False:
+        eps = eps_mf
+    elif isinstance(qp, str):
+        if qp.upper() != 'G0W0':
+            raise ValueError(f"qp='{qp}'; choose 'G0W0', an energy array, or False.")
+        t0 = _begin('qp')
+        out = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
+                             mode='casida', state=list(range(len(eps_mf))),
+                             **(gw_kwargs or {}))
+        eps = np.array([out[p]['GW'] for p in range(len(eps_mf))]) / HARTREE_TO_EV
+        _end('qp', t0)
+    else:
+        eps = np.asarray(qp, dtype=float)
+        if eps.shape != eps_mf.shape:
+            raise ValueError(f'qp energies have shape {eps.shape}, the mean '
+                             f'field has {eps_mf.shape}.')
+        if screen_at not in ('qp', 'mean-field'):
+            raise ValueError(f"screen_at={screen_at!r}; choose 'qp' or "
+                             f"'mean-field'.")
+        if screen_at == 'qp':
+            mf = shifted_mean_field(mf, eps)
+
+    t0 = _begin('W')
+    # One factor for W and the kernel, dressed by whatever is attached to mf;
+    # the screening spectrum is the one mf carries (mean field, or shifted).
+    coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+    W_aux = LinearResponseSolver(get_orbital_energies(mf, representation='spatial'),
+                                 coeff_df=coeff,
+                                 spin_mode='restricted').static_screening_aux(nocc)
+    _end('W', t0)
+
+    lr = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted')
+    amb = None
+    if probe:
+        t0 = _begin('probe')
+        amb = float(lowest_amb_eigenvalue(
+            lr, nocc, polarizability='BSE', W_aux=W_aux,
+            sign_only=(isinstance(probe, str) and probe.lower() == 'sign'),
+            stats=stats)[0])
+        _end('probe', t0)
+        if amb <= 0:
+            raise RuntimeError(
+                f'BSE refused before the solve: min eig(A-B) = {amb:.6f} Ha '
+                '<= 0 -- the mean-field reference is singlet/triplet unstable '
+                'and the Casida omega^2 reduction is invalid there.')
+
+    t0 = _begin('davidson')
+    omega, X, Y = solve_casida_davidson(lr, nocc, nroots=nroots,
+                                        polarizability='BSE', W_aux=W_aux,
+                                        conv_tol=conv_tol, max_cycle=max_cycle,
+                                        guess_factor=guess_factor, stats=stats,
+                                        spin=spin)
+    _end('davidson', t0)
+    f_osc, trans_dip = oscillator_strengths(mf, mol, nocc, omega, X, Y)
+    info = dict(eps=eps, eps_mf=eps_mf, coeff_df=coeff, W_aux=W_aux,
+                min_eig_amb=amb, oscillator_strength=f_osc,
+                transition_dipole=trans_dip, timings=t, stats=stats,evgw=evgw_info)
     return omega, X, Y, info
 
 
@@ -487,13 +705,11 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
     ntau: imaginary-time points; 'auto' (the default) sizes the grid from the
     Kaltak-Klimes-Kresse test integral over the chi0 transition range at
     `tau_target`, exactly as the GW space-time route does -- but over that one
-    range alone, since nothing here transforms a self-energy. A fixed value is
-    not monotonically safe: the transform's Remez window closes above ~20 at
-    molecular energy ranges and the fit COLLAPSES rather than saturating --
-    measured against the 'df' reference on water / cc-pVDZ, 4.6e-7 at ntau=12,
-    1.0e-8 at 18, and back up to 7.2e-4 at 24. The upward scan in
-    `minimax_points_for_accuracy` stops at the first size that meets
-    `tau_target` and never enters that region.
+    range alone, since nothing here transforms a self-energy. More points are
+    monotonically safe and then stop paying: measured against the 'df'
+    reference on water / cc-pVDZ, W(i.omega = 0) is off by 4.6e-7 at ntau=12,
+    1.0e-8 at 18, 2.5e-10 at 24 and 1.8e-10 at 34, the last two sitting on the
+    tabulated coefficients' own precision.
     """
     X_mo, D = _unpack_factors(
         factors if factors is not None
@@ -534,7 +750,7 @@ def _pair_symmetry(orbsym, occ, virt):
 
 
 def df_block_action(lr_solver, nocc, lBSE, W_aux,
-                    tile_memory_gb=DEFAULT_TILE_MEMORY_GB):
+                    tile_memory_gb=ISDF_TILE_GB, spin='singlet'):
     """(apply_AB, diag_d): the Casida blocks as an action on a batch of trial
     vectors, contracted straight out of pyscf's three-index factor.
 
@@ -553,7 +769,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     C_oo = lr_solver.df_coeff[:, occ[:, None], occ]
     C_vv = lr_solver.df_coeff[:, virt[:, None], virt]
     diag_d = (lr_solver.eps[virt][None, :] - lr_solver.eps[occ][:, None])
-    factor = 2.0
+    factor = KAPPA[spin]
 
     def apply_V(z):
         t = np.einsum('Pjb,njb->nP', C_ov, z, optimize=True)
@@ -592,10 +808,16 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
 
     def apply_AB(z):
         # The Hartree term enters A and B identically, so it is contracted once
-        # per trial vector rather than once per block.
-        v = factor * apply_V(z)
-        Az = diag_d[None, :, :] * z + v
-        Bz = v
+        # per trial vector rather than once per block. A triplet has kappa = 0
+        # and drops it entirely -- not merely scaled to zero, skipped, since it
+        # is two of the step's contractions.
+        if factor:
+            v = factor * apply_V(z)
+            Az = diag_d[None, :, :] * z + v
+            Bz = v
+        else:
+            Az = diag_d[None, :, :] * z
+            Bz = np.zeros_like(z)
         if lBSE:
             Az = Az - apply_exchange_direct(z)
             Bz = Bz - apply_exchange_swap(z)
@@ -605,7 +827,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
 
 
 def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
-                      tile_memory_gb=DEFAULT_TILE_MEMORY_GB):
+                      tile_memory_gb=ISDF_TILE_GB, spin='singlet'):
     """The same A/B action from a separable RI -- Fock-like builds on the grid.
 
     Nothing here carries a (naux, nvirt, nvirt) array, and the only object that
@@ -634,7 +856,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
                          "the same fit (see isdf_bse_factors).")
 
     diag_d = (lr_solver.eps[virt][None, :] - lr_solver.eps[occ][:, None])
-    factor = 2.0
+    factor = KAPPA[spin]
     X_o = np.ascontiguousarray(X_mo[:, occ])
     X_v = np.ascontiguousarray(X_mo[:, virt])
     npts, no = X_o.shape
@@ -657,16 +879,18 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
 
     def apply_AB(z):
         Az = diag_d[None, :, :] * z
-        Bz = np.empty_like(z)
+        Bz = np.zeros_like(z)
         for n, zn in enumerate(z):
             zXv = zn @ X_v.T                              # (n_occ, M)
-            # Hartree needs only P's DIAGONAL, and the bare Z = D D^T is never
-            # formed either: two (M, naux) products instead of an (M, M) one.
-            p = np.einsum('kj,jk->k', X_o, zXv, optimize=True)
-            u = D @ (p @ D)
-            hartree = factor * (X_o.T @ (u[:, None] * X_v))
-            Az[n] += hartree
-            Bz[n] = hartree
+            if factor:
+                # Hartree needs only P's DIAGONAL, and the bare Z = D D^T is
+                # never formed either: two (M, naux) products instead of an
+                # (M, M) one. A triplet has kappa = 0 and skips the whole term.
+                p = np.einsum('kj,jk->k', X_o, zXv, optimize=True)
+                u = D @ (p @ D)
+                hartree = factor * (X_o.T @ (u[:, None] * X_v))
+                Az[n] += hartree
+                Bz[n] = hartree
             if not lBSE:
                 continue
             T[:] = 0.0

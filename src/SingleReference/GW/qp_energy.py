@@ -17,6 +17,8 @@ from src.Base.pyscf_interface import (get_orbital_energies,
                                       get_density_fitting_coefficients,
                                       get_two_electron_integrals_chemist)
 from src.Base.solvent_screening import solvent_static_selfenergy
+from src.SingleReference.GW.reaction_field import (
+    bare_self_energy, environment_quasiparticle_shift)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver
@@ -27,12 +29,55 @@ from src.Solvers.qp_equation import solve_qp_equation
 
 IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
 
+#: `mode` values the evGW loop can drive, in its own naming.
+EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
+              'imag-frequency': 'imagfrequency', 'space-time': 'space-time'}
+
+
+def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
+                    spin_channel, route_kwargs):
+    """Quasiparticle energies in eV from the eigenvalue-self-consistent loop.
+
+    The loop returns the whole converged spectrum, so the requested states are
+    read straight out of it: an evGW quasiparticle energy IS the fixed point,
+    not a further correction applied to one.
+    """
+    # cycle: the loop asks this dispatcher for the spectrum every cycle
+    from src.SingleReference.GW.evGW import evgw_eigenvalues
+
+    if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
+        raise NotImplementedError(
+            f'self_consistency=evGW drives GW@RPA only, not '
+            f'selfenergy={selfenergy!r} polarizability={polarizability!r}: the '
+            f'loop reinjects eigenvalues into G and P0, and a vertex or a '
+            f'non-RPA screening would need its own fixed point')
+    if mode_key not in EVGW_MODES:
+        raise ValueError(f"mode={mode_key!r} has no evGW loop; choose one of "
+                         f"{sorted(set(EVGW_MODES))}")
+
+    is_uhf = isinstance(mf, scf.uhf.UHF)
+    eps_qp, info = evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
+                                    **route_kwargs)
+    if is_uhf:
+        # the loop converges both channels at once; the caller asked for one
+        nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]
+        eps_qp = eps_qp[0 if spin_channel == 'alpha' else 1]
+    else:
+        nocc = mol.nelectron // 2
+    states = _resolve_states(state, nocc)
+    out = {p: {'GW': float(eps_qp[p]) * HARTREE_TO_EV} for p in states}
+    out['evgw_info'] = info
+    if not isinstance(state, list):
+        return out[states[0]]['GW']
+    return out
+
 
 def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    eta=DEFAULT_BROADENING_ETA, state='homo',
                    spin_channel='alpha', printSpectralFunction=False,
                    dm_correction=None, tda=False, qp_solver='pole_strength',
-                   nroots=8, mode='casida', **route_kwargs):
+                   nroots=8, mode='casida', self_consistency='G0W0',
+                   eps_anchor=None, **route_kwargs):
     """Quasiparticle energies, in eV.
 
     selfenergy:     'GW'/'GWGammaInf'/'PSD1'...'PSD9', or a list of these.
@@ -52,6 +97,16 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     tda:            solve every Casida problem with Y = 0; the static screening
                     W_aux is unaffected.
     nroots:         EE states in the Lehmann sum, CC polarizability only.
+    self_consistency: 'G0W0' (default) evaluates Sigma once on the mean field's
+                    own eigenvalues. 'evGW' reinjects the quasiparticle
+                    energies into G and P0 until they stop moving -- every
+                    eigenvalue updated, DIIS-accelerated, convergence on the
+                    HOMO and LUMO, quadrature frozen at the first cycle. GW@RPA
+                    only, since that is what the loop drives.
+    eps_anchor:     the eps_p that anchors w = eps_p + <Sigma_x - v_xc> +
+                    Re Sigma_c(w), when it differs from the spectrum that built
+                    the screening. That is the evGW case and the only one;
+                    None means the two coincide.
     qp_solver:      root selection. 'pole_strength' (default) returns the root
                     of largest weight Z, which deep valence and semicore states
                     need -- a Z ~ 0.03 satellite can sit closer to eps than the
@@ -61,7 +116,13 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
+    if str(self_consistency).lower() in ('evgw', 'ev'):
+        return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
+                               state, spin_channel, route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
+        # the anchor is a named argument here and a route keyword there
+        if eps_anchor is not None:
+            route_kwargs = dict(route_kwargs, eps_anchor=eps_anchor)
         return _qp_energy_imaginary_axis_route(
             mf, mol, mode_key, selfenergy, polarizability, df, state,
             spin_channel, qp_solver, dm_correction, tda, route_kwargs)
@@ -78,17 +139,25 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     eps = get_orbital_energies(mf, representation='spatial')
     states = _resolve_states(state, nocc_spin)
 
-    # Static COHSEX reaction field of an attached solvent, first order in
-    # vtilde. Sigma_c is second order in it, so this term carries the
-    # polarization energy. None in the gas phase.
-    sigma_solvent = solvent_static_selfenergy(mf, mol)
-    if isinstance(sigma_solvent, tuple):
-        sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
+    # The reaction field's one-body term, None in the gas phase. Duchemin et
+    # al. Eq. (18) where it is available -- the self-polarization of the
+    # orbital carrying the added charge in the SCREENED reaction field, built
+    # once per mean field so this route and the imaginary-axis ones read the
+    # same array. `cohsex_correction` is the unrestricted fallback: it sums the
+    # BARE vtilde over every orbital and differs by 0.39 eV of quasiparticle
+    # gap on water in water.
+    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
+    if shift is not None:
+        sigma_solvent = np.diag(shift)
+    else:
+        sigma_solvent = solvent_static_selfenergy(mf, mol)
+        if isinstance(sigma_solvent, tuple):
+            sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
 
     if polarizability.upper() in ('CCSD', 'CCSDT'):
         results = _qp_energy_cc_polarizability(
             mf, states, polarizability.lower(), selfenergy, eta, nroots,
-            sigma_solvent, spin_channel, qp_solver, is_uhf)
+            sigma_solvent, shift, spin_channel, qp_solver, is_uhf)
         if not isinstance(state, list) and not isinstance(selfenergy, list):
             return results[states[0]]['GW']
         return results
@@ -97,7 +166,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # Fail fast on typos rather than silently falling back to GW.
     method_infos = {m: get_method_info(m) for m in methods}
 
-    df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
+    with bare_self_energy(mf, shift):
+        df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
     spin_mode = 'unrestricted' if is_uhf else 'restricted'
     lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri,
                                      spin_mode=spin_mode, eta=eta)
@@ -115,17 +185,27 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
         eri_w_singlet, eri_w_triplet = lr_solver.construct_4d_w_rpa(nocc, spin_channel)
 
     eps_spin = (eps[0] if spin_channel == 'alpha' else eps[1]) if is_uhf else eps
+    # The equation is anchored on eps_p while the solvers above screen with
+    # whatever spectrum `mf` carried; evGW is the case where the two differ.
+    if eps_anchor is None:
+        anchor_spin = eps_spin
+    else:
+        anchor = np.asarray(eps_anchor, float)
+        anchor_spin = ((anchor[0] if spin_channel == 'alpha' else anchor[1])
+                       if is_uhf else anchor)
 
+    # <Sigma_Hx - v_Hxc> is one matrix for the whole spectrum; built per state
+    # it was 85 % of an evGW cycle that asks for every orbital.
+    xc_diagonal = _static_correction(mf, mol, se_solver, dm_correction,
+                                     sigma_solvent, spin_channel, is_uhf)
     results = {}
     for p_state in states:
         results[p_state] = {}
         amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos,
                                        methods, spin_channel, p_state,
                                        eri_w_singlet, eri_w_triplet, is_uhf, df)
-        xc_correction = _static_correction(mf, mol, se_solver, dm_correction,
-                                           sigma_solvent, spin_channel,
-                                           p_state, is_uhf)
-        eigKS = eps_spin[p_state]
+        xc_correction = xc_diagonal[p_state]
+        eigKS = anchor_spin[p_state]
 
         for method in methods:
             info = method_infos[method]
@@ -271,15 +351,19 @@ def _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos, methods,
 
 
 def _static_correction(mf, mol, se_solver, dm_correction, sigma_solvent,
-                       spin_channel, p_state, is_uhf):
-    """<Sigma_Hx - v_Hxc>_pp, plus the solvent reaction field.
+                       spin_channel, is_uhf):
+    """<Sigma_Hx - v_Hxc>_pp for every orbital p, plus the solvent reaction
+    field: one array over the spectrum.
 
     Zero on a Hartree-Fock reference with no density correction, where Sigma_Hx
-    is already the mean-field potential.
+    is already the mean-field potential. Both potentials are one AO build each
+    (the exchange-correlation one on the grid, the Hartree-Fock one a J and a
+    K), so they are formed once here, not once per state.
     """
-    xc_correction = 0.0
+    beta = is_uhf and spin_channel != 'alpha'
+    nmo = (mf.mo_coeff[1 if beta else 0] if is_uhf else mf.mo_coeff).shape[1]
+    xc_correction = np.zeros(nmo)
     if hasattr(mf, 'xc') or dm_correction is not None:
-        beta = is_uhf and spin_channel != 'alpha'
         dm_mf = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
         dm_for_hx = dm_correction if dm_correction is not None else dm_mf
         V_Hxc = mf.get_veff(mol, dm_mf)
@@ -293,9 +377,9 @@ def _static_correction(mf, mol, se_solver, dm_correction, sigma_solvent,
         V_Hx_mo = se_solver.calculate_sigma_hx(mol, mf_hf, dm_for_hx, mf.mo_coeff)
         if is_uhf:
             V_Hx_mo = V_Hx_mo[1 if beta else 0]
-        xc_correction = V_Hx_mo[p_state, p_state] - V_Hxc_mo[p_state, p_state]
+        xc_correction = np.diag(V_Hx_mo) - np.diag(V_Hxc_mo)
     if sigma_solvent is not None:
-        xc_correction = xc_correction + sigma_solvent[p_state, p_state]
+        xc_correction = xc_correction + np.diag(np.asarray(sigma_solvent))
     return xc_correction
 
 
@@ -320,7 +404,8 @@ def _print_spectral_function(se_solver, p_state, method, qp_ev, nocc, omega_val,
 
 
 def _qp_energy_cc_polarizability(mf, states, level, selfenergy, eta, nroots,
-                                 sigma_solvent, spin_channel, qp_solver, is_uhf):
+                                 sigma_solvent, shift, spin_channel, qp_solver,
+                                 is_uhf):
     """G0W@CC: the same QP equation, with Sigma_c from an EOM-CC Lehmann sum.
 
     A separate branch because none of the Casida machinery applies -- the CC
@@ -340,15 +425,22 @@ def _qp_energy_cc_polarizability(mf, states, level, selfenergy, eta, nroots,
             "CC polarizability assumes an HF reference; a KS starting point would "
             "additionally need a v_xc correction, which this route does not build.")
 
-    solver = GWCCSelfEnergy(mf, level=level, nroots=nroots)
+    # The CC screening is built from the BARE interaction, like the Casida
+    # route's: the reaction field enters once, through the Eq. (18) static
+    # shift below, and a self-energy screened with v + vtilde as well would
+    # count the same polarization twice.
+    with bare_self_energy(mf, shift):
+        solver = GWCCSelfEnergy(mf, level=level, nroots=nroots)
     spin_offset = 0 if spin_channel == 'alpha' else 1
 
     results = {}
     for p_state in states:
         # Spatial orbital p -> spin orbital 2p (+1 for beta), interleaved.
         p_so = 2 * p_state + spin_offset
-        shift = 0.0 if sigma_solvent is None else sigma_solvent[p_state, p_state]
-        qp_ha = solver.solve_qp(p_so, eta=eta, method=qp_solver, static_shift=shift)
+        static_shift = (0.0 if sigma_solvent is None
+                        else sigma_solvent[p_state, p_state])
+        qp_ha = solver.solve_qp(p_so, eta=eta, method=qp_solver,
+                                static_shift=static_shift)
         results[p_state] = {'GW': qp_ha * HARTREE_TO_EV}
     return results
 

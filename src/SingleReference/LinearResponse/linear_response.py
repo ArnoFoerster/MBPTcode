@@ -1,7 +1,8 @@
 import numpy as np
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.base import get_occ_virt_indices
-from src.Base.constants import DEFAULT_BROADENING_ETA
+from src.Base.constants import (CASIDA_NORM_TOL,
+                                DEFAULT_BROADENING_ETA)
 from src.SingleReference.LinearResponse import imaginary_frequency
 
 class LinearResponseSolver:
@@ -599,3 +600,44 @@ def static_screened_coulomb_aux_uhf(eps_a, eps_b, coeff_a, coeff_b, nocc_a, nocc
     lr = LinearResponseSolver((eps_a, eps_b), coeff_df=(coeff_a, coeff_b),
                               spin_mode='unrestricted')
     return np.asarray(lr.static_screening_aux((nocc_a, nocc_b)))
+
+
+def check_normalization(x, y=None, tol=CASIDA_NORM_TOL):
+    """Refuse Casida vectors that are not in this repo's <X|X> - <Y|Y> = 1.
+
+    Returns (X, Y) as (n_ov, nroots) float arrays with Y materialized as zeros
+    for a Tamm-Dancoff root. Rescaling silently instead would hide a factor of
+    two in every oscillator strength, which is the single most likely way to
+    get this wrong.
+    """
+    x = np.atleast_2d(np.asarray(x, float).T).T if np.ndim(x) == 1 else np.asarray(x, float)
+    y = np.zeros_like(x) if y is None else np.asarray(y, float)
+    if y.shape != x.shape:
+        raise ValueError(f'X {x.shape} and Y {y.shape} disagree')
+    norms = (x ** 2).sum(axis=0) - (y ** 2).sum(axis=0)
+    bad = np.abs(norms - 1.0) > tol
+    if bad.any():
+        worst = norms[bad][np.argmax(np.abs(norms[bad] - 1.0))]
+        hint = (" -- that is pySCF's convention; convert with from_pyscf()"
+                if abs(worst - 0.5) < 0.05 else '')
+        raise ValueError(f'root {int(np.flatnonzero(bad)[0])} has '
+                         f'<X|X> - <Y|Y> = {worst:.6f}, not 1 to {tol:g}{hint}')
+    return x, y
+
+
+def from_pyscf(td):
+    """(omega, X, Y) from a pySCF TDA/TDDFT object, in THIS repo's normalization.
+
+    pySCF normalizes to <X|X> - <Y|Y> = 1/2, so every vector is scaled by
+    sqrt(2). Used to cross-check the module against an independent solver; it
+    is not part of any production path.
+    """
+    nocc = int(np.count_nonzero(td._scf.mo_occ > 0))
+    nvir = np.asarray(td._scf.mo_coeff).shape[1] - nocc
+    x = np.zeros((nocc * nvir, len(td.e)))
+    y = np.zeros_like(x)
+    for k, xy in enumerate(td.xy):
+        x[:, k] = np.asarray(xy[0]).ravel() * np.sqrt(2.0)
+        y[:, k] = np.asarray(xy[1]).ravel() * np.sqrt(2.0) \
+            if np.ndim(xy[1]) else 0.0
+    return np.asarray(td.e, float), x, y

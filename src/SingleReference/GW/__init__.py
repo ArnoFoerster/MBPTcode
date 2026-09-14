@@ -15,6 +15,11 @@
                               imaginary time on separable (ISDF) factors
     cc_polarizability.py      G0W@CC -- the RPA polarizability replaced by an
                               EOM-CC one, through CC/eom.py
+    reaction_field.py         Duchemin et al. Eq. (18): the continuum's shift
+                              of every quasiparticle energy, and the gauge
+                              transform that reaches the bare screening
+    evGW.py                   the eigenvalue-self-consistent loop over any of
+                              the routes above
 
 Davidson note: the three iterative eigensolvers in this tree --
 LinearResponse/davidson.py (symplectic Casida via pyscf real_eig), ADC

@@ -98,8 +98,9 @@ import scipy.linalg
 from pyscf import df, gto, lib, scf
 from pyscf.lib import logger
 
-from src.Base.separable_ri import (DEFAULT_REGULARIZATION, build_D_F, fit_M,
-                                   fit_M_streaming, molecular_points_covariant,
+from src.Base.separable_ri import (DEFAULT_REGULARIZATION, build_D_F,
+                                   fit_M_stable, fit_M_streaming,
+                                   molecular_points_covariant,
                                    optimize_atomic_radii, published_grids)
 
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
@@ -151,13 +152,19 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1):
         default descent is the worst of the starting shapes on carbon; six cut
         benzene's exchange-energy error 23x at the same point count.
     """
+    # The published tables come at ONE size, so they can only be substituted for
+    # a caller who did not ask for a size. Asking for `counts` and silently
+    # getting the published grid instead makes a grid-convergence study return
+    # the same number for every count, which reads as convergence.
+    asked_for_counts = counts is not None
     counts = counts or DEFAULT_COUNTS
     auxbasis = auxbasis or (str(mol.basis) + '-ri')
     if radii is None:
         pub = published_grids()
         radii, origins = {}, {}
         for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
-            if el in pub and str(mol.basis).lower() == 'cc-pvtz':
+            if el in pub and str(mol.basis).lower() == 'cc-pvtz' \
+                    and not asked_for_counts:
                 radii[el], origins[el] = pub[el]
             else:
                 radii[el] = optimize_atomic_radii(el, mol.basis, auxbasis,
@@ -224,7 +231,10 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
     # than assumed, unlike the bare case where `build_D_F` puts an eye there.
     D = np.hstack([D, aux_on_grid])
     F = np.hstack([F, Vinv @ V])
-    return fit_M(D, F, regularization)
+    # The Cholesky solve, not the explicit inverse: cond(G) reaches ~2e8 on a
+    # real grid, where forming G^-1 costs ~2e-9 relative against the same
+    # estimator solved stably.
+    return fit_M_stable(D, F, regularization)
 
 
 # ---------------------------------------------------------------------------

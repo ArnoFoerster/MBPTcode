@@ -36,9 +36,10 @@ import time as _time
 import numpy as np
 from pyscf import df as pyscf_df
 
+from src.Base.environment import environment_of
 from src.Base.pyscf_interface import get_orbital_energies
-from src.Base.solvent_screening import get_solvent_screening
-from src.Base.separable_ri import (DEFAULT_PAIR_TOL, build_separable_ri,
+from src.Base.separable_ri import (DEFAULT_PAIR_TOL, aux_metric_sqrt,
+                                   build_separable_ri,
                                    molecular_points_covariant,
                                    optimize_atomic_radii, published_grids)
 from src.Base.utils.grids import (gauss_legendre_grid, minimax_time_grid,
@@ -57,6 +58,8 @@ from src.SingleReference.GW.imaginary_time import (self_energy_matrix_imaginary_
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              solve_qp_from_imaginary_axis,
                                              imaginary_axis_sample_points)
+from src.SingleReference.GW.reaction_field import (
+    separable_gauge_transform, separable_quasiparticle_shift)
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 
 DEFAULT_NTAU = 'auto'
@@ -107,24 +110,9 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                                  block_memory_gb=block_memory_gb,
                                  pair_tol=pair_tol)
 
-    # Symmetric V^1/2 gauge on the auxiliary index -- the one Sigma expects.
-    V = auxmol.intor('int2c2e', aosym='s1')
-    # An attached solvent screening substitutes v -> v + vtilde. The
-    # interaction enters this factorization only through the auxiliary
-    # metric (Z = D D^T fits pair densities against V), so dressing V is the
-    # whole substitution -- the DF analogue is
-    # SolventScreening.whitened_transform.
-    screening = get_solvent_screening(mf)
-    if screening is not None:
-        V = V + screening.aux_kernel(auxmol)
-    w, v = np.linalg.eigh(V)
-    if screening is not None and w.min() < -1e-10 * w.max():
-        raise RuntimeError(
-            f"the screened auxiliary metric v + vtilde is indefinite "
-            f"(smallest eigenvalue {w.min():.3e}): the reaction field "
-            f"over-screens the bare interaction. Check eps and the cavity.")
-    keep = w > 1e-12 * w.max()
-    V_half = (v[:, keep] * np.sqrt(w[keep])) @ v[:, keep].T
+    # Symmetric V^1/2 gauge on the auxiliary index -- the one Sigma expects,
+    # dressed by the environment attached to the mean field (v -> v + vtilde).
+    V_half = aux_metric_sqrt(auxmol, environment_of(mf))
     return X @ mf.mo_coeff, M.T @ V_half, X, coords
 
 
@@ -177,8 +165,13 @@ def _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points, freq_points,
 
 
 def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
-               solver_mode, dm_correction, greedy, timings, sigma_x='mf'):
-    """Sigma_c on the imaginary axis -> quasiparticle energy, one per state."""
+               solver_mode, dm_correction, greedy, timings, sigma_x='mf',
+               reaction_field=None):
+    """Sigma_c on the imaginary axis -> quasiparticle energy, one per state.
+
+    reaction_field is the continuum's Eq. (18) shift when the route built W,
+    and REPLACES the COHSEX fallback inside `static_exchange_diagonal`.
+    """
     states = np.atleast_1d(p_state)
     scalar = np.ndim(p_state) == 0
     sig = np.atleast_2d(sigma)
@@ -188,7 +181,8 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     # index until it is indexed.
     xc_diag = static_exchange_diagonal(mf, mol, states,
                                        dm_correction=dm_correction,
-                                       exchange=sigma_x)
+                                       exchange=sigma_x,
+                                       reaction_field=reaction_field)
     out = []
     for i, p in enumerate(states):
         z_fit, _ = imaginary_axis_sample_points(pade_freq, nocc, p, mu)
@@ -210,7 +204,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                                timings=None, distribute=False, comm=None,
                                freq_block=None, scratch_dir=None,
                                tau_target=DEFAULT_TAU_TARGET, extras=None,
-                               screen_r_cut=None, sigma_x='mf'):
+                               screen_r_cut=None, sigma_x='mf',
+                               eps_anchor=None):
     """GW@RPA quasiparticle energy by the space-time route; restricted, DF only.
 
     Same quantity as `calc_qp_energy(selfenergy='GW', polarizability='RPA')`.
@@ -228,6 +223,15 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     distribute:  split the tau sums over MPI ranks and all-reduce; exact, no
                  halo. The Dyson inversion stays replicated.
     extras:      dict; receives W(omega=0) for a BSE on the same factors.
+    eps_anchor:  the eps_p anchoring w = eps_p + <Sigma_x - v_xc> +
+                 Re Sigma_c(w), when it differs from the spectrum that builds
+                 G, P0 and W. That is the evGW case and the only one: the
+                 screening follows the corrected eigenvalues while the equation
+                 stays anchored on the mean field. Anchoring it on the ITERATE
+                 instead adds each cycle's correction a second time, which
+                 shows as a gap opening by the same amount every cycle and
+                 never converging. None means the two coincide, which is G0W0
+                 and leaves this route bitwise unchanged.
     sigma_x:     which K builds the static exchange, see
                  `static_exchange_diagonal`. 'mf' on an ISDF mean field puts
                  the grid's K error into every QP energy at first order;
@@ -243,8 +247,14 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     # R = e_max/e_min grows as the gap closes, so a fixed ntau is wrong at one
     # end of any size series.
     if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        ntau, tau_err = minimax_points_for_gw(eps, nocc, mu=mu,
-                                              target=tau_target)
+        # Sized from the ANCHOR spectrum when one is given: an evGW iterate
+        # opens the gap cycle by cycle, and a grid that followed it would make
+        # each cycle integrate a different functional. The mean field has the
+        # smallest gap, so its count is the conservative one.
+        eps_size = eps if eps_anchor is None else np.asarray(eps_anchor, float)
+        ntau, tau_err = minimax_points_for_gw(
+            eps_size, nocc, mu=0.5 * (eps_size[nocc - 1] + eps_size[nocc]),
+            target=tau_target)
         if timings is not None:
             timings['ntau_auto'] = ntau
             timings['tau_fit_error'] = tau_err
@@ -252,6 +262,13 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     X_mo, D, X_ao, coords = _unpack_factors(
         factors if factors is not None
         else separable_factors(mf, mol, auxbasis=auxbasis, radii=radii))
+
+    # THE SELF-ENERGY SCREENS BARE AND TAKES THE CONTINUUM AS A STATIC SHIFT.
+    # Duchemin et al. build Sigma from the gas-phase W and put the whole
+    # reaction field in their Eq. (18), the COHSEX approximation to
+    # Sigma[W_solv] - Sigma[W_gas]; screening Sigma dynamically as well counts
+    # that difference twice. The BSE kernel keeps the dressed factors.
+    transform = separable_gauge_transform(mol, environment_of(mf), auxbasis)
 
     # The frequency axis paired with the time axis: same size, minimax. It is
     # not a quadrature here -- chi0 is transformed onto it only so the Dyson
@@ -271,7 +288,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     # Carry omega = 0 as a zero-weight passenger when the caller wants the
     # static screening, so a BSE need not repeat the tau sweep. Stripped again
     # below: omega = 0 is not part of the Sigma quadrature.
-    want_static = extras is not None
+    want_static = extras is not None or transform is not None
     if want_static:
         freq_points = np.append(np.asarray(freq_points, float), 0.0)
         freq_weights = np.append(np.asarray(freq_weights, float), 0.0)
@@ -289,7 +306,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                            freq_points, pade_freq, p_state, want_static, extras,
                            ntau, nranks, freq_block, scratch_dir, solver_mode,
                            dm_correction, greedy, timings, X_ao, coords,
-                           screen_r_cut, sigma_x)
+                           screen_r_cut, sigma_x, eps_anchor, transform)
 
     _t = _time.time()
     chi0 = chi0_imaginary_frequency(X_mo, D, eps, nocc, grid, mu=mu,
@@ -304,15 +321,27 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     # both the list and the stacked copy on top of chi0.
     _t = _time.time()
     eye = np.eye(chi0.shape[-1])
+    w_static = None
     for k in range(chi0.shape[0]):
+        if want_static and k == chi0.shape[0] - 1:
+            w_static = np.linalg.inv(eye - chi0[k])     # dressed: the kernel's
+        if transform is not None:
+            chi0[k] = transform.T @ chi0[k] @ transform
         chi0[k] = np.linalg.inv(eye - chi0[k])
     W_omega = chi0
     if want_static:
-        extras['w_static'] = W_omega[-1].copy()
-        extras['w_static_ntau'] = ntau
+        if extras is not None:
+            extras['w_static'] = w_static
+            extras['w_static_ntau'] = ntau
         W_omega = W_omega[:-1]
         freq_points = freq_points[:-1]
         freq_weights = freq_weights[:-1]
+
+    reaction_field = None
+    if transform is not None:
+        reaction_field = separable_quasiparticle_shift(X_mo, D, w_static,
+                                                       transform, nocc)
+        D = D @ transform
     if timings is not None:
         timings['t_dyson'] = _time.time() - _t
 
@@ -326,14 +355,17 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    return _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
-                      solver_mode, dm_correction, greedy, timings, sigma_x)
+    return _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
+                      nocc, p_state, mu, pade_freq, mf, mol,
+                      solver_mode, dm_correction, greedy, timings, sigma_x,
+                      reaction_field=reaction_field)
 
 
 def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                 pade_freq, p_state, want_static, extras, ntau, nranks,
                 freq_block, scratch_dir, solver_mode, dm_correction, greedy,
-                timings, X_ao, coords, screen_r_cut, sigma_x='mf'):
+                timings, X_ao, coords, screen_r_cut, sigma_x='mf',
+                eps_anchor=None, transform=None):
     """Low-memory branch: chi0 is never formed.
 
     Frequencies are built, inverted and folded into Wt(i.tau) a block at a time,
@@ -348,6 +380,9 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
     # Fit the omega -> tau weights on the UNEXTENDED axis, then pad with a zero
     # column: every output tau is fitted from all input frequencies, so letting
     # omega = 0 into the fit refits every other coefficient.
+    # A continuum wants W(0) even when the caller asked for no extras, so the
+    # passenger needs somewhere to land either way.
+    static_out = extras if extras is not None else {}
     static_idx = None
     fit_freqs = freq_points[:-1] if want_static else freq_points
     Ctw, w_fit_err = minimax_transform_weights(COSINE_WT, tau_points,
@@ -363,13 +398,19 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
     Wt_tau = screened_interaction_tau_blocked(
         X_mo, D, eps, nocc, grid, Ctw, mu=mu, freq_block=freq_block,
         scratch_dir=scratch_dir, wt_scratch=wt_path,
-        static_index=static_idx, static_out=extras)
+        static_index=static_idx, static_out=static_out, transform=transform)
     if want_static:
-        extras['w_static_ntau'] = ntau
+        static_out['w_static_ntau'] = ntau
     if timings is not None:
         timings['t_chi0'] = _time.time() - _t
         timings['t_dyson'] = 0.0
         timings['nranks'] = 1
+
+    reaction_field = None
+    if transform is not None:
+        reaction_field = separable_quasiparticle_shift(
+            X_mo, D, static_out['w_static'], transform, nocc)
+        D = D @ transform
 
     _t = _time.time()
     sigma = _sigma_mo_diagonal(X_mo, D, None, mf, eps, nocc, tau_points,
@@ -379,8 +420,10 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    out = _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
-                     solver_mode, dm_correction, greedy, timings, sigma_x)
+    out = _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
+                     nocc, p_state, mu, pade_freq, mf, mol,
+                     solver_mode, dm_correction, greedy, timings, sigma_x,
+                     reaction_field=reaction_field)
     del Wt_tau, sigma
     if wt_path and os.path.exists(wt_path):
         os.remove(wt_path)

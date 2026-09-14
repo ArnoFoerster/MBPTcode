@@ -15,7 +15,9 @@ from src.Base.pyscf_interface import (get_orbital_energies,
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.base import get_occ_virt_indices
 from src.Solvers.qp_equation import solve_qp_equation
-from src.SingleReference.GW.qp_solve import (static_exchange_correction,
+from src.SingleReference.GW.reaction_field import (
+    bare_self_energy, environment_quasiparticle_shift)
+from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              solve_qp_from_imaginary_axis,
                                              imaginary_axis_sample_points)
 
@@ -62,7 +64,8 @@ def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_w
 
 def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
                                     eta=DEFAULT_BROADENING_ETA, solver_mode='pole_strength', greedy=True,
-                                    dm_correction=None, timings=None, beta=None):
+                                    dm_correction=None, timings=None, beta=None,
+                                    eps_anchor=None):
     """
     GW@RPA quasiparticle energy via the imaginary-frequency-axis route: 
     RPA W(i*omega) -> convolution -> Pade continuation.
@@ -84,16 +87,30 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     eps = get_orbital_energies(mf, representation='spatial')
     occ_idx, virt_idx = get_occ_virt_indices(eps, nocc)
 
-    # Use B only as B[:, occ, virt] (for chi0) and B[:, p_state, :] (for Sigma)
-    if hasattr(mf, 'with_df') and mf.with_df is not None:
-        C_ov, C_row = get_df_coefficients_ov(mol, mf, occ_idx, virt_idx,rows=[p_state])
-        lr = LinearResponseSolver(eps, coeff_ov=C_ov, spin_mode='restricted',eta=eta)
-    else:
-        # Without with_df there is no three-index object to slice, so that case
-        # still goes through the full builder.
-        df_coeff = get_density_fitting_coefficients(mol, mf,representation='spatial')
-        C_row = df_coeff[:, [p_state], :]
-        lr = LinearResponseSolver(eps, coeff_df=df_coeff,spin_mode='restricted', eta=eta)
+    # A WINDOW SHARES ONE SCREENING BUILD: the rows of the three-index object
+    # are sliced for every requested state at once, and W below is built once.
+    states = np.atleast_1d(p_state).astype(int)
+    scalar = np.ndim(p_state) == 0
+
+    # The self-energy screens bare and takes the continuum as the static Eq.
+    # (18) shift, the same split the space-time route makes.
+    reaction_field = environment_quasiparticle_shift(mf, mol, nocc)
+
+    # Use B only as B[:, occ, virt] (for chi0) and B[:, states, :] (for Sigma)
+    with bare_self_energy(mf, reaction_field):
+        if hasattr(mf, 'with_df') and mf.with_df is not None:
+            C_ov, C_row = get_df_coefficients_ov(mol, mf, occ_idx, virt_idx,
+                                                 rows=list(states))
+            lr = LinearResponseSolver(eps, coeff_ov=C_ov,
+                                      spin_mode='restricted', eta=eta)
+        else:
+            # Without with_df there is no three-index object to slice, so that
+            # case still goes through the full builder.
+            df_coeff = get_density_fitting_coefficients(
+                mol, mf, representation='spatial')
+            C_row = df_coeff[:, states, :]
+            lr = LinearResponseSolver(eps, coeff_df=df_coeff,
+                                      spin_mode='restricted', eta=eta)
 
     # inverse temperature
     if beta is None:
@@ -128,24 +145,28 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     # imaginary axis sampling point
     w_sigma = self_energy_range(eps, mu, e_max)
     pade_order = None if beta is None else ir_continuation_order(beta, w_sigma)
-    z_fit, iw_query = imaginary_axis_sample_points(freq_points, nocc, p_state, mu)
+    # A WINDOW SHARES ONE W. Everything above is state-independent; only the
+    # sampling points, Sigma and the root solve carry a state index, so a
+    # window costs one screening build and not one per orbital.
+    # The equation is anchored on eps_p; evGW hands the mean-field spectrum
+    # here while the screening above follows the corrected one.
+    anchor = eps if eps_anchor is None else np.asarray(eps_anchor, float)
 
-    # Obtain self-energy on imaginary axis
     _t = _time.time()
-    sigma_iw = self_energy_imaginary_axis(C_row, eps - mu, nocc, 0,
-                                          freq_points, freq_weights, W_grid,
-                                          iw_query)
-    if timings is not None:
-        timings['t_sigma'] = _time.time() - _t
-
-    # static exchange correction
-    _t = _time.time()
-    xc_correction = static_exchange_correction(mf, mol, p_state,dm_correction=dm_correction)
-
-    # solve QP equation via analytical continuation
-    out = solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit,sigma_iw, greedy=greedy,
-                                       solver_mode=solver_mode,max_order=pade_order)
+    xc_diag = static_exchange_diagonal(mf, mol, states,
+                                       dm_correction=dm_correction,
+                                       reaction_field=reaction_field)
+    out = []
+    for i, p in enumerate(states):
+        z_fit, iw_query = imaginary_axis_sample_points(freq_points, nocc,
+                                                       int(p), mu)
+        sigma_iw = self_energy_imaginary_axis(C_row[:, [i], :], eps - mu, nocc,
+                                              0, freq_points, freq_weights,
+                                              W_grid, iw_query)
+        out.append(solve_qp_from_imaginary_axis(
+            anchor, int(p), float(xc_diag[i]), z_fit, sigma_iw, greedy=greedy,
+            solver_mode=solver_mode, max_order=pade_order))
     if timings is not None:
         timings['t_qp'] = _time.time() - _t
-    return out
+    return out[0] if scalar else np.asarray(out)
 

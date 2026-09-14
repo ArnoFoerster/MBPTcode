@@ -46,6 +46,15 @@ A correlated density matrix is passed to any of them as
 it was already marked deprecated, and callers that still use it now raise
 `TypeError`.
 
+**evGW** — `calc_qp_energy(..., self_consistency='evGW')` drives any of those
+three routes to a fixed point: the quasiparticle energies are reinjected into
+G and P₀ until the spectrum stops moving, with every eigenvalue updated, DIIS
+acceleration and convergence decided on the HOMO and LUMO. The equation stays
+anchored on the mean field while the screening follows the iterate — anchored
+on the iterate instead, each cycle adds its own correction a second time and
+the gap runs away without ever converging. `evgw_eigenvalues` returns the whole
+converged spectrum and a record of how it got there. See `examples/12_evgw.py`.
+
 **Low-scaling factorization** — the separable RI of Duchemin and Blase
 ([J. Chem. Phys. 150, 174120 (2019)](https://doi.org/10.1063/1.5090605)),
 with optimized atomic interpolation grids. It backs the space-time GW route,
@@ -53,14 +62,35 @@ with optimized atomic interpolation grids. It backs the space-time GW route,
 replaces the density-fitted `cderi` and so removes the three-index tensor from
 the memory budget.
 
-**BSE** — the iterative (Davidson) Bethe-Salpeter equation on ISDF factors,
-sharing one factorization with the GW that feeds it.
+**BSE** — the iterative (Davidson) Bethe-Salpeter equation, singlet or
+triplet, in two interchangeable flavours that share every convention:
+`solve_bse_isdf` on ISDF factors (one factorization for the GW that feeds it
+and the kernel) and `solve_bse_df` on pyscf's own Coulomb fit. Both take
+`self_consistency='evGW'`.
+
+Which eigenvalues build the static W is set by the LEVEL OF THEORY: G0W0
+screens W₀ at the mean-field eigenvalues, which is the standard split, and evGW
+at its converged ones. An explicit `qp=` array therefore follows the G0W0
+convention unless `screen_at='qp'` says the array is itself a self-consistent
+spectrum.
 
 **Solvent** — polarizable-continuum screening in the style of Duchemin,
-Jacquemin and Blase, [J. Chem. Phys. 144, 164106 (2016)](https://doi.org/10.1063/1.4946778):
-the reaction field enters every self-energy at once by substituting v → v + ṽ
-at the integral chokepoints, with the static COHSEX reaction-field operator
-added to Σ(∞), which is where nearly all of the solvation shift lives.
+Jacquemin and Blase, [J. Chem. Phys. 144, 164106 (2016)](https://doi.org/10.1063/1.4946778).
+Non-equilibrium solvation is two dielectric constants and needs both: the
+ground state relaxes inside PCM(ε_static), since the solvent nuclei have had
+time to reorient around it, and only the *response* is optical. One
+`SolventScreening` carries both — `env.mean_field(mol, factory)` applies the
+first, `attach_environment(mf, env)` the second, which substitutes v → v + ṽ
+at the integral chokepoints.
+
+Inside GW the reaction field is then Duchemin, Guido, Jacquemin and Blase,
+Chem. Sci. 9, 4430 (2018), Eq. (18): the
+self-polarization of the orbital carrying the added charge in the *screened*
+reaction field, on every route, with Σ itself screened by the bare interaction
+— screening Σ dynamically as well counts the same polarization twice. The
+static COHSEX operator remains the fallback for the routes that never form W
+(ADC, an unrestricted reference); the two differ by 0.39 eV of quasiparticle
+gap on water in water. See `examples/13_solvated_gw_bse.py`.
 
 **Finite temperature** — Matsubara-axis grids via the intermediate
 representation, for systems where the T = 0 grids (which key on the HOMO-LUMO
@@ -122,6 +152,7 @@ python tests/test_adc3.py
 src/Base/               PySCF interface, constants, linear algebra
     separable_ri.py     ISDF / separable-RI factorization of the ERIs
     isdf_jk.py          ISDF Coulomb and exchange for the SCF
+    environment.py      what the surroundings do, in one contract
     solvent_screening.py  PCM reaction field
     utils/grids.py      minimax and Gauss-Legendre imaginary-axis grids
     utils/time_frequency.py  one grid object carrying both axes
@@ -131,7 +162,8 @@ src/SingleReference/
     CC/                 CCSD/CCSDT amplitudes, lambda, EOM
     DensityMatrix/      MPn / GW / CC correlated 1-RDMs
     EpsteinNesbet/      EN denominators and shifts
-    GW/                 self-energy, QP equation, imaginary axis/time
+    GW/                 self-energy, QP equation, imaginary axis/time,
+                        the reaction field's shift, the evGW loop
     LinearResponse/     Casida, RPA, BSE, Davidson
 src/Solvers/            quasiparticle root finders
 ```

@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 from pyscf import gto, scf, ao2mo
 
-from src.Base.solvent_screening import get_solvent_screening
+from src.Base.environment import environment_of
 
 def get_effective_one_electron_integrals(mol, mf, representation='spatial'):
     fock_ao = mf.get_fock()
@@ -92,11 +92,12 @@ def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
 
     One of the two places the whole code gets its two-electron interaction
     from (get_density_fitting_coefficients is the other), so it is also where
-    an attached solvent screening substitutes v -> v + vtilde -- see
-    src/Base/solvent_screening.py.
+    an attached environment substitutes v -> v + vtilde -- see
+    src/Base/environment.py, and src/Base/solvent_screening.py for the
+    continuum that does.
     """
     is_uhf = isinstance(mf, scf.uhf.UHF)
-    screening = get_solvent_screening(mf)
+    environment = environment_of(mf)
     if is_uhf:
         mo_a, mo_b = mf.mo_coeff[0], mf.mo_coeff[1]
         norb = mo_a.shape[1]
@@ -107,10 +108,11 @@ def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
         # bb|bb
         eri_bb = ao2mo.general(mol, (mo_b, mo_b, mo_b, mo_b), compact=False).reshape(norb, norb, norb, norb)
 
-        if screening is not None:
-            eri_aa = eri_aa + screening.kernel_mo(mol, mo_a, mo_a)
-            eri_ab = eri_ab + screening.kernel_mo(mol, mo_a, mo_b)
-            eri_bb = eri_bb + screening.kernel_mo(mol, mo_b, mo_b)
+        kernel_aa = environment.kernel_mo(mol, mo_a, mo_a)
+        if kernel_aa is not None:
+            eri_aa = eri_aa + kernel_aa
+            eri_ab = eri_ab + environment.kernel_mo(mol, mo_a, mo_b)
+            eri_bb = eri_bb + environment.kernel_mo(mol, mo_b, mo_b)
 
         if representation == 'spin':
             eri_spin = np.zeros((2*norb, 2*norb, 2*norb, 2*norb))
@@ -125,8 +127,9 @@ def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
         mo = mf.mo_coeff
         norb = mo.shape[1]
         eri_chemist = ao2mo.kernel(mol, mo, compact=False).reshape(norb, norb, norb, norb)
-        if screening is not None:
-            eri_chemist = eri_chemist + screening.kernel_mo(mol, mo, mo)
+        kernel = environment.kernel_mo(mol, mo, mo)
+        if kernel is not None:
+            eri_chemist = eri_chemist + kernel
         if representation == 'spin':
             eri_spin = np.zeros((2*norb, 2*norb, 2*norb, 2*norb))
             eri_spin[0::2, 0::2, 0::2, 0::2] = eri_chemist
@@ -198,15 +201,13 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200):
     """The occupied-virtual block of B_Q,pq, and optionally whole rows B_Q,p:.
 
     `get_density_fitting_coefficients` returns the full (naux, norb, norb)
-    tensor. That is 140 GB at dodecacene/cc-pVTZ, and the imaginary-frequency
-    GW route never uses more than two slices of it -- B[:, occ, virt] for chi0
-    and B[:, p, :] for the self-energy -- which together are 11 GB.
+    tensor: 140 GB at dodecacene/cc-pVTZ
 
-    Building only those also keeps the AO->MO transform's own intermediates
-    small, by contracting the OCCUPIED index FIRST: (nb, nao, nocc) then
-    (nb, nocc, nvirt). Taking the virtual index first would pass through
-    (nb, nao, nvirt), which is an order of magnitude larger and defeats the
-    purpose.
+    The imaginary-frequency GW route never uses more than two slices of it: 
+    B[:, occ, virt] for chi0
+    B[:, p, :] for the self-energy--> 11 GB for dodecacene/cc-pVTZ
+
+    So we build only those
 
     Returns (C_ov, C_rows): C_ov is (naux, nocc*nvirt), already flattened the
     way the RPA kernel wants it and index-compatible with
@@ -242,11 +243,11 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200):
     del ov_parts
     C_rows = np.concatenate(row_parts, axis=0) if mo_r is not None else None
 
-    # Solvent screening is a naux x naux congruence on the auxiliary index, so
-    # it applies to a slice exactly as it applies to the full tensor.
-    screening = get_solvent_screening(mf)
-    if screening is not None:
-        transform = screening.whitened_transform(mol, mf)
+    # An environment that dresses the interaction is a naux x naux congruence
+    # on the auxiliary index, so it applies to a slice exactly as it applies to
+    # the full tensor.
+    transform = environment_of(mf).whitened_transform(mol, mf)
+    if transform is not None:
         C_ov = transform @ C_ov
         if C_rows is not None:
             C_rows = np.tensordot(transform, C_rows, axes=(1, 0))
@@ -257,7 +258,7 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
     """RI/DF three-index factor B_Q,pq with sum_Q B_Q,pr B_Q,qs = (pr|qs).
 
     The DF twin of get_two_electron_integrals_chemist, and likewise the place
-    an attached solvent screening substitutes v -> v + vtilde. In the whitened
+    an attached environment substitutes v -> v + vtilde. In the whitened
     auxiliary basis that substitution is a single naux x naux congruence,
     B -> T B, so the screened factor is still a plain three-index object and
     every DF consumer downstream is untouched -- see
@@ -265,7 +266,7 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
     instead decompose an already-screened four-index tensor.
     """
     is_uhf = isinstance(mf, scf.uhf.UHF)
-    screening = get_solvent_screening(mf)
+    environment = environment_of(mf)
 
     # Check if df is used and initialized in PySCF
     has_df = hasattr(mf, 'with_df') and mf.with_df is not None
@@ -312,8 +313,9 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             # get_antisymmetrized_spin_block_eri (~0.08 max abs error on a
             # UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
             eri_ao = mol.intor('int2e')
-            if screening is not None:
-                eri_ao = eri_ao + screening.kernel_ao(mol)
+            kernel = environment.kernel_ao(mol)
+            if kernel is not None:
+                eri_ao = eri_ao + kernel
             nao = eri_ao.shape[0]
             w, vv = np.linalg.eigh(eri_ao.reshape(nao*nao, nao*nao))
             keep = w > 1e-12
@@ -325,8 +327,8 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             coeff_b = np.einsum('Qmn,mp,nr->Qpr', coeff_ao, mo_b, mo_b,
                                 optimize=True)
 
-        if screening is not None and has_df:
-            transform = screening.whitened_transform(mol, mf)
+        transform = environment.whitened_transform(mol, mf) if has_df else None
+        if transform is not None:
             coeff_a = np.tensordot(transform, coeff_a, axes=(1, 0))
             coeff_b = np.tensordot(transform, coeff_b, axes=(1, 0))
 
@@ -369,9 +371,9 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             keep = w > 1e-12
             coeff = (v[:, keep] * np.sqrt(w[keep])).T.reshape(-1, norb, norb)
 
-        if screening is not None and has_df:
-            coeff = np.tensordot(screening.whitened_transform(mol, mf), coeff,
-                                 axes=(1, 0))
+        transform = environment.whitened_transform(mol, mf) if has_df else None
+        if transform is not None:
+            coeff = np.tensordot(transform, coeff, axes=(1, 0))
 
         if representation == 'spin':
             naux = coeff.shape[0]
