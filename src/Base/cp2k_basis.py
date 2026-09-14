@@ -157,6 +157,14 @@ def basis_block(name, element, path):
             if el == element and name in names]
     if len(hits) != 1:
         raise ValueError(f'{len(hits)} blocks named {name} for {element} in {path}')
+    # Every data token must be a number: pyscf's parser falls back to eval() on
+    # anything else, which a file from an unpinned commit must never reach.
+    for line in hits[0][1:]:
+        try:
+            [float(x) for x in line.split()]
+        except ValueError:
+            raise ValueError(f'non-numeric data line in block {name} for {element}: '
+                             f'{line!r}') from None
     return hits[0]
 
 
