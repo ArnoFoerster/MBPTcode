@@ -8,7 +8,8 @@ checked against the AO integrals directly, so an index or block mix-up shows as
 a mismatch rather than as a plausible number. A centrosymmetric molecule then
 checks d_eh = 0 on real Casida vectors, and the ABBA norm c_n = 1 + 2 Y^T Y; the
 matrix-free Davidson vectors must give the dense descriptors (same pair order),
-and an unrestricted mean field is refused.
+and an unrestricted mean field is refused. The DF production driver returns the
+descriptors of its own (X, Y), also when it screens at a shifted spectrum.
 
 Run: python tests/test_exciton_descriptors.py
 """
@@ -24,7 +25,8 @@ from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies,
                                       get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
+                                                         solve_casida_davidson)
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
@@ -249,6 +251,25 @@ def main():
             worst = max(worst, np.abs(np.asarray(got[k]) - np.asarray(want[k])).max())
     ok &= check(worst < tol, 'module moments equal the grid oracle for 2 random (X, Y)',
                 f'max |d| {worst:.1e}, grid orthonormality error {err_s:.1e}')
+
+    print('\n=== 7. solve_bse_df returns the descriptors of its (X, Y) ===')
+    def bse_df_check(label, **kw):
+        _, X_bse, Y_bse, info = solve_bse_df(mf_df, mol, nocc, nroots=3,
+                                             progress=False, **kw)
+        d = info.get('exciton_descriptors')
+        direct = exciton_descriptors(mf_df, mol, nocc, X_bse, Y_bse)
+        worst = (np.inf if d is None
+                 else max(np.abs(np.asarray(d[k]) - direct[k]).max() for k in direct))
+        return info, check(worst < TOL, f'{label}: info matches a direct call',
+                           'key missing' if d is None else f'max |d| {worst:.1e}')
+
+    info, passed = bse_df_check('G0W0 diagonal')
+    ok &= passed
+    # screen_at='qp' shifts mf before the descriptors are taken; only the orbitals
+    # and the nocc split may enter them.
+    _, passed = bse_df_check('screen_at=qp, shifted mean field', qp=info['eps'],
+                             screen_at='qp')
+    ok &= passed
 
     print('\n' + ('All exciton descriptor checks passed.' if ok
                   else 'FAILURES DETECTED'))
