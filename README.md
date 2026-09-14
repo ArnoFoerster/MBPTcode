@@ -136,17 +136,18 @@ references, several ionization states, and screened singles.
 ## Basis sets from CP2K
 
 CP2K's aug-MOLOPT families, all-electron bases with tiered RI sets built for GW
-and BSE, are read from CP2K at run time and returned as PySCF basis dicts:
+and BSE, are read from CP2K at run time and registered as PySCF basis names:
 
 ```python
-from src.Base.basis.cp2k_basis import load_basis, load_ri_basis
+from src.Base.basis.cp2k_basis import register
 
-basis = load_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
-aux = load_ri_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
+basis, aux = register('aug-SZV-MOLOPT-ae', max_error=1e-4)
+mol = gto.M(atom='O 0 0 0; H 0 0 0.958; H 0.926 0 -0.240', basis=basis)
 ```
 
-Pass `aux` explicitly to every route that takes an auxiliary basis. Data sources,
-offline use and the choice of RI tier are in `src/Base/basis/README.md`.
+Without `max_error` you get the tightest RI tiers: converged, but possibly far
+larger than needed. Choose the tier deliberately; data sources, offline use and
+the trade-off are in `src/Base/basis/README.md`.
 
 ## Tests
 

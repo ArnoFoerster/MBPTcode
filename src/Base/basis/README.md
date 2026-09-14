@@ -5,7 +5,7 @@
 available to PySCF and to every route in this tree. They are all-electron Gaussian
 bases built for TDDFT, GW and BSE, each with auxiliary (RI) sets in several tiers.
 CP2K ships them as `data/BASIS_AUG_MOLOPT` and `data/BASIS_RI_AUG_MOLOPT`; MBPTcode
-copies neither file, reads them at run time and returns PySCF basis dicts.
+copies neither file, reads them at run time and hands them to PySCF.
 
 ## Usage
 
@@ -13,23 +13,34 @@ Run from the repository root, like every script here:
 
 ```python
 from pyscf import dft, gto
-from src.Base.basis.cp2k_basis import load_basis, load_ri_basis
+from src.Base.basis.cp2k_basis import register
 
-elements = ['H', 'C', 'O']
+basis, aux = register('aug-SZV-MOLOPT-ae', max_error=1e-4)
 mol = gto.M(atom='H 0 0.934 -0.588; H 0 -0.934 -0.588; C 0 0 0; O 0 0 1.221',
-            basis=load_basis('aug-SZV-MOLOPT-ae', elements))
-aux = load_ri_basis('aug-SZV-MOLOPT-ae', elements, max_error=1e-4)
+            basis=basis)
 mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux).run()
 ```
 
-Both dicts hold exactly the elements passed, so list every element of the molecule.
+`register` makes the orbital set and its RI tiers PySCF basis names, here
+`aug-SZV-MOLOPT-ae` and `aug-SZV-MOLOPT-ae-ri-0.0001`, for every element that has
+them. Every route in this tree then treats them like any named basis. PySCF keeps
+the names in the running process only, so call `register` once at the top of each
+script. It writes the two sets into the cache (below) and returns the names.
 
-Pass `aux` explicitly wherever a route takes an auxiliary basis, for example
-`solve_bse_isdf(mf, mol, nocc, auxbasis=aux)`. The defaults in this tree build
-`str(mol.basis) + '-ri'`, which means nothing for a dict. For the same reason no
-row of the shipped ISDF radii (`src/Base/data/optimized_radii.json`, keyed on basis
-names) matches these sets: `isdf_grid` falls back to `optimize_atomic_radii`, which
-caches its result under `src/Base/data/radii_cache/`.
+The RI name carries the tier rule, so one name means one set in every process:
+
+| call | RI name | tier per element |
+|---|---|---|
+| `register(name)` | `<name>-ri` | the tightest |
+| `register(name, max_error=1e-4)` | `<name>-ri-0.0001` | the smallest with Delta-I <= 1e-4 |
+
+`load_basis` and `load_ri_basis` return the same sets as dicts, and only
+`load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it
+explicitly wherever a route takes an auxiliary basis.
+
+Names are only registered for the files of the pinned CP2K commit. The ISDF radii
+cache is keyed on the name, and other data under the same name would reuse a grid
+optimized for a different set.
 
 `examples/12_cp2k_aug_molopt.py` is the worked case, G0W0 and a dense BSE on
 formaldehyde. `tests/test_cp2k_basis.py` builds every orbital block and RI tier and
@@ -44,6 +55,9 @@ checks each against the function count its header implies.
 | `$MBPT_CP2K_DATA/` | set; a CP2K `data/` directory, read as it is |
 | `$MBPT_CP2K_CACHE/<commit>/`, default `~/.cache/mbptcode/cp2k/<commit>/` | the file is there |
 | a download from `github.com/cp2k/cp2k` at the pinned commit, into that cache | otherwise |
+
+`register` writes its name files to `pyscf/` in the cache directory of the pinned
+commit, whichever source the CP2K files came from.
 
 Files at the pinned commit are checked against their sha256, and a mismatch raises.
 On first use of each file the module prints a notice naming the source, CP2K's
@@ -73,11 +87,11 @@ the size it needs to be, and every density-fitted and ISDF step pays for that.
 
 A tier's name carries its Delta-I, the atomic RI-MP2 error of eq 29 in the paper.
 
-| call | tier per element |
+| argument | tier per element |
 |---|---|
-| `load_ri_basis(name, elements)` | the tightest |
+| none | the tightest |
 | `max_error=1e-4` | the smallest with Delta-I <= 1e-4, the paper's recommendation |
-| `min_lmax=L` | also requires auxiliary l_max >= L; if no tier qualifies, the tightest, with a warning |
+| `min_lmax=L`, `load_ri_basis` only | also requires auxiliary l_max >= L; if no tier qualifies, the tightest, with a warning |
 
 `pick_ri_tier` takes the same arguments for one element and returns the tier's
 name, size, Delta-I and pattern.
