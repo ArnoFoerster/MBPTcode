@@ -1,12 +1,13 @@
 """BSE@G0W0@PBE of formaldehyde in CP2K's aug-SZV-MOLOPT-ae basis with its RI tier.
 
 The orbital and auxiliary sets are read from CP2K at run time (see
-src/Base/cp2k_basis.py for the source, the license notice and the cache); nothing is
-shipped with MBPTcode. The auxiliary tier is the smallest one within the paper's
-Delta-I threshold of 1e-4, and it serves the mean field, W and the BSE kernel alike.
-Delta-I is an MP2 criterion: against the exact 4-center tensor this tier leaves
-27 meV on the lowest singlets and 6 meV on HOMO and LUMO, the tightest tiers 1.6 meV
-and under 1 meV (see the module docstring and `min_lmax` for the angular rule).
+src/Base/basis/cp2k_basis.py for the source, the license notice and the cache);
+nothing is shipped with MBPTcode. The auxiliary tier is the smallest one within
+the paper's Delta-I threshold of 1e-4, and it serves the mean field, W and the BSE
+kernel alike. Delta-I is an MP2 criterion: against the exact 4-center tensor this
+tier leaves 27 meV on the lowest singlets and 6 meV on HOMO and LUMO, the tightest
+tiers 1.6 meV and under 1 meV (see the module docstring and `min_lmax` for the
+angular rule).
 
     python examples/12_cp2k_aug_molopt.py
 """
@@ -19,7 +20,7 @@ from pyscf import dft, gto
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.constants import HARTREE_TO_EV
-from src.Base.cp2k_basis import load_basis, load_ri_basis, pick_ri_tier
+from src.Base.basis.cp2k_basis import load_basis, load_ri_basis, pick_ri_tier
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.SingleReference.GW.qp_energy import calc_qp_energy

@@ -1,7 +1,8 @@
 """cp2k_basis: every aug-MOLOPT block PySCF builds has the count its header implies.
 
-Reads the CP2K files through src.Base.cp2k_basis from MBPT_CP2K_DATA or the cache,
-never downloading; without either it prints SKIPPED and exits 0 with no verdict.
+Reads the CP2K files through src.Base.basis.cp2k_basis from MBPT_CP2K_DATA or the
+cache, never downloading; without either it prints SKIPPED and exits 0 with no
+verdict.
 Counts: sum over sets and l of contractions times 2l + 1, and the header's own
 recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
 """
@@ -15,7 +16,7 @@ from pyscf import gto
 from pyscf.gto.basis import parse_cp2k
 from pyscf.lib.exceptions import BasisNotFoundError
 
-from src.Base import cp2k_basis as cb
+from src.Base.basis import cp2k_basis as cb
 
 
 def check(ok, label, detail=''):
@@ -39,7 +40,7 @@ if __name__ == '__main__':
         ri = cb.data_file('ri', download=False)
     except (OSError, ValueError) as exc:
         print(f'SKIPPED: no CP2K data ({exc}); set MBPT_CP2K_DATA or run '
-              '"python -m src.Base.cp2k_basis fetch" once')
+              '"python -m src.Base.basis.cp2k_basis fetch" once')
         sys.exit(0)
     all_ok = True
 

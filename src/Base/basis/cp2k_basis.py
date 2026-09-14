@@ -33,9 +33,9 @@ the lowest BSE singlets and 6 meV on HOMO and LUMO; the tightest tiers, with g o
 C and O, leave 1.6 meV and under 1 meV. `min_lmax` in `pick_ri_tier` asks for
 that completeness explicitly.
 
-Command line: `python -m src.Base.cp2k_basis scout [ELEMENT ...]` lists, per
-element, the orbital sets with their function counts and the RI tiers with size
-and Delta-I; `fetch` only fills the cache, for a node without network later.
+Command line: `python -m src.Base.basis.cp2k_basis scout [ELEMENT ...]` lists,
+per element, the orbital sets with their function counts and the RI tiers with
+size and Delta-I; `fetch` only fills the cache, for a node without network later.
 Environment: MBPT_CP2K_DATA, a CP2K `data/` directory to read instead of
 downloading; MBPT_CP2K_CACHE, the cache root (default ~/.cache/mbptcode/cp2k).
 """
@@ -121,7 +121,7 @@ def data_file(kind, commit=CP2K_COMMIT, download=True):
         except (urllib.error.URLError, OSError) as exc:
             raise OSError(f'could not download {url} ({exc}); point MBPT_CP2K_DATA '
                           'at a CP2K data directory, or run "python -m '
-                          'src.Base.cp2k_basis fetch" where the network is '
+                          'src.Base.basis.cp2k_basis fetch" where the network is '
                           'reachable') from exc
         os.replace(tmp, path)
     if commit == CP2K_COMMIT and _sha256(path) != SHA256[kind]:
