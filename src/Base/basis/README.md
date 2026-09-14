@@ -47,8 +47,8 @@ checks each against the function count its header implies.
 
 Files at the pinned commit are checked against their sha256, and a mismatch raises.
 On first use of each file the module prints a notice naming the source, CP2K's
-license and the paper. `provenance(kind)` returns the path, digest and commit for
-a run record.
+license and the paper we would kindly ask you to cite. `provenance(kind)` returns
+the path, digest and commit for a run record.
 
 On a node without network, run `python -m src.Base.basis.cp2k_basis fetch` once
 where the network is reachable and share the cache, or point `MBPT_CP2K_DATA` at a
@@ -92,4 +92,6 @@ tensor:
 ## License
 
 The basis data remain CP2K's, distributed under GPL-2.0-or-later; MBPTcode
-redistributes none of it. Cite the paper above when you use the sets.
+redistributes none of it. If you use these basis sets, we would kindly ask you to
+cite Pasquier, Graml and Wilhelm,
+[J. Chem. Theory Comput. 22, 540 (2026)](https://doi.org/10.1021/acs.jctc.5c01386).

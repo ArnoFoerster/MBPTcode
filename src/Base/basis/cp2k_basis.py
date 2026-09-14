@@ -6,7 +6,7 @@ Graml and Wilhelm, J. Chem. Theory Comput. 22, 540 (2026), which CP2K ships as
 RI sets, in tiers). CP2K distributes them under GPL-2.0-or-later, so this module
 copies nothing: it downloads the two files from the CP2K repository at a pinned
 commit into a per-user cache (or reads a local CP2K checkout), verifies them, and
-prints a notice naming the source and its license on first use.
+prints a notice naming the source, its license and the paper to cite on first use.
 
     basis = load_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'])
     aux = load_ri_basis('aug-SZV-MOLOPT-ae', ['H', 'C', 'O'], max_error=1e-4)
@@ -83,8 +83,9 @@ def _notice(kind, path, commit):
     _noticed.add(path)
     source = f'commit {commit[:10]}' if commit else 'a local checkout'
     print(f'NOTE: basis set data read from CP2K: data/{FILES[kind]} at {CP2K_REPO}, '
-          f'{source}, distributed by CP2K under GPL-2.0-or-later; the sets are by '
-          f'{CITATION}. MBPTcode does not redistribute this file (local copy: {path}).')
+          f'{source}, distributed by CP2K under GPL-2.0-or-later; MBPTcode does not '
+          f'redistribute this file (local copy: {path}). If you use these basis sets, '
+          f'we would kindly ask you to cite {CITATION}.')
 
 
 def data_file(kind, commit=CP2K_COMMIT, download=True):
