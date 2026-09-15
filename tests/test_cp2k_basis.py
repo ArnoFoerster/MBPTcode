@@ -98,8 +98,8 @@ if __name__ == '__main__':
         first = type(exc).__name__
     ours = nao('C', cb.load_basis('aug-SZV-MOLOPT-ae', ['C'], orbital)['C'])
     all_ok &= check(ours == 14 and first != '14',
-                    'C aug-SZV-MOLOPT-ae by name is 14 functions, pyscf load() is not',
-                    f'ours {ours}, load() {first}')
+                    'C aug-SZV-MOLOPT-ae by name is 14 functions; pyscf load() raises '
+                    'or differs', f'ours {ours}, load() {first}')
     ae = cb.basis_block('aug-SZV-MOLOPT-ae', 'C', orbital)
     all_ok &= check(cb.pattern(ae) == '3s2p1d', 'C recipe STO-6G + 1s + 1p + 1d',
                     cb.pattern(ae))
@@ -107,7 +107,8 @@ if __name__ == '__main__':
     # primitives where the STO-6G one has 6, so the name and not the shape decides.
     sr = cb.basis_block('aug-SZV-MOLOPT-ae-SR', 'C', orbital)
     nprim = lambda block: int(block[2].split()[3])
-    all_ok &= check(ae != sr and nprim(ae) == 6 and nprim(sr) == 3,
+    all_ok &= check(ae != sr and cb.pattern(sr) == cb.pattern(ae)
+                    and nprim(ae) == 6 and nprim(sr) == 3,
                     'C aug-SZV-MOLOPT-ae and -SR are distinct blocks of equal shape',
                     f'first-shell primitives {nprim(ae)} and {nprim(sr)}')
     # H's header carries two names; both must resolve to the same block.
@@ -116,30 +117,23 @@ if __name__ == '__main__':
     all_ok &= check(h_ae == h_mini and cb.nao_from_block(h_ae) == 6,
                     'H aug-SZV-MOLOPT-ae and -mini share one 6-function block')
 
-    # Every block of every set and element: the count pyscf builds equals the one
-    # the block's set lines imply, so no block is truncated or misread.
+    # Every block in the orbital file: the count pyscf builds equals the one the
+    # block's set lines imply, so no block is truncated or misread.
     bad, nblocks = 0, 0
-    for name in cb.BASIS_NAMES:
-        for el in elements_in(orbital):
-            try:
-                lines = cb.basis_block(name, el, orbital)
-            except ValueError:
-                continue                       # the name has no block for this element
-            bad += nao(el, cb.parse('\n'.join(lines))) != cb.nao_from_block(lines)
-            nblocks += 1
+    for el, _, lines in cb._blocks(orbital):
+        bad += nao(el, cb.parse('\n'.join(lines))) != cb.nao_from_block(lines)
+        nblocks += 1
     all_ok &= check(bad == 0 and nblocks >= 70,
                     'every orbital block of every element builds with its count',
                     f'{nblocks} blocks, {bad} mismatches')
 
-    # Every RI tier: the same, plus the count the tier's own name carries.
+    # Every block in the RI file: the same, plus the count the tier's name carries.
     bad, ntiers = 0, 0
-    for name in cb.BASIS_NAMES:
-        for el in elements_in(ri):
-            for ri_name, n_name, err, pat in cb.ri_tiers(name, el, ri):
-                lines = cb.basis_block(ri_name, el, ri)
-                got = nao(el, cb.parse('\n'.join(lines)))
-                bad += got != n_name or got != cb.nao_from_block(lines)
-                ntiers += 1
+    for el, names, lines in cb._blocks(ri):
+        n_name = [int(m['n']) for n in names if (m := cb._RI_NAME.match(n))]
+        got = nao(el, cb.parse('\n'.join(lines)))
+        bad += got != cb.nao_from_block(lines) or got not in n_name
+        ntiers += 1
     all_ok &= check(bad == 0 and ntiers >= 500,
                     'every RI tier of every element builds with the count in its name',
                     f'{ntiers} tiers, {bad} mismatches')
@@ -163,7 +157,7 @@ if __name__ == '__main__':
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'N', 1e-4, min_lmax=4, path=ri)
-    all_ok &= check(tier[1] == 78 and len(caught) == 1,
+    all_ok &= check(tier[1] == 78 and 'g' not in tier[3] and len(caught) == 1,
                     'N has no g tier: the tightest one is returned with a warning',
                     f'{tier[1]} functions, {len(caught)} warning')
     tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', 1.7e-4, path=ri)
@@ -209,7 +203,8 @@ if __name__ == '__main__':
             OSError, lambda: cb.data_file('ri', commit='0' * 40), 'could not download')
     all_ok &= check(ok_offline, 'an uncached file with download=False raises',
                     msg_offline[:60])
-    all_ok &= check(ok_fetch, 'a failed download raises OSError naming the way out',
+    all_ok &= check(ok_fetch and 'MBPT_CP2K_DATA' in msg_fetch and 'fetch' in msg_fetch,
+                    'a failed download raises OSError naming the way out',
                     msg_fetch[:60])
 
     # Registration. A name must build exactly what the dict builds, element by
