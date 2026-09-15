@@ -1,5 +1,6 @@
 import os
 import sys
+import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -123,6 +124,39 @@ if __name__ == '__main__':
     # an empty state window: no states to scan, no result to return
     e_empty = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state=[])
     all_ok &= check(e_empty == {}, "state=[] returns {}")
+
+    # --- threadpoolctl missing: default n_workers warns and runs serially;
+    # an explicit n_workers > 1 still raises ImportError ---
+    saved_threadpoolctl = sys.modules.get('threadpoolctl')
+    sys.modules['threadpoolctl'] = None
+    try:
+        mol_tp = gto.M(atom='H 0 0 0; F 0 0 0.9', basis='6-31g', verbose=0)
+        mf_tp = scf.RHF(mol_tp).density_fit()
+        mf_tp.with_df.auxbasis = df.make_auxbasis(mol_tp)
+        mf_tp.run()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            e_default = calc_qp_energy(mf_tp, selfenergy='GW',
+                                       polarizability='RPA', state=[0, 1, 2])
+        e_serial = calc_qp_energy(mf_tp, selfenergy='GW', polarizability='RPA',
+                                  state=[0, 1, 2], n_workers=1)
+        all_ok &= check(e_default == e_serial,
+                        'no threadpoolctl: default n_workers matches n_workers=1')
+        all_ok &= check(any('threadpoolctl' in str(w.message) for w in caught),
+                        'no threadpoolctl: default n_workers warns')
+        try:
+            calc_qp_energy(mf_tp, selfenergy='GW', polarizability='RPA',
+                           state=[0, 1, 2], n_workers=4)
+            raised = False
+        except ImportError:
+            raised = True
+        all_ok &= check(raised,
+                        'no threadpoolctl: explicit n_workers=4 raises ImportError')
+    finally:
+        if saved_threadpoolctl is not None:
+            sys.modules['threadpoolctl'] = saved_threadpoolctl
+        else:
+            sys.modules.pop('threadpoolctl', None)
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

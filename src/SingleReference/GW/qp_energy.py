@@ -9,6 +9,7 @@ the same equation w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w):
   space-time     chi0(i.tau) from a separable ISDF factorization.  O(N^3).
 """
 import os
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -116,8 +117,10 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     quasiparticle. 'graphical' returns the root nearest eps;
                     they agree wherever only one root exists. 'newton' and
                     'bisection' are also accepted.
-    n_workers:      threads for the per-state root scan (Casida route); None
-                    reads OMP_NUM_THREADS, 1 is serial.
+    n_workers:      threads for the per-state root scan (Casida route). The
+                    scan uses a thread pool by default (threads from
+                    OMP_NUM_THREADS, else the cpu count); n_workers=1, or
+                    threadpoolctl not being installed, gives the serial scan.
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
@@ -442,14 +445,23 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     p0, out0 = solve_state(0)
     results[p0] = out0
     rest = range(1, len(states))
+    requested_workers = n_workers
     n_workers = _resolve_workers(n_workers, len(states))
-    if n_workers > 1 and len(states) > 1:
+    run_parallel = n_workers > 1 and len(states) > 1
+    if run_parallel:
         try:
             from threadpoolctl import threadpool_limits
         except ImportError as exc:
-            raise ImportError(
-                "qp_energies_from_spectrum with n_workers > 1 needs threadpoolctl "
-                "(pip install threadpoolctl); n_workers=1 is the serial scan") from exc
+            if requested_workers is not None:
+                raise ImportError(
+                    "qp_energies_from_spectrum with n_workers > 1 needs "
+                    "threadpoolctl (pip install threadpoolctl); n_workers=1 "
+                    "is the serial scan") from exc
+            warnings.warn(
+                "threadpoolctl is not installed; running the per-state QP scan "
+                "serially.")
+            run_parallel = False
+    if run_parallel:
         with threadpool_limits(limits=1, user_api='blas'):
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 for p, out in pool.map(solve_state, rest):
