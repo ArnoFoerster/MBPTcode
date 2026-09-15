@@ -222,8 +222,9 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                 omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
                 qp_ev = results[p_state][method]
                 _print_spectral_function(se_solver, p_state, method, qp_ev, nocc,
-                                         omega_val, chi_a_val, chi_b_val, omega_t_val,
-                                         chi_b_t_val, spin_channel, info)
+                                         omega_val, chi_a_val, chi_b_val,
+                                         omega_t_val, chi_b_t_val, spin_channel,
+                                         info)
 
     if not isinstance(state, list) and not isinstance(selfenergy, list):
         return results[states[0]][methods[0]]

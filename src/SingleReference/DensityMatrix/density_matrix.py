@@ -67,12 +67,10 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         elif mode == 'TDHF':
             build_kw = dict(lBSE=True, W_aux=None)
         elif mode == 'BSE':
-            w_aux = lr_solver.solve_rpa_screening(
-                np.array([0.0]), nocc, is_imaginary=True)[0]
+            w_aux = lr_solver.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
             build_kw = dict(lBSE=True, W_aux=w_aux)
         else:
-            raise ValueError(f"Unknown screening mode '{polarizability}'; choose "
-                             "'RPA', 'TDHF', or 'BSE'.")
+            raise ValueError(f"Unknown screening mode '{polarizability}'; choose 'RPA', 'TDHF', or 'BSE'.")
 
         omega, X, Y = CasidaSolver(
             *lr_solver.build_casida_matrices(nocc, **build_kw)).solve()

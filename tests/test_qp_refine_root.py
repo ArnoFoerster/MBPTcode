@@ -25,7 +25,7 @@ class Counted:
 
 
 def reference_refine(func, a, b, tol, max_bisection):
-    """The e707243 loop, evaluating f(a) every step."""
+    """Reference bisection loop, evaluating f(a) every step (no caching)."""
     for _ in range(max_bisection):
         c = 0.5 * (a + b)
         if func(a) * func(c) <= 0.0:

@@ -58,8 +58,8 @@ if __name__ == '__main__':
     from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
     def head_algorithm(mf, states, xc):
-        """The e707243 per-state loop: scalar Sigma per frequency,
-        the unchanged privates."""
+        """Reference per-state loop: scalar Sigma per frequency, built from
+        the unchanged private helpers."""
         mol = mf.mol
         eps = get_orbital_energies(mf, representation='spatial')
         nocc = mol.nelectron // 2
@@ -106,10 +106,11 @@ if __name__ == '__main__':
         xc = _static_correction(mf, mol, se_, None, None, 'alpha', False)[states]
         ref = head_algorithm(mf, states, xc)
         d_head = max(abs(serial[p]['GW'] - ref[p]) for p in states)
-        all_ok &= check(d_head < 1e-6, f'{label}: helper vs e707243 algorithm',
+        all_ok &= check(d_head < 1e-6,
+                        f'{label}: helper vs the scalar per-frequency loop',
                         f'{d_head:.1e} eV')
         if label == 'PBE':
-            # the per-state static correction of e707243, inline
+            # the per-state static correction formula, inline
             dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
             v_hxc_mo = mf.mo_coeff.T @ mf.get_veff(mol, dm) @ mf.mo_coeff
             v_hx_mo = se_.calculate_sigma_hx(mol, scf.RHF(mol), dm, mf.mo_coeff)
