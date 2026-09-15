@@ -52,8 +52,9 @@ explicitly wherever a route takes an auxiliary basis.
 
 Names are only registered for the basis data of the pinned CP2K commit; a file
 that differs in comments or spacing passes, one whose data differ is refused with
-the elements named. The ISDF radii cache is keyed on the name, and other data
-under the same name would reuse a grid optimized for a different set.
+the elements named. The guard is per element and file, so a changed block of any
+set refuses every registration. The ISDF radii cache is keyed on the name, and
+other data under the same name would reuse a grid optimized for a different set.
 
 `examples/12_cp2k_aug_molopt.py` is the worked case, G0W0 and a dense BSE on
 formaldehyde. `tests/test_cp2k_basis.py` builds every orbital block and RI tier and
@@ -75,7 +76,8 @@ commit, whichever source the CP2K files came from.
 Files at the pinned commit are checked against their sha256, and a mismatch raises.
 On first use of each file the module prints a notice naming the source, CP2K's
 license and the paper we would kindly ask you to cite. `provenance(kind)` returns
-the path, digest and commit for a run record.
+the path, the digest, the commit when the file is the pinned one and, as
+`blocks`, the commit when the basis data are, for a run record.
 
 On a node without network, run `python -m src.Base.basis.cp2k_basis fetch` once
 where the network is reachable and share the cache, or point `MBPT_CP2K_DATA` at a

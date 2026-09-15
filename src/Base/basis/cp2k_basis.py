@@ -71,20 +71,20 @@ SHA256 = {'orbital': '4b1fd2d57297f11a0aa28f91b7b929fd62a9245d890ef4eaf560007a70
 # copy that differs in comments and name the elements whose data differ.
 BLOCK_SHA256 = {
     'orbital': {
-        'H': 'a36b9fa8de059f89', 'He': '213f5a509a568cd0', 'Li': 'e15b22606fcd2ad6',
-        'Be': '44de40441c809534', 'B': 'ecb03bca51515df6', 'C': '734ca42828de8c91',
-        'N': '9db906ec617fe8f8', 'O': 'ab536f28bc5d4df2', 'F': '8d49f5edd1fbbc60',
-        'Ne': 'fb8a338764d268a6', 'Na': '8fb7679151a7033f', 'Mg': '7d31c5c79b039f1f',
-        'Al': '12cbb253095948a0', 'Si': '0ffa43d037cbc73a', 'P': '9b6d2f1b11928281',
-        'S': '75566f7351d14364', 'Cl': '1b6e65c0824b145d',
+        'H': 'f7ae12c7d3973eb6', 'He': '985cde4401871bc7', 'Li': '70255751a9a1199f',
+        'Be': '2c9436ad1672ffee', 'B': '25323003cc931bb3', 'C': '488ebdafc559af63',
+        'N': '4dcaa63c4ed7d896', 'O': '103bca6ba64e7778', 'F': 'b0ba2e45a91bd5b4',
+        'Ne': '56cfc05b3474fc75', 'Na': 'cfdd80c93dc1bad9', 'Mg': '6da79d049abf05d1',
+        'Al': 'c878db9752b32cd4', 'Si': '429e02ba81d01c71', 'P': '72f754d3151d8146',
+        'S': '31cd3ebc8147f9f0', 'Cl': '409bf8661f40ad3f',
     },
     'ri': {
-        'H': 'b366fc17353328f6', 'He': '29128ed8e662d78d', 'Li': '7d42dfbfc799816c',
-        'Be': 'b18bf547b43143a1', 'B': '18bcc8dcc2f79277', 'C': 'b73493bb71c652c6',
-        'N': 'aa29164795feb243', 'O': '95a37337e9ffb2a1', 'F': 'c3c0107cb77fe95d',
-        'Ne': 'e3feeb727ee5c477', 'Na': 'b9f02f6dd8f5f63a', 'Mg': 'af3f25a1be71ce79',
-        'Al': '8de081a981195e34', 'Si': 'b176f83bcc8ab002', 'P': '66523d58cb223449',
-        'S': '2864de2922593b2f', 'Cl': '5e2da6edc45b74ab',
+        'H': '2de1ec858dbae8db', 'He': 'b248fe21f37551f5', 'Li': 'b81434edd9b80b7e',
+        'Be': '2ea681e6f5417b3e', 'B': '04f720d25fbbfd37', 'C': '7ab63e342496453f',
+        'N': '000f90107b8afd02', 'O': '6a4238999ebc8a76', 'F': '394f44e1a7c78a94',
+        'Ne': '13c3fca2ad8c83aa', 'Na': '8b30eb3c4e763734', 'Mg': 'f12e3d49f7088c33',
+        'Al': '24f1f04444bbea99', 'Si': '3101163e85e05f49', 'P': '25ad400328d88e67',
+        'S': 'f01f483441914a5d', 'Cl': 'bbb2828225438af4',
     },
 }
 BASIS_NAMES = ('aug-SZV-MOLOPT-ae', 'aug-SZV-MOLOPT-ae-mini', 'aug-SZV-MOLOPT-ae-SR',
@@ -181,19 +181,24 @@ def data_file(kind, commit=CP2K_COMMIT, download=True):
 
 
 def provenance(kind, path=None):
-    """{'path', 'sha256', 'commit'} of the file a run read, for its record."""
+    """{'path', 'sha256', 'commit', 'blocks'} of the file a run read, for its record.
+
+    `commit` is the pinned commit when the file is its file, `blocks` when the
+    basis data are, comments and spacing aside; None otherwise.
+    """
     path = path or data_file(kind)
     digest = _sha256(path)
     commit = CP2K_COMMIT if digest == SHA256[kind] else None
-    return {'path': path, 'sha256': digest, 'commit': commit}
+    blocks = CP2K_COMMIT if content_digests(path) == BLOCK_SHA256[kind] else None
+    return {'path': path, 'sha256': digest, 'commit': commit, 'blocks': blocks}
 
 
 def content_digests(path):
     """{element: 16 hex digits of the sha256 over its blocks}, comments and spacing
-    dropped."""
+    dropped, inside a line as well."""
     lines = {}
     for el, _, block in _blocks(path):
-        lines.setdefault(el, []).extend(block)
+        lines.setdefault(el, []).extend(' '.join(line.split()) for line in block)
     return {el: hashlib.sha256('\n'.join(v).encode()).hexdigest()[:16]
             for el, v in lines.items()}
 

@@ -17,7 +17,8 @@ Checks, in order:
              threshold call leaves `-ri` alone; an element outside a set raises;
              bad arguments
              raise; one warning with the Delta-I an element gets; data other than
-             the pinned commit's are refused by element, comments and spacing pass
+             the pinned commit's are refused by element, changed or missing, while
+             comments and spacing pass
 """
 import contextlib
 import os
@@ -323,20 +324,28 @@ if __name__ == '__main__':
                     'register warns once, naming the element and the Delta-I it gets',
                     msg)
 
-    # Data other than the pinned commit's: comments and spacing pass, one changed
-    # exponent is refused with the element named, since an ISDF grid cached under
-    # the name would otherwise serve the other data.
+    # Data other than the pinned commit's: comments and spacing pass, inside a
+    # line as well; one changed exponent, or a missing element, is refused with
+    # the element named, since an ISDF grid cached under the name would otherwise
+    # serve the other data.
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(orbital, tmp)
         copy = os.path.join(tmp, cb.FILES['ri'])
         with open(ri) as fh:
             text = fh.read()
+        spaced = re.sub(r'(?m)^(\d.*)$', lambda m: ' '.join(m.group(1).split()), text)
         with open(copy, 'w') as fh:
-            fh.write(text.replace('\n', '   \n', 20) + '# not the pinned file\n')
+            fh.write(spaced.replace('\n', '   \n', 20) + '# not the pinned file\n')
         with environ(MBPT_CP2K_DATA=tmp), warnings.catch_warnings():
             warnings.simplefilter('ignore')
             _, msg_pass = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
                                  '')
+        with open(copy, 'w') as fh:
+            fh.write('\n'.join('\n'.join(lines) for el, _, lines in cb._blocks(ri)
+                               if el != 'Cl') + '\n')
+        with environ(MBPT_CP2K_DATA=tmp):
+            refused_cl, _ = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
+                                   f'{copy}: the blocks of Cl differ')
         tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', path=ri)[0]
         exponent = cb.basis_block(tier, 'C', ri)[3].split()[0]
         start = re.search(rf'^C\s+{re.escape(tier)}\b', text, re.M).end()
@@ -348,14 +357,15 @@ if __name__ == '__main__':
             refused, msg_refused = raises(
                 ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
                 f'{copy}: the blocks of C differ from the pinned CP2K commit')
-    all_ok &= check(msg_pass == 'nothing raised' and refused,
-                    'register passes comments and spacing, refuses changed data by '
-                    'element',
+    all_ok &= check(msg_pass == 'nothing raised' and refused and refused_cl,
+                    'register passes comments and spacing, refuses changed or missing '
+                    'data by element',
                     f'comment copy: {msg_pass}; exponent copy: {msg_refused[:60]}')
     prov = cb.provenance('orbital', orbital)
     local = bool(os.environ.get('MBPT_CP2K_DATA'))
-    all_ok &= check(prov['commit'] is not None or local,
-                    'orbital file matches the pinned CP2K commit', prov['sha256'][:12])
+    all_ok &= check((prov['commit'] is not None and prov['blocks'] is not None)
+                    or local, 'orbital file matches the pinned CP2K commit, file and '
+                    'blocks', prov['sha256'][:12])
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
