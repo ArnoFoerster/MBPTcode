@@ -1,11 +1,22 @@
-"""cp2k_basis: every aug-MOLOPT block PySCF builds has the count its header implies.
+"""cp2k_basis: the CP2K files parse, the names build the same sets, the guards fire.
 
 Reads the CP2K files through src.Base.basis.cp2k_basis from MBPT_CP2K_DATA or the
 cache and never fetches them; without either it prints SKIPPED and exits 0 with no
 verdict. One check requests a CP2K commit that does not exist, which fails with a
 404 online and a network error offline, and passes either way.
-Counts: sum over sets and l of contractions times 2l + 1, and the header's own
-recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
+
+Checks, in order:
+  parsing    a block is found by its exact header name, where pyscf's own loader
+             is not; every orbital block and RI tier builds with the count its
+             header implies (per set and l, contractions times 2l + 1; the
+             header's own recipe for C aug-SZV-MOLOPT-ae, STO-6G + 1s + 1p + 1d,
+             is 3s2p1d = 14)
+  tier rule  threshold, the tightest as default, min_lmax, a tier's own Delta-I
+  guards     unknown element, non-numeric data line, offline, failed download
+  register   names build the dicts bit for bit; one RI name per set of tiers;
+             `-ri` on every call; an element outside a set raises; bad arguments
+             raise; one warning with the Delta-I an element gets; data other than
+             the pinned commit's are refused
 """
 import contextlib
 import os
@@ -19,6 +30,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from pyscf import gto
+from pyscf.gto import basis as pyscf_basis
 from pyscf.gto.basis import parse_cp2k
 from pyscf.lib.exceptions import BasisNotFoundError
 
@@ -103,6 +115,8 @@ if __name__ == '__main__':
     all_ok &= check(h_ae == h_mini and cb.nao_from_block(h_ae) == 6,
                     'H aug-SZV-MOLOPT-ae and -mini share one 6-function block')
 
+    # Every block of every set and element: the count pyscf builds equals the one
+    # the block's set lines imply, so no block is truncated or misread.
     bad, nblocks = 0, 0
     for name in cb.BASIS_NAMES:
         for el in elements_in(orbital):
@@ -116,6 +130,7 @@ if __name__ == '__main__':
                     'every orbital block of every element builds with its count',
                     f'{nblocks} blocks, {bad} mismatches')
 
+    # Every RI tier: the same, plus the count the tier's own name carries.
     bad, ntiers = 0, 0
     for name in cb.BASIS_NAMES:
         for el in elements_in(ri):
@@ -128,6 +143,9 @@ if __name__ == '__main__':
                     'every RI tier of every element builds with the count in its name',
                     f'{ntiers} tiers, {bad} mismatches')
 
+    # The tier rule: within a threshold, the smallest tier; without one, the
+    # tightest; min_lmax adds an angular condition; a tier's own Delta-I counts as
+    # within; an unmet condition falls back to the tightest with one warning.
     tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', 1e-4, path=ri)
     all_ok &= check(tier[1] == 48 and tier[2] <= 1e-4,
                     'C aug-SZV-MOLOPT-ae tier at Delta-I 1e-4 is the 48-function set',
@@ -160,6 +178,11 @@ if __name__ == '__main__':
                     and 'l_max >= 4' in msg and 'Delta-I' not in msg,
                     'min_lmax without max_error: tightest with g, else a warning for N',
                     f'O {o_tier[1]}, N {n_tier[1]}; {msg}')
+
+    # Guards on the data. A block that is not there raises; a data token that is
+    # not a number raises here, because pyscf's parser would eval() it; without
+    # the file, offline mode raises instead of fetching, and a fetch that fails
+    # raises an OSError that names the two ways out.
     try:
         cb.basis_block('aug-SZV-MOLOPT-ae', 'Xx', orbital)
         raised = False
@@ -188,8 +211,8 @@ if __name__ == '__main__':
     all_ok &= check(ok_fetch, 'a failed download raises OSError naming the way out',
                     msg_fetch[:60])
 
-    # A registered name must build exactly what the dict builds, element by element,
-    # for every set: the tightest RI name, and one threshold name.
+    # Registration. A name must build exactly what the dict builds, element by
+    # element, for every set: the tightest RI name, and one threshold name.
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')                # S has no tier within 1e-4
         _, ri_loose = cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
@@ -217,10 +240,49 @@ if __name__ == '__main__':
     all_ok &= check(same and counted == {'orbital': 74, 'ri': 72, 'ri 1e-4': 17},
                     'registered names build the same basis as the dicts, bit for bit',
                     ', '.join(f'{v} {k}' for k, v in counted.items()))
-    ri_name = cb.register('aug-SZV-MOLOPT-ae')[1]
-    all_ok &= check(ri_name == 'aug-SZV-MOLOPT-ae-ri'
-                    and ri_loose == 'aug-SZV-MOLOPT-ae-ri-0.0001',
-                    'the RI name encodes its tier rule', f'{ri_name}, {ri_loose}')
+
+    # One name per set of tiers: it carries the largest Delta-I within the
+    # threshold, so thresholds that pick the same tiers share it; None and 0 are
+    # the tightest, `-ri`; a threshold above every Delta-I, the smallest tiers.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        names = {me: cb.register('aug-SZV-MOLOPT-ae', me)[1]
+                 for me in (None, 0, 9e-5, 1e-4, 8.4e-5, 1e-5, 1, 1e3, float('inf'))}
+    all_ok &= check(names[None] == names[0] == 'aug-SZV-MOLOPT-ae-ri'
+                    and names[9e-5] == names[1e-4] == names[8.4e-5]
+                    == 'aug-SZV-MOLOPT-ae-ri-8.4e-05'
+                    and names[1] == names[1e3] == names[float('inf')]
+                    == 'aug-SZV-MOLOPT-ae-ri-4.8e-02'
+                    and names[1e-5] != names[1e-4],
+                    'one RI name per set of tiers, carrying the largest Delta-I within',
+                    f'{names[1e-4]} for 9e-5, 1e-4 and 8.4e-5; {names[1]} for 1 to inf')
+    # Every distinct Delta-I of a set gives a distinct PySCF key, so no two names
+    # meet after pyscf lowercases them and strips the punctuation.
+    keys, count = set(), 0
+    for basis_name in cb.BASIS_NAMES:
+        errs = {t[2] for el in elements_in(ri) for t in cb.ri_tiers(basis_name, el, ri)}
+        keys |= {pyscf_basis._format_basis_name(f'{basis_name}-ri-{e:.1e}')
+                 for e in errs}
+        count += len(errs)
+    all_ok &= check(len(keys) == count and count >= 400,
+                    'every tier Delta-I of every set gives a distinct PySCF key',
+                    f'{count} names')
+    # `-ri`, the tightest, is registered by a threshold call as well, because the
+    # defaults of this tree form str(mol.basis) + '-ri'.
+    key = pyscf_basis._format_basis_name('aug-SZV-MOLOPT-ae-ri')
+    pyscf_basis.USER_BASIS_ALIAS.pop(key, None)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
+    n_o = gto.M(atom='O 0 0 0', basis='aug-SZV-MOLOPT-ae-ri', verbose=0).nao
+    all_ok &= check(key in pyscf_basis.USER_BASIS_ALIAS and n_o == 108,
+                    'a threshold call also registers -ri, the tightest tiers',
+                    f'O in aug-SZV-MOLOPT-ae-ri: {n_o} functions')
+
+    # An element outside a set: the name holds only the elements CP2K has, and
+    # pyscf raises for the rest rather than falling back to another basis. H is in
+    # the -mini orbital set, but CP2K names H's RI tiers after the full set only,
+    # so the -mini RI name has no H.
     mini = 'aug-SZV-MOLOPT-ae-mini'
     no_ri = [el for el in sorted({el for el, names, _ in cb._blocks(orbital)
                                   if mini in names}) if not cb.ri_tiers(mini, el, ri)]
@@ -234,20 +296,33 @@ if __name__ == '__main__':
     all_ok &= check(ok_k and ok_mini and len(no_ri) == 2,
                     'an element outside a registered set raises BasisNotFoundError',
                     f'K in aug-SZV-MOLOPT-ae; {no_ri[0]} in {mini}-ri')
+
+    # Bad arguments: a set CP2K does not have; a negative or nan threshold.
     ok_name, msg_name = raises(ValueError, lambda: cb.register('aug-cc-pVDZ'),
                                'is not one of')
-    ok_err, msg_err = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae',
-                                                             max_error=1.0),
+    ok_neg, msg_neg = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae',
+                                                             max_error=-1e-4),
                              'threshold')
-    all_ok &= check(ok_name and ok_err,
-                    'register rejects an unknown set and max_error outside (0, 1)',
-                    f'{msg_name[:40]}; {msg_err[:40]}')
+    ok_nan, _ = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae',
+                                                       max_error=float('nan')),
+                       'threshold')
+    all_ok &= check(ok_name and ok_neg and ok_nan,
+                    'register rejects an unknown set and a negative or nan max_error',
+                    f'{msg_name[:40]}; {msg_neg[:40]}')
+
+    # One warning per registration, naming each element without a tier within the
+    # threshold and the Delta-I of the tightest tier it gets instead.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
     msg = str(caught[0].message) if caught else 'no warning'
-    all_ok &= check(len(caught) == 1 and 'for S,' in msg,
-                    'register warns once, naming the elements outside max_error', msg)
+    all_ok &= check(len(caught) == 1
+                    and msg.endswith('for S (tightest tier, Delta-I 1.9e-04)'),
+                    'register warns once, naming the element and the Delta-I it gets',
+                    msg)
+
+    # Data other than the pinned commit's are refused, since an ISDF grid cached
+    # under the name would otherwise serve the other data.
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(orbital, tmp)
         with open(ri) as src, open(os.path.join(tmp, cb.FILES['ri']), 'w') as dst:

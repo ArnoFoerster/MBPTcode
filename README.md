@@ -146,8 +146,9 @@ mol = gto.M(atom='O 0 0 0; H 0 0 0.958; H 0.926 0 -0.240', basis=basis)
 ```
 
 Without `max_error` you get the tightest RI tiers: converged, but possibly far
-larger than needed. Choose the tier deliberately; data sources, offline use and
-the trade-off are in `src/Base/basis/README.md`.
+larger than needed. Choose the tier deliberately; the RI name then carries the
+largest Delta-I among the tiers it holds, so one name means one set. Data
+sources, offline use and the trade-off are in `src/Base/basis/README.md`.
 
 ## Tests
 

@@ -12,10 +12,12 @@ prints a notice naming the source, its license and the paper to cite on first us
     mol = gto.M(atom=..., basis=basis)
     mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux)
 
-`register` makes the sets PySCF basis names, so the defaults of this tree that
-form `str(mol.basis) + '-ri'` and the name-keyed ISDF radii cache work as for any
-named basis. `load_basis` and `load_ri_basis` return the same sets as dicts; a
-dict has no name, so pass its auxiliary basis explicitly.
+`register` makes the sets PySCF basis names: `<name>`, `<name>-ri` with the
+tightest RI tier per element, which the defaults of this tree that form
+`str(mol.basis) + '-ri'` resolve, and for a threshold `<name>-ri-<Delta-I>`, one
+name per set of tiers, so the name-keyed ISDF radii cache works as for any named
+basis. `load_basis` and `load_ri_basis` return the same sets as dicts; a dict has
+no name, so pass its auxiliary basis explicitly.
 
 `pyscf.gto.basis.parse_cp2k.parse` reads the block format; its `load` and
 `search_seg` split a file on `# BASIS SET` delimiters, which these files do not
@@ -262,11 +264,28 @@ def _lmax(pat):
     return max(SPDF.index(c) for c in pat if c in SPDF)
 
 
+def _threshold(max_error):
+    """None for the tightest tiers, which 0 also means; negative or nan raise."""
+    if max_error is not None and not max_error >= 0:
+        raise ValueError(f'max_error={max_error} is not a Delta-I threshold')
+    return max_error or None
+
+
+def _effective_error(basis_name, elements, max_error, path):
+    """The largest tier Delta-I within `max_error` over `elements`; None without one.
+
+    The tier choice moves only when the threshold crosses a tier's Delta-I, so
+    every threshold between two of them picks the same tiers; this is the lowest.
+    """
+    return max((t[2] for el in elements for t in ri_tiers(basis_name, el, path)
+                if t[2] <= max_error), default=None)
+
+
 def pick_ri_tier(basis_name, element, max_error=None, min_lmax=None, path=None):
     """The smallest tier within `max_error` and with l_max >= `min_lmax`.
 
-    The default, `max_error=None`, is the tightest tier: converged, and the most
-    expensive. 1e-4 is the paper's recommendation (Section 3.2) and an MP2
+    The default, `max_error=None` or 0, is the tightest tier: converged, and the
+    most expensive. 1e-4 is the paper's recommendation (Section 3.2) and an MP2
     criterion; see the module docstring for what it leaves on BSE energies.
     `min_lmax` adds the angular condition, twice the orbital l_max for a complete
     product space. When no tier satisfies both conditions the tightest one is
@@ -276,6 +295,7 @@ def pick_ri_tier(basis_name, element, max_error=None, min_lmax=None, path=None):
     -------
     (ri_name, nfunc, delta_i, pattern)
     """
+    max_error = _threshold(max_error)
     tiers = ri_tiers(basis_name, element, path)
     if not tiers:
         raise ValueError(f'no RI tier for {basis_name}, {element} in {path}')
@@ -315,20 +335,24 @@ def _write_nwchem(fh, table):
 def register(name, max_error=None):
     """Make an orbital set and its RI tiers PySCF basis names, for this process.
 
-    Both sets are written, for every element CP2K has them for, into the cache
-    beside the CP2K files, and added to `pyscf.gto.basis.USER_BASIS_ALIAS`. That
+    The sets are written, for every element CP2K has them for, into the cache
+    beside the CP2K files and added to `pyscf.gto.basis.USER_BASIS_ALIAS`. That
     table lives in the running process only, so call this once per script before
-    building a Mole. The RI name encodes its tier rule, `<name>-ri` for the
-    tightest tiers and `<name>-ri-<max_error>` for a threshold, so one name means
-    one set in every process: the ISDF radii cache is keyed on it. `min_lmax` has
-    no name; use the dict of `load_ri_basis` for it.
+    building a Mole. Three names: `<name>`; `<name>-ri`, the tightest tier per
+    element, which the defaults of this tree resolve; and for a threshold
+    `<name>-ri-<Delta-I>`, the smallest tier within `max_error` per element, where
+    Delta-I is the largest tier error within the threshold among the set's
+    elements. Every threshold that picks the same tiers gets that one name, and
+    passing the name's Delta-I back reproduces its set, so one name means one set
+    in every process, which the ISDF radii cache, keyed on it, relies on.
+    `min_lmax` has no name; use the dict of `load_ri_basis` for it.
 
     Parameters
     ----------
     name : str
         One of `BASIS_NAMES`.
     max_error : float, optional
-        Delta-I threshold as in `pick_ri_tier`; None, the tightest tiers.
+        Delta-I threshold as in `pick_ri_tier`; None or 0, the tightest tiers.
 
     Returns
     -------
@@ -337,10 +361,7 @@ def register(name, max_error=None):
     """
     if name not in BASIS_NAMES:
         raise ValueError(f'{name} is not one of {BASIS_NAMES}')
-    if max_error is not None and not 0 < max_error < 1:
-        raise ValueError(f'max_error={max_error} is not a Delta-I threshold in (0, 1)')
-    # repr is exact, so thresholds that select different tiers never share a name
-    ri_name = f'{name}-ri' if max_error is None else f'{name}-ri-{float(max_error)!r}'
+    max_error = _threshold(max_error)
     orbital, ri = data_file('orbital'), data_file('ri')
     # Other data would put a second set under the same name, and a cached ISDF
     # grid keyed on that name would silently serve the wrong one.
@@ -351,15 +372,23 @@ def register(name, max_error=None):
                              'use load_basis and load_ri_basis instead')
     elements = sorted({el for el, names, _ in _blocks(orbital) if name in names})
     ri_elements = [el for el in elements if ri_tiers(name, el, ri)]
+    error = None if max_error is None else _effective_error(name, ri_elements,
+                                                            max_error, ri)
+    # The file writes every Delta-I with two significant digits, so .1e is exact.
+    ri_name = f'{name}-ri' if error is None else f'{name}-ri-{error:.1e}'
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')        # one warning below, not one per element
         sets = {name: load_basis(name, elements, orbital),
-                ri_name: load_ri_basis(name, ri_elements, max_error, path=ri)}
-        loose = [el for el in ri_elements if max_error is not None
-                 and pick_ri_tier(name, el, max_error, path=ri)[2] > max_error]
+                f'{name}-ri': load_ri_basis(name, ri_elements, path=ri)}
+        if error is not None:
+            sets[ri_name] = load_ri_basis(name, ri_elements, max_error, path=ri)
+        loose = [(el, pick_ri_tier(name, el, max_error, path=ri)[2])
+                 for el in ri_elements if max_error is not None]
+    loose = [f'{el} (tightest tier, Delta-I {err:.1e})' for el, err in loose
+             if err > max_error]
     if loose:
-        warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}, '
-                      'which get their tightest tier', stacklevel=2)
+        warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}',
+                      stacklevel=2)
     out = os.path.join(_cache_dir(CP2K_COMMIT), 'pyscf')
     os.makedirs(out, exist_ok=True)
     for alias, table in sets.items():

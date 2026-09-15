@@ -22,17 +22,25 @@ mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux).run()
 ```
 
 `register` makes the orbital set and its RI tiers PySCF basis names, here
-`aug-SZV-MOLOPT-ae` and `aug-SZV-MOLOPT-ae-ri-0.0001`, for every element that has
+`aug-SZV-MOLOPT-ae` and `aug-SZV-MOLOPT-ae-ri-8.4e-05`, for every element that has
 them. Every route in this tree then treats them like any named basis. PySCF keeps
 the names in the running process only, so call `register` once at the top of each
-script. It writes the two sets into the cache (below) and returns the names.
+script. It writes the sets into the cache (below) and returns the names.
 
-The RI name carries the tier rule, so one name means one set in every process:
+One RI name means one set of tiers, in every process:
 
 | call | RI name | tier per element |
 |---|---|---|
-| `register(name)` | `<name>-ri` | the tightest |
-| `register(name, max_error=1e-4)` | `<name>-ri-0.0001` | the smallest with Delta-I <= 1e-4 |
+| `register(name)`, or `max_error=0` | `<name>-ri` | the tightest |
+| `register(name, max_error=1e-4)` | `<name>-ri-8.4e-05` | the smallest with Delta-I <= 1e-4 |
+
+The name carries the largest Delta-I within the threshold among the set's
+elements, here 8.4e-5, so every threshold that picks the same tiers gets the same
+name, and `max_error=8.4e-5` reproduces the set. A threshold above every tier's
+Delta-I, 1 or `inf`, picks the smallest tier of every element.
+
+`<name>-ri` is registered by every call, because the defaults of this tree form
+`str(mol.basis) + '-ri'`: a route you do not hand `aux` uses the tightest tiers.
 
 `load_basis` and `load_ri_basis` return the same sets as dicts, and only
 `load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it
@@ -94,12 +102,14 @@ A tier's name carries its Delta-I, the atomic RI-MP2 error of eq 29 in the paper
 
 | argument | tier per element |
 |---|---|
-| none | the tightest |
+| none, or `max_error=0` | the tightest |
 | `max_error=1e-4` | the smallest with Delta-I <= 1e-4, the paper's recommendation |
 | `min_lmax=L`, `load_ri_basis` only | also requires auxiliary l_max >= L; if no tier qualifies, the tightest, with a warning |
 
-`pick_ri_tier` takes the same arguments for one element and returns the tier's
-name, size, Delta-I and pattern.
+An element without a tier within the threshold gets its tightest one, and one
+warning names the elements and the Delta-I each of them gets. `pick_ri_tier` takes
+the same arguments for one element and returns the tier's name, size, Delta-I and
+pattern.
 
 Delta-I is an MP2 criterion: it measures the (ia|jb) integrals. The BSE direct
 term and the GW self-energy contract (ij|ab), and a product of two orbital
