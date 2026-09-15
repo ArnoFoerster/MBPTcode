@@ -6,7 +6,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
+from src.Base.constants import get_method_info
+from src.SingleReference.GW.qp_energy import _casida_spectrum
 from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
 
 def check(ok, label, detail=''):
@@ -115,6 +118,35 @@ if __name__ == '__main__':
             over <= RATCHET_HANDOFF[kind],
             f'{kind}: peak with A, B handed to the solver <= {RATCHET_HANDOFF[kind]}',
             f'{over:.2f} arrays, A and B included')
+
+    # --- tracemalloc ratchet on _casida_spectrum's singlet solve, same
+    # synthetic DF system as test_casida_build_inplace.py's build ratchet ---
+    naux_s, norb_s, nocc_s = 400, 100, 30
+    n_pair_s = nocc_s * (norb_s - nocc_s)
+    spec_rng = np.random.default_rng(0)
+    coeff_s = spec_rng.standard_normal((naux_s, norb_s, norb_s))
+    coeff_s = coeff_s + coeff_s.transpose(0, 2, 1)
+    eps_s = np.sort(spec_rng.uniform(-1.0, 1.0, norb_s))
+    lr_s = LinearResponseSolver(eps_s, coeff_df=coeff_s, spin_mode='restricted')
+    methods_s = ['GW']
+    method_infos_s = {'GW': get_method_info('GW')}
+    spec_unit = 8 * n_pair_s * n_pair_s
+    RATCHET_SPECTRUM = 4.2
+
+    tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        spectrum = _casida_spectrum(lr_s, nocc_s, 'RPA', None, False,
+                                    method_infos_s, methods_s, False, True)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    del spectrum
+    over = (peak - base) / spec_unit
+    all_ok &= check(over <= RATCHET_SPECTRUM,
+                    f'_casida_spectrum RPA singlet: peak <= {RATCHET_SPECTRUM}',
+                    f'{over:.2f} arrays')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
