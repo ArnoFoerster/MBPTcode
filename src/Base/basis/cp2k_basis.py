@@ -444,6 +444,7 @@ def available(element, orbital_path=None, ri_path=None):
 
 
 def main(argv=None):
+    """The `fetch` and `scout` subcommands of the module docstring."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('fetch', help='fill the cache with both files at the pinned commit')

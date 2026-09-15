@@ -38,12 +38,14 @@ from src.Base.basis import cp2k_basis as cb
 
 
 def check(ok, label, detail=''):
+    """Print one verdict line and return the verdict."""
     tag = 'ok' if ok else 'FAIL'
     print(f'  [{tag}] {label}' + (f'   ({detail})' if detail else ''))
     return bool(ok)
 
 
 def nao(element, basis):
+    """Function count PySCF builds for one atom in an internal-format basis."""
     return gto.M(atom=f'{element} 0 0 0', basis={element: basis}, verbose=0,
                  spin=gto.charge(element) % 2).nao
 
