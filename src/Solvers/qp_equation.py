@@ -17,7 +17,9 @@ def solve_qp_equation(func, e_start, method='pole_strength', **kwargs):
     """Single entry point dispatching to the pole-strength/graphical/newton/
     bisection root finders below. func(w) must return f(w) = w - eps - Sigma(w) (or any
     function whose root is the sought quasiparticle/eigenvalue energy);
-    e_start is the zeroth-order guess (e.g. the KS/HF eigenvalue)."""
+    e_start is the zeroth-order guess (e.g. the KS/HF eigenvalue).
+    vectorized=True (pole_strength, graphical): func accepts and returns
+    arrays; the search grid is one call."""
     if method == 'graphical':
         return solve_qp_equation_graphical(func, e_start, **kwargs)
     if method == 'pole_strength':
@@ -184,9 +186,11 @@ def pole_strength(func, w, h=QP_Z_DERIV_STEP):
     return 1.0 / deriv
 
 
-def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP_GRAPHICAL_N_OMEGA,
-                                    max_bisection=QP_GRAPHICAL_MAX_BISECTION, z_min=QP_Z_MIN,
-                                    return_diagnostics=False):
+def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL,
+                                    nOmega=QP_GRAPHICAL_N_OMEGA,
+                                    max_bisection=QP_GRAPHICAL_MAX_BISECTION,
+                                    z_min=QP_Z_MIN, return_diagnostics=False,
+                                    vectorized=False):
     """Solve f(w) = w - eps - Sigma(w) = 0, returning the root with the largest
     quasiparticle weight Z = 1/f'(w) rather than the one nearest eigKS.
 
@@ -203,7 +207,10 @@ def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP
     """
     omegaMin, omegaMax = _qp_search_window(eigKS)
     omega_grid = np.linspace(omegaMin, omegaMax, nOmega)
-    shifts = np.array([func(w) for w in omega_grid])
+    if vectorized:
+        shifts = np.asarray(func(omega_grid), dtype=float)
+    else:
+        shifts = np.array([func(w) for w in omega_grid])
 
     sign_change_idx = np.where(shifts[1:] * shifts[:-1] < 0.0)[0] + 1
     if len(sign_change_idx) == 0:
@@ -224,7 +231,10 @@ def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP
     return (best, found) if return_diagnostics else best
 
 
-def solve_qp_equation_graphical(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP_GRAPHICAL_N_OMEGA, max_bisection=QP_GRAPHICAL_MAX_BISECTION):
+def solve_qp_equation_graphical(func, eigKS, tol=QP_GRAPHICAL_TOL,
+                                nOmega=QP_GRAPHICAL_N_OMEGA,
+                                max_bisection=QP_GRAPHICAL_MAX_BISECTION,
+                                vectorized=False):
     """Solve f(w) = w - eps - Sigma(w) = 0 by grid search, then bisect only the sign-changing interval closest to eigKS.
 
     Only that closest root is ever returned: bisection can't move a root out
@@ -240,7 +250,10 @@ def solve_qp_equation_graphical(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP_GRA
     omegaMax = -omegaMin
 
     omega_grid = np.linspace(omegaMin + eigKS, omegaMax + eigKS, nOmega)
-    shifts = np.array([func(w) for w in omega_grid])
+    if vectorized:
+        shifts = np.asarray(func(omega_grid), dtype=float)
+    else:
+        shifts = np.array([func(w) for w in omega_grid])
 
     sign_change_idx = np.where(shifts[1:] * shifts[:-1] < 0.0)[0] + 1
     if len(sign_change_idx) == 0:
