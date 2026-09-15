@@ -7,12 +7,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf_interface import (
+    get_orbital_energies, get_density_fitting_coefficients)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
 
 def check(ok, label, detail=''):
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + (f'   ({detail})' if detail else ''))
+    print(f"  [{'ok' if ok else 'FAIL'}] {label}"
+          + (f'   ({detail})' if detail else ''))
     return bool(ok)
 
 
@@ -58,20 +60,71 @@ if __name__ == '__main__':
         cases = [('RPA singlet', dict(lBSE=False), 2.0, None),
                  ('RPA triplet', dict(lBSE=False, triplet=True), 0.0, None),
                  ('TDHF singlet', dict(lBSE=True, W_aux=None), 2.0, 'bare'),
-                 ('TDHF triplet', dict(lBSE=True, W_aux=None, triplet=True), 0.0, 'bare'),
+                 ('TDHF triplet', dict(lBSE=True, W_aux=None, triplet=True),
+                  0.0, 'bare'),
                  ('BSE singlet', dict(lBSE=True, W_aux=w_aux), 2.0, w_aux),
-                 ('BSE triplet', dict(lBSE=True, W_aux=w_aux, triplet=True), 0.0, w_aux)]
+                 ('BSE triplet', dict(lBSE=True, W_aux=w_aux, triplet=True),
+                  0.0, w_aux)]
         for name, kw, factor, W in cases:
             A, B = lr.build_casida_matrices(nocc, **kw)
             A_ref, B_ref = reference_ab(eps, coeff, nocc, factor, W)
             scale = max(1.0, np.max(np.abs(A_ref)))
             dA = np.max(np.abs(A - A_ref)) / scale
             dB = np.max(np.abs(B - B_ref)) / scale
-            all_ok &= check(dA < 1e-12 and dB < 1e-12, f'{label} {name}: A, B vs einsum reference',
-                            f'dA={dA:.1e} dB={dB:.1e}')
-        all_ok &= check(np.array_equal(w_aux, w_copy), f'{label}: W_aux untouched by the builds')
+            all_ok &= check(
+                dA < 1e-12 and dB < 1e-12,
+                f'{label} {name}: A, B vs einsum reference',
+                f'dA={dA:.1e} dB={dB:.1e}')
+        all_ok &= check(np.array_equal(w_aux, w_copy),
+                        f'{label}: W_aux untouched by the builds')
 
-    # --- tracemalloc ratchet on the BSE-DF build, N_pair = 2100, in units of one N_pair^2 array ---
+        # --- restricted full-ERI twin: same eps/coeff, chemist eri built
+        # from the DF factors ---
+        eri = np.einsum('Ppq,Prs->pqrs', coeff, coeff)
+        lr_full = LinearResponseSolver(eps, eri_chemist=eri,
+                                       spin_mode='restricted')
+        full_cases = [
+            ('RPA singlet', dict(lBSE=False), 2.0, None),
+            ('RPA triplet', dict(lBSE=False, triplet=True), 0.0, None),
+            ('TDHF singlet', dict(lBSE=True, W_aux=None), 2.0, 'bare'),
+            ('TDHF triplet', dict(lBSE=True, W_aux=None, triplet=True),
+             0.0, 'bare'),
+        ]
+        for name, kw, factor, W in full_cases:
+            A, B = lr_full.build_casida_matrices(nocc, **kw)
+            A_ref, B_ref = reference_ab(eps, coeff, nocc, factor, W)
+            scale = max(1.0, np.max(np.abs(A_ref)))
+            dA = np.max(np.abs(A - A_ref)) / scale
+            dB = np.max(np.abs(B - B_ref)) / scale
+            all_ok &= check(
+                dA < 1e-12 and dB < 1e-12,
+                f'{label} full {name}: A, B vs einsum reference',
+                f'dA={dA:.1e} dB={dB:.1e}')
+
+        # BSE, full ERI: one W_aux reused for singlet then triplet, each
+        # compared to a build given a fresh copy taken before either build.
+        w_full = lr_full.static_screening_aux(nocc)
+        w_full_before = w_full.copy()
+        w_full_copy_s = w_full.copy()
+        w_full_copy_t = w_full.copy()
+        A_s, B_s = lr_full.build_casida_matrices(nocc, lBSE=True, W_aux=w_full)
+        A_t, B_t = lr_full.build_casida_matrices(
+            nocc, lBSE=True, W_aux=w_full, triplet=True)
+        A_s_ref, B_s_ref = lr_full.build_casida_matrices(
+            nocc, lBSE=True, W_aux=w_full_copy_s)
+        A_t_ref, B_t_ref = lr_full.build_casida_matrices(
+            nocc, lBSE=True, W_aux=w_full_copy_t, triplet=True)
+        all_ok &= check(
+            np.array_equal(A_s, A_s_ref) and np.array_equal(B_s, B_s_ref),
+            f'{label} full BSE singlet: reused vs fresh-copy W_aux')
+        all_ok &= check(
+            np.array_equal(A_t, A_t_ref) and np.array_equal(B_t, B_t_ref),
+            f'{label} full BSE triplet: reused vs fresh-copy W_aux')
+        all_ok &= check(np.array_equal(w_full, w_full_before),
+                        f'{label} full: W_aux untouched by the builds')
+
+    # --- tracemalloc ratchet on the BSE-DF build, N_pair = 2100, in units
+    # of one N_pair^2 array ---
     rng = np.random.default_rng(0)
     naux, norb, nocc = 400, 100, 30
     n_pair = nocc * (norb - nocc)
@@ -82,7 +135,7 @@ if __name__ == '__main__':
     Wm = Wm @ Wm.T + np.eye(naux)
     lr = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted')
     unit = 8 * n_pair * n_pair
-    RATCHET = 4.3                                 # pinned in Task 2 step 4
+    RATCHET = 4.3
     tracemalloc.start()
     base = tracemalloc.get_traced_memory()[0]
     tracemalloc.reset_peak()
@@ -90,7 +143,9 @@ if __name__ == '__main__':
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     over = (peak - base) / unit
-    all_ok &= check(over <= RATCHET, f'BSE-DF build peak <= {RATCHET} arrays', f'{over:.2f} arrays')
+    all_ok &= check(over <= RATCHET,
+                    f'BSE-DF build peak <= {RATCHET} arrays',
+                    f'{over:.2f} arrays')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
