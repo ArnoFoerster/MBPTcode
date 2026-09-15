@@ -156,13 +156,17 @@ def _qp_search_window(eigKS):
 
 
 def _refine_root(func, a, b, tol, max_bisection):
-    """Bisect a bracketing interval [a, b] down to `tol`."""
+    """Bisect a bracketing interval [a, b] down to `tol`; f(a) is
+    evaluated once per move."""
+    fa = func(a)
     for _ in range(max_bisection):
         c = 0.5 * (a + b)
-        if func(a) * func(c) <= 0.0:
+        fc = func(c)
+        if fa * fc <= 0.0:
             b = c
         else:
             a = c
+            fa = fc
         if abs(b - a) <= tol:
             break
     return 0.5 * (a + b)
