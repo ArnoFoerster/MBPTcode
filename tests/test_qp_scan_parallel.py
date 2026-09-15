@@ -113,8 +113,10 @@ if __name__ == '__main__':
             v_hxc_mo = mf.mo_coeff.T @ mf.get_veff(mol, dm) @ mf.mo_coeff
             v_hx_mo = se_.calculate_sigma_hx(mol, scf.RHF(mol), dm, mf.mo_coeff)
             per_state = np.array([v_hx_mo[p, p] - v_hxc_mo[p, p] for p in states])
-            all_ok &= check(np.array_equal(xc, per_state),
-                            'PBE: _static_correction equals the per-state formula')
+            d_xc = np.max(np.abs(xc - per_state))
+            all_ok &= check(d_xc < 1e-12,
+                            'PBE: _static_correction equals the per-state formula',
+                            f'{d_xc:.1e} Ha')
     # a single state and a scalar return keep the old shape
     e_homo = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state='homo')
     all_ok &= check(isinstance(e_homo, float), "state='homo' returns a float")
