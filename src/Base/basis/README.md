@@ -97,8 +97,7 @@ its orbital block with `aug-SZV-MOLOPT-ae`, whose tiers are named after that set
 only, so `aug-SZV-MOLOPT-ae-mini-ri` raises for any molecule with H. A fallback
 used in production, the nanographene calculations of
 [lsGW_Nanographenes](https://github.com/MGraml/lsGW_Nanographenes), is the H tier
-of `aug-SZV-MOLOPT-ae-SR`, optimized for a different H block. Build the dict and
-pass it explicitly:
+of `aug-SZV-MOLOPT-ae-SR`. Build the dict and pass it explicitly:
 
 ```python
 aux = load_ri_basis('aug-SZV-MOLOPT-ae-mini', ['C', 'N'], max_error=1e-4)

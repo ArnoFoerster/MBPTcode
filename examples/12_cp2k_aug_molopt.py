@@ -2,12 +2,13 @@
 
 The orbital and auxiliary sets are read from CP2K at run time (see
 src/Base/basis/cp2k_basis.py for the source, the license notice and the cache);
-nothing is shipped with MBPTcode. The auxiliary tier is chosen, not defaulted: the
-smallest one within the paper's Delta-I threshold of 1e-4, and it serves the mean
-field, W and the BSE kernel alike. Delta-I is an MP2 criterion: against the exact
-4-center tensor this tier leaves 27 meV on the lowest singlets and 6 meV on HOMO
-and LUMO, the tightest tiers 1.6 meV and under 1 meV (see the module docstring and
-`min_lmax` for the angular rule).
+nothing is shipped with MBPTcode. By default `register` takes the tightest RI tier
+of every element; this example asks for the smallest tier within the paper's
+Delta-I threshold of 1e-4, and it serves the mean field, W and the BSE kernel
+alike. Delta-I is an MP2 criterion: against the exact 4-center tensor this tier
+leaves 27 meV on the lowest singlets and 6 meV on HOMO and LUMO, the tightest tiers
+1.6 meV and under 1 meV (see the module docstring and `min_lmax` for the angular
+rule).
 
     python examples/12_cp2k_aug_molopt.py
 """
