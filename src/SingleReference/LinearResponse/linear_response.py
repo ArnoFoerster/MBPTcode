@@ -58,8 +58,8 @@ class LinearResponseSolver:
             eps = (self.eps_a, self.eps_b)
             eri = (self.eri_a, self.eri_b, self.eri_ab)
 
-            A_rpa, B_rpa = self.build_casida_matrices(nocc, lBSE=False)
-            omega_rpa, X_rpa, Y_rpa = CasidaSolver(A_rpa, B_rpa).solve()
+            omega_rpa, X_rpa, Y_rpa = CasidaSolver(
+                *self.build_casida_matrices(nocc, lBSE=False)).solve()
 
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(eps[0], nocc_a)
@@ -69,18 +69,23 @@ class LinearResponseSolver:
 
             XpY_a = (X_rpa[:n_pair_a] + Y_rpa[:n_pair_a])
             XpY_b = (X_rpa[n_pair_a:] + Y_rpa[n_pair_a:])
+            del X_rpa, Y_rpa
 
             V_aa_matrix = eri[0][np.ix_(occ_a, virt_a)].reshape(n_pair_a, -1)
             V_ba_matrix = eri[2].transpose(2, 3, 0, 1)[np.ix_(occ_b, virt_b)].reshape(n_pair_b, -1)
             M_a = V_aa_matrix.T @ XpY_a + V_ba_matrix.T @ XpY_b
             screened_a = 2.0 * (M_a / omega_rpa[None, :]) @ M_a.T
-            W_rpa_a = eri[0] - screened_a.reshape(eri[0].shape)
+            del M_a
+            W_rpa_a = screened_a.reshape(eri[0].shape)
+            np.subtract(eri[0], W_rpa_a, out=W_rpa_a)
 
             V_ab_matrix = eri[2][np.ix_(occ_a, virt_a)].reshape(n_pair_a, -1)
             V_bb_matrix = eri[1][np.ix_(occ_b, virt_b)].reshape(n_pair_b, -1)
             M_b = V_ab_matrix.T @ XpY_a + V_bb_matrix.T @ XpY_b
             screened_b = 2.0 * (M_b / omega_rpa[None, :]) @ M_b.T
-            W_rpa_b = eri[1] - screened_b.reshape(eri[1].shape)
+            del M_b
+            W_rpa_b = screened_b.reshape(eri[1].shape)
+            np.subtract(eri[1], W_rpa_b, out=W_rpa_b)
 
             eri_w_singlet = W_rpa_a if spin_channel == 'alpha' else W_rpa_b
             eri_w_triplet = eri_w_singlet
@@ -88,16 +93,20 @@ class LinearResponseSolver:
             eps = self.eps
             eri = self.eri_chemist
 
-            A_rpa, B_rpa = self.build_casida_matrices(nocc, lBSE=False)
-            omega_rpa, X_rpa, Y_rpa = CasidaSolver(A_rpa, B_rpa).solve()
+            omega_rpa, X_rpa, Y_rpa = CasidaSolver(
+                *self.build_casida_matrices(nocc, lBSE=False)).solve()
             rpa_factor = 4.0
             occ, virt = self._get_occ_virt_indices(eps, nocc)
             n_pair = len(occ) * len(virt)
             XpY = (X_rpa + Y_rpa).reshape(n_pair, -1)
+            del X_rpa, Y_rpa
             V_matrix = eri[np.ix_(occ, virt)].reshape(n_pair, -1)
             V_exciton = V_matrix.T @ XpY
+            del V_matrix, XpY
             screened = rpa_factor * (V_exciton / omega_rpa[None, :]) @ V_exciton.T
-            W_rpa = eri - screened.reshape(eri.shape)
+            del V_exciton
+            W_rpa = screened.reshape(eri.shape)
+            np.subtract(eri, W_rpa, out=W_rpa)
             eri_w_singlet = W_rpa
             eri_w_triplet = W_rpa
 

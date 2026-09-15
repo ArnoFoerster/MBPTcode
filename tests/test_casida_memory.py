@@ -10,7 +10,8 @@ from src.SingleReference.LinearResponse.casida import CasidaSolver
 
 
 def check(ok, label, detail=''):
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + (f'   ({detail})' if detail else ''))
+    print(f"  [{'ok' if ok else 'FAIL'}] {label}" +
+          (f'   ({detail})' if detail else ''))
     return bool(ok)
 
 
@@ -32,7 +33,8 @@ def synthetic(n, kind, rng):
 
 
 def peak_over_inputs(fn, unit):
-    """Traced peak during fn() minus the traced size before it, in units of `unit` bytes."""
+    """Traced peak during fn() minus the traced size before it, in units of
+    `unit` bytes."""
     tracemalloc.start()
     try:
         base = tracemalloc.get_traced_memory()[0]
@@ -59,7 +61,8 @@ if __name__ == '__main__':
         if kind != 'fallback':
             r1 = np.max(np.abs(A @ X + B @ Y - X * omega[None, :]))
             r2 = np.max(np.abs(B @ X + A @ Y + Y * omega[None, :]))
-            all_ok &= check(r1 < 1e-9 and r2 < 1e-9, f'{kind}: Casida residuals', f'{r1:.1e}, {r2:.1e}')
+            all_ok &= check(r1 < 1e-9 and r2 < 1e-9, f'{kind}: Casida residuals',
+                            f'{r1:.1e}, {r2:.1e}')
         nrm = np.max(np.abs(X.T @ X - Y.T @ Y - np.eye(len(omega))))
         all_ok &= check(nrm < 1e-9, f'{kind}: X^T X - Y^T Y = 1', f'{nrm:.1e}')
 
@@ -70,19 +73,48 @@ if __name__ == '__main__':
     s_keep = CasidaSolver(A, B, keep_intermediates=True)
     res_keep = s_keep.solve()
     all_ok &= check(s_default.Z is None, 'default: Z not stored')
-    all_ok &= check(s_keep.Z is not None and s_keep.Z.shape == A.shape, 'keep_intermediates: Z stored')
+    all_ok &= check(s_keep.Z is not None and s_keep.Z.shape == A.shape,
+                    'keep_intermediates: Z stored')
     all_ok &= check(all(np.array_equal(a, b) for a, b in zip(res_default, res_keep)),
                     'keep_intermediates does not change omega, X, Y')
+    all_ok &= check(s_default.A is None and s_default.B is None,
+                    'default: A, B released by solve')
+    all_ok &= check(s_keep.A is not None and s_keep.B is not None,
+                    'keep_intermediates: A, B kept')
 
     # --- tracemalloc ratchets at n = 1500, in units of one n x n float64 array ---
     n = 1500
     unit = 8 * n * n
-    RATCHET = {'diag': 4.2, 'chol': 5.2, 'tda': 3.2}    # pinned in Task 1 step 4
+    RATCHET = {'diag': 4.2, 'chol': 5.2, 'tda': 3.2}
     for kind, tda in (('diag', False), ('chol', False), ('tda', True)):
         A, B = synthetic(n, 'diag' if kind == 'diag' else 'chol', rng)
         over, _ = peak_over_inputs(lambda: CasidaSolver(A, B).solve(tda=tda), unit)
-        all_ok &= check(over <= RATCHET[kind], f'{kind}: peak over caller-held A, B <= {RATCHET[kind]}',
+        all_ok &= check(over <= RATCHET[kind],
+                        f'{kind}: peak over caller-held A, B <= {RATCHET[kind]}',
                         f'{over:.2f} arrays')
+
+    # --- ownership handoff: nothing but the solver holds A, B during the solve ---
+    def handoff_peak(kind, tda, unit):
+        """Traced peak of solve() alone, A and B included, in units of `unit`
+        bytes: synthetic()'s own construction memory is excluded by starting
+        the peak window after the inputs exist, on a box the solver empties."""
+        tracemalloc.start()
+        try:
+            base = tracemalloc.get_traced_memory()[0]
+            box = [synthetic(n, kind, rng)]
+            tracemalloc.reset_peak()
+            CasidaSolver(*box.pop()).solve(tda=tda)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        return (peak - base) / unit
+    RATCHET_HANDOFF = {'diag': 4.1, 'chol': 5.1, 'tda': 4.1}
+    for kind, tda in (('diag', False), ('chol', False), ('tda', True)):
+        over = handoff_peak('diag' if kind == 'diag' else 'chol', tda, unit)
+        all_ok &= check(
+            over <= RATCHET_HANDOFF[kind],
+            f'{kind}: peak with A, B handed to the solver <= {RATCHET_HANDOFF[kind]}',
+            f'{over:.2f} arrays, A and B included')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

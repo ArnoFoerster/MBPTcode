@@ -273,9 +273,9 @@ def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
     # BSE screens exchange with the static RPA W; TDHF uses bare exchange.
     w_casida = w_aux if mode == 'BSE' else None
 
-    A_s, B_s = lr_solver.build_casida_matrices(nocc, lBSE=lBSE, W_aux=w_casida,
-                                               triplet=False)
-    out = {'lBSE': lBSE, 'singlet': CasidaSolver(A_s, B_s).solve(tda=tda)}
+    out = {'lBSE': lBSE,
+           'singlet': CasidaSolver(*lr_solver.build_casida_matrices(
+               nocc, lBSE=lBSE, W_aux=w_casida, triplet=False)).solve(tda=tda)}
 
     if any(method_infos[m]['needs_triplet'] for m in methods):
         if is_uhf:
@@ -285,16 +285,14 @@ def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
                         for c in ('ba', 'ab')]
             out['triplet'] = tuple(zip(*channels))
         else:
-            A_t, B_t = lr_solver.build_casida_matrices(nocc, lBSE=lBSE,
-                                                       W_aux=w_casida,
-                                                       triplet=True)
-            out['triplet'] = CasidaSolver(A_t, B_t).solve(tda=tda)
+            out['triplet'] = CasidaSolver(*lr_solver.build_casida_matrices(
+                nocc, lBSE=lBSE, W_aux=w_casida, triplet=True)).solve(tda=tda)
     else:
         out['triplet'] = (None, None, None)
 
     if lBSE and any(method_infos[m]['force_rpa_casida'] for m in methods):
-        A_rpa, B_rpa = lr_solver.build_casida_matrices(nocc, lBSE=False)
-        out['rpa'] = CasidaSolver(A_rpa, B_rpa).solve(tda=tda)
+        out['rpa'] = CasidaSolver(
+            *lr_solver.build_casida_matrices(nocc, lBSE=False)).solve(tda=tda)
     else:
         out['rpa'] = out['singlet']
     return out

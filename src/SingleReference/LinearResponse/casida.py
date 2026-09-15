@@ -34,7 +34,22 @@ class CasidaSolver:
 
     @staticmethod
     def _combine_in_place(XpY, XmY):
-        """X = (XpY + XmY)/2 and Y = (XpY - XmY)/2, Y written into XmY's buffer."""
+        """Recover X, Y from X+Y and X-Y; Y overwrites XmY's buffer.
+
+        Parameters
+        ----------
+        XpY : ndarray, shape (n_ov, n_state)
+            X + Y.
+        XmY : ndarray, shape (n_ov, n_state)
+            X - Y. Overwritten in place with Y.
+
+        Returns
+        -------
+        X : ndarray, shape (n_ov, n_state)
+            A new array, (XpY + XmY) / 2.
+        Y : ndarray, shape (n_ov, n_state)
+            XmY's buffer, holding (XpY - XmY) / 2.
+        """
         X = XpY + XmY
         X *= 0.5
         np.subtract(XpY, XmY, out=XmY)
@@ -48,7 +63,13 @@ class CasidaSolver:
         omega = eig(A), X = eigenvectors (X^T X = 1 normalization), Y = 0.
         """
         if tda:
-            omega, Z_res, is_distributed, solver, comm = diagonalize_matrix(self.A, threshold=threshold)
+            A = self.A
+            if not self.keep_intermediates:
+                self.A = None
+                self.B = None
+            omega, Z_res, is_distributed, solver, comm = diagonalize_matrix(
+                A, threshold=threshold)
+            del A
             X = Z_res
             # calloc'd zeros stay unresident until written; zeros_like writes them.
             Y = np.zeros(Z_res.shape, dtype=Z_res.dtype,
@@ -60,8 +81,13 @@ class CasidaSolver:
             self.is_distributed = is_distributed
             return CasidaResult(omega, X, Y, is_distributed)
 
-        ApB = self.A + self.B
-        AmB = self.A - self.B
+        A, B = self.A, self.B
+        if not self.keep_intermediates:
+            self.A = None
+            self.B = None
+        ApB = A + B
+        AmB = A - B
+        del A, B
 
         # Check if A-B is diagonal: only check off-diagonal norm.
         # Computed from the Frobenius norms rather than by forming
