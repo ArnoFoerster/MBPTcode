@@ -186,6 +186,34 @@ def pole_strength(func, w, h=QP_Z_DERIV_STEP):
     return 1.0 / deriv
 
 
+def _grid_shifts(func, omega_grid, vectorized):
+    """Evaluate f on the search grid, scalar loop or one vectorized call.
+
+    Parameters
+    ----------
+    func : callable
+        f(w) = w - eps - Sigma(w); scalar-to-scalar, or (if `vectorized`)
+        ndarray-to-ndarray of the same shape as `omega_grid`.
+    omega_grid : ndarray, shape (nOmega,)
+        Frequencies to evaluate f at.
+    vectorized : bool
+        If True, call func once on the whole grid; otherwise loop over it.
+
+    Returns
+    -------
+    shifts : ndarray, shape (nOmega,)
+        f(omega_grid), evaluated elementwise.
+    """
+    if not vectorized:
+        return np.array([func(w) for w in omega_grid])
+    shifts = np.asarray(func(omega_grid), dtype=float)
+    if shifts.shape != omega_grid.shape:
+        raise ValueError(
+            f'vectorized func must return shape {omega_grid.shape}, '
+            f'got {shifts.shape}')
+    return shifts
+
+
 def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL,
                                     nOmega=QP_GRAPHICAL_N_OMEGA,
                                     max_bisection=QP_GRAPHICAL_MAX_BISECTION,
@@ -207,10 +235,7 @@ def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL,
     """
     omegaMin, omegaMax = _qp_search_window(eigKS)
     omega_grid = np.linspace(omegaMin, omegaMax, nOmega)
-    if vectorized:
-        shifts = np.asarray(func(omega_grid), dtype=float)
-    else:
-        shifts = np.array([func(w) for w in omega_grid])
+    shifts = _grid_shifts(func, omega_grid, vectorized)
 
     sign_change_idx = np.where(shifts[1:] * shifts[:-1] < 0.0)[0] + 1
     if len(sign_change_idx) == 0:
@@ -250,10 +275,7 @@ def solve_qp_equation_graphical(func, eigKS, tol=QP_GRAPHICAL_TOL,
     omegaMax = -omegaMin
 
     omega_grid = np.linspace(omegaMin + eigKS, omegaMax + eigKS, nOmega)
-    if vectorized:
-        shifts = np.asarray(func(omega_grid), dtype=float)
-    else:
-        shifts = np.array([func(w) for w in omega_grid])
+    shifts = _grid_shifts(func, omega_grid, vectorized)
 
     sign_change_idx = np.where(shifts[1:] * shifts[:-1] < 0.0)[0] + 1
     if len(sign_change_idx) == 0:

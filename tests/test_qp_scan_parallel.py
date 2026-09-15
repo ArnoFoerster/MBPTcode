@@ -36,5 +36,15 @@ if __name__ == '__main__':
                          f'{r_v:.12f}')
         all_ok &= check(v.calls < s.calls - 100, f'{method}: grid took one call',
                          f'{v.calls} vs {s.calls}')
+
+    bad = lambda w: np.atleast_2d(f(w))
+    for method in ('pole_strength', 'graphical'):
+        try:
+            solve_qp_equation(bad, -0.2, method=method, vectorized=True)
+            raised = False
+        except ValueError:
+            raised = True
+        all_ok &= check(raised, f'{method}: bad grid shape raises ValueError')
+
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
