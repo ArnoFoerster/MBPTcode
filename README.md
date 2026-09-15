@@ -98,11 +98,14 @@ gap) are undefined.
 
 ## Install
 
-Requires Python 3.10+, NumPy, SciPy, PySCF and opt_einsum:
+Requires Python 3.10+, NumPy, SciPy, PySCF, opt_einsum and threadpoolctl:
 
 ```bash
-pip install numpy scipy pyscf opt_einsum
+pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
+
+threadpoolctl pins the BLAS threads inside the parallel quasiparticle root
+scan (calc_qp_energy(n_workers=...)); the serial scan runs without it.
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
