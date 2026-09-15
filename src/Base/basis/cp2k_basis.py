@@ -12,12 +12,14 @@ prints a notice naming the source, its license and the paper to cite on first us
     mol = gto.M(atom=..., basis=basis)
     mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux)
 
-`register` makes the sets PySCF basis names: `<name>`, `<name>-ri` with the
+`register` makes the sets PySCF basis names: `<name>`, and `<name>-ri` with the
 tightest RI tier per element, which the defaults of this tree that form
-`str(mol.basis) + '-ri'` resolve, and for a threshold `<name>-ri-<Delta-I>`, one
+`str(mol.basis) + '-ri'` resolve, or for a threshold `<name>-ri-<Delta-I>`, one
 name per set of tiers, so the name-keyed ISDF radii cache works as for any named
-basis. `load_basis` and `load_ri_basis` return the same sets as dicts; a dict has
-no name, so pass its auxiliary basis explicitly.
+basis. A threshold call registers only its own RI name, so a route not handed
+`auxbasis` raises rather than switching sets. `load_basis` and `load_ri_basis`
+return the same sets as dicts; a dict has no name, so pass its auxiliary basis
+explicitly.
 
 `pyscf.gto.basis.parse_cp2k.parse` reads the block format; its `load` and
 `search_seg` split a file on `# BASIS SET` delimiters, which these files do not
@@ -360,15 +362,17 @@ def register(name, max_error=None):
     The sets are written, for every element CP2K has them for, into the cache
     beside the CP2K files and added to `pyscf.gto.basis.USER_BASIS_ALIAS`. That
     table lives in the running process only, so call this once per script before
-    building a Mole. Three names: `<name>`; `<name>-ri`, the tightest tier per
-    element, which the defaults of this tree resolve; and for a threshold
+    building a Mole. Two names: `<name>`, and either `<name>-ri`, the tightest
+    tier per element, which the defaults of this tree resolve, or for a threshold
     `<name>-ri-<Delta-I>`, the smallest tier within `max_error` per element, where
     Delta-I is the smallest threshold that picks those tiers: the largest Delta-I
     among them, leaving out an element's tightest tier, which every lower
     threshold picks as well. Every threshold that picks the same tiers gets that
     one name, and passing the name's Delta-I back reproduces its set, so one name
     means one set in every process, which the ISDF radii cache, keyed on it,
-    relies on. `min_lmax` has no name; use the dict of `load_ri_basis` for it.
+    relies on. A threshold call leaves `<name>-ri` alone, so a route not handed
+    the threshold name raises instead of switching sets. `min_lmax` has no name;
+    use the dict of `load_ri_basis` for it.
 
     Parameters
     ----------
@@ -412,9 +416,7 @@ def register(name, max_error=None):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         sets = {name: load_basis(name, elements, orbital),
-                f'{name}-ri': load_ri_basis(name, ri_elements, path=ri)}
-        if error is not None:
-            sets[ri_name] = load_ri_basis(name, ri_elements, max_error, path=ri)
+                ri_name: load_ri_basis(name, ri_elements, max_error, path=ri)}
     loose = [f'{el} (tightest tier, Delta-I {t[2]:.1e})' for el, t in picked.items()
              if t[2] > max_error]
     if loose:

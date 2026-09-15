@@ -41,8 +41,10 @@ the same tiers gets the same name, and `max_error=7.3e-5` reproduces the set. A
 threshold above every tier's Delta-I, 1 or `inf`, picks the smallest tier of
 every element.
 
-`<name>-ri` is registered by every call, because the defaults of this tree form
-`str(mol.basis) + '-ri'`: a route you do not hand `aux` uses the tightest tiers.
+The defaults of this tree form `str(mol.basis) + '-ri'`, the tightest tiers,
+which `register(name)` registers. A threshold call registers only its own RI
+name, so a route you do not hand `aux` raises `BasisNotFoundError` instead of
+switching sets: pass `aux` to every route.
 
 `load_basis` and `load_ri_basis` return the same sets as dicts, and only
 `load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it

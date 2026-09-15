@@ -13,8 +13,9 @@ Checks, in order:
              is 3s2p1d = 14)
   tier rule  threshold, the tightest as default, min_lmax, a tier's own Delta-I
   guards     unknown element, non-numeric data line, offline, failed download
-  register   names build the dicts bit for bit; one RI name per set of tiers;
-             `-ri` on every call; an element outside a set raises; bad arguments
+  register   names build the dicts bit for bit; one RI name per set of tiers; a
+             threshold call leaves `-ri` alone; an element outside a set raises;
+             bad arguments
              raise; one warning with the Delta-I an element gets; data other than
              the pinned commit's are refused by element, comments and spacing pass
 """
@@ -266,17 +267,19 @@ if __name__ == '__main__':
     all_ok &= check(len(keys) == count and count >= 400,
                     'every tier Delta-I of every set gives a distinct PySCF key',
                     f'{count} names')
-    # `-ri`, the tightest, is registered by a threshold call as well, because the
-    # defaults of this tree form str(mol.basis) + '-ri'.
+    # A threshold call registers its own RI name only: a route that defaults to
+    # str(mol.basis) + '-ri' then raises instead of switching to the tightest set.
     key = pyscf_basis._format_basis_name('aug-SZV-MOLOPT-ae-ri')
     pyscf_basis.USER_BASIS_ALIAS.pop(key, None)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         cb.register('aug-SZV-MOLOPT-ae', max_error=1e-4)
-    n_o = gto.M(atom='O 0 0 0', basis='aug-SZV-MOLOPT-ae-ri', verbose=0).nao
-    all_ok &= check(key in pyscf_basis.USER_BASIS_ALIAS and n_o == 108,
-                    'a threshold call also registers -ri, the tightest tiers',
-                    f'O in aug-SZV-MOLOPT-ae-ri: {n_o} functions')
+        ok_default, msg_default = raises(BasisNotFoundError, lambda: gto.M(
+            atom='O 0 0 0', basis='aug-SZV-MOLOPT-ae-ri', verbose=0),
+            'aug-SZV-MOLOPT-ae-ri')
+    all_ok &= check(key not in pyscf_basis.USER_BASIS_ALIAS and ok_default,
+                    'a threshold call leaves -ri unregistered, so a default raises',
+                    msg_default.split('\n')[0][:50])
 
     # An element outside a set: the name holds only the elements CP2K has, and
     # pyscf raises for the rest rather than falling back to another basis. H is in
