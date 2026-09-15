@@ -20,15 +20,34 @@ class CasidaSolver:
     below are Hermitian, which reduces to the real case for real inputs.
     """
     def __init__(self, A, B, eta=CASIDA_NUMERICAL_EPS, keep_intermediates=False):
+        """Build the solver from one pair of Casida matrices.
+
+        Parameters
+        ----------
+        A : ndarray, shape (n, n)
+            The (A) Casida block, Hermitian.
+        B : ndarray, shape (n, n)
+            The (B) Casida block.
+        eta : float
+            Numerical floor kept away from zero, e.g. when clipping
+            eigenvalues before a square root.
+        keep_intermediates : bool
+            The instance is single-use by default: solve() releases A and B
+            unless keep_intermediates=True, and a second solve() call on a
+            released instance raises RuntimeError. Setting it True also
+            keeps the eigenvectors Z of the transformed problem on the
+            instance, and allows solve() to be called again. The cost is two
+            more n x n arrays held through a non-TDA solve, one more for TDA.
+        """
         self.A = np.asarray(A)
         self.B = np.asarray(B)
         self.eta = eta
         self.ndim = self.A.shape[0]
         self.is_complex = np.iscomplexobj(self.A) or np.iscomplexobj(self.B)
         self.is_distributed = False
-        # False: solve() releases every N_ov x N_ov array at its last read and
-        # leaves Z unset. True keeps A, B and the eigenvectors Z of the
-        # transformed problem on the instance, one array more through the solve.
+        # False: solve() releases A and B and leaves Z unset. True: solve()
+        # keeps A, B and the eigenvectors Z of the transformed problem on the
+        # instance; see this method's docstring for the cost.
         self.keep_intermediates = keep_intermediates
         self.Z = None
 
@@ -62,6 +81,10 @@ class CasidaSolver:
         tda=True ignores B (Tamm-Dancoff): plain Hermitian diagonalization of A,
         omega = eig(A), X = eigenvectors (X^T X = 1 normalization), Y = 0.
         """
+        if self.A is None:
+            raise RuntimeError(
+                "solve() already released A and B on this instance; construct "
+                "with keep_intermediates=True to solve() more than once.")
         if tda:
             A = self.A
             if not self.keep_intermediates:
