@@ -51,7 +51,7 @@ the elements named. The guard is per element and file, so a changed block of any
 set refuses every registration. The ISDF radii cache is keyed on the name, and
 other data under the same name would reuse a grid optimized for a different set.
 
-`examples/12_cp2k_aug_molopt.py` is the worked case, G0W0 and a dense BSE on
+`examples/14_cp2k_aug_molopt.py` is the worked case, G0W0 and a dense BSE on
 formaldehyde. `tests/test_cp2k_basis.py` builds every orbital block and RI tier and
 checks each against the function count its header implies.
 

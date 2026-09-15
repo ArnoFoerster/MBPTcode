@@ -10,7 +10,7 @@ leaves 27 meV on the lowest singlets and 6 meV on HOMO and LUMO, the tightest ti
 1.6 meV and under 1 meV (see the module docstring and `min_lmax` for the angular
 rule).
 
-    python examples/12_cp2k_aug_molopt.py
+    python examples/14_cp2k_aug_molopt.py
 """
 import os
 import sys
