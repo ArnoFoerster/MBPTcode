@@ -46,6 +46,7 @@ import hashlib
 import os
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import warnings
@@ -76,6 +77,23 @@ _noticed = set()
 def _sha256(path):
     with open(path, 'rb') as fh:
         return hashlib.sha256(fh.read()).hexdigest()
+
+
+def _replace_with(path, write, mode='w'):
+    """Write through `write(fh)` into a fresh file beside `path`, then move it there.
+
+    No reader sees a partial file, and two processes writing at once, on one node
+    or on two nodes of a shared filesystem, never share a temporary name.
+    """
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                               prefix=os.path.basename(path) + '.')
+    try:
+        with os.fdopen(fd, mode) as fh:
+            write(fh)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    os.replace(tmp, path)
 
 
 def _notice(kind, path, commit):
@@ -121,17 +139,14 @@ def data_file(kind, commit=CP2K_COMMIT, download=True):
         if not download:
             raise FileNotFoundError(f'{path} is not cached and download=False')
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f'{path}.{os.getpid()}.tmp'
         try:
             with urllib.request.urlopen(url, timeout=10) as resp:
-                with open(tmp, 'wb') as out:
-                    out.write(resp.read())
+                _replace_with(path, lambda out: out.write(resp.read()), 'wb')
         except (urllib.error.URLError, OSError) as exc:
             raise OSError(f'could not download {url} ({exc}); point MBPT_CP2K_DATA '
                           'at a CP2K data directory, or run "python -m '
                           'src.Base.basis.cp2k_basis fetch" where the network is '
                           'reachable') from exc
-        os.replace(tmp, path)
     if commit == CP2K_COMMIT and _sha256(path) != SHA256[kind]:
         raise ValueError(f'{path} does not match the pinned CP2K commit {commit[:10]}; '
                          'delete it and fetch again')
@@ -287,17 +302,14 @@ def load_ri_basis(basis_name, elements, max_error=None, min_lmax=None, path=None
             for el in elements}
 
 
-def _write_nwchem(path, table):
+def _write_nwchem(fh, table):
     """{element: PySCF internal basis} as NWChem text PySCF reads back bit for bit."""
-    tmp = f'{path}.{os.getpid()}.tmp'
-    with open(tmp, 'w') as fh:
-        for el, shells in table.items():
-            fh.write(f'#BASIS SET: {el}\n')
-            for shell in shells:
-                fh.write(f'{el}    {SPDF[shell[0]].upper()}\n')
-                for row in shell[1:]:
-                    fh.write('  '.join(repr(float(x)) for x in row) + '\n')
-    os.replace(tmp, path)
+    for el, shells in table.items():
+        fh.write(f'#BASIS SET: {el}\n')
+        for shell in shells:
+            fh.write(f'{el}    {SPDF[shell[0]].upper()}\n')
+            for row in shell[1:]:
+                fh.write('  '.join(repr(float(x)) for x in row) + '\n')
 
 
 def register(name, max_error=None):
@@ -355,7 +367,7 @@ def register(name, max_error=None):
         if key in pyscf_basis.ALIAS or key in pyscf_basis.GTH_ALIAS:
             raise ValueError(f'{alias} collides with a basis name PySCF ships')
         path = os.path.join(out, f'{alias}.dat')
-        _write_nwchem(path, table)
+        _replace_with(path, lambda fh: _write_nwchem(fh, table))
         pyscf_basis.USER_BASIS_ALIAS[key] = path
     return name, ri_name
 
