@@ -8,6 +8,9 @@ the same equation w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w):
   imagfrequency  chi0(i.omega) by direct particle-hole summation.  O(N^4).
   space-time     chi0(i.tau) from a separable ISDF factorization.  O(N^3).
 """
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from pyscf import scf
 
@@ -77,7 +80,7 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    spin_channel='alpha', printSpectralFunction=False,
                    dm_correction=None, tda=False, qp_solver='pole_strength',
                    nroots=8, mode='casida', self_consistency='G0W0',
-                   eps_anchor=None, **route_kwargs):
+                   eps_anchor=None, n_workers=None, **route_kwargs):
     """Quasiparticle energies, in eV.
 
     selfenergy:     'GW'/'GWGammaInf'/'PSD1'...'PSD9', or a list of these.
@@ -113,6 +116,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     quasiparticle. 'graphical' returns the root nearest eps;
                     they agree wherever only one root exists. 'newton' and
                     'bisection' are also accepted.
+    n_workers:      threads for the per-state root scan (Casida route); None
+                    reads OMP_NUM_THREADS, 1 is serial.
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
@@ -198,33 +203,24 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # it was 85 % of an evGW cycle that asks for every orbital.
     xc_diagonal = _static_correction(mf, mol, se_solver, dm_correction,
                                      sigma_solvent, spin_channel, is_uhf)
-    results = {}
-    for p_state in states:
-        results[p_state] = {}
-        amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos,
-                                       methods, spin_channel, p_state,
-                                       eri_w_singlet, eri_w_triplet, is_uhf, df)
-        xc_correction = xc_diagonal[p_state]
-        eigKS = anchor_spin[p_state]
+    energies = qp_energies_from_spectrum(
+        se_solver, nocc, spectrum, method_infos, methods, spin_channel, states,
+        eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin,
+        xc_diagonal[states], qp_solver=qp_solver, n_workers=n_workers)
+    results = {p: {m: energies[p][m] * HARTREE_TO_EV for m in methods} for p in states}
 
-        for method in methods:
-            info = method_infos[method]
-            omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
-
-            func = lambda w: w - eigKS - xc_correction - se_solver.calculate_self_energy(
-                p_state, w, nocc, omega_val, chi_a_val, chi_b_val,
-                eigenvalues_casida_t=omega_t_val, chiXYb_t=chi_b_t_val,
-                spin_channel=spin_channel,
-                vertex_mode=info['vertex_mode'], calc_imag=False)
-            qp_ev = solve_qp_equation(func, eigKS,
-                                      method=qp_solver) * HARTREE_TO_EV
-            results[p_state][method] = qp_ev
-
-            if printSpectralFunction:
+    if printSpectralFunction:
+        for p_state in states:
+            amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos,
+                                           methods, spin_channel, p_state,
+                                           eri_w_singlet, eri_w_triplet, is_uhf, df)
+            for method in methods:
+                info = method_infos[method]
+                omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
+                qp_ev = results[p_state][method]
                 _print_spectral_function(se_solver, p_state, method, qp_ev, nocc,
-                                         omega_val, chi_a_val, chi_b_val,
-                                         omega_t_val, chi_b_t_val, spin_channel,
-                                         info)
+                                         omega_val, chi_a_val, chi_b_val, omega_t_val,
+                                         chi_b_t_val, spin_channel, info)
 
     if not isinstance(state, list) and not isinstance(selfenergy, list):
         return results[states[0]][methods[0]]
@@ -379,6 +375,88 @@ def _static_correction(mf, mol, se_solver, dm_correction, sigma_solvent,
     if sigma_solvent is not None:
         xc_correction = xc_correction + np.diag(np.asarray(sigma_solvent))
     return xc_correction
+
+
+def _resolve_workers(n_workers, n_states):
+    """Threads for the per-state scan: the keyword, else OMP_NUM_THREADS, else the
+    cpu count; never more than there are states."""
+    if n_workers is None:
+        pinned = os.environ.get('OMP_NUM_THREADS', '').strip()
+        n_workers = int(pinned) if pinned.isdigit() and int(pinned) > 0 else (
+            os.cpu_count() or 1)
+    return max(1, min(int(n_workers), n_states))
+
+
+def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
+                              spin_channel, states, eri_w_singlet, eri_w_triplet,
+                              is_uhf, df, eps_spin, xc_correction,
+                              qp_solver='pole_strength', n_workers=None):
+    """Quasiparticle energies, in Hartree, for every state from one Casida spectrum.
+
+    Solves w = eps_p + xc_p + Re Sigma_pp(w) per state and method, states in a
+    thread pool. The first state runs before the pool so the p-independent
+    amplitude caches exist before the threads read them; inside the pool every
+    BLAS is pinned to one thread (threadpoolctl) and the per-state work is
+    elementwise numpy, which releases the GIL.
+
+    Parameters
+    ----------
+    se_solver : SelfEnergySolver
+    spectrum : dict, as returned by _casida_spectrum
+    states : sequence of int, orbital indices
+    eps_spin : ndarray, shape (norb,), orbital energies of the spin channel
+    xc_correction : float or ndarray, shape (len(states),), <Sigma_Hx - v_Hxc>_pp
+    qp_solver : str, root selection as in solve_qp_equation
+    n_workers : int or None; None reads OMP_NUM_THREADS, then the cpu count; 1 is serial
+
+    Returns
+    -------
+    dict {p: {method: E_qp}} in Hartree
+    """
+    states = [int(p) for p in states]
+    xc = np.broadcast_to(np.asarray(xc_correction, dtype=float), (len(states),))
+    vect_ok = qp_solver in ('pole_strength', 'graphical')
+    grid_kw = {'vectorized': True} if vect_ok else {}
+
+    def solve_state(i):
+        p = states[i]
+        amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos, methods,
+                                       spin_channel, p, eri_w_singlet, eri_w_triplet,
+                                       is_uhf, df)
+        out = {}
+        for method in methods:
+            info = method_infos[method]
+            omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
+            sigma = se_solver.self_energy_evaluator(
+                p, nocc, omega_val, chi_a_val, chi_b_val,
+                eigenvalues_casida_t=omega_t_val, chiXYb_t=chi_b_t_val,
+                spin_channel=spin_channel, vertex_mode=info['vertex_mode'])
+            e0, x = eps_spin[p], xc[i]
+            func = lambda w, e0=e0, x=x, sigma=sigma: w - e0 - x - sigma(w)
+            out[method] = solve_qp_equation(func, e0, method=qp_solver, **grid_kw)
+        return p, out
+
+    results = {}
+    p0, out0 = solve_state(0)
+    results[p0] = out0
+    rest = range(1, len(states))
+    n_workers = _resolve_workers(n_workers, len(states))
+    if n_workers > 1 and len(states) > 1:
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError as exc:
+            raise ImportError(
+                "qp_energies_from_spectrum with n_workers > 1 needs threadpoolctl "
+                "(pip install threadpoolctl); n_workers=1 is the serial scan") from exc
+        with threadpool_limits(limits=1, user_api='blas'):
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for p, out in pool.map(solve_state, rest):
+                    results[p] = out
+    else:
+        for i in rest:
+            p, out = solve_state(i)
+            results[p] = out
+    return results
 
 
 def _print_spectral_function(se_solver, p_state, method, qp_ev, nocc, omega_val,
