@@ -22,7 +22,7 @@ mf = dft.RKS(mol, xc='PBE').density_fit(auxbasis=aux).run()
 ```
 
 `register` makes the orbital set and its RI tiers PySCF basis names, here
-`aug-SZV-MOLOPT-ae` and `aug-SZV-MOLOPT-ae-ri-8.4e-05`, for every element that has
+`aug-SZV-MOLOPT-ae` and `aug-SZV-MOLOPT-ae-ri-7.3e-05`, for every element that has
 them. Every route in this tree then treats them like any named basis. PySCF keeps
 the names in the running process only, so call `register` once at the top of each
 script. It writes the sets into the cache (below) and returns the names.
@@ -32,12 +32,14 @@ One RI name means one set of tiers, in every process:
 | call | RI name | tier per element |
 |---|---|---|
 | `register(name)`, or `max_error=0` | `<name>-ri` | the tightest |
-| `register(name, max_error=1e-4)` | `<name>-ri-8.4e-05` | the smallest with Delta-I <= 1e-4 |
+| `register(name, max_error=1e-4)` | `<name>-ri-7.3e-05` | the smallest with Delta-I <= 1e-4 |
 
-The name carries the largest Delta-I within the threshold among the set's
-elements, here 8.4e-5, so every threshold that picks the same tiers gets the same
-name, and `max_error=8.4e-5` reproduces the set. A threshold above every tier's
-Delta-I, 1 or `inf`, picks the smallest tier of every element.
+The name carries the smallest threshold that picks the same tiers, here 7.3e-5:
+the largest Delta-I among the tiers picked, leaving out an element's tightest
+tier, which every lower threshold picks as well. So every threshold that picks
+the same tiers gets the same name, and `max_error=7.3e-5` reproduces the set. A
+threshold above every tier's Delta-I, 1 or `inf`, picks the smallest tier of
+every element.
 
 `<name>-ri` is registered by every call, because the defaults of this tree form
 `str(mol.basis) + '-ri'`: a route you do not hand `aux` uses the tightest tiers.

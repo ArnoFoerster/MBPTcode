@@ -242,23 +242,26 @@ if __name__ == '__main__':
                     'registered names build the same basis as the dicts, bit for bit',
                     ', '.join(f'{v} {k}' for k, v in counted.items()))
 
-    # One name per set of tiers: it carries the largest Delta-I within the
-    # threshold, so thresholds that pick the same tiers share it; None and 0 are
-    # the tightest, `-ri`; a threshold above every Delta-I, the smallest tiers.
+    # One name per set of tiers: it carries the smallest threshold that picks
+    # them, so 8e-5 to 1e-4 share it although C's tightest tier, at 8.4e-5, is
+    # within only part of that range; None and 0 are the tightest, `-ri`; a
+    # threshold above every Delta-I gives the smallest tiers.
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         names = {me: cb.register('aug-SZV-MOLOPT-ae', me)[1]
-                 for me in (None, 0, 9e-5, 1e-4, 8.4e-5, 1e-5, 1, 1e3, float('inf'))}
+                 for me in (None, 0, 8e-5, 9e-5, 1e-4, 7.3e-5, 1e-5, 1, 1e3,
+                            float('inf'))}
     all_ok &= check(names[None] == names[0] == 'aug-SZV-MOLOPT-ae-ri'
-                    and names[9e-5] == names[1e-4] == names[8.4e-5]
-                    == 'aug-SZV-MOLOPT-ae-ri-8.4e-05'
+                    and names[8e-5] == names[9e-5] == names[1e-4] == names[7.3e-5]
+                    == 'aug-SZV-MOLOPT-ae-ri-7.3e-05'
                     and names[1] == names[1e3] == names[float('inf')]
                     == 'aug-SZV-MOLOPT-ae-ri-4.8e-02'
                     and names[1e-5] != names[1e-4],
-                    'one RI name per set of tiers, carrying the largest Delta-I within',
-                    f'{names[1e-4]} for 9e-5, 1e-4 and 8.4e-5; {names[1]} for 1 to inf')
+                    'one RI name per set of tiers, the smallest threshold picking it',
+                    f'{names[1e-4]} for 8e-5 to 1e-4; {names[1]} for 1 to inf')
     # Every distinct Delta-I of a set gives a distinct PySCF key, so no two names
-    # meet after pyscf lowercases them and strips the punctuation.
+    # meet after pyscf lowercases them and strips the punctuation; a name is one
+    # of these values.
     keys, count = set(), 0
     for basis_name in cb.BASIS_NAMES:
         errs = {t[2] for el in elements_in(ri) for t in cb.ri_tiers(basis_name, el, ri)}

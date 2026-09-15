@@ -303,16 +303,6 @@ def _threshold(max_error):
     return max_error or None
 
 
-def _effective_error(basis_name, elements, max_error, path):
-    """The largest tier Delta-I within `max_error` over `elements`; None without one.
-
-    The tier choice moves only when the threshold crosses a tier's Delta-I, so
-    every threshold between two of them picks the same tiers; this is the lowest.
-    """
-    return max((t[2] for el in elements for t in ri_tiers(basis_name, el, path)
-                if t[2] <= max_error), default=None)
-
-
 def pick_ri_tier(basis_name, element, max_error=None, min_lmax=None, path=None):
     """The smallest tier within `max_error` and with l_max >= `min_lmax`.
 
@@ -373,11 +363,12 @@ def register(name, max_error=None):
     building a Mole. Three names: `<name>`; `<name>-ri`, the tightest tier per
     element, which the defaults of this tree resolve; and for a threshold
     `<name>-ri-<Delta-I>`, the smallest tier within `max_error` per element, where
-    Delta-I is the largest tier error within the threshold among the set's
-    elements. Every threshold that picks the same tiers gets that one name, and
-    passing the name's Delta-I back reproduces its set, so one name means one set
-    in every process, which the ISDF radii cache, keyed on it, relies on.
-    `min_lmax` has no name; use the dict of `load_ri_basis` for it.
+    Delta-I is the smallest threshold that picks those tiers: the largest Delta-I
+    among them, leaving out an element's tightest tier, which every lower
+    threshold picks as well. Every threshold that picks the same tiers gets that
+    one name, and passing the name's Delta-I back reproduces its set, so one name
+    means one set in every process, which the ISDF radii cache, keyed on it,
+    relies on. `min_lmax` has no name; use the dict of `load_ri_basis` for it.
 
     Parameters
     ----------
@@ -408,20 +399,24 @@ def register(name, max_error=None):
                              'load_ri_basis instead')
     elements = sorted({el for el, names, _ in _blocks(orbital) if name in names})
     ri_elements = [el for el in elements if ri_tiers(name, el, ri)]
-    error = None if max_error is None else _effective_error(name, ri_elements,
-                                                            max_error, ri)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')        # one warning below, not one per element
+        picked = {el: pick_ri_tier(name, el, max_error, path=ri)
+                  for el in ri_elements if max_error is not None}
+    # An element's tightest tier is picked at every threshold below its Delta-I
+    # too, so it does not raise the smallest threshold that picks this set.
+    error = max((t[2] for el, t in picked.items()
+                 if t != min(ri_tiers(name, el, ri), key=lambda s: s[2])), default=None)
     # The file writes every Delta-I with two significant digits, so .1e is exact.
     ri_name = f'{name}-ri' if error is None else f'{name}-ri-{error:.1e}'
     with warnings.catch_warnings():
-        warnings.simplefilter('ignore')        # one warning below, not one per element
+        warnings.simplefilter('ignore')
         sets = {name: load_basis(name, elements, orbital),
                 f'{name}-ri': load_ri_basis(name, ri_elements, path=ri)}
         if error is not None:
             sets[ri_name] = load_ri_basis(name, ri_elements, max_error, path=ri)
-        loose = [(el, pick_ri_tier(name, el, max_error, path=ri)[2])
-                 for el in ri_elements if max_error is not None]
-    loose = [f'{el} (tightest tier, Delta-I {err:.1e})' for el, err in loose
-             if err > max_error]
+    loose = [f'{el} (tightest tier, Delta-I {t[2]:.1e})' for el, t in picked.items()
+             if t[2] > max_error]
     if loose:
         warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}',
                       stacklevel=2)
