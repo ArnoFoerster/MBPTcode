@@ -20,7 +20,8 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
     g is the real or imaginary part of the broadened denominator, as in
     SelfEnergySolver._denom_grid, sign_q = +1 for q < nocc_spin and -1 otherwise.
     The exciton axis is summed in chunks so that each (nw, chunk, norb) temporary
-    holds at most block_elems float64 values and stays in cache.
+    holds at most block_elems float64 values, or nw*norb values, if that is
+    larger, and stays in cache.
 
     Parameters
     ----------

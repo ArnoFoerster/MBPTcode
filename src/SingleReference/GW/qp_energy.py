@@ -405,16 +405,44 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     Parameters
     ----------
     se_solver : SelfEnergySolver
+    nocc : int or (int, int)
+        Occupied-orbital count of the spin channel, or (nocc_alpha,
+        nocc_beta) when `is_uhf`.
     spectrum : dict, as returned by _casida_spectrum
+    method_infos : dict {str: dict}
+        Per-method entry from get_method_info: vertex_mode, force_rpa_casida,
+        needs_vertex, needs_triplet.
+    methods : list of str
+        Self-energy method names, e.g. 'GW', 'GWGammaInf', 'PSD1'...'PSD9'.
+    spin_channel : {'alpha', 'beta'}
     states : sequence of int, orbital indices
+    eri_w_singlet, eri_w_triplet : ndarray
+        Screened interaction feeding the vertex correction: shape (naux,
+        naux) when `df`, else (norb, norb, norb, norb). The two differ only
+        for the unrestricted spin-flip vertex.
+    is_uhf : bool
+    df : bool
+        Density fitting: the auxiliary form (True) or the explicit 4-index
+        ERI (False).
     eps_spin : ndarray, shape (norb,), orbital energies of the spin channel
     xc_correction : float or ndarray, shape (len(states),), <Sigma_Hx - v_Hxc>_pp
     qp_solver : str, root selection as in solve_qp_equation
-    n_workers : int or None; None reads OMP_NUM_THREADS, then the cpu count; 1 is serial
+    n_workers : int or None
+        None reads OMP_NUM_THREADS, then the cpu count; 1 is serial;
+        threadpoolctl not being installed also gives the serial scan.
 
     Returns
     -------
-    dict {p: {method: E_qp}} in Hartree
+    qp_energies : dict {p: {method: E_qp}}
+        Quasiparticle energy per state and method, in Hartree.
+
+    Notes
+    -----
+    Use one `se_solver` per spectrum: its amplitude cache keys on the identity
+    of the X/Y arrays, so a solver reused after an earlier spectrum was freed
+    can return stale amplitudes. Memory grows with n_workers because each
+    in-flight state holds its self-energy weights (a few arrays of shape
+    (nexciton, norb)) and amplitudes.
     """
     states = [int(p) for p in states]
     if not states:
