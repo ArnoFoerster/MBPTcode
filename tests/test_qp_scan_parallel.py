@@ -120,6 +120,9 @@ if __name__ == '__main__':
     # a single state and a scalar return keep the old shape
     e_homo = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state='homo')
     all_ok &= check(isinstance(e_homo, float), "state='homo' returns a float")
+    # an empty state window: no states to scan, no result to return
+    e_empty = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state=[])
+    all_ok &= check(e_empty == {}, "state=[] returns {}")
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

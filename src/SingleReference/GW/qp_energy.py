@@ -414,6 +414,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     dict {p: {method: E_qp}} in Hartree
     """
     states = [int(p) for p in states]
+    if not states:
+        return {}
     xc = np.broadcast_to(np.asarray(xc_correction, dtype=float), (len(states),))
     vect_ok = qp_solver in ('pole_strength', 'graphical')
     grid_kw = {'vectorized': True} if vect_ok else {}
