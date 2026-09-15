@@ -34,17 +34,12 @@ One RI name means one set of tiers, in every process:
 | `register(name)`, or `max_error=0` | `<name>-ri` | the tightest |
 | `register(name, max_error=1e-4)` | `<name>-ri-7.3e-05` | the smallest with Delta-I <= 1e-4 |
 
-The name carries the smallest threshold that picks the same tiers, here 7.3e-5:
-the largest Delta-I among the tiers picked, leaving out an element's tightest
-tier, which every lower threshold picks as well. So every threshold that picks
-the same tiers gets the same name, and `max_error=7.3e-5` reproduces the set. A
-threshold above every tier's Delta-I, 1 or `inf`, picks the smallest tier of
-every element.
-
-The defaults of this tree form `str(mol.basis) + '-ri'`, the tightest tiers,
-which `register(name)` registers. A threshold call registers only its own RI
-name, so a route you do not hand `aux` raises `BasisNotFoundError` instead of
-switching sets: pass `aux` to every route.
+The number in the name is the smallest threshold that picks the same tiers, so
+every threshold that gives the same set gives the same name, and passing it back
+reproduces the set. A threshold above every tier's Delta-I, 1 or `inf`, gives the
+smallest tiers. A threshold call registers only its own RI name; the defaults of
+this tree form `str(mol.basis) + '-ri'`, which `register(name)` registers, so
+after a threshold call pass `aux` to every route, or it raises.
 
 `load_basis` and `load_ri_basis` return the same sets as dicts, and only
 `load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it

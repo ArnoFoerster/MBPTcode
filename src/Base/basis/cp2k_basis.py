@@ -40,8 +40,7 @@ that completeness explicitly.
 
 Command line: `python -m src.Base.basis.cp2k_basis scout [ELEMENT ...]` lists,
 per element, the orbital sets with their function counts and the RI tiers with
-size and Delta-I; `fetch` only fills the cache, for a node without network later;
-`digest` prints `BLOCK_SHA256` for the files it reads, for a new pin.
+size and Delta-I; `fetch` only fills the cache, for a node without network later.
 Usage, sources and the choice of RI tier: README.md beside this file.
 Environment: MBPT_CP2K_DATA, a CP2K `data/` directory to read instead of
 downloading; MBPT_CP2K_CACHE, the cache root (default ~/.cache/mbptcode/cp2k).
@@ -66,9 +65,9 @@ CP2K_COMMIT = '674a0aca9940d9ada2b1d45bcc64119acd04f502'
 FILES = {'orbital': 'BASIS_AUG_MOLOPT', 'ri': 'BASIS_RI_AUG_MOLOPT'}
 SHA256 = {'orbital': '4b1fd2d57297f11a0aa28f91b7b929fd62a9245d890ef4eaf560007a70051053',
           'ri': 'b280e81ac26c187ff95bdbac12c946a452f02566069dbdc46a66dda6679aa729'}
-# Per element, the first 16 hex digits of the sha256 over its blocks at CP2K_COMMIT
-# with comments and spacing dropped (`content_digests`), so `register` can accept a
-# copy that differs in comments and name the elements whose data differ.
+# Per element, `content_digests(data_file(kind))` at CP2K_COMMIT: the sha256 over
+# its blocks with comments and spacing dropped, so `register` accepts a copy that
+# differs in comments and names the elements whose data differ.
 BLOCK_SHA256 = {
     'orbital': {
         'H': 'f7ae12c7d3973eb6', 'He': '985cde4401871bc7', 'Li': '70255751a9a1199f',
@@ -365,19 +364,14 @@ def register(name, max_error=None):
     """Make an orbital set and its RI tiers PySCF basis names, for this process.
 
     The sets are written, for every element CP2K has them for, into the cache
-    beside the CP2K files and added to `pyscf.gto.basis.USER_BASIS_ALIAS`. That
-    table lives in the running process only, so call this once per script before
-    building a Mole. Two names: `<name>`, and either `<name>-ri`, the tightest
-    tier per element, which the defaults of this tree resolve, or for a threshold
-    `<name>-ri-<Delta-I>`, the smallest tier within `max_error` per element, where
-    Delta-I is the smallest threshold that picks those tiers: the largest Delta-I
-    among them, leaving out an element's tightest tier, which every lower
-    threshold picks as well. Every threshold that picks the same tiers gets that
-    one name, and passing the name's Delta-I back reproduces its set, so one name
-    means one set in every process, which the ISDF radii cache, keyed on it,
-    relies on. A threshold call leaves `<name>-ri` alone, so a route not handed
-    the threshold name raises instead of switching sets. `min_lmax` has no name;
-    use the dict of `load_ri_basis` for it.
+    beside the CP2K files and added to `pyscf.gto.basis.USER_BASIS_ALIAS`, which
+    lives in the running process only: call this once per script, before the
+    Mole. The RI name is `<name>-ri` for the tightest tiers, or for a threshold
+    `<name>-ri-<Delta-I>` with the smallest threshold that picks the same tiers,
+    so one name means one set in every process (the ISDF radii cache is keyed on
+    it) and the name's Delta-I reproduces the set. A threshold call registers only
+    that name; a route not handed it raises rather than switching sets.
+    `min_lmax` has no name; use the dict of `load_ri_basis` for it.
 
     Parameters
     ----------
@@ -412,10 +406,10 @@ def register(name, max_error=None):
         warnings.simplefilter('ignore')        # one warning below, not one per element
         picked = {el: pick_ri_tier(name, el, max_error, path=ri)
                   for el in ri_elements if max_error is not None}
-    # An element's tightest tier is picked at every threshold below its Delta-I
-    # too, so it does not raise the smallest threshold that picks this set.
-    error = max((t[2] for el, t in picked.items()
-                 if t != min(ri_tiers(name, el, ri), key=lambda s: s[2])), default=None)
+        tightest = {el: pick_ri_tier(name, el, path=ri) for el in picked}
+    # The smallest threshold that picks these tiers; a tightest tier is picked at
+    # every lower threshold as well, so it does not count.
+    error = max((t[2] for el, t in picked.items() if t != tightest[el]), default=None)
     # The file writes every Delta-I with two significant digits, so .1e is exact.
     ri_name = f'{name}-ri' if error is None else f'{name}-ri-{error:.1e}'
     with warnings.catch_warnings():
@@ -472,15 +466,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('fetch', help='fill the cache with both files at the pinned commit')
-    sub.add_parser('digest', help='print BLOCK_SHA256 of the files read, for a new pin')
     p = sub.add_parser('scout', help='list the orbital sets and RI tiers per element')
     p.add_argument('elements', nargs='*', default=['H', 'C', 'N', 'O'])
     args = ap.parse_args(argv)
     for kind in FILES:
         print(f'{kind}: {data_file(kind)}')
-    if args.cmd == 'digest':
-        for kind in FILES:
-            print(f"    '{kind}': {content_digests(data_file(kind))},")
     if args.cmd == 'scout':
         for el in args.elements:
             info = available(el)
