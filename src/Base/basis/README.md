@@ -43,7 +43,9 @@ after a threshold call pass `aux` to every route, or it raises.
 
 `load_basis` and `load_ri_basis` return the same sets as dicts, and only
 `load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it
-explicitly wherever a route takes an auxiliary basis.
+explicitly wherever a route takes an auxiliary basis; the ISDF routes form
+`str(mol.basis) + '-ri'` in one place no argument reaches, so they need a
+registered name.
 
 Names are only registered for the basis data of the pinned CP2K commit; a file
 that differs in comments or spacing passes, one whose data differ is refused with
