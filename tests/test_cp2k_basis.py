@@ -323,6 +323,15 @@ if __name__ == '__main__':
                     and msg.endswith('for S (tightest tier, Delta-I 1.9e-04)'),
                     'register warns once, naming the element and the Delta-I it gets',
                     msg)
+    # A threshold below every element's tightest tier is one message, not a list
+    # of every element, and gives the `-ri` set.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        _, ri_floor = cb.register('aug-SZV-MOLOPT-ae', max_error=1e-9)
+    msg = str(caught[0].message) if caught else 'no warning'
+    all_ok &= check(len(caught) == 1 and ri_floor == 'aug-SZV-MOLOPT-ae-ri'
+                    and 'tightest tier of every element' in msg and 'for' not in msg,
+                    'a threshold below every tier warns once and gives -ri', msg)
 
     # Data other than the pinned commit's: comments and spacing pass, inside a
     # line as well; one changed exponent, or a missing element, is refused with

@@ -424,7 +424,11 @@ def register(name, max_error=None):
                 ri_name: load_ri_basis(name, ri_elements, max_error, path=ri)}
     loose = [f'{el} (tightest tier, Delta-I {t[2]:.1e})' for el, t in picked.items()
              if t[2] > max_error]
-    if loose:
+    if picked and error is None:
+        warnings.warn(f'{name}: max_error={max_error} picks the tightest tier of every '
+                      f'element, which is {ri_name}, the set of max_error=None',
+                      stacklevel=2)
+    elif loose:
         warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}',
                       stacklevel=2)
     out = os.path.join(_cache_dir(CP2K_COMMIT), 'pyscf')

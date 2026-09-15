@@ -114,7 +114,8 @@ A tier's name carries its Delta-I, the atomic RI-MP2 error of eq 29 in the paper
 | `min_lmax=L`, `load_ri_basis` only | also requires auxiliary l_max >= L; if no tier qualifies, the tightest, with a warning |
 
 An element without a tier within the threshold gets its tightest one, and one
-warning names the elements and the Delta-I each of them gets. `pick_ri_tier` takes
+warning names the elements and the Delta-I each of them gets; a threshold that
+picks every element's tightest tier gets one line saying so. `pick_ri_tier` takes
 the same arguments for one element and returns the tier's name, size, Delta-I and
 pattern.
 
