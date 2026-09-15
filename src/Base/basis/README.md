@@ -68,7 +68,10 @@ checks each against the function count its header implies.
 `register` writes its name files to `pyscf/` in the cache directory of the pinned
 commit, whichever source the CP2K files came from.
 
-Files at the pinned commit are checked against their sha256, and a mismatch raises.
+`cp2k_pin.json` beside the module holds the pinned commit, the sha256 of both
+files and, per element, the digest of its blocks with comments and spacing
+dropped (`content_digests`). Files at the pinned commit are checked against
+their sha256, and a mismatch raises.
 On first use of each file the module prints a notice naming the source, CP2K's
 license and the paper we would kindly ask you to cite. `provenance(kind)` returns
 the path, the digest, the commit when the file is the pinned one and, as
@@ -88,6 +91,19 @@ CP2K checkout. `data_file(kind, download=False)` raises instead of downloading.
 RI tiers exist for H to Cl. `python -m src.Base.basis.cp2k_basis scout C O` lists,
 per element, every orbital set with its function count and every RI tier with its
 size and Delta-I; `available(element)` returns the same as a dict.
+
+`aug-SZV-MOLOPT-ae-mini` has no RI tiers for H and He in CP2K's file: H shares
+its orbital block with `aug-SZV-MOLOPT-ae`, whose tiers are named after that set
+only, so `aug-SZV-MOLOPT-ae-mini-ri` raises for any molecule with H. A fallback
+used in production, the nanographene calculations of
+[lsGW_Nanographenes](https://github.com/MGraml/lsGW_Nanographenes), is the H tier
+of `aug-SZV-MOLOPT-ae-SR`, optimized for a different H block. Build the dict and
+pass it explicitly:
+
+```python
+aux = load_ri_basis('aug-SZV-MOLOPT-ae-mini', ['C', 'N'], max_error=1e-4)
+aux['H'] = load_ri_basis('aug-SZV-MOLOPT-ae-SR', ['H'], max_error=1e-4)['H']
+```
 
 The sets stay well conditioned despite their diffuse functions. On a
 hydrogen-terminated graphene flake of 184 atoms, the overlap condition number is
