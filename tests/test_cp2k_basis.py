@@ -1,8 +1,9 @@
 """cp2k_basis: every aug-MOLOPT block PySCF builds has the count its header implies.
 
 Reads the CP2K files through src.Base.basis.cp2k_basis from MBPT_CP2K_DATA or the
-cache, never downloading; without either it prints SKIPPED and exits 0 with no
-verdict.
+cache and never fetches them; without either it prints SKIPPED and exits 0 with no
+verdict. One check requests a CP2K commit that does not exist, which fails with a
+404 online and a network error offline, and passes either way.
 Counts: sum over sets and l of contractions times 2l + 1, and the header's own
 recipe for C aug-SZV-MOLOPT-ae, 'STO-6G + 1s + 1p + 1d' = 3s2p1d = 14.
 """
