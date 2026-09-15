@@ -46,9 +46,10 @@ Delta-I, 1 or `inf`, picks the smallest tier of every element.
 `load_ri_basis` takes `min_lmax` (below). A dict has no name, so pass it
 explicitly wherever a route takes an auxiliary basis.
 
-Names are only registered for the files of the pinned CP2K commit. The ISDF radii
-cache is keyed on the name, and other data under the same name would reuse a grid
-optimized for a different set.
+Names are only registered for the basis data of the pinned CP2K commit; a file
+that differs in comments or spacing passes, one whose data differ is refused with
+the elements named. The ISDF radii cache is keyed on the name, and other data
+under the same name would reuse a grid optimized for a different set.
 
 `examples/12_cp2k_aug_molopt.py` is the worked case, G0W0 and a dense BSE on
 formaldehyde. `tests/test_cp2k_basis.py` builds every orbital block and RI tier and

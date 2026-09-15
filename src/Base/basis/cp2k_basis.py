@@ -38,7 +38,8 @@ that completeness explicitly.
 
 Command line: `python -m src.Base.basis.cp2k_basis scout [ELEMENT ...]` lists,
 per element, the orbital sets with their function counts and the RI tiers with
-size and Delta-I; `fetch` only fills the cache, for a node without network later.
+size and Delta-I; `fetch` only fills the cache, for a node without network later;
+`digest` prints `BLOCK_SHA256` for the files it reads, for a new pin.
 Usage, sources and the choice of RI tier: README.md beside this file.
 Environment: MBPT_CP2K_DATA, a CP2K `data/` directory to read instead of
 downloading; MBPT_CP2K_CACHE, the cache root (default ~/.cache/mbptcode/cp2k).
@@ -63,6 +64,27 @@ CP2K_COMMIT = '674a0aca9940d9ada2b1d45bcc64119acd04f502'
 FILES = {'orbital': 'BASIS_AUG_MOLOPT', 'ri': 'BASIS_RI_AUG_MOLOPT'}
 SHA256 = {'orbital': '4b1fd2d57297f11a0aa28f91b7b929fd62a9245d890ef4eaf560007a70051053',
           'ri': 'b280e81ac26c187ff95bdbac12c946a452f02566069dbdc46a66dda6679aa729'}
+# Per element, the first 16 hex digits of the sha256 over its blocks at CP2K_COMMIT
+# with comments and spacing dropped (`content_digests`), so `register` can accept a
+# copy that differs in comments and name the elements whose data differ.
+BLOCK_SHA256 = {
+    'orbital': {
+        'H': 'a36b9fa8de059f89', 'He': '213f5a509a568cd0', 'Li': 'e15b22606fcd2ad6',
+        'Be': '44de40441c809534', 'B': 'ecb03bca51515df6', 'C': '734ca42828de8c91',
+        'N': '9db906ec617fe8f8', 'O': 'ab536f28bc5d4df2', 'F': '8d49f5edd1fbbc60',
+        'Ne': 'fb8a338764d268a6', 'Na': '8fb7679151a7033f', 'Mg': '7d31c5c79b039f1f',
+        'Al': '12cbb253095948a0', 'Si': '0ffa43d037cbc73a', 'P': '9b6d2f1b11928281',
+        'S': '75566f7351d14364', 'Cl': '1b6e65c0824b145d',
+    },
+    'ri': {
+        'H': 'b366fc17353328f6', 'He': '29128ed8e662d78d', 'Li': '7d42dfbfc799816c',
+        'Be': 'b18bf547b43143a1', 'B': '18bcc8dcc2f79277', 'C': 'b73493bb71c652c6',
+        'N': 'aa29164795feb243', 'O': '95a37337e9ffb2a1', 'F': 'c3c0107cb77fe95d',
+        'Ne': 'e3feeb727ee5c477', 'Na': 'b9f02f6dd8f5f63a', 'Mg': 'af3f25a1be71ce79',
+        'Al': '8de081a981195e34', 'Si': 'b176f83bcc8ab002', 'P': '66523d58cb223449',
+        'S': '2864de2922593b2f', 'Cl': '5e2da6edc45b74ab',
+    },
+}
 BASIS_NAMES = ('aug-SZV-MOLOPT-ae', 'aug-SZV-MOLOPT-ae-mini', 'aug-SZV-MOLOPT-ae-SR',
                'aug-DZVP-MOLOPT-ae', 'aug-TZVP-MOLOPT-ae')
 CITATION = ('R. Pasquier, M. Graml, J. Wilhelm, J. Chem. Theory Comput. 22, 540 '
@@ -162,6 +184,16 @@ def provenance(kind, path=None):
     digest = _sha256(path)
     commit = CP2K_COMMIT if digest == SHA256[kind] else None
     return {'path': path, 'sha256': digest, 'commit': commit}
+
+
+def content_digests(path):
+    """{element: 16 hex digits of the sha256 over its blocks}, comments and spacing
+    dropped."""
+    lines = {}
+    for el, _, block in _blocks(path):
+        lines.setdefault(el, []).extend(block)
+    return {el: hashlib.sha256('\n'.join(v).encode()).hexdigest()[:16]
+            for el, v in lines.items()}
 
 
 def _blocks(path):
@@ -366,10 +398,14 @@ def register(name, max_error=None):
     # Other data would put a second set under the same name, and a cached ISDF
     # grid keyed on that name would silently serve the wrong one.
     for kind, path in (('orbital', orbital), ('ri', ri)):
-        if provenance(kind, path)['commit'] is None:
-            raise ValueError(f'{path} is not the file of the pinned CP2K commit '
-                             f'{CP2K_COMMIT[:10]}; names are reserved for that data, '
-                             'use load_basis and load_ri_basis instead')
+        got, pinned = content_digests(path), BLOCK_SHA256[kind]
+        changed = sorted(el for el in set(got) | set(pinned)
+                         if got.get(el) != pinned.get(el))
+        if changed:
+            raise ValueError(f'{path}: the blocks of {", ".join(changed)} differ from '
+                             f'the pinned CP2K commit {CP2K_COMMIT[:10]}; names are '
+                             'reserved for that data, use load_basis and '
+                             'load_ri_basis instead')
     elements = sorted({el for el, names, _ in _blocks(orbital) if name in names})
     ri_elements = [el for el in elements if ri_tiers(name, el, ri)]
     error = None if max_error is None else _effective_error(name, ri_elements,
@@ -430,11 +466,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('fetch', help='fill the cache with both files at the pinned commit')
+    sub.add_parser('digest', help='print BLOCK_SHA256 of the files read, for a new pin')
     p = sub.add_parser('scout', help='list the orbital sets and RI tiers per element')
     p.add_argument('elements', nargs='*', default=['H', 'C', 'N', 'O'])
     args = ap.parse_args(argv)
     for kind in FILES:
         print(f'{kind}: {data_file(kind)}')
+    if args.cmd == 'digest':
+        for kind in FILES:
+            print(f"    '{kind}': {content_digests(data_file(kind))},")
     if args.cmd == 'scout':
         for el in args.elements:
             info = available(el)

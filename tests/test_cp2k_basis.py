@@ -16,10 +16,11 @@ Checks, in order:
   register   names build the dicts bit for bit; one RI name per set of tiers;
              `-ri` on every call; an element outside a set raises; bad arguments
              raise; one warning with the Delta-I an element gets; data other than
-             the pinned commit's are refused
+             the pinned commit's are refused by element, comments and spacing pass
 """
 import contextlib
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -321,16 +322,35 @@ if __name__ == '__main__':
                     'register warns once, naming the element and the Delta-I it gets',
                     msg)
 
-    # Data other than the pinned commit's are refused, since an ISDF grid cached
-    # under the name would otherwise serve the other data.
+    # Data other than the pinned commit's: comments and spacing pass, one changed
+    # exponent is refused with the element named, since an ISDF grid cached under
+    # the name would otherwise serve the other data.
     with tempfile.TemporaryDirectory() as tmp:
         shutil.copy(orbital, tmp)
-        with open(ri) as src, open(os.path.join(tmp, cb.FILES['ri']), 'w') as dst:
-            dst.write(src.read() + '# not the pinned file\n')
+        copy = os.path.join(tmp, cb.FILES['ri'])
+        with open(ri) as fh:
+            text = fh.read()
+        with open(copy, 'w') as fh:
+            fh.write(text.replace('\n', '   \n', 20) + '# not the pinned file\n')
+        with environ(MBPT_CP2K_DATA=tmp), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _, msg_pass = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
+                                 '')
+        tier = cb.pick_ri_tier('aug-SZV-MOLOPT-ae', 'C', path=ri)[0]
+        exponent = cb.basis_block(tier, 'C', ri)[3].split()[0]
+        start = re.search(rf'^C\s+{re.escape(tier)}\b', text, re.M).end()
+        pos = text.index(exponent, start)
+        digit = '7' if exponent[-1] != '7' else '3'
+        with open(copy, 'w') as fh:
+            fh.write(text[:pos] + exponent[:-1] + digit + text[pos + len(exponent):])
         with environ(MBPT_CP2K_DATA=tmp):
-            refused, msg = raises(ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
-                                  'pinned CP2K commit')
-    all_ok &= check(refused, 'register refuses data other than the pinned commit')
+            refused, msg_refused = raises(
+                ValueError, lambda: cb.register('aug-SZV-MOLOPT-ae'),
+                f'{copy}: the blocks of C differ from the pinned CP2K commit')
+    all_ok &= check(msg_pass == 'nothing raised' and refused,
+                    'register passes comments and spacing, refuses changed data by '
+                    'element',
+                    f'comment copy: {msg_pass}; exponent copy: {msg_refused[:60]}')
     prov = cb.provenance('orbital', orbital)
     local = bool(os.environ.get('MBPT_CP2K_DATA'))
     all_ok &= check(prov['commit'] is not None or local,
