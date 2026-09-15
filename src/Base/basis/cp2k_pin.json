@@ -1,0 +1,47 @@
+{
+ "commit": "674a0aca9940d9ada2b1d45bcc64119acd04f502",
+ "sha256": {
+  "orbital": "4b1fd2d57297f11a0aa28f91b7b929fd62a9245d890ef4eaf560007a70051053",
+  "ri": "b280e81ac26c187ff95bdbac12c946a452f02566069dbdc46a66dda6679aa729"
+ },
+ "blocks": {
+  "orbital": {
+   "H": "f7ae12c7d3973eb6",
+   "He": "985cde4401871bc7",
+   "Li": "70255751a9a1199f",
+   "Be": "2c9436ad1672ffee",
+   "B": "25323003cc931bb3",
+   "C": "488ebdafc559af63",
+   "N": "4dcaa63c4ed7d896",
+   "O": "103bca6ba64e7778",
+   "F": "b0ba2e45a91bd5b4",
+   "Ne": "56cfc05b3474fc75",
+   "Na": "cfdd80c93dc1bad9",
+   "Mg": "6da79d049abf05d1",
+   "Al": "c878db9752b32cd4",
+   "Si": "429e02ba81d01c71",
+   "P": "72f754d3151d8146",
+   "S": "31cd3ebc8147f9f0",
+   "Cl": "409bf8661f40ad3f"
+  },
+  "ri": {
+   "H": "2de1ec858dbae8db",
+   "He": "b248fe21f37551f5",
+   "Li": "b81434edd9b80b7e",
+   "Be": "2ea681e6f5417b3e",
+   "B": "04f720d25fbbfd37",
+   "C": "7ab63e342496453f",
+   "N": "000f90107b8afd02",
+   "O": "6a4238999ebc8a76",
+   "F": "394f44e1a7c78a94",
+   "Ne": "13c3fca2ad8c83aa",
+   "Na": "8b30eb3c4e763734",
+   "Mg": "f12e3d49f7088c33",
+   "Al": "24f1f04444bbea99",
+   "Si": "3101163e85e05f49",
+   "P": "25ad400328d88e67",
+   "S": "f01f483441914a5d",
+   "Cl": "bbb2828225438af4"
+  }
+ }
+}

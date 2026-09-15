@@ -47,6 +47,7 @@ downloading; MBPT_CP2K_CACHE, the cache root (default ~/.cache/mbptcode/cp2k).
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
@@ -59,33 +60,13 @@ from pyscf.gto import basis as pyscf_basis
 from pyscf.gto.basis.parse_cp2k import parse
 
 CP2K_REPO = 'https://github.com/cp2k/cp2k'
-# The commit that last touched either file (2025-08-14); both files' content at
-# this commit is what the digests below describe.
-CP2K_COMMIT = '674a0aca9940d9ada2b1d45bcc64119acd04f502'
 FILES = {'orbital': 'BASIS_AUG_MOLOPT', 'ri': 'BASIS_RI_AUG_MOLOPT'}
-SHA256 = {'orbital': '4b1fd2d57297f11a0aa28f91b7b929fd62a9245d890ef4eaf560007a70051053',
-          'ri': 'b280e81ac26c187ff95bdbac12c946a452f02566069dbdc46a66dda6679aa729'}
-# Per element, `content_digests(data_file(kind))` at CP2K_COMMIT: the sha256 over
-# its blocks with comments and spacing dropped, so `register` accepts a copy that
-# differs in comments and names the elements whose data differ.
-BLOCK_SHA256 = {
-    'orbital': {
-        'H': 'f7ae12c7d3973eb6', 'He': '985cde4401871bc7', 'Li': '70255751a9a1199f',
-        'Be': '2c9436ad1672ffee', 'B': '25323003cc931bb3', 'C': '488ebdafc559af63',
-        'N': '4dcaa63c4ed7d896', 'O': '103bca6ba64e7778', 'F': 'b0ba2e45a91bd5b4',
-        'Ne': '56cfc05b3474fc75', 'Na': 'cfdd80c93dc1bad9', 'Mg': '6da79d049abf05d1',
-        'Al': 'c878db9752b32cd4', 'Si': '429e02ba81d01c71', 'P': '72f754d3151d8146',
-        'S': '31cd3ebc8147f9f0', 'Cl': '409bf8661f40ad3f',
-    },
-    'ri': {
-        'H': '2de1ec858dbae8db', 'He': 'b248fe21f37551f5', 'Li': 'b81434edd9b80b7e',
-        'Be': '2ea681e6f5417b3e', 'B': '04f720d25fbbfd37', 'C': '7ab63e342496453f',
-        'N': '000f90107b8afd02', 'O': '6a4238999ebc8a76', 'F': '394f44e1a7c78a94',
-        'Ne': '13c3fca2ad8c83aa', 'Na': '8b30eb3c4e763734', 'Mg': 'f12e3d49f7088c33',
-        'Al': '24f1f04444bbea99', 'Si': '3101163e85e05f49', 'P': '25ad400328d88e67',
-        'S': 'f01f483441914a5d', 'Cl': 'bbb2828225438af4',
-    },
-}
+# cp2k_pin.json: the commit that last touched either file (2025-08-14), the two
+# files' sha256, and per element `content_digests` of its blocks, so `register`
+# accepts a copy that differs in comments and names the elements whose data differ.
+with open(os.path.join(os.path.dirname(__file__), 'cp2k_pin.json')) as _fh:
+    _PIN = json.load(_fh)
+CP2K_COMMIT, SHA256, BLOCK_SHA256 = _PIN['commit'], _PIN['sha256'], _PIN['blocks']
 BASIS_NAMES = ('aug-SZV-MOLOPT-ae', 'aug-SZV-MOLOPT-ae-mini', 'aug-SZV-MOLOPT-ae-SR',
                'aug-DZVP-MOLOPT-ae', 'aug-TZVP-MOLOPT-ae')
 CITATION = ('R. Pasquier, M. Graml, J. Wilhelm, J. Chem. Theory Comput. 22, 540 '
