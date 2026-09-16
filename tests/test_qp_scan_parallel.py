@@ -119,6 +119,40 @@ if __name__ == '__main__':
             all_ok &= check(d_xc < 1e-12,
                             'PBE: _static_correction equals the per-state formula',
                             f'{d_xc:.1e} Ha')
+            # the correction is one array over the orbitals, read at p, so a
+            # reordered subset of states gets each state's own value
+            eps_pbe = get_orbital_energies(mf, representation='spatial')
+            nocc = mol.nelectron // 2
+            lr_ = LinearResponseSolver(eps_pbe, coeff_df=df_coeff,
+                                       spin_mode='restricted')
+            w_aux_ = lr_.static_screening_aux(nocc)
+            infos = {'GW': get_method_info('GW')}
+            spectrum_ = _casida_spectrum(lr_, nocc, 'RPA', w_aux_, False, infos,
+                                         ['GW'], False, True)
+            xc_orb = _static_correction(mf, mol, se_, None, None, 'alpha', False)
+            subset = [nocc, 2, nocc - 1]
+            try:
+                sub = qp_energies_from_spectrum(
+                    se_, nocc, spectrum_, infos, ['GW'], 'alpha', subset,
+                    w_aux_, w_aux_, False, True, eps_pbe, xc_orb, n_workers=1)
+                d_sub = max(abs(sub[p]['GW'] * HARTREE_TO_EV - serial[p]['GW'])
+                            for p in subset)
+                detail = f'{d_sub:.1e} eV'
+            except Exception as exc:
+                d_sub, detail = np.inf, f'{type(exc).__name__}: {exc}'
+            all_ok &= check(d_sub < 1e-10,
+                            f'PBE: states {subset} read xc at their orbital index',
+                            detail)
+            try:
+                qp_energies_from_spectrum(
+                    se_, nocc, spectrum_, infos, ['GW'], 'alpha', subset,
+                    w_aux_, w_aux_, False, True, eps_pbe, xc_orb[subset],
+                    n_workers=1)
+                raised = False
+            except ValueError:
+                raised = True
+            all_ok &= check(raised, 'PBE: xc shorter than the orbitals raises '
+                                    'ValueError')
     # a single state and a scalar return keep the old shape
     e_homo = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state='homo')
     all_ok &= check(isinstance(e_homo, float), "state='homo' returns a float")

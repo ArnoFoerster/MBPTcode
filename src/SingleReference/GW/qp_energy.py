@@ -208,8 +208,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                                      sigma_solvent, spin_channel, is_uhf)
     energies = qp_energies_from_spectrum(
         se_solver, nocc, spectrum, method_infos, methods, spin_channel, states,
-        eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin,
-        xc_diagonal[states], qp_solver=qp_solver, n_workers=n_workers)
+        eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin, xc_diagonal,
+        qp_solver=qp_solver, n_workers=n_workers)
     results = {p: {m: energies[p][m] * HARTREE_TO_EV for m in methods} for p in states}
 
     if printSpectralFunction:
@@ -425,8 +425,12 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     df : bool
         Density fitting: the auxiliary form (True) or the explicit 4-index
         ERI (False).
-    eps_spin : ndarray, shape (norb,), orbital energies of the spin channel
-    xc_correction : float or ndarray, shape (len(states),), <Sigma_Hx - v_Hxc>_pp
+    eps_spin : ndarray, shape (norb,)
+        The eps_p the equation is anchored on, per orbital: the spin
+        channel's orbital energies, or the mean-field anchor under evGW.
+    xc_correction : float or ndarray, shape (norb,)
+        <Sigma_Hx - v_Hxc>_pp indexed by orbital p, as _static_correction
+        returns it; a float applies to every state.
     qp_solver : str, root selection as in solve_qp_equation
     n_workers : int or None
         None reads OMP_NUM_THREADS, then the cpu count; 1 is serial;
@@ -448,7 +452,13 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     states = [int(p) for p in states]
     if not states:
         return {}
-    xc = np.broadcast_to(np.asarray(xc_correction, dtype=float), (len(states),))
+    xc = np.asarray(xc_correction, dtype=float)
+    if xc.ndim == 0:
+        xc = np.full(np.shape(eps_spin), float(xc))
+    elif xc.shape != np.shape(eps_spin):
+        raise ValueError(
+            f'xc_correction has shape {xc.shape}; it is indexed by orbital, '
+            f'so it needs the shape of eps_spin, {np.shape(eps_spin)}')
     vect_ok = qp_solver in ('pole_strength', 'graphical')
     grid_kw = {'vectorized': True} if vect_ok else {}
 
@@ -465,7 +475,7 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
                 p, nocc, omega_val, chi_a_val, chi_b_val,
                 eigenvalues_casida_t=omega_t_val, chiXYb_t=chi_b_t_val,
                 spin_channel=spin_channel, vertex_mode=info['vertex_mode'])
-            e0, x = eps_spin[p], xc[i]
+            e0, x = eps_spin[p], xc[p]
             func = lambda w, e0=e0, x=x, sigma=sigma: w - e0 - x - sigma(w)
             out[method] = solve_qp_equation(func, e0, method=qp_solver, **grid_kw)
         return p, out
