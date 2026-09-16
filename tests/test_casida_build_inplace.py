@@ -41,6 +41,17 @@ def reference_ab(eps, coeff, nocc, factor, W):
     return A - W_dir, B - W_swap
 
 
+def df_static_screening(eps, coeff, nocc, eta):
+    """W = (1 - χ₀)⁻¹ in the auxiliary basis at ω = 0, independent of src:
+    χ₀ = 2 C_ov diag(f) C_ovᵀ with f = -2d / (d² + η²)."""
+    norb = coeff.shape[1]
+    occ, virt = np.arange(nocc), np.arange(nocc, norb)
+    C_ov = coeff[:, occ[:, None], virt].reshape(coeff.shape[0], -1)
+    d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
+    f = -2.0 * d / (d**2 + eta**2)
+    return np.linalg.inv(np.eye(coeff.shape[0]) - 2.0 * (C_ov * f) @ C_ov.T)
+
+
 if __name__ == '__main__':
     all_ok = True
     systems = [('HF/6-31g', 'H 0 0 0; F 0 0 0.9', '6-31g'),
@@ -122,6 +133,39 @@ if __name__ == '__main__':
             f'{label} full BSE triplet: reused vs fresh-copy W_aux')
         all_ok &= check(np.array_equal(w_full, w_full_before),
                         f'{label} full: W_aux untouched by the builds')
+
+        # BSE, full ERI, values. With eri = C·C the push-through identity
+        # C_ovᵀ (1 - C_ov χ₀ C_ovᵀ)⁻¹ C_ov = V (1 - χ₀ V)⁻¹ makes the full-ERI
+        # kernel equal to the DF one, so the DF einsum reference applies.
+        # B takes W_aux from the caller (imaginary axis, η = 0). A screens its
+        # direct term inside the builder at ω = 0 on the real axis, which
+        # carries the solver's η, at the eps_screen gaps when those are given.
+        w_swap_df = df_static_screening(eps, coeff, nocc, 0.0)
+        w_dir_df = df_static_screening(eps, coeff, nocc, lr_full.eta)
+        norb = len(eps)
+        eps_qp = (eps + np.where(np.arange(norb) < nocc, -0.03, 0.05)
+                  + 1e-3 * np.arange(norb))
+        lr_full_qp = LinearResponseSolver(eps_qp, eri_chemist=eri,
+                                          spin_mode='restricted')
+        value_cases = [
+            ('BSE', lr_full, eps, dict()),
+            ('BSE@QP with eps_screen', lr_full_qp, eps_qp, dict(eps_screen=eps)),
+        ]
+        for name, solver, eps_diag, extra in value_cases:
+            for spin, triplet, factor in (('singlet', False, 2.0),
+                                          ('triplet', True, 0.0)):
+                A, B = solver.build_casida_matrices(
+                    nocc, lBSE=True, W_aux=w_full.copy(), triplet=triplet,
+                    **extra)
+                A_ref = reference_ab(eps_diag, coeff, nocc, factor, w_dir_df)[0]
+                B_ref = reference_ab(eps_diag, coeff, nocc, factor, w_swap_df)[1]
+                scale = max(1.0, np.max(np.abs(A_ref)))
+                dA = np.max(np.abs(A - A_ref)) / scale
+                dB = np.max(np.abs(B - B_ref)) / scale
+                all_ok &= check(
+                    dA < 1e-12 and dB < 1e-12,
+                    f'{label} full {name} {spin}: A, B vs DF einsum reference',
+                    f'dA={dA:.1e} dB={dB:.1e}')
 
     # --- tracemalloc ratchet on the BSE-DF build, N_pair = 2100, in units
     # of one N_pair^2 array ---
