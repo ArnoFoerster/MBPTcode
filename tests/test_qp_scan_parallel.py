@@ -201,6 +201,25 @@ if __name__ == '__main__':
     # an empty state window: no states to scan, no result to return
     e_empty = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state=[])
     all_ok &= check(e_empty == {}, "state=[] returns {}")
+    # evGW through the front door: every cycle's Casida scan gets n_workers
+    import src.SingleReference.GW.qp_energy as qp_module
+    seen = []
+    real_scan = qp_module.qp_energies_from_spectrum
+
+    def recording_scan(*args, **kwargs):
+        seen.append(kwargs.get('n_workers'))
+        return real_scan(*args, **kwargs)
+    qp_module.qp_energies_from_spectrum = recording_scan
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            calc_qp_energy(mf, mode='casida', self_consistency='evGW',
+                           n_workers=3, max_cycle=2)
+    finally:
+        qp_module.qp_energies_from_spectrum = real_scan
+    all_ok &= check(len(seen) > 0 and set(seen) == {3},
+                    "evGW: n_workers=3 reaches every cycle's scan",
+                    f'{len(seen)} scans, n_workers seen {sorted(map(str, set(seen)))}')
 
     # --- threadpoolctl missing: default n_workers warns and runs serially;
     # an explicit n_workers > 1 still raises ImportError ---

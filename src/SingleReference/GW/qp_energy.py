@@ -117,7 +117,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     quasiparticle. 'graphical' returns the root nearest eps;
                     they agree wherever only one root exists. 'newton' and
                     'bisection' are also accepted.
-    n_workers:      threads for the per-state root scan (Casida route). The
+    n_workers:      threads for the per-state root scan (Casida route, also
+                    inside every evGW cycle on it). The
                     scan uses a thread pool by default, sized to the
                     allocation: SLURM_CPUS_PER_TASK inside a Slurm step, else
                     the process's CPU affinity, and never above
@@ -127,6 +128,10 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
     if str(self_consistency).lower() in ('evgw', 'ev'):
+        # each evGW cycle calls back into this function, so the scan's thread
+        # count travels as a route keyword
+        if n_workers is not None:
+            route_kwargs = dict(route_kwargs, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, spin_channel, route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
