@@ -105,8 +105,11 @@ pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
 
 The per-state quasiparticle root scan (`calc_qp_energy(n_workers=...)`) uses a
-thread pool by default, with threadpoolctl pinning its BLAS threads;
-`n_workers=1`, or threadpoolctl not being installed, gives the serial scan.
+thread pool by default, with threadpoolctl pinning its BLAS threads. The pool
+takes the allocation, `SLURM_CPUS_PER_TASK` inside a Slurm step and the
+process's CPU affinity otherwise, and never exceeds `OMP_NUM_THREADS` when that
+is set; `n_workers=1`, or threadpoolctl not being installed, gives the serial
+scan.
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.

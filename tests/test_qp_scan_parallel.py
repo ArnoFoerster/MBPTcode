@@ -47,6 +47,48 @@ if __name__ == '__main__':
             raised = True
         all_ok &= check(raised, f'{method}: bad grid shape raises ValueError')
 
+    # --- worker count: the keyword, else the allocation (SLURM_CPUS_PER_TASK,
+    # else the affinity mask), never above OMP_NUM_THREADS or the state count ---
+    from src.SingleReference.GW.qp_energy import _resolve_workers
+    saved_env = {k: os.environ.get(k) for k in ('SLURM_CPUS_PER_TASK',
+                                                 'OMP_NUM_THREADS')}
+    saved_mask = getattr(os, 'sched_getaffinity', None)
+    os.sched_getaffinity = lambda pid: set(range(12))
+    cases = [  # (keyword, SLURM_CPUS_PER_TASK, OMP_NUM_THREADS, n_states, expected)
+        (3, '6', None, 100, 3),
+        (None, '6', None, 100, 6),
+        (None, '6', '2', 100, 2),
+        (None, '6', '16', 100, 6),
+        (None, None, None, 100, 12),
+        (None, None, '4', 100, 4),
+        (None, None, '8,4', 100, 12),
+        (None, '6', None, 3, 3),
+    ]
+    try:
+        for keyword, slurm, omp, n_states, expected in cases:
+            for name, value in (('SLURM_CPUS_PER_TASK', slurm),
+                                ('OMP_NUM_THREADS', omp)):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            got = _resolve_workers(keyword, n_states)
+            all_ok &= check(
+                got == expected,
+                f'workers: keyword={keyword} SLURM_CPUS_PER_TASK={slurm} '
+                f'OMP_NUM_THREADS={omp} mask=12 states={n_states} -> {expected}',
+                f'got {got}')
+    finally:
+        for name, value in saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        if saved_mask is None:
+            del os.sched_getaffinity
+        else:
+            os.sched_getaffinity = saved_mask
+
     from pyscf import gto, scf, dft, df
     from src.Base.constants import HARTREE_TO_EV, get_method_info
     from src.Base.pyscf_interface import (get_orbital_energies,

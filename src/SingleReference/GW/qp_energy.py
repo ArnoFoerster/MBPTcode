@@ -118,8 +118,10 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     they agree wherever only one root exists. 'newton' and
                     'bisection' are also accepted.
     n_workers:      threads for the per-state root scan (Casida route). The
-                    scan uses a thread pool by default (threads from
-                    OMP_NUM_THREADS, else the cpu count); n_workers=1, or
+                    scan uses a thread pool by default, sized to the
+                    allocation: SLURM_CPUS_PER_TASK inside a Slurm step, else
+                    the process's CPU affinity, and never above
+                    OMP_NUM_THREADS when that is set. n_workers=1, or
                     threadpoolctl not being installed, gives the serial scan.
     """
     mol = mf.mol
@@ -381,13 +383,32 @@ def _static_correction(mf, mol, se_solver, dm_correction, sigma_solvent,
     return xc_correction
 
 
+def _positive_int_env(name):
+    """The environment variable `name` as a positive int, or None."""
+    value = os.environ.get(name, '').strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
 def _resolve_workers(n_workers, n_states):
-    """Threads for the per-state scan: the keyword, else OMP_NUM_THREADS, else the
-    cpu count; never more than there are states."""
+    """Threads for the per-state scan; never more than there are states.
+
+    The keyword wins. Otherwise the allocation: SLURM_CPUS_PER_TASK inside a
+    Slurm step, else the CPUs in this process's affinity mask, else the cpu
+    count. The Slurm variable comes first because with OMP_PROC_BIND set the
+    OpenMP runtime can bind this thread to one core as it loads, which shrinks
+    the mask. OMP_NUM_THREADS, when set, only lowers the allocation, so
+    streams that split one allocation through their thread pins keep the split.
+    """
     if n_workers is None:
-        pinned = os.environ.get('OMP_NUM_THREADS', '').strip()
-        n_workers = int(pinned) if pinned.isdigit() and int(pinned) > 0 else (
-            os.cpu_count() or 1)
+        n_workers = _positive_int_env('SLURM_CPUS_PER_TASK')
+        if n_workers is None:
+            try:
+                n_workers = len(os.sched_getaffinity(0))
+            except AttributeError:
+                n_workers = os.cpu_count() or 1
+        pinned = _positive_int_env('OMP_NUM_THREADS')
+        if pinned is not None:
+            n_workers = min(n_workers, pinned)
     return max(1, min(int(n_workers), n_states))
 
 
@@ -433,7 +454,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
         returns it; a float applies to every state.
     qp_solver : str, root selection as in solve_qp_equation
     n_workers : int or None
-        None reads OMP_NUM_THREADS, then the cpu count; 1 is serial;
+        None sizes the pool to the allocation (SLURM_CPUS_PER_TASK, else the
+        CPU affinity mask), capped by OMP_NUM_THREADS when set; 1 is serial;
         threadpoolctl not being installed also gives the serial scan.
 
     Returns
