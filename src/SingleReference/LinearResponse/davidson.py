@@ -545,8 +545,9 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
     `attach_environment(mf, env)`.
 
     Returns (omega, X, Y, info) with the ISDF twin's fields: eps / eps_mf /
-    coeff_df / W_aux / min_eig_amb, length-gauge oscillator_strength and
-    transition_dipole per root, per-stage timings, and the evGW record.
+    coeff_df / W_aux / min_eig_amb, length-gauge oscillator_strength,
+    transition_dipole and exciton_descriptors per root, per-stage timings, and
+    the evGW record.
     """
     t = {}
     stats = {}
@@ -648,7 +649,9 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
     f_osc, trans_dip = oscillator_strengths(mf, mol, nocc, omega, X, Y)
     info = dict(eps=eps, eps_mf=eps_mf, coeff_df=coeff, W_aux=W_aux,
                 min_eig_amb=amb, oscillator_strength=f_osc,
-                transition_dipole=trans_dip, timings=t, stats=stats,evgw=evgw_info)
+                transition_dipole=trans_dip,
+                exciton_descriptors=exciton_descriptors(mf, mol, nocc, X, Y),
+                timings=t, stats=stats,evgw=evgw_info)
     return omega, X, Y, info
 
 
