@@ -106,10 +106,13 @@ pip install numpy scipy pyscf opt_einsum threadpoolctl
 
 The per-state quasiparticle root scan (`calc_qp_energy(n_workers=...)`) uses a
 thread pool by default, with threadpoolctl pinning its BLAS threads. The pool
-takes the allocation, `SLURM_CPUS_PER_TASK` inside a Slurm step and the
-process's CPU affinity otherwise, and never exceeds `OMP_NUM_THREADS` when that
-is set; `n_workers=1`, or threadpoolctl not being installed, gives the serial
-scan.
+has `OMP_NUM_THREADS` threads, else one per CPU the process may run on, and
+never more than those CPUs; `n_workers=1`, or threadpoolctl not being
+installed, gives the serial scan. On a Slurm cluster with SMT, request
+`--cpus-per-task=N --hint=nomultithread`, export `OMP_NUM_THREADS=N`, and leave
+`OMP_PROC_BIND` unset: pool threads inherit the main thread's CPU mask, and a
+bound main thread puts the whole pool on one core. Under MPI the same holds per
+rank, `srun --ntasks=R --cpus-per-task=T` with `OMP_NUM_THREADS=T`.
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.

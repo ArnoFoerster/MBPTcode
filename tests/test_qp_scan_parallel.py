@@ -47,37 +47,43 @@ if __name__ == '__main__':
             raised = True
         all_ok &= check(raised, f'{method}: bad grid shape raises ValueError')
 
-    # --- worker count: the keyword, else the allocation (SLURM_CPUS_PER_TASK,
-    # else the affinity mask), never above OMP_NUM_THREADS or the state count ---
+    # --- worker count: the keyword, else OMP_NUM_THREADS, else the affinity
+    # mask; never above the mask (with a warning) or the state count; Slurm's
+    # variables are not read ---
     from src.SingleReference.GW.qp_energy import _resolve_workers
     saved_env = {k: os.environ.get(k) for k in ('SLURM_CPUS_PER_TASK',
                                                  'OMP_NUM_THREADS')}
     saved_mask = getattr(os, 'sched_getaffinity', None)
     os.sched_getaffinity = lambda pid: set(range(12))
-    cases = [  # (keyword, SLURM_CPUS_PER_TASK, OMP_NUM_THREADS, n_states, expected)
-        (3, '6', None, 100, 3),
-        (None, '6', None, 100, 6),
-        (None, '6', '2', 100, 2),
-        (None, '6', '16', 100, 6),
-        (None, None, None, 100, 12),
-        (None, None, '4', 100, 4),
-        (None, None, '8,4', 100, 12),
-        (None, '6', None, 3, 3),
+    cases = [  # (keyword, SLURM_CPUS_PER_TASK, OMP_NUM_THREADS, n_states,
+               #  expected, warns)
+        (3, None, '8', 100, 3, False),
+        (None, None, None, 100, 12, False),
+        (None, None, '4', 100, 4, False),
+        (None, None, '8,4', 100, 12, False),
+        (None, '6', None, 100, 12, False),
+        (None, None, '6', 3, 3, False),
+        (None, None, '16', 100, 12, True),
+        (20, None, None, 100, 12, True),
     ]
     try:
-        for keyword, slurm, omp, n_states, expected in cases:
+        for keyword, slurm, omp, n_states, expected, warns in cases:
             for name, value in (('SLURM_CPUS_PER_TASK', slurm),
                                 ('OMP_NUM_THREADS', omp)):
                 if value is None:
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
-            got = _resolve_workers(keyword, n_states)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                got = _resolve_workers(keyword, n_states)
+            warned = any('OMP_PROC_BIND' in str(w.message) for w in caught)
             all_ok &= check(
-                got == expected,
+                got == expected and warned == warns,
                 f'workers: keyword={keyword} SLURM_CPUS_PER_TASK={slurm} '
-                f'OMP_NUM_THREADS={omp} mask=12 states={n_states} -> {expected}',
-                f'got {got}')
+                f'OMP_NUM_THREADS={omp} mask=12 states={n_states} -> {expected}'
+                f'{", warns" if warns else ""}',
+                f'got {got}, warned={warned}')
     finally:
         for name, value in saved_env.items():
             if value is None:

@@ -119,10 +119,9 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     'bisection' are also accepted.
     n_workers:      threads for the per-state root scan (Casida route, also
                     inside every evGW cycle on it). The
-                    scan uses a thread pool by default, sized to the
-                    allocation: SLURM_CPUS_PER_TASK inside a Slurm step, else
-                    the process's CPU affinity, and never above
-                    OMP_NUM_THREADS when that is set. n_workers=1, or
+                    scan uses a thread pool by default of OMP_NUM_THREADS
+                    threads, else one per CPU in the process's affinity mask,
+                    never more than that mask holds. n_workers=1, or
                     threadpoolctl not being installed, gives the serial scan.
     """
     mol = mf.mol
@@ -395,26 +394,28 @@ def _positive_int_env(name):
 
 
 def _resolve_workers(n_workers, n_states):
-    """Threads for the per-state scan; never more than there are states.
+    """Threads for the per-state scan.
 
-    The keyword wins. Otherwise the allocation: SLURM_CPUS_PER_TASK inside a
-    Slurm step, else the CPUs in this process's affinity mask, else the cpu
-    count. The Slurm variable comes first because with OMP_PROC_BIND set the
-    OpenMP runtime can bind this thread to one core as it loads, which shrinks
-    the mask. OMP_NUM_THREADS, when set, only lowers the allocation, so
-    streams that split one allocation through their thread pins keep the split.
+    The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
+    too, else the CPUs in this thread's affinity mask. Never more than those
+    CPUs, since the pool threads inherit the mask, and never more than there
+    are states. A mask narrower than the request warns: with OMP_PROC_BIND set,
+    the OpenMP runtime binds this thread to one core as pyscf loads, and the
+    whole pool would share that core.
     """
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
     if n_workers is None:
-        n_workers = _positive_int_env('SLURM_CPUS_PER_TASK')
-        if n_workers is None:
-            try:
-                n_workers = len(os.sched_getaffinity(0))
-            except AttributeError:
-                n_workers = os.cpu_count() or 1
-        pinned = _positive_int_env('OMP_NUM_THREADS')
-        if pinned is not None:
-            n_workers = min(n_workers, pinned)
-    return max(1, min(int(n_workers), n_states))
+        n_workers = _positive_int_env('OMP_NUM_THREADS') or cpus
+    n_workers = int(n_workers)
+    if n_workers > cpus:
+        warnings.warn(
+            f'{n_workers} threads requested for the QP scan, but this thread may '
+            f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
+            f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
+    return max(1, min(n_workers, cpus, n_states))
 
 
 def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
@@ -459,8 +460,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
         returns it; a float applies to every state.
     qp_solver : str, root selection as in solve_qp_equation
     n_workers : int or None
-        None sizes the pool to the allocation (SLURM_CPUS_PER_TASK, else the
-        CPU affinity mask), capped by OMP_NUM_THREADS when set; 1 is serial;
+        None takes OMP_NUM_THREADS, else the CPUs in the affinity mask; any
+        value is capped at that mask (see _resolve_workers); 1 is serial;
         threadpoolctl not being installed also gives the serial scan.
 
     Returns
