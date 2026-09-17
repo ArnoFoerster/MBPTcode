@@ -133,7 +133,7 @@ class CasidaSolver:
             del AmB
             sqrt_AmB_diag = np.sqrt(diag_AmB)
             inv_sqrt_AmB_diag = 1.0 / sqrt_AmB_diag
-
+            
             # Target matrix: (A-B)^{1/2} (A+B) (A-B)^{1/2}, formed IN PLACE in
             # ApB's buffer. ApB is dead after this line in this branch, and the
             # out-of-place form costs two further n_ov x n_ov temporaries (one
@@ -150,7 +150,7 @@ class CasidaSolver:
 
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
-
+            
             if is_distributed:
                 # Gather, back-transform globally, and scatter back
                 Z_full = gather_block_cyclic(Z_res, global_N, solver, comm)
@@ -196,7 +196,7 @@ class CasidaSolver:
 
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
-
+            
             if is_distributed:
                 # Gather, back-transform globally, and scatter back
                 Z_full = gather_block_cyclic(Z_res, global_N, solver, comm)
