@@ -444,10 +444,10 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
         Self-energy method names, e.g. 'GW', 'GWGammaInf', 'PSD1'...'PSD9'.
     spin_channel : {'alpha', 'beta'}
     states : sequence of int, orbital indices
-    eri_w_singlet, eri_w_triplet : ndarray
-        Screened interaction feeding the vertex correction: shape (naux,
-        naux) when `df`, else (norb, norb, norb, norb). The two differ only
-        for the unrestricted spin-flip vertex.
+    eri_w_singlet, eri_w_triplet : ndarray, shape (naux, naux) or (norb,) * 4
+        Screened interaction feeding the vertex correction: the auxiliary
+        form when `df`, else the 4-index tensor. The two differ only for the
+        unrestricted spin-flip vertex.
     is_uhf : bool
     df : bool
         Density fitting: the auxiliary form (True) or the explicit 4-index
