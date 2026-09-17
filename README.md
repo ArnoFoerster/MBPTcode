@@ -104,15 +104,8 @@ Requires Python 3.10+, NumPy, SciPy, PySCF, opt_einsum and threadpoolctl:
 pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
 
-The per-state quasiparticle root scan (`calc_qp_energy(n_workers=...)`) uses a
-thread pool by default, with threadpoolctl pinning its BLAS threads. The pool
-has `OMP_NUM_THREADS` threads, else one per CPU the process may run on, and
-never more than those CPUs; `n_workers=1`, or threadpoolctl not being
-installed, gives the serial scan. On a Slurm cluster with SMT, request
-`--cpus-per-task=N --hint=nomultithread`, export `OMP_NUM_THREADS=N`, and leave
-`OMP_PROC_BIND` unset: pool threads inherit the main thread's CPU mask, and a
-bound main thread puts the whole pool on one core. Under MPI the same holds per
-rank, `srun --ntasks=R --cpus-per-task=T` with `OMP_NUM_THREADS=T`.
+`threadpoolctl` lets the quasiparticle root scan run in a thread pool; without it
+the scan runs serially. Thread settings are under [Threads](#threads).
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
@@ -142,6 +135,33 @@ print(f"ADC(3) IP = {-e[0] * 27.2114:.3f} eV   Z = {Z[0]:.3f}")
 
 See `examples/` for density fitting, Epstein-Nesbet variants, open-shell
 references, several ionization states, and screened singles.
+
+## Threads
+
+Set `OMP_NUM_THREADS` to the number of physical cores the run may use. It sets
+the OpenMP and BLAS threads of PySCF and NumPy, and the thread pool of the
+per-state quasiparticle root scan (`calc_qp_energy(n_workers=...)`). The pool
+takes `n_workers`, else `OMP_NUM_THREADS`, else one thread per CPU the process
+may run on, and never exceeds those CPUs; `n_workers=1` gives the serial scan.
+
+Leave `OMP_PROC_BIND` unset. Pool threads inherit the main thread's CPU mask, so
+a bound main thread confines the pool to its own CPUs, often a single core; the
+scan then warns and shrinks the pool. With the pip wheels, export
+`OMP_WAIT_POLICY=PASSIVE`: otherwise PySCF's OpenMP threads and NumPy's OpenBLAS
+threads spin against each other on small calls.
+
+In a Slurm job:
+
+```bash
+#SBATCH --cpus-per-task=16
+#SBATCH --hint=nomultithread       # 16 cores; without it, 8 cores and their SMT siblings
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_WAIT_POLICY=PASSIVE
+unset OMP_PROC_BIND
+```
+
+Several processes in one job step each get their own cores with
+`srun --ntasks=R --cpus-per-task=T --hint=nomultithread` and `OMP_NUM_THREADS=T`.
 
 ## Basis sets from CP2K
 
