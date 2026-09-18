@@ -11,7 +11,6 @@ polarizability, and the cycle repeated to a fixed point:
 The equation stays ANCHORED on the mean field. w = eps_p^MF + <Sigma_x - v_xc>
 + Re Sigma_c(w) with Sigma_c screened by the current iterate
 """
-import copy
 import warnings
 
 import numpy as np
@@ -30,10 +29,13 @@ def shifted_mean_field(mf, eps):
     """
     `mf` carrying `eps` in place of its own eigenvalues.
 
-    A shallow copy, so every integral, fit and cavity the reference already
-    holds is shared once per cycle.
+    A shallow copy through PySCF's own `copy`, so every integral, fit, cavity
+    and the direct-SCF optimizer the reference already holds is shared once
+    per cycle. `copy.copy` would go through the pickle hooks of the mean
+    field, which drop that optimizer, and a J/K build on a molecule too large
+    for the in-core branch then fails on the copy.
     """
-    out = copy.copy(mf)
+    out = mf.copy()
     out.mo_energy = np.asarray(eps, float)
     return out
 

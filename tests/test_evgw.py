@@ -210,6 +210,24 @@ def test_the_shift_view_does_not_move_the_original(mf):
                  'the shifted view shares everything but the spectrum')
 
 
+def test_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
+    """A molecule too large for in-core J/K takes PySCF's direct branch, which
+    reads the optimizer the mean field caches; a view made through the pickle
+    hooks arrives without it and the static correction of every cycle raises.
+    `max_memory = 0` forces that branch on the small reference."""
+    view = shifted_mean_field(mf, np.asarray(mf.mo_energy, float))
+    view.max_memory = 0
+    dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+    try:
+        v_direct = view.get_veff(mf.mol, dm)
+        ok = np.allclose(v_direct, mf.get_veff(mf.mol, dm), atol=1e-10)
+        detail = 'direct and in-core V_Hxc agree'
+    except AttributeError as err:
+        ok, detail = False, f'direct get_veff raised: {err}'
+    return check(ok, 'the shifted view builds V_Hxc on the direct J/K path',
+                 detail)
+
+
 def test_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
     """`eps_anchor=None` must leave the single-shot route BITWISE as it was, or
     threading the keyword moved every existing G0W0 number."""
@@ -426,6 +444,7 @@ if __name__ == '__main__':
     all_ok &= test_the_high_virtuals_do_not_decide_convergence(mf)
     all_ok &= test_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf)
     all_ok &= test_the_shift_view_does_not_move_the_original(mf)
+    all_ok &= test_the_shift_view_builds_j_and_k_on_the_direct_path(mf)
     print('\n-- 5. the front door, on every route')
     all_ok &= test_calc_qp_energy_drives_every_route(mf)
     all_ok &= test_the_refusals(mf)
