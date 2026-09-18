@@ -8,6 +8,10 @@ the same equation w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w):
   imagfrequency  chi0(i.omega) by direct particle-hole summation.  O(N^4).
   space-time     chi0(i.tau) from a separable ISDF factorization.  O(N^3).
 """
+import os
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from pyscf import scf
 
@@ -77,7 +81,7 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    spin_channel='alpha', printSpectralFunction=False,
                    dm_correction=None, tda=False, qp_solver='pole_strength',
                    nroots=8, mode='casida', self_consistency='G0W0',
-                   eps_anchor=None, **route_kwargs):
+                   eps_anchor=None, n_workers=None, **route_kwargs):
     """Quasiparticle energies, in eV.
 
     selfenergy:     'GW'/'GWGammaInf'/'PSD1'...'PSD9', or a list of these.
@@ -113,10 +117,20 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     quasiparticle. 'graphical' returns the root nearest eps;
                     they agree wherever only one root exists. 'newton' and
                     'bisection' are also accepted.
+    n_workers:      threads for the per-state root scan (Casida route, also
+                    inside every evGW cycle on it). The
+                    scan uses a thread pool by default of OMP_NUM_THREADS
+                    threads, else one per CPU in the process's affinity mask,
+                    never more than that mask holds. n_workers=1, or
+                    threadpoolctl not being installed, gives the serial scan.
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
     if str(self_consistency).lower() in ('evgw', 'ev'):
+        # each evGW cycle calls back into this function, so the scan's thread
+        # count travels as a route keyword
+        if n_workers is not None:
+            route_kwargs = dict(route_kwargs, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, spin_channel, route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
@@ -198,29 +212,21 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # it was 85 % of an evGW cycle that asks for every orbital.
     xc_diagonal = _static_correction(mf, mol, se_solver, dm_correction,
                                      sigma_solvent, spin_channel, is_uhf)
-    results = {}
-    for p_state in states:
-        results[p_state] = {}
-        amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos,
-                                       methods, spin_channel, p_state,
-                                       eri_w_singlet, eri_w_triplet, is_uhf, df)
-        xc_correction = xc_diagonal[p_state]
-        eigKS = anchor_spin[p_state]
+    energies = qp_energies_from_spectrum(
+        se_solver, nocc, spectrum, method_infos, methods, spin_channel, states,
+        eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin, xc_diagonal,
+        qp_solver=qp_solver, n_workers=n_workers)
+    results = {p: {m: energies[p][m] * HARTREE_TO_EV for m in methods} for p in states}
 
-        for method in methods:
-            info = method_infos[method]
-            omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
-
-            func = lambda w: w - eigKS - xc_correction - se_solver.calculate_self_energy(
-                p_state, w, nocc, omega_val, chi_a_val, chi_b_val,
-                eigenvalues_casida_t=omega_t_val, chiXYb_t=chi_b_t_val,
-                spin_channel=spin_channel,
-                vertex_mode=info['vertex_mode'], calc_imag=False)
-            qp_ev = solve_qp_equation(func, eigKS,
-                                      method=qp_solver) * HARTREE_TO_EV
-            results[p_state][method] = qp_ev
-
-            if printSpectralFunction:
+    if printSpectralFunction:
+        for p_state in states:
+            amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos,
+                                           methods, spin_channel, p_state,
+                                           eri_w_singlet, eri_w_triplet, is_uhf, df)
+            for method in methods:
+                info = method_infos[method]
+                omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
+                qp_ev = results[p_state][method]
                 _print_spectral_function(se_solver, p_state, method, qp_ev, nocc,
                                          omega_val, chi_a_val, chi_b_val,
                                          omega_t_val, chi_b_t_val, spin_channel,
@@ -273,9 +279,9 @@ def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
     # BSE screens exchange with the static RPA W; TDHF uses bare exchange.
     w_casida = w_aux if mode == 'BSE' else None
 
-    A_s, B_s = lr_solver.build_casida_matrices(nocc, lBSE=lBSE, W_aux=w_casida,
-                                               triplet=False)
-    out = {'lBSE': lBSE, 'singlet': CasidaSolver(A_s, B_s).solve(tda=tda)}
+    out = {'lBSE': lBSE,
+           'singlet': CasidaSolver(*lr_solver.build_casida_matrices(
+               nocc, lBSE=lBSE, W_aux=w_casida, triplet=False)).solve(tda=tda)}
 
     if any(method_infos[m]['needs_triplet'] for m in methods):
         if is_uhf:
@@ -285,16 +291,14 @@ def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
                         for c in ('ba', 'ab')]
             out['triplet'] = tuple(zip(*channels))
         else:
-            A_t, B_t = lr_solver.build_casida_matrices(nocc, lBSE=lBSE,
-                                                       W_aux=w_casida,
-                                                       triplet=True)
-            out['triplet'] = CasidaSolver(A_t, B_t).solve(tda=tda)
+            out['triplet'] = CasidaSolver(*lr_solver.build_casida_matrices(
+                nocc, lBSE=lBSE, W_aux=w_casida, triplet=True)).solve(tda=tda)
     else:
         out['triplet'] = (None, None, None)
 
     if lBSE and any(method_infos[m]['force_rpa_casida'] for m in methods):
-        A_rpa, B_rpa = lr_solver.build_casida_matrices(nocc, lBSE=False)
-        out['rpa'] = CasidaSolver(A_rpa, B_rpa).solve(tda=tda)
+        out['rpa'] = CasidaSolver(
+            *lr_solver.build_casida_matrices(nocc, lBSE=False)).solve(tda=tda)
     else:
         out['rpa'] = out['singlet']
     return out
@@ -381,6 +385,159 @@ def _static_correction(mf, mol, se_solver, dm_correction, sigma_solvent,
     if sigma_solvent is not None:
         xc_correction = xc_correction + np.diag(np.asarray(sigma_solvent))
     return xc_correction
+
+
+def _positive_int_env(name):
+    """The environment variable `name` as a positive int, or None."""
+    value = os.environ.get(name, '').strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def _resolve_workers(n_workers, n_states):
+    """Threads for the per-state scan.
+
+    The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
+    too, else the CPUs in this thread's affinity mask. Never more than those
+    CPUs, since the pool threads inherit the mask, and never more than there
+    are states. A mask narrower than the request warns: with OMP_PROC_BIND set,
+    the OpenMP runtime binds this thread to one core as pyscf loads, and the
+    whole pool would share that core.
+    """
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    if n_workers is None:
+        n_workers = _positive_int_env('OMP_NUM_THREADS') or cpus
+    n_workers = int(n_workers)
+    if n_workers > cpus:
+        warnings.warn(
+            f'{n_workers} threads requested for the QP scan, but this thread may '
+            f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
+            f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
+    return max(1, min(n_workers, cpus, n_states))
+
+
+def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
+                              spin_channel, states, eri_w_singlet, eri_w_triplet,
+                              is_uhf, df, eps_spin, xc_correction,
+                              qp_solver='pole_strength', n_workers=None):
+    """Quasiparticle energies, in Hartree, for every state from one Casida spectrum.
+
+    Solves w = eps_p + xc_p + Re Sigma_pp(w) per state and method, states in a
+    thread pool. The first state runs before the pool so the p-independent
+    amplitude caches exist before the threads read them; inside the pool every
+    BLAS is pinned to one thread (threadpoolctl) and the per-state work is
+    elementwise numpy, which releases the GIL.
+
+    Parameters
+    ----------
+    se_solver : SelfEnergySolver
+    nocc : int or (int, int)
+        Occupied-orbital count of the spin channel, or (nocc_alpha,
+        nocc_beta) when `is_uhf`.
+    spectrum : dict, as returned by _casida_spectrum
+    method_infos : dict {str: dict}
+        Per-method entry from get_method_info: vertex_mode, force_rpa_casida,
+        needs_vertex, needs_triplet.
+    methods : list of str
+        Self-energy method names, e.g. 'GW', 'GWGammaInf', 'PSD1'...'PSD9'.
+    spin_channel : {'alpha', 'beta'}
+    states : sequence of int, orbital indices
+    eri_w_singlet, eri_w_triplet : ndarray, shape (naux, naux) or (norb,) * 4
+        Screened interaction feeding the vertex correction: the auxiliary
+        form when `df`, else the 4-index tensor. The two differ only for the
+        unrestricted spin-flip vertex.
+    is_uhf : bool
+    df : bool
+        Density fitting: the auxiliary form (True) or the explicit 4-index
+        ERI (False).
+    eps_spin : ndarray, shape (norb,)
+        The eps_p the equation is anchored on, per orbital: the spin
+        channel's orbital energies, or the mean-field anchor under evGW.
+    xc_correction : float or ndarray, shape (norb,)
+        <Sigma_Hx - v_Hxc>_pp indexed by orbital p, as _static_correction
+        returns it; a float applies to every state.
+    qp_solver : str, root selection as in solve_qp_equation
+    n_workers : int or None
+        None takes OMP_NUM_THREADS, else the CPUs in the affinity mask; any
+        value is capped at that mask (see _resolve_workers); 1 is serial;
+        threadpoolctl not being installed also gives the serial scan.
+
+    Returns
+    -------
+    qp_energies : dict {p: {method: E_qp}}
+        Quasiparticle energy per state and method, in Hartree.
+
+    Notes
+    -----
+    Use one `se_solver` per spectrum: its amplitude cache keys on the identity
+    of the X/Y arrays, so a solver reused after an earlier spectrum was freed
+    can return stale amplitudes. Memory grows with n_workers because each
+    in-flight state holds its self-energy weights (a few arrays of shape
+    (nexciton, norb)) and amplitudes.
+    """
+    states = [int(p) for p in states]
+    if not states:
+        return {}
+    xc = np.asarray(xc_correction, dtype=float)
+    if xc.ndim == 0:
+        xc = np.full(np.shape(eps_spin), float(xc))
+    elif xc.shape != np.shape(eps_spin):
+        raise ValueError(
+            f'xc_correction has shape {xc.shape}; it is indexed by orbital, '
+            f'so it needs the shape of eps_spin, {np.shape(eps_spin)}')
+    vect_ok = qp_solver in ('pole_strength', 'graphical')
+    grid_kw = {'vectorized': True} if vect_ok else {}
+
+    def solve_state(i):
+        p = states[i]
+        amps = _self_energy_amplitudes(se_solver, nocc, spectrum, method_infos, methods,
+                                       spin_channel, p, eri_w_singlet, eri_w_triplet,
+                                       is_uhf, df)
+        out = {}
+        for method in methods:
+            info = method_infos[method]
+            omega_val, chi_a_val, chi_b_val, omega_t_val, chi_b_t_val = amps[method]
+            sigma = se_solver.self_energy_evaluator(
+                p, nocc, omega_val, chi_a_val, chi_b_val,
+                eigenvalues_casida_t=omega_t_val, chiXYb_t=chi_b_t_val,
+                spin_channel=spin_channel, vertex_mode=info['vertex_mode'])
+            e0, x = eps_spin[p], xc[p]
+            func = lambda w, e0=e0, x=x, sigma=sigma: w - e0 - x - sigma(w)
+            out[method] = solve_qp_equation(func, e0, method=qp_solver, **grid_kw)
+        return p, out
+
+    results = {}
+    p0, out0 = solve_state(0)
+    results[p0] = out0
+    rest = range(1, len(states))
+    requested_workers = n_workers
+    n_workers = _resolve_workers(n_workers, len(states))
+    run_parallel = n_workers > 1 and len(states) > 1
+    if run_parallel:
+        try:
+            from threadpoolctl import threadpool_limits
+        except ImportError as exc:
+            if requested_workers is not None:
+                raise ImportError(
+                    "qp_energies_from_spectrum with n_workers > 1 needs "
+                    "threadpoolctl (pip install threadpoolctl); n_workers=1 "
+                    "is the serial scan") from exc
+            warnings.warn(
+                "threadpoolctl is not installed; running the per-state QP scan "
+                "serially.")
+            run_parallel = False
+    if run_parallel:
+        with threadpool_limits(limits=1, user_api='blas'):
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for p, out in pool.map(solve_state, rest):
+                    results[p] = out
+    else:
+        for i in rest:
+            p, out = solve_state(i)
+            results[p] = out
+    return results
 
 
 def _print_spectral_function(se_solver, p_state, method, qp_ev, nocc, omega_val,

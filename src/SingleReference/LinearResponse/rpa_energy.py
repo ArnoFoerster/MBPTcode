@@ -12,8 +12,11 @@ def rpa_correlation_energy_casida(lr_solver, nocc):
     Works with either DF or full-ERI LinearResponseSolver (dispatched inside build_casida_matrices).
     """
     A, B = lr_solver.build_casida_matrices(nocc, lBSE=False)
-    omega, _, _ = CasidaSolver(A, B).solve()
-    return 0.5 * (np.sum(omega) - np.trace(A))
+    trace_a = np.trace(A)
+    solver = CasidaSolver(A, B)
+    del A, B
+    omega, _, _ = solver.solve()
+    return 0.5 * (np.sum(omega) - trace_a)
 
 
 def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):

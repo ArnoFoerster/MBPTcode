@@ -63,16 +63,17 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         )
         mode = polarizability.upper()
         if mode == 'RPA':
-            A, B = lr_solver.build_casida_matrices(nocc, lBSE=False)
+            build_kw = dict(lBSE=False)
         elif mode == 'TDHF':
-            A, B = lr_solver.build_casida_matrices(nocc, lBSE=True, W_aux=None)
+            build_kw = dict(lBSE=True, W_aux=None)
         elif mode == 'BSE':
             w_aux = lr_solver.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
-            A, B = lr_solver.build_casida_matrices(nocc, lBSE=True, W_aux=w_aux)
+            build_kw = dict(lBSE=True, W_aux=w_aux)
         else:
             raise ValueError(f"Unknown screening mode '{polarizability}'; choose 'RPA', 'TDHF', or 'BSE'.")
 
-        omega, X, Y = CasidaSolver(A, B).solve()
+        omega, X, Y = CasidaSolver(
+            *lr_solver.build_casida_matrices(nocc, **build_kw)).solve()
         return omega, X, Y
 
     def compute_unrelaxed_blocks(self, nocc, mf, mol, polarizability='RPA', omega=None, X=None, Y=None,

@@ -58,8 +58,8 @@ class LinearResponseSolver:
             eps = (self.eps_a, self.eps_b)
             eri = (self.eri_a, self.eri_b, self.eri_ab)
 
-            A_rpa, B_rpa = self.build_casida_matrices(nocc, lBSE=False)
-            omega_rpa, X_rpa, Y_rpa = CasidaSolver(A_rpa, B_rpa).solve()
+            omega_rpa, X_rpa, Y_rpa = CasidaSolver(
+                *self.build_casida_matrices(nocc, lBSE=False)).solve()
 
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(eps[0], nocc_a)
@@ -69,18 +69,23 @@ class LinearResponseSolver:
 
             XpY_a = (X_rpa[:n_pair_a] + Y_rpa[:n_pair_a])
             XpY_b = (X_rpa[n_pair_a:] + Y_rpa[n_pair_a:])
+            del X_rpa, Y_rpa
 
             V_aa_matrix = eri[0][np.ix_(occ_a, virt_a)].reshape(n_pair_a, -1)
             V_ba_matrix = eri[2].transpose(2, 3, 0, 1)[np.ix_(occ_b, virt_b)].reshape(n_pair_b, -1)
             M_a = V_aa_matrix.T @ XpY_a + V_ba_matrix.T @ XpY_b
             screened_a = 2.0 * (M_a / omega_rpa[None, :]) @ M_a.T
-            W_rpa_a = eri[0] - screened_a.reshape(eri[0].shape)
+            del M_a
+            W_rpa_a = screened_a.reshape(eri[0].shape)
+            np.subtract(eri[0], W_rpa_a, out=W_rpa_a)
 
             V_ab_matrix = eri[2][np.ix_(occ_a, virt_a)].reshape(n_pair_a, -1)
             V_bb_matrix = eri[1][np.ix_(occ_b, virt_b)].reshape(n_pair_b, -1)
             M_b = V_ab_matrix.T @ XpY_a + V_bb_matrix.T @ XpY_b
             screened_b = 2.0 * (M_b / omega_rpa[None, :]) @ M_b.T
-            W_rpa_b = eri[1] - screened_b.reshape(eri[1].shape)
+            del M_b
+            W_rpa_b = screened_b.reshape(eri[1].shape)
+            np.subtract(eri[1], W_rpa_b, out=W_rpa_b)
 
             eri_w_singlet = W_rpa_a if spin_channel == 'alpha' else W_rpa_b
             eri_w_triplet = eri_w_singlet
@@ -88,16 +93,20 @@ class LinearResponseSolver:
             eps = self.eps
             eri = self.eri_chemist
 
-            A_rpa, B_rpa = self.build_casida_matrices(nocc, lBSE=False)
-            omega_rpa, X_rpa, Y_rpa = CasidaSolver(A_rpa, B_rpa).solve()
+            omega_rpa, X_rpa, Y_rpa = CasidaSolver(
+                *self.build_casida_matrices(nocc, lBSE=False)).solve()
             rpa_factor = 4.0
             occ, virt = self._get_occ_virt_indices(eps, nocc)
             n_pair = len(occ) * len(virt)
             XpY = (X_rpa + Y_rpa).reshape(n_pair, -1)
+            del X_rpa, Y_rpa
             V_matrix = eri[np.ix_(occ, virt)].reshape(n_pair, -1)
             V_exciton = V_matrix.T @ XpY
+            del V_matrix, XpY
             screened = rpa_factor * (V_exciton / omega_rpa[None, :]) @ V_exciton.T
-            W_rpa = eri - screened.reshape(eri.shape)
+            del V_exciton
+            W_rpa = screened.reshape(eri.shape)
+            np.subtract(eri, W_rpa, out=W_rpa)
             eri_w_singlet = W_rpa
             eri_w_triplet = W_rpa
 
@@ -305,41 +314,121 @@ class LinearResponseSolver:
         nocc = len(occ)
         nvirt = len(virt)
         n_pair = nocc * nvirt
-        
+        naux = coeff_all.shape[0]
+
         diag_d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
 
         # Optimize indexing with 3D advanced indexing
-        C_ov = coeff_all[:, occ[:, None], virt]
-        C_ov_flat = C_ov.reshape(coeff_all.shape[0], n_pair)
-        
+        C_ov_flat = coeff_all[:, occ[:, None], virt].reshape(naux, n_pair)
         V_iajb = C_ov_flat.T @ C_ov_flat
-        V_iaswap = V_iajb.reshape(nocc, nvirt, nocc, nvirt).transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
-        
-        C_oo_flat = coeff_all[:, occ[:, None], occ].reshape(coeff_all.shape[0], nocc * nocc)
-        C_vv_flat = coeff_all[:, virt[:, None], virt].reshape(coeff_all.shape[0], nvirt * nvirt)
-        V_exchange = (C_oo_flat.T @ C_vv_flat).reshape(nocc, nocc, nvirt, nvirt).transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
-        
+
         if not lBSE:
-            A = np.diag(diag_d) + factor * V_iajb
-            B = factor * V_iajb
+            # A = diag(d) + factor V and B = factor V, assembled in V's
+            # buffer and one copy.
+            V_iajb *= factor
+            B = V_iajb
+            A = B.copy()
+            A.flat[::n_pair + 1] += diag_d
             return A, B
+
+        if W_aux is not None:
+            C_oo_flat = coeff_all[:, occ[:, None], occ].reshape(naux, nocc * nocc)
+            C_vv_flat = coeff_all[:, virt[:, None], virt].reshape(naux, nvirt * nvirt)
+            tmp_dir = W_aux @ C_vv_flat
+            res_dir = C_oo_flat.T @ tmp_dir
+            del tmp_dir, C_oo_flat, C_vv_flat
+            W_direct_att = (
+                res_dir.reshape(nocc, nocc, nvirt, nvirt)
+                .transpose(0, 2, 1, 3)
+                .reshape(n_pair, n_pair)
+            )
+            del res_dir
+            tmp_swap = W_aux @ C_ov_flat
+            res_swap = C_ov_flat.T @ tmp_swap
+            del tmp_swap
+            W_swap_att = (
+                res_swap.reshape(nocc, nvirt, nocc, nvirt)
+                .transpose(0, 3, 2, 1)
+                .reshape(n_pair, n_pair)
+            )
+            del res_swap
         else:
-            if W_aux is not None:
-                naux = coeff_all.shape[0]
-                tmp_dir = W_aux @ C_vv_flat
-                res_dir = C_oo_flat.T @ tmp_dir
-                W_direct_att = res_dir.reshape(nocc, nocc, nvirt, nvirt).transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
-                
-                tmp_swap = W_aux @ C_ov_flat
-                res_swap = C_ov_flat.T @ tmp_swap
-                W_swap_att = res_swap.reshape(nocc, nvirt, nocc, nvirt).transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
-            else:
-                W_direct_att = V_exchange
-                W_swap_att = V_iaswap
-            
-            A = np.diag(diag_d) + factor * V_iajb - W_direct_att
-            B = factor * V_iajb - W_swap_att
-            return A, B
+            C_oo_flat = coeff_all[:, occ[:, None], occ].reshape(naux, nocc * nocc)
+            C_vv_flat = coeff_all[:, virt[:, None], virt].reshape(naux, nvirt * nvirt)
+            W_direct_att = (
+                (C_oo_flat.T @ C_vv_flat)
+                .reshape(nocc, nocc, nvirt, nvirt)
+                .transpose(0, 2, 1, 3)
+                .reshape(n_pair, n_pair)
+            )
+            del C_oo_flat, C_vv_flat
+            W_swap_att = (
+                V_iajb.reshape(nocc, nvirt, nocc, nvirt)
+                .transpose(0, 3, 2, 1)
+                .reshape(n_pair, n_pair)
+            )
+            if np.may_share_memory(W_swap_att, V_iajb):
+                # nocc == 1 or nvirt == 1: the swap is a view of V_iajb, which is
+                # scaled in place below.
+                W_swap_att = W_swap_att.copy()
+
+        return self._assemble_in_place(diag_d, V_iajb, factor, W_direct_att, W_swap_att,
+                                       swap_shares_caller=False)
+
+    @staticmethod
+    def _assemble_in_place(diag_d, V_iajb, factor, W_direct_att, W_swap_att,
+                            swap_shares_caller):
+        """Assemble the Casida A, B blocks in place, reusing V/W buffers.
+
+        Computes ``A = diag(diag_d) + factor * V_iajb - W_direct_att`` and
+        ``B = factor * V_iajb - W_swap_att``, writing each result into an
+        existing buffer instead of allocating a fresh ``(n_pair, n_pair)``
+        array. `V_iajb` is scaled by `factor` in place; the diagonal of A
+        keeps the evaluation order ``(diag_d + factor * V_iajb_ii) -
+        W_direct_att_ii`` to match the off-diagonal rounding.
+
+        Parameters
+        ----------
+        diag_d : ndarray, shape (n_pair,)
+            Orbital-energy gaps eps_virt - eps_occ, one per (i, a) pair.
+        V_iajb : ndarray, shape (n_pair, n_pair)
+            Bare Coulomb block. Scaled by `factor` in place.
+        factor : float
+            Spin factor multiplying `V_iajb` (2.0 singlet, 0.0 triplet,
+            1.0 unrestricted).
+        W_direct_att : ndarray, shape (n_pair, n_pair)
+            Direct screened-exchange block. Overwritten in place and
+            reused as the buffer `A` is returned in.
+        W_swap_att : ndarray, shape (n_pair, n_pair)
+            Swap screened-exchange block. Overwritten in place and reused
+            as the buffer `B` is returned in, unless `swap_shares_caller`
+            is True.
+        swap_shares_caller : bool
+            True when `W_swap_att` is a view into an array the caller
+            still owns (for example `W_aux`), so it must not be written
+            to; `B` is then computed out of place instead.
+
+        Returns
+        -------
+        A : ndarray, shape (n_pair, n_pair)
+            Alias of `W_direct_att`, written in place.
+        B : ndarray, shape (n_pair, n_pair)
+            Alias of `W_swap_att` written in place, or a fresh array when
+            `swap_shares_caller` is True.
+        """
+        n_pair = V_iajb.shape[0]
+        W_dir_ii = W_direct_att.flat[::n_pair + 1].copy()
+        V_iajb *= factor
+        A_ii = (diag_d + V_iajb.flat[::n_pair + 1]) - W_dir_ii
+        np.subtract(V_iajb, W_direct_att, out=W_direct_att)
+        A = W_direct_att
+        A.flat[::n_pair + 1] = A_ii
+        if swap_shares_caller:
+            B = V_iajb - W_swap_att
+        else:
+            np.subtract(V_iajb, W_swap_att, out=W_swap_att)
+            B = W_swap_att
+        return A, B
 
     def _build_block_full(self, eps, occ, virt, lBSE, W_aux, factor, eri_all, spin_channel, nocc=None,
                           eps_screen=None):
@@ -352,16 +441,21 @@ class LinearResponseSolver:
         # Optimize indexing with np.ix_
         V_iajb_4d = eri_all[np.ix_(occ, virt, occ, virt)]
         V_iajb = V_iajb_4d.reshape(n_pair, n_pair)
-        V_iaswap = V_iajb_4d.transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
-        
-        V_exch_raw = eri_all[np.ix_(occ, occ, virt, virt)]
-        V_exchange = V_exch_raw.reshape(nocc_val, nocc_val, nvirt_val, nvirt_val).transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
-        
+
         if not lBSE:
-            A = np.diag(diag_d) + factor * V_iajb
-            B = factor * V_iajb
+            V_iajb *= factor
+            B = V_iajb
+            A = B.copy()
+            A.flat[::n_pair + 1] += diag_d
             return A, B
         else:
+            V_exch_raw = eri_all[np.ix_(occ, occ, virt, virt)]
+            V_exchange = (
+                V_exch_raw.reshape(nocc_val, nocc_val, nvirt_val, nvirt_val)
+                .transpose(0, 2, 1, 3)
+                .reshape(n_pair, n_pair)
+            )
+            del V_exch_raw
             if W_aux is not None:
                 if self.spin_mode == 'unrestricted':
                     nocc_a, nocc_b = nocc
@@ -407,8 +501,16 @@ class LinearResponseSolver:
                         V_abld_trans = np.block([V_ba_abld, V_bb_abld])
                         
                     tmp = V_ijkc_trans @ chi_trans
+                    del chi0_trans, chi_trans
                     W_minus_V_direct_raw = tmp @ V_abld_trans.T
-                    W_direct_att = V_exchange + W_minus_V_direct_raw.reshape(nocc_val, nocc_val, nvirt_val, nvirt_val).transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
+                    W_direct_att = V_exchange
+                    W_direct_att += (
+                        W_minus_V_direct_raw.reshape(
+                            nocc_val, nocc_val, nvirt_val, nvirt_val)
+                        .transpose(0, 2, 1, 3)
+                        .reshape(n_pair, n_pair)
+                    )
+                    del W_minus_V_direct_raw, tmp
                     
                     if spin_channel == 'a':
                         W_swap_att_raw = W_aux[:n_pair, :n_pair]
@@ -431,18 +533,30 @@ class LinearResponseSolver:
                     V_abld = eri_all[np.ix_(virt, virt, occ, virt)]
                     
                     tmp = V_ijkc.reshape(nocc_val*nocc_val, n_pair) @ chi
+                    del chi0, chi
                     W_minus_V_direct_raw = tmp @ V_abld.reshape(nvirt_val*nvirt_val, n_pair).T
-                    W_direct_att = V_exchange + W_minus_V_direct_raw.reshape(nocc_val, nocc_val, nvirt_val, nvirt_val).transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
+                    W_direct_att = V_exchange
+                    W_direct_att += (
+                        W_minus_V_direct_raw.reshape(
+                            nocc_val, nocc_val, nvirt_val, nvirt_val)
+                        .transpose(0, 2, 1, 3)
+                        .reshape(n_pair, n_pair)
+                    )
+                    del W_minus_V_direct_raw, tmp
                     W_swap_att_raw = W_aux
                 
                 W_swap_att = W_swap_att_raw.reshape(nocc_val, nvirt_val, nocc_val, nvirt_val).transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
+                swap_shares_caller = np.may_share_memory(W_swap_att, W_aux)
             else:
                 W_direct_att = V_exchange
-                W_swap_att = V_iaswap
-            
-            A = np.diag(diag_d) + factor * V_iajb - W_direct_att
-            B = factor * V_iajb - W_swap_att
-            return A, B
+                W_swap_att = V_iajb_4d.transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
+                if np.may_share_memory(W_swap_att, V_iajb):
+                    W_swap_att = W_swap_att.copy()
+                swap_shares_caller = False
+
+            return self._assemble_in_place(
+                diag_d, V_iajb, factor, W_direct_att, W_swap_att,
+                swap_shares_caller)
 
     def solve_rpa_screening(self, omega_grid, nocc, is_imaginary=False):
         """W(omega) by direct particle-hole summation -- route 2 of three.
