@@ -21,9 +21,9 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
 
     g is the real or imaginary part of the broadened denominator, as in
     SelfEnergySolver._denom_grid, sign_q = +1 for q < nocc_spin and -1 otherwise.
-    The exciton axis is summed in chunks so that each (nw, chunk, norb) temporary
-    holds at most block_elems float64 values, or nw*norb values, if that is
-    larger, and stays in cache.
+    The exciton axis is summed in chunks of at most block_elems // (nw * norb)
+    excitations, at least one, through two (nw, chunk, norb) buffers allocated
+    once per call and filled in place, so a chunk costs no fresh pages.
 
     Parameters
     ----------
@@ -43,15 +43,23 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
     base = w_grid[:, None, None] - eps[None, None, :]            # (nw, 1, norb)
     chunk = max(1, block_elems // (nw * norb))
     out = np.zeros((len(weights), nw))
+    # per-call buffers: a pool thread owns its call, so nothing here is shared
+    energy = np.empty((nw, chunk, norb))
+    denom = np.empty((nw, chunk, norb))
     for k, (wt, om) in enumerate(zip(weights, omegas)):
         for s0 in range(0, len(om), chunk):
             s1 = min(s0 + chunk, len(om))
-            energy = base + (sign[None, :] * om[s0:s1, None])[None, :, :]
+            e = energy[:, :s1 - s0]                 # a view; the last chunk is short
+            d = denom[:, :s1 - s0]
+            np.add(base, (sign[None, :] * om[s0:s1, None])[None, :, :], out=e)
+            np.multiply(e, e, out=d)
+            d += eta**2
             if calc_imag:
-                denom = -sign[None, None, :] * eta / (energy**2 + eta**2)
+                np.divide(-eta, d, out=d)
+                d *= sign[None, None, :]
             else:
-                denom = energy / (energy**2 + eta**2)
-            out[k] += denom.reshape(nw, -1) @ wt[s0:s1].ravel()
+                np.divide(e, d, out=d)
+            out[k] += d.reshape(nw, -1) @ wt[s0:s1].ravel()
     return out
 
 
