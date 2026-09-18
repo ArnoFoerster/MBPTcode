@@ -39,14 +39,20 @@ IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
 EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
               'imag-frequency': 'imagfrequency', 'space-time': 'space-time'}
 
+#: `self_consistency` values that enter the loop, and the screening each keeps:
+#: evGW rebuilds P0 and W from the iterate, evGW0 keeps the mean field's.
+EVGW_SCREENING = {'evgw': 'updated', 'ev': 'updated',
+                  'evgw0': 'fixed', 'ev0': 'fixed'}
+
 
 def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
-                    spin_channel, route_kwargs):
+                    spin_channel, screening, route_kwargs):
     """Quasiparticle energies in eV from the eigenvalue-self-consistent loop.
 
     The loop returns the whole converged spectrum, so the requested states are
     read straight out of it: an evGW quasiparticle energy IS the fixed point,
-    not a further correction applied to one.
+    not a further correction applied to one. `screening` is the loop's:
+    'updated' for evGW, 'fixed' for evGW0.
     """
     if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
         raise NotImplementedError(
@@ -60,7 +66,7 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
     eps_qp, info = evGW.evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
-                                         **route_kwargs)
+                                         screening=screening, **route_kwargs)
     if is_uhf:
         # the loop converges both channels at once; the caller asked for one
         nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]
@@ -104,8 +110,10 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     own eigenvalues. 'evGW' reinjects the quasiparticle
                     energies into G and P0 until they stop moving -- every
                     eigenvalue updated, DIIS-accelerated, convergence on the
-                    HOMO and LUMO, quadrature frozen at the first cycle. GW@RPA
-                    only, since that is what the loop drives.
+                    HOMO and LUMO, quadrature frozen at the first cycle. 'evGW0'
+                    reinjects them into G alone: the mean field's P0 and W
+                    stay, the poles of Sigma_c move; Casida route only. Both
+                    GW@RPA only, since that is what the loop drives.
     eps_anchor:     the eps_p that anchors w = eps_p + <Sigma_x - v_xc> +
                     Re Sigma_c(w), when it differs from the spectrum that built
                     the screening. That is the evGW case and the only one;
@@ -125,7 +133,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
-    if str(self_consistency).lower() in ('evgw', 'ev'):
+    consistency = str(self_consistency).lower()
+    if consistency in EVGW_SCREENING:
         # the loop takes the route's knobs by name, on the Casida route through
         # its own step and on the imaginary axis by calling back into this
         # function every cycle
@@ -133,7 +142,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                             dm_correction=dm_correction, tda=tda,
                             qp_solver=qp_solver, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
-                               state, spin_channel, route_kwargs)
+                               state, spin_channel, EVGW_SCREENING[consistency],
+                               route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
         # the anchor is a named argument here and a route keyword there
         if eps_anchor is not None:
@@ -298,6 +308,14 @@ def _channel_terms(mf, mol, setup, df, dm_correction, sigma_solvent, spin_channe
     xc_diagonal = _static_correction(mf, mol, setup['se_solver'], dm_correction,
                                      sigma_solvent, spin_channel, is_uhf)
     return eri_w_singlet, eri_w_triplet, xc_diagonal
+
+
+def _move_poles(se_solver, eps):
+    """The poles of Sigma_c at `eps`; the amplitudes, the spectrum's, stay."""
+    if se_solver.spin_mode == 'unrestricted':
+        se_solver.eps_a, se_solver.eps_b = eps
+    else:
+        se_solver.eps = eps
 
 
 def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
@@ -562,22 +580,27 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     return results
 
 
-def casida_evgw_step(mf, mol, df=True, eta=DEFAULT_BROADENING_ETA,
+def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
                      dm_correction=None, tda=False, qp_solver='pole_strength',
                      n_workers=None):
     """The map eps -> eps_new of an eigenvalue-self-consistent loop on the Casida
     route: GW@RPA, every orbital, in Hartree, its setup built once.
 
-    Each cycle solves the RPA Casida problem on `eps`, puts the poles of
-    Sigma_c at `eps` and anchors w = eps_p + <Sigma_x - v_xc> + Re Sigma_c(w)
-    on the mean field's eps_p. The keywords are `calc_qp_energy`'s.
+    screening: 'updated' (evGW) solves the RPA Casida problem on `eps` every
+        cycle; 'fixed' (evGW0) keeps the mean field's. Both put the poles of
+        Sigma_c at `eps` and anchor w = eps_p + <Sigma_x - v_xc> + Re Sigma_c(w)
+        on the mean field's eps_p.
+    The other keywords are `calc_qp_energy`'s.
 
     Built once, since none of it moves with the eigenvalues: the reaction
     field, the DF factors, the static W (a vertex would read it; the loop
-    refuses one) and <Sigma_Hx - v_Hxc> of every spin channel. The
-    self-energy solver is fresh per spectrum, since its amplitude cache keys
-    on the identity of X and Y.
+    refuses one) and <Sigma_Hx - v_Hxc> of every spin channel. 'fixed' also
+    keeps the one self-energy solver, whose amplitude cache keys on the
+    identity of X and Y; 'updated' takes a fresh one per spectrum for the same
+    reason.
     """
+    if screening not in ('updated', 'fixed'):
+        raise ValueError(f"screening={screening!r}: choose 'updated' or 'fixed'")
     is_uhf = isinstance(mf, scf.uhf.UHF)
     nocc = mf.nelec if is_uhf else mol.nelectron // 2
     channels = ('alpha', 'beta') if is_uhf else ('alpha',)
@@ -592,17 +615,25 @@ def casida_evgw_step(mf, mol, df=True, eta=DEFAULT_BROADENING_ETA,
     terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction, fields[ch][1],
                                 ch, is_uhf, nocc)
              for ch in channels}
+    if screening == 'fixed':
+        spectrum_mf = _casida_spectrum(setup['lr_solver'], nocc, 'RPA',
+                                       setup['w_aux'], tda, method_infos, methods,
+                                       is_uhf, df)
 
     def step(eps):
         eps = np.asarray(eps, float)
-        lr_solver = LinearResponseSolver(eps, coeff_df=setup['df_coeff'],
+        if screening == 'fixed':
+            spectrum, se_solver = spectrum_mf, setup['se_solver']
+            _move_poles(se_solver, eps)
+        else:
+            lr_solver = LinearResponseSolver(eps, coeff_df=setup['df_coeff'],
+                                             eri_chemist=setup['eri'],
+                                             spin_mode=setup['spin_mode'], eta=eta)
+            spectrum = _casida_spectrum(lr_solver, nocc, 'RPA', setup['w_aux'], tda,
+                                        method_infos, methods, is_uhf, df)
+            se_solver = SelfEnergySolver(eps, df_coeff=setup['df_coeff'],
                                          eri_chemist=setup['eri'],
                                          spin_mode=setup['spin_mode'], eta=eta)
-        spectrum = _casida_spectrum(lr_solver, nocc, 'RPA', setup['w_aux'], tda,
-                                    method_infos, methods, is_uhf, df)
-        se_solver = SelfEnergySolver(eps, df_coeff=setup['df_coeff'],
-                                     eri_chemist=setup['eri'],
-                                     spin_mode=setup['spin_mode'], eta=eta)
         out = []
         for ch in channels:
             eri_w_singlet, eri_w_triplet, xc_diagonal = terms[ch]

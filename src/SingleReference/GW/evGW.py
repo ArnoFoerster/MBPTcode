@@ -8,6 +8,9 @@ polarizability, and the cycle repeated to a fixed point:
     eps_qp, info = evgw_eigenvalues(mf, mol, mode='space-time')
     info['cycles'], info['converged'], info['residual_untested']
 
+evGW0 feeds it back into the Green's function alone, `screening='fixed'`: the
+mean field's P0 and W stay and the poles of Sigma_c move, on the Casida route.
+
 The equation stays ANCHORED on the mean field. w = eps_p^MF + <Sigma_x - v_xc>
 + Re Sigma_c(w) with Sigma_c screened by the current iterate
 """
@@ -23,6 +26,9 @@ from src.SingleReference.GW import qp_energy  # module import: it imports this f
 
 #: The routes the dispatcher knows, in its own naming.
 MODES = ('casida', 'imagfrequency', 'space-time')
+#: What the iterate screens: P0 and W rebuilt from it (evGW), or the mean
+#: field's kept and only the poles of Sigma_c moved (evGW0).
+SCREENINGS = ('updated', 'fixed')
 
 
 def shifted_mean_field(mf, eps):
@@ -56,8 +62,8 @@ def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
     return np.asarray(out, float) / HARTREE_TO_EV
 
 
-def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
-                     max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
+def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
+                     converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
                      diis_size=EVGW_DIIS_SIZE, diis_start=EVGW_DIIS_START,
                      damping=EVGW_DAMPING, verbose=False, **route_kw):
     """(eps_qp, info): the eigenvalue-self-consistent GW spectrum, in Hartree.
@@ -68,6 +74,9 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
     mode: 'casida', 'imagfrequency' or 'space-time', and `route_kw` goes to
         that route: the Casida route's step takes it by name, the others
         through `calc_qp_energy`.
+    screening: 'updated' (evGW) rebuilds P0 and W from the iterate every
+        cycle; 'fixed' (evGW0) keeps the mean field's and moves the poles of
+        Sigma_c alone, on the Casida route.
     converge_on: orbitals whose movement decides convergence. Default is the
         HOMO and the LUMO.
     tol:    convergence on max |delta eps| over `converge_on`, in Hartree.
@@ -83,6 +92,14 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
     mol = mf.mol if mol is None else mol
     if mode not in MODES:
         raise ValueError(f'mode={mode!r}: choose one of {MODES}')
+    if screening not in SCREENINGS:
+        raise ValueError(f'screening={screening!r}: choose one of {SCREENINGS}')
+    if screening == 'fixed' and mode != 'casida':
+        raise NotImplementedError(
+            f"screening='fixed' (evGW0) runs on the Casida route; mode={mode!r} "
+            f"builds chi0 from the spectrum it is handed, so its W would follow "
+            f"the iterate")
+    label = 'evGW0' if screening == 'fixed' else 'evGW'
     eps0 = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     unrestricted = eps0.ndim == 2
     channels = ('alpha', 'beta') if unrestricted else ('alpha',)
@@ -101,7 +118,7 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
     untested = np.setdiff1d(flat, tested)
 
     if mode == 'casida':
-        step = qp_energy.casida_evgw_step(mf, mol, **route_kw)
+        step = qp_energy.casida_evgw_step(mf, mol, screening, **route_kw)
     else:
         def step(eps):
             view = shifted_mean_field(mf, eps)
@@ -124,7 +141,7 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
         if verbose:
             top = np.atleast_2d(eps_new)[0]
             gap = (top[noccs[0]] - top[noccs[0] - 1]) * HARTREE_TO_EV
-            print(f'  evGW cycle {cycle + 1:2d}  max|d eps| '
+            print(f'  {label} cycle {cycle + 1:2d}  max|d eps| '
                   f'{delta * HARTREE_TO_EV:9.6f} eV   gap {gap:8.4f} eV'
                   f'   (untested {rest * HARTREE_TO_EV:8.5f} eV)')
         if delta < tol:
@@ -141,7 +158,7 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
 
     if not converged:
         warnings.warn(
-            f'evGW did not converge in {max_cycle} cycles: max |delta eps| is '
+            f'{label} did not converge in {max_cycle} cycles: max |delta eps| is '
             f'{history[-1] * HARTREE_TO_EV:.4f} eV against a tolerance of '
             f'{tol * HARTREE_TO_EV:.4f} eV. The spectrum returned is the last '
             f'iterate, not a fixed point; raise max_cycle or damping.',
@@ -149,6 +166,6 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
 
     return eps, {'cycles': len(history), 'converged': converged,
                  'history': history, 'states': states, 'mode': mode,
-                 'converge_on': tested,
+                 'screening': screening, 'converge_on': tested,
                  'residual_untested': untested_history[-1],
                  'eps_mean_field': eps0, 'shift': eps - eps0}

@@ -12,6 +12,9 @@ version still runs, still prints plausible numbers and never converges, so the
 test asserts it FAILS -- otherwise nothing here would notice the anchor being
 dropped.
 
+evGW0 (`screening='fixed'`) is gated on the Casida problem being solved once
+for the whole loop and on its gap landing between G0W0 and evGW.
+
 Run: python tests/test_evgw.py
 """
 import os
@@ -30,6 +33,7 @@ from src.SingleReference.GW.imaginary_time import (DEFAULT_TAU_TARGET,
                                                    minimax_points_for_gw)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
+import src.SingleReference.GW.qp_energy as qpe
 import src.SingleReference.GW.space_time as gwst
 import src.SingleReference.LinearResponse.davidson as dv
 
@@ -298,6 +302,17 @@ def test_the_refusals(mf):
     except ValueError as exc:
         ok &= check('choose one of' in str(exc), 'an unknown mode is refused')
     try:
+        evgw_eigenvalues(mf, mf.mol, mode='casida', screening='nonsense')
+        ok &= check(False, 'an unknown screening is refused')
+    except ValueError as exc:
+        ok &= check('choose one of' in str(exc), 'an unknown screening is refused')
+    try:
+        evgw_eigenvalues(mf, mf.mol, mode='space-time', screening='fixed')
+        ok &= check(False, "screening='fixed' off the Casida route is refused")
+    except NotImplementedError as exc:
+        ok &= check('Casida route' in str(exc),
+                    "screening='fixed' off the Casida route is refused")
+    try:
         dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, nroots=1,
                           probe=False, self_consistency='qsGW')
         ok &= check(False, "an unknown self_consistency is refused")
@@ -424,6 +439,66 @@ def test_an_unrestricted_reference_is_driven_channel_by_channel():
     return ok
 
 
+def test_evgw0_keeps_w_and_moves_the_poles():
+    """evGW0 reinjects the eigenvalues into G alone: the RPA Casida problem is
+    solved once for the whole loop, and only the poles of Sigma_c follow the
+    iterate. Its gap lands between G0W0 and evGW on water: the moved poles open
+    it, the frozen W leaves it below the loop that screens less every cycle.
+    The first cycle IS the Casida G0W0, or the loop starts elsewhere."""
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis='cc-pvdz', verbose=0)
+    mf = dft.RKS(mol)
+    mf.xc = 'pbe0'
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    nocc = mol.nelectron // 2
+    states = list(range(len(np.asarray(mf.mo_energy))))
+
+    def gap(e):
+        return (e[nocc] - e[nocc - 1]) * HARTREE_TO_EV
+
+    builds = []
+    original = qpe._casida_spectrum
+
+    def counted(*args, **kw):
+        builds.append(1)
+        return original(*args, **kw)
+
+    qpe._casida_spectrum = counted
+    try:
+        eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida',
+                                            screening='fixed')
+        n_fixed = len(builds)
+        builds.clear()
+        eps_updated, updated = evgw_eigenvalues(mf, mol, mode='casida')
+        n_updated = len(builds)
+    finally:
+        qpe._casida_spectrum = original
+    _, one = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed',
+                              max_cycle=1, tol=0.0)
+    first = one['eps_mean_field'] + one['shift']
+    g0w0 = calc_qp_energy(mf, mode='casida', state=states)
+    g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
+
+    ok = check(fixed['converged'] and fixed['screening'] == 'fixed',
+               'evGW0 converges',
+               f"{fixed['cycles']} cycles, last residual "
+               f"{fixed['history'][-1] * HARTREE_TO_EV:.2e} eV")
+    d = np.abs(first - g0w0).max()
+    ok &= check(d < 1e-10, 'the first evGW0 cycle IS the Casida G0W0',
+                f'max |d eps| {d:.1e} Ha')
+    ok &= check(n_fixed == 1 and n_updated == updated['cycles'],
+                'one Casida solve for the whole evGW0 loop, one per evGW cycle',
+                f"{n_fixed} vs {n_updated} in {updated['cycles']} cycles")
+    ok &= check(gap(g0w0) < gap(eps_fixed) < gap(eps_updated),
+                'G0W0 < evGW0 < evGW on the gap',
+                f'{gap(g0w0):.3f} < {gap(eps_fixed):.3f} < {gap(eps_updated):.3f} eV')
+    homo = calc_qp_energy(mf, mode='casida', self_consistency='evGW0')
+    ok &= check(abs(homo - eps_fixed[nocc - 1] * HARTREE_TO_EV) < 1e-8,
+                "self_consistency='evGW0' returns the evGW0 fixed point")
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -450,5 +525,7 @@ if __name__ == '__main__':
     all_ok &= test_the_refusals(mf)
     print('\n-- 6. an unrestricted reference')
     all_ok &= test_an_unrestricted_reference_is_driven_channel_by_channel()
+    print('\n-- 7. evGW0: W of the mean field, poles of the iterate')
+    all_ok &= test_evgw0_keeps_w_and_moves_the_poles()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
