@@ -5,6 +5,26 @@ from src.Base.constants import (CASIDA_NORM_TOL,
                                 DEFAULT_BROADENING_ETA)
 from src.SingleReference.LinearResponse import imaginary_frequency
 
+
+def gram_product(C, block_elems=2**27):
+    """V = C^T C for C of shape (naux, n), assembled in row blocks of at most
+    block_elems values.
+
+    Written as ``C.T @ C`` the product goes to the BLAS symmetric rank-k kernel,
+    where the OpenBLAS bundled with the numpy wheel segfaults once n^2 reaches a
+    few 10^9 values. A row block V[i0:i1] = C[:, i0:i1]^T C is a plain GEMM on
+    distinct buffers, which holds at those sizes, so every block takes that
+    path, straight into its slice of V.
+    """
+    n = C.shape[1]
+    V = np.empty((n, n), dtype=np.result_type(C, C))
+    rows = max(1, block_elems // max(n, 1))
+    for i0 in range(0, n, rows):
+        i1 = min(i0 + rows, n)
+        np.matmul(C[:, i0:i1].T, C, out=V[i0:i1])
+    return V
+
+
 class LinearResponseSolver:
     """RPA and BSE linear response solver, restricted (RHF/singlet/triplet) or unrestricted (UHF), DF or full 4-center ERIs."""
     def __init__(self, eps, coeff_df=None, eri_chemist=None, spin_mode='restricted', eta=DEFAULT_BROADENING_ETA,
@@ -320,7 +340,7 @@ class LinearResponseSolver:
 
         # Optimize indexing with 3D advanced indexing
         C_ov_flat = coeff_all[:, occ[:, None], virt].reshape(naux, n_pair)
-        V_iajb = C_ov_flat.T @ C_ov_flat
+        V_iajb = gram_product(C_ov_flat)
 
         if not lBSE:
             # A = diag(d) + factor V and B = factor V, assembled in V's
