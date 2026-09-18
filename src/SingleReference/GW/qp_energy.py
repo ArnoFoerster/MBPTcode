@@ -126,10 +126,12 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
     if str(self_consistency).lower() in ('evgw', 'ev'):
-        # each evGW cycle calls back into this function, so the scan's thread
-        # count travels as a route keyword
-        if n_workers is not None:
-            route_kwargs = dict(route_kwargs, n_workers=n_workers)
+        # the loop takes the route's knobs by name, on the Casida route through
+        # its own step and on the imaginary axis by calling back into this
+        # function every cycle
+        route_kwargs = dict(route_kwargs, df=df, eta=eta,
+                            dm_correction=dm_correction, tda=tda,
+                            qp_solver=qp_solver, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, spin_channel, route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
@@ -148,24 +150,9 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
     nocc = mf.nelec if is_uhf else mol.nelectron // 2
-    nocc_spin = (nocc[0] if spin_channel == 'alpha' else nocc[1]) if is_uhf else nocc
-    eps = get_orbital_energies(mf, representation='spatial')
+    nocc_spin = _channel(nocc, spin_channel, is_uhf)
     states = _resolve_states(state, nocc_spin)
-
-    # The reaction field's one-body term, None in the gas phase. Duchemin et
-    # al. Eq. (18) where it is available -- the self-polarization of the
-    # orbital carrying the added charge in the SCREENED reaction field, built
-    # once per mean field so this route and the imaginary-axis ones read the
-    # same array. `cohsex_correction` is the unrestricted fallback: it sums the
-    # BARE vtilde over every orbital and differs by 0.39 eV of quasiparticle
-    # gap on water in water.
-    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
-    if shift is not None:
-        sigma_solvent = np.diag(shift)
-    else:
-        sigma_solvent = solvent_static_selfenergy(mf, mol)
-        if isinstance(sigma_solvent, tuple):
-            sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
+    shift, sigma_solvent = _reaction_field_terms(mf, mol, nocc_spin, spin_channel)
 
     if polarizability.upper() in ('CCSD', 'CCSDT'):
         results = _qp_energy_cc_polarizability(
@@ -179,38 +166,19 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # Fail fast on typos rather than silently falling back to GW.
     method_infos = {m: get_method_info(m) for m in methods}
 
-    with bare_self_energy(mf, shift):
-        df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
-    spin_mode = 'unrestricted' if is_uhf else 'restricted'
-    lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri,
-                                     spin_mode=spin_mode, eta=eta)
-    se_solver = SelfEnergySolver(eps, df_coeff=df_coeff, eri_chemist=eri,
-                                 spin_mode=spin_mode, eta=eta)
-    w_aux = lr_solver.static_screening_aux(nocc)
-    spectrum = _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda,
-                                method_infos, methods, is_uhf, df)
+    setup = _casida_setup(mf, mol, df, eta, shift, is_uhf, nocc)
+    se_solver = setup['se_solver']
+    spectrum = _casida_spectrum(setup['lr_solver'], nocc, polarizability,
+                                setup['w_aux'], tda, method_infos, methods, is_uhf,
+                                df)
+    eri_w_singlet, eri_w_triplet, xc_diagonal = _channel_terms(
+        mf, mol, setup, df, dm_correction, sigma_solvent, spin_channel, is_uhf,
+        nocc)
 
-    # A vertex contracts against W: the auxiliary form under DF, the explicit
-    # four-index one otherwise.
-    if df:
-        eri_w_singlet = eri_w_triplet = w_aux
-    else:
-        eri_w_singlet, eri_w_triplet = lr_solver.construct_4d_w_rpa(nocc, spin_channel)
-
-    eps_spin = (eps[0] if spin_channel == 'alpha' else eps[1]) if is_uhf else eps
     # The equation is anchored on eps_p while the solvers above screen with
     # whatever spectrum `mf` carried; evGW is the case where the two differ.
-    if eps_anchor is None:
-        anchor_spin = eps_spin
-    else:
-        anchor = np.asarray(eps_anchor, float)
-        anchor_spin = ((anchor[0] if spin_channel == 'alpha' else anchor[1])
-                       if is_uhf else anchor)
-
-    # <Sigma_Hx - v_Hxc> is one matrix for the whole spectrum; built per state
-    # it was 85 % of an evGW cycle that asks for every orbital.
-    xc_diagonal = _static_correction(mf, mol, se_solver, dm_correction,
-                                     sigma_solvent, spin_channel, is_uhf)
+    anchor = setup['eps'] if eps_anchor is None else np.asarray(eps_anchor, float)
+    anchor_spin = _channel(anchor, spin_channel, is_uhf)
     energies = qp_energies_from_spectrum(
         se_solver, nocc, spectrum, method_infos, methods, spin_channel, states,
         eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin, xc_diagonal,
@@ -260,6 +228,76 @@ def _two_electron_integrals(mol, mf, df, is_uhf):
         S_ab = mo_a.T @ mol.intor_symmetric('int1e_ovlp') @ mo_b
         df_coeff = (df_a, df_b, np.einsum('ia, pik -> pka', S_ab, df_a))
     return df_coeff, None
+
+
+def _channel(x, spin_channel, is_uhf):
+    """One spin channel's entry of a per-channel pair; `x` itself when restricted."""
+    if not is_uhf:
+        return x
+    return x[0] if spin_channel == 'alpha' else x[1]
+
+
+def _reaction_field_terms(mf, mol, nocc_spin, spin_channel):
+    """(shift, sigma_solvent): the environment's one-body terms, None in the gas
+    phase.
+
+    Duchemin et al. Eq. (18) where it is available -- the self-polarization of
+    the orbital carrying the added charge in the SCREENED reaction field, built
+    once per mean field so this route and the imaginary-axis ones read the
+    same array; `sigma_solvent` is then its diagonal. `cohsex_correction` is
+    the unrestricted fallback: it sums the BARE vtilde over every orbital and
+    differs by 0.39 eV of quasiparticle gap on water in water.
+    """
+    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
+    if shift is not None:
+        return shift, np.diag(shift)
+    sigma_solvent = solvent_static_selfenergy(mf, mol)
+    if isinstance(sigma_solvent, tuple):
+        sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
+    return None, sigma_solvent
+
+
+def _casida_setup(mf, mol, df, eta, shift, is_uhf, nocc):
+    """What the Casida route builds from the mean field before a spectrum screens.
+
+    A dict: 'eps', the mean field's own spectrum; 'df_coeff' and 'eri', the
+    three-index factors or the chemist ERI, built with the environment off
+    where `shift` carries it (`bare_self_energy`); 'spin_mode'; 'lr_solver' and
+    'se_solver' on that spectrum; 'w_aux', the static RPA W_aux a vertex or a
+    BSE screening contracts against. None of it moves with the eigenvalues, so
+    an eigenvalue-self-consistent loop builds it once and rebuilds only the
+    Casida problem and the poles of Sigma_c per cycle.
+    """
+    eps = get_orbital_energies(mf, representation='spatial')
+    with bare_self_energy(mf, shift):
+        df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
+    spin_mode = 'unrestricted' if is_uhf else 'restricted'
+    lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri,
+                                     spin_mode=spin_mode, eta=eta)
+    se_solver = SelfEnergySolver(eps, df_coeff=df_coeff, eri_chemist=eri,
+                                 spin_mode=spin_mode, eta=eta)
+    return {'eps': eps, 'df_coeff': df_coeff, 'eri': eri, 'spin_mode': spin_mode,
+            'lr_solver': lr_solver, 'se_solver': se_solver,
+            'w_aux': lr_solver.static_screening_aux(nocc)}
+
+
+def _channel_terms(mf, mol, setup, df, dm_correction, sigma_solvent, spin_channel,
+                   is_uhf, nocc):
+    """(eri_w_singlet, eri_w_triplet, xc_diagonal) of one spin channel.
+
+    A vertex contracts against W: the auxiliary form under DF, the explicit
+    four-index one otherwise. <Sigma_Hx - v_Hxc> is one matrix for the whole
+    spectrum; built per state it was 85 % of an evGW cycle that asks for every
+    orbital.
+    """
+    if df:
+        eri_w_singlet = eri_w_triplet = setup['w_aux']
+    else:
+        eri_w_singlet, eri_w_triplet = setup['lr_solver'].construct_4d_w_rpa(
+            nocc, spin_channel)
+    xc_diagonal = _static_correction(mf, mol, setup['se_solver'], dm_correction,
+                                     sigma_solvent, spin_channel, is_uhf)
+    return eri_w_singlet, eri_w_triplet, xc_diagonal
 
 
 def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
@@ -522,6 +560,60 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
             p, out = solve_state(i)
             results[p] = out
     return results
+
+
+def casida_evgw_step(mf, mol, df=True, eta=DEFAULT_BROADENING_ETA,
+                     dm_correction=None, tda=False, qp_solver='pole_strength',
+                     n_workers=None):
+    """The map eps -> eps_new of an eigenvalue-self-consistent loop on the Casida
+    route: GW@RPA, every orbital, in Hartree, its setup built once.
+
+    Each cycle solves the RPA Casida problem on `eps`, puts the poles of
+    Sigma_c at `eps` and anchors w = eps_p + <Sigma_x - v_xc> + Re Sigma_c(w)
+    on the mean field's eps_p. The keywords are `calc_qp_energy`'s.
+
+    Built once, since none of it moves with the eigenvalues: the reaction
+    field, the DF factors, the static W (a vertex would read it; the loop
+    refuses one) and <Sigma_Hx - v_Hxc> of every spin channel. The
+    self-energy solver is fresh per spectrum, since its amplitude cache keys
+    on the identity of X and Y.
+    """
+    is_uhf = isinstance(mf, scf.uhf.UHF)
+    nocc = mf.nelec if is_uhf else mol.nelectron // 2
+    channels = ('alpha', 'beta') if is_uhf else ('alpha',)
+    methods = ['GW']
+    method_infos = {'GW': get_method_info('GW')}
+
+    fields = {ch: _reaction_field_terms(mf, mol, _channel(nocc, ch, is_uhf), ch)
+              for ch in channels}
+    setup = _casida_setup(mf, mol, df, eta, fields['alpha'][0], is_uhf, nocc)
+    eps0 = np.asarray(setup['eps'], float)
+    states = list(range(eps0.shape[-1]))
+    terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction, fields[ch][1],
+                                ch, is_uhf, nocc)
+             for ch in channels}
+
+    def step(eps):
+        eps = np.asarray(eps, float)
+        lr_solver = LinearResponseSolver(eps, coeff_df=setup['df_coeff'],
+                                         eri_chemist=setup['eri'],
+                                         spin_mode=setup['spin_mode'], eta=eta)
+        spectrum = _casida_spectrum(lr_solver, nocc, 'RPA', setup['w_aux'], tda,
+                                    method_infos, methods, is_uhf, df)
+        se_solver = SelfEnergySolver(eps, df_coeff=setup['df_coeff'],
+                                     eri_chemist=setup['eri'],
+                                     spin_mode=setup['spin_mode'], eta=eta)
+        out = []
+        for ch in channels:
+            eri_w_singlet, eri_w_triplet, xc_diagonal = terms[ch]
+            energies = qp_energies_from_spectrum(
+                se_solver, nocc, spectrum, method_infos, methods, ch, states,
+                eri_w_singlet, eri_w_triplet, is_uhf, df, _channel(eps0, ch, is_uhf),
+                xc_diagonal, qp_solver=qp_solver, n_workers=n_workers)
+            out.append([energies[p]['GW'] for p in states])
+        return np.asarray(out, float).reshape(eps0.shape)
+
+    return step
 
 
 def _print_spectral_function(se_solver, p_state, method, qp_ev, nocc, omega_val,

@@ -66,7 +66,8 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
     screens.
 
     mode: 'casida', 'imagfrequency' or 'space-time', and `route_kw` goes to
-        that route through `calc_qp_energy`.
+        that route: the Casida route's step takes it by name, the others
+        through `calc_qp_energy`.
     converge_on: orbitals whose movement decides convergence. Default is the
         HOMO and the LUMO.
     tol:    convergence on max |delta eps| over `converge_on`, in Hartree.
@@ -99,15 +100,21 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', converge_on=None,
                          'would decide convergence')
     untested = np.setdiff1d(flat, tested)
 
+    if mode == 'casida':
+        step = qp_energy.casida_evgw_step(mf, mol, **route_kw)
+    else:
+        def step(eps):
+            view = shifted_mean_field(mf, eps)
+            return np.array([quasiparticle_spectrum(view, mol, mode, eps0,
+                                                    spin_channel=ch, **route_kw)
+                             for ch in channels]).reshape(eps0.shape)
+
     eps = eps0.copy()
     history, untested_history = [], []
     converged = False
     accel = DIIS(int(diis_size), start_iter=int(diis_start)) if diis_size else None
     for cycle in range(int(max_cycle)):
-        view = shifted_mean_field(mf, eps)
-        eps_new = np.array([quasiparticle_spectrum(view, mol, mode, eps0,
-                                                   spin_channel=ch, **route_kw)
-                            for ch in channels]).reshape(eps0.shape)
+        eps_new = step(eps)
         residual = (eps_new - eps).ravel()
         delta = float(np.abs(residual[tested]).max())
         rest = (float(np.abs(residual[untested]).max())
