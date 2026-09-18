@@ -430,6 +430,18 @@ def test_an_unrestricted_reference_is_driven_channel_by_channel():
                              spin_channel=ch)
         ok &= check(abs(got - eps[row, n - 1] * HARTREE_TO_EV) < 1e-8,
                     f'the dispatcher returns the {label} fixed point')
+    # evGW0 through the same channel loop: the poles of each channel move, the
+    # one Casida spectrum stays, so each channel's gap opens less than evGW's
+    eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed')
+    ordered = True
+    for ch, n, row in (('alpha', na, 0), ('beta', nb, 1)):
+        g0w0 = calc_qp_energy(mf, mode='casida', state=[n - 1, n], spin_channel=ch)
+        ordered &= (g0w0[n]['GW'] - g0w0[n - 1]['GW']
+                    < (eps_fixed[row, n] - eps_fixed[row, n - 1]) * HARTREE_TO_EV
+                    < (eps[row, n] - eps[row, n - 1]) * HARTREE_TO_EV)
+    ok &= check(fixed['converged'] and ordered,
+                'evGW0 converges both channels, G0W0 < evGW0 < evGW on each gap',
+                f"{fixed['cycles']} cycles")
     try:
         evgw_eigenvalues(mf, mol, mode='space-time')
         ok &= check(False, 'the imaginary-axis routes refuse it themselves')
