@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from pyscf import scf
+from threadpoolctl import threadpool_limits
 
 from src.Base.constants import (get_method_info, DEFAULT_BROADENING_ETA,
                                 HARTREE_TO_EV)
@@ -119,8 +120,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     inside every evGW cycle on it). The
                     scan uses a thread pool by default of OMP_NUM_THREADS
                     threads, else one per CPU in the process's affinity mask,
-                    never more than that mask holds. n_workers=1, or
-                    threadpoolctl not being installed, gives the serial scan.
+                    never more than that mask holds. n_workers=1 gives the
+                    serial scan.
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
@@ -459,8 +460,7 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     qp_solver : str, root selection as in solve_qp_equation
     n_workers : int or None
         None takes OMP_NUM_THREADS, else the CPUs in the affinity mask; any
-        value is capped at that mask (see _resolve_workers); 1 is serial;
-        threadpoolctl not being installed also gives the serial scan.
+        value is capped at that mask (see _resolve_workers); 1 is serial.
 
     Returns
     -------
@@ -510,22 +510,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     p0, out0 = solve_state(0)
     results[p0] = out0
     rest = range(1, len(states))
-    requested_workers = n_workers
     n_workers = _resolve_workers(n_workers, len(states))
     run_parallel = n_workers > 1 and len(states) > 1
-    if run_parallel:
-        try:
-            from threadpoolctl import threadpool_limits
-        except ImportError as exc:
-            if requested_workers is not None:
-                raise ImportError(
-                    "qp_energies_from_spectrum with n_workers > 1 needs "
-                    "threadpoolctl (pip install threadpoolctl); n_workers=1 "
-                    "is the serial scan") from exc
-            warnings.warn(
-                "threadpoolctl is not installed; running the per-state QP scan "
-                "serially.")
-            run_parallel = False
     if run_parallel:
         with threadpool_limits(limits=1, user_api='blas'):
             with ThreadPoolExecutor(max_workers=n_workers) as pool:

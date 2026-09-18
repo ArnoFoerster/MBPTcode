@@ -104,8 +104,9 @@ Requires Python 3.10+, NumPy, SciPy, PySCF, opt_einsum and threadpoolctl:
 pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
 
-`threadpoolctl` lets the quasiparticle root scan run in a thread pool; without it
-the scan runs serially. Thread settings are under [Threads](#threads).
+`threadpoolctl` pins BLAS to one thread inside the quasiparticle root scan's
+thread pool and is imported at module load by `GW/qp_energy.py`. Thread
+settings are under [Threads](#threads).
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
