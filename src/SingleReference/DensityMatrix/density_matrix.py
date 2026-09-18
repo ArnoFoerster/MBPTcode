@@ -22,6 +22,8 @@ from src.Base.constants import (
     CPHF_TOL,
 )
 from src.Base.utils.grids import minimax_time_grid
+from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
+    MPnDensityDriverUnrestricted)
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted,
 )
@@ -373,7 +375,6 @@ def semicanonicalize_restricted(mf, mol=None, dm=None, nocc=None):
     in the new basis, with a residual ov coupling f_ov_semi
     that cannot be rotated away. See _semicanonicalize_fock_blocks.
     """
-    from pyscf import scf
     mol = mol if mol is not None else mf.mol
     nocc = nocc if nocc is not None else mol.nelectron // 2
     dm = dm if dm is not None else mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
@@ -398,7 +399,6 @@ def semicanonicalize_uhf(mf, mol=None, dm=None):
     (mo_coeff_semi_a, eps_semi_a, f_ov_semi_a, U_oo_a, U_vv_a,
      mo_coeff_semi_b, eps_semi_b, f_ov_semi_b, U_oo_b, U_vv_b).
     """
-    from pyscf import scf
     mol = mol if mol is not None else mf.mol
     nocc_a, nocc_b = mf.nelec
     dm = dm if dm is not None else mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
@@ -1505,7 +1505,6 @@ def compute_mp3_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_ker
         eps_a, eps_b = get_orbital_energies(mf, representation='spatial')
         g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf)
 
-        from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
         driver = MPnDensityDriverUnrestricted(np.diag(eps_a), np.diag(eps_b),
                                               g_aaaa, g_abab, g_bbbb, nocc_a, nocc_b)
         (oo2_a, oo2_b, ov2_a, ov2_b, vv2_a, vv2_b), (oo3_a, oo3_b, ov3_a, ov3_b, vv3_a, vv3_b) = \
@@ -1583,7 +1582,6 @@ def compute_mp2_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_ker
         eps_a, eps_b = get_orbital_energies(mf, representation='spatial')
         g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf)
 
-        from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
         driver = MPnDensityDriverUnrestricted(np.diag(eps_a), np.diag(eps_b),
                                               g_aaaa, g_abab, g_bbbb, nocc_a, nocc_b)
         oo_a, oo_b, ov_a, ov_b, vv_a, vv_b = driver.compute_delta_gamma2()

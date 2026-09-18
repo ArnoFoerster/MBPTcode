@@ -27,6 +27,7 @@ from src.SingleReference.ADC import adc_u_utils
 from src.SingleReference.ADC import adc_u_dense_full, adc_u_dense_df
 from src.SingleReference.ADC import adc_u_sigma_full, adc_u_sigma_df
 from src.SingleReference.ADC import adc_r_driver, adc_u_driver
+from src.SingleReference.ADC import spin_adapt  # module import: it imports this file
 from src.SingleReference.ADC.solve import (diag_dense, lanczos_spectral,
                                            downfolded_seed_vectors,
                                            select_resonant_configs,
@@ -612,9 +613,8 @@ class ADCSolverRestricted:
         every block obtained by the numerically-validated isometry T rather
         than a re-derived CSF formula."""
         if getattr(self, '_csf_adapter', None) is None:
-            # import cycle: spin_adapt imports ADCSolverRestricted from here
-            from src.SingleReference.ADC.spin_adapt import ADCSolverCSF
-            self._csf_adapter = ADCSolverCSF(self._get_spin_orbital_solver())
+            self._csf_adapter = spin_adapt.ADCSolverCSF(
+                self._get_spin_orbital_solver())
         return self._csf_adapter
 
     @staticmethod

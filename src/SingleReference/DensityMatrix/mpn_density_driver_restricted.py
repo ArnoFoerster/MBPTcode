@@ -39,6 +39,8 @@ didn't expose it: max diff was exactly 0, not just small). The "unreversed,
 sign=+1" convention below was confirmed to reproduce that same oracle's N^(2)
 value bit-for-bit (0.008944961578635474 both), not just approximately.
 """
+import inspect
+
 import numpy as np
 
 from src.SingleReference.DensityMatrix.generated_mpn_restricted import mpn_density_pieces_restricted as gen
@@ -330,6 +332,8 @@ def compute_delta_gamma2_df_streamed(B_aa, eps, nocc, dh=None, dp=None, e_ai=Non
     (cancels in the bilinears, explicit in the linear t1_2 numerator
     terms, which reproduce gen_df.t1_2_aa_numerator_df's six terms
     chunk-by-chunk)."""
+    # call-time import: ADC/__init__ imports base, whose chain reaches this
+    # module through EpsteinNesbet before its names exist
     from src.SingleReference.ADC.adc_r_utils import _u2_2p1h_amplitude_chunks
     norb = B_aa.shape[1]
     no, nv = nocc, norb - nocc
@@ -967,7 +971,6 @@ class MPnDensityDriverRestricted:
         materialized t2_3 to the minimax accuracy (converges with ntau; gate
         tests/test_mp4_t2_3_amplitude.py, 3-10e-9 at ntau=6 on NH3). Returns
         (t2_3_aaaa, t2_3_abab)."""
-        import inspect
         args = self._args()
         no, nv = self.no, self.nv
         d2 = _denom_restricted(self._eps_a, 2, no, nv)
@@ -1007,7 +1010,6 @@ class MPnDensityDriverRestricted:
         compute_t1_4. == the materialized t1_4 to the minimax accuracy
         (5.6e-10 @ntau=6 -> 4.5e-13 @ntau=10 on NH3; gate
         tests/test_mp4_t1_4_laplace.py). Returns t1_4_aa."""
-        import inspect
         d1 = _denom_restricted(self._eps_a, 1, self.no, self.nv)
         pool = {**self._args(), 'eps_a': self._eps_a, 'ntau': ntau,
                 't1_3_aa': t1_3_aa, 't2_3_aaaa': t2_3_aaaa, 't2_3_abab': t2_3_abab,

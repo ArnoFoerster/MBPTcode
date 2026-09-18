@@ -1,11 +1,13 @@
 import numpy as np
+from pyscf import scf, dft
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.base import get_occ_virt_indices
 from src.Base.constants import DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE, get_method_info
 from src.Base.solvent_screening import solvent_static_selfenergy
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.Solvers.qp_equation import solve_qp_equation_newton
+from src.Solvers.qp_equation import (solve_qp_equation_graphical,
+                                     solve_qp_equation_newton)
 
 # 'PSD3' is intentionally absent -- unimplemented, raises ValueError rather than
 # silently falling back to plain GW.
@@ -509,7 +511,6 @@ class SelfEnergySolver(AmplitudeGenerator):
                         "is restricted-only, like the rest of this method")
                 xc_correction += sigma_solvent[p_state, p_state]
         if mf is not None and mol is not None and hasattr(mf, 'xc'):
-            from pyscf import scf, dft
             dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
             V_Hxc = mf.get_veff(mol, dm)
             if isinstance(mf, (scf.uhf.UHF, dft.uks.UKS)):
@@ -586,7 +587,6 @@ class SelfEnergySolver(AmplitudeGenerator):
                     )
                     
         if solver_mode == 'graphical':
-            from src.Solvers.qp_equation import solve_qp_equation_graphical
             qp = solve_qp_equation_graphical(func, eps[p_state])
         else:
             qp = solve_qp_equation_newton(func, eps[p_state])

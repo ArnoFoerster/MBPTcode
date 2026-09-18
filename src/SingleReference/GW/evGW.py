@@ -19,7 +19,7 @@ from src.Base.constants import (EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
                                 EVGW_MAX_CYCLE, EVGW_TOL, HARTREE_TO_EV)
 from src.Base.pyscf_interface import get_orbital_energies
 from src.SingleReference.CC.diis import DIIS
-from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.SingleReference.GW import qp_energy  # module import: it imports this file
 
 #: The routes the dispatcher knows, in its own naming.
 MODES = ('casida', 'imagfrequency', 'space-time')
@@ -47,9 +47,10 @@ def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
     with the spectrum `mf` carries and anchored on `eps_anchor`.
     """
     n = np.asarray(get_orbital_energies(mf, representation='spatial')).shape[-1]
-    out = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', mode=mode,
-                         state=list(range(n)), eps_anchor=eps_anchor,
-                         spin_channel=spin_channel, **route_kw)
+    out = qp_energy.calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
+                                   mode=mode, state=list(range(n)),
+                                   eps_anchor=eps_anchor,
+                                   spin_channel=spin_channel, **route_kw)
     if isinstance(out, dict):
         out = [out[p]['GW'] for p in range(n)]
     return np.asarray(out, float) / HARTREE_TO_EV

@@ -29,6 +29,7 @@ from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.cc_polarizability import GWCCSelfEnergy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
+from src.SingleReference.GW import evGW  # module import: evGW imports this file
 from src.Solvers.qp_equation import solve_qp_equation
 
 IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
@@ -46,9 +47,6 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
     read straight out of it: an evGW quasiparticle energy IS the fixed point,
     not a further correction applied to one.
     """
-    # cycle: the loop asks this dispatcher for the spectrum every cycle
-    from src.SingleReference.GW.evGW import evgw_eigenvalues
-
     if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
         raise NotImplementedError(
             f'self_consistency=evGW drives GW@RPA only, not '
@@ -60,8 +58,8 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
                          f"{sorted(set(EVGW_MODES))}")
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
-    eps_qp, info = evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
-                                    **route_kwargs)
+    eps_qp, info = evGW.evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
+                                         **route_kwargs)
     if is_uhf:
         # the loop converges both channels at once; the caller asked for one
         nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]

@@ -4,6 +4,10 @@ production open-shell EN route), and the matrix-free ingredient set."""
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.SingleReference.DensityMatrix.generated_mpn import (
+    mpn_density_pieces as mpn_gen)
+from src.SingleReference.DensityMatrix.mpn_density_driver import (
+    MPnDensityDriver, _denom, g_vvoo_df, t1_2_numerator_df)
 from src.SingleReference.EpsteinNesbet.shifts import epstein_nesbet_denominator
 
 
@@ -23,15 +27,10 @@ def u1_dressing_shift(s, nocc, t2_ijcd):
     dressed t2 fed to apply_U_2h1p/apply_U_2p1h (identically ~0 for bare
     t2): the exact residual of the telescoping (l1f - eps_p*S2) identity,
     one t1_2_numerator contraction on (t2_bare - t2_fed) per solve."""
-    # generated-on-demand exception: mpn_density_driver top-imports the
-    # GENERATED generated_mpn module -- resolve on use, not at package import
-    from src.SingleReference.DensityMatrix.mpn_density_driver import (
-        MPnDensityDriver, _denom, g_vvoo_df, t1_2_numerator_df)
     norb = s.norb
     o, v = slice(0, nocc), slice(nocc, norb)
     t2_fed_native = t2_ijcd.transpose(2, 3, 0, 1)          # -> (nv,nv,no,no)
     if s.g is not None:
-        from src.SingleReference.DensityMatrix.generated_mpn import mpn_density_pieces as mpn_gen
         t2_bare_native = MPnDensityDriver(s.eps, s.g, nocc).compute_t2_1()
         num_delta = mpn_gen.t1_2_numerator(
             g=s.g, kd=np.eye(norb), o=o, v=v,
@@ -48,9 +47,6 @@ def dressed_t2_amplitudes(s, nocc, u2_denom_dress):
     matrix-free dressing hook -- determinant-wise EN channels
     {'hh'/'pp'/'hp'}; 'spin_adapted': True is refused (CSF concept).
     g-free via B_spin when s.g is None."""
-    # generated-on-demand exception, as in u1_dressing_shift
-    from src.SingleReference.DensityMatrix.mpn_density_driver import (
-        MPnDensityDriver, _denom, g_vvoo_df)
     if u2_denom_dress.get('spin_adapted', False):
         raise NotImplementedError(
             "u2_denom_dress={'spin_adapted': True} is a restricted/CSF concept "

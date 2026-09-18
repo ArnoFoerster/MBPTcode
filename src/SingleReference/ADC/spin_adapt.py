@@ -36,7 +36,7 @@ Convention notes (locked in by the invariance test, not by trust):
 import numpy as np
 from scipy import sparse
 
-from src.SingleReference.ADC.base import ADCSolverRestricted
+from src.SingleReference.ADC import base  # module import: base.py imports this file
 
 
 # =====================================================================
@@ -409,7 +409,7 @@ class ADCSolverCSF:
     def _embed_sc(static_correction):
         if static_correction is None:
             return None
-        return ADCSolverRestricted._embed_static_correction_spin(static_correction)
+        return base.ADCSolverRestricted._embed_static_correction_spin(static_correction)
 
     # ---------------- dimensions ----------------
 
