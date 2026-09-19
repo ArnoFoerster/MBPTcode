@@ -285,6 +285,22 @@ def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
 
     if any(method_infos[m]['needs_triplet'] for m in methods):
         if is_uhf:
+            # w_casida is an (naux,naux) DF metric; build_spin_flip's full-ERI
+            # branch needs a dense (alpha,alpha|beta,beta) 4-index W instead
+            # (construct_4d_w_rpa never builds that cross block), so df=False
+            # falls back to BARE exchange for the spin-flip channel only --
+            # fine on a stable reference (test_unrestricted_neon's 4e-1 eV
+            # PSD2 tolerance already prices this in), but on a reference with
+            # a genuine triplet/spin-flip instability (e.g. C2, BN) the bare
+            # eigenvalue is far more negative than the screened one and can
+            # send the QP root arbitrarily far off. Use df=True there.
+            if lBSE and not df:
+                warnings.warn(
+                    "needs_triplet method on a UHF reference with df=False: "
+                    "the spin-flip channel uses BARE exchange, not BSE-"
+                    "screened W (see comment above) -- use df=True on any "
+                    "reference that may be triplet/spin-flip unstable.",
+                    stacklevel=2)
             W_sf = w_casida if df else None
             channels = [CasidaSolver(*lr_solver.build_spin_flip_casida_matrices(
                             nocc, lBSE=lBSE, W_aux=W_sf, channel=c)).solve(tda=tda)
