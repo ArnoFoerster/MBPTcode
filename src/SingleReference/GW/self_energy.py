@@ -445,42 +445,65 @@ class SelfEnergySolver(AmplitudeGenerator):
         return self_energy_matrix
 
     def static_self_energy_matrix(self, nocc, eigenvalues_casida, rho, eigenvalues=None,
-                                  block_elems=QSGW_BLOCK_ELEMS):
-        """The static Hermitian GW self-energy of qsGW (Kotani's mode A), restricted.
+                                  flow=None, block_elems=QSGW_BLOCK_ELEMS):
+        """The static Hermitian GW self-energy of qsGW, restricted: Kotani's mode A,
+        or its SRG-regularized form when `flow` is given.
 
-            Sigma~_pq = 1/2 [Sigma_pq(eps_p) + Sigma_pq(eps_q)] = T_pq + T_qp,
-            T_qp = sum_{S,r} chi_Srq chi_Srp g(eps_p - eps_r + s_r Omega_S),
+        With Δ_Srp = ε_p - ε_r + s_r Ω_S, s_r = +1 for r < nocc and -1 otherwise,
+        and χ_Srp = sum_P ρ_PS B_Prp the amplitudes on this solver's DF factors:
 
-        g the real part of the broadened denominator (_denom_grid), s_r = +1 for
-        r < nocc and -1 otherwise, chi_Srp = sum_P rho_PS B_Prp with this
-        solver's DF factors, and the restricted prefactor 2 of
-        calculate_self_energy folded into T + T^T. The exciton axis runs in
-        chunks of at most block_elems // (norb * nmo) excitations, so no
-        (nexciton, norb, nmo) array exists: per chunk one GEMM forms chi, an
-        elementwise pass forms g, one GEMM accumulates T.
+            mode A (flow None):
+                Σ~_pq = ½ [Σ_pq(ε_p) + Σ_pq(ε_q)]
+                      = 2 sum_Sr χ_Srp χ_Srq ½ [g(Δ_Srp) + g(Δ_Srq)],
+                g(Δ) = Δ / (Δ² + η²), the real part of _denom_grid's denominator;
+            SRG (flow = s, in Hartree^-2):
+                Σ~_pq(s) = 2 sum_Sr χ_Srp χ_Srq K(Δ_Srp, Δ_Srq),
+                K(a, b) = (a + b) / (a² + b²) [1 - exp(-(a² + b²) s)].
+
+        The 2 is the restricted spin sum of calculate_self_energy, folded into
+        T + Tᵀ. On the diagonal both reduce to 2 sum_Sr χ_Srp² times a
+        regularized 1/Δ_Srp; they differ where some Δ is within η, or within
+        1/sqrt(2 s), of zero. s = 0 is the Hartree-Fock limit, Σ~ = 0.
+
+        The exciton axis runs in chunks of at most block_elems // (norb * nmo)
+        excitations, so no (nexciton, norb, nmo) array exists. Mode A is two
+        GEMMs per chunk. The SRG kernel couples p and q inside K, so its sum over
+        (S, r) is a batched outer product, nexciton * norb * nmo² kernel
+        evaluations in (pair, nmo, nmo) buffers of at most block_elems elements.
 
         Parameters
         ----------
         nocc : int
         eigenvalues_casida : ndarray, shape (nexciton,)
-        rho : ndarray, shape (naux, nexciton)
-            The DF transition density sum_ia B_Pia (X+Y)_ia,S, in whichever
+            Ω_S, Hartree.
+        rho : ndarray, shape (naux, nexciton), index order (P, S)
+            The DF transition density ρ_PS = sum_ia B_Pia (X+Y)_ia,S, in whichever
             orbital basis the Casida problem was solved (_rho_a_df); the DF
             factors of this solver set the basis of the result.
         eigenvalues : ndarray, shape (nmo,), optional
-            Poles and evaluation points; default this solver's eps.
+            ε, the poles and evaluation points; default this solver's eps.
+        flow : float, optional
+            The SRG flow parameter s, Hartree^-2; None gives mode A with self.eta.
         block_elems : int
-            Bound on the elements of each (chunk, norb, nmo) buffer.
+            Bound on the elements of each chunk buffer.
 
         Returns
         -------
-        ndarray, shape (nmo, nmo), symmetric, Hartree
+        ndarray, shape (nmo, nmo), index order (p, q), symmetric, Hartree
+
+        References
+        ----------
+        Mode A: Kotani, van Schilfgaarde and Faleev, Phys. Rev. B 76, 165106
+        (2007). SRG: Marie and Loos, J. Chem. Theory Comput. 2023,
+        doi 10.1021/acs.jctc.3c00281, eq. 44 of arXiv:2303.05984.
         """
         if self.spin_mode != 'restricted':
             raise NotImplementedError(
                 'static_self_energy_matrix is restricted-spin only')
         if self.df_coeff is None:
             raise ValueError('static_self_energy_matrix needs the DF factors')
+        if flow is not None and flow < 0:
+            raise ValueError(f'flow={flow!r}: the SRG flow parameter is s >= 0')
         eps = self.eps if eigenvalues is None else np.asarray(eigenvalues, float)
         om = np.asarray(eigenvalues_casida, float)
         naux, norb, nmo = self.df_coeff.shape
@@ -488,16 +511,33 @@ class SelfEnergySolver(AmplitudeGenerator):
         coeff = self.df_coeff.reshape(naux, norb * nmo)
         base = eps[None, None, :] - eps[None, :, None]              # (1, norb, nmo)
         chunk = max(1, int(block_elems) // (norb * nmo))
+        pairs = max(1, int(block_elems) // (nmo * nmo))
         tmp = np.zeros((nmo, nmo))
         for s0 in range(0, len(om), chunk):
             s1 = min(s0 + chunk, len(om))
-            # chi[S, r, p] = sum_P rho[P, S] B[P, r, p]
+            # χ[S, r, p] = sum_P ρ[P, S] B[P, r, p]
             chi = (rho[:, s0:s1].T @ coeff).reshape(s1 - s0, norb, nmo)
+            # Δ[S, r, p] = ε_p - ε_r + s_r Ω_S
             energy = base + (sign[None, :] * om[s0:s1, None])[:, :, None]
-            g = energy / (energy**2 + self.eta**2)
-            g *= chi
-            # T[q, p] += sum_{S, r} chi[S, r, q] (chi g)[S, r, p]
-            tmp += chi.reshape(-1, nmo).T @ g.reshape(-1, nmo)
+            if flow is None:
+                # mode A: T[q, p] += sum_{S, r} χ[S, r, q] χ[S, r, p] g(Δ[S, r, p])
+                g = energy / (energy**2 + self.eta**2)
+                g *= chi
+                tmp += chi.reshape(-1, nmo).T @ g.reshape(-1, nmo)
+                continue
+            # SRG: k = (S, r) flattened, T[p, q] += sum_k χ[k, p] K[k, p, q] χ[k, q]
+            chi = chi.reshape(-1, nmo)
+            energy = energy.reshape(-1, nmo)
+            for k0 in range(0, len(energy), pairs):
+                k1 = min(k0 + pairs, len(energy))
+                a = energy[k0:k1]
+                lam = flow * (a[:, :, None]**2 + a[:, None, :]**2)
+                # K[k, p, q] = s (a_p + a_q) (1 - exp(-λ)) / λ, λ = s (a_p² + a_q²),
+                # whose λ -> 0 limit is s (a_p + a_q)
+                kern = np.divide(-np.expm1(-lam), lam, out=np.ones_like(lam),
+                                 where=lam > 0)
+                kern *= flow * (a[:, :, None] + a[:, None, :])
+                tmp += np.einsum('kp, kpq, kq -> pq', chi[k0:k1], kern, chi[k0:k1])
         return tmp + tmp.T
 
     def calculate_self_energy_diagonal_batch(self, freq, nocc, eigenvalues_casida, chiXYa,

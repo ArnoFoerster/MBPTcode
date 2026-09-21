@@ -42,6 +42,13 @@ QSGW_DM_TOL = 1e-6
 QSGW_DIIS_SIZE = 10
 QSGW_DAMPING = 0.3
 QSGW_BLOCK_ELEMS = 2**24
+# SRG flow parameter s of the qsGW static self-energy, in Hartree^-2 (Marie and
+# Loos, JCTC 2023, doi 10.1021/acs.jctc.3c00281, eq. 44). A diagonal term with
+# energy denominator a enters with weight 1 - exp(-2 a^2 s), above 0.99 for
+# |a| > 1.85 eV at s = 500, so the near-pole terms that stall mode A are damped
+# and the rest kept. Their recommendation is 500 or 1000; convergence degrades
+# above 1000.
+QSGW_SRG_FLOW = 500.0
 
 # CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
 CPHF_MAX_CYCLE = 100
