@@ -193,7 +193,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
             raise NotImplementedError(
                 'self_consistency=qsGW builds the density from its own orbitals '
                 'every cycle; dm_correction has no place in it')
-        route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda)
+        route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda,
+                            n_workers=n_workers)
         return _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, QSGW_SCREENING[consistency], route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:

@@ -125,8 +125,8 @@ def test_the_srg_static_self_energy(mf):
     the 2 from the restricted spin sum. The builder evaluates K through a
     quadrature of relative error below QSGW_SRG_QUAD_TOL, so against a dense
     einsum of the formula each element may miss by that tolerance times
-    2 sum |chi chi K| over its terms, plus round-off; blocked and one-chunk
-    builds both meet it.
+    2 sum |chi chi K| over its terms, plus round-off; blocked, one-chunk and
+    threaded builds all meet it, and threads change only the summation order.
     s = 0 is the Hartree-Fock limit, zero. On the HOMO and LUMO rows every
     denominator exceeds 0.25 Ha, so there the diagonal equals mode A's at
     eta = 1 mHa to O(eta^2 / a^2) ~ 1e-5 relative, below EVGW_TOL: that pins
@@ -145,20 +145,28 @@ def test_the_srg_static_self_energy(mf):
     bound = (QSGW_SRG_QUAD_TOL * 2.0
              * np.einsum('Srp, Srq, Srpq -> pq', np.abs(chi), np.abs(chi),
                          np.abs(kern)) + 1e-14)
+    nmo = len(eps)
     blocked = se.static_self_energy_matrix(nocc, omega, rho, flow=flow,
                                            block_elems=1)
     whole = se.static_self_energy_matrix(nocc, omega, rho, flow=flow)
+    threaded = se.static_self_energy_matrix(nocc, omega, rho, flow=flow,
+                                            block_elems=10 * nmo * nmo,
+                                            n_workers=4)
     zero = se.static_self_energy_matrix(nocc, omega, rho, flow=0.0)
     mode_a = se.static_self_energy_matrix(nocc, omega, rho)
     front = [nocc - 1, nocc]
     ok = True
     for label, sigma in (('one excitation per chunk', blocked),
-                         ('one chunk', whole)):
+                         ('one chunk', whole),
+                         ('four threads, twelve chunks each', threaded)):
         ratio = (np.abs(sigma - dense) / bound).max()
         ok &= check(ratio <= 1.0,
                     f'SRG builder equals eq. 44 to its tolerance, {label}',
                     f'max |d Sigma| {np.abs(sigma - dense).max():.1e} Ha, '
                     f'{ratio:.2f} of the bound')
+    d_thr = np.abs(threaded - whole).max() / np.abs(whole).max()
+    ok &= check(d_thr < 1e-12, 'threads change only the summation order',
+                f'max relative {d_thr:.1e}')
     ok &= check(np.abs(zero).max() == 0.0, 's = 0 is the Hartree-Fock limit, zero')
     ok &= check(np.abs(whole - whole.T).max() == 0.0, 'it is symmetric')
     d_front = np.abs(np.diag(whole)[front] - np.diag(mode_a)[front]).max()

@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from pyscf import scf, dft
+from threadpoolctl import threadpool_limits
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.base import get_occ_virt_indices
 from src.Base.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
@@ -492,7 +495,7 @@ class SelfEnergySolver(AmplitudeGenerator):
 
     def static_self_energy_matrix(self, nocc, eigenvalues_casida, rho, eigenvalues=None,
                                   flow=None, block_elems=QSGW_BLOCK_ELEMS,
-                                  quad_tol=QSGW_SRG_QUAD_TOL):
+                                  quad_tol=QSGW_SRG_QUAD_TOL, n_workers=1):
         """The static Hermitian GW self-energy of qsGW, restricted: Kotani's mode A,
         or its SRG-regularized form when `flow` is given.
 
@@ -521,7 +524,10 @@ class SelfEnergySolver(AmplitudeGenerator):
         λ = a² + b², separates them, K(a, b) ≈ (a + b) sum_n w_n exp(-t_n a²)
         exp(-t_n b²), so each quadrature node is one more GEMM per chunk, 50 to
         60 nodes (_srg_laplace_quadrature), and each term of Σ~ carries a
-        relative error below quad_tol.
+        relative error below quad_tol. Per node the elementwise build of U and
+        V costs about as much as the GEMM once nmo nears 10³, and numpy runs it
+        on one thread, so n_workers > 1 hands each worker a fixed, interleaved
+        share of the chunks, its own accumulator and BLAS pinned to one thread.
 
         Parameters
         ----------
@@ -537,9 +543,11 @@ class SelfEnergySolver(AmplitudeGenerator):
         flow : float, optional
             The SRG flow parameter s, Hartree^-2; None gives mode A with self.eta.
         block_elems : int
-            Bound on the elements of each chunk buffer.
+            Bound on the elements of each chunk buffer, summed over the workers.
         quad_tol : float
             Relative error bound of the SRG quadrature on each term.
+        n_workers : int
+            Threads for the SRG arm; mode A runs on BLAS's own threads.
 
         Returns
         -------
@@ -567,38 +575,58 @@ class SelfEnergySolver(AmplitudeGenerator):
         coeff = self.df_coeff.reshape(naux, norb * nmo)
         base = eps[None, None, :] - eps[None, :, None]              # (1, norb, nmo)
         chunk = max(1, int(block_elems) // (norb * nmo))
-        if flow is not None:
-            # every s λ of this call is at most 2 s (ε_max - ε_min + Ω_max)²
-            a_max = eps.max() - eps.min() + om.max()
-            x, w = _srg_laplace_quadrature(2.0 * flow * a_max**2, quad_tol)
-            t_nodes, w_nodes = flow * x, flow * w
         tmp = np.zeros((nmo, nmo))
-        for s0 in range(0, len(om), chunk):
-            s1 = min(s0 + chunk, len(om))
-            # χ[S, r, p] = sum_P ρ[P, S] B[P, r, p]
-            chi = (rho[:, s0:s1].T @ coeff).reshape(s1 - s0, norb, nmo)
-            # Δ[S, r, p] = ε_p - ε_r + s_r Ω_S
-            energy = base + (sign[None, :] * om[s0:s1, None])[:, :, None]
-            if flow is None:
+        if flow is None:
+            for s0 in range(0, len(om), chunk):
+                s1 = min(s0 + chunk, len(om))
+                # χ[S, r, p] = sum_P ρ[P, S] B[P, r, p]
+                chi = (rho[:, s0:s1].T @ coeff).reshape(s1 - s0, norb, nmo)
+                # Δ[S, r, p] = ε_p - ε_r + s_r Ω_S
+                energy = base + (sign[None, :] * om[s0:s1, None])[:, :, None]
                 # mode A: T[q, p] += sum_{S, r} χ[S, r, q] χ[S, r, p] g(Δ[S, r, p])
                 g = energy / (energy**2 + self.eta**2)
                 g *= chi
                 tmp += chi.reshape(-1, nmo).T @ g.reshape(-1, nmo)
-                continue
-            # SRG, k = (S, r) flattened, per node n:
-            # T[p, q] += 2 w_n sum_k U[k, p] V[k, q],
-            # U[k, p] = χ[k, p] Δ[k, p] exp(-t_n Δ[k, p]²),
-            # V[k, q] = χ[k, q] exp(-t_n Δ[k, q]²)
-            chi = chi.reshape(-1, nmo)
-            energy = energy.reshape(-1, nmo)
-            sq = energy**2
-            v = np.empty_like(sq)
-            for t, wt in zip(t_nodes, w_nodes):
-                np.multiply(sq, -t, out=v)
-                np.exp(v, out=v)
-                v *= chi
-                u = v * energy
-                tmp += (2.0 * wt) * (u.T @ v)
+            return tmp + tmp.T
+
+        # every s λ of this call is at most 2 s (ε_max - ε_min + Ω_max)²
+        a_max = eps.max() - eps.min() + om.max()
+        x, w = _srg_laplace_quadrature(2.0 * flow * a_max**2, quad_tol)
+        t_nodes, w_nodes = flow * x, flow * w
+        n_workers = max(1, int(n_workers))
+        chunk = max(1, int(block_elems) // (norb * nmo * n_workers))
+        bounds = [(s0, min(s0 + chunk, len(om))) for s0 in range(0, len(om), chunk)]
+        n_workers = min(n_workers, len(bounds))
+
+        def accumulate(share):
+            part = np.zeros((nmo, nmo))
+            for s0, s1 in share:
+                # χ[k, p] = sum_P ρ[P, S] B[P, r, p], k = (S, r) flattened
+                chi = (rho[:, s0:s1].T @ coeff).reshape(-1, nmo)
+                # Δ[k, p] = ε_p - ε_r + s_r Ω_S
+                energy = (base + (sign[None, :] * om[s0:s1, None])[:, :, None]
+                          ).reshape(-1, nmo)
+                sq = energy**2
+                v = np.empty_like(sq)
+                for t, wt in zip(t_nodes, w_nodes):
+                    # per node n: T[p, q] += 2 w_n sum_k U[k, p] V[k, q],
+                    # U[k, p] = χ[k, p] Δ[k, p] exp(-t_n Δ[k, p]²),
+                    # V[k, q] = χ[k, q] exp(-t_n Δ[k, q]²)
+                    np.multiply(sq, -t, out=v)
+                    np.exp(v, out=v)
+                    v *= chi
+                    u = v * energy
+                    part += (2.0 * wt) * (u.T @ v)
+            return part
+
+        if n_workers == 1:
+            tmp += accumulate(bounds)
+        else:
+            shares = [bounds[i::n_workers] for i in range(n_workers)]
+            with threadpool_limits(limits=1, user_api='blas'):
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    for part in pool.map(accumulate, shares):
+                        tmp += part
         return tmp + tmp.T
 
     def calculate_self_energy_diagonal_batch(self, freq, nocc, eigenvalues_casida, chiXYa,

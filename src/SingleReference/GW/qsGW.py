@@ -63,7 +63,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
                      damping=QSGW_DAMPING, flow=QSGW_SRG_FLOW,
                      block_elems=QSGW_BLOCK_ELEMS, keep_spectrum=False,
                      verbose=False, df=True,
-                     eta=DEFAULT_BROADENING_ETA, tda=False):
+                     eta=DEFAULT_BROADENING_ETA, tda=False, n_workers=None):
     """(eps, mo_coeff, info): the quasiparticle-self-consistent GW spectrum and
     orbitals, in Hartree and the AO basis.
 
@@ -82,6 +82,9 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     keep_spectrum: also return the last cycle's Casida solution and transition
         density in `info`, for a fixed-point check; large, off by default.
     df, eta, tda: the Casida route's, as `calc_qp_energy` takes them.
+    n_workers: threads for the SRG static self-energy; None takes
+        OMP_NUM_THREADS, else the CPUs in the affinity mask, as the Casida
+        route's QP scan does.
 
     `info['df_coeff']` are the DF factors in the converged orbitals and
     `info['w_aux']` the static RPA W: built from those factors and `eps` for
@@ -115,6 +118,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         raise ValueError('converge_on and the spectrum do not overlap, so nothing '
                          'would decide convergence')
 
+    workers = qp_energy._resolve_workers(n_workers, nocc * (nmo - nocc))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
     mf_hf = scf.RHF(mol)
@@ -149,7 +153,8 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             rho = se._rho_a_df(nocc, X, Y)
         # Sigma~ in the current MO basis, then to the AO basis: C^-1 = C^T S
         sigma = se.static_self_energy_matrix(nocc, omega, rho, eigenvalues=eps,
-                                             flow=flow, block_elems=block_elems)
+                                             flow=flow, block_elems=block_elems,
+                                             n_workers=workers)
         cs = ovlp @ mo_coeff
         ham = hcore + mf_hf.get_veff(mol, dm) + cs @ sigma @ cs.T
         if accel is not None:
