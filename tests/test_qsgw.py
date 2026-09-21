@@ -12,12 +12,13 @@ Run: python tests/test_qsgw.py
 """
 import os
 import sys
+import types
 import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-from pyscf import df, dft, gto
+from pyscf import df, dft, gto, scf
 
 from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_SRG_FLOW,
                                 QSGW_SRG_QUAD_TOL, get_method_info)
@@ -40,9 +41,9 @@ def check(ok, label, detail=''):
     return bool(ok)
 
 
-def build_reference(xc='pbe0'):
+def build_reference(xc='pbe0', atom=GEOMETRY, basis='cc-pvdz', symmetry=False):
     """Water, cc-pVDZ, exact-JK SCF, the RI set attached for W and Sigma."""
-    mol = gto.M(atom=GEOMETRY, basis='cc-pvdz', verbose=0)
+    mol = gto.M(atom=atom, basis=basis, symmetry=symmetry, verbose=0)
     mf = dft.RKS(mol)
     mf.xc = xc
     mf.conv_tol = 1e-12
@@ -314,6 +315,40 @@ def test_the_refusals(mf):
         ok &= check(False, 'an unrestricted reference is refused')
     except NotImplementedError as e:
         ok &= check('restricted' in str(e), 'an unrestricted reference is refused')
+    romf = dft.ROKS(mol)
+    romf.xc = 'pbe0'
+    romf.kernel()
+    try:
+        qsgw_eigenvalues(romf, max_cycle=1)
+        ok &= check(False, 'an open-shell restricted (ROKS) reference is refused')
+    except NotImplementedError as e:
+        ok &= check('closed-shell' in str(e),
+                    'an open-shell restricted (ROKS) reference is refused')
+    # canonical orthogonalization forced on water: S eigenvalues below 0.05 dropped
+    lmf = scf.addons.remove_linear_dep_(dft.RKS(mf.mol), threshold=0.05, lindep=1.0)
+    lmf.xc = 'pbe0'
+    lmf.kernel()
+    try:
+        qsgw_eigenvalues(lmf, max_cycle=1)
+        ok &= check(False, 'a mean field with fewer MOs than AOs is refused')
+    except NotImplementedError as e:
+        ok &= check('AO space' in str(e) and lmf.mo_coeff.shape[1] < mf.mol.nao,
+                    'a mean field with fewer MOs than AOs is refused',
+                    f'{lmf.mo_coeff.shape[1]} of {mf.mol.nao} orbitals kept')
+    solvated = mf.copy()
+    solvated.with_screening = types.SimpleNamespace(screens=True)
+    for label, call, exc, text in (
+            ('no density fitting', lambda: qsgw_eigenvalues(mf, df=False),
+             NotImplementedError, 'DF'),
+            ('an attached environment', lambda: qsgw_eigenvalues(solvated),
+             NotImplementedError, 'gas phase'),
+            ('a negative flow', lambda: qsgw_eigenvalues(mf, flow=-1.0, max_cycle=1),
+             ValueError, 'flow')):
+        try:
+            call()
+            ok &= check(False, f'{label} is refused')
+        except exc as e:
+            ok &= check(text in str(e), f'{label} is refused with {exc.__name__}')
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         _, _, info = qsgw_eigenvalues(mf, max_cycle=1)
@@ -354,6 +389,12 @@ def test_calc_qp_energy_drives_the_loop(mf):
         ok &= check(False, 'a vertex under qsGW is refused')
     except NotImplementedError:
         ok &= check(True, 'a vertex under qsGW is refused')
+    try:
+        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
+                           polarizability='BSE')
+        ok &= check(False, 'a BSE polarizability under qsGW is refused')
+    except NotImplementedError:
+        ok &= check(True, 'a BSE polarizability under qsGW is refused')
     try:
         qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
                            dm_correction=mf.make_rdm1())
@@ -469,6 +510,38 @@ def test_qsgw_forgets_its_starting_point():
     return ok
 
 
+def test_the_boundaries(mf):
+    """Shapes and switches the other checks never visit: TDA screening, a
+    Mole with point-group symmetry on (the same fixed point as without, within
+    10 EVGW_TOL on HOMO and LUMO, each run converged to EVGW_TOL), one occupied
+    orbital (H2) and one virtual (HF in STO-3G), where a reshape of an
+    (nocc, nvirt) block can return a view instead of a copy. Each converges,
+    both flavors for the two small molecules."""
+    nocc = mf.mol.nelectron // 2
+    ok = True
+    e_tda, _, i_tda = qsgw_eigenvalues(mf, tda=True)
+    e_full, _, _ = qsgw_eigenvalues(mf)
+    ok &= check(i_tda['converged'], 'TDA screening converges',
+                f"{i_tda['cycles']} cycles, gap {gap_ev(e_tda, nocc):.3f} eV "
+                f"against {gap_ev(e_full, nocc):.3f} eV with full RPA")
+    e_sym, _, i_sym = qsgw_eigenvalues(build_reference(symmetry=True))
+    d_sym = np.abs(e_sym[[nocc - 1, nocc]] - e_full[[nocc - 1, nocc]]).max()
+    ok &= check(i_sym['converged'] and d_sym < 10 * EVGW_TOL,
+                'point-group symmetry on reaches the same fixed point',
+                f'{d_sym * HARTREE_TO_EV * 1e3:.4f} meV')
+    for label, atom, basis in (('H2, nocc = 1', 'H 0 0 0; H 0 0 0.74', 'cc-pvdz'),
+                               ('HF in STO-3G, nvirt = 1', 'F 0 0 0; H 0 0 0.917',
+                                'sto-3g')):
+        small = build_reference(atom=atom, basis=basis)
+        n = small.mol.nelectron // 2
+        for screening in ('updated', 'fixed'):
+            e, _, info = qsgw_eigenvalues(small, screening=screening)
+            ok &= check(info['converged'] and e[n] > e[n - 1],
+                        f'{label}, {screening}: converges with a positive gap',
+                        f"{info['cycles']} cycles, gap {gap_ev(e, n):.3f} eV")
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -491,5 +564,7 @@ if __name__ == '__main__':
     all_ok &= test_the_step_keywords_leave_evgw_unchanged(mf)
     print('\n-- 6. starting-point independence, gate (b)')
     all_ok &= test_qsgw_forgets_its_starting_point()
+    print('\n-- 7. the boundaries')
+    all_ok &= test_the_boundaries(mf)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

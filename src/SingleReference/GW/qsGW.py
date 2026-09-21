@@ -111,6 +111,18 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     c0 = np.asarray(mf.mo_coeff, float)
     mo_occ = np.asarray(mf.mo_occ)
     nmo = len(eps0)
+    # an ROHF/ROKS object is not a UHF one, so the spin test above lets it by
+    if mol.spin != 0 or not np.isin(mo_occ, (0.0, 2.0)).all():
+        raise NotImplementedError(
+            f'qsgw_eigenvalues needs a closed-shell reference, occupations 2 or 0; '
+            f'this one has spin {mol.spin} and occupations '
+            f'{sorted(set(mo_occ.tolist()))}')
+    # the loop diagonalizes h + J + K + Sigma~ in the full AO space
+    if c0.shape[1] != c0.shape[0]:
+        raise NotImplementedError(
+            f'qsgw_eigenvalues diagonalizes in the full AO space; this mean field '
+            f'keeps {c0.shape[1]} of {c0.shape[0]} orbitals (linear dependencies '
+            f'removed), which the loop would not reproduce')
     if converge_on is None:
         converge_on = [nocc - 1, nocc]
     tested = np.intersect1d(np.atleast_1d(converge_on).astype(int), np.arange(nmo))
