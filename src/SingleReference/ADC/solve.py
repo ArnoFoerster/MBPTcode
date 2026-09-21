@@ -4,8 +4,7 @@ Lanczos/continued-fraction spectral solver."""
 import numpy as np
 from pyscf import lib as pyscf_lib
 
-from src.Base.utils.linearAlgebra.diagonalization import (diagonalize_matrix,
-                                                          gather_block_cyclic)
+from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
 
 def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
                     conv_tol=1e-6, max_cycle=100, max_space=30, verbose=0):
@@ -169,11 +168,10 @@ def diag_dense(H, norb, threshold=5000):
     (eGF, Z, Reigv) sorted ascending. Only rank 0 gets Reigv/Z distributed."""
     eGF, Reigv, is_distributed, solver, comm = diagonalize_matrix(H, threshold=threshold)
     if is_distributed:
-        Reigv_full = gather_block_cyclic(Reigv, H.shape[0], solver, comm)
+        # Reigv came back whole on rank 0; the other ranks are done.
         solver.destroy()
         if comm.Get_rank() != 0:
             return eGF, None, None
-        Reigv = Reigv_full
     Z = np.sum(Reigv[:norb, :] ** 2, axis=0)
     order = np.argsort(eGF)
     return eGF[order], Z[order], Reigv[:, order]

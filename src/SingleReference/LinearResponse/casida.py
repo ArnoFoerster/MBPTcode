@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.linalg as la
-from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix, gather_block_cyclic, scatter_block_cyclic
+from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
 from src.Base.constants import CASIDA_NUMERICAL_EPS
 
 class CasidaResult(tuple):
@@ -93,12 +93,15 @@ class CasidaSolver:
             omega, Z_res, is_distributed, solver, comm = diagonalize_matrix(
                 A, threshold=threshold)
             del A
+            if is_distributed:
+                solver.destroy()
+                if comm.Get_rank() != 0:
+                    self.is_distributed = True
+                    return CasidaResult(omega, None, None, True)
             X = Z_res
             # calloc'd zeros stay unresident until written; zeros_like writes them.
             Y = np.zeros(Z_res.shape, dtype=Z_res.dtype,
                          order='F' if Z_res.flags.f_contiguous else 'C')
-            if is_distributed:
-                solver.destroy()
             if self.keep_intermediates:
                 self.Z = Z_res
             self.is_distributed = is_distributed
@@ -152,31 +155,20 @@ class CasidaSolver:
             omega = np.sqrt(omega2)
             
             if is_distributed:
-                # Gather, back-transform globally, and scatter back
-                Z_full = gather_block_cyclic(Z_res, global_N, solver, comm)
-                if comm.Get_rank() == 0:
-                    X_plus_Y_full = (Z_full * sqrt_AmB_diag[:, None]) / np.sqrt(omega)[None, :]
-                    X_minus_Y_full = (Z_full * inv_sqrt_AmB_diag[:, None]) * np.sqrt(omega)[None, :]
-                    X_full = 0.5 * (X_plus_Y_full + X_minus_Y_full)
-                    Y_full = 0.5 * (X_plus_Y_full - X_minus_Y_full)
-                else:
-                    X_full = None
-                    Y_full = None
-                X = scatter_block_cyclic(X_full, solver, comm)
-                Y = scatter_block_cyclic(Y_full, solver, comm)
+                # Z came back whole on rank 0; the other ranks are done.
                 solver.destroy()
-                if self.keep_intermediates:
-                    self.Z = Z_res
-            else:
-                sqrt_omega = np.sqrt(omega)
-                X_plus_Y = Z_res * sqrt_AmB_diag[:, None]
-                X_plus_Y /= sqrt_omega[None, :]
-                X_minus_Y = Z_res * inv_sqrt_AmB_diag[:, None]
-                X_minus_Y *= sqrt_omega[None, :]
-                if self.keep_intermediates:
-                    self.Z = Z_res
-                del Z_res
-                X, Y = self._combine_in_place(X_plus_Y, X_minus_Y)
+                if comm.Get_rank() != 0:
+                    self.is_distributed = True
+                    return CasidaResult(omega, None, None, True)
+            sqrt_omega = np.sqrt(omega)
+            X_plus_Y = Z_res * sqrt_AmB_diag[:, None]
+            X_plus_Y /= sqrt_omega[None, :]
+            X_minus_Y = Z_res * inv_sqrt_AmB_diag[:, None]
+            X_minus_Y *= sqrt_omega[None, :]
+            if self.keep_intermediates:
+                self.Z = Z_res
+            del Z_res
+            X, Y = self._combine_in_place(X_plus_Y, X_minus_Y)
         else:
             try:
                 L = la.cholesky(ApB, lower=True)
@@ -198,32 +190,20 @@ class CasidaSolver:
             omega = np.sqrt(omega2)
             
             if is_distributed:
-                # Gather, back-transform globally, and scatter back
-                Z_full = gather_block_cyclic(Z_res, global_N, solver, comm)
-                if comm.Get_rank() == 0:
-                    sqrt_omega = np.sqrt(omega)
-                    X_plus_Y_full = la.solve_triangular(L, Z_full, lower=True, trans='C') * sqrt_omega[None, :]
-                    X_minus_Y_full = (L @ Z_full) / sqrt_omega[None, :]
-                    X_full = 0.5 * (X_plus_Y_full + X_minus_Y_full)
-                    Y_full = 0.5 * (X_plus_Y_full - X_minus_Y_full)
-                else:
-                    X_full = None
-                    Y_full = None
-                X = scatter_block_cyclic(X_full, solver, comm)
-                Y = scatter_block_cyclic(Y_full, solver, comm)
+                # Z came back whole on rank 0; the other ranks are done.
                 solver.destroy()
-                if self.keep_intermediates:
-                    self.Z = Z_res
-            else:
-                sqrt_omega = np.sqrt(omega)
-                X_plus_Y = la.solve_triangular(L, Z_res, lower=True, trans='C')
-                X_plus_Y *= sqrt_omega[None, :]
-                X_minus_Y = L @ Z_res
-                X_minus_Y /= sqrt_omega[None, :]
-                if self.keep_intermediates:
-                    self.Z = Z_res
-                del L, Z_res
-                X, Y = self._combine_in_place(X_plus_Y, X_minus_Y)
+                if comm.Get_rank() != 0:
+                    self.is_distributed = True
+                    return CasidaResult(omega, None, None, True)
+            sqrt_omega = np.sqrt(omega)
+            X_plus_Y = la.solve_triangular(L, Z_res, lower=True, trans='C')
+            X_plus_Y *= sqrt_omega[None, :]
+            X_minus_Y = L @ Z_res
+            X_minus_Y /= sqrt_omega[None, :]
+            if self.keep_intermediates:
+                self.Z = Z_res
+            del L, Z_res
+            X, Y = self._combine_in_place(X_plus_Y, X_minus_Y)
 
         self.is_distributed = is_distributed
         return CasidaResult(omega, X, Y, is_distributed)

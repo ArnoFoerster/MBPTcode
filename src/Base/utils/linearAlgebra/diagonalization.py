@@ -106,7 +106,9 @@ def scatter_block_cyclic(matrix_full, solver, comm):
 def diagonalize_matrix(M, threshold=5000):
     """Diagonalize symmetric M: distributed ELPA if dim >= threshold and MPI available, else local scipy.linalg.eigh.
 
-    Returns (eigenvalues, Z, is_distributed, solver, comm); Z is a local chunk if distributed, else full.
+    Returns (eigenvalues, Z, is_distributed, solver, comm). Distributed, M is
+    read on rank 0 only, scattered in block-cyclic chunks, and Z comes back whole
+    on rank 0 and None on every other rank; the eigenvalues are on all ranks.
     """
     global_N = M.shape[0]
 
@@ -115,13 +117,12 @@ def diagonalize_matrix(M, threshold=5000):
         try:
             comm = MPI.COMM_WORLD
             solver = ElpaEigensolver(global_N=global_N, block_size=64, comm=comm)
-
-            global_i = get_global_indices_1d(solver.local_rows, solver.Nb, solver.Pr, solver.my_prow)
-            global_j = get_global_indices_1d(solver.local_cols, solver.Nb, solver.Pc, solver.my_pcol)
-
-            M_local = M[np.ix_(global_i, global_j)]
+            M_local = scatter_block_cyclic(M, solver, comm)
             eigenvalues, Z_local = solver.solve(M_local)
-            return eigenvalues, Z_local, True, solver, comm
+            del M_local
+            Z = gather_block_cyclic(Z_local, global_N, solver, comm)
+            del Z_local
+            return eigenvalues, Z, True, solver, comm
         except Exception as exc:
             # Do not fail silently: without this the caller cannot tell a
             # distributed solve from a local one, and the local fallback has a
