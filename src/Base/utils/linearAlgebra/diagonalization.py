@@ -37,8 +37,10 @@ def _try_init_mpi():
     if os.environ.get('MBPT_USE_ELPA', '').lower() in ('0', 'false', 'no'):
         return False                                  # explicit opt-OUT only
     try:
-        from mpi4py import MPI as _MPI                       # may MPI_Init here
-        from elpa.elpa import ElpaEigensolver as _Elpa
+        # elpa.py imports the binding before mpi4py, the order it insists on;
+        # MPI_Init happens inside that import.
+        from src.Base.utils.linearAlgebra.elpa import ElpaEigensolver as _Elpa
+        from mpi4py import MPI as _MPI
         MPI, ElpaEigensolver, HAS_MPI = _MPI, _Elpa, True
     except (ImportError, RuntimeError):
         HAS_MPI = False
