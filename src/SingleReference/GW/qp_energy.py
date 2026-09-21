@@ -31,6 +31,7 @@ from src.SingleReference.GW.cc_polarizability import GWCCSelfEnergy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 from src.SingleReference.GW import evGW  # module import: evGW imports this file
+from src.SingleReference.GW import qsGW  # module import: qsGW imports this file
 from src.Solvers.qp_equation import solve_qp_equation
 
 IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
@@ -43,6 +44,12 @@ EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
 #: evGW rebuilds P0 and W from the iterate, evGW0 keeps the mean field's.
 EVGW_SCREENING = {'evgw': 'updated', 'ev': 'updated',
                   'evgw0': 'fixed', 'ev0': 'fixed'}
+
+#: `self_consistency` values that enter the quasiparticle-self-consistent loop,
+#: and the screening each keeps: qsGW rebuilds W from the rotated orbitals,
+#: qsGW0 keeps the mean field's.
+QSGW_SCREENING = {'qsgw': 'updated', 'qs': 'updated',
+                  'qsgw0': 'fixed', 'qs0': 'fixed'}
 
 
 def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
@@ -81,6 +88,36 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
     return out
 
 
+def _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability, state,
+                    screening, route_kwargs):
+    """Quasiparticle energies in eV from the quasiparticle-self-consistent loop.
+
+    The loop returns the whole converged spectrum and its orbitals; the
+    requested states are read out of the spectrum and the orbitals ride in
+    `info['mo_coeff']`, since a qsGW energy without its orbital is half the
+    result. `screening` is the loop's: 'updated' for qsGW, 'fixed' for qsGW0.
+    """
+    if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
+        raise NotImplementedError(
+            f'self_consistency=qsGW drives GW@RPA only, not '
+            f'selfenergy={selfenergy!r} polarizability={polarizability!r}: the '
+            f'static self-energy is built from the plain GW amplitudes')
+    if mode_key != 'casida':
+        raise NotImplementedError(
+            f"mode={mode_key!r} has no qsGW loop: the static self-energy is a "
+            f"pole sum over the Casida spectrum, so the loop runs on mode='casida'")
+    eps_qp, mo_coeff, info = qsGW.qsgw_eigenvalues(mf, mol, screening=screening,
+                                                   **route_kwargs)
+    info['mo_coeff'] = mo_coeff
+    nocc = mol.nelectron // 2
+    states = _resolve_states(state, nocc)
+    out = {p: {'GW': float(eps_qp[p]) * HARTREE_TO_EV} for p in states}
+    out['qsgw_info'] = info
+    if not isinstance(state, list):
+        return out[states[0]]['GW']
+    return out
+
+
 def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    eta=DEFAULT_BROADENING_ETA, state='homo',
                    spin_channel='alpha', printSpectralFunction=False,
@@ -114,6 +151,11 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     reinjects them into G alone: the mean field's P0 and W
                     stay, the poles of Sigma_c move; Casida route only. Both
                     GW@RPA only, since that is what the loop drives.
+                    'qsGW' / 'qsGW0' run the quasiparticle-self-consistent loop
+                    of qsGW.py on the Casida route: orbitals and eigenvalues
+                    reinjected, W rebuilt (qsGW) or the mean field's kept
+                    (qsGW0); a list of states returns 'qsgw_info' with the
+                    orbitals.
     eps_anchor:     the eps_p that anchors w = eps_p + <Sigma_x - v_xc> +
                     Re Sigma_c(w), when it differs from the spectrum that built
                     the screening. That is the evGW case and the only one;
@@ -144,6 +186,16 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, spin_channel, EVGW_SCREENING[consistency],
                                route_kwargs)
+    if consistency in QSGW_SCREENING:
+        # the loop builds its own density every cycle, so a density correction
+        # has nowhere to enter; the imaginary-axis knobs mean nothing to it
+        if dm_correction is not None:
+            raise NotImplementedError(
+                'self_consistency=qsGW builds the density from its own orbitals '
+                'every cycle; dm_correction has no place in it')
+        route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda)
+        return _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability,
+                               state, QSGW_SCREENING[consistency], route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
         # the anchor is a named argument here and a route keyword there
         if eps_anchor is not None:

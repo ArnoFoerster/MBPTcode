@@ -279,6 +279,47 @@ def test_the_refusals(mf):
     return ok
 
 
+def test_calc_qp_energy_drives_the_loop(mf):
+    """The front door: self_consistency='qsGW' returns the loop's HOMO, a list
+    of states the dict with the loop's info and orbitals; qsGW0 likewise; any
+    other route, a vertex and a density correction are refused."""
+    nocc = mf.mol.nelectron // 2
+    eps_qs, c_qs, _ = qsgw_eigenvalues(mf, screening='updated')
+    homo = qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW')
+    ok = check(abs(homo - eps_qs[nocc - 1] * HARTREE_TO_EV) < 1e-8,
+               "self_consistency='qsGW' returns the qsGW HOMO")
+    both = qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW0',
+                              state=[nocc - 1, nocc])
+    eps_qs0, c_qs0, _ = qsgw_eigenvalues(mf, screening='fixed')
+    # an eigenvector is fixed up to its sign, and eigh's choice varies between
+    # runs, so each column is aligned with the direct run's before comparing
+    c_front = both['qsgw_info']['mo_coeff']
+    c_front = c_front * np.sign(np.einsum('mp, mp -> p', c_front, c_qs0))
+    ok &= check(abs(both[nocc]['GW'] - eps_qs0[nocc] * HARTREE_TO_EV) < 1e-8
+                and np.abs(c_front - c_qs0).max() < 1e-8,
+                "self_consistency='qsGW0' with a state list carries the orbitals")
+    try:
+        qpe.calc_qp_energy(mf, mode='space-time', self_consistency='qsGW')
+        ok &= check(False, 'qsGW on the space-time route is refused')
+    except NotImplementedError as e:
+        ok &= check('casida' in str(e).lower(),
+                    'qsGW on the space-time route is refused')
+    try:
+        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
+                           selfenergy='GWGammaInf')
+        ok &= check(False, 'a vertex under qsGW is refused')
+    except NotImplementedError:
+        ok &= check(True, 'a vertex under qsGW is refused')
+    try:
+        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
+                           dm_correction=mf.make_rdm1())
+        ok &= check(False, 'a density correction under qsGW is refused')
+    except NotImplementedError as e:
+        ok &= check('dm_correction' in str(e),
+                    'a density correction under qsGW is refused')
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -293,5 +334,7 @@ if __name__ == '__main__':
     all_ok &= test_both_flavors_converge_and_open_the_gap(mf)
     all_ok &= test_the_two_mixings_land_on_one_fixed_point(mf)
     all_ok &= test_the_refusals(mf)
+    print('\n-- 4. the front door')
+    all_ok &= test_calc_qp_energy_drives_the_loop(mf)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
