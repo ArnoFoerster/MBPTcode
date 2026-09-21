@@ -24,10 +24,10 @@ import types
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# elpa.py imports mpi4py and elpa at module scope; neither is needed for the
-# arithmetic, and elpa is not installable from PyPI, so stub them.
-for name, attrs in (('mpi4py', {'MPI': types.SimpleNamespace(COMM_WORLD=None)}),
-                    ('elpa', {'Elpa': object})):
+# elpa.py imports pyelpa and mpi4py at module scope; neither is needed for the
+# arithmetic, and pyelpa is not installable from PyPI, so stub them.
+for name, attrs in (('pyelpa', {'Elpa': object}),
+                    ('mpi4py', {'MPI': types.SimpleNamespace(COMM_WORLD=None)})):
     if name not in sys.modules:
         mod = types.ModuleType(name)
         mod.__dict__.update(attrs)

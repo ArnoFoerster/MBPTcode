@@ -1,6 +1,8 @@
 import numpy as np
+import pyelpa                  # before mpi4py: the binding refuses the other order
 from mpi4py import MPI
-import elpa
+
+ELPA_SOLVER_2STAGE = 2         # elpa/elpa_constants.h; the binding exports no constant
 
 class ElpaEigensolver:
     """Distributed eigensolver for symmetric matrices using ELPA and ScaLAPACK 2D block-cyclic data distribution."""
@@ -24,7 +26,7 @@ class ElpaEigensolver:
         self.local_rows = self._numroc(self.global_N, self.Nb, self.my_prow, 0, self.Pr)
         self.local_cols = self._numroc(self.global_N, self.Nb, self.my_pcol, 0, self.Pc)
 
-        self.elpa_ctx = elpa.Elpa()
+        self.elpa_ctx = pyelpa.Elpa()
         self._configure_elpa()
 
     def _numroc(self, n, nb, iproc, isrcproc, nprocs):
@@ -50,21 +52,23 @@ class ElpaEigensolver:
 
     def _configure_elpa(self):
         """Sets up the ELPA parameters before memory is allocated."""
-        self.elpa_ctx.set("na", self.global_N)
-        self.elpa_ctx.set("local_nrows", self.local_rows)
-        self.elpa_ctx.set("local_ncols", self.local_cols)
-        self.elpa_ctx.set("nblk", self.Nb)
+        self.elpa_ctx.set_integer("na", self.global_N)
+        self.elpa_ctx.set_integer("nev", self.global_N)
+        self.elpa_ctx.set_integer("local_nrows", self.local_rows)
+        self.elpa_ctx.set_integer("local_ncols", self.local_cols)
+        self.elpa_ctx.set_integer("nblk", self.Nb)
 
-        self.elpa_ctx.set("mpi_comm_parent", MPI._addressof(self.comm))
-        self.elpa_ctx.set("process_row", self.my_prow)
-        self.elpa_ctx.set("process_col", self.my_pcol)
+        # ELPA takes the Fortran handle of the communicator, not its address.
+        self.elpa_ctx.set_integer("mpi_comm_parent", self.comm.py2f())
+        self.elpa_ctx.set_integer("process_row", self.my_prow)
+        self.elpa_ctx.set_integer("process_col", self.my_pcol)
 
         self.elpa_ctx.setup()
 
-        self.elpa_ctx.set("solver", elpa.SOLVER_2STAGE)
+        self.elpa_ctx.set_integer("solver", ELPA_SOLVER_2STAGE)
 
         try:
-            self.elpa_ctx.set("nvidia-gpu", 1)
+            self.elpa_ctx.set_integer("nvidia-gpu", 1)
         except Exception:
             pass
 
