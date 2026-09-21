@@ -54,6 +54,19 @@ anchored on the mean field while the screening follows the iterate — anchored
 on the iterate instead, each cycle adds its own correction a second time and
 the gap runs away without ever converging. `evgw_eigenvalues` returns the whole
 converged spectrum and a record of how it got there. See `examples/12_evgw.py`.
+`self_consistency='evGW0'` reinjects them into G alone: the mean field's P₀ and
+W stay and only the poles of Σ_c move, on the Casida route.
+
+**qsGW** — `self_consistency='qsGW'` (or `'qsGW0'`, W kept at the mean field)
+runs the quasiparticle-self-consistent loop on the Casida route: a static
+Hermitian self-energy replaces v_xc, h + J + K + Σ̃ is diagonalized, and the
+orbitals and eigenvalues are reinjected until the density and the frontier
+eigenvalues stop moving. Σ̃ is the SRG-regularized form of Marie and Loos
+([J. Chem. Theory Comput. 19, 3943 (2023)](https://doi.org/10.1021/acs.jctc.3c00281))
+at flow s = 100 Ha⁻², since Kotani's mode A on the pole sum has no fixed
+point. `qsgw_eigenvalues` returns the spectrum, the orbitals and, for a BSE on
+top, the DF factors and static W of the result. Restricted closed shell, gas
+phase.
 
 **Low-scaling factorization** — the separable RI of Duchemin and Blase
 ([J. Chem. Phys. 150, 174120 (2019)](https://doi.org/10.1063/1.5090605)),
