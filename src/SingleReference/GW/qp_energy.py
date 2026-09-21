@@ -634,7 +634,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
 
 def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
                      dm_correction=None, tda=False, qp_solver='pole_strength',
-                     n_workers=None):
+                     n_workers=None, eps_anchor=None, fixed_spectrum=None,
+                     fixed_rho=None):
     """The map eps -> eps_new of an eigenvalue-self-consistent loop on the Casida
     route: GW@RPA, every orbital, in Hartree, its setup built once.
 
@@ -642,6 +643,14 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
         cycle; 'fixed' (evGW0) keeps the mean field's. Both put the poles of
         Sigma_c at `eps` and anchor w = eps_p + <Sigma_x - v_xc> + Re Sigma_c(w)
         on the mean field's eps_p.
+    eps_anchor: the eps_p the equation is anchored on, in place of the mean
+        field's eigenvalues; what a quasiparticle-self-consistent fixed point
+        needs, the Kohn-Sham Fock diagonal of its rotated density.
+    fixed_spectrum, fixed_rho: under 'fixed', the Casida solution (a dict as
+        _casida_spectrum returns) and its DF transition density (naux,
+        nexciton) to screen with, in place of the one built from `mf`; the
+        amplitudes are then that density contracted with `mf`'s own DF
+        factors, which is how the mean field's W meets rotated orbitals.
     The other keywords are `calc_qp_energy`'s.
 
     Built once, since none of it moves with the eigenvalues: the reaction
@@ -653,6 +662,10 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
     """
     if screening not in ('updated', 'fixed'):
         raise ValueError(f"screening={screening!r}: choose 'updated' or 'fixed'")
+    if screening != 'fixed' and (fixed_spectrum is not None or fixed_rho is not None):
+        raise ValueError("fixed_spectrum and fixed_rho belong to screening='fixed'")
+    if fixed_spectrum is not None and fixed_rho is None:
+        raise ValueError('fixed_spectrum needs fixed_rho, its DF transition density')
     is_uhf = isinstance(mf, scf.uhf.UHF)
     nocc = mf.nelec if is_uhf else mol.nelectron // 2
     channels = ('alpha', 'beta') if is_uhf else ('alpha',)
@@ -667,10 +680,15 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
     terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction, fields[ch][1],
                                 ch, is_uhf, nocc)
              for ch in channels}
-    if screening == 'fixed':
+    if screening == 'fixed' and fixed_spectrum is None:
         spectrum_mf = _casida_spectrum(setup['lr_solver'], nocc, 'RPA',
                                        setup['w_aux'], tda, method_infos, methods,
                                        is_uhf, df)
+    elif screening == 'fixed':
+        spectrum_mf = fixed_spectrum
+        _, X_f, Y_f = fixed_spectrum['singlet']
+        setup['se_solver'].preset_transition_density(nocc, X_f, Y_f, fixed_rho)
+    anchor = eps0 if eps_anchor is None else np.asarray(eps_anchor, float)
 
     def step(eps):
         eps = np.asarray(eps, float)
@@ -691,7 +709,7 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
             eri_w_singlet, eri_w_triplet, xc_diagonal = terms[ch]
             energies = qp_energies_from_spectrum(
                 se_solver, nocc, spectrum, method_infos, methods, ch, states,
-                eri_w_singlet, eri_w_triplet, is_uhf, df, _channel(eps0, ch, is_uhf),
+                eri_w_singlet, eri_w_triplet, is_uhf, df, _channel(anchor, ch, is_uhf),
                 xc_diagonal, qp_solver=qp_solver, n_workers=n_workers)
             out.append([energies[p]['GW'] for p in states])
         return np.asarray(out, float).reshape(eps0.shape)

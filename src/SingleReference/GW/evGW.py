@@ -80,7 +80,8 @@ def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
 def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
                      converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
                      diis_size=EVGW_DIIS_SIZE, diis_start=EVGW_DIIS_START,
-                     damping=EVGW_DAMPING, verbose=False, **route_kw):
+                     damping=EVGW_DAMPING, eps_init=None, verbose=False,
+                     **route_kw):
     """(eps_qp, info): the eigenvalue-self-consistent GW spectrum, in Hartree.
 
     `eps_qp` is the full array -- every orbital is updated and every orbital
@@ -98,6 +99,8 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
     diis_size: DIIS subspace; 0 falls back to linear mixing through `damping`.
     damping: linear mixing, eps <- (1 - d) eps_new + d eps_old, used only when
         DIIS is off.
+    eps_init: the first iterate, default the mean field's eigenvalues; a
+        converged spectrum handed in tests whether it is a fixed point.
 
     An unrestricted reference is driven channel by channel: the spectrum is
     (2, nmo), the anchor and the convergence test are per channel, DIIS runs
@@ -141,7 +144,9 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
                                                     spin_channel=ch, **route_kw)
                              for ch in channels]).reshape(eps0.shape)
 
-    eps = eps0.copy()
+    eps = eps0.copy() if eps_init is None else np.asarray(eps_init, float).copy()
+    if eps.shape != eps0.shape:
+        raise ValueError(f'eps_init has shape {eps.shape}, the spectrum {eps0.shape}')
     history, untested_history = [], []
     converged = False
     accel = DIIS(int(diis_size), start_iter=int(diis_start)) if diis_size else None

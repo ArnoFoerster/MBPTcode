@@ -23,7 +23,7 @@ from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_SRG_FLOW,
                                 get_method_info)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
-from src.SingleReference.GW.evGW import rotated_mean_field
+from src.SingleReference.GW.evGW import evgw_eigenvalues, rotated_mean_field
 from src.SingleReference.GW.qsGW import qsgw_eigenvalues
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -320,6 +320,81 @@ def test_calc_qp_energy_drives_the_loop(mf):
     return ok
 
 
+def kohn_sham_fock_diagonal(mf, mo_coeff):
+    """<h + v_Hxc[D]>_pp in the basis `mo_coeff`, D its closed-shell density."""
+    dm = mf.make_rdm1(mo_coeff, mf.mo_occ)
+    fock = mf.get_hcore() + mf.get_veff(mf.mol, dm)
+    return np.einsum('mp, mn, np -> p', mo_coeff, fock, mo_coeff)
+
+
+def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
+    """Gate (e). One application of the Casida eigenvalue map at the converged
+    (eps', C'), anchored on the Kohn-Sham Fock diagonal of the rotated density,
+    returns eps' on HOMO and LUMO within EVGW_TOL, and the evGW0 loop started
+    there stops at cycle 1. For qsGW the step builds W from (eps', C') itself;
+    for qsGW0 the mean field's spectrum and transition density are injected.
+    The per-state root scan and the static part are independent code from the
+    blocked builder, so this is a check of the loop and not of itself. The map
+    broadens with eta, the loop regularizes with the SRG flow; on the frontier
+    rows the two diagonals differ by about 5e-8 Ha (gate (a)), far inside the
+    tolerance."""
+    nocc = mf.mol.nelectron // 2
+    ok = True
+    for screening in ('updated', 'fixed'):
+        # converged two orders tighter than the gate, so the gate reads the
+        # fixed point and not the last step of the loop
+        eps_qs, c_qs, info = qsgw_eigenvalues(mf, screening=screening,
+                                              keep_spectrum=True, tol=1e-7,
+                                              dm_tol=1e-8)
+        view = rotated_mean_field(mf, eps_qs, c_qs)
+        anchor = kohn_sham_fock_diagonal(mf, c_qs)
+        step_kw = {'eps_anchor': anchor}
+        if screening == 'fixed':
+            step_kw.update(fixed_spectrum=info['spectrum'], fixed_rho=info['rho'])
+        step = qpe.casida_evgw_step(view, mf.mol, screening, **step_kw)
+        back = step(eps_qs)
+        d_front = np.abs((back - eps_qs)[[nocc - 1, nocc]]).max()
+        d_all = np.abs(back - eps_qs).max()
+        label = 'qsGW' if screening == 'updated' else 'qsGW0'
+        ok &= check(info['converged'] and d_front < EVGW_TOL,
+                    f'{label}: one step of the evGW0 map returns the fixed point',
+                    f'HOMO/LUMO {d_front * HARTREE_TO_EV * 1e3:.3f} meV, '
+                    f'all states {d_all * HARTREE_TO_EV * 1e3:.3f} meV')
+        _, loop = evgw_eigenvalues(view, mf.mol, mode='casida', screening=screening,
+                                   eps_init=eps_qs, **step_kw)
+        ok &= check(loop['converged'] and loop['cycles'] == 1,
+                    f'{label}: the evGW0 loop started there stops at cycle 1',
+                    f"{loop['cycles']} cycles, residual "
+                    f"{loop['history'][-1] * HARTREE_TO_EV * 1e3:.3f} meV")
+    return ok
+
+
+def test_the_step_keywords_leave_evgw_unchanged(mf):
+    """Without the three keywords the step is the one evGW0 has always used,
+    and a spectrum without its transition density is refused."""
+    eps_fixed, fixed = evgw_eigenvalues(mf, mf.mol, mode='casida', screening='fixed')
+    step = qpe.casida_evgw_step(mf, mf.mol, 'fixed')
+    eps0 = np.asarray(mf.mo_energy, float)
+    first = step(eps0)
+    states = list(range(len(eps0)))
+    g0w0 = qpe.calc_qp_energy(mf, mode='casida', state=states)
+    g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
+    d = np.abs(first - g0w0).max()
+    ok = check(d < 1e-10 and fixed['converged'],
+               'the default step is still the Casida G0W0 and evGW0 still converges',
+               f'max |d eps| {d:.1e} Ha')
+    for kw, text in (({'fixed_spectrum': {}}, 'fixed_rho'),
+                     ({'fixed_rho': np.zeros((1, 1))}, "screening='fixed'")):
+        screening = 'updated' if 'fixed_rho' in kw else 'fixed'
+        try:
+            qpe.casida_evgw_step(mf, mf.mol, screening, **kw)
+            ok &= check(False, f'{sorted(kw)} under {screening!r} is refused')
+        except ValueError as e:
+            ok &= check(text in str(e),
+                        f'{sorted(kw)} under {screening!r} is refused')
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -336,5 +411,8 @@ if __name__ == '__main__':
     all_ok &= test_the_refusals(mf)
     print('\n-- 4. the front door')
     all_ok &= test_calc_qp_energy_drives_the_loop(mf)
+    print('\n-- 5. the refeed, gate (e)')
+    all_ok &= test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf)
+    all_ok &= test_the_step_keywords_leave_evgw_unchanged(mf)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
