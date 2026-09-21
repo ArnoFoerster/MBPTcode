@@ -117,6 +117,9 @@ The coupled-cluster integral path additionally needs `openfermion` and
 pip install openfermion openfermionpyscf
 ```
 
+The distributed eigensolve needs `mpi4py` and ELPA's `pyelpa`, both
+optional; see [Distributed eigensolve](#distributed-eigensolve).
+
 There is no build step. Run from the repository root so that `src` is
 importable.
 
@@ -162,6 +165,98 @@ unset OMP_PROC_BIND
 
 Several processes in one job step each get their own cores with
 `srun --ntasks=R --cpus-per-task=T --hint=nomultithread` and `OMP_NUM_THREADS=T`.
+
+## Distributed eigensolve
+
+The dense eigensolves of the Casida route (`CasidaSolver.solve`, behind the RPA,
+GW and dense BSE routes) and of ADC (`solve_dense`) can run on
+[ELPA](https://elpa.mpcdf.mpg.de/) over MPI ranks. They do so for a matrix of
+dimension 5000 or more (their `threshold` argument) whenever `mpi4py` and
+ELPA's Python binding `pyelpa` both import, on one rank or on several.
+Otherwise, or with `MBPT_USE_ELPA=0`, they call `scipy.linalg.eigh`, as they do
+for every complex Hermitian matrix.
+
+Rank 0 runs the script alone; the other ranks wait to serve its eigensolves.
+Open and close the script with
+
+```python
+import sys
+
+from src.Base.utils.linearAlgebra.diagonalization import (serve_distributed_solves,
+                                                          release_workers)
+
+if serve_distributed_solves():
+    sys.exit(0)                     # a worker rank, released by rank 0 at the end
+
+...                                 # the calculation, on rank 0 only
+
+release_workers()
+```
+
+On one rank, or without `mpi4py` and `pyelpa`, both calls do nothing, so the
+same script runs serially. Call
+`serve_distributed_solves()` before anything imports `mpi4py`: `pyelpa` refuses
+to load after it, and every solve then stays on `eigh`. A failure inside a
+distributed solve, on any rank, aborts the job.
+
+Rank 0 still builds and holds each matrix and its eigenvectors, and runs
+everything outside the eigensolve on its own threads. ELPA spreads the
+eigensolver's work and workspace over the ranks, not the matrices' memory.
+
+In a Slurm job, one node as 8 ranks of 24 cores:
+
+```bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=24
+#SBATCH --hint=nomultithread
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export ELPA_DEFAULT_omp_threads=$OMP_NUM_THREADS
+srun --mpi=pmix --cpus-per-task=$SLURM_CPUS_PER_TASK --cpu-bind=cores python run.py
+```
+
+ELPA's own OpenMP threads default to one per rank, and `OMP_NUM_THREADS` does
+not reach them; `ELPA_DEFAULT_omp_threads` does, if `pyelpa` is linked against
+the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores, with
+`--cpu-bind=cores` or `mpirun --bind-to core --map-by slot:PE=24`: unbound, a
+test solve ran at least ten times slower. `--mpi=pmix` suits Open MPI 5;
+`srun --mpi=list` shows what your Slurm offers.
+
+`pyelpa` is on neither PyPI nor conda-forge. Build it from `python/pyelpa` in
+the source of the installed ELPA version: with ELPA's own
+`./configure --enable-python`, or against the installed library with this
+`setup.py` in `python/`, ELPA's `.pc` file on `PKG_CONFIG_PATH`, Cython
+installed, `CC=mpicc`, and `pip install --no-build-isolation .`:
+
+```python
+import subprocess
+
+import numpy
+from Cython.Build import cythonize
+from setuptools import Extension, setup
+
+
+def pkg(flag):
+    return subprocess.check_output(['pkg-config', flag, 'elpa_openmp'],
+                                   text=True).split()
+
+
+ext = Extension(
+    'pyelpa.wrapper',
+    sources=['pyelpa/wrapper.pyx'],
+    include_dirs=[numpy.get_include()] + [f[2:] for f in pkg('--cflags-only-I')],
+    extra_compile_args=[f for f in pkg('--cflags') if not f.startswith('-I')],
+    extra_link_args=pkg('--libs'),
+    define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+)
+
+setup(name='pyelpa', version='2025.01.002',     # the ELPA release
+      packages=['pyelpa'], ext_modules=cythonize([ext], language_level=3))
+```
+
+Write `elpa` for `elpa_openmp` where ELPA was built without OpenMP. To check
+the setup, run `tests/test_elpa_casida.py` under `srun` or `mpirun`: on more
+than one rank it fails if a solve fell back to `eigh`.
 
 ## Basis sets from CP2K
 
