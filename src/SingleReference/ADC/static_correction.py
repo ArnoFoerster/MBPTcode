@@ -1,5 +1,4 @@
 """Static (frequency-independent) corrections to the ADC(3) F block."""
-import copy
 import numpy as np
 from pyscf import scf
 
@@ -143,7 +142,9 @@ def _ks_semicanonical_setup(mf, mol, nocc, ncore):
 
     mo_coeff_semi, eps_semi, f_ov_semi, U_oo, U_vv = semicanonicalize_restricted(mf, mol, nocc=nocc)
 
-    mf_semi = copy.copy(mf)
+    # PySCF's own shallow copy: copy.copy runs the pickle hooks, which drop the
+    # direct-SCF optimizer that a J/K build on a large molecule reads
+    mf_semi = mf.copy()
     mf_semi.mo_coeff = mo_coeff_semi
     mf_semi.mo_energy = eps_semi
 
@@ -170,7 +171,7 @@ def _ks_semicanonical_setup_uhf(mf, mol, ncore):
     (mo_a_semi, eps_a_semi, f_ov_a_semi, U_oo_a, U_vv_a,
      mo_b_semi, eps_b_semi, f_ov_b_semi, U_oo_b, U_vv_b) = semicanonicalize_uhf(mf, mol)
 
-    mf_semi = copy.copy(mf)
+    mf_semi = mf.copy()  # keeps the direct-SCF optimizer, as above
     mf_semi.mo_coeff = (mo_a_semi, mo_b_semi)
     mf_semi.mo_energy = (eps_a_semi, eps_b_semi)
 
