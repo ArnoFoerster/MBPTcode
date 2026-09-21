@@ -20,12 +20,13 @@ import numpy as np
 from pyscf import df, dft, gto
 
 from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_SRG_FLOW,
-                                get_method_info)
+                                QSGW_SRG_QUAD_TOL, get_method_info)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.SingleReference.GW.evGW import evgw_eigenvalues, rotated_mean_field
 from src.SingleReference.GW.qsGW import qsgw_eigenvalues
-from src.SingleReference.GW.self_energy import SelfEnergySolver
+from src.SingleReference.GW.self_energy import (SelfEnergySolver,
+                                                _srg_laplace_quadrature)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 import src.SingleReference.GW.qp_energy as qpe
 
@@ -90,6 +91,30 @@ def test_the_blocked_static_self_energy_is_the_dense_one(mf):
     return ok
 
 
+def test_the_laplace_quadrature():
+    """The rule behind the SRG kernel: sum_n w_n exp(-mu x_n) against
+    int_0^1 exp(-mu x) dx = (1 - exp(-mu)) / mu, on a grid five times denser
+    than the rule's own check. Relative error below QSGW_SRG_QUAD_TOL for every
+    mu in [0, mu_max], three decades of mu_max; a tolerance below machine
+    precision is refused."""
+    ok = True
+    for mu_max in (10.0, 1e4, 1e6):
+        x, w = _srg_laplace_quadrature(mu_max, QSGW_SRG_QUAD_TOL)
+        mu = np.concatenate([[0.0], np.logspace(-6, np.log10(mu_max), 20000)])
+        exact = np.ones_like(mu)
+        exact[1:] = -np.expm1(-mu[1:]) / mu[1:]
+        err = np.abs(np.exp(-np.outer(mu, x)) @ w / exact - 1).max()
+        ok &= check(err < QSGW_SRG_QUAD_TOL and 0 < x.min() and x.max() <= 1,
+                    f'mu_max = {mu_max:g}: the rule meets its tolerance',
+                    f'{len(x)} nodes, max rel err {err:.1e}')
+    try:
+        _srg_laplace_quadrature(1e6, 1e-17)
+        ok &= check(False, 'a tolerance below machine precision is refused')
+    except ValueError as e:
+        ok &= check('tol' in str(e), 'a tolerance below machine precision is refused')
+    return ok
+
+
 def test_the_srg_static_self_energy(mf):
     """Gate (a), the regularized form. Marie and Loos's SRG-qsGW self-energy
     (arXiv:2303.05984, eq. 44; JCTC 2023, doi 10.1021/acs.jctc.3c00281),
@@ -97,11 +122,15 @@ def test_the_srg_static_self_energy(mf):
         Sigma_pq(s) = 2 sum_{S,r} chi_Srp chi_Srq K(a_Srp, a_Srq),
         K(a, b) = (a + b) / (a^2 + b^2) [1 - exp(-(a^2 + b^2) s)],
 
-    the 2 from the restricted spin sum. The blocked builder, forced to one
-    (S, r) pair per chunk, equals a dense einsum of the formula; s = 0 is the
-    Hartree-Fock limit, zero. On the HOMO and LUMO rows every denominator
-    exceeds 0.25 Ha, so there the diagonal equals mode A's at eta = 1 mHa to
-    O(eta^2 / a^2) ~ 1e-5 relative, below EVGW_TOL: that pins the prefactor."""
+    the 2 from the restricted spin sum. The builder evaluates K through a
+    quadrature of relative error below QSGW_SRG_QUAD_TOL, so against a dense
+    einsum of the formula each element may miss by that tolerance times
+    2 sum |chi chi K| over its terms, plus round-off; blocked and one-chunk
+    builds both meet it.
+    s = 0 is the Hartree-Fock limit, zero. On the HOMO and LUMO rows every
+    denominator exceeds 0.25 Ha, so there the diagonal equals mode A's at
+    eta = 1 mHa to O(eta^2 / a^2) ~ 1e-5 relative, below EVGW_TOL: that pins
+    the prefactor."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
     se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
     rho = se._rho_a_df(nocc, X, Y)
@@ -113,21 +142,26 @@ def test_the_srg_static_self_energy(mf):
     lam = a[..., :, None]**2 + a[..., None, :]**2
     kern = (a[..., :, None] + a[..., None, :]) / lam * -np.expm1(-flow * lam)
     dense = 2.0 * np.einsum('Srp, Srq, Srpq -> pq', chi, chi, kern)
+    bound = (QSGW_SRG_QUAD_TOL * 2.0
+             * np.einsum('Srp, Srq, Srpq -> pq', np.abs(chi), np.abs(chi),
+                         np.abs(kern)) + 1e-14)
     blocked = se.static_self_energy_matrix(nocc, omega, rho, flow=flow,
                                            block_elems=1)
     whole = se.static_self_energy_matrix(nocc, omega, rho, flow=flow)
     zero = se.static_self_energy_matrix(nocc, omega, rho, flow=0.0)
     mode_a = se.static_self_energy_matrix(nocc, omega, rho)
     front = [nocc - 1, nocc]
-    d_blocked = np.abs(blocked - dense).max()
-    d_whole = np.abs(whole - dense).max()
-    d_front = np.abs(np.diag(whole)[front] - np.diag(mode_a)[front]).max()
-    ok = check(d_blocked < 1e-11, 'chunked SRG builder equals eq. 44, dense',
-               f'max |d Sigma| {d_blocked:.1e} Ha, one (S, r) pair per chunk')
-    ok &= check(d_whole < 1e-11, 'one-chunk SRG builder equals eq. 44, dense',
-                f'max |d Sigma| {d_whole:.1e} Ha')
+    ok = True
+    for label, sigma in (('one excitation per chunk', blocked),
+                         ('one chunk', whole)):
+        ratio = (np.abs(sigma - dense) / bound).max()
+        ok &= check(ratio <= 1.0,
+                    f'SRG builder equals eq. 44 to its tolerance, {label}',
+                    f'max |d Sigma| {np.abs(sigma - dense).max():.1e} Ha, '
+                    f'{ratio:.2f} of the bound')
     ok &= check(np.abs(zero).max() == 0.0, 's = 0 is the Hartree-Fock limit, zero')
     ok &= check(np.abs(whole - whole.T).max() == 0.0, 'it is symmetric')
+    d_front = np.abs(np.diag(whole)[front] - np.diag(mode_a)[front]).max()
     ok &= check(d_front < EVGW_TOL, 'HOMO and LUMO diagonals equal mode A\'s',
                 f'max |d Sigma_pp| {d_front:.1e} Ha at s = {flow:g}')
     return ok
@@ -431,6 +465,7 @@ if __name__ == '__main__':
     all_ok = True
     print('\n-- 1. the static self-energy, gate (a)')
     all_ok &= test_the_blocked_static_self_energy_is_the_dense_one(mf)
+    all_ok &= test_the_laplace_quadrature()
     all_ok &= test_the_srg_static_self_energy(mf)
     print('\n-- 2. the rotated view and the injected transition density')
     all_ok &= test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf)

@@ -52,6 +52,10 @@ QSGW_BLOCK_ELEMS = 2**24
 # and PBE and PBE0 starts end 0.9 to 1.6 meV apart at the frontier; at s = 100
 # they agree to 1e-4 meV, with HOMO and LUMO within 1 meV of s = 1000.
 QSGW_SRG_FLOW = 100.0
+# Relative error bound of the quadrature behind the SRG kernel,
+# (1 - exp(-s lam)) / lam = int_0^s exp(-t lam) dt ~ sum_n w_n exp(-t_n lam):
+# each term of Sigma~ is off by at most this fraction of itself.
+QSGW_SRG_QUAD_TOL = 1e-7
 
 # CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
 CPHF_MAX_CYCLE = 100

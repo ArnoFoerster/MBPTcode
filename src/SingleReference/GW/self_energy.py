@@ -3,7 +3,8 @@ from pyscf import scf, dft
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.base import get_occ_virt_indices
 from src.Base.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
-                                QSGW_BLOCK_ELEMS, get_method_info)
+                                QSGW_BLOCK_ELEMS, QSGW_SRG_QUAD_TOL,
+                                get_method_info)
 from src.Base.solvent_screening import solvent_static_selfenergy
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -62,6 +63,51 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
                 np.divide(e, d, out=d)
             out[k] += d.reshape(nw, -1) @ wt[s0:s1].ravel()
     return out
+
+
+def _srg_laplace_quadrature(mu_max, tol, nodes_per_panel=12, width=4.0):
+    """(x, w): nodes in (0, 1] and weights of the Laplace quadrature
+
+        sum_n w_n exp(-μ x_n) ≈ ∫_0^1 exp(-μ x) dx = (1 - exp(-μ)) / μ,
+
+    to a relative error below `tol` for every μ in [0, mu_max].
+
+    Gauss-Legendre in v = ln x, `nodes_per_panel` nodes on panels `width`
+    e-folds wide from ln x_lo, x_lo = 0.01 / mu_max, up to 0, and one node at
+    x_lo / 2 of weight x_lo for [0, x_lo]. The rule is checked against the
+    closed form on 4000 log-spaced μ and μ = 0; a miss narrows the panels by
+    3/4, at most five times, then raises ValueError. The panel count grows as
+    ln(mu_max): 49 nodes at mu_max = 2.5e4, 61 at 2.5e5, for tol = 1e-7.
+
+    Parameters
+    ----------
+    mu_max : float
+        Largest μ the rule must serve; values below 1 are raised to 1.
+    tol : float
+        Bound on max_μ |sum_n w_n exp(-μ x_n) / f(μ) - 1|.
+
+    Returns
+    -------
+    x, w : ndarray, shape (nnode,)
+    """
+    mu_max = max(float(mu_max), 1.0)
+    g, gw = np.polynomial.legendre.leggauss(nodes_per_panel)
+    mu = np.concatenate([[0.0], np.logspace(-6, np.log10(mu_max), 4000)])
+    exact = np.ones_like(mu)
+    exact[1:] = -np.expm1(-mu[1:]) / mu[1:]
+    lo = np.log(0.01 / mu_max)
+    for _ in range(6):
+        edges = np.linspace(lo, 0.0, int(np.ceil(-lo / width)) + 1)
+        half = 0.5 * np.diff(edges)[:, None]
+        v = (half * g + 0.5 * (edges[1:] + edges[:-1])[:, None]).ravel()
+        x = np.concatenate([[0.5 * np.exp(lo)], np.exp(v)])
+        w = np.concatenate([[np.exp(lo)], (half * gw).ravel() * np.exp(v)])
+        err = np.abs(np.exp(-np.outer(mu, x)) @ w / exact - 1).max()
+        if err < tol:
+            return x, w
+        width *= 0.75
+    raise ValueError(f'the Laplace quadrature reaches a relative error of '
+                     f'{err:.1e} at mu_max = {mu_max:.3g}, not tol = {tol:.1e}')
 
 
 class SigmaEvaluator:
@@ -445,7 +491,8 @@ class SelfEnergySolver(AmplitudeGenerator):
         return self_energy_matrix
 
     def static_self_energy_matrix(self, nocc, eigenvalues_casida, rho, eigenvalues=None,
-                                  flow=None, block_elems=QSGW_BLOCK_ELEMS):
+                                  flow=None, block_elems=QSGW_BLOCK_ELEMS,
+                                  quad_tol=QSGW_SRG_QUAD_TOL):
         """The static Hermitian GW self-energy of qsGW, restricted: Kotani's mode A,
         or its SRG-regularized form when `flow` is given.
 
@@ -467,9 +514,14 @@ class SelfEnergySolver(AmplitudeGenerator):
 
         The exciton axis runs in chunks of at most block_elems // (norb * nmo)
         excitations, so no (nexciton, norb, nmo) array exists. Mode A is two
-        GEMMs per chunk. The SRG kernel couples p and q inside K, so its sum over
-        (S, r) is a batched outer product, nexciton * norb * nmo² kernel
-        evaluations in (pair, nmo, nmo) buffers of at most block_elems elements.
+        GEMMs per chunk. K couples p and q; its Laplace form
+
+            (1 - exp(-s λ)) / λ = ∫_0^s exp(-t λ) dt ≈ sum_n w_n exp(-t_n λ),
+
+        λ = a² + b², separates them, K(a, b) ≈ (a + b) sum_n w_n exp(-t_n a²)
+        exp(-t_n b²), so each quadrature node is one more GEMM per chunk, 50 to
+        60 nodes (_srg_laplace_quadrature), and each term of Σ~ carries a
+        relative error below quad_tol.
 
         Parameters
         ----------
@@ -486,6 +538,8 @@ class SelfEnergySolver(AmplitudeGenerator):
             The SRG flow parameter s, Hartree^-2; None gives mode A with self.eta.
         block_elems : int
             Bound on the elements of each chunk buffer.
+        quad_tol : float
+            Relative error bound of the SRG quadrature on each term.
 
         Returns
         -------
@@ -507,11 +561,17 @@ class SelfEnergySolver(AmplitudeGenerator):
         eps = self.eps if eigenvalues is None else np.asarray(eigenvalues, float)
         om = np.asarray(eigenvalues_casida, float)
         naux, norb, nmo = self.df_coeff.shape
+        if flow == 0 or len(om) == 0:
+            return np.zeros((nmo, nmo))
         sign = np.where(np.arange(norb) < nocc, 1.0, -1.0)
         coeff = self.df_coeff.reshape(naux, norb * nmo)
         base = eps[None, None, :] - eps[None, :, None]              # (1, norb, nmo)
         chunk = max(1, int(block_elems) // (norb * nmo))
-        pairs = max(1, int(block_elems) // (nmo * nmo))
+        if flow is not None:
+            # every s λ of this call is at most 2 s (ε_max - ε_min + Ω_max)²
+            a_max = eps.max() - eps.min() + om.max()
+            x, w = _srg_laplace_quadrature(2.0 * flow * a_max**2, quad_tol)
+            t_nodes, w_nodes = flow * x, flow * w
         tmp = np.zeros((nmo, nmo))
         for s0 in range(0, len(om), chunk):
             s1 = min(s0 + chunk, len(om))
@@ -525,19 +585,20 @@ class SelfEnergySolver(AmplitudeGenerator):
                 g *= chi
                 tmp += chi.reshape(-1, nmo).T @ g.reshape(-1, nmo)
                 continue
-            # SRG: k = (S, r) flattened, T[p, q] += sum_k χ[k, p] K[k, p, q] χ[k, q]
+            # SRG, k = (S, r) flattened, per node n:
+            # T[p, q] += 2 w_n sum_k U[k, p] V[k, q],
+            # U[k, p] = χ[k, p] Δ[k, p] exp(-t_n Δ[k, p]²),
+            # V[k, q] = χ[k, q] exp(-t_n Δ[k, q]²)
             chi = chi.reshape(-1, nmo)
             energy = energy.reshape(-1, nmo)
-            for k0 in range(0, len(energy), pairs):
-                k1 = min(k0 + pairs, len(energy))
-                a = energy[k0:k1]
-                lam = flow * (a[:, :, None]**2 + a[:, None, :]**2)
-                # K[k, p, q] = s (a_p + a_q) (1 - exp(-λ)) / λ, λ = s (a_p² + a_q²),
-                # whose λ -> 0 limit is s (a_p + a_q)
-                kern = np.divide(-np.expm1(-lam), lam, out=np.ones_like(lam),
-                                 where=lam > 0)
-                kern *= flow * (a[:, :, None] + a[:, None, :])
-                tmp += np.einsum('kp, kpq, kq -> pq', chi[k0:k1], kern, chi[k0:k1])
+            sq = energy**2
+            v = np.empty_like(sq)
+            for t, wt in zip(t_nodes, w_nodes):
+                np.multiply(sq, -t, out=v)
+                np.exp(v, out=v)
+                v *= chi
+                u = v * energy
+                tmp += (2.0 * wt) * (u.T @ v)
         return tmp + tmp.T
 
     def calculate_self_energy_diagonal_batch(self, freq, nocc, eigenvalues_casida, chiXYa,
