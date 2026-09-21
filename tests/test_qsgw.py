@@ -20,6 +20,7 @@ from pyscf import df, dft, gto
 from src.Base.constants import EVGW_TOL, HARTREE_TO_EV, get_method_info
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
+from src.SingleReference.GW.evGW import rotated_mean_field
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 import src.SingleReference.GW.qp_energy as qpe
@@ -85,11 +86,59 @@ def test_the_blocked_static_self_energy_is_the_dense_one(mf):
     return ok
 
 
+def test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf):
+    """The view hands the rotated orbitals to get_density_fitting_coefficients,
+    so B' = U^T B U with U the rotation, and leaves the original untouched."""
+    eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((len(eps), len(eps)))
+    U, _ = np.linalg.qr(A)
+    view = rotated_mean_field(mf, eps + 0.01, mf.mo_coeff @ U)
+    coeff_view = get_density_fitting_coefficients(mf.mol, view,
+                                                  representation='spatial')
+    rotated = np.einsum('rq, Prs, sp -> Pqp', U, coeff, U)
+    d = np.abs(coeff_view - rotated).max()
+    ok = check(d < 1e-10, "the view's DF factors are U^T B U", f'max |d B| {d:.1e}')
+    ok &= check(view.with_df is mf.with_df,
+                'the view shares the DF object of the original')
+    ok &= check(np.abs(np.asarray(mf.mo_energy) - eps).max() == 0.0
+                and np.abs(mf.mo_coeff - (view.mo_coeff @ U.T)).max() < 1e-12,
+                'the original keeps its eigenvalues and orbitals')
+    ok &= check(np.array_equal(view.mo_occ, mf.mo_occ), 'the occupations are kept')
+    return ok
+
+
+def test_a_preset_transition_density_feeds_the_amplitudes(mf):
+    """A solver built on rotated DF factors contracts an injected rho, the mean
+    field's, instead of forming its own: the qsGW0 amplitudes chi' = rho^T B'."""
+    eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
+    se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
+    rho = se._rho_a_df(nocc, X, Y)
+    rng = np.random.default_rng(1)
+    U, _ = np.linalg.qr(rng.standard_normal((len(eps), len(eps))))
+    coeff_rot = np.einsum('rq, Prs, sp -> Pqp', U, coeff, U)
+    se_rot = SelfEnergySolver(eps, df_coeff=coeff_rot, spin_mode='restricted')
+    se_rot.preset_transition_density(nocc, X, Y, rho)
+    chi_rot = se_rot.get_chi_a(nocc, X, Y, p_state=3)
+    expect = rho.T @ np.ascontiguousarray(coeff_rot[:, :, 3])
+    d = np.abs(chi_rot - expect).max()
+    ok = check(d < 1e-12, "get_chi_a uses the preset rho with the solver's factors",
+               f'max |d chi| {d:.1e}')
+    own = SelfEnergySolver(eps, df_coeff=coeff_rot, spin_mode='restricted')
+    own_chi = own.get_chi_a(nocc, X, Y, p_state=3)
+    ok &= check(np.abs(own_chi - chi_rot).max() > 1e-6,
+                'without the preset the solver forms a different rho from its factors')
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
     all_ok = True
     print('\n-- 1. the static self-energy, gate (a)')
     all_ok &= test_the_blocked_static_self_energy_is_the_dense_one(mf)
+    print('\n-- 2. the rotated view and the injected transition density')
+    all_ok &= test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf)
+    all_ok &= test_a_preset_transition_density_feeds_the_amplitudes(mf)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

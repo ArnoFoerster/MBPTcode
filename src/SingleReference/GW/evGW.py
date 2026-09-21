@@ -46,6 +46,21 @@ def shifted_mean_field(mf, eps):
     return out
 
 
+def rotated_mean_field(mf, eps, mo_coeff):
+    """
+    `mf` carrying `eps` and `mo_coeff` in place of its own; the occupations stay.
+
+    The shallow copy of `shifted_mean_field`, so the integrals, the DF object
+    and the direct-SCF optimizer are shared. `get_density_fitting_coefficients`
+    reads `mo_coeff`, so the DF factors of the view are the rotated ones, and
+    `make_rdm1` on the view gives the rotated density.
+    """
+    out = shifted_mean_field(mf, eps)
+    out.mo_coeff = np.asarray(mo_coeff, float)
+    out.mo_occ = np.asarray(mf.mo_occ)
+    return out
+
+
 def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
                            **route_kw):
     """
