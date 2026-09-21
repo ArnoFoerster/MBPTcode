@@ -28,7 +28,9 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
     SelfEnergySolver._denom_grid, sign_q = +1 for q < nocc_spin and -1 otherwise.
     The exciton axis is summed in chunks of at most block_elems // (nw * norb)
     excitations, at least one, through two (nw, chunk, norb) buffers allocated
-    once per call and filled in place, so a chunk costs no fresh pages.
+    once per call and filled in place, so a chunk costs no fresh pages. A call
+    holds 2 block_elems doubles, 8 MB at the default, and a pool of concurrent
+    callers that many times over.
 
     Parameters
     ----------
@@ -564,8 +566,9 @@ class SelfEnergySolver(AmplitudeGenerator):
                 'static_self_energy_matrix is restricted-spin only')
         if self.df_coeff is None:
             raise ValueError('static_self_energy_matrix needs the DF factors')
-        if flow is not None and flow < 0:
-            raise ValueError(f'flow={flow!r}: the SRG flow parameter is s >= 0')
+        if flow is not None and not (np.isfinite(flow) and flow >= 0):
+            raise ValueError(f'flow={flow!r}: the SRG flow parameter is a finite '
+                             f's >= 0')
         eps = self.eps if eigenvalues is None else np.asarray(eigenvalues, float)
         om = np.asarray(eigenvalues_casida, float)
         naux, norb, nmo = self.df_coeff.shape

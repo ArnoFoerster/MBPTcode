@@ -50,7 +50,7 @@ QSGW_BLOCK_ELEMS = 2**24
 # recommend 500 or 1000, judged on convergence from a HF start. On water
 # cc-pVDZ from s = 200 up the high virtuals carry two self-consistent branches
 # and PBE and PBE0 starts end 0.9 to 1.6 meV apart at the frontier; at s = 100
-# they agree to 1e-4 meV, with HOMO and LUMO within 1 meV of s = 1000.
+# they agree to 1e-4 meV, with HOMO and LUMO about 1 meV from s = 1000.
 QSGW_SRG_FLOW = 100.0
 # Relative error bound of the quadrature behind the SRG kernel,
 # (1 - exp(-s lam)) / lam = int_0^s exp(-t lam) dt ~ sum_n w_n exp(-t_n lam):

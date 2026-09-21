@@ -1,12 +1,11 @@
 """qsGW and qsGW0: the orbitals and the eigenvalues reinjected until the static
 Hermitian self-energy stops moving.
 
-Gate (a): the blocked static self-energy equals the dense matrix routine and,
-on its diagonal, the per-state self-energy at eps_p; its SRG-regularized form,
-the one the loop runs, equals a dense evaluation of its formula. Gate (b): PBE
-and PBE0 starts land on one fixed point. Gate (e): the converged point is a
-fixed point of the evGW0 eigenvalue map, in one step. The two mixings land on
-one fixed point.
+The blocked static self-energy equals the dense matrix routine and, on its
+diagonal, the per-state self-energy at eps_p; its SRG-regularized form, the one
+the loop runs, equals a dense evaluation of its formula. PBE and PBE0 starts
+land on one fixed point. The converged point is a fixed point of the evGW0
+eigenvalue map, in one step. The two mixings land on one fixed point.
 
 Run: python tests/test_qsgw.py
 """
@@ -20,8 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_SRG_FLOW,
-                                QSGW_SRG_QUAD_TOL, get_method_info)
+from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_DM_TOL,
+                                QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL, get_method_info)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.SingleReference.GW.evGW import evgw_eigenvalues, rotated_mean_field
@@ -52,8 +51,10 @@ def build_reference(xc='pbe0', atom=GEOMETRY, basis='cc-pvdz', symmetry=False):
     return mf
 
 
-def mean_field_spectrum(mf):
-    """(eps, coeff, nocc, omega, X, Y): the RPA Casida solution of `mf`."""
+def mean_field_casida(mf):
+    """(eps, coeff, nocc, spectrum, w_aux): the RPA Casida solution of `mf` as
+    _casida_spectrum returns it, a dict with 'singlet' and 'rpa', and the
+    static RPA W in the auxiliary basis of its DF factors `coeff`."""
     mol = mf.mol
     nocc = mol.nelectron // 2
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
@@ -61,12 +62,18 @@ def mean_field_spectrum(mf):
     lr = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted')
     spectrum = qpe._casida_spectrum(lr, nocc, 'RPA', None, False,
                                     {'GW': get_method_info('GW')}, ['GW'], False, True)
+    return eps, coeff, nocc, spectrum, lr.static_screening_aux(nocc)
+
+
+def mean_field_spectrum(mf):
+    """(eps, coeff, nocc, omega, X, Y): the RPA Casida solution of `mf`."""
+    eps, coeff, nocc, spectrum, _ = mean_field_casida(mf)
     omega, X, Y = spectrum['singlet']
     return eps, coeff, nocc, omega, X, Y
 
 
 def test_the_blocked_static_self_energy_is_the_dense_one(mf):
-    """Gate (a). The blocked builder, forced to one excitation per chunk,
+    """The blocked builder, forced to one excitation per chunk,
     reproduces calculate_self_energy_matrix at round-off, and its diagonal is
     calculate_self_energy(p, eps_p) per state: the matrix routine's
     `tmp + tmp.T` with prefactor 1.0 is the per-state prefactor 2.0 on the
@@ -97,10 +104,10 @@ def test_the_laplace_quadrature():
     """The rule behind the SRG kernel: sum_n w_n exp(-mu x_n) against
     int_0^1 exp(-mu x) dx = (1 - exp(-mu)) / mu, on a grid five times denser
     than the rule's own check. Relative error below QSGW_SRG_QUAD_TOL for every
-    mu in [0, mu_max], three decades of mu_max; a tolerance below machine
-    precision is refused."""
+    mu in [0, mu_max], from 10 to 1e9, the 2 s a_max^2 of an all-electron
+    basis on a heavy atom; a tolerance below machine precision is refused."""
     ok = True
-    for mu_max in (10.0, 1e4, 1e6):
+    for mu_max in (10.0, 1e4, 1e6, 1e9):
         x, w = _srg_laplace_quadrature(mu_max, QSGW_SRG_QUAD_TOL)
         mu = np.concatenate([[0.0], np.logspace(-6, np.log10(mu_max), 20000)])
         exact = np.ones_like(mu)
@@ -118,7 +125,7 @@ def test_the_laplace_quadrature():
 
 
 def test_the_srg_static_self_energy(mf):
-    """Gate (a), the regularized form. Marie and Loos's SRG-qsGW self-energy
+    """The regularized form. Marie and Loos's SRG-qsGW self-energy
     (arXiv:2303.05984, eq. 44; JCTC 2023, doi 10.1021/acs.jctc.3c00281),
 
         Sigma_pq(s) = 2 sum_{S,r} chi_Srp chi_Srq K(a_Srp, a_Srq),
@@ -232,7 +239,10 @@ def test_both_flavors_converge_and_open_the_gap(mf):
     QSGW_DM_TOL on the density; both gaps lie above the Casida G0W0 gap of the
     same mean field, as every self-consistent flavor's does on water (Kaplan
     2016, Table 1: qsGW IP 12.95 eV against G0W0@PBE 11.87 eV). qsGW0 solves
-    the Casida problem once; qsGW once per cycle."""
+    the Casida problem once; qsGW once per cycle. `info` carries the DF
+    factors with_df builds for the returned orbitals and the static W each
+    flavor screens with, the result's for qsGW and the start's for qsGW0, to
+    round-off."""
     nocc = mf.mol.nelectron // 2
     builds = []
     original = qpe._casida_spectrum
@@ -255,7 +265,7 @@ def test_both_flavors_converge_and_open_the_gap(mf):
     g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
     ok = check(qs['converged'] and qs0['converged'], 'qsGW and qsGW0 converge',
                f"{qs['cycles']} and {qs0['cycles']} cycles")
-    ok &= check(qs['history'][-1] < EVGW_TOL and qs['dm_history'][-1] < 1e-6,
+    ok &= check(qs['history'][-1] < EVGW_TOL and qs['dm_history'][-1] < QSGW_DM_TOL,
                 'the last qsGW step meets both criteria',
                 f"d eps {qs['history'][-1]:.1e} Ha, d D {qs['dm_history'][-1]:.1e}")
     ok &= check(n_qs == qs['cycles'] and n_qs0 == 1,
@@ -270,11 +280,21 @@ def test_both_flavors_converge_and_open_the_gap(mf):
     ortho = np.abs(c_qs.T @ ov @ c_qs - np.eye(len(eps_qs))).max()
     ok &= check(ortho < 1e-10, 'the returned orbitals are S-orthonormal',
                 f'max |C^T S C - 1| {ortho:.1e}')
-    naux = qs['df_coeff'].shape[0]
-    ok &= check(qs['w_aux'].shape == (naux, naux)
-                and qs0['w_aux'].shape == (naux, naux)
-                and qs['df_coeff'].shape == (naux, len(eps_qs), len(eps_qs)),
-                'info carries the static W and the DF factors of the result')
+    # the factors rebuilt from the returned orbitals through with_df, and the W
+    # each flavor screens with: qsGW's from those factors, qsGW0's the start's
+    eps0, coeff0, _, _, w0 = mean_field_casida(mf)
+    d_b, d_w = [], []
+    for eps_x, c_x, info, screening in ((eps_qs, c_qs, qs, 'updated'),
+                                        (eps_qs0, c_qs0, qs0, 'fixed')):
+        rebuilt = get_density_fitting_coefficients(
+            mf.mol, rotated_mean_field(mf, eps_x, c_x), representation='spatial')
+        w_ref = w0 if screening == 'fixed' else LinearResponseSolver(
+            eps_x, coeff_df=rebuilt, spin_mode='restricted').static_screening_aux(nocc)
+        d_b.append(np.abs(info['df_coeff'] - rebuilt).max())
+        d_w.append(np.abs(info['w_aux'] - w_ref).max() / np.abs(w_ref).max())
+    ok &= check(max(d_b) < 1e-10 and max(d_w) < 1e-10,
+                'info carries the DF factors of the result and the W it screens with',
+                f'max |d B| {max(d_b):.1e}, max relative |d W| {max(d_w):.1e}')
     return ok
 
 
@@ -295,17 +315,78 @@ def test_the_two_mixings_land_on_one_fixed_point(mf):
     return ok
 
 
+def test_a_mean_field_without_density_fitting(mf):
+    """Without with_df the DF factors are an eigendecomposition of the MO-basis
+    ERI, whose auxiliary index follows the orbitals. The loop rotates the mean
+    field's factors, B'_P,pq = sum_mn U_mp B_P,mn U_nq with U = C0^T S C, so the
+    transition density qsGW0 builds once stays in their auxiliary basis. On the
+    same SCF with with_df removed both flavors converge and land on the RI runs'
+    HOMO and LUMO within 5 meV, the cc-pvdz-ri fitting error being about 1 meV
+    (the qsGW pair, reported). The evGW0 step refuses a transition density on
+    such a mean field, which has no auxiliary basis to keep it in."""
+    nocc = mf.mol.nelectron // 2
+    front = [nocc - 1, nocc]
+    plain = mf.copy()
+    plain.with_df = None
+    ok = True
+    d_front = {}
+    for screening in ('updated', 'fixed'):
+        e_ri, _, _ = qsgw_eigenvalues(mf, screening=screening)
+        e_ex, c_ex, info = qsgw_eigenvalues(plain, screening=screening)
+        d_front[screening] = np.abs(e_ex[front] - e_ri[front]).max() * HARTREE_TO_EV
+        rot = mf.mo_coeff.T @ mf.get_ovlp() @ c_ex
+        coeff0 = get_density_fitting_coefficients(mf.mol, plain,
+                                                  representation='spatial')
+        d_b = np.abs(info['df_coeff']
+                     - np.einsum('Pmn, mp, nq -> Ppq', coeff0, rot, rot)).max()
+        ok &= check(info['converged'] and d_b < 1e-10,
+                    f'{screening}: converges, df_coeff in the mean field\'s '
+                    f'auxiliary basis', f"{info['cycles']} cycles, "
+                    f'max |df_coeff - U^T B0 U| {d_b:.1e}')
+    ok &= check(d_front['fixed'] < 5e-3,
+                'qsGW0 without with_df lands on the RI HOMO and LUMO',
+                f"{d_front['fixed'] * 1e3:.3f} meV, qsGW {d_front['updated'] * 1e3:.3f}"
+                ' meV')
+    eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
+    rho = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')._rho_a_df(
+        nocc, X, Y)
+    spectrum = {'singlet': (omega, X, Y)}
+    try:
+        qpe.casida_evgw_step(plain, plain.mol, 'fixed', fixed_spectrum=spectrum,
+                             fixed_rho=rho)
+        ok &= check(False, 'fixed_rho on a mean field without with_df is refused')
+    except NotImplementedError as e:
+        ok &= check('density_fit' in str(e),
+                    'fixed_rho on a mean field without with_df is refused')
+    return ok
+
+
 def test_the_refusals(mf):
     """Bad input and unsupported branches are named, not silently served."""
     ok = True
-    for kw, exc, text in (({'screening': 'never'}, ValueError, 'screening'),
-                          ({'mixing': 'never'}, ValueError, 'mixing'),
-                          ({'converge_on': [10**6]}, ValueError, 'converge_on')):
+    for kw, text in (({'screening': 'never'}, 'screening'),
+                     ({'mixing': 'never'}, 'mixing'),
+                     ({'converge_on': [10**6]}, 'converge_on'),
+                     ({'converge_on': [4, -1]}, 'converge_on'),
+                     ({'mixing': 'linear', 'damping': 1.0}, 'damping'),
+                     ({'max_cycle': 0}, 'max_cycle'),
+                     ({'diis_size': 0}, 'diis_size'),
+                     ({'flow': float('nan')}, 'flow')):
         try:
-            qsgw_eigenvalues(mf, max_cycle=1, **kw)
+            qsgw_eigenvalues(mf, **{'max_cycle': 1, **kw})
             ok &= check(False, f'{kw} is refused')
-        except exc as e:
-            ok &= check(text in str(e), f'{kw} is refused with {exc.__name__}')
+        except ValueError as e:
+            ok &= check(text in str(e), f'{kw} is refused with ValueError')
+    nocc = mf.mol.nelectron // 2
+    swapped = mf.copy()
+    swapped.mo_occ = mf.mo_occ.copy()
+    swapped.mo_occ[[nocc - 1, nocc]] = swapped.mo_occ[[nocc, nocc - 1]]
+    try:
+        qsgw_eigenvalues(swapped, max_cycle=1)
+        ok &= check(False, 'a closed-shell but non-aufbau occupation is refused')
+    except NotImplementedError as e:
+        ok &= check('aufbau' in str(e),
+                    'a closed-shell but non-aufbau occupation is refused')
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, verbose=0)
     umf = dft.UKS(mol)
     umf.xc = 'pbe0'
@@ -361,7 +442,7 @@ def test_the_refusals(mf):
 def test_calc_qp_energy_drives_the_loop(mf):
     """The front door: self_consistency='qsGW' returns the loop's HOMO, a list
     of states the dict with the loop's info and orbitals; qsGW0 likewise; any
-    other route, a vertex and a density correction are refused."""
+    other route, a vertex, a density correction and an anchor are refused."""
     nocc = mf.mol.nelectron // 2
     eps_qs, c_qs, _ = qsgw_eigenvalues(mf, screening='updated')
     homo = qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW')
@@ -383,25 +464,18 @@ def test_calc_qp_energy_drives_the_loop(mf):
     except NotImplementedError as e:
         ok &= check('casida' in str(e).lower(),
                     'qsGW on the space-time route is refused')
-    try:
-        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
-                           selfenergy='GWGammaInf')
-        ok &= check(False, 'a vertex under qsGW is refused')
-    except NotImplementedError:
-        ok &= check(True, 'a vertex under qsGW is refused')
-    try:
-        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
-                           polarizability='BSE')
-        ok &= check(False, 'a BSE polarizability under qsGW is refused')
-    except NotImplementedError:
-        ok &= check(True, 'a BSE polarizability under qsGW is refused')
-    try:
-        qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW',
-                           dm_correction=mf.make_rdm1())
-        ok &= check(False, 'a density correction under qsGW is refused')
-    except NotImplementedError as e:
-        ok &= check('dm_correction' in str(e),
-                    'a density correction under qsGW is refused')
+    for label, kw, text in (
+            ('a vertex', {'selfenergy': 'GWGammaInf'}, 'GW@RPA only'),
+            ('a BSE polarizability', {'polarizability': 'BSE'}, 'GW@RPA only'),
+            ('a density correction', {'dm_correction': mf.make_rdm1()},
+             'dm_correction'),
+            ('an anchor', {'eps_anchor': np.asarray(mf.mo_energy, float)},
+             'eps_anchor')):
+        try:
+            qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW', **kw)
+            ok &= check(False, f'{label} under qsGW is refused')
+        except NotImplementedError as e:
+            ok &= check(text in str(e), f'{label} under qsGW is refused')
     return ok
 
 
@@ -413,20 +487,22 @@ def kohn_sham_fock_diagonal(mf, mo_coeff):
 
 
 def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
-    """Gate (e). One application of the Casida eigenvalue map at the converged
+    """One application of the Casida eigenvalue map at the converged
     (eps', C'), anchored on the Kohn-Sham Fock diagonal of the rotated density,
     returns eps' on HOMO and LUMO within EVGW_TOL, and the evGW0 loop started
     there stops at cycle 1. For qsGW the step builds W from (eps', C') itself;
-    for qsGW0 the mean field's spectrum and transition density are injected.
+    for qsGW0 the mean field's spectrum and transition density, built here and
+    not handed back by the loop, are injected, and the density the loop kept
+    must equal them.
     The per-state root scan and the static part are independent code from the
     blocked builder, so this is a check of the loop and not of itself. The map
     broadens with eta, the loop regularizes with the SRG flow; on the frontier
-    rows the two diagonals differ by about 5e-8 Ha (gate (a)), far inside the
-    tolerance."""
+    rows the two diagonals differ by about 5e-8 Ha
+    (test_the_srg_static_self_energy), far inside the tolerance."""
     nocc = mf.mol.nelectron // 2
     ok = True
     for screening in ('updated', 'fixed'):
-        # converged two orders tighter than the gate, so the gate reads the
+        # converged two orders tighter than the check, so the check reads the
         # fixed point and not the last step of the loop
         eps_qs, c_qs, info = qsgw_eigenvalues(mf, screening=screening,
                                               keep_spectrum=True, tol=1e-7,
@@ -435,7 +511,20 @@ def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
         anchor = kohn_sham_fock_diagonal(mf, c_qs)
         step_kw = {'eps_anchor': anchor}
         if screening == 'fixed':
-            step_kw.update(fixed_spectrum=info['spectrum'], fixed_rho=info['rho'])
+            eps0, coeff0, _, spectrum0, _ = mean_field_casida(mf)
+            _, X0, Y0 = spectrum0['singlet']
+            rho0 = SelfEnergySolver(eps0, df_coeff=coeff0,
+                                    spin_mode='restricted')._rho_a_df(nocc, X0, Y0)
+            # an eigenvector is fixed up to its sign, so compare
+            # sum_S rho_PS rho_QS / Omega_S, the combination Sigma reads
+            omega0 = spectrum0['singlet'][0]
+            ref = (rho0 / omega0) @ rho0.T
+            d_rho = (np.abs((info['rho'] / omega0) @ info['rho'].T - ref).max()
+                     / np.abs(ref).max())
+            ok &= check(d_rho < 1e-10,
+                        "qsGW0: the loop's transition density is the mean field's",
+                        f'max relative |d sum_S rho rho / Omega| {d_rho:.1e}')
+            step_kw.update(fixed_spectrum=spectrum0, fixed_rho=rho0)
         step = qpe.casida_evgw_step(view, mf.mol, screening, **step_kw)
         back = step(eps_qs)
         d_front = np.abs((back - eps_qs)[[nocc - 1, nocc]]).max()
@@ -455,8 +544,8 @@ def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
 
 
 def test_the_step_keywords_leave_evgw_unchanged(mf):
-    """Without the three keywords the step is the one evGW0 has always used,
-    and a spectrum without its transition density is refused."""
+    """Without the three keywords the step is the one evGW0 has always used;
+    a spectrum without its transition density, or the reverse, is refused."""
     eps_fixed, fixed = evgw_eigenvalues(mf, mf.mol, mode='casida', screening='fixed')
     step = qpe.casida_evgw_step(mf, mf.mol, 'fixed')
     eps0 = np.asarray(mf.mo_energy, float)
@@ -468,9 +557,10 @@ def test_the_step_keywords_leave_evgw_unchanged(mf):
     ok = check(d < 1e-10 and fixed['converged'],
                'the default step is still the Casida G0W0 and evGW0 still converges',
                f'max |d eps| {d:.1e} Ha')
-    for kw, text in (({'fixed_spectrum': {}}, 'fixed_rho'),
-                     ({'fixed_rho': np.zeros((1, 1))}, "screening='fixed'")):
-        screening = 'updated' if 'fixed_rho' in kw else 'fixed'
+    for screening, kw, text in (
+            ('fixed', {'fixed_spectrum': {}}, 'fixed_rho'),
+            ('fixed', {'fixed_rho': np.zeros((1, 1))}, 'fixed_spectrum'),
+            ('updated', {'fixed_rho': np.zeros((1, 1))}, "screening='fixed'")):
         try:
             qpe.casida_evgw_step(mf, mf.mol, screening, **kw)
             ok &= check(False, f'{sorted(kw)} under {screening!r} is refused')
@@ -481,27 +571,35 @@ def test_the_step_keywords_leave_evgw_unchanged(mf):
 
 
 def test_qsgw_forgets_its_starting_point():
-    """Gate (b). qsGW from PBE and from PBE0 lands on one fixed point: HOMO and
-    LUMO within 10 EVGW_TOL, each run converged to EVGW_TOL on its own, so two
-    starts cannot be asked to agree tighter than a few multiples of it. The
-    density change between the two end points is reported, not asserted.
-    qsGW0 keeps the start's W and is start-dependent by construction; its two
-    end points are reported for the record."""
+    """qsGW from PBE and from PBE0 lands on one fixed point. Both runs converge
+    two orders tighter than the default, tol = 1e-7 Ha and dm_tol = 1e-8, so
+    the comparison reads the fixed points and not the loops' last steps: HOMO
+    and LUMO within EVGW_TOL, every state within 1 meV. The all-state bound is
+    the one that tells two self-consistent branches apart: where the high
+    virtuals of the two starts settle on different ones, the frontier can
+    still agree to a meV while they sit eV apart. qsGW0 keeps the start's W
+    and is start-dependent by construction; its two end points are reported."""
     nocc = None
     ends = {}
     for xc in ('pbe', 'pbe0'):
         mf = build_reference(xc)
         nocc = mf.mol.nelectron // 2
-        ends[xc] = {s: qsgw_eigenvalues(mf, screening=s)
-                    for s in ('updated', 'fixed')}
-    e_pbe, c_pbe, _ = ends['pbe']['updated']
-    e_pbe0, c_pbe0, _ = ends['pbe0']['updated']
+        ends[xc] = {'updated': qsgw_eigenvalues(mf, tol=1e-7, dm_tol=1e-8),
+                    'fixed': qsgw_eigenvalues(mf, screening='fixed')}
+    e_pbe, c_pbe, i_pbe = ends['pbe']['updated']
+    e_pbe0, c_pbe0, i_pbe0 = ends['pbe0']['updated']
     front = [nocc - 1, nocc]
     d_qs = np.abs(e_pbe[front] - e_pbe0[front]).max()
+    d_all = np.abs(e_pbe - e_pbe0).max()
     d_dm = np.linalg.norm(2 * c_pbe[:, :nocc] @ c_pbe[:, :nocc].T
                           - 2 * c_pbe0[:, :nocc] @ c_pbe0[:, :nocc].T) / len(e_pbe)
-    ok = check(d_qs < 10 * EVGW_TOL, 'qsGW from PBE and PBE0 agree on HOMO and LUMO',
-               f'{d_qs * HARTREE_TO_EV * 1e3:.3f} meV, |dD|/nmo {d_dm:.1e}')
+    ok = check(i_pbe['converged'] and i_pbe0['converged'],
+               'qsGW from PBE and from PBE0 converges at tol 1e-7, dm_tol 1e-8',
+               f"{i_pbe['cycles']} and {i_pbe0['cycles']} cycles")
+    ok &= check(d_qs < EVGW_TOL, 'the two agree on HOMO and LUMO',
+                f'{d_qs * HARTREE_TO_EV * 1e3:.4f} meV, |dD|/nmo {d_dm:.1e}')
+    ok &= check(d_all * HARTREE_TO_EV < 1e-3, 'and on every state, one branch',
+                f'{d_all * HARTREE_TO_EV * 1e3:.3f} meV')
     e0_pbe = ends['pbe']['fixed'][0]
     e0_pbe0 = ends['pbe0']['fixed'][0]
     d_qs0 = np.abs(e0_pbe[front] - e0_pbe0[front]).max()
@@ -511,17 +609,23 @@ def test_qsgw_forgets_its_starting_point():
 
 
 def test_the_boundaries(mf):
-    """Shapes and switches the other checks never visit: TDA screening, a
-    Mole with point-group symmetry on (the same fixed point as without, within
-    10 EVGW_TOL on HOMO and LUMO, each run converged to EVGW_TOL), one occupied
-    orbital (H2) and one virtual (HF in STO-3G), where a reshape of an
-    (nocc, nvirt) block can return a view instead of a copy. Each converges,
-    both flavors for the two small molecules."""
+    """Shapes and switches the other checks never visit. TDA screening
+    converges to its own fixed point, its gap more than 0.1 eV from full RPA's,
+    so the switch reaches the Casida solver. A Mole with point-group symmetry
+    on reaches the same fixed point as without, within 10 EVGW_TOL on HOMO and
+    LUMO, each run converged to EVGW_TOL. One occupied orbital (H2) and one
+    virtual (HF in STO-3G), where a reshape of an (nocc, nvirt) block can
+    return a view instead of a copy: both flavors converge with a positive
+    gap, leave the mean field untouched, and one excitation per chunk on one
+    thread gives the default build's spectrum within EVGW_TOL, each run
+    converged to it."""
     nocc = mf.mol.nelectron // 2
     ok = True
     e_tda, _, i_tda = qsgw_eigenvalues(mf, tda=True)
     e_full, _, _ = qsgw_eigenvalues(mf)
-    ok &= check(i_tda['converged'], 'TDA screening converges',
+    ok &= check(i_tda['converged']
+                and abs(gap_ev(e_tda, nocc) - gap_ev(e_full, nocc)) > 0.1,
+                'TDA screening converges to its own fixed point',
                 f"{i_tda['cycles']} cycles, gap {gap_ev(e_tda, nocc):.3f} eV "
                 f"against {gap_ev(e_full, nocc):.3f} eV with full RPA")
     e_sym, _, i_sym = qsgw_eigenvalues(build_reference(symmetry=True))
@@ -534,11 +638,21 @@ def test_the_boundaries(mf):
                                 'sto-3g')):
         small = build_reference(atom=atom, basis=basis)
         n = small.mol.nelectron // 2
+        eps_mf = np.asarray(small.mo_energy, float).copy()
+        c_mf = np.asarray(small.mo_coeff, float).copy()
         for screening in ('updated', 'fixed'):
             e, _, info = qsgw_eigenvalues(small, screening=screening)
-            ok &= check(info['converged'] and e[n] > e[n - 1],
-                        f'{label}, {screening}: converges with a positive gap',
-                        f"{info['cycles']} cycles, gap {gap_ev(e, n):.3f} eV")
+            e_one, _, i_one = qsgw_eigenvalues(small, screening=screening,
+                                               block_elems=1, n_workers=1)
+            d_one = np.abs(e_one - e).max()
+            kept = (np.array_equal(small.mo_energy, eps_mf)
+                    and np.array_equal(small.mo_coeff, c_mf))
+            ok &= check(info['converged'] and i_one['converged'] and e[n] > e[n - 1]
+                        and kept and d_one < EVGW_TOL,
+                        f'{label}, {screening}: converges with a positive gap, '
+                        f'blocking-independent, mean field kept',
+                        f"{info['cycles']} cycles, gap {gap_ev(e, n):.3f} eV, "
+                        f'one-element blocks {d_one * HARTREE_TO_EV * 1e3:.4f} meV')
     return ok
 
 
@@ -546,7 +660,7 @@ if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
     all_ok = True
-    print('\n-- 1. the static self-energy, gate (a)')
+    print('\n-- 1. the static self-energy')
     all_ok &= test_the_blocked_static_self_energy_is_the_dense_one(mf)
     all_ok &= test_the_laplace_quadrature()
     all_ok &= test_the_srg_static_self_energy(mf)
@@ -556,13 +670,14 @@ if __name__ == '__main__':
     print('\n-- 3. the loop')
     all_ok &= test_both_flavors_converge_and_open_the_gap(mf)
     all_ok &= test_the_two_mixings_land_on_one_fixed_point(mf)
+    all_ok &= test_a_mean_field_without_density_fitting(mf)
     all_ok &= test_the_refusals(mf)
     print('\n-- 4. the front door')
     all_ok &= test_calc_qp_energy_drives_the_loop(mf)
-    print('\n-- 5. the refeed, gate (e)')
+    print('\n-- 5. the converged point is a fixed point of the evGW0 map')
     all_ok &= test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf)
     all_ok &= test_the_step_keywords_leave_evgw_unchanged(mf)
-    print('\n-- 6. starting-point independence, gate (b)')
+    print('\n-- 6. starting-point independence')
     all_ok &= test_qsgw_forgets_its_starting_point()
     print('\n-- 7. the boundaries')
     all_ok &= test_the_boundaries(mf)

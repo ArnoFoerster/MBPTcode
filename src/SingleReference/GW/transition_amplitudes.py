@@ -45,9 +45,11 @@ class AmplitudeGenerator:
         this X/Y, so get_chi_a contracts it with this solver's own DF factors.
 
         The qsGW0 amplitudes: the Casida problem was solved in the mean field's
-        orbitals, rho = C_ov^T (X + Y) there is basis-independent as an
-        auxiliary-space object, and the amplitudes of the rotated orbitals are
-        rho^T B' with the rotated factors this solver holds. Restricted only;
+        orbitals, and rho_PS = sum_ia B_P,ia (X + Y)_ia,S there is an
+        auxiliary-space object. The amplitudes of the rotated orbitals are
+        rho^T B' with the rotated factors this solver holds, provided B' shares
+        B's auxiliary basis: a with_df's, or B rotated, never factors
+        re-decomposed from the rotated ERI. Restricted only;
         keyed exactly as _rho_a_df keys its own build, so X and Y must stay
         alive while the solver is used.
         """

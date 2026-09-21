@@ -12,14 +12,21 @@ remembers the starting functional:
     info['cycles'], info['converged'], info['w_aux'], info['df_coeff']
 
 Sigma~ is Marie and Loos's SRG-regularized form (J. Chem. Theory Comput. 2023,
-doi 10.1021/acs.jctc.3c00281): Kotani, van Schilfgaarde and Faleev's mode A,
-1/2 [Sigma_pq(eps_p) + Sigma_pq(eps_q)] (Phys. Rev. B 76, 165106, 2007), with
-every term whose energy denominator lies within about 1/sqrt(2 s) of zero
-damped. Plain mode A on the pole sum puts high virtuals on poles of Sigma, and
-its loop does not settle; `flow=None` still selects it, with eta as the
-broadening. qsGW0 keeps the mean field's RPA Casida solution,
-`screening='fixed'`: W stays, the amplitudes and the poles follow the rotated
-orbitals. Restricted spin, Casida route only.
+doi 10.1021/acs.jctc.3c00281). Its diagonal is that of Kotani, van Schilfgaarde
+and Faleev's mode A, 1/2 [Sigma_pq(eps_p) + Sigma_pq(eps_q)] (Phys. Rev. B 76,
+165106, 2007), with every term whose energy denominator lies within about
+1/sqrt(2 s) of zero damped; off the diagonal the two differ at every s
+(SelfEnergySolver.static_self_energy_matrix). Plain mode A on the pole sum puts
+high virtuals on poles of Sigma, and its loop does not settle; `flow=None`
+still selects it, with eta as the broadening. qsGW0 keeps the mean field's RPA
+Casida solution, `screening='fixed'`: W stays, the amplitudes and the poles
+follow the rotated orbitals. Restricted spin, Casida route only.
+
+The DF factors are the mean field's, rotated into the current orbitals,
+B_P,pq = sum_mn U_mp B_P,mn U_nq with U = C0^T S C, and never rebuilt: without
+with_df they are an eigendecomposition of the MO-basis ERI, whose auxiliary
+index would follow the orbitals and leave qsGW0's transition density, W and
+the returned factors in three different auxiliary bases.
 """
 import warnings
 
@@ -34,8 +41,7 @@ from src.Base.constants import (DEFAULT_BROADENING_ETA, EVGW_MAX_CYCLE, EVGW_TOL
                                 get_method_info)
 from src.Base.environment import environment_of
 from src.Base.pyscf_interface import get_density_fitting_coefficients
-# module imports: both files import this one through qp_energy
-from src.SingleReference.GW import evGW, qp_energy
+from src.SingleReference.GW import qp_energy  # module import: it imports this file
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
@@ -55,6 +61,15 @@ def _rpa_spectrum(eps, coeff, nocc, eta, tda):
                                           {'GW': get_method_info('GW')}, ['GW'],
                                           False, True)
     return spectrum, lr
+
+
+def _rotated_factors(coeff0, c0, ovlp, mo_coeff):
+    """B_P,pq of the orbitals `mo_coeff`, shape (naux, nmo, nmo), from the mean
+    field's B_P,mn of `c0` in the same auxiliary basis; exact when both span
+    the full AO space, since then C = C0 U with U = C0^T S C."""
+    rot = c0.T @ ovlp @ mo_coeff
+    # B_P,pq = sum_mn U_mp B_P,mn U_nq
+    return np.einsum('Pmn,mp,nq->Ppq', coeff0, rot, rot, optimize=True)
 
 
 def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
@@ -86,9 +101,15 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         OMP_NUM_THREADS, else the CPUs in the affinity mask, as the Casida
         route's QP scan does.
 
-    `info['df_coeff']` are the DF factors in the converged orbitals and
-    `info['w_aux']` the static RPA W: built from those factors and `eps` for
-    qsGW, the mean field's for qsGW0. A BSE on top takes both.
+    `info['df_coeff']`, shape (naux, nmo, nmo), are the DF factors in the
+    returned orbitals and `info['w_aux']`, shape (naux, naux), the static RPA
+    W in the same auxiliary basis: built from those factors and `eps` for
+    qsGW, the mean field's for qsGW0. A BSE on top takes both. Beside them:
+    'cycles', 'converged'; 'history' and 'dm_history', the two criteria per
+    cycle; 'screening', 'mixing', 'flow', 'converge_on'; 'eps_mean_field' and
+    'mo_coeff_mean_field', the start; 'sigma_static', the last cycle's Sigma~
+    in the MO basis that cycle started from, not the returned one; 'spectrum'
+    and 'rho', None unless `keep_spectrum`.
 
     Restricted spin only; an attached environment (solvent) is refused, since
     its reaction field enters the mean field's eigenvalues and not this
@@ -99,6 +120,18 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         raise ValueError(f'screening={screening!r}: choose one of {SCREENINGS}')
     if mixing not in MIXINGS:
         raise ValueError(f'mixing={mixing!r}: choose one of {MIXINGS}')
+    if not 0.0 <= damping < 1.0:
+        # at 1 the Hamiltonian never moves, and the change the criterion reads,
+        # (1 - damping) times the fixed-point residual, vanishes at the start
+        raise ValueError(f'damping={damping!r}: linear mixing keeps that fraction '
+                         f'of the old Hamiltonian and needs 0 <= damping < 1')
+    if flow is not None and not (np.isfinite(flow) and flow >= 0):
+        raise ValueError(f'flow={flow!r}: the SRG flow parameter is a finite s >= 0')
+    if int(max_cycle) < 1:
+        raise ValueError(f'max_cycle={max_cycle!r}: the loop needs one cycle or more')
+    if mixing == 'diis' and int(diis_size) < 1:
+        raise ValueError(f"diis_size={diis_size!r}: mixing='diis' needs a subspace "
+                         f"of one Hamiltonian or more; mixing='linear' needs none")
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError('qsgw_eigenvalues is restricted-spin only')
     if getattr(environment_of(mf), 'screens', True):
@@ -111,12 +144,14 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     c0 = np.asarray(mf.mo_coeff, float)
     mo_occ = np.asarray(mf.mo_occ)
     nmo = len(eps0)
-    # an ROHF/ROKS object is not a UHF one, so the spin test above lets it by
-    if mol.spin != 0 or not np.isin(mo_occ, (0.0, 2.0)).all():
+    # an ROHF/ROKS object is not a UHF one, so the spin test above lets it by;
+    # eigh sorts the orbitals, so the occupied ones must be the lowest nocc
+    off = int(np.count_nonzero(mo_occ != np.where(np.arange(nmo) < nocc, 2.0, 0.0)))
+    if mol.spin != 0 or off:
         raise NotImplementedError(
-            f'qsgw_eigenvalues needs a closed-shell reference, occupations 2 or 0; '
-            f'this one has spin {mol.spin} and occupations '
-            f'{sorted(set(mo_occ.tolist()))}')
+            f'qsgw_eigenvalues needs a closed-shell aufbau reference, the lowest '
+            f'{nocc} orbitals doubly occupied and the rest empty; this one has '
+            f'spin {mol.spin} and {off} occupations off that pattern')
     # the loop diagonalizes h + J + K + Sigma~ in the full AO space
     if c0.shape[1] != c0.shape[0]:
         raise NotImplementedError(
@@ -125,24 +160,27 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             f'removed), which the loop would not reproduce')
     if converge_on is None:
         converge_on = [nocc - 1, nocc]
-    tested = np.intersect1d(np.atleast_1d(converge_on).astype(int), np.arange(nmo))
-    if tested.size == 0:
-        raise ValueError('converge_on and the spectrum do not overlap, so nothing '
-                         'would decide convergence')
+    tested = np.unique(np.atleast_1d(converge_on).astype(int))
+    if tested.size == 0 or tested[0] < 0 or tested[-1] >= nmo:
+        raise ValueError(f'converge_on={tested.tolist()}: name one orbital or more, '
+                         f'each an index 0 to {nmo - 1} of the spectrum')
 
     workers = qp_energy._resolve_workers(n_workers, nocc * (nmo - nocc))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
     mf_hf = scf.RHF(mol)
+    coeff0 = get_density_fitting_coefficients(mol, mf, representation='spatial')
     if screening == 'fixed':
         # the mean field's Casida problem, solved once; its transition density
-        # is an auxiliary-space object that every rotated basis can read
-        coeff0 = get_density_fitting_coefficients(mol, mf, representation='spatial')
+        # lives in coeff0's auxiliary basis, which the rotated factors keep
         spectrum, lr0 = _rpa_spectrum(eps0, coeff0, nocc, eta, tda)
         omega, X, Y = spectrum['singlet']
         rho = SelfEnergySolver(eps0, df_coeff=coeff0, spin_mode='restricted',
                                eta=eta)._rho_a_df(nocc, X, Y)
         w_aux = lr0.static_screening_aux(nocc)
+        # the loop needs omega and rho only; X and Y are nexciton x nocc nvirt
+        del lr0, X, Y
+        spectrum = spectrum if keep_spectrum else None
 
     eps, mo_coeff = eps0.copy(), c0.copy()
     dm = mf_hf.make_rdm1(mo_coeff, mo_occ)
@@ -154,15 +192,17 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     converged = False
     sigma = None
     for cycle in range(int(max_cycle)):
-        # the DF factors of the current orbitals; get_density_fitting_coefficients
-        # reads the view's mo_coeff
-        view = evGW.rotated_mean_field(mf, eps, mo_coeff)
-        coeff = get_density_fitting_coefficients(mol, view, representation='spatial')
+        coeff = _rotated_factors(coeff0, c0, ovlp, mo_coeff)
         se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted', eta=eta)
         if screening == 'updated':
+            # X and Y of the last cycle go before this solve allocates its own;
+            # the loop needs omega and rho only
+            spectrum = None
             spectrum, _ = _rpa_spectrum(eps, coeff, nocc, eta, tda)
             omega, X, Y = spectrum['singlet']
             rho = se._rho_a_df(nocc, X, Y)
+            del X, Y
+            spectrum = spectrum if keep_spectrum else None
         # Sigma~ in the current MO basis, then to the AO basis: C^-1 = C^T S
         sigma = se.static_self_energy_matrix(nocc, omega, rho, eigenvalues=eps,
                                              flow=flow, block_elems=block_elems,
@@ -199,8 +239,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             f'switch the mixing.', RuntimeWarning, stacklevel=2)
 
     # the factors of the returned orbitals, and for qsGW the W they screen with
-    view = evGW.rotated_mean_field(mf, eps, mo_coeff)
-    coeff = get_density_fitting_coefficients(mol, view, representation='spatial')
+    coeff = _rotated_factors(coeff0, c0, ovlp, mo_coeff)
     if screening == 'updated':
         w_aux = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted',
                                      eta=eta).static_screening_aux(nocc)
@@ -208,7 +247,6 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             'dm_history': dm_history, 'screening': screening, 'mixing': mixing,
             'flow': flow, 'converge_on': tested, 'eps_mean_field': eps0,
             'mo_coeff_mean_field': c0, 'df_coeff': coeff, 'w_aux': w_aux,
-            'sigma_static': sigma,
-            'spectrum': spectrum if keep_spectrum else None,
+            'sigma_static': sigma, 'spectrum': spectrum,
             'rho': rho if keep_spectrum else None}
     return eps, mo_coeff, info
