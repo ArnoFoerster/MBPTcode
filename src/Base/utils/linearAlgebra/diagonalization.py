@@ -1,4 +1,7 @@
+import atexit
 import os
+import sys
+import traceback
 import warnings
 
 import numpy as np
@@ -126,6 +129,10 @@ def diagonalize_matrix(M, threshold=5000):
             del Z_local
             return eigenvalues, Z, True, solver, comm
         except Exception as exc:
+            if _SERVING:
+                # the workers are inside this solve's transfers; a local
+                # fallback would leave them waiting until the walltime
+                _abort(exc)
             # Do not fail silently: without this the caller cannot tell a
             # distributed solve from a local one, and the local fallback has a
             # hard size ceiling (below) that the distributed path does not.
@@ -159,6 +166,11 @@ def serve_distributed_solves():
     above its threshold is one served solve: the size by broadcast, the chunk
     of M, the eigenvectors back. Without MPI, or with MBPT_USE_ELPA=0, every
     rank returns False and the driver runs as before.
+
+    A failure inside a served solve, on any rank, aborts every rank: the others
+    are mid-transfer and would otherwise wait until the walltime. A driver that
+    ends without release_workers(), by an exception or sys.exit, releases the
+    workers at interpreter exit.
     """
     global _SERVING
     if not _try_init_mpi():
@@ -166,18 +178,30 @@ def serve_distributed_solves():
     comm = MPI.COMM_WORLD
     if comm.Get_rank() == 0:
         _SERVING = comm.Get_size() > 1
+        if _SERVING:
+            atexit.register(release_workers)
         return False
     while True:
-        global_N = comm.bcast(None, root=0)
-        if global_N == 0:
-            return True
-        solver = ElpaEigensolver(global_N=global_N, block_size=64, comm=comm)
-        M_local = scatter_block_cyclic(None, solver, comm)
-        _, Z_local = solver.solve(M_local)
-        del M_local
-        gather_block_cyclic(Z_local, global_N, solver, comm)
-        del Z_local
-        solver.destroy()
+        try:
+            global_N = comm.bcast(None, root=0)
+            if global_N == 0:
+                return True
+            solver = ElpaEigensolver(global_N=global_N, block_size=64, comm=comm)
+            M_local = scatter_block_cyclic(None, solver, comm)
+            _, Z_local = solver.solve(M_local)
+            del M_local
+            gather_block_cyclic(Z_local, global_N, solver, comm)
+            del Z_local
+            solver.destroy()
+        except Exception as exc:
+            _abort(exc)
+
+
+def _abort(exc):
+    """Print exc and abort every rank; a served solve cannot recover."""
+    traceback.print_exception(exc)
+    sys.stderr.flush()
+    MPI.COMM_WORLD.Abort(1)
 
 
 def release_workers():
