@@ -34,6 +34,7 @@ GEOMETRY = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def check(ok, label, detail=''):
+    """Print an [ok]/[FAIL] verdict line for `label` and return `ok`."""
     print(f"  [{'ok' if ok else 'FAIL'}] {label}"
           + (f'   ({detail})' if detail else ''))
     return bool(ok)
@@ -221,6 +222,7 @@ def test_a_preset_transition_density_feeds_the_amplitudes(mf):
 
 
 def gap_ev(eps, nocc):
+    """HOMO-LUMO gap in eV of the spectrum `eps`, shape (nmo,), in Hartree."""
     return (eps[nocc] - eps[nocc - 1]) * HARTREE_TO_EV
 
 

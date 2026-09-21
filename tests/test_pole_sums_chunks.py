@@ -12,6 +12,7 @@ from src.SingleReference.GW.self_energy import _pole_sums
 
 
 def check(ok, label, detail=''):
+    """Print an [ok]/[FAIL] verdict line for `label` and return `ok`."""
     print(f"  [{'ok' if ok else 'FAIL'}] {label}" +
           (f'   ({detail})' if detail else ''))
     return bool(ok)
