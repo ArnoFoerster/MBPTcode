@@ -55,44 +55,53 @@ def get_global_indices_1d(local_size, block_size, grid_dim, process_coord):
     global_indices = global_block_num * block_size + offset_in_block
     return global_indices
 
+def _chunk_indices(solver, rank):
+    """Global (rows, cols) index arrays of the block-cyclic chunk `rank` owns."""
+    prow, pcol = rank % solver.Pr, rank // solver.Pr
+    nrows = solver._numroc(solver.global_N, solver.Nb, prow, 0, solver.Pr)
+    ncols = solver._numroc(solver.global_N, solver.Nb, pcol, 0, solver.Pc)
+    return (get_global_indices_1d(nrows, solver.Nb, solver.Pr, prow),
+            get_global_indices_1d(ncols, solver.Nb, solver.Pc, pcol))
+
+# Both transfers are buffered point-to-point rather than comm.gather/scatter:
+# the pickled collectives cap one message at 2 GB and hold every chunk a second
+# time on rank 0, so neither reaches a Casida matrix of 10^5 pair states.
+
 def gather_block_cyclic(Z_local, global_N, solver, comm):
-    """Gathers distributed block-cyclic matrix Z_local to Rank 0."""
+    """Gathers distributed block-cyclic matrix Z_local to Rank 0; None elsewhere."""
     rank = comm.Get_rank()
-    global_i = get_global_indices_1d(Z_local.shape[0], solver.Nb, solver.Pr, solver.my_prow)
-    global_j = get_global_indices_1d(Z_local.shape[1], solver.Nb, solver.Pc, solver.my_pcol)
-
-    local_data = (global_i, global_j, Z_local)
-    all_data = comm.gather(local_data, root=0)
-
-    if rank == 0:
-        Z_full = np.empty((global_N, global_N), dtype=Z_local.dtype)
-        for idx_i, idx_j, chunk in all_data:
-            Z_full[np.ix_(idx_i, idx_j)] = chunk
-        return Z_full
-    return None
+    if rank != 0:
+        comm.Send(np.ascontiguousarray(Z_local), dest=0, tag=1)
+        return None
+    Z_full = np.empty((global_N, global_N), dtype=Z_local.dtype)
+    for src in range(comm.Get_size()):
+        idx_i, idx_j = _chunk_indices(solver, src)
+        if src == 0:
+            chunk = Z_local
+        else:
+            chunk = np.empty((len(idx_i), len(idx_j)), dtype=Z_local.dtype)
+            comm.Recv(chunk, source=src, tag=1)
+        Z_full[np.ix_(idx_i, idx_j)] = chunk
+    return Z_full
 
 def scatter_block_cyclic(matrix_full, solver, comm):
     """Scatters global matrix on Rank 0 to all ranks as block-cyclic chunks."""
     rank = comm.Get_rank()
-    if rank == 0:
-        send_data = []
-        for target_rank in range(comm.Get_size()):
-            target_prow = target_rank % solver.Pr
-            target_pcol = target_rank // solver.Pr
-
-            local_rows = solver._numroc(solver.global_N, solver.Nb, target_prow, 0, solver.Pr)
-            local_cols = solver._numroc(solver.global_N, solver.Nb, target_pcol, 0, solver.Pc)
-
-            idx_i = get_global_indices_1d(local_rows, solver.Nb, solver.Pr, target_prow)
-            idx_j = get_global_indices_1d(local_cols, solver.Nb, solver.Pc, target_pcol)
-
-            chunk = matrix_full[np.ix_(idx_i, idx_j)]
-            send_data.append(chunk)
-    else:
-        send_data = None
-
-    local_chunk = comm.scatter(send_data, root=0)
-    return local_chunk
+    dtype = comm.bcast(matrix_full.dtype if rank == 0 else None, root=0)
+    if rank != 0:
+        idx_i, idx_j = _chunk_indices(solver, rank)
+        chunk = np.empty((len(idx_i), len(idx_j)), dtype=dtype)
+        comm.Recv(chunk, source=0, tag=2)
+        return chunk
+    own = None
+    for dest in range(comm.Get_size()):
+        idx_i, idx_j = _chunk_indices(solver, dest)
+        chunk = matrix_full[np.ix_(idx_i, idx_j)]
+        if dest == 0:
+            own = chunk
+        else:
+            comm.Send(chunk, dest=dest, tag=2)
+    return own
 
 def diagonalize_matrix(M, threshold=5000):
     """Diagonalize symmetric M: distributed ELPA if dim >= threshold and MPI available, else local scipy.linalg.eigh.
