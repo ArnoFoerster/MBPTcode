@@ -112,8 +112,9 @@ def diagonalize_matrix(M, threshold=5000):
     """
     global_N = M.shape[0] if M is not None else 0
 
-    # size check FIRST, so MPI is never initialized for small matrices
-    if global_N >= threshold and _try_init_mpi():
+    # size check FIRST, so MPI is never initialized for small matrices; elpa.py
+    # solves real matrices only, so a complex Hermitian M stays local
+    if global_N >= threshold and not np.iscomplexobj(M) and _try_init_mpi():
         try:
             comm = MPI.COMM_WORLD
             comm.bcast(global_N, root=0)          # served workers read it here
