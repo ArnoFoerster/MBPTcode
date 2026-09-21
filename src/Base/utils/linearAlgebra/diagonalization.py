@@ -110,12 +110,13 @@ def diagonalize_matrix(M, threshold=5000):
     read on rank 0 only, scattered in block-cyclic chunks, and Z comes back whole
     on rank 0 and None on every other rank; the eigenvalues are on all ranks.
     """
-    global_N = M.shape[0]
+    global_N = M.shape[0] if M is not None else 0
 
     # size check FIRST, so MPI is never initialized for small matrices
     if global_N >= threshold and _try_init_mpi():
         try:
             comm = MPI.COMM_WORLD
+            comm.bcast(global_N, root=0)          # served workers read it here
             solver = ElpaEigensolver(global_N=global_N, block_size=64, comm=comm)
             M_local = scatter_block_cyclic(M, solver, comm)
             eigenvalues, Z_local = solver.solve(M_local)
@@ -142,3 +143,45 @@ def diagonalize_matrix(M, threshold=5000):
     driver = 'evd' if 1 + 6*global_N + 2*global_N**2 <= 2**31 - 1 else 'evr'
     eigenvalues, Z = la.eigh(M, driver=driver)
     return eigenvalues, Z, False, None, None
+
+
+_SERVING = False
+
+
+def serve_distributed_solves():
+    """Park every rank but 0 to serve the distributed solves rank 0 requests.
+
+    Called once at the top of a driver started under mpirun. Rank 0 returns
+    False at once and runs the driver alone, so the matrices are built once;
+    the other ranks return True only after rank 0 calls release_workers(), and
+    the driver exits on True. In between, each diagonalize_matrix on rank 0
+    above its threshold is one served solve: the size by broadcast, the chunk
+    of M, the eigenvectors back. Without MPI, or with MBPT_USE_ELPA=0, every
+    rank returns False and the driver runs as before.
+    """
+    global _SERVING
+    if not _try_init_mpi():
+        return False
+    comm = MPI.COMM_WORLD
+    if comm.Get_rank() == 0:
+        _SERVING = comm.Get_size() > 1
+        return False
+    while True:
+        global_N = comm.bcast(None, root=0)
+        if global_N == 0:
+            return True
+        solver = ElpaEigensolver(global_N=global_N, block_size=64, comm=comm)
+        M_local = scatter_block_cyclic(None, solver, comm)
+        _, Z_local = solver.solve(M_local)
+        del M_local
+        gather_block_cyclic(Z_local, global_N, solver, comm)
+        del Z_local
+        solver.destroy()
+
+
+def release_workers():
+    """End the service serve_distributed_solves started; rank 0, driver end."""
+    global _SERVING
+    if _SERVING:
+        MPI.COMM_WORLD.bcast(0, root=0)
+        _SERVING = False
