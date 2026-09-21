@@ -395,6 +395,36 @@ def test_the_step_keywords_leave_evgw_unchanged(mf):
     return ok
 
 
+def test_qsgw_forgets_its_starting_point():
+    """Gate (b). qsGW from PBE and from PBE0 lands on one fixed point: HOMO and
+    LUMO within 10 EVGW_TOL, each run converged to EVGW_TOL on its own, so two
+    starts cannot be asked to agree tighter than a few multiples of it. The
+    density change between the two end points is reported, not asserted.
+    qsGW0 keeps the start's W and is start-dependent by construction; its two
+    end points are reported for the record."""
+    nocc = None
+    ends = {}
+    for xc in ('pbe', 'pbe0'):
+        mf = build_reference(xc)
+        nocc = mf.mol.nelectron // 2
+        ends[xc] = {s: qsgw_eigenvalues(mf, screening=s)
+                    for s in ('updated', 'fixed')}
+    e_pbe, c_pbe, _ = ends['pbe']['updated']
+    e_pbe0, c_pbe0, _ = ends['pbe0']['updated']
+    front = [nocc - 1, nocc]
+    d_qs = np.abs(e_pbe[front] - e_pbe0[front]).max()
+    d_dm = np.linalg.norm(2 * c_pbe[:, :nocc] @ c_pbe[:, :nocc].T
+                          - 2 * c_pbe0[:, :nocc] @ c_pbe0[:, :nocc].T) / len(e_pbe)
+    ok = check(d_qs < 10 * EVGW_TOL, 'qsGW from PBE and PBE0 agree on HOMO and LUMO',
+               f'{d_qs * HARTREE_TO_EV * 1e3:.3f} meV, |dD|/nmo {d_dm:.1e}')
+    e0_pbe = ends['pbe']['fixed'][0]
+    e0_pbe0 = ends['pbe0']['fixed'][0]
+    d_qs0 = np.abs(e0_pbe[front] - e0_pbe0[front]).max()
+    print(f'  qsGW0 from PBE vs PBE0 on HOMO/LUMO: {d_qs0 * HARTREE_TO_EV:.4f} eV '
+          f'(reported, start-dependent by construction)')
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -414,5 +444,7 @@ if __name__ == '__main__':
     print('\n-- 5. the refeed, gate (e)')
     all_ok &= test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf)
     all_ok &= test_the_step_keywords_leave_evgw_unchanged(mf)
+    print('\n-- 6. starting-point independence, gate (b)')
+    all_ok &= test_qsgw_forgets_its_starting_point()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

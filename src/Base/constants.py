@@ -45,10 +45,13 @@ QSGW_BLOCK_ELEMS = 2**24
 # SRG flow parameter s of the qsGW static self-energy, in Hartree^-2 (Marie and
 # Loos, JCTC 2023, doi 10.1021/acs.jctc.3c00281, eq. 44). A diagonal term with
 # energy denominator a enters with weight 1 - exp(-2 a^2 s), above 0.99 for
-# |a| > 1.85 eV at s = 500, so the near-pole terms that stall mode A are damped
-# and the rest kept. Their recommendation is 500 or 1000; convergence degrades
-# above 1000.
-QSGW_SRG_FLOW = 500.0
+# |a| > 4.1 eV at s = 100, so the near-pole terms that stall mode A are damped
+# and the rest kept. Marie and Loos find their accuracy plateau from s = 50 and
+# recommend 500 or 1000, judged on convergence from a HF start. On water
+# cc-pVDZ from s = 200 up the high virtuals carry two self-consistent branches
+# and PBE and PBE0 starts end 0.9 to 1.6 meV apart at the frontier; at s = 100
+# they agree to 1e-4 meV, with HOMO and LUMO within 1 meV of s = 1000.
+QSGW_SRG_FLOW = 100.0
 
 # CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
 CPHF_MAX_CYCLE = 100
