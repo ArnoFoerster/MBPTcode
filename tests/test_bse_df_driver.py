@@ -124,8 +124,16 @@ def test_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
     om_isdf = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, auxbasis=AUXBASIS,
                              probe=False, self_consistency='evGW')[0]
     d = np.abs(np.sort(om) - np.sort(om_isdf)).max() * HARTREE_TO_EV
-    return ok & check(d < FIT_TOL, 'both routes reach the same evGW-BSE roots',
-                      f'{d * 1e3:.1f} meV')
+    ok &= check(d < FIT_TOL, 'both routes reach the same evGW-BSE roots',
+                f'{d * 1e3:.1f} meV')
+    # the kernel screens at the fixed point, evGW's W; evGW0 would keep another
+    try:
+        solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False,
+                     self_consistency='evGW', gw_kwargs={'screening': 'fixed'})
+        ok &= check(False, "a 'screening' in gw_kwargs is refused")
+    except ValueError as e:
+        ok &= check('screening' in str(e), "a 'screening' in gw_kwargs is refused")
+    return ok
 
 
 def test_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):

@@ -13,8 +13,11 @@ def gram_product(C, block_elems=2**27):
     Written as ``C.T @ C`` the product goes to the BLAS symmetric rank-k kernel,
     where the OpenBLAS bundled with the numpy wheel segfaults once n^2 reaches a
     few 10^9 values. A row block V[i0:i1] = C[:, i0:i1]^T C is a plain GEMM on
-    distinct buffers, which holds at those sizes, so every block takes that
-    path, straight into its slice of V.
+    distinct buffers, which holds at those sizes, straight into its slice of V.
+    One block covering every row, n^2 <= block_elems, is ``C.T @ C`` itself and
+    takes the rank-k kernel again: harmless at the default, far below the
+    fault, which is why block_elems stays well under 10^9. With several blocks
+    V is symmetric to round-off only; its consumers read one triangle.
     """
     n = C.shape[1]
     V = np.empty((n, n), dtype=np.result_type(C, C))

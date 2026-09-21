@@ -155,11 +155,14 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     of qsGW.py on the Casida route: orbitals and eigenvalues
                     reinjected, W rebuilt (qsGW) or the mean field's kept
                     (qsGW0); a list of states returns 'qsgw_info' with the
-                    orbitals.
+                    orbitals. The loops' own keywords (max_cycle, tol, mixing,
+                    flow, ...) pass through **route_kwargs to evgw_eigenvalues
+                    and qsgw_eigenvalues.
     eps_anchor:     the eps_p that anchors w = eps_p + <Sigma_x - v_xc> +
                     Re Sigma_c(w), when it differs from the spectrum that built
                     the screening. That is the evGW case and the only one;
-                    None means the two coincide.
+                    None means the two coincide. The loops set their own and
+                    refuse it.
     qp_solver:      root selection. 'pole_strength' (default) returns the root
                     of largest weight Z, which deep valence and semicore states
                     need -- a Z ~ 0.03 satellite can sit closer to eps than the
@@ -176,6 +179,12 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
     consistency = str(self_consistency).lower()
+    if eps_anchor is not None and consistency in {**EVGW_SCREENING, **QSGW_SCREENING}:
+        # the loops anchor on the mean field's eigenvalues (evGW) or on none
+        # (qsGW); casida_evgw_step takes an anchor for a single step
+        raise NotImplementedError(
+            f'self_consistency={self_consistency!r} sets its own anchor; '
+            f'eps_anchor has no place in it')
     if consistency in EVGW_SCREENING:
         # the loop takes the route's knobs by name, on the Casida route through
         # its own step and on the imaginary axis by calling back into this
@@ -306,8 +315,9 @@ def _reaction_field_terms(mf, mol, nocc_spin, spin_channel):
 
     Duchemin et al. Eq. (18) where it is available -- the self-polarization of
     the orbital carrying the added charge in the SCREENED reaction field, built
-    once per mean field so this route and the imaginary-axis ones read the
-    same array; `sigma_solvent` is then its diagonal. `cohsex_correction` is
+    once per spectrum a mean field carries, so this route and the imaginary-axis
+    ones read the same array, in every evGW cycle as well; `sigma_solvent` is
+    then its diagonal. `cohsex_correction` is
     the unrestricted fallback: it sums the BARE vtilde over every orbital and
     differs by 0.39 eV of quasiparticle gap on water in water.
     """
@@ -345,16 +355,19 @@ def _casida_setup(mf, mol, df, eta, shift, is_uhf, nocc):
 
 
 def _channel_terms(mf, mol, setup, df, dm_correction, sigma_solvent, spin_channel,
-                   is_uhf, nocc):
+                   is_uhf, nocc, vertex=True):
     """(eri_w_singlet, eri_w_triplet, xc_diagonal) of one spin channel.
 
     A vertex contracts against W: the auxiliary form under DF, the explicit
-    four-index one otherwise. <Sigma_Hx - v_Hxc> is one matrix for the whole
-    spectrum; built per state it was 85 % of an evGW cycle that asks for every
-    orbital.
+    four-index one otherwise, built only when `vertex` asks for it and None
+    without. <Sigma_Hx - v_Hxc> is one matrix for the whole spectrum; built per
+    state it costs a J/K and a grid build per orbital, which dominates a
+    cycle that asks for every orbital.
     """
     if df:
         eri_w_singlet = eri_w_triplet = setup['w_aux']
+    elif not vertex:
+        eri_w_singlet = eri_w_triplet = None
     else:
         eri_w_singlet, eri_w_triplet = setup['lr_solver'].construct_4d_w_rpa(
             nocc, spin_channel)
@@ -502,7 +515,7 @@ def _positive_int_env(name):
 
 
 def _resolve_workers(n_workers, n_states):
-    """Threads for the per-state scan.
+    """Threads for the per-state scan, and for the qsGW static self-energy.
 
     The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
     too, else the CPUs in this thread's affinity mask. Never more than those
@@ -520,7 +533,7 @@ def _resolve_workers(n_workers, n_states):
     n_workers = int(n_workers)
     if n_workers > cpus:
         warnings.warn(
-            f'{n_workers} threads requested for the QP scan, but this thread may '
+            f'{n_workers} threads requested for a thread pool, but this thread may '
             f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
             f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
     return max(1, min(n_workers, cpus, n_states))
@@ -652,21 +665,33 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
         nexciton) to screen with, in place of the one built from `mf`; the
         amplitudes are then that density contracted with `mf`'s own DF
         factors, which is how the mean field's W meets rotated orbitals.
+        Both or neither; `mf` must carry `with_df`, whose auxiliary basis
+        does not move with the orbitals.
     The other keywords are `calc_qp_energy`'s.
 
-    Built once, since none of it moves with the eigenvalues: the reaction
-    field, the DF factors, the static W (a vertex would read it; the loop
-    refuses one) and <Sigma_Hx - v_Hxc> of every spin channel. 'fixed' also
-    keeps the one self-energy solver, whose amplitude cache keys on the
-    identity of X and Y; 'updated' takes a fresh one per spectrum for the same
-    reason.
+    Built once, since none of it moves with the eigenvalues: the DF factors,
+    the static W (a vertex would read it; the loop refuses one) and
+    <Sigma_Hx - v_Hxc> of every spin channel. 'fixed' also keeps the one
+    self-energy solver, whose amplitude cache keys on the identity of X and Y;
+    'updated' takes a fresh one per spectrum for the same reason. The reaction
+    field of an attached environment does move: its Delta W screens with the
+    eigenvalues it is built at, so 'updated' rebuilds its term every cycle at
+    the iterate, as the imaginary-axis routes do through calc_qp_energy on the
+    shifted view, and 'fixed' keeps the mean field's with the rest of W.
     """
     if screening not in ('updated', 'fixed'):
         raise ValueError(f"screening={screening!r}: choose 'updated' or 'fixed'")
     if screening != 'fixed' and (fixed_spectrum is not None or fixed_rho is not None):
         raise ValueError("fixed_spectrum and fixed_rho belong to screening='fixed'")
-    if fixed_spectrum is not None and fixed_rho is None:
-        raise ValueError('fixed_spectrum needs fixed_rho, its DF transition density')
+    if (fixed_spectrum is None) != (fixed_rho is None):
+        raise ValueError('fixed_spectrum and fixed_rho come together: the Casida '
+                         'solution and its DF transition density')
+    if fixed_rho is not None and getattr(mf, 'with_df', None) is None:
+        # without with_df the factors decompose the MO-basis ERI, and their
+        # auxiliary index follows mf's orbitals, not the one fixed_rho was built in
+        raise NotImplementedError(
+            'fixed_rho is an auxiliary-space object and needs a fixed auxiliary '
+            'basis: attach one with mf.density_fit() or mf.with_df = df.DF(mol)')
     is_uhf = isinstance(mf, scf.uhf.UHF)
     nocc = mf.nelec if is_uhf else mol.nelectron // 2
     channels = ('alpha', 'beta') if is_uhf else ('alpha',)
@@ -678,8 +703,13 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
     setup = _casida_setup(mf, mol, df, eta, fields['alpha'][0], is_uhf, nocc)
     eps0 = np.asarray(setup['eps'], float)
     states = list(range(eps0.shape[-1]))
-    terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction, fields[ch][1],
-                                ch, is_uhf, nocc)
+    # the reaction field screens with the iterate under 'updated', so there it
+    # is added per cycle and left out of the terms built once
+    follow = screening == 'updated' and any(f[1] is not None for f in fields.values())
+    # the loop refuses every vertex, so no four-index W is built for one
+    terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction,
+                                None if follow else fields[ch][1], ch, is_uhf, nocc,
+                                vertex=False)
              for ch in channels}
     if screening == 'fixed' and fixed_spectrum is None:
         spectrum_mf = _casida_spectrum(setup['lr_solver'], nocc, 'RPA',
@@ -705,9 +735,14 @@ def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
             se_solver = SelfEnergySolver(eps, df_coeff=setup['df_coeff'],
                                          eri_chemist=setup['eri'],
                                          spin_mode=setup['spin_mode'], eta=eta)
+        view = evGW.shifted_mean_field(mf, eps) if follow else None
         out = []
         for ch in channels:
             eri_w_singlet, eri_w_triplet, xc_diagonal = terms[ch]
+            if follow:
+                sigma_solvent = _reaction_field_terms(
+                    view, mol, _channel(nocc, ch, is_uhf), ch)[1]
+                xc_diagonal = xc_diagonal + np.diag(np.asarray(sigma_solvent))
             energies = qp_energies_from_spectrum(
                 se_solver, nocc, spectrum, method_infos, methods, ch, states,
                 eri_w_singlet, eri_w_triplet, is_uhf, df, _channel(anchor, ch, is_uhf),

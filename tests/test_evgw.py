@@ -13,7 +13,9 @@ test asserts it FAILS -- otherwise nothing here would notice the anchor being
 dropped.
 
 evGW0 (`screening='fixed'`) is gated on the Casida problem being solved once
-for the whole loop and on its gap landing between G0W0 and evGW.
+for the whole loop and on its gap landing between G0W0 and evGW. In a
+continuum the reaction field's term follows the iterate under evGW, as W does,
+and stays the mean field's under evGW0.
 
 Run: python tests/test_evgw.py
 """
@@ -27,8 +29,11 @@ import numpy as np
 from pyscf import dft, gto
 
 from src.Base.constants import HARTREE_TO_EV
+from src.Base.environment import attach_environment
+from src.Base.solvent_screening import SolventScreening
 from src.SingleReference.GW.evGW import (MODES, evgw_eigenvalues,
                                          shifted_mean_field)
+from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.SingleReference.GW.imaginary_time import (DEFAULT_TAU_TARGET,
                                                    minimax_points_for_gw)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
@@ -218,14 +223,19 @@ def test_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
     """A molecule too large for in-core J/K takes PySCF's direct branch, which
     reads the optimizer the mean field caches; a view made through the pickle
     hooks arrives without it and the static correction of every cycle raises.
-    `max_memory = 0` forces that branch on the small reference."""
+    `max_memory = 0` with no cached ERI forces that branch on the small
+    reference; the view shares the reference's ERI until it is cleared, and
+    the in-core branch would store a fresh one, so an ERI still absent after
+    the build is the witness that the direct branch ran."""
     view = shifted_mean_field(mf, np.asarray(mf.mo_energy, float))
     view.max_memory = 0
+    view._eri = None
     dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
     try:
         v_direct = view.get_veff(mf.mol, dm)
-        ok = np.allclose(v_direct, mf.get_veff(mf.mol, dm), atol=1e-10)
-        detail = 'direct and in-core V_Hxc agree'
+        ok = (np.allclose(v_direct, mf.get_veff(mf.mol, dm), atol=1e-10)
+              and view._eri is None)
+        detail = f'direct and in-core V_Hxc agree, ERI cached: {view._eri is not None}'
     except AttributeError as err:
         ok, detail = False, f'direct get_veff raised: {err}'
     return check(ok, 'the shifted view builds V_Hxc on the direct J/K path',
@@ -296,6 +306,12 @@ def test_the_refusals(mf):
             ok &= check(False, f'{kw} is refused')
         except NotImplementedError as exc:
             ok &= check('GW@RPA only' in str(exc), f'{kw} is refused')
+    try:
+        calc_qp_energy(mf, self_consistency='evGW',
+                       eps_anchor=np.asarray(mf.mo_energy, float))
+        ok &= check(False, 'an eps_anchor under evGW is refused')
+    except NotImplementedError as exc:
+        ok &= check('eps_anchor' in str(exc), 'an eps_anchor under evGW is refused')
     try:
         evgw_eigenvalues(mf, mf.mol, mode='nonsense')
         ok &= check(False, 'an unknown mode is refused')
@@ -508,6 +524,66 @@ def test_evgw0_keeps_w_and_moves_the_poles():
     homo = calc_qp_energy(mf, mode='casida', self_consistency='evGW0')
     ok &= check(abs(homo - eps_fixed[nocc - 1] * HARTREE_TO_EV) < 1e-8,
                 "self_consistency='evGW0' returns the evGW0 fixed point")
+    eps_tda, _ = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed',
+                                  tda=True)
+    homo_tda = calc_qp_energy(mf, mode='casida', self_consistency='evGW0', tda=True)
+    moved = (eps_tda[nocc - 1] - eps_fixed[nocc - 1]) * HARTREE_TO_EV
+    ok &= check(abs(homo_tda - eps_tda[nocc - 1] * HARTREE_TO_EV) < 1e-8
+                and abs(moved) > 1e-3,
+                'a route keyword, tda=True, reaches the loop through the front door',
+                f'TDA moves the evGW0 HOMO by {moved * 1e3:+.1f} meV')
+    return ok
+
+
+def test_the_reaction_field_follows_the_iterate():
+    """In a continuum the reaction field's Delta W screens with the eigenvalues
+    it is built at, so the evGW step on the Casida route rebuilds its term
+    every cycle at the iterate, as the imaginary-axis routes do by calling
+    calc_qp_energy on the shifted view. On water with a continuum of
+    eps_inf = 1.78 and a spectrum opened by 0.5 eV, one step equals
+    calc_qp_energy on that view anchored on the mean field, every state within
+    1e-10 Ha; the term itself moves the HOMO by more than 1e-6 Ha between the
+    two spectra, ten thousand times that, so a term kept at the mean field
+    would show. evGW0 keeps it at the mean field with the rest of W."""
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis='cc-pvdz', verbose=0)
+    mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol = 1e-11
+    mf.kernel()
+    attach_environment(mf, SolventScreening(mol, eps=1.78))
+    nocc = mol.nelectron // 2
+    eps0 = np.asarray(mf.mo_energy, float)
+    states = list(range(len(eps0)))
+    opened = eps0.copy()
+    opened[:nocc] -= 0.5 / HARTREE_TO_EV
+    opened[nocc:] += 0.5 / HARTREE_TO_EV
+    view = shifted_mean_field(mf, opened)
+    step = qpe.casida_evgw_step(mf, mol, 'updated')(opened)
+    ref = calc_qp_energy(view, mode='casida', state=states, eps_anchor=eps0)
+    ref = np.array([ref[p]['GW'] for p in states]) / HARTREE_TO_EV
+    d = np.abs(step - ref).max()
+    moved = (environment_quasiparticle_shift(view, mol, nocc)[nocc - 1]
+             - environment_quasiparticle_shift(mf, mol, nocc)[nocc - 1])
+    ok = check(d < 1e-10 and abs(moved) > 1e-6,
+               'evGW: the Casida step rebuilds the reaction field at the iterate',
+               f'max |d eps| {d:.1e} Ha; the term moves the HOMO by '
+               f'{moved * HARTREE_TO_EV * 1e3:+.2f} meV')
+    built_at = []
+    original = qpe._reaction_field_terms
+
+    def spy(m, *args, **kw):
+        built_at.append(np.asarray(m.mo_energy, float).copy())
+        return original(m, *args, **kw)
+
+    qpe._reaction_field_terms = spy
+    try:
+        qpe.casida_evgw_step(mf, mol, 'fixed')(opened)
+    finally:
+        qpe._reaction_field_terms = original
+    ok &= check(len(built_at) > 0
+                and all(np.array_equal(e, eps0) for e in built_at),
+                'evGW0: the term is built at the mean field only',
+                f'{len(built_at)} build(s)')
     return ok
 
 
@@ -539,5 +615,7 @@ if __name__ == '__main__':
     all_ok &= test_an_unrestricted_reference_is_driven_channel_by_channel()
     print('\n-- 7. evGW0: W of the mean field, poles of the iterate')
     all_ok &= test_evgw0_keeps_w_and_moves_the_poles()
+    print('\n-- 8. in a continuum: the reaction field follows the iterate')
+    all_ok &= test_the_reaction_field_follows_the_iterate()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

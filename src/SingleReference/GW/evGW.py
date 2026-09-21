@@ -12,7 +12,8 @@ evGW0 feeds it back into the Green's function alone, `screening='fixed'`: the
 mean field's P0 and W stay and the poles of Sigma_c move, on the Casida route.
 
 The equation stays ANCHORED on the mean field. w = eps_p^MF + <Sigma_x - v_xc>
-+ Re Sigma_c(w) with Sigma_c screened by the current iterate
++ Re Sigma_c(w) with Sigma_c screened by the current iterate (evGW) or by the
+mean field with its poles at the iterate (evGW0)
 """
 import warnings
 
