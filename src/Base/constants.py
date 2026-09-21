@@ -32,6 +32,17 @@ EVGW_DAMPING = 0.0
 EVGW_DIIS_SIZE = 8
 EVGW_DIIS_START = 2
 
+# Quasiparticle-self-consistent GW (qsGW). The loop stops when HOMO and LUMO
+# move by less than EVGW_TOL and the density by less than QSGW_DM_TOL,
+# ||D' - D||_F / nmo, PySCF's criterion. The DIIS space is PySCF's qsGW one;
+# the damping is Kaplan's linear mixing, H <- (1 - d) H_new + d H_old, used
+# only when mixing='linear'. QSGW_BLOCK_ELEMS bounds the (chunk, norb, nmo)
+# buffers of the static self-energy builder: 2**24 doubles is 128 MB each.
+QSGW_DM_TOL = 1e-6
+QSGW_DIIS_SIZE = 10
+QSGW_DAMPING = 0.3
+QSGW_BLOCK_ELEMS = 2**24
+
 # CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
 CPHF_MAX_CYCLE = 100
 CPHF_TOL = 1e-9

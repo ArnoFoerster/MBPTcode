@@ -2,7 +2,8 @@ import numpy as np
 from pyscf import scf, dft
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.base import get_occ_virt_indices
-from src.Base.constants import DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE, get_method_info
+from src.Base.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
+                                QSGW_BLOCK_ELEMS, get_method_info)
 from src.Base.solvent_screening import solvent_static_selfenergy
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -442,6 +443,62 @@ class SelfEnergySolver(AmplitudeGenerator):
             
         self_energy_matrix = prefactor * (tmp + tmp.T)
         return self_energy_matrix
+
+    def static_self_energy_matrix(self, nocc, eigenvalues_casida, rho, eigenvalues=None,
+                                  block_elems=QSGW_BLOCK_ELEMS):
+        """The static Hermitian GW self-energy of qsGW (Kotani's mode A), restricted.
+
+            Sigma~_pq = 1/2 [Sigma_pq(eps_p) + Sigma_pq(eps_q)] = T_pq + T_qp,
+            T_qp = sum_{S,r} chi_Srq chi_Srp g(eps_p - eps_r + s_r Omega_S),
+
+        g the real part of the broadened denominator (_denom_grid), s_r = +1 for
+        r < nocc and -1 otherwise, chi_Srp = sum_P rho_PS B_Prp with this
+        solver's DF factors, and the restricted prefactor 2 of
+        calculate_self_energy folded into T + T^T. The exciton axis runs in
+        chunks of at most block_elems // (norb * nmo) excitations, so no
+        (nexciton, norb, nmo) array exists: per chunk one GEMM forms chi, an
+        elementwise pass forms g, one GEMM accumulates T.
+
+        Parameters
+        ----------
+        nocc : int
+        eigenvalues_casida : ndarray, shape (nexciton,)
+        rho : ndarray, shape (naux, nexciton)
+            The DF transition density sum_ia B_Pia (X+Y)_ia,S, in whichever
+            orbital basis the Casida problem was solved (_rho_a_df); the DF
+            factors of this solver set the basis of the result.
+        eigenvalues : ndarray, shape (nmo,), optional
+            Poles and evaluation points; default this solver's eps.
+        block_elems : int
+            Bound on the elements of each (chunk, norb, nmo) buffer.
+
+        Returns
+        -------
+        ndarray, shape (nmo, nmo), symmetric, Hartree
+        """
+        if self.spin_mode != 'restricted':
+            raise NotImplementedError(
+                'static_self_energy_matrix is restricted-spin only')
+        if self.df_coeff is None:
+            raise ValueError('static_self_energy_matrix needs the DF factors')
+        eps = self.eps if eigenvalues is None else np.asarray(eigenvalues, float)
+        om = np.asarray(eigenvalues_casida, float)
+        naux, norb, nmo = self.df_coeff.shape
+        sign = np.where(np.arange(norb) < nocc, 1.0, -1.0)
+        coeff = self.df_coeff.reshape(naux, norb * nmo)
+        base = eps[None, None, :] - eps[None, :, None]              # (1, norb, nmo)
+        chunk = max(1, int(block_elems) // (norb * nmo))
+        tmp = np.zeros((nmo, nmo))
+        for s0 in range(0, len(om), chunk):
+            s1 = min(s0 + chunk, len(om))
+            # chi[S, r, p] = sum_P rho[P, S] B[P, r, p]
+            chi = (rho[:, s0:s1].T @ coeff).reshape(s1 - s0, norb, nmo)
+            energy = base + (sign[None, :] * om[s0:s1, None])[:, :, None]
+            g = energy / (energy**2 + self.eta**2)
+            g *= chi
+            # T[q, p] += sum_{S, r} chi[S, r, q] (chi g)[S, r, p]
+            tmp += chi.reshape(-1, nmo).T @ g.reshape(-1, nmo)
+        return tmp + tmp.T
 
     def calculate_self_energy_diagonal_batch(self, freq, nocc, eigenvalues_casida, chiXYa,
                                               chiXYb=None, spin_channel='alpha', vertex_mode='GW',
