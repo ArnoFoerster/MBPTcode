@@ -17,6 +17,7 @@ import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import scipy.linalg
 from pyscf import df, dft, gto, scf
 
 from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_DM_TOL,
@@ -301,12 +302,35 @@ def test_both_flavors_converge_and_open_the_gap(mf):
 def test_the_two_mixings_land_on_one_fixed_point(mf):
     """CDIIS on the AO Hamiltonian and Kaplan's linear mixing are two paths to
     the same fixed point: HOMO and LUMO agree within 10 EVGW_TOL, each run
-    being converged to EVGW_TOL on its own."""
+    being converged to EVGW_TOL on its own. The linear step is Kaplan et al.'s
+    eq. 21 (J. Chem. Theory Comput. 12, 2528 (2016)), lambda of the new
+    Hamiltonian and 1 - lambda of the last iterate's: at the first cycle the
+    mean field's Fock matrix, here PySCF's own get_fock, so one cycle at
+    lambda = 0.3 gives the spectrum of 0.3 H_new + 0.7 F_KS, H_new rebuilt from
+    the cycle's Sigma~, within 1e-6 Ha: get_fock rebuilds F from the converged
+    density, which differs from the SCF's last eigenpairs at its gradient
+    tolerance, sqrt(conv_tol). A first cycle left unmixed misses by 0.5 Ha. At
+    Kaplan's lambda the linear loop needs 25 to 30 cycles on water, so its runs
+    here get 60."""
     nocc = mf.mol.nelectron // 2
     ok = True
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        e_one, _, one = qsgw_eigenvalues(mf, mixing='linear', mixing_lambda=0.3,
+                                         max_cycle=1)
+    ovlp = mf.get_ovlp()
+    dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+    cs0 = ovlp @ mf.mo_coeff
+    h_new = (mf.get_hcore() + scf.RHF(mf.mol).get_veff(mf.mol, dm0)
+             + cs0 @ one['sigma_static'] @ cs0.T)
+    e_ref = scipy.linalg.eigh(0.3 * h_new + 0.7 * mf.get_fock(), ovlp)[0]
+    d_one = np.abs(e_one - e_ref).max()
+    ok &= check(d_one < 1e-6, "one linear cycle is Kaplan's eq. 21 from the mean field",
+                f'max |d eps| {d_one:.1e} Ha')
     for screening in ('updated', 'fixed'):
         e_d, _, d = qsgw_eigenvalues(mf, screening=screening, mixing='diis')
-        e_l, _, l = qsgw_eigenvalues(mf, screening=screening, mixing='linear')
+        e_l, _, l = qsgw_eigenvalues(mf, screening=screening, mixing='linear',
+                                     max_cycle=60)
         delta = np.abs(e_d[[nocc - 1, nocc]] - e_l[[nocc - 1, nocc]]).max()
         ok &= check(d['converged'] and l['converged'] and delta < 10 * EVGW_TOL,
                     f"{screening}: DIIS and linear mixing agree on HOMO and LUMO",
@@ -368,7 +392,7 @@ def test_the_refusals(mf):
                      ({'mixing': 'never'}, 'mixing'),
                      ({'converge_on': [10**6]}, 'converge_on'),
                      ({'converge_on': [4, -1]}, 'converge_on'),
-                     ({'mixing': 'linear', 'damping': 1.0}, 'damping'),
+                     ({'mixing': 'linear', 'mixing_lambda': 0.0}, 'mixing_lambda'),
                      ({'max_cycle': 0}, 'max_cycle'),
                      ({'diis_size': 0}, 'diis_size'),
                      ({'flow': float('nan')}, 'flow')):

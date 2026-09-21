@@ -36,8 +36,8 @@ from pyscf import scf
 from pyscf.scf import diis as scf_diis
 
 from src.Base.constants import (DEFAULT_BROADENING_ETA, EVGW_MAX_CYCLE, EVGW_TOL,
-                                HARTREE_TO_EV, QSGW_BLOCK_ELEMS, QSGW_DAMPING,
-                                QSGW_DIIS_SIZE, QSGW_DM_TOL, QSGW_SRG_FLOW,
+                                HARTREE_TO_EV, QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE,
+                                QSGW_DM_TOL, QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
                                 get_method_info)
 from src.Base.environment import environment_of
 from src.Base.pyscf_interface import get_density_fitting_coefficients
@@ -49,7 +49,7 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 #: mean field's kept and only the amplitudes and poles moved (qsGW0).
 SCREENINGS = ('updated', 'fixed')
 #: How the AO Hamiltonian is mixed between cycles: PySCF's CDIIS, or linear
-#: mixing H <- (1 - d) H_new + d H_old with d = damping.
+#: mixing, Kaplan et al.'s H <- lambda H_new + (1 - lambda) S C diag(eps) C^T S.
 MIXINGS = ('diis', 'linear')
 
 
@@ -75,7 +75,7 @@ def _rotated_factors(coeff0, c0, ovlp, mo_coeff):
 def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
                      converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
                      dm_tol=QSGW_DM_TOL, diis_size=QSGW_DIIS_SIZE,
-                     damping=QSGW_DAMPING, flow=QSGW_SRG_FLOW,
+                     mixing_lambda=QSGW_MIXING_LAMBDA, flow=QSGW_SRG_FLOW,
                      block_elems=QSGW_BLOCK_ELEMS, keep_spectrum=False,
                      verbose=False, df=True,
                      eta=DEFAULT_BROADENING_ETA, tda=False, n_workers=None):
@@ -86,7 +86,12 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         orbitals every cycle; 'fixed' (qsGW0) keeps the mean field's and
         re-expands its transition density in the rotated orbitals.
     mixing: 'diis', PySCF's CDIIS on the AO Hamiltonian with the commutator
-        FDS - SDF as error; 'linear', H <- (1 - damping) H_new + damping H_old.
+        FDS - SDF as error; 'linear', eq. 21 of Kaplan et al. (J. Chem. Theory
+        Comput. 12, 2528 (2016)), H <- lambda H_new + (1 - lambda) H_eps with
+        H_eps = S C diag(eps) C^T S, the last iterate's eigenvalues in its own
+        orbitals, the mean field's at the first cycle.
+    mixing_lambda: that lambda, the new Hamiltonian's weight, 0 < lambda <= 1;
+        1 is no mixing.
     converge_on: orbitals whose eigenvalue movement decides convergence, HOMO
         and LUMO by default.
     tol:    max |delta eps| over `converge_on`, in Hartree.
@@ -120,11 +125,12 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         raise ValueError(f'screening={screening!r}: choose one of {SCREENINGS}')
     if mixing not in MIXINGS:
         raise ValueError(f'mixing={mixing!r}: choose one of {MIXINGS}')
-    if not 0.0 <= damping < 1.0:
-        # at 1 the Hamiltonian never moves, and the change the criterion reads,
-        # (1 - damping) times the fixed-point residual, vanishes at the start
-        raise ValueError(f'damping={damping!r}: linear mixing keeps that fraction '
-                         f'of the old Hamiltonian and needs 0 <= damping < 1')
+    if not 0.0 < mixing_lambda <= 1.0:
+        # at 0 the Hamiltonian never moves, and the change the criterion reads,
+        # lambda times the fixed-point residual, vanishes at the start
+        raise ValueError(f'mixing_lambda={mixing_lambda!r}: linear mixing takes '
+                         f'that fraction of the new Hamiltonian and needs '
+                         f'0 < mixing_lambda <= 1')
     if flow is not None and not (np.isfinite(flow) and flow >= 0):
         raise ValueError(f'flow={flow!r}: the SRG flow parameter is a finite s >= 0')
     if int(max_cycle) < 1:
@@ -187,7 +193,6 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     accel = scf_diis.CDIIS() if mixing == 'diis' else None
     if accel is not None:
         accel.space = int(diis_size)
-    ham_old = None
     history, dm_history = [], []
     converged = False
     sigma = None
@@ -211,9 +216,11 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         ham = hcore + mf_hf.get_veff(mol, dm) + cs @ sigma @ cs.T
         if accel is not None:
             ham = accel.update(ovlp, dm, ham)
-        elif ham_old is not None:
-            ham = (1.0 - damping) * ham + damping * ham_old
-        ham_old = ham
+        else:
+            # H_eps,mn = sum_p (SC)_mp eps_p (SC)_np, the iterate (eps, C) as an
+            # operator: the last mixed Hamiltonian, and the mean field's Fock
+            # matrix at the first cycle
+            ham = mixing_lambda * ham + (1.0 - mixing_lambda) * (cs * eps) @ cs.T
         eps_new, mo_coeff = scipy.linalg.eigh(ham, ovlp)
         dm_new = mf_hf.make_rdm1(mo_coeff, mo_occ)
         delta = float(np.abs((eps_new - eps)[tested]).max())
