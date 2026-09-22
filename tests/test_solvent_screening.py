@@ -75,7 +75,7 @@ def test_analytic_sphere():
             screening = SolventScreening(mol, eps=eps, method=method,
                                          radii_table=radii, allow_static_eps=True)
             v_grid = gto.mole.intor_cross('int2c2e', source, screening._fakemol())
-            got = float(v_grid @ screening.response_matrix() @ v_grid.T)
+            got = (v_grid @ screening.response_matrix() @ v_grid.T).item()
             # COSMO's f(eps) = (eps-1)/(eps+1/2) is a deliberate approximation
             # to the conductor limit, so it is checked against its own f.
             f = ((eps - 1) / (eps + 0.5) if method == 'COSMO' else 1 - 1 / eps)
