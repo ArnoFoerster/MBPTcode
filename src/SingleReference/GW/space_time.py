@@ -70,7 +70,7 @@ DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 
 def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                       block_memory_gb=4.0, pair_tol=DEFAULT_PAIR_TOL,
-                      n_start=1):
+                      n_start=1, grid_accuracy=None):
     """(X_mo, D, X_ao, coords) of the Duchemin-Blase separable RI, Z = D D^T.
 
     X_ao is the collocation the fit actually produces; X_mo = X_ao C is the
@@ -86,7 +86,19 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      memory one -- one `aux_e2` call per block, each rebuilding
                      a shell-pair list over nbas x auxnbas. See `build_D_F`,
                      which carries the measurement; size it from the node.
+    grid_accuracy:   an accuracy level resolved through
+                     `separable_ri.resolve_isdf_grid` into `counts`/`n_start`.
+                     Accepted here only so callers that pass it (e.g. the
+                     contour-deformation route) get a named error rather than
+                     a TypeError; `resolve_isdf_grid`'s validated-grid table is
+                     not part of this port yet.
     """
+    if grid_accuracy is not None:
+        raise NotImplementedError(
+            "separable_factors(grid_accuracy=...) is not wired up in this "
+            "port: it needs separable_ri.resolve_isdf_grid and the validated "
+            "ISDF_GRID_ACCURACY table, which are not yet ported here. Pass "
+            "radii= or counts= directly, or leave both at their defaults.")
     auxbasis = auxbasis or (str(mol.basis) + '-ri')
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=auxbasis)
     counts = counts or DEFAULT_COUNTS

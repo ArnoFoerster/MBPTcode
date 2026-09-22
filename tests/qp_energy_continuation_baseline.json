@@ -1,0 +1,2921 @@
+{
+ "water": {
+  "driver": "tools/qp_route_audit/run_routes.py",
+  "argv": [
+   "--system",
+   "water",
+   "--basis",
+   "cc-pvdz",
+   "--orbital",
+   "homo,homo-1,lumo",
+   "--threads",
+   "2",
+   "--out",
+   "<scratch>"
+  ],
+  "returncode": 0,
+  "n_records": 3,
+  "records": [
+   {
+    "kind": "qp_route_audit",
+    "system": "water",
+    "tier": "T0",
+    "natm": 3,
+    "geometry_source": "systems.py inline",
+    "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 24,
+    "naux": 84,
+    "nocc": 5,
+    "orbital": 4,
+    "orbital_label": "homo",
+    "eps_eV": -13.417514912746505,
+    "gap_eV": 18.484525210794622,
+    "e_scf": -76.02784961778849,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -12.15686753678388,
+    "setup_warnings": [],
+    "xc_correction_eV": 1.2111894581337485e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": -12.156407301950573,
+      "z": 0.9506201520059765,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -12.156087532359136,
+      "z": 0.9508441694627834,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -12.156370552830857,
+      "z": 0.9504281370426026,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.750211335391441e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 364. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 364, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -12.15686753678388,
+      "z": 0.9506512118379953,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.4467566417560321,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 4.451039161271412e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -12.15686753678388,
+      "z": 0.9506512118379953,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.4467566417560321,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 4.451039161271412e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -12.156867267865413,
+      "z": 0.950650596603013,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.4467566417560321,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 4.451039161271412e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -12.156864837199326,
+      "z": 0.9506496377283278,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": 4.451039161271412e-17,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": -12.157066187350358,
+      "z": 0.9506205119524074,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 2281,
+       "delta_eV": 1.2111894581337485e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": -12.157066187350368,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2410628080772312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 444,
+     "naux": 84,
+     "radii": {
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.339647",
+     "e_min_gw": 0.3396468861177543,
+     "e_max": 24.698721141091895,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 0.9786549912220721,
+    "z_spread": 0.00041603242018073416,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "water",
+    "tier": "T0",
+    "natm": 3,
+    "geometry_source": "systems.py inline",
+    "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 24,
+    "naux": 84,
+    "nocc": 5,
+    "orbital": 3,
+    "orbital_label": "homo-1",
+    "eps_eV": -15.416020102857408,
+    "gap_eV": 18.484525210794622,
+    "e_scf": -76.02784961778849,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -14.436458371700834,
+    "setup_warnings": [],
+    "xc_correction_eV": 6.83615821214696e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": -14.436344391649255,
+      "z": 0.9511641944015548,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -14.43633202583172,
+      "z": 0.9511641944015548,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -14.436371213281651,
+      "z": 0.9509401769447479,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.750211335391441e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 364. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 364, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -14.436458371700834,
+      "z": 0.9511945716172243,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 1,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5305300597770656,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.05512413477405871,
+       "xc_correction": 2.5122418058193826e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -14.436458371700903,
+      "z": 0.9511945716172211,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 1,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5305300597770656,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.05512413477406247,
+       "xc_correction": 2.5122418058193826e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -14.436458327816624,
+      "z": 0.9511945020747811,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5305300597770656,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.05512413239995339,
+       "xc_correction": 2.5122418058193826e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -14.436454987341284,
+      "z": 0.9511940779286419,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": 2.5122418058193826e-16,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": -14.436907436144994,
+      "z": 0.9511752197288623,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 2281,
+       "delta_eV": 6.83615821214696e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": -14.436907436144999,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2410628080772312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 444,
+     "naux": 84,
+     "radii": {
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.339647",
+     "e_min_gw": 0.3396468861177543,
+     "e_max": 24.698721141091895,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 0.5754103132744603,
+    "z_spread": 0.00025439467247645453,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "water",
+    "tier": "T0",
+    "natm": 3,
+    "geometry_source": "systems.py inline",
+    "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 24,
+    "naux": 84,
+    "nocc": 5,
+    "orbital": 5,
+    "orbital_label": "lumo",
+    "eps_eV": 5.067010298048117,
+    "gap_eV": 18.484525210794622,
+    "e_scf": -76.02784961778849,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": 4.725708185294445,
+    "setup_warnings": [],
+    "xc_correction_eV": 2.5209075548211718e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": 4.725414080747532,
+      "z": 0.9892151595761178,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": 4.72539370327357,
+      "z": 0.9891831570821297,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": 4.725743603659841,
+      "z": 0.9892151595758403,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.750211335391441e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 364. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 364, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": 4.725708185294445,
+      "z": 0.9892121460282157,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.17366657260951546,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 9.264164390716589e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": 4.725708185294445,
+      "z": 0.9892121460282157,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.17366657260951546,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 9.264164390716589e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": 4.725708186269653,
+      "z": 0.9892121562830967,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.17366657260951546,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 9.264164390716589e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": 4.7257078995387936,
+      "z": 0.9892120291393222,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": 9.264164390716589e-17,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": 4.725782621732013,
+      "z": 0.989200289855071,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 2281,
+       "delta_eV": 2.5209075548211718e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": 4.725782621732014,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2410628080772312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 444,
+     "naux": 84,
+     "radii": {
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.339647",
+     "e_min_gw": 0.3396468861177543,
+     "e_max": 24.698721141091895,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 0.38891845844357675,
+    "z_spread": 3.200249398815913e-05,
+    "n_routes_ok": 8,
+    "status": "ok"
+   }
+  ],
+  "stderr_tail": [
+   "OMP: Warning #179: Function Can't set size of /tmp file failed:"
+  ]
+ },
+ "formaldehyde": {
+  "driver": "tools/qp_route_audit/run_routes.py",
+  "argv": [
+   "--system",
+   "formaldehyde",
+   "--basis",
+   "cc-pvdz",
+   "--orbital",
+   "homo,homo-1,lumo",
+   "--threads",
+   "2",
+   "--out",
+   "<scratch>"
+  ],
+  "returncode": 0,
+  "n_records": 3,
+  "records": [
+   {
+    "kind": "qp_route_audit",
+    "system": "formaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 38,
+    "naux": 140,
+    "nocc": 8,
+    "orbital": 7,
+    "orbital_label": "homo",
+    "eps_eV": -11.837353525724662,
+    "gap_eV": 15.551790898140123,
+    "e_scf": -113.87796007587666,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -10.808601383971578,
+    "setup_warnings": [],
+    "xc_correction_eV": 3.91059846662463e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": -10.808891355183148,
+      "z": 0.9408273888922292,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -10.808951790939265,
+      "z": 0.9409874013605046,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -10.808599800555662,
+      "z": 0.9408273888913965,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 8.90367779504686e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 427. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 427, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -10.808601383971578,
+      "z": 0.9408838056402402,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3972087745278019,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 1.4371184294961094e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -10.808601383971578,
+      "z": 0.9408838056402402,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3972087745278019,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 1.4371184294961094e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -10.808601386429508,
+      "z": 0.9408838116649639,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3972087745278019,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": 1.4371184294961094e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -10.808604503049652,
+      "z": 0.9408857551114558,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": 1.4371184294961094e-16,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": -10.810105416853864,
+      "z": 0.9408444971482419,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 9121,
+       "delta_eV": 3.91059846662463e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": -10.8101054168539,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2193744278188312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 140,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.285759",
+     "e_min_gw": 0.28575888706208513,
+     "e_max": 24.41485767691023,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 1.505616298201673,
+    "z_spread": 0.00016001246910812839,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "formaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 38,
+    "naux": 140,
+    "nocc": 8,
+    "orbital": 6,
+    "orbital_label": "homo-1",
+    "eps_eV": -14.418164949984419,
+    "gap_eV": 15.551790898140123,
+    "e_scf": -113.87796007587666,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -14.171135210919024,
+    "setup_warnings": [],
+    "xc_correction_eV": -9.822924702380506e-17,
+    "routes": {
+     "casida": {
+      "energy_eV": -14.170736000701876,
+      "z": 0.9381391794094363,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -14.170850253889231,
+      "z": 0.938331194372255,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -14.170055880737515,
+      "z": 0.9376271395078462,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 8.90367779504686e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 427. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 427, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -14.171135210919024,
+      "z": 0.9381971179287313,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 1,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5207796134608318,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.15006514043816424,
+       "xc_correction": -3.609858245949811e-18,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -14.171135210919028,
+      "z": 0.9381971179287297,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 1,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5207796134608318,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.15006514043816443,
+       "xc_correction": -3.609858245949811e-18,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -14.171135664358292,
+      "z": 0.9381978805505323,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.5207796134608318,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.15006516959488778,
+       "xc_correction": -3.609858245949811e-18,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -14.171132403528732,
+      "z": 0.9381906604747832,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": -3.609858245949811e-18,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": -14.17188955757509,
+      "z": 0.9381394149960277,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 9121,
+       "delta_eV": -9.822924702380506e-17,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": -14.171889557575103,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2193744278188312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 140,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.285759",
+     "e_min_gw": 0.28575888706208513,
+     "e_max": 24.41485767691023,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 1.8336768375757373,
+    "z_spread": 0.0007040548644088318,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "formaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 38,
+    "naux": 140,
+    "nocc": 8,
+    "orbital": 8,
+    "orbital_label": "lumo",
+    "eps_eV": 3.714437372415459,
+    "gap_eV": 15.551790898140123,
+    "e_scf": -113.87796007587666,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": 2.8545910509506975,
+    "setup_warnings": [],
+    "xc_correction_eV": -7.405898832710709e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": 2.8532235806846398,
+      "z": 0.9573406757124037,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": 2.8530225926081045,
+      "z": 0.9572446682308555,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": 2.8540184763356873,
+      "z": 0.9572766707245661,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 18,
+       "ntau_source": "auto",
+       "tau_fit_error": 8.90367779504686e-11,
+       "nfreq": "auto (minimax, 18 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 1.09e-03 at 18 points over e_max/e_min = 427. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 427, so use MORE points; n=18 is tabulated down to e_max/e_min = 100 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": 2.8545910509506975,
+      "z": 0.9573526026896679,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.10490428621112875,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -2.721617622035931e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": 2.8545910509506975,
+      "z": 0.9573526026896679,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.10490428621112875,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -2.721617622035931e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": 2.8545910378392736,
+      "z": 0.9573526023455623,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.10490428621112875,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -2.721617622035931e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": 2.8545904389382377,
+      "z": 0.9573523031294748,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": -2.721617622035931e-16,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "qb": {
+      "energy_eV": 2.854799050515486,
+      "z": 0.9573464098735261,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 9121,
+       "delta_eV": -7.405898832710709e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": 2.854799050515499,
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.2193744278188312e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 140,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "O": {
+       "A1": [
+        0.05938291225519559,
+        0.21471142685862712,
+        0.4293172199379212,
+        0.7768638896519697,
+        1.250180295159282,
+        1.6405783166946803,
+        2.3579696978192812,
+        3.5732238239169556
+       ],
+       "A2": [
+        0.1332413301413255,
+        0.7494247511201794,
+        1.4120364661690956,
+        0.4096802473968116,
+        2.733604115477653
+       ],
+       "A3": [
+        1.0150161117233774,
+        1.9025394614727194,
+        0.559286251078997
+       ],
+       "B1": [
+        0.30787092214402617
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.285759",
+     "e_min_gw": 0.28575888706208513,
+     "e_max": 24.41485767691023,
+     "cd_grid_sized": true,
+     "ntau_w": 14
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 1.7764579073813458,
+    "z_spread": 0.0001079344588124087,
+    "n_routes_ok": 8,
+    "status": "ok"
+   }
+  ],
+  "stderr_tail": [
+   "OMP: Warning #179: Function Can't set size of /tmp file failed:"
+  ]
+ },
+ "thioformaldehyde": {
+  "driver": "tools/qp_route_audit/run_routes.py",
+  "argv": [
+   "--system",
+   "thioformaldehyde",
+   "--basis",
+   "cc-pvdz",
+   "--orbital",
+   "homo,homo-1,lumo",
+   "--threads",
+   "2",
+   "--out",
+   "<scratch>"
+  ],
+  "returncode": 0,
+  "n_records": 3,
+  "records": [
+   {
+    "kind": "qp_route_audit",
+    "system": "thioformaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 42,
+    "naux": 160,
+    "nocc": 12,
+    "orbital": 11,
+    "orbital_label": "homo",
+    "eps_eV": -9.455887888888437,
+    "gap_eV": 10.97288718790391,
+    "e_scf": -436.54875738222785,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -9.083878741301552,
+    "setup_warnings": [],
+    "xc_correction_eV": -1.2811146858307246e-14,
+    "routes": {
+     "casida": {
+      "energy_eV": -9.087323565211031,
+      "z": 0.9483159724499313,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -9.08762905315405,
+      "z": 0.9485719924007263,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -9.084003081953535,
+      "z": 0.9483159724493762,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 22,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.4721892855648093e-11,
+       "nfreq": "auto (minimax, 22 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 4.82e-03 at 22 points over e_max/e_min = 2.35e+03. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 2.35e+03, so use MORE points; n=22 is tabulated down to e_max/e_min = 300 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -9.083878741301552,
+      "z": 0.9483006411444557,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3338263864686741,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -4.708009633355632e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -9.083878741301552,
+      "z": 0.9483006411444557,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3338263864686741,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -4.708009633355632e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -9.083878631262197,
+      "z": 0.9483009610757769,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.3338263864686741,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -4.708009633355632e-16,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -9.083878204613086,
+      "z": 0.9482996807235404,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": -4.708009633355632e-16,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 9.08e-03 at 64 points over e_max/e_min = 2.35e+03."
+      ]
+     },
+     "qb": {
+      "energy_eV": -9.088595132293895,
+      "z": 0.9483094622897391,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 15121,
+       "delta_eV": -1.2811146858307246e-14,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": null,
+       "qp_energy_general_skipped": "supermatrix dim 15121 exceeds --qb-max-dim 12000",
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.7326515656251873e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 160,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "S": {
+       "A1": [
+        0.1553696396145854,
+        0.359470063629062,
+        0.6720380008325576,
+        1.3823955535279877,
+        2.7574189565004152,
+        2.185028910047856,
+        1.7125239539940345,
+        4.656968067840135
+       ],
+       "A2": [
+        0.05146778657126709,
+        1.2456711643811975,
+        3.471888020274218,
+        1.9453975241929795,
+        0.7835827340277789
+       ],
+       "A3": [
+        0.3081911477395057,
+        2.1243957552910353,
+        0.6028093973415647
+       ],
+       "B1": [
+        1.1506361337675997
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.201623",
+     "e_min_gw": 0.20162308323269884,
+     "e_max": 94.73258944872309,
+     "cd_grid_sized": true,
+     "ntau_w": 18
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 4.71692768080878,
+    "z_spread": 0.000272311677185888,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "thioformaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 42,
+    "naux": 160,
+    "nocc": 12,
+    "orbital": 10,
+    "orbital_label": "homo-1",
+    "eps_eV": -11.283789913143586,
+    "gap_eV": 10.97288718790391,
+    "e_scf": -436.54875738222785,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": -11.50420961538527,
+    "setup_warnings": [],
+    "xc_correction_eV": 1.6746006717630317e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": -11.504899351887282,
+      "z": 0.9483799774373525,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": -11.50463043889753,
+      "z": 0.9488600148449544,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": -11.503615745193978,
+      "z": 0.9480919549931244,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 22,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.4721892855648093e-11,
+       "nfreq": "auto (minimax, 22 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 4.82e-03 at 22 points over e_max/e_min = 2.35e+03. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 2.35e+03, so use MORE points; n=22 is tabulated down to e_max/e_min = 300 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": -11.50420961538527,
+      "z": 0.948398895327339,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 2,
+       "pole_offset": 0.001,
+       "newton_seed": -0.42277190553206123,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.18667117335853262,
+       "xc_correction": 6.154043960218793e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": -11.50420961538529,
+      "z": 0.948398895327339,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 2,
+       "pole_offset": 0.001,
+       "newton_seed": -0.42277190553206123,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.18667117335853453,
+       "xc_correction": 6.154043960218793e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": -11.504209846586834,
+      "z": 0.9483990821116505,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": -0.42277190553206123,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.18667119442879065,
+       "xc_correction": 6.154043960218793e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": -11.504193977788518,
+      "z": 0.9483782299692637,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": 6.154043960218793e-17,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 9.08e-03 at 64 points over e_max/e_min = 2.35e+03."
+      ]
+     },
+     "qb": {
+      "energy_eV": -11.507140660931347,
+      "z": 0.9483501767142937,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 15121,
+       "delta_eV": 1.6746006717630317e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": null,
+       "qp_energy_general_skipped": "supermatrix dim 15121 exceeds --qb-max-dim 12000",
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.7326515656251873e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 160,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "S": {
+       "A1": [
+        0.1553696396145854,
+        0.359470063629062,
+        0.6720380008325576,
+        1.3823955535279877,
+        2.7574189565004152,
+        2.185028910047856,
+        1.7125239539940345,
+        4.656968067840135
+       ],
+       "A2": [
+        0.05146778657126709,
+        1.2456711643811975,
+        3.471888020274218,
+        1.9453975241929795,
+        0.7835827340277789
+       ],
+       "A3": [
+        0.3081911477395057,
+        2.1243957552910353,
+        0.6028093973415647
+       ],
+       "B1": [
+        1.1506361337675997
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.201623",
+     "e_min_gw": 0.20162308323269884,
+     "e_max": 94.73258944872309,
+     "cd_grid_sized": true,
+     "ntau_w": 18
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 3.5249157373691276,
+    "z_spread": 0.0007680598518300386,
+    "n_routes_ok": 8,
+    "status": "ok"
+   },
+   {
+    "kind": "qp_route_audit",
+    "system": "thioformaldehyde",
+    "tier": "T0",
+    "natm": 4,
+    "geometry_source": "systems.py inline",
+    "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
+    "basis": "cc-pvdz",
+    "auxbasis": "cc-pvdz-ri",
+    "reference": "HF",
+    "scf": "df",
+    "nao": 42,
+    "naux": 160,
+    "nocc": 12,
+    "orbital": 12,
+    "orbital_label": "lumo",
+    "eps_eV": 1.5169992990154733,
+    "gap_eV": 10.97288718790391,
+    "e_scf": -436.54875738222785,
+    "spin_channel": "restricted",
+    "eta_requested": 0.001,
+    "qp_solver": "pole_strength",
+    "study": "",
+    "wicks_commit": "unknown",
+    "threads": "2",
+    "slurm_job": "",
+    "slurm_task": "",
+    "cd_sizing_reference_eV": 0.7487734805625297,
+    "setup_warnings": [],
+    "xc_correction_eV": -1.779774696335521e-15,
+    "routes": {
+     "casida": {
+      "energy_eV": 0.7491051072190732,
+      "z": 0.9526683116117818,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "casida (A, B) diagonalization",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "eta": 0.001,
+       "qp_solver": "pole_strength",
+       "polarizability": "RPA",
+       "selfenergy": "GW",
+       "tda": false,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "imagfrequency": {
+      "energy_eV": 0.7482981940833804,
+      "z": 0.9521242692165851,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "chi0": "particle-hole sum on a minimax frequency grid",
+       "integrals": "DF three-index, cc-pvdz-ri",
+       "nfreq": 20,
+       "grid": "minimax",
+       "greedy": true,
+       "eta": null,
+       "qp_solver": "pole_strength",
+       "continuation": "pade (all nfreq nodes, greedy order)"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "space-time": {
+      "energy_eV": 0.7487961359471716,
+      "z": 0.9527323165994458,
+      "z_method": "dw/d(eps_p) by eps_anchor, step 0.0001 Ha",
+      "params": {
+       "reads": [
+        "isdf"
+       ],
+       "chi0": "ISDF separable, imaginary time",
+       "ntau": 22,
+       "ntau_source": "auto",
+       "tau_fit_error": 4.4721892855648093e-11,
+       "nfreq": "auto (minimax, 22 points)",
+       "npade": 16,
+       "sigma_x": "mf",
+       "qp_solver": "pole_strength",
+       "eta": null,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 4.82e-03 at 22 points over e_max/e_min = 2.35e+03. The usable n RISES with the energy range and this fit is under-resolved at e_max/e_min = 2.35e+03, so use MORE points; n=22 is tabulated down to e_max/e_min = 300 and stretched below that."
+      ]
+     },
+     "cd": {
+      "energy_eV": 0.7487734805625297,
+      "z": 0.952690398633214,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "explicit",
+       "residue_route_taken": "explicit",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.027516917873778943,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -6.540551371571259e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "laplace": {
+      "energy_eV": 0.7487734805625297,
+      "z": 0.952690398633214,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "laplace",
+       "residue_route_taken": "laplace",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.027516917873778943,
+       "n_poles": null,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -6.540551371571259e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "sop": {
+      "energy_eV": 0.7487732254697539,
+      "z": 0.952689925183513,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "residue_route_requested": "sop",
+       "residue_route_taken": "sop",
+       "residues": 0,
+       "pole_offset": 0.001,
+       "newton_seed": 0.027516917873778943,
+       "n_poles": 12,
+       "sop_eq27_admits": true,
+       "sop_eq27_clearance": 0.0,
+       "xc_correction": -6.540551371571259e-17,
+       "continuation": "none"
+      },
+      "status": "ok",
+      "warnings": []
+     },
+     "st-pade": {
+      "energy_eV": 0.7487710559792158,
+      "z": 0.9526879989313932,
+      "z_method": "central difference of the Pade Sigma_c",
+      "params": {
+       "reads": [
+        "isdf",
+        "cd_grid"
+       ],
+       "eta": 0.0,
+       "npade": 16,
+       "pade_nodes_used": 16,
+       "qp_solver": "pole_strength",
+       "xc_correction": -6.540551371571259e-17,
+       "continuation": "pade (npade Gauss-Legendre nodes, w0 = 1.0)"
+      },
+      "status": "ok",
+      "warnings": [
+       "minimax transform fit reached only 9.08e-03 at 64 points over e_max/e_min = 2.35e+03."
+      ]
+     },
+     "qb": {
+      "energy_eV": 0.751432513089157,
+      "z": 0.9526927762624003,
+      "z_method": "newton slope, closed form",
+      "params": {
+       "chi0": "dense RPA (A, B) in the four-index basis",
+       "integrals": "exact ao2mo (pq|rs), no density fitting",
+       "screening": "rpa",
+       "eta": 0.0,
+       "supermatrix_dim": 15121,
+       "delta_eV": -1.779774696335521e-15,
+       "solver": "closed-form Newton on the downfolded supermatrix",
+       "continuation": "none",
+       "qp_energy_general_eV": null,
+       "qp_energy_general_skipped": "supermatrix dim 15121 exceeds --qb-max-dim 12000",
+       "qp_energy_general_comparable": true
+      },
+      "status": "ok",
+      "warnings": []
+     }
+    },
+    "mean_field_shared": true,
+    "scf_residual": 1.7326515656251873e-12,
+    "isdf": {
+     "integrals": "ISDF separable RI on cc-pvdz-ri",
+     "counts": {
+      "A1": 8,
+      "A2": 5,
+      "A3": 3,
+      "B1": 1
+     },
+     "n_start": 1,
+     "isdf_points": 592,
+     "naux": 160,
+     "radii": {
+      "C": {
+       "A1": [
+        0.07824255274280348,
+        0.3063969192957443,
+        0.5922235320139838,
+        1.0401129518405563,
+        1.272668259935565,
+        1.975958324041914,
+        3.2809152255680987,
+        4.80858398553308
+       ],
+       "A2": [
+        0.1890161077308978,
+        0.4798028996775985,
+        0.3676068581085084,
+        1.0920268092169771,
+        2.019728889827364
+       ],
+       "A3": [
+        1.5279830629789761,
+        2.5963191405567367,
+        3.6447126965681407
+       ],
+       "B1": [
+        0.7941112998225881
+       ]
+      },
+      "H": {
+       "A1": [
+        0.1990867645848204,
+        0.3279201549914935,
+        0.5741222917939721,
+        0.828634459306141,
+        1.513604094986078,
+        2.329647487398476,
+        3.9002961479930214,
+        6.400236137660393
+       ],
+       "A2": [
+        0.19869960777420417,
+        0.48946705849196254,
+        1.1297875173846939,
+        2.220049279003244,
+        6.40295706960295
+       ],
+       "A3": [
+        0.19801638707206898,
+        1.1197775225550817,
+        6.398486287164591
+       ],
+       "B1": [
+        0.19568122021910006
+       ]
+      },
+      "S": {
+       "A1": [
+        0.1553696396145854,
+        0.359470063629062,
+        0.6720380008325576,
+        1.3823955535279877,
+        2.7574189565004152,
+        2.185028910047856,
+        1.7125239539940345,
+        4.656968067840135
+       ],
+       "A2": [
+        0.05146778657126709,
+        1.2456711643811975,
+        3.471888020274218,
+        1.9453975241929795,
+        0.7835827340277789
+       ],
+       "A3": [
+        0.3081911477395057,
+        2.1243957552910353,
+        0.6028093973415647
+       ],
+       "B1": [
+        1.1506361337675997
+       ]
+      }
+     }
+    },
+    "cd_grid": {
+     "ntau_gw": 24,
+     "nfreq_cd": 64,
+     "cd_quadrature": "gauss-legendre, w0 = 0.201623",
+     "e_min_gw": 0.20162308323269884,
+     "e_max": 94.73258944872309,
+     "cd_grid_sized": true,
+     "ntau_w": 18
+    },
+    "input_drift": [
+     {
+      "route": "imagfrequency",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     },
+     {
+      "route": "space-time",
+      "parameter": "eta",
+      "requested": 0.001,
+      "used": "none; the route has no broadening parameter"
+     }
+    ],
+    "spread_meV": 3.1343190057766535,
+    "z_spread": 0.000608047382860688,
+    "n_routes_ok": 8,
+    "status": "ok"
+   }
+  ],
+  "stderr_tail": [
+   "OMP: Warning #179: Function Can't set size of /tmp file failed:"
+  ]
+ }
+}

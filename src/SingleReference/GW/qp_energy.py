@@ -7,6 +7,14 @@ the same equation w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w):
                  only route carrying vertex corrections or a CC polarizability.
   imagfrequency  chi0(i.omega) by direct particle-hole summation.  O(N^4).
   space-time     chi0(i.tau) from a separable ISDF factorization.  O(N^3).
+
+`mode` is the chi0 realization; `continuation` is how that chi0 reaches the
+REAL axis, which is a separate approximation and the one a deep state is lost
+to. The two imaginary-axis realizations offer four of them -- Thiele-Pade of
+Sigma_c(i.omega), the contour deformation of `GW.contour_deformation` with its
+residues from the explicit chi0(w') or from the cosh transform of proj(tau),
+and the auxiliary-pole model of `GW.sum_over_poles` -- and `MODE_CONTINUATIONS`
+is the table of which pairs exist.
 """
 import os
 import warnings
@@ -37,9 +45,162 @@ IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
 EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
               'imag-frequency': 'imagfrequency', 'space-time': 'space-time'}
 
+#: The `continuation` each `mode` can run; the first entry is that mode's
+#: default. A pair missing here is refused rather than approximated by a
+#: neighbour: the continuation is where a deep state is lost, so substituting
+#: one for another returns a different functional under the name asked for.
+MODE_CONTINUATIONS = {'casida': ('spectral',),
+                      'imagfrequency': ('pade', 'cd'),
+                      'imag-frequency': ('pade', 'cd'),
+                      'space-time': ('pade', 'cd', 'laplace', 'sop')}
+
+#: Route keywords only the contour driver reads.
+CONTOUR_KEYWORDS = frozenset({'nfreq_cd', 'w0_cd', 'e_min_below_gap',
+                              'pole_offset', 'tile_gb', 'diagnostics'})
+
+#: ... and, on top of those, the two only the pole model reads. All three
+#: contour continuations read the CD frequency grid, since the pole model is
+#: FITTED on `wc` sampled there.
+SOP_KEYWORDS = frozenset({'n_poles', 'sop_stride'})
+
+#: Route keywords only a Pade continuation's drivers read.
+PADE_KEYWORDS = frozenset({'nfreq', 'npade', 'w0', 'grid', 'greedy',
+                           'tau_target', 'freq_block', 'scratch_dir', 'extras',
+                           'screen_r_cut', 'distribute', 'timings'})
+
+#: Route keywords naming the ISDF factorization or its imaginary-time grid,
+#: which no Casida route has.
+ISDF_KEYWORDS = frozenset({'ntau', 'counts', 'radii', 'factors', 'auxbasis',
+                          'grid_accuracy', 'sigma_x'})
+
+#: What `solver` accepts on the Casida route. 'auto' is resolved through
+#: `bse.solver_choice`, the repository's one eigensolver rule.
+CASIDA_SOLVERS = ('auto', 'dense', 'davidson')
+
+
+def casida_pair_count(mf, mol):
+    """nocc * nvirt, summed over the spin channels the Casida blocks span."""
+    eps = np.asarray(mf.mo_energy, float)
+    if eps.ndim == 1:
+        nocc = mol.nelectron // 2
+        return nocc * (eps.shape[-1] - nocc)
+    return sum(int(n) * (eps.shape[-1] - int(n)) for n in mf.nelec)
+
+
+def refuse_unbuilt_casida_solver(solver, mf, mol, tda):
+    """The Casida route has ONE eigensolver; 'auto' above the memory rule refuses.
+
+    THERE IS NO MATRIX-FREE CASIDA GW. Sigma_c here is the Lehmann sum over
+    EVERY neutral excitation of the (A, B) problem -- `_self_energy_amplitudes`
+    contracts the whole spectrum -- while `solve_casida_davidson` returns the
+    lowest `nroots` of it, so routing there would truncate the self-energy at a
+    root count nobody declared and return a different functional under this
+    name. 'davidson' is therefore refused outright.
+
+    'auto' is resolved through `solver_choice`, production's one rule, and its
+    'davidson' answer is the rule saying the dense (A, B) pair no longer fits
+    in BSE_DENSE_MAX_GB. That is refused too rather than paid silently: the
+    memory is the whole content of the rule, and mode='space-time' is the route
+    that reaches those sizes.
+    """
+    if solver not in CASIDA_SOLVERS:
+        raise ValueError(f'solver {solver!r} not in {CASIDA_SOLVERS}')
+    if solver == 'dense':
+        return
+    n_ov = casida_pair_count(mf, mol)
+    if solver == 'auto':
+        # cycle: bse.py drives this dispatcher for the quasiparticle diagonal.
+        # LinearResponse.bse is a parallel, not-yet-landed port; solver='auto'
+        # is calc_qp_energy's default, so a hard import here would break every
+        # default mode='casida' call rather than only the ones this rule was
+        # meant to catch. Fall back to proceeding (dense) with a warning until
+        # it lands -- solver='dense'/'davidson' name the choice explicitly and
+        # need no such fallback.
+        try:
+            from src.SingleReference.LinearResponse.bse import solver_choice
+        except ImportError:
+            warnings.warn(
+                "LinearResponse.bse.solver_choice is not available yet, so "
+                "the dense (A, B) pair's memory rule cannot be checked for "
+                "solver='auto'; proceeding as if it fit. Pass solver='dense' "
+                "once you have confirmed the pair fits, to silence this.",
+                RuntimeWarning, stacklevel=3)
+            return
+        if solver_choice(n_ov, tda) == 'dense':
+            return
+    reached = ('the memory rule refuses the dense (A, B) pair at '
+               f'n_ov={n_ov} ({2 * int(n_ov)**2 * 8 / 1e9:.1f} GB)'
+               if solver == 'auto' else "solver='davidson' was asked for")
+    raise NotImplementedError(
+        f"{reached}, and mode='casida' has no matrix-free solve: its Sigma_c "
+        f"is a Lehmann sum over EVERY Casida root and the Davidson returns the "
+        f"lowest nroots of them. Take mode='space-time', whose self-energy "
+        f"never forms the spectrum at all, or solver='dense' to pay the pair.")
+
+
+def _refused_keywords(continuation):
+    """The route keywords this continuation does not read."""
+    if continuation == 'spectral':
+        return CONTOUR_KEYWORDS | SOP_KEYWORDS | PADE_KEYWORDS | ISDF_KEYWORDS
+    if continuation == 'pade':
+        return CONTOUR_KEYWORDS | SOP_KEYWORDS
+    if continuation in ('cd', 'laplace'):
+        return PADE_KEYWORDS | SOP_KEYWORDS
+    return PADE_KEYWORDS
+
+
+def _continuation_of(mode_key, continuation, route_kwargs, return_z):
+    """The continuation `mode` will run, with the validity table enforced.
+
+    Decided and checked before any integral is built, because the alternative
+    is a converged self-energy and then a refusal. The table is
+    `MODE_CONTINUATIONS`; the keyword sets above say which route reads what, so
+    a keyword aimed at another continuation is an error rather than a request
+    that quietly does nothing.
+    """
+    allowed = MODE_CONTINUATIONS[mode_key]
+    name = allowed[0] if continuation is None else str(continuation).lower()
+    if name not in allowed:
+        known = sorted(set().union(*MODE_CONTINUATIONS.values()))
+        if name not in known:
+            raise ValueError(f'continuation={continuation!r}; choose one of '
+                             f'{known}')
+        raise ValueError(
+            f"mode={mode_key!r} cannot run continuation={name!r}; it accepts "
+            f"{list(allowed)}. 'spectral' is the Casida route's Lehmann sum "
+            f"over a spectrum it already holds, 'laplace' and 'sop' both read "
+            f"proj(tau), which only mode='space-time' builds, and 'pade' and "
+            f"'cd' need an imaginary-axis chi0.")
+    refused = sorted(_refused_keywords(name) & set(route_kwargs))
+    if refused:
+        raise TypeError(f"continuation={name!r} does not read {refused}")
+    if name == 'cd' and mode_key != 'space-time':
+        raise NotImplementedError(
+            f"mode={mode_key!r} with continuation='cd' is not built: the "
+            f"contour needs wc[nu, q] on the CD quadrature and a real-frequency "
+            f"backend, and this route's chi0 comes from "
+            f"`solve_rpa_screening_df` on its OWN minimax grid, which it "
+            f"inverts to W and continues. Nothing of the contour falls out of "
+            f"that code path, so it would be a second driver with a second "
+            f"grid. mode='space-time' with continuation='cd' is the built one.")
+    if return_z and name in ('pade', 'spectral'):
+        raise ValueError(
+            f"return_z=True is refused for continuation={name!r}. A Thiele "
+            f"continuation is not differentiable -- forward mode through its "
+            f"recursion divides by inverse differences approaching zero -- so "
+            f"the only Z available is a difference of the continued Sigma_c, "
+            f"which is noise; and the Casida route's root finder "
+            f"(`Solvers.qp_equation.solve_qp_equation`) returns the root "
+            f"alone, its pole strength being an internal finite difference "
+            f"that only qp_solver='pole_strength' forms at all. "
+            f"The three contour continuations return Z from their own "
+            f"Newton slope, which is the exact derivative of the equation "
+            f"solved.")
+    return name
+
 
 def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
-                    spin_channel, route_kwargs):
+                    spin_channel, eta, route_kwargs):
     """Quasiparticle energies in eV from the eigenvalue-self-consistent loop.
 
     The loop returns the whole converged spectrum, so the requested states are
@@ -60,8 +221,9 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
                          f"{sorted(set(EVGW_MODES))}")
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
+    # Every cycle re-enters this function, so eta travels as a route keyword.
     eps_qp, info = evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
-                                    **route_kwargs)
+                                    eta=eta, **route_kwargs)
     if is_uhf:
         # the loop converges both channels at once; the caller asked for one
         nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]
@@ -81,7 +243,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    spin_channel='alpha', printSpectralFunction=False,
                    dm_correction=None, tda=False, qp_solver='pole_strength',
                    nroots=8, mode='casida', self_consistency='G0W0',
-                   eps_anchor=None, n_workers=None, **route_kwargs):
+                   eps_anchor=None, n_workers=None, continuation=None,
+                   return_z=False, solver='auto', **route_kwargs):
     """Quasiparticle energies, in eV.
 
     selfenergy:     'GW'/'GWGammaInf'/'PSD1'...'PSD9', or a list of these.
@@ -95,6 +258,50 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     mode:           how Sigma_c is built; see the module docstring. The two
                     imaginary-axis routes implement GW@RPA only and reject every
                     other combination rather than silently downgrading it.
+    continuation:   how that Sigma_c reaches the REAL axis, None taking each
+                    mode's default. `MODE_CONTINUATIONS` is the table of pairs
+                    that exist; a keyword another continuation reads is a
+                    TypeError naming both.
+                    'spectral' the Lehmann sum at omega + i.eta over the Casida
+                        spectrum; mode='casida' only, and its only choice.
+                    'pade'     Thiele-Pade of Sigma_c(i.omega), the default on
+                        both imaginary-axis modes. Reads nfreq/npade/w0 and the
+                        rest of their quadrature; returns no Z, since
+                        differentiating a Thiele recursion divides by inverse
+                        differences approaching zero.
+                    'cd'       contour deformation: the imaginary-axis integral
+                        plus the residues of the poles of G the rotation sweeps.
+                        Exact for any state and O(N^4) per residue, because each
+                        one evaluates W at a real frequency. mode='space-time'.
+                        Reads nfreq_cd, w0_cd, e_min_below_gap, pole_offset.
+                    'laplace'  the same contour with each residue's W from the
+                        cosh transform of proj(tau): O(N^3) instead of O(N^4),
+                        and defined only below the particle-hole gap, where
+                        that transform exists. A residue the imaginary-time
+                        grid does not carry is refused by name rather than
+                        served from the explicit backend. mode='space-time',
+                        and it reads the same keywords as 'cd'.
+                    'sop'      W modelled by n_poles auxiliary poles and
+                        Sigma_c closed form: no real-frequency screening at all,
+                        and a refusal for the states Eq. (27) of the pole paper
+                        excludes, named with their reach. mode='space-time'.
+                        Reads n_poles and sop_stride on top of the CD grid,
+                        which is the grid the pole model is fitted on.
+    diagnostics:    a dict that receives what the contour driver decided:
+                    the CD grid it resolved, the residues swept, the pole
+                    guard in force, the Newton seed, the residue treatment
+                    that ran and the Laplace transform's representation error
+                    where it did. 'cd', 'laplace' and 'sop' only.
+    return_z:       return (energy, Z) instead of the energy. The three
+                    contour continuations take Z from their own Newton slope,
+                    the exact derivative of the equation they solved; the other
+                    two refuse it rather than return a differenced one.
+    solver:         the Casida eigensolver, mode='casida' only. 'auto'
+                    (default) resolves through `bse.solver_choice`, the one
+                    memory rule; 'dense' pays the (A, B) pair whatever its
+                    size. There is no matrix-free route here -- the self-energy
+                    sums over EVERY Casida root -- so 'davidson', and 'auto'
+                    above the rule, are refused by name.
     state:          'homo', an orbital index, or a list of them.
     dm_correction:  AO 1RDM used in place of the mean-field density in the
                     static Sigma_Hx term, e.g. a CCSD or GW 1RDM.
@@ -126,23 +333,54 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
+    if mode_key not in MODE_CONTINUATIONS:
+        raise ValueError(
+            f"mode='{mode}'; choose 'casida', 'imagfrequency' or 'space-time'.")
+    # THE TABLE IS ENFORCED FIRST. The alternative is a converged self-energy
+    # and then a refusal.
+    continuation = _continuation_of(mode_key, continuation, route_kwargs,
+                                    return_z)
+    # The eigensolver is decided before an integral is built, like the table
+    # above: the alternative is a converged screening and then a refusal.
+    if mode_key == 'casida':
+        refuse_unbuilt_casida_solver(solver, mf, mol, tda)
+    elif solver != 'auto':
+        raise TypeError(
+            f"mode={mode_key!r} does not read solver={solver!r}: it builds "
+            f"chi0 on the imaginary axis and has no Casida eigenproblem to "
+            f"choose a solver for. mode='casida' is the only route that has "
+            f"one.")
     if str(self_consistency).lower() in ('evgw', 'ev'):
+        if continuation != MODE_CONTINUATIONS[mode_key][0]:
+            raise ValueError(
+                f"self_consistency='evGW' drives continuation="
+                f"{MODE_CONTINUATIONS[mode_key][0]!r} only, not "
+                f"{continuation!r}: the loop freezes its quadrature at the "
+                f"first cycle and reinjects eigenvalues, and every other "
+                f"continuation would have to freeze its own branch as well.")
         # each evGW cycle calls back into this function, so the scan's thread
         # count travels as a route keyword
         if n_workers is not None:
             route_kwargs = dict(route_kwargs, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
-                               state, spin_channel, route_kwargs)
+                               state, spin_channel, eta, route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
+        # Neither route has a broadening to set: chi0 has the real denominator
+        # -2d/(d^2 + w^2) on the imaginary axis, and Sigma_c reaches the real
+        # axis by Pade or by contour deformation rather than at w + i.eta.
+        if eta != DEFAULT_BROADENING_ETA:
+            raise ValueError(
+                f"mode='{mode_key}' has no broadening: eta={eta!r} never "
+                f"reaches the self-energy, so the number returned would be the "
+                f"one at eta={DEFAULT_BROADENING_ETA!r} under another name. "
+                f"mode='casida' is the only route eta acts on.")
         # the anchor is a named argument here and a route keyword there
         if eps_anchor is not None:
             route_kwargs = dict(route_kwargs, eps_anchor=eps_anchor)
         return _qp_energy_imaginary_axis_route(
-            mf, mol, mode_key, selfenergy, polarizability, df, state,
-            spin_channel, qp_solver, dm_correction, tda, route_kwargs)
-    if mode_key != 'casida':
-        raise ValueError(
-            f"mode='{mode}'; choose 'casida', 'imagfrequency' or 'space-time'.")
+            mf, mol, mode_key, continuation, selfenergy, polarizability, df,
+            state, spin_channel, qp_solver, dm_correction, tda, return_z,
+            route_kwargs)
     if route_kwargs:
         raise TypeError(
             f"unexpected keyword(s) {sorted(route_kwargs)} for mode='casida'")
@@ -618,14 +856,20 @@ def _qp_energy_cc_polarizability(mf, states, level, selfenergy, eta, nroots,
     return results
 
 
-def _qp_energy_imaginary_axis_route(mf, mol, mode_key, selfenergy, polarizability,
-                                    df, state, spin_channel, qp_solver,
-                                    dm_correction, tda, route_kwargs):
-    """Dispatch to the imaginary-frequency or space-time driver.
+def _qp_energy_imaginary_axis_route(mf, mol, mode_key, continuation, selfenergy,
+                                    polarizability, df, state, spin_channel,
+                                    qp_solver, dm_correction, tda, return_z,
+                                    route_kwargs):
+    """Dispatch to the imaginary-frequency, space-time or contour driver.
 
-    Both implement GW@RPA on a restricted, density-fitted reference and nothing
+    All implement GW@RPA on a restricted, density-fitted reference and nothing
     else, so every unsupported combination is rejected rather than quietly
-    returning a GW@RPA number under another name.
+    returning a GW@RPA number under another name. `eta` is one of them and is
+    refused by the caller, since none of them broadens anything.
+
+    The three drivers differ in the CHI0 they build and in the continuation
+    that takes it to the real axis; `continuation` has already been checked
+    against `MODE_CONTINUATIONS` and against the keywords it reads.
     """
     if isinstance(selfenergy, list) or str(selfenergy).upper() != 'GW':
         raise ValueError(
@@ -646,19 +890,50 @@ def _qp_energy_imaginary_axis_route(mf, mol, mode_key, selfenergy, polarizabilit
     nocc = mol.nelectron // 2
     states = _resolve_states(state, nocc)
 
-    if mode_key == 'space-time':
+    if continuation in ('cd', 'laplace', 'sop'):
+        # Deferred: contour_deformation.py's chi0 comes from
+        # LinearResponse.space_time's polarizability_projected_sweep /
+        # three_index_ov / three_index_slice / owned_frequency_blocks and
+        # LinearResponse.imaginary_frequency's frequency_factor, which are a
+        # parallel port and may not exist yet -- keeping this import out of
+        # the module top level means mode='casida'/'imagfrequency'/'space-time'
+        # with continuation='pade' stay unaffected either way.
+        from src.SingleReference.GW.contour_deformation import \
+            solve_qp_energy_contour
+
+        # The two contours and the pole model share every step but the last:
+        # one factorization, one proj(tau), one contour grid, one exchange
+        # build.
+        if qp_solver != 'pole_strength':
+            raise ValueError(
+                f"continuation={continuation!r} solves the quasiparticle "
+                f"equation with the guarded Newton of `Solvers.qp_equation`, "
+                f"which selects no root: qp_solver={qp_solver!r} would never "
+                f"reach it. continuation='pade' is where the root selector "
+                f"acts.")
+        diagnostics_out = route_kwargs.pop('diagnostics', None)
+        out, z, diagnostics = solve_qp_energy_contour(
+            mf, mol, nocc, np.asarray(states), continuation=continuation,
+            dm_correction=dm_correction, **route_kwargs)
+        if diagnostics_out is not None:
+            diagnostics_out.update(diagnostics)
+        out, z = list(out), list(z)
+    elif mode_key == 'space-time':
         # One call for the whole window: chi0, the Dyson inversion, the tau
         # sweep and <Sigma_x - v_xc> are all shared across states.
         out = solve_qp_energy_space_time(mf, mol, nocc, np.asarray(states),
                                          solver_mode=qp_solver,
                                          dm_correction=dm_correction,
                                          **route_kwargs)
+        out, z = [e * HARTREE_TO_EV for e in out], None
     else:
         out = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p,
                                               solver_mode=qp_solver,
                                               dm_correction=dm_correction,
                                               **route_kwargs)
                for p in states]
+        out, z = [e * HARTREE_TO_EV for e in out], None
 
-    out = [e * HARTREE_TO_EV for e in out]
-    return out[0] if not isinstance(state, list) else out
+    if not isinstance(state, list):
+        return (out[0], z[0]) if return_z else out[0]
+    return (out, z) if return_z else out

@@ -1,9 +1,98 @@
 import warnings
+import weakref
 
 import numpy as np
 from pyscf import gto, scf, ao2mo
 
+from src.Base.constants import AUX_METRIC_LINDEP
 from src.Base.environment import environment_of
+
+#: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
+_FOCK_MO_CACHE = weakref.WeakKeyDictionary()
+
+
+def response_kernel(mf, environment=True):
+    """G(x) = dV_eff/dD . x for this mean field, cached on it.
+
+    pyscf's `gen_response` IS this operator and reduces to `vj - 0.5 vk` on
+    Hartree-Fock exactly, so using it everywhere keeps the HF route unchanged
+    and picks up f_xc and the hybrid scaling on a Kohn-Sham one, which is the
+    whole difference between the two references in a Lagrangian built on it.
+
+    A CONTINUUM MUST RESPOND HERE, and pyscf gates that on
+    `equilibrium_solvation`, defaulting to False -- right for a vertical
+    excitation, where the solvent nuclei are too slow to follow the
+    first-order density, and wrong for an orbital response that answers
+    moving ATOMS, which the whole continuum follows. The flag is read inside
+    pyscf's closure at call time, so it is set on the mean field rather than
+    around the call.
+
+    environment=False gives the SAME operator with no reaction field in it,
+    for a quantity that has none: `Sigma_x - v_xc` reads v_xc as
+    `get_veff - get_j`, and pyscf TAGS the reaction field onto get_veff rather
+    than adding it, so that operator is continuum-free and its response must
+    be too. The identity J - K/2 - G = d(Sigma_x - v_xc)/dD holds only for the
+    gas-phase G; handing it the solvated one puts a spurious term into the
+    quasiparticle chain while leaving the dRPA ground state exact.
+
+    Cached because a Z-vector solve calls this inside its matvec: rebuilding
+    the numerical-integration machinery per iteration would dominate the
+    solve. A mean field is converged and immutable for the length of one
+    gradient, and a displaced geometry gets a new object, so the cache cannot
+    go stale.
+    """
+    key = '_wicks_response_kernel' + ('' if environment else '_gas')
+    fn = getattr(mf, key, None)
+    if fn is None:
+        if not hasattr(mf, 'with_solvent'):
+            fn = mf.gen_response(hermi=1)
+        elif environment:
+            mf.with_solvent.equilibrium_solvation = True
+            fn = mf.gen_response(hermi=1)
+        else:
+            fn = mf.undo_solvent().gen_response(hermi=1)
+        setattr(mf, key, fn)
+    return fn
+
+
+def fock_mo(mf):
+    """C^T F C of a CONVERGED mean field.
+
+    An orbital-response matvec reads this on every Krylov iteration, but it
+    depends on the mean field alone and not on the density the matvec
+    carries, so it is cached rather than rebuilt on every iteration.
+    """
+    hit = _FOCK_MO_CACHE.get(mf)
+    if hit is None:
+        C = mf.mo_coeff
+        hit = C.T @ mf.get_fock() @ C
+        _FOCK_MO_CACHE[mf] = hit
+    return hit
+
+
+def aux_metric_inverse(V, lindep=AUX_METRIC_LINDEP):
+    """Pseudo-inverse of an auxiliary metric, on its numerical range.
+
+    The Coulomb metric is well conditioned and this is then an ordinary
+    inverse. The LONG-RANGE metric of a range-separated hybrid is not: it goes
+    singular to machine precision, so its null directions are projected out
+    rather than solved through. The dropped directions carry no density, which
+    is why the fit survives losing them.
+
+    TIKHONOV, NOT TRUNCATION, and the difference is the whole point here. A
+    truncated pseudo-inverse is not differentiable the way an adjoint assumes:
+    d(V^-1) = -V^-1 dV V^-1 holds for an inverse, and a rank-deficient
+    projection picks up an extra term from its moving null space. Shifting the
+    spectrum keeps the object a true inverse, so the same adjoint is exact for
+    the regularized fit that is actually evaluated.
+
+    The shift is RELATIVE to the largest eigenvalue, so it does not move with
+    the overall scale of the basis and the rank never changes as atoms move.
+    """
+    V = 0.5 * (np.asarray(V, float) + np.asarray(V, float).T)
+    w, u = np.linalg.eigh(V)
+    keep = w > lindep * w.max()
+    return (u[:, keep] / w[keep]) @ u[:, keep].T
 
 def get_effective_one_electron_integrals(mol, mf, representation='spatial'):
     fock_ao = mf.get_fock()

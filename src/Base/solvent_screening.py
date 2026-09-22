@@ -68,8 +68,9 @@ from pyscf import solvent as pyscf_solvent
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
-from src.Base.constants import ISDF_TILE_GB
+from src.Base.constants import HARTREE_TO_EV, ISDF_TILE_GB, SOLVENT_PLASMON_EV
 from src.Base.environment import attach_environment, environment_of
+from src.Base.pcm_derivatives import by_atom, solver_bilinear_gradient
 from src.Base.separable_ri import auxmol_key
 
 # n^2 below this is not a plausible optical dielectric constant for a
@@ -126,6 +127,38 @@ def resolve_optical_eps(eps=None, solvent=None, allow_static_eps=False):
     return eps, eps_static
 
 
+def dynamic_screening_factor(omega, omega_p):
+    """g(iw) = Omega_p^2 / (w^2 + Omega_p^2), omega and omega_p in Hartree.
+
+    The fraction of the solvent's static electronic response that survives at
+    imaginary frequency w: 1 below the solvent's pole, falling as Omega_p^2/w^2
+    above it, so the solvent goes transparent where it has no oscillator
+    strength. Omega_p -> infinity is the adiabatic limit g == 1.
+    """
+    return omega_p ** 2 / (np.asarray(omega, float) ** 2 + omega_p ** 2)
+
+
+def solvent_plasmon_energy(solvent, rule='f_sum'):
+    """Omega_p in HARTREE for a named solvent, from `SOLVENT_PLASMON_EV`.
+
+    rule: 'f_sum' for the value that matches the model's high-frequency tail to
+    the f-sum rule, 'fit' for the fit to the measured visible-UV response.
+    """
+    key = None if solvent is None else solvent.lower()
+    if key not in SOLVENT_PLASMON_EV:
+        raise KeyError(
+            f"no single-pole energy tabulated for solvent {solvent!r}; "
+            f"SOLVENT_PLASMON_EV has {sorted(SOLVENT_PLASMON_EV)} -- add it "
+            f"there or pass omega_p= explicitly (in Hartree)")
+    value = SOLVENT_PLASMON_EV[key].get(rule)
+    if value is None:
+        raise KeyError(
+            f"solvent {solvent!r} has no {rule!r} single-pole energy; the "
+            f"literature fit exists for water only, and the f-sum-rule value "
+            f"follows from the solvent's own electron density")
+    return value / HARTREE_TO_EV
+
+
 class SolventScreening:
     """The reaction-field kernel vtilde = v chi v of a PCM continuum.
 
@@ -148,7 +181,8 @@ class SolventScreening:
 
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
                  lebedev_order=29, vdw_scale=1.2, r_probe=0.0,
-                 radii_table=None, allow_static_eps=False, eps_static=None):
+                 radii_table=None, allow_static_eps=False, eps_static=None,
+                 omega_p=None):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
         pyscf's SMD table, whose refractive index sets eps = n^2), not both.
         method/lebedev_order/vdw_scale/r_probe/radii_table are handed straight
@@ -158,6 +192,14 @@ class SolventScreening:
         puts the SCF inside. A solvent name supplies it; an explicit optical eps
         needs it explicitly, and without one the ground state stays bare -- the
         frozen-polarization limit rather than a solvated calculation.
+
+        omega_p: the solvent's single-pole energy in HARTREE, which sets how
+        fast its reaction field dies with imaginary frequency through
+        `dynamic_factor`. A named solvent takes the f-sum-rule value from
+        `SOLVENT_PLASMON_EV`; an explicit `eps` with no name has no spectrum to
+        take one from and stays adiabatic (g == 1) unless given one. It is a
+        property of the SOLVENT, so it travels with eps and eps_static rather
+        than being set per calculation.
 
         THE STATIC ONE-BODY TERM IS NOT OPTIONAL. A continuum acts through two
         channels -- the reaction field of the transition density, which reaches
@@ -184,6 +226,9 @@ class SolventScreening:
         self.eps_static = eps_static
         self.solvent = solvent
         self.method = method
+        if omega_p is None and solvent is not None:
+            omega_p = solvent_plasmon_energy(solvent)
+        self.omega_p = None if omega_p is None else float(omega_p)
         self._cavity = dict(lebedev_order=lebedev_order, vdw_scale=vdw_scale,
                             r_probe=r_probe, radii_table=radii_table)
 
@@ -388,6 +433,22 @@ class SolventScreening:
             self._aux_cache[key] = v_aux @ self.response_matrix() @ v_aux.T
         return self._aux_cache[key]
 
+    def dynamic_factor(self, omega):
+        """g(iw) = Omega_p^2 / (w^2 + Omega_p^2), the share of the reaction
+        field left at imaginary frequency w, or 1 with no pole energy.
+
+        `aux_kernel` is the reaction field at eps_inf, which is the w -> 0
+        amplitude of the solvent's ELECTRONIC response and not its value at
+        every frequency. A correlation energy integrates over all of them, and
+        above the solvent's own absorption there is no oscillator strength left
+        to screen with, so the dressed interaction is v + g(iw) vtilde. The
+        excitation energies are unaffected: they see the reaction field at the
+        excitation's own frequency, which is what eps_inf already describes.
+        """
+        if self.omega_p is None:
+            return np.ones_like(np.asarray(omega, float))
+        return dynamic_screening_factor(omega, self.omega_p)
+
     def whitened_transform(self, mol, mf):
         """T with (B -> T B) turning a Coulomb-fitted RI factor into a
         (v + vtilde)-fitted one.
@@ -445,6 +506,11 @@ class SolventScreening:
 
     # ---- the Environment contract -----------------------------------------
 
+    #: Both halves of the reaction field's nuclear derivative are built:
+    #: `aux_kernel_adjoint` for the dressed metric and
+    #: `static_self_energy_adjoint` for the static reaction field, on the
+    #: bilinear cavity derivative of `pcm_derivatives`.
+    differentiable = True
     screens = True
 
     def for_geometry(self, mol):
@@ -459,7 +525,7 @@ class SolventScreening:
         dielectric = (dict(solvent=self.solvent) if self.solvent is not None
                       else dict(eps=self.eps, allow_static_eps=True,
                                 eps_static=self.eps_static))
-        return SolventScreening(mol, method=self.method,
+        return SolventScreening(mol, method=self.method, omega_p=self.omega_p,
                                 **dielectric, **self._cavity)
 
     def mean_field(self, mol, scf_factory):
@@ -523,6 +589,226 @@ class SolventScreening:
             return (self.cohsex_correction(mol, mo_a, nocc_a),
                     self.cohsex_correction(mol, mo_b, nocc_b))
         return self.cohsex_correction(mol, mo_coeff, mol.nelectron // 2)
+
+    def aux_kernel_adjoint(self, auxmol, v_bar):
+        """(natm, 3) of d/dR Tr[v_bar^T vtilde_aux], the adjoint held fixed.
+
+        vtilde_aux = A Q A^T with A = `aux_grid_potential` (naux, ngrids) and
+        Q = `response_matrix`, so the geometry enters twice: through the
+        auxiliary functions and cavity charges that A is an integral between,
+        and through the cavity response Q itself.
+
+            d/dR Tr[Y A Q A^T] = 2 sum_Pk L[P,k] dA[P,k]/dR + Tr[Z dQ]
+            L = Y A Q                       (naux, ngrids)
+            Z = A^T Y A                     rank <= naux, NEVER formed
+
+        Only the symmetric part of `v_bar` can survive, vtilde_aux being
+        symmetric. The rank of Z is what keeps this cubic: it is carried as the
+        factor pair (A, Y A) and handed to the bilinear solver derivative as a
+        batch of naux vector pairs, so no ngrids^2 adjoint is ever built.
+        """
+        A = self.aux_grid_potential(auxmol)                # (naux, ngrids)
+        Y = 0.5 * (np.asarray(v_bar, float) + np.asarray(v_bar, float).T)
+        Q = self.response_matrix()
+        B = Y @ A                                          # (naux, ngrids)
+
+        # Tr[Z dQ] with Z = A^T Y A and Q = sym(K^-1 R): the symmetrization
+        # makes it the average of the two orderings of the same bilinear form.
+        de = 0.5 * (solver_bilinear_gradient(self._pcm, A, B)
+                    + solver_bilinear_gradient(self._pcm, B, A))
+        # 2 L : dA/dR, both centres of the two-centre integral
+        de += 2.0 * self._aux_potential_gradient(auxmol, (Y @ A) @ Q.T)
+        return de
+
+    def _aux_potential_gradient(self, auxmol, L):
+        """(natm, 3) of sum_Pk L[P,k] dA[P,k]/dR for A = (chi_P | g_k).
+
+        Two centres move independently: the auxiliary function rides its own
+        atom through `auxmol.aoslice_by_atom`, and the smeared cavity charge
+        rides the atom that owns its surface point through `gslice_by_atom`.
+        pyscf's `int2c2e_ip1` differentiates the FIRST argument and carries its
+        -d/dR convention, so both slots are taken with the same intor and the
+        arguments swapped, and both enter with a minus.
+        """
+        fakemol = self._fakemol()
+        gridslice = self._pcm.surface['gslice_by_atom']
+        de = np.zeros((self.mol.natm, 3))
+
+        # d/d(auxiliary centre): (3, naux, ngrids)
+        dA_aux = gto.mole.intor_cross('int2c2e_ip1', auxmol, fakemol)
+        per_aux = np.einsum('xPk,Pk->Px', dA_aux, L, optimize=True)
+        for ia, (_, _, p0, p1) in enumerate(auxmol.aoslice_by_atom()):
+            de[ia] -= per_aux[p0:p1].sum(axis=0)
+
+        # d/d(charge centre): (3, ngrids, naux)
+        dA_chg = gto.mole.intor_cross('int2c2e_ip1', fakemol, auxmol)
+        per_pt = np.einsum('xkP,Pk->kx', dA_chg, L, optimize=True)
+        de -= by_atom(per_pt, gridslice)
+        return de
+
+    def static_self_energy_skeleton(self, mol, mo_coeff, nocc, weights):
+        """(natm, 3) of d/dR sum_p w_p Sigma^solv_pp at FIXED orbitals.
+
+        Folding the weights into Gamma = sum_p w_p C_p C_p^T and the occupancy
+        signs into M = C diag(s) C^T, s = +1 virtual and -1 occupied, the
+        weighted trace is
+
+            sum_p w_p Sigma^solv_pp
+                = 1/2 sum_kk' Q[k,k'] Tr[Gamma v_k M v_k']
+
+        which moves with the nuclei through the cavity response Q and through
+        the grid potentials v_k. Both terms are here; the ORBITAL response,
+        which is what makes C itself geometry-dependent, is `..._response` and
+        is a separate object because it has to reach the Lagrangian, not the
+        skeleton.
+
+        M is written from the coefficients rather than as S^-1 - 2 P_occ: with
+        the orbitals frozen the two are identical, and this form carries no
+        overlap derivative to get wrong.
+        """
+        v_ao = self.ao_grid_potential(mol)                    # (nao, nao, ng)
+        C = np.asarray(mo_coeff, float)
+        w = np.zeros(C.shape[1])
+        w[:len(np.atleast_1d(weights))] = np.atleast_1d(weights)
+        signs = np.ones(C.shape[1])
+        signs[:nocc] = -1.0
+        Gamma = (C * w) @ C.T
+        M = (C * signs) @ C.T
+        Q = self.response_matrix()
+
+        # --- dQ/dR. Z[k,k'] = 1/2 Tr[Gamma v_k M v_k'] is symmetric and of
+        # rank at most rank(Gamma) * rank(M), so it is carried as that outer
+        # product of vectors and never formed.
+        gv, gU = np.linalg.eigh(Gamma)
+        mv, mU = np.linalg.eigh(M)
+        keep_g = np.abs(gv) > 1e-12 * max(np.abs(gv).max(), 1.0)
+        gv, gU = gv[keep_g], gU[:, keep_g]
+        half = np.einsum('mr,mnk->rnk', gU, v_ao, optimize=True)
+        a = np.einsum('rnk,ns->rsk', half, mU, optimize=True)  # gamma_r^T v_k mu_s
+        a = a.reshape(-1, self.ngrids)
+        scale = np.outer(gv, mv).ravel()
+        de = 0.5 * solver_bilinear_gradient(self._pcm, a * scale[:, None], a)
+
+        # --- dv/dR. The two v factors are equivalent under the trace, so one
+        # of them carries the whole derivative at twice the weight. The order
+        # of the three matrices is not free: differentiating the FIRST v in
+        # Tr[Gamma v_k M v_j] leaves M v_j Gamma, not Gamma M v_j.
+        vQ = np.tensordot(v_ao, Q, axes=(2, 1))               # sum_j v_j Q[k,j]
+        G = np.einsum('rs,smk,mn->rnk', M, vQ, Gamma, optimize=True)
+        de += self._grid_potential_gradient(mol, G)
+
+        # --- dS/dR through the COMPLETENESS half of M. Summing over every
+        # orbital makes that half C C^T = S^-1, which moves with the nuclei
+        # even though the coefficients are held fixed. Freezing C hides this
+        # term from a finite difference that also freezes C, and leaves the
+        # chain short by an atom-dependent amount.
+        P = 0.5 * self.vtilde_mediated(mol, Gamma)            # dF/dM
+        Sinv = np.linalg.inv(mol.intor('int1e_ovlp'))
+        de += self._overlap_gradient(mol, Sinv @ P @ Sinv)
+        return de
+
+    def _overlap_gradient(self, mol, W):
+        """(natm, 3) of d/dR Tr[W S^-1]-style term: -Tr[W dS/dR], W symmetric.
+
+        `int1e_ipovlp` differentiates the BRA and carries pyscf's -d/dR, so the
+        ket slot is the transpose and the pair enters once per atom.
+        """
+        ds = mol.intor('int1e_ipovlp')                        # (3, nao, nao)
+        Ws = W + W.T
+        de = np.zeros((mol.natm, 3))
+        per_ao = np.einsum('xmn,mn->mx', ds, Ws, optimize=True)
+        for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+            de[ia] += per_ao[p0:p1].sum(axis=0)
+        return de
+
+    def _grid_potential_gradient(self, mol, G):
+        """(natm, 3) of sum_k G[mu,nu,k] dv_k[mu,nu]/dR for v = (mu nu | g_k).
+
+        Three centres move: the two AO slots, through `int3c2e_ip1`, and the
+        smeared charge, through `int3c2e_ip2`. pyscf hands back -d/dR for both.
+        """
+        fakemol = self._fakemol()
+        gridslice = self._pcm.surface['gslice_by_atom']
+        de = np.zeros((mol.natm, 3))
+        Gs = G + G.transpose(1, 0, 2)          # the two AO slots are equivalent
+
+        ip1 = pyscf_df.incore.aux_e2(mol, fakemol, intor='int3c2e_ip1',
+                                     aosym='s1', comp=3)
+        per_ao = np.einsum('xmnk,mnk->mx', ip1, Gs, optimize=True)
+        for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+            de[ia] -= per_ao[p0:p1].sum(axis=0)
+
+        ip2 = pyscf_df.incore.aux_e2(mol, fakemol, intor='int3c2e_ip2',
+                                     aosym='s1', comp=3)
+        per_pt = np.einsum('xmnk,mnk->kx', ip2, G, optimize=True)
+        de -= by_atom(per_pt, gridslice)
+        return de
+
+    def vtilde_mediated(self, mol, x):
+        """sum_kk' Q[k,k'] v_k x v_k' -- the reaction field's exchange-like build.
+
+        The one operator this environment contributes. It is NOT the mean-field
+        response kernel: the reaction field carries no Coulomb and no
+        exchange-correlation, only vtilde, so `response_kernel` must not stand
+        in for it.
+        """
+        v_ao = self.ao_grid_potential(mol)
+        vx = np.einsum('mnk,nr->mrk', v_ao, np.asarray(x, float), optimize=True)
+        vQ = np.tensordot(v_ao, self.response_matrix(), axes=(2, 1))
+        return np.einsum('mrk,rsk->ms', vx, vQ, optimize=True)
+
+    def static_self_energy_operator(self, mol, mo_coeff, nocc):
+        """Sigma^solv as an AO operator: 1/2 [vtilde-mediated](S^-1 - D_AO).
+
+        `cohsex_correction` is its MO diagonal. Writing it this way is what
+        exposes the density dependence the orbital response needs: the whole
+        occupancy structure sits in one matrix, M = S^-1 - D_AO, and the
+        operator is linear in it.
+        """
+        C = np.asarray(mo_coeff, float)
+        signs = np.ones(C.shape[1])
+        signs[:nocc] = -1.0
+        return 0.5 * self.vtilde_mediated(mol, (C * signs) @ C.T)
+
+    def static_self_energy_response(self, mol, mo_coeff, nocc, weights):
+        """Orbital-rotation gradient of sum_p w_p Sigma^solv_pp.
+
+        The same two terms as `qp_xc_correction_Y`: one from the two-sided MO
+        transform, and one from the operator's own density dependence. Sigma^solv
+        is linear in M = S^-1 - D_AO, so its density response is simply
+        dO(x) = -1/2 [vtilde-mediated](x), which is why the second term carries
+        the opposite sign to the first and lands only on the occupied columns.
+
+        Must enter the Lagrangian BEFORE the multiplier solve: it shares Lambda
+        with every other orbital-response contribution.
+        """
+        C = np.asarray(mo_coeff, float)
+        w = np.zeros(C.shape[1])
+        w[:len(np.atleast_1d(weights))] = np.atleast_1d(weights)
+        gs = np.diag(w)
+        g_ao = C @ gs @ C.T
+        o_mo = C.T @ self.static_self_energy_operator(mol, C, nocc) @ C
+        Y = 2.0 * (o_mo @ gs)
+        d_o = -0.5 * self.vtilde_mediated(mol, g_ao)
+        Y[:, :nocc] += 4.0 * (C.T @ d_o @ C)[:, :nocc]
+        return Y
+
+    def static_self_energy_adjoint(self, mf, weights):
+        """(Y_extra, skeleton) of sum_p w_p Sigma^solv_pp, the protocol's order.
+
+        The Y has to reach the Lagrangian before the multiplier solve, because
+        it shares Lambda with every other orbital-rotation contribution; the
+        skeleton is already a force.
+        """
+        mol = mf.mol
+        mo_coeff = np.asarray(mf.mo_coeff, float)
+        if mo_coeff.ndim == 3:
+            raise NotImplementedError(
+                'the solvated static self-energy adjoint is restricted-only, '
+                'like its consumers')
+        nocc = mol.nelectron // 2
+        return (self.static_self_energy_response(mol, mo_coeff, nocc, weights),
+                self.static_self_energy_skeleton(mol, mo_coeff, nocc, weights))
 
     # ---- housekeeping -----------------------------------------------------
 

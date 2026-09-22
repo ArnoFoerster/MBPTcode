@@ -105,6 +105,32 @@ def separable_gauge_transform(mol, environment, auxbasis=None):
     return bare_gauge_transform(auxmol, environment)
 
 
+def projected_quasiparticle_shift(a_dressed, w_dressed, a_bare, w_bare, nocc):
+    """Eq. (18) for every orbital from the PROJECTED orbital densities, in Hartree.
+
+    THE ONE CONTRACTION OF EQ. (18). Delta W never forms: the shift contracts
+    it twice against the same orbital density, so projecting that density onto
+    the auxiliary index first -- a[Q,p] = sum_k D[k,Q] X[k,p]^2 -- leaves
+    nothing bigger than (naux, nmo), against the (M, M) of Delta W itself.
+
+    How the BARE partner is reached is the caller's: by congruence from one
+    chi0 (`separable_quasiparticle_shift`, a forward pass's cheapest route) or
+    by screening a second factorization
+    (`gradients.reaction_field_adjoint.reaction_field_shift`, whose D branch
+    carries a nuclear derivative that a pseudo-inverse of a metric root does
+    not). The two agree to the ISDF reproducibility floor and differ nowhere
+    else, because the contraction below is the same object for both.
+
+    The sign is the occupancy's: the added charge is stabilized either way, so
+    both branches close the quasiparticle gap.
+    """
+    shift = 0.5 * (
+        np.einsum('Qp,QR,Rp->p', a_dressed, w_dressed, a_dressed, optimize=True)
+        - np.einsum('Qp,QR,Rp->p', a_bare, w_bare, a_bare, optimize=True))
+    shift[:nocc] *= -1.0
+    return shift
+
+
 def separable_quasiparticle_shift(x_mo, d_mo, w_dressed, transform, nocc):
     """Eq. (18) for every orbital from the separable factors, in Hartree.
 

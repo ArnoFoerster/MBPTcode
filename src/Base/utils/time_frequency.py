@@ -329,6 +329,77 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
     return (W * phase if kind in (COSINE_TW, SINE_TW) else W * phase.T), max_error
 
 
+# ---------------------------------------------------------------------------
+# the transform pair the self-energy is fitted on
+# ---------------------------------------------------------------------------
+
+def self_energy_fit_ranges_from_window(eps, mu, w_lo, w_hi, pad=SELF_ENERGY_PAD):
+    """((w_lo, w_hi), (sig_lo, sig_hi)) -- the two ranges, from one window.
+
+    Sigma = -G Wt is a PRODUCT, so its decay rates are SUMS |eps - mu| + Omega
+    and reach beyond either factor's range -- hence rS is built from dG plus
+    the window rather than from the window alone, and fitting the Sigma
+    transform on rW is a silent accuracy loss rather than an error.
+    """
+    lo, hi = pad
+    dG = np.abs(np.asarray(eps) - mu)
+    return ((lo * w_lo, hi * w_hi),
+            (lo * (float(dG.min()) + w_lo), hi * (float(dG.max()) + w_hi)))
+
+
+def sigma_fit_ranges(eps, nocc, mu=None, intermediate=None):
+    """(rW, rS) for `sigma_transforms`, with rS narrowed to the masked sum."""
+    eps = np.asarray(eps)
+    # occ/virt taken by plain slicing, not `SingleReference.base.get_occ_virt_indices`:
+    # importing that package back into Base would close an import cycle, since
+    # GW.imaginary_time imports this module.
+    occ, virt = eps[:nocc], eps[nocc:]
+    if mu is None:
+        mu = 0.5 * (occ.max() + virt.min())
+    w_lo, w_hi = virt.min() - occ.max(), virt.max() - occ.min()
+    rW, rS = self_energy_fit_ranges_from_window(eps, mu, w_lo, w_hi)
+    if intermediate is None:
+        return rW, rS
+    # the screening is still the full system's, so the Omega window is unchanged
+    return rW, self_energy_fit_ranges_from_window(
+        eps[np.atleast_1d(intermediate)], mu, w_lo, w_hi)[1]
+
+
+def sigma_transforms(eps, nocc, tau_points, omega_in, omega_out, mu=None,
+                     intermediate=None):
+    """(Ctw, C, S): the omega->tau and tau->omega weights the self-energy uses.
+
+    Built once and passed to both passes: a discrete choice frozen per
+    geometry, like the grid size and the interpolation points, not a
+    differentiable function of eps.
+
+    `intermediate` is the orbital mask `selfenergy_block` sums over. Sigma =
+    -G Wt is a product, so masking the summed index to the environment of an
+    active window removes the orbitals nearest mu and raises the slowest
+    surviving decay rate, narrowing rS -- fitting the masked self-energy on
+    the all-orbital range is a silent accuracy loss, not an error.
+    """
+    rW, rS = sigma_fit_ranges(eps, nocc, mu=mu, intermediate=intermediate)
+    Ctw = minimax_transform_weights(COSINE_WT, tau_points, omega_in, *rW)[0]
+    C = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS)[0]
+    S = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS)[0]
+    return Ctw, C, S
+
+
+def sigma_transform_error(eps, nocc, tau_points, omega_out, mu=None,
+                          intermediate=None):
+    """(worst Remez residual, e_max/e_min) of the two tau -> omega fits.
+
+    The measurable a caller guards a hand-set grid size on: point count alone
+    does not say whether a grid resolves a system, since the accuracy is set
+    by the interplay of ntau with rS, the self-energy's range.
+    """
+    rS = sigma_fit_ranges(eps, nocc, mu=mu, intermediate=intermediate)[1]
+    worst = max(minimax_transform_weights(kind, tau_points, omega_out, *rS)[1]
+                for kind in (COSINE_TW, SINE_TW))
+    return worst, rS[1] / rS[0]
+
+
 class TimeFrequencyGrid:
     """Imaginary-time and imaginary-frequency axes plus the maps between them.
 

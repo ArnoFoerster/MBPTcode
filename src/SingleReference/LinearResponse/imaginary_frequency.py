@@ -14,31 +14,65 @@ the space-time route agree to the accuracy of the factorization.
 
 Free functions taking a `LinearResponseSolver` as first argument, so the three
 routes stay separable; the solver's methods delegate here.
-
-References
-----------
-Kaltak, Klimes and Kresse, J. Chem. Theory Comput. 10, 2498 (2014) -- the
-minimax imaginary-frequency quadrature that makes a handful of points enough
-here (grid tables in `src/Base/utils/grids.py`).
 """
 import numpy as np
 
 from src.SingleReference.base import get_occ_virt_indices
 
 
-def _f_rpa(lr, d, w, is_imaginary):
-    """Frequency factor of the non-interacting particle-hole propagator.
+def frequency_factor(d, w, imaginary, eta=0.0, slopes=False):
+    """Frequency factor of the non-interacting particle-hole propagator at
+    frequency w for the pair energy d = eps_a - eps_i, and its slopes.
 
-    On the imaginary axis, -2d/(d^2 + w^2): minus the cosine transform of
-    e^{-d tau}, the identity `space_time.py` runs the other way.
+    Imaginary axis:  f = -2 d / (d^2 + w^2), minus the cosine transform of
+    e^{-d tau}, the identity `space_time.py` runs the other way. The frequency
+    is a quadrature node there and not a variable, so df/dw is None.
+
+    Real axis:       f = 1/(w - d) - 1/(w + d), the two poles of the bubble.
+    eta > 0 broadens them to a/(a^2 + eta^2) - b/(b^2 + eta^2) with a = w - d,
+    b = w + d: biased, and off by default. It exists because a residue
+    frequency landing on top of a transition makes W and its derivative
+    arbitrarily large -- see `GW.contour_deformation.residue_pole_distance`.
+
+    slopes=True returns (f, df/dd, df/dw); the contour deformation needs both,
+    the screening builds need only f.
+    """
+    if imaginary:
+        den = d ** 2 + w ** 2
+        f = -2.0 * d / den
+        if not slopes:
+            return f
+        return f, -2.0 * (w ** 2 - d ** 2) / den ** 2, None
+    a, b = w - d, w + d
+    if eta == 0.0:
+        f = 1.0 / a - 1.0 / b
+        if not slopes:
+            return f
+        return f, 1.0 / a ** 2 + 1.0 / b ** 2, -1.0 / a ** 2 + 1.0 / b ** 2
+    da, db = a ** 2 + eta ** 2, b ** 2 + eta ** 2
+    f = a / da - b / db
+    if not slopes:
+        return f
+    return (f, -(eta ** 2 - a ** 2) / da ** 2 - (eta ** 2 - b ** 2) / db ** 2,
+            (eta ** 2 - a ** 2) / da ** 2 - (eta ** 2 - b ** 2) / db ** 2)
+
+
+def _f_rpa(lr, d, w, is_imaginary):
+    """`frequency_factor` at this solver's broadening, for the RPA builds below.
+
+    Two branches do not go through it. w = 0 on the real axis is the static
+    limit, which this route spells with the imaginary-axis denominator and eta
+    in place of w. And eta = 0 on the real axis is a/a^2 - b/b^2 here against
+    `frequency_factor`'s 1/a - 1/b: the same function one rounding apart, and
+    these numbers are pinned to this spelling.
     """
     if is_imaginary:
-        return -2.0 * d / (d**2 + w**2)
-    else:
-        if np.abs(w) < 1e-12:
-            return -2.0 * d / (d**2 + lr.eta**2)
-        else:
-            return (w - d) / ((w - d)**2 + lr.eta**2) - (w + d) / ((w + d)**2 + lr.eta**2)
+        return frequency_factor(d, w, True)
+    if np.abs(w) < 1e-12:
+        return -2.0 * d / (d**2 + lr.eta**2)
+    if lr.eta == 0.0:
+        return (w - d) / ((w - d)**2 + lr.eta**2) - (w + d) / ((w + d)**2 + lr.eta**2)
+    return frequency_factor(d, w, False, lr.eta)
 
 
 def solve_rpa_screening(lr, omega_grid, nocc, is_imaginary=False):

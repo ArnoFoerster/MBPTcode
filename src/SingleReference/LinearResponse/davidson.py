@@ -70,7 +70,6 @@ from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
                                               separable_factors,
                                                solve_qp_diagonal_space_time)
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
-from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
@@ -671,6 +670,41 @@ def minimax_points_for_bse(eps, nocc, tau_target=DEFAULT_TAU_TARGET):
                                        target=tau_target)
 
 
+def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
+    """The one-point (omega = 0) minimax grid a static screening is built on.
+
+    ONE frequency, omega = 0: the BSE kernel and the reaction field's
+    self-polarization both want the STATIC screened interaction, so only the
+    tau -> omega direction is ever evaluated. with_inverse=False skips the
+    omega -> tau matrices, which a single input frequency cannot constrain --
+    they would report an error of order one and warn on every call.
+
+    ntau: None or 'auto' sizes the grid from the chi0 transition range through
+    `minimax_points_for_bse`.
+    """
+    eps = np.asarray(eps, float)
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    e_min = eps[virt].min() - eps[occ].max()
+    e_max = eps[virt].max() - eps[occ].min()
+    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
+        ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
+    return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                           with_sine=False, with_inverse=False)
+
+
+def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None):
+    """W = [1 - chi0(i.omega = 0)]^-1 in the auxiliary basis, from the
+    separable factors in imaginary time.
+
+    THE ONE BUILD OF THE STATIC SCREENED INTERACTION: the BSE kernel's W_aux
+    (`isdf_bse_factors`) and a static reaction field built on the same
+    factors are this matrix, in the auxiliary gauge of the factors handed in.
+    """
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
+    chi0 = chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=mu)[0]
+    return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
+
+
 def isdf_bse_factors(mf, mol, nocc, eps=None,
                      auxbasis=None, radii=None, counts=None, factors=None,
                      screening='imaginary-time', ntau=DEFAULT_NTAU,
@@ -697,7 +731,9 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
       'imaginary-time'  chi0(i.0) built from the separable factors in imaginary
             time by `LinearResponse/space_time.py`, which is tiled and cubic and
             touches nothing bigger than (naux, naux). The only route that
-            reaches production sizes.
+            reaches production sizes. `static_screening_matrix` on
+            `static_screening_grid`, so any other consumer of the same static
+            screening builds it identically.
       'df'  chi0 from the three-index factor these factors imply. Exact for the
             given factors, and the reference the imaginary-time route was
             checked against -- 1e-8 relative on the W entries at ntau=18 on
@@ -728,20 +764,8 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
     if screening != 'imaginary-time':
         raise ValueError(f"screening='{screening}'; choose 'imaginary-time' or 'df'.")
 
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    e_min = eps[virt].min() - eps[occ].max()
-    e_max = eps[virt].max() - eps[occ].min()
-    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
-    # ONE frequency, omega = 0: the BSE kernel wants the STATIC screening, so
-    # only the tau -> omega direction is ever evaluated. with_inverse=False
-    # skips the omega -> tau matrices, which cannot be fitted from a single
-    # input point and would otherwise warn on every BSE run.
-    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
-                                           [0.0], [1.0], with_sine=False,
-                                           with_inverse=False)
-    chi0 = chi0_imaginary_frequency(X_mo, D, eps, nocc, grid)[0]
-    return X_mo, D, np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
+    grid = static_screening_grid(eps, nocc, ntau=ntau, tau_target=tau_target)
+    return X_mo, D, static_screening_matrix(X_mo, D, eps, nocc, grid)
 
 
 def _pair_symmetry(orbsym, occ, virt):
@@ -750,6 +774,27 @@ def _pair_symmetry(orbsym, occ, virt):
         return None
     orbsym_d2h = np.asarray(orbsym) % 10
     return (orbsym_d2h[occ][:, None] ^ orbsym_d2h[virt][None, :]).ravel()
+
+
+def bse_pair_diagonal(eps, nocc):
+    """eps_a - eps_i on every particle-hole pair, (n_occ, n_vir).
+
+    THE ONE PLACE A BSE PUTS A SPECTRUM ON ITS DIAGONAL. A BSE@GW carries the
+    QUASIPARTICLE energies here while its kernel screens at whatever spectrum
+    built W -- the G0W0-BSE split -- so the two spectra enter the problem in
+    two different places and each route has to take them from the same rule.
+    The matrix-free action reads this straight off `lr_solver.eps`; the dense
+    route builds A at the screening spectrum and moves the diagonal onto the
+    quasiparticle one by the difference of two calls here. Both are this
+    expression, and the pair layout -- occupied slow, virtual fast -- is what
+    makes a vector of one route a vector of the other.
+
+    The split is by INDEX (`get_occ_virt_indices`), so a quasiparticle array
+    whose entries no longer ascend still pairs occupied i with virtual a.
+    """
+    eps = np.asarray(eps, float)
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    return eps[virt][None, :] - eps[occ][:, None]
 
 
 def df_block_action(lr_solver, nocc, lBSE, W_aux,

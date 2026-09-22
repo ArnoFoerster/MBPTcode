@@ -95,8 +95,9 @@ import contextlib
 
 import numpy as np
 import scipy.linalg
-from pyscf import df, gto, lib, scf
+from pyscf import df, dft, gto, lib, scf
 from pyscf.lib import logger
+from pyscf.scf.dispersion import parse_disp
 
 from src.Base.separable_ri import (DEFAULT_REGULARIZATION, build_D_F,
                                    fit_M_stable, fit_M_streaming,
@@ -106,6 +107,10 @@ from src.Base.separable_ri import (DEFAULT_REGULARIZATION, build_D_F,
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
 #: one factorization when the caller wants that. 148 points per atom.
 DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
+
+#: Hartree-Fock minus its own exchange, for `exchange_free_reference`: the
+#: empty functional, so a pure Hartree-Fock mean field keeps none of it.
+_NO_FUNCTIONAL = '0*LDA'
 
 #: Eigenvalue floor for V^{1/2}. The attenuated metric is far more
 #: rank-deficient than the bare one -- erf(omega r)/r is smooth, so its
@@ -140,7 +145,8 @@ def range_coulomb(mol, auxmol, omega):
             auxmol.omega = saved[1]
 
 
-def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1):
+def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
+              return_info=False):
     """Interpolation points for `mol`, the same way `space_time` picks them.
 
     Published Duchemin-Blase tables where they apply (H/C/N/O at cc-pVTZ),
@@ -151,6 +157,9 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1):
     n_start: descents per element in `optimize_atomic_radii`. The single
         default descent is the worst of the starting shapes on carbon; six cut
         benzene's exchange-energy error 23x at the same point count.
+    return_info: also return the per-element radii and cusp-sample flags the
+        points were placed from. A nuclear derivative needs them, because a
+        bare point cloud does not say which atom owns which row.
     """
     # The published tables come at ONE size, so they can only be substituted for
     # a caller who did not ask for a size. Asking for `counts` and silently
@@ -173,7 +182,8 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1):
                 origins[el] = False
     else:
         origins = {el: False for el in radii}
-    return molecular_points_covariant(mol, radii, origin_by_element=origins)
+    pts = molecular_points_covariant(mol, radii, origin_by_element=origins)
+    return (pts, radii, origins) if return_info else pts
 
 
 def metric_sqrt(V, tol=_METRIC_EIG_TOL):
@@ -420,6 +430,11 @@ class ISDFJK(df.df.DF):
         self.coords = None
         self.X = None            # (nk, nao)
         self.M = None            # (naux, nk)
+        # What `build` placed the points from, which a nuclear derivative needs
+        # to split them into atom-local clouds. None when `coords` was set from
+        # outside, and the gradient refuses that case rather than guessing.
+        self.grid_radii = None
+        self.grid_origins = None
         self._z = {}             # omega key -> _ZRows
         self._built = False
 
@@ -438,8 +453,9 @@ class ISDFJK(df.df.DF):
         if self.auxmol is None:
             self.auxmol = df.addons.make_auxmol(mol, auxbasis=self.auxbasis)
         if self.coords is None:
-            self.coords = isdf_grid(mol, counts=self.counts, radii=self.radii,
-                                    auxbasis=self.auxbasis, n_start=self.n_start)
+            self.coords, self.grid_radii, self.grid_origins = isdf_grid(
+                mol, counts=self.counts, radii=self.radii,
+                auxbasis=self.auxbasis, n_start=self.n_start, return_info=True)
         self.X = mol.eval_gto('GTOval_sph', self.coords)
         self.M = fit_M_streaming(mol, self.auxmol, self.coords,
                                  l_max_second=self.l_max_second,
@@ -687,6 +703,7 @@ class ISDFJK(df.df.DF):
         if mol is not None:
             self.coords = None
             self.X = self.M = None
+            self.grid_radii = self.grid_origins = None
             self._z = {}
             self._jdf = {}
             self._checked = False
@@ -760,3 +777,146 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
                          n_start=n_start)
     out.with_df.max_memory = mf.max_memory
     return out
+
+
+class _NoExactExchange(dft.numint.NumInt):
+    """A numint reporting NO exact exchange, with the functional untouched.
+
+    pyscf's Kohn-Sham `get_veff` and its gradient both read the exchange
+    fractions from `rsh_and_hybrid_coeff` and never by re-parsing the string,
+    so zeroing them here removes the exact exchange and leaves `eval_xc`
+    exactly as it was -- which for a range-separated functional is the
+    SHORT-RANGE DFT exchange libxc holds under the same name.
+
+    This replaces appending "- a_x*HF" to the functional, which could not
+    express a range-separated hybrid at all and could not survive a
+    dispersion suffix, since `b3lyp-d3bj - 0.2*HF` is not a name pyscf can
+    split. Zeroing the coefficients has neither problem.
+    """
+
+    def rsh_and_hybrid_coeff(self, xc_code, spin=0):
+        return 0.0, 0.0, 0.0
+
+    def hybrid_coeff(self, xc_code, spin=0):
+        return 0.0
+
+    def rsh_coeff(self, xc_code):
+        return 0.0, 0.0, 0.0
+
+
+def _base_functional(xc):
+    """`xc` with any empirical-dispersion suffix removed.
+
+    KEYED ON THE DISPERSION VERSION, NOT ON `parse_disp`'s FIRST RETURN. That
+    element is documented as "xc_code_for_dftd3" -- the name to hand the DFTD3
+    library -- and when there is no dispersion there is nothing to hand it, so
+    reading element 0 unconditionally can yield None for a plain functional.
+    Reading it through `disp` instead falls back to `xc` itself whenever no
+    dispersion suffix was present.
+
+    The dispersion is a function of the geometry alone and the caller that
+    takes this reference's gradient adds its force back separately, which is
+    why it comes off here at all.
+    """
+    base, disp, _ = parse_disp(xc)
+    out = xc if disp is None else base
+    if not out:
+        raise ValueError(
+            f'could not read a functional out of {xc!r}: parse_disp gave '
+            f'{(base, disp)}. The exchange-free reference cannot be built '
+            f'without one, and pyscf fails far from here if it is handed None.')
+    return out
+
+
+def exchange_free_reference(mf):
+    """`mf` at its own orbitals with the exact-exchange fraction taken out.
+
+    Everything the ISDF route did NOT interpolate, in one pyscf mean field: the
+    functional minus its a_x*HF term, density-fitted on the same auxiliary basis
+    (which is where `j_route='df-direct'` takes J from) and carrying the
+    converged coefficients, orbital energies and occupations, so that its
+    gradient's one-electron, Coulomb, exchange-correlation and energy-weighted
+    overlap terms are the ISDF route's own.
+
+    The SAME grid objects as the mean field's: a Kohn-Sham energy is a property
+    of its quadrature, and a finite difference taken against a different grid
+    would be differencing two functionals.
+
+    An empirical dispersion correction is left OUT of the name here, because
+    pyscf reads the damping from the functional string and `b3lyp-d3bj -
+    0.2*HF` is not a string it can split. It is a function of the geometry
+    alone, so the caller adds its force back separately rather than losing it.
+    """
+    # Kohn-Sham iff the reference carries a functional, the same test
+    # `mean_field_skeleton_force` makes below.
+    is_ks = hasattr(mf, 'xc')
+    # Hartree-Fock minus its exchange is the empty functional, which is what
+    # `_NO_FUNCTIONAL` already is. A Kohn-Sham reference keeps its own
+    # functional and has the exact-exchange fractions zeroed instead of
+    # subtracted by name -- see `_NoExactExchange`.
+    xc = _base_functional(mf.xc) if is_ks else _NO_FUNCTIONAL
+    ref = dft.RKS(mf.mol, xc=xc).density_fit(auxbasis=mf.with_df.auxbasis)
+    if is_ks:
+        ref._numint = _NoExactExchange()
+        ref.grids, ref.nlcgrids = mf.grids, mf.nlcgrids
+    ref.mo_coeff, ref.mo_energy = mf.mo_coeff, mf.mo_energy
+    ref.mo_occ, ref.converged = mf.mo_occ, True
+    return ref
+
+
+def mean_field_skeleton_force(mf):
+    """dE/dR of the energy THIS mean field reported, whatever built its exchange.
+
+    One call site for every correlated chain that adds a Lagrangian on top of
+    the mean-field force. pyscf's gradient is right for a fitted reference and
+    wrong for an interpolated one, and the correct interpolated force exists,
+    so the choice is a dispatch and not a refusal.
+    """
+    # circular import: gradients.isdf_mean_field needs ISDFJK from this module
+    from src.gradients.isdf_mean_field import isdf_mean_field_gradient
+
+    if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+        return np.asarray(isdf_mean_field_gradient(mf))
+    g0 = mf.Gradients()
+    if hasattr(mf, 'xc'):
+        g0.grid_response = True
+    return np.asarray(g0.kernel())
+
+
+def refuse_isdf_jk_gradient(mf, what):
+    """Raise if `mf` answers its exchange from ISDF factors and a NUCLEAR FORCE
+    is about to be taken from PYSCF's own gradient.
+
+    pyscf's density-fitted gradient differentiates the three- and two-centre
+    integrals of a FITTED interaction. It knows nothing of the interpolation
+    points or the fit matrix this route builds K from, so what it returns is
+    the force of the fitted functional evaluated on the interpolated one --
+    a gradient of a different function than the energy just reported.
+
+    THE GROUND-STATE FORCE ITSELF IS BUILT, and this guard is not the way to
+    it: `src.gradients.isdf_mean_field.isdf_mean_field_gradient` replaces the
+    fitted exchange derivative by the ISDF one and agrees with a central
+    difference of this route's own energy, falling as h^2 the way the fitted
+    route does. What remains fitted -- and why every caller of this guard
+    still gets refused -- is the LAGRANGIAN a correlated chain adds on top:
+    `fock_partial_skeleton` routes a density-fitted mean field to
+    `fock_partial_skeleton_df`, whose exchange half is built from the
+    auxiliary basis, and `exx_double_counting_skeleton` differences two fitted
+    pyscf gradients. So a GW, BSE or dRPA force on an ISDF mean field is still
+    the derivative of a different function, while the SCF force is not.
+
+    Energies are unaffected and are what this route exists for: at production
+    scale the fitted three-index tensor can reach tens of terabytes, so there
+    the choice is ISDF or nothing.
+    """
+    with_df = getattr(mf, 'with_df', None)
+    if not isinstance(with_df, ISDFJK):
+        return
+    raise NotImplementedError(
+        f'{what} takes a nuclear force from a mean field whose exchange comes '
+        f'from ISDF factors, and pyscf\'s gradient does not know about them: '
+        f'it differentiates the FITTED interaction rather than the '
+        f'interpolated one this route actually built. Use '
+        f'`src.gradients.isdf_mean_field.isdf_mean_field_gradient` for the SCF '
+        f'force; a correlated (GW/BSE/dRPA) force on this reference is not '
+        f'built at all.')

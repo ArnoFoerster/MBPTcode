@@ -2,7 +2,9 @@
 
 Many-body perturbation theory for molecular systems, on top of
 [PySCF](https://pyscf.org/): Dyson IP/EA-ADC, MPn density matrices, coupled
-cluster, GW and linear response. Co-authored by Claude.
+cluster, GW and linear response, and the analytic nuclear gradients and
+potential-energy-surface properties built on top of them. Co-authored by
+Claude.
 
 ## Methods
 
@@ -45,6 +47,22 @@ A correlated density matrix is passed to any of them as
 `dm_correction=`. The `dm_ccsd=` alias for that argument has been **removed**;
 it was already marked deprecated, and callers that still use it now raise
 `TypeError`.
+
+The imaginary-axis routes reach the real axis by one of four continuations,
+`calc_qp_energy(..., continuation=...)`: `'pade'` (Thiele-Pade of
+Sigma_c(i.omega), the default, no analytic gradient); `'cd'` (contour
+deformation — the omega' contour rotated onto the imaginary axis, the poles of
+G it sweeps over collected as residues, no continuation at all); `'sop'` (W
+modelled by M poles fit on the imaginary axis, so Sigma_c is closed-form and
+never evaluated off it, valence states only); and `'spectral'` (the Lehmann
+sum at omega + i.eta, `mode='casida'` only). `MODE_CONTINUATIONS` is the
+validity table pairing modes with the continuations they accept; a keyword
+another continuation reads raises `TypeError` naming both.
+
+A dense route (`GW.quasi_boson`, `LinearResponse.quasi_boson_bse`) builds the
+same dRPA/BSE amplitudes as an explicit auxiliary-boson diagonalization rather
+than a Davidson iteration — bitwise the physics of `casida(eta=0)`, at O(N^6),
+and what the dense analytic gradients below differentiate.
 
 **evGW** — `calc_qp_energy(..., self_consistency='evGW')` drives any of those
 three routes to a fixed point: the quasiparticle energies are reinjected into
@@ -92,6 +110,86 @@ static COHSEX operator remains the fallback for the routes that never form W
 (ADC, an unrestricted reference); the two differ by 0.39 eV of quasiparticle
 gap on water in water. See `examples/13_solvated_gw_bse.py`.
 
+Both halves of the reaction field's nuclear derivative are analytic —
+`aux_kernel_adjoint` for the dressed metric, `static_self_energy_adjoint` for
+the static term — on the bilinear cavity derivative of `pcm_derivatives.py`;
+a solvated excitation gradient reproduces finite differences at the same
+8e-8-relative floor as the gas-phase chain.
+
+**Empirical dispersion** — a semi-classical -C6/R^6 correction (D3/D4, via
+pyscf's own `xc='pbe0-d4'`-style functional names) for a hybrid, which has no
+long-range correlation of its own. It is a function of the nuclear
+coordinates alone, so it moves the surface without moving the spectrum: every
+orbital, and therefore every excitation energy, is bitwise unchanged by it.
+It must never sit under a direct-RPA ground state, whose correlation energy
+already contains dispersion, nor be added twice to a functional (r2SCAN-3c,
+wB97X-V, ...) that already carries a correction of its own — both are refused
+rather than silently double-counted.
+
+**Polarizable embedding** — classical QM/MMPol, in the style of Li, D'Avino,
+Duchemin, Beljonne and Blase,
+[Phys. Rev. B 97, 035108 (2018)](https://doi.org/10.1103/PhysRevB.97.035108).
+A site's induced dipole couples to every other site's,
+`mu = (alpha^-1 - T)^-1 E`, giving the classical response matrix B that
+dresses the interaction exactly as the PCM continuum's v -> v + ṽ does, field
+(dipole) response in place of charge (surface) response. `PolarizableSites`
+builds B from a hand-rolled, isotropic, uniformly Thole-damped coupling;
+`cppe_interface.py` sources it instead from a real force-field potential file
+(PyFraME, DALTON's PE library) through [cppe](https://github.com/maxscheurer/cppe),
+with per-atom anisotropic tensors and 1-2/1-3 exclusions. `composite_environment.py`
+carries permanent charges and polarizable sites as ONE environment with
+neither channel leaking into the other's: permanent multipoles reach the
+mean field and contribute nothing to the reaction-field kernel, sites screen
+and leave the ground state alone — the split the paper's Sec. II A and II D
+draw.
+
+**Analytic nuclear gradients** — `src/gradients/` differentiates production's
+own forward objects (`src.SingleReference`, `src.Base`) rather than a second
+copy of them: the Lagrangian of Toelle,
+[arXiv:2412.17085](https://arxiv.org/abs/2412.17085), and Toelle, Kitsaras and
+Loos, [arXiv:2507.02160](https://arxiv.org/abs/2507.02160), with the papers'
+iterative BCH/truncated-Taylor machinery replaced by exact closed forms.
+`RPAGroundStateChain` carries the cubic-scaling dRPA ground-state gradient and
+`ExcitedStateChain` the cubic-scaling BSE@GW one, both on a frozen ISDF
+factorization; `DenseRPASurface` and `DenseBSESurface` carry the same two
+gradients at O(N^6), on the dense quasi-boson layer.
+Every continuation above (Pade, contour deformation, sum-over-poles) and every
+environment above (PCM, dispersion, polarizable sites) has its own adjoint,
+so a quasiparticle or excitation gradient is exact for whichever route and
+surroundings computed the energy, not a finite difference of a different one.
+One orbital-response (Z-vector) solve is shared by every energy target a
+chain carries. See `examples/16_numerical_hessian_from_gradient.py` for a
+property built directly from the gradient: a vibrational analysis by central
+differences of the analytic force, exact against pyscf's own analytic Hessian
+where that exists, and the only route where it does not (an ISDF mean field).
+
+**Potential-energy surfaces** — `src/properties/` computes FROM a surface
+rather than BY one. `potential_energy_surface(ground_state, excitation=None,
+charge=None, ...)` dispatches on the DECLARED physics (`src.Base.declaration`:
+`GroundState`, `Excitation`, `ChargedExcitation`, `QPStates`) to the gradient
+chain that realizes it and records the realization; `compare_surfaces` refuses
+to difference two surfaces that do not share a ground-state functional and
+environment. `calc_vertical_excitation`, `calc_emission_energy`,
+`calc_adiabatic_excitation` and `calc_adiabatic_gap` build both surfaces of a
+difference from one `SurfaceSpec`, so the functional under an excited state
+and under its ground state cannot silently be two different functionals.
+`optimize`/`relax` walk Cartesian RFO/BFGS with the rigid-body directions
+projected out, or [geomeTRIC](https://github.com/leeping/geomeTRIC) when it is
+installed; `vibronic` gives normal modes and Huang-Rhys factors by two
+independent routes; `conformers` the Boltzmann-weighted average over torsional
+minima a soft emitter has; `spin_orbit` and `nonadiabatic` the two couplings a
+`rates` Marcus-Levich-Jortner or golden-rule rate needs; `characters` labels a
+BSE root by its charge-transfer weight; `hessian` the nuclear Hessian by
+central differences of the analytic gradient, for a route pyscf's own
+analytic Hessian cannot serve. See
+`examples/15_excited_state_geometry_optimization.py` for the one entry point,
+`calc_adiabatic_excitation`, driving an excited-state relaxation end to end,
+and `examples/17_spin_orbit_coupling.py` for `spin_orbit` read at the two
+minima `calc_adiabatic_gap` already relaxes (El-Sayed's rule, computed rather
+than assumed) plus the Herzberg-Teller dV/dq scan over `vibronic`'s
+ground-state modes that `rates.spin_vibronic_rate` needs for an
+El-Sayed-forbidden pair, where the Condon term alone is not the whole story.
+
 **Finite temperature** — Matsubara-axis grids via the intermediate
 representation, for systems where the T = 0 grids (which key on the HOMO-LUMO
 gap) are undefined.
@@ -116,6 +214,18 @@ The coupled-cluster integral path additionally needs `openfermion` and
 ```bash
 pip install openfermion openfermionpyscf
 ```
+
+Three more optional dependencies, each imported only when the feature is
+reached:
+
+```bash
+pip install geometric        # geomeTRIC relaxation, in properties.optimize
+pip install cppe             # polarizable embedding from a real potential file
+pip install pyscf-dispersion # D3/D4 empirical dispersion
+```
+
+`PolarizableSites`' own hand-rolled coupled-dipole response and PCM solvation
+need nothing beyond pyscf.
 
 There is no build step. Run from the repository root so that `src` is
 importable.
@@ -182,25 +292,40 @@ sources, offline use and the trade-off are in `src/Base/basis/README.md`.
 
 ## Tests
 
-The tests are standalone scripts that print their own verdicts and exit
-non-zero on failure:
+Two styles coexist. The ADC/CC/density-matrix/GW-core suite are standalone
+scripts that print their own verdict and exit non-zero on failure:
 
 ```bash
 python tests/test_adc3.py
 ```
 
-`pytest` collects almost nothing here — the checks live under
-`if __name__ == '__main__'` — so run them as scripts and read the exit code.
+The gradients/properties/environment suite (`src/gradients`, `src/properties`,
+`src/Base/{declaration,dispersion,polarizable_sites,composite_environment,
+cppe_interface,pcm_factorization,pcm_derivatives}.py` and their
+`SingleReference` dependents) is ordinary pytest:
+
+```bash
+pytest tests/test_excited_state.py
+```
+
 `tests/README.md` maps which tests cover what.
 
 ## Layout
 
 ```
 src/Base/               PySCF interface, constants, linear algebra
+    declaration.py      the GroundState/Excitation/QPStates vocabulary a
+                        surface is built from and validated against
     separable_ri.py     ISDF / separable-RI factorization of the ERIs
     isdf_jk.py          ISDF Coulomb and exchange for the SCF
     environment.py      what the surroundings do, in one contract
-    solvent_screening.py  PCM reaction field
+    solvent_screening.py  PCM reaction field, with its analytic adjoint
+    dispersion.py        the empirical D3/D4 correction
+    composite_environment.py, polarizable_sites.py, cppe_interface.py
+                        QM/MMPol: permanent charges plus induced dipoles
+    pcm_factorization.py, pcm_derivatives.py
+                        the PCM cavity's cached solve and its nuclear
+                        derivative primitives
     basis/cp2k_basis.py CP2K's aug-MOLOPT orbital and RI sets, read at run time
     utils/grids.py      minimax and Gauss-Legendre imaginary-axis grids
     utils/time_frequency.py  one grid object carrying both axes
@@ -211,9 +336,18 @@ src/SingleReference/
     DensityMatrix/      MPn / GW / CC correlated 1-RDMs
     EpsteinNesbet/      EN denominators and shifts
     GW/                 self-energy, QP equation, imaginary axis/time,
-                        the reaction field's shift, the evGW loop
-    LinearResponse/     Casida, RPA, BSE, Davidson
-src/Solvers/            quasiparticle root finders
+                        the reaction field's shift, the evGW loop, contour
+                        deformation and sum-over-poles continuations, the
+                        dense quasi-boson route
+    LinearResponse/     Casida, RPA, BSE, Davidson, the dense quasi-boson BSE
+    BSE/                the upfolded (non-perturbative) BSE
+src/Solvers/            quasiparticle root finders, including the
+                        pole-guarded Newton solve contour deformation uses
+src/gradients/          analytic nuclear gradients: one adjoint module per
+                        forward one, differentiating production's own objects
+src/properties/         the ONE surface dispatcher, geometry optimization,
+                        vibronic analysis, conformers, rates and the
+                        couplings they need
 ```
 
 ## License

@@ -63,12 +63,17 @@ def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_w
 
 
 def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
-                                    eta=DEFAULT_BROADENING_ETA, solver_mode='pole_strength', greedy=True,
+                                    solver_mode='pole_strength', greedy=True,
                                     dm_correction=None, timings=None, beta=None,
                                     eps_anchor=None):
     """
-    GW@RPA quasiparticle energy via the imaginary-frequency-axis route: 
+    GW@RPA quasiparticle energy via the imaginary-frequency-axis route:
     RPA W(i*omega) -> convolution -> Pade continuation.
+
+    No broadening to set: chi0(i*omega) has the real denominator
+    -2d/(d^2 + w^2) and Sigma_c reaches the real axis by Pade rather than at
+    w + i.eta, so this signature advertises none -- a caller wanting eta
+    reaches mode='casida' instead, the only route it acts on.
 
     beta: inverse temperature in inverse Hartree, for a system whose gap is too
     small for a T = 0 grid. 
@@ -102,7 +107,8 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
             C_ov, C_row = get_df_coefficients_ov(mol, mf, occ_idx, virt_idx,
                                                  rows=list(states))
             lr = LinearResponseSolver(eps, coeff_ov=C_ov,
-                                      spin_mode='restricted', eta=eta)
+                                      spin_mode='restricted',
+                                      eta=DEFAULT_BROADENING_ETA)
         else:
             # Without with_df there is no three-index object to slice, so that
             # case still goes through the full builder.
@@ -110,7 +116,8 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
                 mol, mf, representation='spatial')
             C_row = df_coeff[:, states, :]
             lr = LinearResponseSolver(eps, coeff_df=df_coeff,
-                                      spin_mode='restricted', eta=eta)
+                                      spin_mode='restricted',
+                                      eta=DEFAULT_BROADENING_ETA)
 
     # inverse temperature
     if beta is None:

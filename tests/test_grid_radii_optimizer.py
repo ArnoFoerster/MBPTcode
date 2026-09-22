@@ -28,7 +28,6 @@ differentiated descent under threaded BLAS, so its result moves with the thread
 count -- the same reason `shipped_radii` exists. Everything here is a ratio or
 a structural property.
 """
-import json
 import os
 import sys
 
@@ -104,11 +103,18 @@ if __name__ == '__main__':
     #    cusp sampled, or with r_max widened to 8, carbon's single start lands
     #    in a good basin by itself and there is nothing left to rescue.
     print('\n3. multi-start rescues carbon at 148 counts, production settings:')
+    # Both calls must BYPASS the table. It holds ONE grid per physical request
+    # now, so a lookup answers n_start=1 and n_start=4 with the same row and the
+    # comparison would measure nothing -- it reported 1.0x before this bypass
+    # was added. `return_candidates` is the documented bypass: a caller that
+    # wants the runners-up has to run the search.
     e_one = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                  counts=COUNTS_148, maxiter=110, n_start=1)[1]
-    r_many, e_many = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                           counts=COUNTS_148, maxiter=110,
-                                           n_start=4)
+                                  counts=COUNTS_148, maxiter=110, n_start=1,
+                                  return_candidates=True)[1]
+    r_many, e_many, _ = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
+                                              counts=COUNTS_148, maxiter=110,
+                                              n_start=4,
+                                              return_candidates=True)
     ok3 = e_many < e_one / 10.0
     all_ok &= ok3
     print(f'   1 start {e_one:.3e}   4 starts {e_many:.3e}   '
@@ -125,22 +131,41 @@ if __name__ == '__main__':
         print(f'   {name}: {np.array2string(v, precision=3, floatmode="fixed")}')
     print(f'   smallest adjacent ratio - 1 = {gap:.3f}   {"OK" if ok4 else "FAIL"}')
 
-    # 5. Recipes must coexist in the shipped table without disturbing the rows
-    #    already there: the legacy key is unchanged, and n_start or a non-legacy
-    #    box each produce a distinct key.
-    print('\n5. shipped-table keys: legacy unchanged, recipes distinct:')
-    k_legacy = _shipped_key('C', 'cc-pvdz', 'cc-pvdz-ri', COUNTS_148)
-    k_old = json.dumps(['C', 'cc-pvdz', 'cc-pvdz-ri',
-                        sorted(COUNTS_148.items())])
-    k_n8 = _shipped_key('C', 'cc-pvdz', 'cc-pvdz-ri', COUNTS_148, n_start=8)
-    k_r16 = _shipped_key('Mg', 'cc-pvdz', 'cc-pvdz-ri', COUNTS_148, n_start=8,
-                         r_max=16.0)
-    ok5 = (k_legacy == k_old and k_n8 != k_legacy and k_r16 != k_n8
-           and all(k in shipped_radii() for k in shipped_radii()))
+    # 5. The table is keyed on the PHYSICS and on nothing else, so one physical
+    #    grid has one row. Keying on the optimizer recipe as well is what left
+    #    up to nine rows per request, chosen between at run time by
+    #    `search_r_max` -- a heuristic that picked the worse box in 272 of 612
+    #    cases. There must be no way to spell a recipe into a key any more.
+    print('\n5. the table key is the physics alone:')
+    key = _shipped_key('C', 'cc-pvdz', 'cc-pvdz-ri', COUNTS_148)
+    table = shipped_radii()
+    reachable = all(
+        _shipped_key(row['element'], row['basis'], row['auxbasis'],
+                     row['counts']) == k
+        for k, row in table.items())
+    # Each row must name a grid whose radii match its counts, or a lookup hands
+    # back a shape the fit cannot place.
+    shaped = all(
+        all(len(row['radii'][n]) == row['counts'][n]
+            for n in ('A1', 'A2', 'A3', 'B1') if n in row['radii'])
+        for row in table.values())
+    # A cusp-sampled row must refuse to answer a caller who asked for no cusp:
+    # the point counts differ by one, so substituting silently is a different
+    # grid. The transcribed Duchemin & Blase rows are the ones that set it.
+    cusp_guarded = False
+    try:
+        optimize_atomic_radii('C', 'cc-pvtz', 'cc-pvtz-ri',
+                              counts={'A1': 9, 'A2': 9, 'A3': 7, 'B1': 4},
+                              origin=False)
+    except ValueError:
+        cusp_guarded = True
+    ok5 = (key == 'C|cc-pvdz|cc-pvdz-ri|8,5,3,1' and reachable and shaped
+           and cusp_guarded)
     all_ok &= ok5
-    print(f'   legacy key byte-identical to the pre-recipe form: {k_legacy == k_old}')
-    print(f'   n_start=8 key distinct: {k_n8 != k_legacy}   r_max=16 key distinct: '
-          f'{k_r16 != k_n8}   {"OK" if ok5 else "FAIL"}')
+    print(f'   key spells the physics: {key}')
+    print(f'   every row reachable from its own fields: {reachable}   '
+          f'radii match counts: {shaped}   cusp row guarded: {cusp_guarded}   '
+          f'{"OK" if ok5 else "FAIL"}')
 
     # 6. The box rule: one descent keeps the legacy box for every element, so
     #    nothing cached changes meaning; a multi-start search widens it only

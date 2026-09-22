@@ -57,6 +57,11 @@ class Environment(Protocol):
     #: whether this environment dresses the interaction at all
     screens: bool
 
+    #: whether both adjoints below are built, i.e. whether a chain in this
+    #: environment can return a force at all. A chain asks BEFORE the reverse
+    #: pass, so a missing derivative costs a message rather than the run.
+    differentiable: bool
+
     def for_geometry(self, mol):
         """
         This environment around the atoms of `mol` (a cavity moves with them).
@@ -95,6 +100,25 @@ class Environment(Protocol):
         not read it.
         """
 
+    def dynamic_factor(self, omega):
+        """
+        g(iw) in [0, 1]: the fraction of `aux_kernel` surviving at imaginary
+        frequency w, elementwise over an array. An environment with no
+        dynamics of its own returns 1 (the adiabatic limit).
+        """
+
+    def aux_kernel_adjoint(self, auxmol, v_bar):
+        """
+        (natm, 3): d/dR sum_PQ v_bar[P,Q] vtilde_PQ, for a symmetric adjoint v_bar.
+        """
+
+    def static_self_energy_adjoint(self, mf, weights):
+        """
+        (Y_extra, skeleton) of sum_p weights[p] <p|Sigma^env|p>: the orbital-rotation
+        gradient that joins the Lagrangian before the multiplier solve, and the
+        (natm, 3) skeleton at fixed coefficients.
+        """
+
 
 class NoEnvironment:
     """
@@ -102,6 +126,7 @@ class NoEnvironment:
     """
 
     screens = False
+    differentiable = True
 
     def for_geometry(self, mol):
         return self
@@ -124,6 +149,15 @@ class NoEnvironment:
     def static_self_energy(self, mf, mol=None):
         return None
 
+    def dynamic_factor(self, omega):
+        return np.ones_like(np.asarray(omega, float))
+
+    def aux_kernel_adjoint(self, auxmol, v_bar):
+        return np.zeros((auxmol.natm, 3))
+
+    def static_self_energy_adjoint(self, mf, weights):
+        return 0.0, np.zeros((mf.mol.natm, 3))
+
     def __repr__(self):
         return 'NoEnvironment()'
 
@@ -140,6 +174,7 @@ class PointCharges:
     """
 
     screens = False
+    differentiable = True
 
     def __init__(self, coords, charges, unit='Angstrom'):
         self.coords = np.asarray(coords, float).reshape(-1, 3)
@@ -203,6 +238,16 @@ class PointCharges:
     def static_self_energy(self, mf, mol=None):
         return None
 
+    def dynamic_factor(self, omega):
+        # a fixed charge does not respond at any frequency
+        return np.ones_like(np.asarray(omega, float))
+
+    def aux_kernel_adjoint(self, auxmol, v_bar):
+        return np.zeros((auxmol.natm, 3))
+
+    def static_self_energy_adjoint(self, mf, weights):
+        return 0.0, np.zeros((mf.mol.natm, 3))
+
     def __repr__(self):
         return (f'PointCharges({len(self.charges)} charges, total '
                 f'{self.charges.sum():+.3f})')
@@ -250,3 +295,33 @@ def attached_environment(mf, environment):
         yield mf
     finally:
         mf.with_screening = previous
+
+
+def environment_label(environment):
+    """
+    The environment's printable name for a `SurfacePhysics`; 'gas' is none.
+
+    The declaration carries a STRING, not the object: two surfaces standing in
+    the same continuum are comparable whether or not they were handed the same
+    instance of it, and a declaration must be readable off a record that no
+    longer holds the cavity.
+    """
+    if environment is None or isinstance(environment, NoEnvironment):
+        return 'gas'
+    return repr(environment)
+
+
+def resolve_environment(environment=None, mf=None):
+    """
+    The environment a gradient chain carries: the one given, else the one
+    attached to its reference mean field, else the gas phase.
+
+    Adopting the attached one is what makes half an answer impossible: the
+    static term the mean field would already have shown the chain and the
+    substitution in the metric it would not come from one object.
+    """
+    if environment is not None:
+        return environment
+    if mf is not None:
+        return environment_of(mf)
+    return NoEnvironment()

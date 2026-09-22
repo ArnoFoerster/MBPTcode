@@ -73,6 +73,8 @@ import scipy.linalg
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
+from src.Base.constants import ISDF_GRID_ACCURACY, ISDF_GRID_N_START
+
 #: Pair-screening threshold: a test co-density is dropped when its peak
 #: amplitude anywhere on the interpolation grid falls below this times the
 #: global maximum. It is what makes the pair count linear in system size.
@@ -140,6 +142,14 @@ def lebedev_subshells():
 
 
 _SHELLS = None
+
+
+def subshells():
+    """`lebedev_subshells`, built once: fixed direction tables, no reason to rebuild."""
+    global _SHELLS
+    if _SHELLS is None:
+        _SHELLS = lebedev_subshells()
+    return _SHELLS
 
 
 def atomic_points(radii, centre=(0.0, 0.0, 0.0), origin=False):
@@ -323,6 +333,48 @@ def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     D = np.hstack(D_parts + [aux_on_grid])
     F = np.hstack(F_parts + [np.eye(naux)])
     return D, F
+
+
+def test_set_layout(mol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL):
+    """(mu, nu, weight) of the AO-pair columns `build_D_F` keeps, in its order.
+
+    The test set is (all AOs) x (AOs with l <= l_max_second), angular-weighted
+    on the second index and screened on the pair density the grid samples,
+    max_k |chi_mu(r_k) chi_nu(r_k)| > pair_tol x a global reference. The
+    reference is global and the screen is per column, so the column set does
+    NOT depend on how `build_D_F` blocks the first index, and the order is
+    simply ascending mu then ascending position in the second set.
+
+    The auxiliary block that follows carries F = identity exactly, so it
+    contributes nothing through F and only a collocation through D.
+
+    SCREENING IS A DISCRETE CHOICE and is frozen with everything else: a
+    differentiated column set must be the reference geometry's, or the surface
+    steps where a pair crosses the tolerance.
+    """
+    ao = mol.eval_gto('GTOval_sph', coords)
+    l_ao = _ao_l_labels(mol)
+    second = np.where(l_ao <= l_max_second)[0]
+    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
+    ref = _screening_reference(ao, second, w)
+    mu_keep, nu_keep, w_keep = [], [], []
+    for mu in range(mol.nao_nr()):
+        blk = ao[:, mu][:, None] * ao[:, second] * w[None, :]
+        col_max = np.maximum(blk.max(axis=0), -blk.min(axis=0))
+        keep = np.flatnonzero(col_max > pair_tol * ref)
+        mu_keep.append(np.full(len(keep), mu, dtype=int))
+        nu_keep.append(second[keep])
+        w_keep.append(w[keep])
+    return (np.concatenate(mu_keep), np.concatenate(nu_keep),
+            np.concatenate(w_keep))
+
+
+def test_set_D(mol, auxmol, coords, layout):
+    """The D of `build_D_F` rebuilt from a frozen layout: pairs then auxiliaries."""
+    mu, nu, w = layout
+    ao = mol.eval_gto('GTOval_sph', coords)
+    pairs = ao[:, mu] * ao[:, nu] * w[None, :]
+    return np.hstack([pairs, auxmol.eval_gto('GTOval_sph', coords)])
 
 
 def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
@@ -632,9 +684,14 @@ def fit_error_coulomb(mol, auxmol, coords, M=None, l_max_second=2,
 _DEFAULT_COUNTS = {'A1': 8, 'A2': 6, 'A3': 4, 'B1': 2}
 
 
+#: Order of the sub-shells in the flat optimization vector. One spelling: a
+#: gradient concatenated in a different order is silently a different variable.
+_SHELL_ORDER = ('A1', 'A2', 'A3', 'B1')
+
+
 def _radii_from_flat(x, counts):
     out, i = {}, 0
-    for name in ('A1', 'A2', 'A3', 'B1'):
+    for name in _SHELL_ORDER:
         n = counts.get(name, 0)
         if n:
             out[name] = np.exp(x[i:i + n])
@@ -643,7 +700,7 @@ def _radii_from_flat(x, counts):
 
 
 def _flat_from_radii(radii):
-    return np.concatenate([np.log(radii[n]) for n in ('A1', 'A2', 'A3', 'B1')
+    return np.concatenate([np.log(radii[n]) for n in _SHELL_ORDER
                            if n in radii and len(np.atleast_1d(radii[n]))])
 
 
@@ -712,63 +769,106 @@ def search_r_max(element, n_start=1, r_max=None):
     return LEGACY_R_MAX if n_start == 1 else ELEMENT_R_MAX.get(element, 12.0)
 
 
-def shipped_radii():
-    """Optimized atomic radii that travel WITH the source, not in a scratch cache.
+RADII_TABLE_SCHEMA = 2
 
+
+def shipped_radii():
+    """THE radii table: one row per grid a caller can ask for.
+
+    Optimized atomic radii travel WITH the source, not in a scratch cache.
     `optimize_atomic_radii`'s on-disk cache is gitignored, so a clean checkout
     re-optimizes from scratch -- and that optimizer is a local descent whose
     result is not reproducible (see the note on the cache below). Measured
     consequence: the pinned BSE roots in tests/test_bse_isdf_driver.py move by
     6.5-8.7 meV between a populated and an empty cache, i.e. a fresh clone fails
-    its own regression tests. Shipping the tables fixes the reproducibility;
-    it does NOT make a bad grid good, which is why each entry carries the
-    `fit_error` it was accepted at. Read those before trusting a row: anything
-    approaching 1 is a fit that has failed, not a grid that is merely coarse.
+    its own regression tests. Shipping the table fixes the reproducibility;
+    it does NOT make a bad grid good, which is why each row carries both the
+    `fit_error` and the `score_mHa_per_atom` it was accepted at. Read those
+    before trusting a row: a fit error approaching 1 is a fit that has failed,
+    not a grid that is merely coarse.
 
-    Keyed on the same tuple as `_radii_cache_path`, so a lookup here and a cache
-    hit cannot disagree about what they are answering.
+    Rows are keyed on the PHYSICS -- `element|basis|auxbasis|A1,A2,A3,B1` --
+    and on nothing else. The optimizer recipe that found a grid (`n_start`,
+    `r_max`) is recorded per row under `optimizer` but is not part of the key:
+    it is how a grid was found, not what was asked for. Keying on it left the
+    table with up to nine rows for one physical request, to be chosen between
+    at run time by `search_r_max`, a per-element heuristic that knows nothing
+    about grid quality and picked the worse box in 272 of 612 cases. Those axes
+    were collapsed by the exchange-probe score.
 
-    Returns {key: entry}; use `shipped_radii_lookup` rather than indexing.
+    Returns {key: row}; use `shipped_radii_lookup` rather than indexing.
     """
     path = os.path.join(os.path.dirname(__file__), 'data', 'optimized_radii.json')
     if not os.path.exists(path):
         return {}
     with open(path) as fh:
-        return json.load(fh)
+        raw = json.load(fh)
+    schema = raw.get('schema')
+    if schema != RADII_TABLE_SCHEMA:
+        raise ValueError(
+            f'{path} declares schema {schema!r}, and this code reads '
+            f'{RADII_TABLE_SCHEMA}. A pre-consolidation table is keyed on the '
+            f'optimizer recipe as well as the physics, so reading it here '
+            f'would miss on every lookup and silently re-optimize instead.')
+    return raw['rows']
 
 
-def _shipped_key(element, basis, auxbasis, counts, n_start=1,
-                 r_max=LEGACY_R_MAX):
-    """Table key. The recipe (n_start, r_max) is appended only when it is not
-    the legacy single descent in the legacy box, so every existing key stands
-    and rows for different recipes coexist instead of overwriting each other."""
-    recipe = ([] if n_start == 1 else [['n_start', int(n_start)]]) + \
-             ([] if float(r_max) == LEGACY_R_MAX else [['r_max', float(r_max)]])
-    return json.dumps([element, str(basis), str(auxbasis),
-                       sorted((counts or {}).items())] + recipe)
+def _shipped_key(element, basis, auxbasis, counts):
+    """Table key: the physics, and nothing about how the grid was found."""
+    return f'{element}|{basis}|{auxbasis}|' + \
+           ','.join(str(int((counts or {}).get(name, 0))) for name in _SHELL_ORDER)
 
 
-def shipped_radii_lookup(element, basis, auxbasis, settings):
-    """(radii, fit_error) from the shipped table, or None.
+def _tabulated_counts(element, basis, auxbasis):
+    """The count tuples the table holds for this atom, with their point counts.
 
-    The FULL settings dict has to match, not just the element and basis. A
-    table entry optimized under different settings is a different grid, and
-    handing it back is the silent substitution `_radii_settings` exists to
-    prevent -- there is no point guarding the scratch cache and leaving the
-    shipped table open.
+    What a caller needs when its own tuple missed: the miss is almost always a
+    tuple nobody ever optimized rather than a corrupt table.
     """
-    entry = shipped_radii().get(
-        _shipped_key(element, basis, auxbasis, dict(settings['counts']),
-                     settings.get('n_start', 1), settings['r_max']))
-    if entry is None:
+    out = []
+    for key, row in shipped_radii().items():
+        el, bas, aux, counts = key.split('|')
+        if (el, bas, aux) != (str(element), str(basis), str(auxbasis)):
+            continue
+        out.append((row['points'], f'({counts}) {row["points"]} pts'
+                                   + ('' if row.get('gated', True)
+                                      else ' [ungated]')))
+    return [text for _, text in sorted(out)] or 'none for this element and basis'
+
+
+def shipped_radii_lookup(element, basis, auxbasis, counts):
+    """(radii, fit_error, origin) from the table, or None.
+
+    `origin` comes back because it is part of the GRID, not of the recipe: a
+    row carrying it places one extra point at the nucleus, so honouring the
+    radii while dropping the flag builds a 306-point grid where the row
+    describes a 307-point one. Only the transcribed Duchemin & Blase rows set
+    it, and they are the rows most likely to be asked for by someone
+    reproducing a published number.
+    """
+    row = shipped_radii().get(_shipped_key(element, basis, auxbasis, counts))
+    if row is None:
         return None
-    # Compare CANONICAL JSON, not the objects: a round trip through the file
-    # turns every tuple into a list, so `entry['settings'] != settings` is true
-    # for two identical settings and the table silently misses on all of them.
-    if json.dumps(entry.get('settings'), sort_keys=True) != json.dumps(settings, sort_keys=True):
-        return None
-    return ({k: np.array(v) for k, v in entry['radii'].items()},
-            entry['fit_error'])
+    return ({k: np.array(v) for k, v in row['radii'].items()},
+            row['fit_error'], bool(row.get('origin', False)))
+
+
+def atomic_grid(element, basis, auxbasis=None, counts=None):
+    """The ONE lookup for a tabulated atomic grid. Returns (radii, origin).
+
+    What a grid BUILDER needs, as opposed to `optimize_atomic_radii`, which is
+    the optimizer and takes recipe arguments this does not: the radii and
+    whether the nuclear cusp is sampled, which together are the grid.
+    """
+    auxbasis = auxbasis or (str(basis) + '-ri')
+    hit = shipped_radii_lookup(element, str(basis), str(auxbasis), counts)
+    if hit is None:
+        raise KeyError(
+            f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
+            f'{sorted((counts or {}).items())}. Held for this element and '
+            f'basis: {_tabulated_counts(element, basis, auxbasis)}.')
+    radii, _, origin = hit
+    return radii, origin
 
 
 def _radii_settings(counts, r_min, r_max, l_max_second, regularization,
@@ -870,9 +970,21 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     # Neither the table nor the cache holds the runners-up, so a caller that
     # wants every candidate has to run the search; the table and cache still
     # receive its best-by-fit result on the way out.
-    shipped = shipped_radii_lookup(element, basis, auxbasis, settings)
-    if shipped is not None and not return_candidates:
-        return shipped
+    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
+    if hit is not None and not return_candidates:
+        radii, fit_error, row_origin = hit
+        # The row's cusp flag is part of the grid, so it cannot be quietly
+        # overridden by the argument: handing these radii back under
+        # origin=False builds a grid one point smaller than the row describes.
+        if row_origin != bool(origin):
+            raise ValueError(
+                f'the tabulated grid for {element}/{basis}/{auxbasis} at counts '
+                f'{sorted((counts or {}).items())} has origin={row_origin} and '
+                f'origin={bool(origin)} was asked for. The cusp point is part '
+                f'of the grid, not of the recipe, so the two are different '
+                f'grids at different point counts. Use `atomic_grid(...)`, '
+                f'which returns the row\'s flag alongside its radii.')
+        return radii, fit_error
 
     cache = _radii_cache_path(element, basis, auxbasis, settings)
     if os.path.exists(cache) and not return_candidates:
@@ -943,6 +1055,128 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     if return_candidates:
         return radii, float(res.fun), candidates
     return radii, float(res.fun)
+
+
+def grid_points_per_atom(counts):
+    """Interpolation points one atom contributes: |A1| A1 + |A2| A2 + ... .
+
+    The sub-shell sizes come from `subshells()` rather than the literals
+    6/8/12/24, so the count and the directions cannot drift apart.
+    """
+    shells = subshells()
+    return sum(len(shells[name]) * int(counts.get(name, 0))
+               for name in _SHELL_ORDER)
+
+
+def _explicit_counts(spec):
+    """Four shell counts from 'a,b,c,d', a sequence of four, or a dict.
+
+    The dict form is keyed either on the shell names the fit uses or on the
+    positions 0..3 of `_SHELL_ORDER`; both spell the same grid.
+    """
+    if isinstance(spec, dict):
+        if set(spec) == set(_SHELL_ORDER):
+            return {name: int(spec[name]) for name in _SHELL_ORDER}
+        if set(spec) == set(range(len(_SHELL_ORDER))):
+            return {name: int(spec[i]) for i, name in enumerate(_SHELL_ORDER)}
+        raise ValueError(
+            f'grid counts {spec!r}: a dict must be keyed on '
+            f'{list(_SHELL_ORDER)} or on 0..{len(_SHELL_ORDER) - 1}.')
+    if isinstance(spec, str):
+        values = [v for v in spec.replace(' ', '').split(',') if v]
+    else:
+        try:
+            values = list(spec)
+        except TypeError:
+            raise ValueError(
+                f'grid {spec!r}: give an accuracy level, or shell counts as '
+                f'"A1,A2,A3,B1", a sequence of {len(_SHELL_ORDER)} or a dict.')
+    if len(values) != len(_SHELL_ORDER):
+        raise ValueError(
+            f'grid counts {spec!r}: {len(_SHELL_ORDER)} numbers are needed, '
+            f'one per Lebedev sub-shell {list(_SHELL_ORDER)}, and '
+            f'{len(values)} were given.')
+    try:
+        return {name: int(v) for name, v in zip(_SHELL_ORDER, values)}
+    except (TypeError, ValueError):
+        raise ValueError(f'grid counts {spec!r}: every entry must be an integer.')
+
+
+def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
+                      n_start=ISDF_GRID_N_START):
+    """The ONE named way to ask for an interpolation grid. Returns (counts, n_start).
+
+    grid: an accuracy level of `ISDF_GRID_ACCURACY` -- 'G1' < 8 meV, 'G2'
+        < 4 meV, 'G3' < 2 meV on the three lowest BSE roots against
+        `solve_bse_df` -- or four explicit shell counts as 'A1,A2,A3,B1', a
+        sequence, or a {shell: count} dict.
+    elements: the atoms the grid will be placed on. Each is required to have a
+        row in the shipped radii table, because a missing row does not make the
+        run slower, it makes it a different grid: the radii are then
+        re-optimized at run time onto another local minimum of a multi-modal
+        surface, which no scored campaign describes.
+
+    `n_start` is returned alongside the counts as the recipe to re-optimize
+    with should a caller go on to build a row the table does not hold. It is
+    not needed to READ one: the table is keyed on the physics alone, so a
+    lookup asks for (element, basis, auxbasis, counts) and nothing else.
+
+    COVERAGE IS STILL PER ELEMENT, so the check below is per element rather
+    than per basis, and a molecule can be refused at a level its basis
+    validates.
+
+    There is no fallback anywhere in here. An accuracy level absent at a basis
+    was never measured there, and the nearest level, a larger count or another
+    basis are guesses dressed as answers -- the measured ladder is not even
+    monotone, so a larger grid is not a safer one.
+    """
+    if grid is None:
+        raise ValueError(
+            'no grid asked for: pass an accuracy level of ISDF_GRID_ACCURACY '
+            'or four shell counts.')
+    if isinstance(grid, str) and ',' not in grid:
+        level = grid.strip().upper()
+        validated = ISDF_GRID_ACCURACY.get(str(basis).lower(), {})
+        if level not in validated:
+            raise ValueError(
+                f'grid does not exist: no interpolation grid is validated at '
+                f'accuracy {grid!r} for {basis}. '
+                + (f'Validated at {basis}: {", ".join(sorted(validated))}.'
+                   if validated else
+                   f'Nothing is validated at {basis} at any accuracy; bases '
+                   f'that have a level: {", ".join(sorted(ISDF_GRID_ACCURACY))}.')
+                + f' A missing level was never measured, so there is nothing '
+                  f'to fall back to -- score and optimize a grid table entry '
+                  f'first, or pass four explicit shell counts.')
+        counts = dict(zip(_SHELL_ORDER, validated[level]))
+        asked = f'which is what accuracy {level} asks for at {basis}'
+    else:
+        counts = _explicit_counts(grid)
+        asked = 'which is what was asked for explicitly'
+    auxbasis = auxbasis or (str(basis) + '-ri')
+    # The counts naming a grid and the table HOLDING one are two questions: a
+    # level validated at a basis can still have no row for one of these
+    # elements. The lookup is the physics key, so this asks exactly what a
+    # fitting run will ask.
+    shape = ','.join(str(counts[name]) for name in _SHELL_ORDER)
+    missing = []
+    for element in sorted(set(elements)):
+        if shipped_radii_lookup(element, str(basis), str(auxbasis), counts) is None:
+            held = _tabulated_counts(element, basis, auxbasis)
+            missing.append(f'{element}: '
+                           + (held if isinstance(held, str) else ', '.join(held)))
+    if missing:
+        raise KeyError(
+            f'grid does not exist: the shipped radii table has no row at '
+            f'({shape}) for '
+            f'{", ".join(m.split(":")[0] for m in missing)} at '
+            f'{basis}/{auxbasis}, {asked}'
+            + '. Re-optimizing at run time is hours per element and lands on a '
+              'different local minimum from every tabulated row, so the result '
+              'would be neither cheap nor the grid that was scored. What the '
+              'table does hold, with the recipe each row was found under -- '
+            + '; '.join(missing))
+    return counts, n_start
 
 
 # ---------------------------------------------------------------------------

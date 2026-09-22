@@ -23,7 +23,8 @@ from src.Base.utils.time_frequency import (minimax_transform_weights,
                                           COSINE_TW, COSINE_WT, SINE_TW)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.LinearResponse.space_time import (
-    polarizability_projected_tau)
+    owned_frequency_blocks, polarizability_projected_sweep,
+    polarizability_projected_tau, split_branches, three_index_slice)
 
 
 def greens_function_imaginary_time(X, eps, nocc, tau, mu=None):
@@ -441,5 +442,109 @@ def sigma_ao_to_mo_diagonal(sigma_ao, mo_coeff, states=None):
     """
     C = mo_coeff if states is None else mo_coeff[:, states]
     return np.einsum('mp,wmn,np->wp', C, sigma_ao, C, optimize=True)
+
+
+def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB):
+    """Wt(tau) = sum_w Ctw[t, w] ([I - chi0_w]^-1 - I) from proj(tau), (ntau_out, naux, naux).
+
+    W - I is folded into imaginary time one frequency block at a time, so no
+    (nfreq, naux, naux) array exists; the transform weights Ctw are the
+    omega -> tau half of `sigma_transforms`.
+    """
+    naux = proj_tau.shape[-1]
+    eye = np.eye(naux)
+    Wt_tau = np.zeros((Ctw.shape[0], naux, naux))
+    for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb):
+        for m in range(len(ks)):
+            blk[m] = np.linalg.inv(eye - blk[m]) - eye
+        Wt_tau += np.tensordot(Ctw[:, ks], blk, axes=(1, 0))
+    return Wt_tau
+
+
+def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
+                     intermediate=None, tile_gb=ISDF_TILE_GB):
+    """Sigma^c_pq(i.omega_out) for p, q in `states`: the self-energy MATRIX on a
+    block, (nfreq_out, nstates, nstates), by the space-time route.
+
+    `selfenergy_diag`'s construction with both bra and ket free,
+
+        Sigma^<_pq(tau) = sum_i e^{e_i tau} B_p[:,i]^T Wt(tau) B_q[:,i],
+        Sigma^>_pq(tau) = -sum_a e^{-e_a tau} B_p[:,a]^T Wt(tau) B_q[:,a],
+
+    one (naux, norb) GEMM per tau and bra state. `intermediate` restricts the
+    summed index i, a to a set of orbitals: with the environment orbitals of an
+    active window it is Sigma_c^{G^E W}, the embedding self-energy in which the
+    intermediate state lies outside the window and the screening is the full
+    system's (Sheng et al., JCTC 18, 3512 (2022)). Real orbitals make
+    Sigma_pq(tau) real, so every element obeys Sigma(z*) = Sigma(z)* and is
+    continued like a diagonal one.
+
+    Returns (Sigma, cache) as `selfenergy_diag` does; the cache holds proj(tau),
+    Wt(tau) and the state slices B_p, which is what a reverse pass reads.
+    """
+    Ctw, C, S = transforms
+    _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
+    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
+                                              mu=mu, tile_memory_gb=tile_gb)
+    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb)
+
+    states = np.atleast_1d(states)
+    n_s = len(states)
+    keep = np.ones(len(eps), bool)
+    if intermediate is not None:
+        keep[:] = False
+        keep[np.atleast_1d(intermediate)] = True
+    w_occ = np.where(keep[occ], 1.0, 0.0)
+    w_virt = np.where(keep[virt], 1.0, 0.0)
+    Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=tile_gb)
+                   for s in states])                        # (nstates, naux, norb)
+    ntau = len(grid.tau_points)
+    sig_l = np.zeros((ntau, n_s, n_s))
+    sig_g = np.zeros((ntau, n_s, n_s))
+    for k in range(ntau):
+        tau = grid.tau_points[k]
+        w, u = np.exp(e_o * tau) * w_occ, np.exp(-e_v * tau) * w_virt
+        for s in range(n_s):
+            Y = Wt_tau[k] @ Bs[s]                            # (naux, norb)
+            for t in range(n_s):
+                bYb = np.einsum('Pq,Pq->q', Bs[t], Y)
+                sig_l[k, t, s] = bYb[occ] @ w
+                sig_g[k, t, s] = -(bYb[virt] @ u)
+    sigma = -0.5 * (np.tensordot(C, sig_g + sig_l, axes=(1, 0))
+                    + 1j * np.tensordot(S, sig_g - sig_l, axes=(1, 0)))
+    return sigma, (proj_tau, Wt_tau, Bs)
+
+
+def selfenergy_diag(X, D, eps, nocc, grid, states, transforms, mu,
+                    tile_gb=ISDF_TILE_GB):
+    """Sigma^c_pp(i.omega_out) by the space-time route, and the tape it needs.
+
+    Same quantity as `self_energy_frequency_from_time`, built in the auxiliary
+    basis: W - I is folded into Wt(tau) one frequency block at a time, then
+    per tau and state one (naux, norb) GEMM. Returns (Sigma, cache); the cache
+    holds proj(tau), Wt(tau) and the state slices B_p -- (naux, naux) and
+    (naux, norb) objects only.
+    """
+    Ctw, C, S = transforms
+    _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
+    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
+                                              mu=mu, tile_memory_gb=tile_gb)
+    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb)
+
+    states = np.atleast_1d(states)
+    Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=tile_gb)
+                   for s in states])                        # (nstates, naux, norb)
+    ntau = len(grid.tau_points)
+    sig_l = np.zeros((ntau, len(states)))
+    sig_g = np.zeros((ntau, len(states)))
+    for k in range(ntau):
+        tau = grid.tau_points[k]
+        w, u = np.exp(e_o * tau), np.exp(-e_v * tau)
+        for s in range(len(states)):
+            bYb = np.einsum('Pq,Pq->q', Bs[s], Wt_tau[k] @ Bs[s])
+            sig_l[k, s] = bYb[occ] @ w
+            sig_g[k, s] = -(bYb[virt] @ u)
+    sigma = -0.5 * ((sig_g + sig_l).T @ C.T + 1j * ((sig_g - sig_l).T @ S.T))
+    return sigma, (proj_tau, Wt_tau, Bs)
 
 

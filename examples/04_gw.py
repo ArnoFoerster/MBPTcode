@@ -6,7 +6,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.SingleReference import calc_qp_energy
+from src.SingleReference import calc_qp_energy, evgw_eigenvalues
 
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis='cc-pvdz', verbose=0)
