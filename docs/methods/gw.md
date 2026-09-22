@@ -59,9 +59,11 @@ Hermitian self-energy replaces v_xc, h + J + K + Σ̃ is diagonalized, and the
 orbitals and eigenvalues are reinjected until the density and the frontier
 eigenvalues stop moving. Σ̃ is the SRG-regularized form of Marie and Loos
 ([J. Chem. Theory Comput. 19, 3943 (2023)](https://doi.org/10.1021/acs.jctc.3c00281))
-at flow s = 100 Ha⁻², since Kotani's mode A on the pole sum has no fixed
-point. `qsgw_eigenvalues` returns the spectrum, the orbitals and, for a BSE on
-top, the DF factors and static W of the result. Restricted or unrestricted
+at flow s = 100 Ha⁻². Kotani's mode A (`flow=None`) carries each high
+virtual's crossing of a pole of Σ into the occupied–virtual block at size 1/η,
+so its loop converges at some broadenings and not at others. `qsgw_eigenvalues`
+returns the spectrum, the orbitals and, for a BSE on top, the DF factors and
+static W of the result. Restricted or unrestricted
 (per-spin Fock and Σ̃ around one W), in the gas phase or a continuum: there
 the SCF's PCM potential stays in the Fock matrix every cycle and the solute's
 response to its own added charge enters as a static operator from the
