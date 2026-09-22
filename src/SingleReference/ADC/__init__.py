@@ -1,5 +1,8 @@
-"""Dyson IP/EA-ADC.
+"""Dyson IP/EA-ADC, plus electronic-excitation ADC in eeADC/.
 
+    eeADC/                  excitation-energy ADC (polarization propagator,
+                            the ee_* modules) -- see its ee_driver.py for
+                            solve_ee_adc, the front end
     base.py                ADCSolver dispatcher + the two branch classes
     adc_utils.py           shared DF-gather / chunked-einsum / solver helpers
     adc_r_driver.py        hand-written restricted orchestration
