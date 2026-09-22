@@ -1,7 +1,7 @@
 import warnings
 
 import numpy as np
-from pyscf import gto, scf, ao2mo
+from pyscf import gto, scf, ao2mo, lib
 
 from src.Base.environment import environment_of
 
@@ -217,8 +217,6 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200):
     Restricted and DF only -- without `with_df` there is no three-index object
     to slice, and the caller should fall back to the full builder.
     """
-    from pyscf import lib
-
     mo = mf.mo_coeff
     norb = mo.shape[1]
     mo_o = np.ascontiguousarray(mo[:, occ])
@@ -276,7 +274,6 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
         norb = mo_a.shape[1]
         if has_df:
             try:
-                from pyscf import lib
                 coeff_a_list = []
                 coeff_b_list = []
                 for chunk in mf.with_df.loop(blksize=200):
@@ -349,7 +346,6 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
         norb = mo.shape[1]
         if has_df:
             try:
-                from pyscf import lib
                 coeff_list = []
                 for chunk in mf.with_df.loop(blksize=200):
                     ao_3c = lib.unpack_tril(chunk)

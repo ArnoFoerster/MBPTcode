@@ -22,6 +22,8 @@ Set MBPT_USE_MPI=0 to force the serial path.
 """
 import os
 
+import numpy as np
+
 MPI = None
 _HAS_MPI = False
 _TRIED = False
@@ -67,7 +69,6 @@ def partition(n, rank, size):
     rather than an error -- 18 tau points on 32 ranks is a legitimate, if
     wasteful, configuration.
     """
-    import numpy as np
     return np.arange(rank, n, size)
 
 
@@ -75,7 +76,6 @@ def reduce_sum(a, comm):
     """In-place all-reduce of a numpy array. No-op without a comm."""
     if comm is None or comm.Get_size() == 1:
         return a
-    import numpy as np
     buf = np.ascontiguousarray(a)
     comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.SUM)
     if buf is not a:

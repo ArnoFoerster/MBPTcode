@@ -93,7 +93,8 @@ import warnings
 import numpy as np
 
 from src.Base.utils.grids import (minimax_frequency_grid, minimax_time_grid,
-                                  gauss_legendre_grid)
+                                  gauss_legendre_grid, _load_minimax_tau_data)
+from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
 
 # GreenX minimax_utils.F90 transformation-type codes, kept so the port stays
 # line-comparable with the Fortran.
@@ -138,7 +139,6 @@ def minimax_convergence_floor(npoints):
     transform that misses is under-resolved for its range, and the cure is more
     points, never fewer.
     """
-    from src.Base.utils.grids import _load_minimax_tau_data
     data = _load_minimax_tau_data()
     row = data.get(str(npoints))
     return float(row['energy_range'][0]) if row else None
@@ -481,7 +481,6 @@ class TimeFrequencyGrid:
         statistics='boson' is the right choice for a polarizability; the
         self-energy and Green's function are 'fermion'.
         """
-        from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
 
         basis = IRBasis(beta * omega_max, eps=eps, statistics=statistics)
         x_tau = basis.default_tau_sampling()

@@ -40,6 +40,26 @@ class AmplitudeGenerator:
             return ('none',)
         return (id(arr), arr.shape)
 
+    def preset_transition_density(self, nocc, X, Y, rho):
+        """Store `rho`, shape (naux, nexciton), as the DF transition density of
+        this X/Y, so get_chi_a contracts it with this solver's own DF factors.
+
+        The qsGW0 amplitudes: the Casida problem was solved in the mean field's
+        orbitals, and rho_PS = sum_ia B_P,ia (X + Y)_ia,S there is an
+        auxiliary-space object. The amplitudes of the rotated orbitals are
+        rho^T B' with the rotated factors this solver holds, provided B' shares
+        B's auxiliary basis: a with_df's, or B rotated, never factors
+        re-decomposed from the rotated ERI. Restricted only;
+        keyed exactly as _rho_a_df keys its own build, so X and Y must stay
+        alive while the solver is used.
+        """
+        if self.spin_mode != 'restricted':
+            raise NotImplementedError(
+                'preset_transition_density is restricted-spin only')
+        key = ('rho_a_r', self._identity_key(X), self._identity_key(Y), nocc)
+        cache = self.__dict__.setdefault('_transition_amp_cache', {})
+        cache[key] = np.asarray(rho, float)
+
     def get_chi_a(self, nocc, X, Y, spin_channel='alpha', p_state=None):
         """Computes the GW transition amplitude (dispatches to DF or full ERI version)."""
         if (self.spin_mode == 'unrestricted' and self.df_a is not None) or (self.spin_mode != 'unrestricted' and self.df_coeff is not None):

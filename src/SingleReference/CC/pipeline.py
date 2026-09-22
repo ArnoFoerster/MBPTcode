@@ -6,6 +6,7 @@ functions return the full AO-basis 1-RDM, usable as
 calc_qp_energy(..., dm_correction=...).
 """
 import numpy as np
+from pyscf import cc
 
 from . import amplitudes
 from . import solver
@@ -93,7 +94,6 @@ def compute_ccsd_density_matrix(mf, ncore=0):
 
     ncore: number of frozen spatial core orbitals (e.g. 2 for C+O 1s).
     Passed as frozen=ncore to pyscf's CCSD."""
-    from pyscf import cc
     mycc = cc.CCSD(mf)
     if ncore > 0:
         mycc.frozen = ncore
@@ -109,7 +109,6 @@ def compute_ccsd_density_matrix_uhf(mf, ncore=0):
 
     ncore: number of frozen spatial core orbitals, passed as frozen=ncore to
     pyscf's UCCSD. Returns (dm_a_ao, dm_b_ao)."""
-    from pyscf import cc
     mycc = cc.UCCSD(mf)
     if ncore > 0:
         mycc.frozen = ncore

@@ -6,10 +6,14 @@ expansion uses openfermion/openfermionpyscf rather than a hand-rolled one,
 since that pipeline is independently validated against NWChem's CCSDT.
 """
 import numpy as np
+import pyscf
+from pyscf import scf
 from src.Base.pyscf_interface import (
     get_effective_one_electron_integrals,
     get_antisymmetrized_spin_block_eri,
     get_orbital_energies,
+    get_uhf_spin_orbital_arrays_blockstacked,
+    uhf_blockstacked_order,
 )
 
 
@@ -19,11 +23,9 @@ def build_spinorbital_integrals_from_mf(mf):
     Returns dict with fock, g (antisymmetrized <pq||rs>), hf_energy,
     nuclear_repulsion, nocc/nvir (spin-orbital counts), mo_coeff, mo_energy.
     """
-    from pyscf import scf
     mol = mf.mol
 
     if isinstance(mf, scf.uhf.UHF):
-        from src.Base.pyscf_interface import get_uhf_spin_orbital_arrays_blockstacked, uhf_blockstacked_order
         eps_spin, g, nocc = get_uhf_spin_orbital_arrays_blockstacked(mol, mf)
         nvir = g.shape[0] - nocc
 
@@ -58,8 +60,14 @@ def build_spinorbital_integrals_from_mf(mf):
         mo_energy = mf.mo_energy
 
     else:
-        from openfermion.chem.molecular_data import spinorb_from_spatial
-        from openfermionpyscf._run_pyscf import compute_integrals
+        # call-time import: optional (README, Install) and slow to load
+        try:
+            from openfermion.chem.molecular_data import spinorb_from_spatial
+            from openfermionpyscf._run_pyscf import compute_integrals
+        except ImportError as exc:
+            raise ImportError("the restricted path needs openfermion and "
+                              "openfermionpyscf (pip install openfermion "
+                              "openfermionpyscf)") from exc
 
         mo_occ = np.asarray(mf.mo_occ)
         if mo_occ.ndim != 1 or not np.all(np.isin(mo_occ, (0.0, 2.0))):
@@ -100,7 +108,6 @@ def build_spinorbital_integrals(geometry, basis, charge=0):
 
     geometry: list of (symbol, (x, y, z)) tuples, coordinates in Angstrom.
     """
-    import pyscf
     atom_str = '; '.join(f'{sym} {x} {y} {z}' for sym, (x, y, z) in geometry)
     mol = pyscf.M(atom=atom_str, basis=basis, charge=charge)
     mf = mol.RHF()

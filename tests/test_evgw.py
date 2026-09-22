@@ -12,6 +12,11 @@ version still runs, still prints plausible numbers and never converges, so the
 test asserts it FAILS -- otherwise nothing here would notice the anchor being
 dropped.
 
+evGW0 (`screening='fixed'`) is gated on the Casida problem being solved once
+for the whole loop and on its gap landing between G0W0 and evGW. In a
+continuum the reaction field's term follows the iterate under evGW, as W does,
+and stays the mean field's under evGW0.
+
 Run: python tests/test_evgw.py
 """
 import os
@@ -24,12 +29,16 @@ import numpy as np
 from pyscf import dft, gto
 
 from src.Base.constants import HARTREE_TO_EV
+from src.Base.environment import attach_environment
+from src.Base.solvent_screening import SolventScreening
 from src.SingleReference.GW.evGW import (MODES, evgw_eigenvalues,
                                          shifted_mean_field)
+from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.SingleReference.GW.imaginary_time import (DEFAULT_TAU_TARGET,
                                                    minimax_points_for_gw)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
+import src.SingleReference.GW.qp_energy as qpe
 import src.SingleReference.GW.space_time as gwst
 import src.SingleReference.LinearResponse.davidson as dv
 
@@ -210,6 +219,29 @@ def test_the_shift_view_does_not_move_the_original(mf):
                  'the shifted view shares everything but the spectrum')
 
 
+def test_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
+    """A molecule too large for in-core J/K takes PySCF's direct branch, which
+    reads the optimizer the mean field caches; a view made through the pickle
+    hooks arrives without it and the static correction of every cycle raises.
+    `max_memory = 0` with no cached ERI forces that branch on the small
+    reference; the view shares the reference's ERI until it is cleared, and
+    the in-core branch would store a fresh one, so an ERI still absent after
+    the build is the witness that the direct branch ran."""
+    view = shifted_mean_field(mf, np.asarray(mf.mo_energy, float))
+    view.max_memory = 0
+    view._eri = None
+    dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+    try:
+        v_direct = view.get_veff(mf.mol, dm)
+        ok = (np.allclose(v_direct, mf.get_veff(mf.mol, dm), atol=1e-10)
+              and view._eri is None)
+        detail = f'direct and in-core V_Hxc agree, ERI cached: {view._eri is not None}'
+    except AttributeError as err:
+        ok, detail = False, f'direct get_veff raised: {err}'
+    return check(ok, 'the shifted view builds V_Hxc on the direct J/K path',
+                 detail)
+
+
 def test_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
     """`eps_anchor=None` must leave the single-shot route BITWISE as it was, or
     threading the keyword moved every existing G0W0 number."""
@@ -275,10 +307,27 @@ def test_the_refusals(mf):
         except NotImplementedError as exc:
             ok &= check('GW@RPA only' in str(exc), f'{kw} is refused')
     try:
+        calc_qp_energy(mf, self_consistency='evGW',
+                       eps_anchor=np.asarray(mf.mo_energy, float))
+        ok &= check(False, 'an eps_anchor under evGW is refused')
+    except NotImplementedError as exc:
+        ok &= check('eps_anchor' in str(exc), 'an eps_anchor under evGW is refused')
+    try:
         evgw_eigenvalues(mf, mf.mol, mode='nonsense')
         ok &= check(False, 'an unknown mode is refused')
     except ValueError as exc:
         ok &= check('choose one of' in str(exc), 'an unknown mode is refused')
+    try:
+        evgw_eigenvalues(mf, mf.mol, mode='casida', screening='nonsense')
+        ok &= check(False, 'an unknown screening is refused')
+    except ValueError as exc:
+        ok &= check('choose one of' in str(exc), 'an unknown screening is refused')
+    try:
+        evgw_eigenvalues(mf, mf.mol, mode='space-time', screening='fixed')
+        ok &= check(False, "screening='fixed' off the Casida route is refused")
+    except NotImplementedError as exc:
+        ok &= check('Casida route' in str(exc),
+                    "screening='fixed' off the Casida route is refused")
     try:
         dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, nroots=1,
                           probe=False, self_consistency='qsGW')
@@ -397,12 +446,144 @@ def test_an_unrestricted_reference_is_driven_channel_by_channel():
                              spin_channel=ch)
         ok &= check(abs(got - eps[row, n - 1] * HARTREE_TO_EV) < 1e-8,
                     f'the dispatcher returns the {label} fixed point')
+    # evGW0 through the same channel loop: the poles of each channel move, the
+    # one Casida spectrum stays, so each channel's gap opens less than evGW's
+    eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed')
+    ordered = True
+    for ch, n, row in (('alpha', na, 0), ('beta', nb, 1)):
+        g0w0 = calc_qp_energy(mf, mode='casida', state=[n - 1, n], spin_channel=ch)
+        ordered &= (g0w0[n]['GW'] - g0w0[n - 1]['GW']
+                    < (eps_fixed[row, n] - eps_fixed[row, n - 1]) * HARTREE_TO_EV
+                    < (eps[row, n] - eps[row, n - 1]) * HARTREE_TO_EV)
+    ok &= check(fixed['converged'] and ordered,
+                'evGW0 converges both channels, G0W0 < evGW0 < evGW on each gap',
+                f"{fixed['cycles']} cycles")
     try:
         evgw_eigenvalues(mf, mol, mode='space-time')
         ok &= check(False, 'the imaginary-axis routes refuse it themselves')
     except NotImplementedError as exc:
         ok &= check('restricted-spin only' in str(exc),
                     'the imaginary-axis routes refuse it themselves')
+    return ok
+
+
+def test_evgw0_keeps_w_and_moves_the_poles():
+    """evGW0 reinjects the eigenvalues into G alone: the RPA Casida problem is
+    solved once for the whole loop, and only the poles of Sigma_c follow the
+    iterate. Its gap lands between G0W0 and evGW on water: the moved poles open
+    it, the frozen W leaves it below the loop that screens less every cycle.
+    The first cycle IS the Casida G0W0, or the loop starts elsewhere."""
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis='cc-pvdz', verbose=0)
+    mf = dft.RKS(mol)
+    mf.xc = 'pbe0'
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    nocc = mol.nelectron // 2
+    states = list(range(len(np.asarray(mf.mo_energy))))
+
+    def gap(e):
+        return (e[nocc] - e[nocc - 1]) * HARTREE_TO_EV
+
+    builds = []
+    original = qpe._casida_spectrum
+
+    def counted(*args, **kw):
+        builds.append(1)
+        return original(*args, **kw)
+
+    qpe._casida_spectrum = counted
+    try:
+        eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida',
+                                            screening='fixed')
+        n_fixed = len(builds)
+        builds.clear()
+        eps_updated, updated = evgw_eigenvalues(mf, mol, mode='casida')
+        n_updated = len(builds)
+    finally:
+        qpe._casida_spectrum = original
+    _, one = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed',
+                              max_cycle=1, tol=0.0)
+    first = one['eps_mean_field'] + one['shift']
+    g0w0 = calc_qp_energy(mf, mode='casida', state=states)
+    g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
+
+    ok = check(fixed['converged'] and fixed['screening'] == 'fixed',
+               'evGW0 converges',
+               f"{fixed['cycles']} cycles, last residual "
+               f"{fixed['history'][-1] * HARTREE_TO_EV:.2e} eV")
+    d = np.abs(first - g0w0).max()
+    ok &= check(d < 1e-10, 'the first evGW0 cycle IS the Casida G0W0',
+                f'max |d eps| {d:.1e} Ha')
+    ok &= check(n_fixed == 1 and n_updated == updated['cycles'],
+                'one Casida solve for the whole evGW0 loop, one per evGW cycle',
+                f"{n_fixed} vs {n_updated} in {updated['cycles']} cycles")
+    ok &= check(gap(g0w0) < gap(eps_fixed) < gap(eps_updated),
+                'G0W0 < evGW0 < evGW on the gap',
+                f'{gap(g0w0):.3f} < {gap(eps_fixed):.3f} < {gap(eps_updated):.3f} eV')
+    homo = calc_qp_energy(mf, mode='casida', self_consistency='evGW0')
+    ok &= check(abs(homo - eps_fixed[nocc - 1] * HARTREE_TO_EV) < 1e-8,
+                "self_consistency='evGW0' returns the evGW0 fixed point")
+    eps_tda, _ = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed',
+                                  tda=True)
+    homo_tda = calc_qp_energy(mf, mode='casida', self_consistency='evGW0', tda=True)
+    moved = (eps_tda[nocc - 1] - eps_fixed[nocc - 1]) * HARTREE_TO_EV
+    ok &= check(abs(homo_tda - eps_tda[nocc - 1] * HARTREE_TO_EV) < 1e-8
+                and abs(moved) > 1e-3,
+                'a route keyword, tda=True, reaches the loop through the front door',
+                f'TDA moves the evGW0 HOMO by {moved * 1e3:+.1f} meV')
+    return ok
+
+
+def test_the_reaction_field_follows_the_iterate():
+    """In a continuum the reaction field's Delta W screens with the eigenvalues
+    it is built at, so the evGW step on the Casida route rebuilds its term
+    every cycle at the iterate, as the imaginary-axis routes do by calling
+    calc_qp_energy on the shifted view. On water with a continuum of
+    eps_inf = 1.78 and a spectrum opened by 0.5 eV, one step equals
+    calc_qp_energy on that view anchored on the mean field, every state within
+    1e-10 Ha; the term itself moves the HOMO by more than 1e-6 Ha between the
+    two spectra, ten thousand times that, so a term kept at the mean field
+    would show. evGW0 keeps it at the mean field with the rest of W."""
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis='cc-pvdz', verbose=0)
+    mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol = 1e-11
+    mf.kernel()
+    attach_environment(mf, SolventScreening(mol, eps=1.78))
+    nocc = mol.nelectron // 2
+    eps0 = np.asarray(mf.mo_energy, float)
+    states = list(range(len(eps0)))
+    opened = eps0.copy()
+    opened[:nocc] -= 0.5 / HARTREE_TO_EV
+    opened[nocc:] += 0.5 / HARTREE_TO_EV
+    view = shifted_mean_field(mf, opened)
+    step = qpe.casida_evgw_step(mf, mol, 'updated')(opened)
+    ref = calc_qp_energy(view, mode='casida', state=states, eps_anchor=eps0)
+    ref = np.array([ref[p]['GW'] for p in states]) / HARTREE_TO_EV
+    d = np.abs(step - ref).max()
+    moved = (environment_quasiparticle_shift(view, mol, nocc)[nocc - 1]
+             - environment_quasiparticle_shift(mf, mol, nocc)[nocc - 1])
+    ok = check(d < 1e-10 and abs(moved) > 1e-6,
+               'evGW: the Casida step rebuilds the reaction field at the iterate',
+               f'max |d eps| {d:.1e} Ha; the term moves the HOMO by '
+               f'{moved * HARTREE_TO_EV * 1e3:+.2f} meV')
+    built_at = []
+    original = qpe._reaction_field_terms
+
+    def spy(m, *args, **kw):
+        built_at.append(np.asarray(m.mo_energy, float).copy())
+        return original(m, *args, **kw)
+
+    qpe._reaction_field_terms = spy
+    try:
+        qpe.casida_evgw_step(mf, mol, 'fixed')(opened)
+    finally:
+        qpe._reaction_field_terms = original
+    ok &= check(len(built_at) > 0
+                and all(np.array_equal(e, eps0) for e in built_at),
+                'evGW0: the term is built at the mean field only',
+                f'{len(built_at)} build(s)')
     return ok
 
 
@@ -426,10 +607,15 @@ if __name__ == '__main__':
     all_ok &= test_the_high_virtuals_do_not_decide_convergence(mf)
     all_ok &= test_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf)
     all_ok &= test_the_shift_view_does_not_move_the_original(mf)
+    all_ok &= test_the_shift_view_builds_j_and_k_on_the_direct_path(mf)
     print('\n-- 5. the front door, on every route')
     all_ok &= test_calc_qp_energy_drives_every_route(mf)
     all_ok &= test_the_refusals(mf)
     print('\n-- 6. an unrestricted reference')
     all_ok &= test_an_unrestricted_reference_is_driven_channel_by_channel()
+    print('\n-- 7. evGW0: W of the mean field, poles of the iterate')
+    all_ok &= test_evgw0_keeps_w_and_moves_the_poles()
+    print('\n-- 8. in a continuum: the reaction field follows the iterate')
+    all_ok &= test_the_reaction_field_follows_the_iterate()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

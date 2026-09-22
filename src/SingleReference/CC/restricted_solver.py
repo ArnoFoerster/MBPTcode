@@ -18,7 +18,7 @@ feedback.
 """
 import numpy as np
 
-from .integrals import energy_denominators
+from .integrals import build_restricted_integrals_from_mf, energy_denominators
 from .generated_restricted import amplitudes_restricted as TR
 from .generated_restricted import lambda_residual_restricted as LR
 from .generated_restricted import d1_blocks_restricted as D1R
@@ -273,8 +273,6 @@ def compute_ccsdt_density_matrix_restricted(mf, symmetrize=True, **kwargs):
     compute_ccsdt_density_matrix, but via the restricted (spin-blocked)
     T-CCSDT + Lambda-CCSD(T3-informed) pipeline instead of full generalized
     spin-orbital CCSDT."""
-    from .integrals import build_restricted_integrals_from_mf
-
     ints = build_restricted_integrals_from_mf(mf)
     opdm, _ = solve_ccsdt_1rdm_restricted_from_ints(ints, **kwargs)
     dm_ao = ints['mo_coeff'] @ opdm @ ints['mo_coeff'].T

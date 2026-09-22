@@ -98,7 +98,8 @@ import scipy.linalg
 from pyscf import df, gto, lib, scf
 from pyscf.lib import logger
 
-from src.Base.separable_ri import (DEFAULT_REGULARIZATION, build_D_F,
+from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
+                                   _ao_l_labels, build_D_F,
                                    fit_M_stable, fit_M_streaming,
                                    molecular_points_covariant,
                                    optimize_atomic_radii, published_grids)
@@ -207,7 +208,6 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
     That fragility is the refit route's, not the reuse route's: Z_w = M^T V_w M
     only ever multiplies BY the metric.
     """
-    from src.Base.separable_ri import ANGULAR_WEIGHTS, _ao_l_labels
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
     ao = mol.eval_gto('GTOval_sph', coords)
