@@ -9,7 +9,8 @@ from pyscf import gto, scf, df
 
 from src.Base.pyscf_interface import (
     get_orbital_energies, get_density_fitting_coefficients)
-from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse.linear_response import (
+    LinearResponseSolver, gram_product)
 
 
 def check(ok, label, detail=''):
@@ -166,6 +167,17 @@ if __name__ == '__main__':
                     dA < 1e-12 and dB < 1e-12,
                     f'{label} full {name} {spin}: A, B vs DF einsum reference',
                     f'dA={dA:.1e} dB={dB:.1e}')
+
+    # --- gram_product against the einsum reference, in ragged row blocks ---
+    rng = np.random.default_rng(1)
+    C = rng.standard_normal((5, 37))
+    V_ref = np.einsum('Pi,Pj->ij', C, C)
+    for block_elems in (64, 100, 2**27):
+        V = gram_product(C, block_elems=block_elems)
+        dV = np.abs(V - V_ref).max()
+        all_ok &= check(dV < 1e-13 and V.flags.c_contiguous,
+                        f'gram_product block_elems={block_elems}: C^T C by row blocks',
+                        f'dV={dV:.1e}')
 
     # --- tracemalloc ratchet on the BSE-DF build, N_pair = 2100, in units
     # of one N_pair^2 array ---

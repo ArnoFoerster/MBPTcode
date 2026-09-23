@@ -1,10 +1,11 @@
 """Static (frequency-independent) corrections to the ADC(3) F block."""
 import numpy as np
-from pyscf import scf as _pyscf_scf
+from pyscf import scf
 
 from src.SingleReference.EpsteinNesbet import (_build_dressed_e_ai, _build_dressed_e_abij,
                                                 _build_dressed_denoms_uhf,
-                                                restricted_channel_shifts)
+                                                restricted_channel_shifts,
+                                                validate_en_dress)
 from src.Base.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, get_antisymmetrized_spin_eri
 from src.Base.pyscf_interface import uhf_blockstacked_order
 from src.Base.solvent_screening import solvent_static_selfenergy
@@ -38,6 +39,17 @@ from src.Base.pyscf_interface import (
 from src.SingleReference.CC.pipeline import compute_ccsd_density_matrix
 from src.SingleReference.CC.pipeline import compute_ccsd_density_matrix_uhf
 from src.SingleReference.CC.pipeline import compute_ccsdt_density_matrix
+from src.SingleReference.ADC.adc_r_utils import _dress_is_streamable
+from src.SingleReference.DensityMatrix.generated_mpn import (
+    mpn_density_pieces as mpn_gen)
+from src.SingleReference.DensityMatrix.mpn_density_driver import (
+    _denom, _to_l, g_vvoo_df, t1_2_numerator_df)
+from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
+    MPnDensityDriverUnrestricted)
+from src.SingleReference.EpsteinNesbet.shifts import (
+    _diag_ladder_df, _diag_ladder_df_screened, epstein_nesbet_denominator)
+from src.SingleReference.LinearResponse.linear_response import (
+    static_screened_coulomb_aux_uhf)
 
 def diagonalize_static_only(eps_spin, static_correction=None):
     """Diagonalize just diag(eps_spin) + static_correction"""
@@ -124,14 +136,15 @@ def _ks_semicanonical_setup(mf, mol, nocc, ncore):
     dgamma_oo_t1/dgamma_vv_t1 are active-space-sized (ncore already excluded, matching
     _embed_active's convention).
     """
-    import copy
 
     if not hasattr(mf, 'xc'):
         return None
 
     mo_coeff_semi, eps_semi, f_ov_semi, U_oo, U_vv = semicanonicalize_restricted(mf, mol, nocc=nocc)
 
-    mf_semi = copy.copy(mf)
+    # PySCF's own shallow copy: copy.copy runs the pickle hooks, which drop the
+    # direct-SCF optimizer that a J/K build on a large molecule reads
+    mf_semi = mf.copy()
     mf_semi.mo_coeff = mo_coeff_semi
     mf_semi.mo_energy = eps_semi
 
@@ -151,7 +164,6 @@ def _ks_semicanonical_setup_uhf(mf, mol, ncore):
     -- mf_semi is a shallow copy of mf with mo_coeff/mo_energy replaced by the
     per-spin semicanonical ones; the t1/dgamma pieces are active-space-sized.
     """
-    import copy
 
     if not hasattr(mf, 'xc'):
         return None
@@ -159,7 +171,7 @@ def _ks_semicanonical_setup_uhf(mf, mol, ncore):
     (mo_a_semi, eps_a_semi, f_ov_a_semi, U_oo_a, U_vv_a,
      mo_b_semi, eps_b_semi, f_ov_b_semi, U_oo_b, U_vv_b) = semicanonicalize_uhf(mf, mol)
 
-    mf_semi = copy.copy(mf)
+    mf_semi = mf.copy()  # keeps the direct-SCF optimizer, as above
     mf_semi.mo_coeff = (mo_a_semi, mo_b_semi)
     mf_semi.mo_energy = (eps_a_semi, eps_b_semi)
 
@@ -237,7 +249,6 @@ def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
     # 'hp'/spin-resolved dressing is not chunk-representable and takes the
     # materialized driver path below -- the same documented exception as
     # the ADC solver's _dress_is_streamable gate.
-    from src.SingleReference.ADC.adc_r_utils import _dress_is_streamable
     _mp2_streamable = (B_aa is not None and ks_setup is None
                        and _dress_is_streamable(u2_denom_dress))
 
@@ -444,7 +455,6 @@ def build_mp2_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u
     orbitals only form a contiguous slice in that ordering for a general
     nocc_a != nocc_b).
     """
-    from pyscf import scf
 
     mol = mol if mol is not None else mf.mol
     is_uhf = isinstance(mf, scf.uhf.UHF)
@@ -462,7 +472,6 @@ def build_mp2_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u
         # tests/test_mpn_density_unrestricted.py). Frozen core: ncore is a
         # [ncore:] window on eps/g per spin channel, sliced before
         # construction (same convention as _mp2_dgamma_spatial's RHF branch).
-        from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
         w = slice(ncore, None)
         custom_denom = None
         if u2_denom_dress is not None:
@@ -542,13 +551,8 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
 
     Restrictions (raise): UHF only (no KS semicanonicalization), ncore=0.
     """
-    from pyscf import scf as _scf
-    from src.SingleReference.DensityMatrix.mpn_density_driver import (
-        _denom, _to_l, g_vvoo_df, t1_2_numerator_df)
-    from src.SingleReference.DensityMatrix.generated_mpn import mpn_density_pieces as mpn_gen
-    from src.SingleReference.EpsteinNesbet.shifts import epstein_nesbet_denominator
 
-    if not isinstance(mf, _scf.uhf.UHF):
+    if not isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("build_mp2_static_correction_uhf_df is UHF-only")
     if hasattr(mf, 'xc'):
         raise NotImplementedError(
@@ -587,9 +591,6 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
             # no second DF build. alpha occ sits at [0:nocc_a) and alpha virt
             # at [nocc:nocc+nvirt_a) in blockstacked order (see
             # uhf_blockstacked_order); beta fills the remaining two slices.
-            from src.SingleReference.EpsteinNesbet.shifts import _diag_ladder_df_screened
-            from src.SingleReference.LinearResponse.linear_response import (
-                static_screened_coulomb_aux_uhf)
             nvirt_a = norb_a - nocc_a
             idx_a = np.concatenate([np.arange(0, nocc_a),
                                     np.arange(nocc, nocc + nvirt_a)])
@@ -601,7 +602,6 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
                                                      nocc_a, nocc_b)
             d1 = d1 + _diag_ladder_df_screened(B_so, W_aux, v, o)
         elif singles:
-            from src.SingleReference.EpsteinNesbet.shifts import _diag_ladder_df
             d1 = d1 + _diag_ladder_df(B_so, v, o)
     else:
         D = D_bare
@@ -670,7 +670,6 @@ def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False,
     correlation piece, via _mp2_dgamma_spatial's own B_aa branch, and the
     final J-0.5*K contraction, via _static_correction_from_dgamma_restricted_df).
     """
-    from pyscf import scf
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError(
             "build_mp2_static_correction_restricted is RHF-only -- use "
@@ -717,7 +716,6 @@ def build_mp3_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u
     compute_mp3_density_matrix_ao's docstring and
     tests/test_mp3_finite_field.py for the regression check that pins this.
     """
-    from pyscf import scf
 
     mol = mol if mol is not None else mf.mol
     is_uhf = isinstance(mf, scf.uhf.UHF)
@@ -738,7 +736,6 @@ def build_mp3_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u
         # tests/test_mpn_density_unrestricted.py). Frozen core: ncore is a
         # [ncore:] window on eps/g per spin channel, sliced before
         # construction.
-        from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
         w = slice(ncore, None)
         custom_denom = None
         if u2_denom_dress is not None:
@@ -789,7 +786,6 @@ def build_mp3_static_correction_restricted(mf, mol=None, nocc=None, relax=False,
     B_aa: see build_mp2_static_correction_restricted's parameter of the same
     name -- when given, no dense eri_chemist norb^4 array is ever built.
     """
-    from pyscf import scf
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError(
             "build_mp3_static_correction_restricted is RHF-only -- use "
@@ -832,7 +828,6 @@ def build_ccsd_static_correction(mf, mol=None, ncore=0):
     RHF reference, or the (nso, nso) block-stacked spin-orbital correction
     (get_uhf_spin_orbital_arrays_blockstacked's ordering) for a UHF reference.
     """
-    from pyscf import scf
 
     mol = mol if mol is not None else mf.mol
 
@@ -859,7 +854,6 @@ def build_ccsd_static_correction_restricted(mf, mol=None, ncore=0):
     ncore: number of frozen spatial core orbitals (e.g. 2 for C+O 1s).
     Returns the (nmo, nmo) restricted correction G[Delta_gamma], symmetric.
     """
-    from pyscf import scf
 
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("build_ccsd_static_correction_restricted is RHF-only.")
@@ -887,7 +881,6 @@ def build_ccsdt_static_correction(mf, mol=None, **kwargs):
 
     Returns the (2*nmo, 2*nmo) spin-orbital correction G[Delta_gamma], symmetric.
     """
-    from pyscf import scf
 
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("build_ccsdt_static_correction is currently restricted-spin only.")
@@ -907,7 +900,6 @@ def build_ccsdt_static_correction_restricted(mf, mol=None, **kwargs):
 
     Returns the (nmo, nmo) restricted correction G[Delta_gamma], symmetric.
     """
-    from pyscf import scf
 
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("build_ccsdt_static_correction_restricted is RHF-only.")
@@ -939,7 +931,6 @@ def _ks_hx_hxc_correction_restricted(mf, mol, dm=None):
     dm: density evaluated at for both Sigma_Hx and Sigma_Hxc (defaults to mf's own
     SCF density); pass a correlated density to evaluate the correction there instead.
     """
-    from pyscf import scf
     dm = dm if dm is not None else mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
     V_Hxc = mf.get_veff(mol, dm)
     mf_hf = scf.RHF(mol)
@@ -951,7 +942,6 @@ def _ks_hx_hxc_correction_restricted(mf, mol, dm=None):
 def _ks_hx_hxc_correction_uhf(mf, mol, dm=None):
     """UHF/UKS counterpart of _ks_hx_hxc_correction_restricted: per-spin
     (norb_a,norb_a)/(norb_b,norb_b) spatial-MO Sigma_Hx-Sigma_Hxc matrices."""
-    from pyscf import scf
     dm = dm if dm is not None else mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
     V_Hxc_a, V_Hxc_b = mf.get_veff(mol, dm)
     mf_hf = scf.UHF(mol)
@@ -978,7 +968,6 @@ def build_ks_static_correction(mf, mol=None, dm=None):
     point from Sigma_Hxc(KS) to Sigma_Hx(HF), the Delta_gamma term adds the
     genuine correlation correction G[Delta_gamma] on top.
     """
-    from pyscf import scf
     mol = mol if mol is not None else mf.mol
     if not hasattr(mf, 'xc') and dm is None:
         return None
@@ -1001,7 +990,6 @@ def build_ks_static_correction_restricted(mf, mol=None, dm=None):
     build_ks_static_correction (spin-orbital) for UHF/UKS. Returns None if mf is
     not a KS object and dm is not given.
     """
-    from pyscf import scf
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError(
             "build_ks_static_correction_restricted is RHF-only -- use "
@@ -1113,7 +1101,6 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
     cphf_level_shift/cphf_max_cycle/cphf_tol: forwarded to the UHF CPHF/
         Z-vector solve (relax=True only, dense or df); see
         solve_cphf_relaxation_uhf /."""
-    from src.SingleReference.EpsteinNesbet import validate_en_dress
     mol = mol if mol is not None else mf.mol
     kind, kind_dress = parse_static_kind(kind)
     if kind_dress is not None:
@@ -1121,7 +1108,7 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
             raise ValueError("give EITHER an EN-prefixed kind OR en_dress, "
                              "not both")
         en_dress = kind_dress
-    is_uhf = isinstance(mf, _pyscf_scf.uhf.UHF)
+    is_uhf = isinstance(mf, scf.uhf.UHF)
     if spin == 'auto':
         spin = 'spinorbital' if is_uhf else 'restricted'
     if spin not in ('restricted', 'spinorbital'):

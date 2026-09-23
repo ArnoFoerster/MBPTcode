@@ -528,7 +528,9 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
     The quasiparticle diagonal comes from the Casida GW route -- the dense RPA
     spectrum in the same auxiliary basis, `calc_qp_energy(mode='casida')` for
     every orbital -- and `self_consistency='evGW'` drives that route through
-    the eigenvalue loop. The static W is built from the same three-index
+    the eigenvalue loop, `gw_kwargs` going to `evgw_eigenvalues` (its own
+    keywords and the Casida step's; `screening` is refused, the loop here is
+    evGW). The static W is built from the same three-index
     factor: at the MEAN-FIELD spectrum for `qp='G0W0'`, the standard G0W0-BSE
     split, and at the fixed point under evGW, since that is the spectrum the
     self-energy was built with. `qp` as an ENERGY ARRAY and `screen_at` follow
@@ -578,6 +580,12 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
 
     evgw_info = None
     if str(self_consistency).lower() in ('evgw', 'ev'):
+        if 'screening' in (gw_kwargs or {}):
+            # the kernel below screens at the fixed point, which is evGW's W;
+            # evGW0 keeps the mean field's, and this route does not build that
+            raise ValueError("gw_kwargs: self_consistency='evGW' screens the BSE "
+                             "at the loop's fixed point, so 'screening' has no "
+                             "place here")
         t0 = _begin('evgw')
         qp, evgw_info = evgw_eigenvalues(mf, mol, mode='casida',
                                          **(gw_kwargs or {}))

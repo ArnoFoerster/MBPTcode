@@ -35,7 +35,7 @@ optional third-party one.
 | ISDF factorization | `test_isdf_jk`, `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_static_exchange_routes` |
 | BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization` |
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field` |
-| distributed linear algebra | `test_numroc` |
+| distributed linear algebra | `test_numroc`, `test_elpa_casida` |
 
 ## The ISDF and BSE tests, in the order they build on each other
 
@@ -111,3 +111,17 @@ per-machine scratch cache beside it (`src/Base/data/radii_cache/`) is
 gitignored, because the radii optimizer is a numerically differentiated descent
 under threaded BLAS and does not reproduce across thread counts — the shipped
 table is what makes a clean clone reproduce the suite.
+
+## The multi-rank test
+
+`test_elpa_casida` is the one script meant for several MPI ranks:
+
+```bash
+srun -n 4 --mpi=pmix python tests/test_elpa_casida.py
+```
+
+It solves the three Casida branches and ADC's dense matrix once with every rank
+taking part and once with the workers parked in `serve_distributed_solves`, and
+compares each with the serial solve. On more than one rank a cell that fell back
+to `eigh` fails, so a missing `pyelpa` shows as a failure, not as a pass. Run
+serially, as the suite does, it checks the comparisons only.

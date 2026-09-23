@@ -72,6 +72,19 @@ anchored on the mean field while the screening follows the iterate — anchored
 on the iterate instead, each cycle adds its own correction a second time and
 the gap runs away without ever converging. `evgw_eigenvalues` returns the whole
 converged spectrum and a record of how it got there. See `examples/12_evgw.py`.
+`self_consistency='evGW0'` reinjects them into G alone: the mean field's P₀ and
+W stay and only the poles of Σ_c move, on the Casida route.
+
+**qsGW** — `self_consistency='qsGW'` (or `'qsGW0'`, W kept at the mean field)
+runs the quasiparticle-self-consistent loop on the Casida route: a static
+Hermitian self-energy replaces v_xc, h + J + K + Σ̃ is diagonalized, and the
+orbitals and eigenvalues are reinjected until the density and the frontier
+eigenvalues stop moving. Σ̃ is the SRG-regularized form of Marie and Loos
+([J. Chem. Theory Comput. 19, 3943 (2023)](https://doi.org/10.1021/acs.jctc.3c00281))
+at flow s = 100 Ha⁻², since Kotani's mode A on the pole sum has no fixed
+point. `qsgw_eigenvalues` returns the spectrum, the orbitals and, for a BSE on
+top, the DF factors and static W of the result. Restricted closed shell, gas
+phase.
 
 **Low-scaling factorization** — the separable RI of Duchemin and Blase
 ([J. Chem. Phys. 150, 174120 (2019)](https://doi.org/10.1063/1.5090605)),
@@ -202,8 +215,9 @@ Requires Python 3.10+, NumPy, SciPy, PySCF, opt_einsum and threadpoolctl:
 pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
 
-`threadpoolctl` lets the quasiparticle root scan run in a thread pool; without it
-the scan runs serially. Thread settings are under [Threads](#threads).
+`threadpoolctl` pins BLAS to one thread inside the quasiparticle root scan's
+thread pool and is imported at module load by `GW/qp_energy.py`. Thread
+settings are under [Threads](#threads).
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
@@ -226,6 +240,9 @@ pip install pyscf-dispersion # D3/D4 empirical dispersion
 
 `PolarizableSites`' own hand-rolled coupled-dipole response and PCM solvation
 need nothing beyond pyscf.
+
+The distributed eigensolve needs `mpi4py` and ELPA's `pyelpa`, both
+optional; see [Distributed eigensolve](#distributed-eigensolve).
 
 There is no build step. Run from the repository root so that `src` is
 importable.
@@ -272,6 +289,98 @@ unset OMP_PROC_BIND
 
 Several processes in one job step each get their own cores with
 `srun --ntasks=R --cpus-per-task=T --hint=nomultithread` and `OMP_NUM_THREADS=T`.
+
+## Distributed eigensolve
+
+The dense eigensolves of the Casida route (`CasidaSolver.solve`, behind the RPA,
+GW and dense BSE routes) and of ADC (`solve_dense`) can run on
+[ELPA](https://elpa.mpcdf.mpg.de/) over MPI ranks. They do so for a matrix of
+dimension 5000 or more (their `threshold` argument) whenever `mpi4py` and
+ELPA's Python binding `pyelpa` both import, on one rank or on several.
+Otherwise, or with `MBPT_USE_ELPA=0`, they call `scipy.linalg.eigh`, as they do
+for every complex Hermitian matrix.
+
+Rank 0 runs the script alone; the other ranks wait to serve its eigensolves.
+Open and close the script with
+
+```python
+import sys
+
+from src.Base.utils.linearAlgebra.diagonalization import (serve_distributed_solves,
+                                                          release_workers)
+
+if serve_distributed_solves():
+    sys.exit(0)                     # a worker rank, released by rank 0 at the end
+
+...                                 # the calculation, on rank 0 only
+
+release_workers()
+```
+
+On one rank, or without `mpi4py` and `pyelpa`, both calls do nothing, so the
+same script runs serially. Call
+`serve_distributed_solves()` before anything imports `mpi4py`: `pyelpa` refuses
+to load after it, and every solve then stays on `eigh`. A failure inside a
+distributed solve, on any rank, aborts the job.
+
+Rank 0 still builds and holds each matrix and its eigenvectors, and runs
+everything outside the eigensolve on its own threads. ELPA spreads the
+eigensolver's work and workspace over the ranks, not the matrices' memory.
+
+In a Slurm job, one node as 8 ranks of 24 cores:
+
+```bash
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=24
+#SBATCH --hint=nomultithread
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export ELPA_DEFAULT_omp_threads=$OMP_NUM_THREADS
+srun --mpi=pmix --cpus-per-task=$SLURM_CPUS_PER_TASK --cpu-bind=cores python run.py
+```
+
+ELPA's own OpenMP threads default to one per rank, and `OMP_NUM_THREADS` does
+not reach them; `ELPA_DEFAULT_omp_threads` does, if `pyelpa` is linked against
+the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores, with
+`--cpu-bind=cores` or `mpirun --bind-to core --map-by slot:PE=24`: unbound, a
+test solve ran at least ten times slower. `--mpi=pmix` suits Open MPI 5;
+`srun --mpi=list` shows what your Slurm offers.
+
+`pyelpa` is on neither PyPI nor conda-forge. Build it from `python/pyelpa` in
+the source of the installed ELPA version: with ELPA's own
+`./configure --enable-python`, or against the installed library with this
+`setup.py` in `python/`, ELPA's `.pc` file on `PKG_CONFIG_PATH`, Cython
+installed, `CC=mpicc`, and `pip install --no-build-isolation .`:
+
+```python
+import subprocess
+
+import numpy
+from Cython.Build import cythonize
+from setuptools import Extension, setup
+
+
+def pkg(flag):
+    return subprocess.check_output(['pkg-config', flag, 'elpa_openmp'],
+                                   text=True).split()
+
+
+ext = Extension(
+    'pyelpa.wrapper',
+    sources=['pyelpa/wrapper.pyx'],
+    include_dirs=[numpy.get_include()] + [f[2:] for f in pkg('--cflags-only-I')],
+    extra_compile_args=[f for f in pkg('--cflags') if not f.startswith('-I')],
+    extra_link_args=pkg('--libs'),
+    define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+)
+
+setup(name='pyelpa', version='2025.01.002',     # the ELPA release
+      packages=['pyelpa'], ext_modules=cythonize([ext], language_level=3))
+```
+
+Write `elpa` for `elpa_openmp` where ELPA was built without OpenMP. To check
+the setup, run `tests/test_elpa_casida.py` under `srun` or `mpirun`: on more
+than one rank it fails if a solve fell back to `eigh`.
 
 ## Basis sets from CP2K
 
@@ -336,13 +445,14 @@ src/SingleReference/
     DensityMatrix/      MPn / GW / CC correlated 1-RDMs
     EpsteinNesbet/      EN denominators and shifts
     GW/                 self-energy, QP equation, imaginary axis/time,
-                        the reaction field's shift, the evGW loop, contour
-                        deformation and sum-over-poles continuations, the
-                        dense quasi-boson route
+                        the reaction field's shift, the evGW and qsGW
+                        loops, contour deformation and sum-over-poles
+                        continuations, the dense quasi-boson route
     LinearResponse/     Casida, RPA, BSE, Davidson, the dense quasi-boson BSE
     BSE/                the upfolded (non-perturbative) BSE
 src/Solvers/            quasiparticle root finders, including the
-                        pole-guarded Newton solve contour deformation uses
+                        pole-guarded Newton solve contour deformation uses,
+                        and a matrix-free Davidson eigensolver
 src/gradients/          analytic nuclear gradients: one adjoint module per
                         forward one, differentiating production's own objects
 src/properties/         the ONE surface dispatcher, geometry optimization,

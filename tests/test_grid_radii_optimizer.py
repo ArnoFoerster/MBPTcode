@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import df, gto
+from threadpoolctl import threadpool_limits
 
 from src.Base.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
                                    _shipped_key, _start_radii, atomic_points,
@@ -102,20 +103,31 @@ if __name__ == '__main__':
     #    default box. Both of the tempting variations hide the defect: with the
     #    cusp sampled, or with r_max widened to 8, carbon's single start lands
     #    in a good basin by itself and there is nothing left to rescue.
+    #
+    #    Both calls must run the LIVE search, bypassing the shipped table AND
+    #    the git-ignored radii cache; `return_candidates=True` is the
+    #    documented bypass of both, since a caller that wants the runners-up
+    #    has to run the search. The table holds ONE grid per physical request,
+    #    so a lookup answers n_start=1 and n_start=4 with the same row and the
+    #    comparison measures nothing (it reported 1.0x before the bypass); a
+    #    stale cache silently reports its own thread count's minimum (see
+    #    optimize_atomic_radii). One BLAS thread, since the objective is a
+    #    numerically differentiated descent under threaded BLAS and a
+    #    different reduction order moves L-BFGS-B onto a different local
+    #    minimum. The ratio still varies by machine even from an empty cache
+    #    (measured 15x-44x across CPUs/OpenBLAS kernels at one thread), so the
+    #    bound is kept loose -- this checks that multi-start helps at all, not
+    #    by how much.
     print('\n3. multi-start rescues carbon at 148 counts, production settings:')
-    # Both calls must BYPASS the table. It holds ONE grid per physical request
-    # now, so a lookup answers n_start=1 and n_start=4 with the same row and the
-    # comparison would measure nothing -- it reported 1.0x before this bypass
-    # was added. `return_candidates` is the documented bypass: a caller that
-    # wants the runners-up has to run the search.
-    e_one = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                  counts=COUNTS_148, maxiter=110, n_start=1,
-                                  return_candidates=True)[1]
-    r_many, e_many, _ = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                              counts=COUNTS_148, maxiter=110,
-                                              n_start=4,
-                                              return_candidates=True)
-    ok3 = e_many < e_one / 10.0
+    with threadpool_limits(limits=1, user_api='blas'):
+        e_one = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
+                                      counts=COUNTS_148, maxiter=110, n_start=1,
+                                      return_candidates=True)[1]
+        r_many, e_many, _ = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
+                                                  counts=COUNTS_148, maxiter=110,
+                                                  n_start=4,
+                                                  return_candidates=True)
+    ok3 = e_many < e_one / 5.0
     all_ok &= ok3
     print(f'   1 start {e_one:.3e}   4 starts {e_many:.3e}   '
           f'{e_one / e_many:.1f}x   {"OK" if ok3 else "FAIL"}')

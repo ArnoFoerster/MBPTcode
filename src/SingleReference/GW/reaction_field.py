@@ -16,6 +16,7 @@ from src.Base.environment import (attached_environment, dresses_interaction,
                                   environment_of)
 from src.Base.pyscf_interface import get_orbital_energies
 from src.Base.separable_ri import aux_metric_sqrt
+from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
 
 def bare_gauge_transform(auxmol, environment, V=None):
@@ -158,10 +159,6 @@ def environment_quasiparticle_shift(mf, mol=None, nocc=None, auxbasis=None):
     """
     Eq. (18) for every orbital of `mf`, or None in the gas phase.
     """
-    # cycle: LinearResponseSolver reaches back into this package's screening
-    from src.SingleReference.LinearResponse.linear_response import \
-        LinearResponseSolver
-
     mol = mf.mol if mol is None else mol
 
     # Unrestricted falls back to COHSEX

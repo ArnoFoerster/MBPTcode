@@ -64,12 +64,14 @@ Reported behaviour to check against: ~3x the auxiliary basis size (320 points
 per C/N/O, 180 per H at cc-pVTZ/cc-pVTZ-RI), meV agreement with RI-V, empirical
 exponent 3.07, crossover with quartic RI-V at ~350 electrons.
 """
+import hashlib
 import json
 import os
 import time
 
 import numpy as np
 import scipy.linalg
+from scipy.optimize import minimize, basinhopping
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
@@ -894,7 +896,6 @@ def _radii_settings(counts, r_min, r_max, l_max_second, regularization,
 
 
 def _radii_cache_path(element, basis, auxbasis, settings):
-    import hashlib
     key = json.dumps([element, str(basis), str(auxbasis), settings], sort_keys=True)
     tag = hashlib.sha1(key.encode()).hexdigest()[:12]
     d = os.path.join(os.path.dirname(__file__), 'data', 'radii_cache')
@@ -943,7 +944,6 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         magnesium's density altogether; it is kept for n_start=1 only so that
         every existing cached and shipped grid keeps its key.
     """
-    from scipy.optimize import minimize, basinhopping
 
     counts = counts or _DEFAULT_COUNTS
 

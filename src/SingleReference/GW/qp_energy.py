@@ -15,6 +15,12 @@ Sigma_c(i.omega), the contour deformation of `GW.contour_deformation` with its
 residues from the explicit chi0(w') or from the cosh transform of proj(tau),
 and the auxiliary-pole model of `GW.sum_over_poles` -- and `MODE_CONTINUATIONS`
 is the table of which pairs exist.
+
+`self_consistency` wraps a route in a loop instead of evaluating Sigma once:
+evGW/evGW0 (`GW.evGW`, eigenvalues reinjected) on any mode, and qsGW/qsGW0
+(`GW.qsGW`, orbitals and eigenvalues reinjected) on mode='casida'. A loop runs
+its mode's default continuation only; `calc_qp_energy`'s docstring gives the
+order the dispatch decides in.
 """
 import os
 import warnings
@@ -22,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from pyscf import scf
+from threadpoolctl import threadpool_limits
 
 from src.Base.constants import (get_method_info, DEFAULT_BROADENING_ETA,
                                 HARTREE_TO_EV)
@@ -37,6 +44,8 @@ from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.cc_polarizability import GWCCSelfEnergy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
+from src.SingleReference.GW import evGW  # module import: evGW imports this file
+from src.SingleReference.GW import qsGW  # module import: qsGW imports this file
 from src.Solvers.qp_equation import solve_qp_equation
 
 IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
@@ -44,6 +53,17 @@ IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
 #: `mode` values the evGW loop can drive, in its own naming.
 EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
               'imag-frequency': 'imagfrequency', 'space-time': 'space-time'}
+
+#: `self_consistency` values that enter the loop, and the screening each keeps:
+#: evGW rebuilds P0 and W from the iterate, evGW0 keeps the mean field's.
+EVGW_SCREENING = {'evgw': 'updated', 'ev': 'updated',
+                  'evgw0': 'fixed', 'ev0': 'fixed'}
+
+#: `self_consistency` values that enter the quasiparticle-self-consistent loop,
+#: and the screening each keeps: qsGW rebuilds W from the rotated orbitals,
+#: qsGW0 keeps the mean field's.
+QSGW_SCREENING = {'qsgw': 'updated', 'qs': 'updated',
+                  'qsgw0': 'fixed', 'qs0': 'fixed'}
 
 #: The `continuation` each `mode` can run; the first entry is that mode's
 #: default. A pair missing here is refused rather than approximated by a
@@ -200,16 +220,14 @@ def _continuation_of(mode_key, continuation, route_kwargs, return_z):
 
 
 def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
-                    spin_channel, eta, route_kwargs):
+                    spin_channel, screening, route_kwargs):
     """Quasiparticle energies in eV from the eigenvalue-self-consistent loop.
 
     The loop returns the whole converged spectrum, so the requested states are
     read straight out of it: an evGW quasiparticle energy IS the fixed point,
-    not a further correction applied to one.
+    not a further correction applied to one. `screening` is the loop's:
+    'updated' for evGW, 'fixed' for evGW0.
     """
-    # cycle: the loop asks this dispatcher for the spectrum every cycle
-    from src.SingleReference.GW.evGW import evgw_eigenvalues
-
     if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
         raise NotImplementedError(
             f'self_consistency=evGW drives GW@RPA only, not '
@@ -221,9 +239,8 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
                          f"{sorted(set(EVGW_MODES))}")
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
-    # Every cycle re-enters this function, so eta travels as a route keyword.
-    eps_qp, info = evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
-                                    eta=eta, **route_kwargs)
+    eps_qp, info = evGW.evgw_eigenvalues(mf, mol, mode=EVGW_MODES[mode_key],
+                                         screening=screening, **route_kwargs)
     if is_uhf:
         # the loop converges both channels at once; the caller asked for one
         nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]
@@ -238,6 +255,36 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
     return out
 
 
+def _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability, state,
+                    screening, route_kwargs):
+    """Quasiparticle energies in eV from the quasiparticle-self-consistent loop.
+
+    The loop returns the whole converged spectrum and its orbitals; the
+    requested states are read out of the spectrum and the orbitals ride in
+    `info['mo_coeff']`, since a qsGW energy without its orbital is half the
+    result. `screening` is the loop's: 'updated' for qsGW, 'fixed' for qsGW0.
+    """
+    if str(selfenergy).upper() != 'GW' or str(polarizability).upper() != 'RPA':
+        raise NotImplementedError(
+            f'self_consistency=qsGW drives GW@RPA only, not '
+            f'selfenergy={selfenergy!r} polarizability={polarizability!r}: the '
+            f'static self-energy is built from the plain GW amplitudes')
+    if mode_key != 'casida':
+        raise NotImplementedError(
+            f"mode={mode_key!r} has no qsGW loop: the static self-energy is a "
+            f"pole sum over the Casida spectrum, so the loop runs on mode='casida'")
+    eps_qp, mo_coeff, info = qsGW.qsgw_eigenvalues(mf, mol, screening=screening,
+                                                   **route_kwargs)
+    info['mo_coeff'] = mo_coeff
+    nocc = mol.nelectron // 2
+    states = _resolve_states(state, nocc)
+    out = {p: {'GW': float(eps_qp[p]) * HARTREE_TO_EV} for p in states}
+    out['qsgw_info'] = info
+    if not isinstance(state, list):
+        return out[states[0]]['GW']
+    return out
+
+
 def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    eta=DEFAULT_BROADENING_ETA, state='homo',
                    spin_channel='alpha', printSpectralFunction=False,
@@ -246,6 +293,27 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    eps_anchor=None, n_workers=None, continuation=None,
                    return_z=False, solver='auto', **route_kwargs):
     """Quasiparticle energies, in eV.
+
+    The dispatch decides in this order, every refusal before an integral is
+    built:
+      1. `mode` must be a key of `MODE_CONTINUATIONS`, and `continuation` (None
+         takes the mode's default: 'spectral' on 'casida', 'pade' on the two
+         imaginary-axis modes) must be one it pairs with; a route keyword only
+         another continuation reads is a TypeError (`_continuation_of`).
+      2. `solver` is checked (mode='casida': the dense-pair memory rule; any
+         other mode: 'auto' only), and a non-default `eta` is refused on the
+         imaginary-axis modes, which broaden nothing.
+      3. `self_consistency` picks the loop. A key of `EVGW_SCREENING` ('evGW',
+         'evGW0') enters `evGW.evgw_eigenvalues` and runs only the mode's
+         default continuation, so 'cd', 'laplace' and 'sop' are refused there;
+         a key of `QSGW_SCREENING` ('qsGW', 'qsGW0') enters
+         `qsGW.qsgw_eigenvalues`, mode='casida' only. Neither takes
+         `eps_anchor`, and the loop's own keywords ride in **route_kwargs.
+      4. Anything else is G0W0: an imaginary-axis mode goes to its driver with
+         the chosen continuation (the Pade drivers of `imaginary_axis` and
+         `space_time`, or `contour_deformation` for 'cd', 'laplace' and
+         'sop'), and mode='casida' solves the Lehmann sum over its spectrum
+         here, refusing any route keyword.
 
     selfenergy:     'GW'/'GWGammaInf'/'PSD1'...'PSD9', or a list of these.
     polarizability: screening of the Casida states feeding Sigma -- 'RPA'
@@ -312,12 +380,22 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     own eigenvalues. 'evGW' reinjects the quasiparticle
                     energies into G and P0 until they stop moving -- every
                     eigenvalue updated, DIIS-accelerated, convergence on the
-                    HOMO and LUMO, quadrature frozen at the first cycle. GW@RPA
-                    only, since that is what the loop drives.
+                    HOMO and LUMO, quadrature frozen at the first cycle. 'evGW0'
+                    reinjects them into G alone: the mean field's P0 and W
+                    stay, the poles of Sigma_c move; Casida route only. Both
+                    GW@RPA only, since that is what the loop drives.
+                    'qsGW' / 'qsGW0' run the quasiparticle-self-consistent loop
+                    of qsGW.py on the Casida route: orbitals and eigenvalues
+                    reinjected, W rebuilt (qsGW) or the mean field's kept
+                    (qsGW0); a list of states returns 'qsgw_info' with the
+                    orbitals. The loops' own keywords (max_cycle, tol, mixing,
+                    flow, ...) pass through **route_kwargs to evgw_eigenvalues
+                    and qsgw_eigenvalues.
     eps_anchor:     the eps_p that anchors w = eps_p + <Sigma_x - v_xc> +
                     Re Sigma_c(w), when it differs from the spectrum that built
                     the screening. That is the evGW case and the only one;
-                    None means the two coincide.
+                    None means the two coincide. The loops set their own and
+                    refuse it.
     qp_solver:      root selection. 'pole_strength' (default) returns the root
                     of largest weight Z, which deep valence and semicore states
                     need -- a Z ~ 0.03 satellite can sit closer to eps than the
@@ -328,8 +406,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     inside every evGW cycle on it). The
                     scan uses a thread pool by default of OMP_NUM_THREADS
                     threads, else one per CPU in the process's affinity mask,
-                    never more than that mask holds. n_workers=1, or
-                    threadpoolctl not being installed, gives the serial scan.
+                    never more than that mask holds. n_workers=1 gives the
+                    serial scan.
     """
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
@@ -350,30 +428,55 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
             f"chi0 on the imaginary axis and has no Casida eigenproblem to "
             f"choose a solver for. mode='casida' is the only route that has "
             f"one.")
-    if str(self_consistency).lower() in ('evgw', 'ev'):
+    if mode_key in IMAGINARY_AXIS_MODES and eta != DEFAULT_BROADENING_ETA:
+        # Neither route has a broadening to set: chi0 has the real denominator
+        # -2d/(d^2 + w^2) on the imaginary axis, and Sigma_c reaches the real
+        # axis by Pade or by contour deformation rather than at w + i.eta.
+        # Refused here rather than on the route, so that an evGW loop, whose
+        # every cycle calls back in with this eta, stops before its first one.
+        raise ValueError(
+            f"mode='{mode_key}' has no broadening: eta={eta!r} never "
+            f"reaches the self-energy, so the number returned would be the "
+            f"one at eta={DEFAULT_BROADENING_ETA!r} under another name. "
+            f"mode='casida' is the only route eta acts on.")
+    consistency = str(self_consistency).lower()
+    if eps_anchor is not None and consistency in {**EVGW_SCREENING, **QSGW_SCREENING}:
+        # the loops anchor on the mean field's eigenvalues (evGW) or on none
+        # (qsGW); casida_evgw_step takes an anchor for a single step
+        raise NotImplementedError(
+            f'self_consistency={self_consistency!r} sets its own anchor; '
+            f'eps_anchor has no place in it')
+    if consistency in EVGW_SCREENING:
         if continuation != MODE_CONTINUATIONS[mode_key][0]:
             raise ValueError(
-                f"self_consistency='evGW' drives continuation="
+                f"self_consistency={self_consistency!r} drives continuation="
                 f"{MODE_CONTINUATIONS[mode_key][0]!r} only, not "
                 f"{continuation!r}: the loop freezes its quadrature at the "
                 f"first cycle and reinjects eigenvalues, and every other "
                 f"continuation would have to freeze its own branch as well.")
-        # each evGW cycle calls back into this function, so the scan's thread
-        # count travels as a route keyword
-        if n_workers is not None:
-            route_kwargs = dict(route_kwargs, n_workers=n_workers)
+        # the loop takes the route's knobs by name, on the Casida route through
+        # its own step and on the imaginary axis by calling back into this
+        # function every cycle
+        route_kwargs = dict(route_kwargs, df=df, eta=eta,
+                            dm_correction=dm_correction, tda=tda,
+                            qp_solver=qp_solver, n_workers=n_workers)
         return _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability,
-                               state, spin_channel, eta, route_kwargs)
+                               state, spin_channel, EVGW_SCREENING[consistency],
+                               route_kwargs)
+    if consistency in QSGW_SCREENING:
+        # the loop builds its own density every cycle, so a density correction
+        # has nowhere to enter; the imaginary-axis knobs mean nothing to it.
+        # Its mode refusal lives in _qp_energy_qsgw: on mode='casida' the table
+        # above has already left 'spectral', the only continuation there is.
+        if dm_correction is not None:
+            raise NotImplementedError(
+                'self_consistency=qsGW builds the density from its own orbitals '
+                'every cycle; dm_correction has no place in it')
+        route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda,
+                            n_workers=n_workers)
+        return _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability,
+                               state, QSGW_SCREENING[consistency], route_kwargs)
     if mode_key in IMAGINARY_AXIS_MODES:
-        # Neither route has a broadening to set: chi0 has the real denominator
-        # -2d/(d^2 + w^2) on the imaginary axis, and Sigma_c reaches the real
-        # axis by Pade or by contour deformation rather than at w + i.eta.
-        if eta != DEFAULT_BROADENING_ETA:
-            raise ValueError(
-                f"mode='{mode_key}' has no broadening: eta={eta!r} never "
-                f"reaches the self-energy, so the number returned would be the "
-                f"one at eta={DEFAULT_BROADENING_ETA!r} under another name. "
-                f"mode='casida' is the only route eta acts on.")
         # the anchor is a named argument here and a route keyword there
         if eps_anchor is not None:
             route_kwargs = dict(route_kwargs, eps_anchor=eps_anchor)
@@ -387,24 +490,9 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
 
     is_uhf = isinstance(mf, scf.uhf.UHF)
     nocc = mf.nelec if is_uhf else mol.nelectron // 2
-    nocc_spin = (nocc[0] if spin_channel == 'alpha' else nocc[1]) if is_uhf else nocc
-    eps = get_orbital_energies(mf, representation='spatial')
+    nocc_spin = _channel(nocc, spin_channel, is_uhf)
     states = _resolve_states(state, nocc_spin)
-
-    # The reaction field's one-body term, None in the gas phase. Duchemin et
-    # al. Eq. (18) where it is available -- the self-polarization of the
-    # orbital carrying the added charge in the SCREENED reaction field, built
-    # once per mean field so this route and the imaginary-axis ones read the
-    # same array. `cohsex_correction` is the unrestricted fallback: it sums the
-    # BARE vtilde over every orbital and differs by 0.39 eV of quasiparticle
-    # gap on water in water.
-    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
-    if shift is not None:
-        sigma_solvent = np.diag(shift)
-    else:
-        sigma_solvent = solvent_static_selfenergy(mf, mol)
-        if isinstance(sigma_solvent, tuple):
-            sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
+    shift, sigma_solvent = _reaction_field_terms(mf, mol, nocc_spin, spin_channel)
 
     if polarizability.upper() in ('CCSD', 'CCSDT'):
         results = _qp_energy_cc_polarizability(
@@ -418,38 +506,19 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # Fail fast on typos rather than silently falling back to GW.
     method_infos = {m: get_method_info(m) for m in methods}
 
-    with bare_self_energy(mf, shift):
-        df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
-    spin_mode = 'unrestricted' if is_uhf else 'restricted'
-    lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri,
-                                     spin_mode=spin_mode, eta=eta)
-    se_solver = SelfEnergySolver(eps, df_coeff=df_coeff, eri_chemist=eri,
-                                 spin_mode=spin_mode, eta=eta)
-    w_aux = lr_solver.static_screening_aux(nocc)
-    spectrum = _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda,
-                                method_infos, methods, is_uhf, df)
+    setup = _casida_setup(mf, mol, df, eta, shift, is_uhf, nocc)
+    se_solver = setup['se_solver']
+    spectrum = _casida_spectrum(setup['lr_solver'], nocc, polarizability,
+                                setup['w_aux'], tda, method_infos, methods, is_uhf,
+                                df)
+    eri_w_singlet, eri_w_triplet, xc_diagonal = _channel_terms(
+        mf, mol, setup, df, dm_correction, sigma_solvent, spin_channel, is_uhf,
+        nocc)
 
-    # A vertex contracts against W: the auxiliary form under DF, the explicit
-    # four-index one otherwise.
-    if df:
-        eri_w_singlet = eri_w_triplet = w_aux
-    else:
-        eri_w_singlet, eri_w_triplet = lr_solver.construct_4d_w_rpa(nocc, spin_channel)
-
-    eps_spin = (eps[0] if spin_channel == 'alpha' else eps[1]) if is_uhf else eps
     # The equation is anchored on eps_p while the solvers above screen with
     # whatever spectrum `mf` carried; evGW is the case where the two differ.
-    if eps_anchor is None:
-        anchor_spin = eps_spin
-    else:
-        anchor = np.asarray(eps_anchor, float)
-        anchor_spin = ((anchor[0] if spin_channel == 'alpha' else anchor[1])
-                       if is_uhf else anchor)
-
-    # <Sigma_Hx - v_Hxc> is one matrix for the whole spectrum; built per state
-    # it was 85 % of an evGW cycle that asks for every orbital.
-    xc_diagonal = _static_correction(mf, mol, se_solver, dm_correction,
-                                     sigma_solvent, spin_channel, is_uhf)
+    anchor = setup['eps'] if eps_anchor is None else np.asarray(eps_anchor, float)
+    anchor_spin = _channel(anchor, spin_channel, is_uhf)
     energies = qp_energies_from_spectrum(
         se_solver, nocc, spectrum, method_infos, methods, spin_channel, states,
         eri_w_singlet, eri_w_triplet, is_uhf, df, anchor_spin, xc_diagonal,
@@ -499,6 +568,88 @@ def _two_electron_integrals(mol, mf, df, is_uhf):
         S_ab = mo_a.T @ mol.intor_symmetric('int1e_ovlp') @ mo_b
         df_coeff = (df_a, df_b, np.einsum('ia, pik -> pka', S_ab, df_a))
     return df_coeff, None
+
+
+def _channel(x, spin_channel, is_uhf):
+    """One spin channel's entry of a per-channel pair; `x` itself when restricted."""
+    if not is_uhf:
+        return x
+    return x[0] if spin_channel == 'alpha' else x[1]
+
+
+def _reaction_field_terms(mf, mol, nocc_spin, spin_channel):
+    """(shift, sigma_solvent): the environment's one-body terms, None in the gas
+    phase.
+
+    Duchemin et al. Eq. (18) where it is available -- the self-polarization of
+    the orbital carrying the added charge in the SCREENED reaction field, built
+    once per spectrum a mean field carries, so this route and the imaginary-axis
+    ones read the same array, in every evGW cycle as well; `sigma_solvent` is
+    then its diagonal. `cohsex_correction` is
+    the unrestricted fallback: it sums the BARE vtilde over every orbital and
+    differs by 0.39 eV of quasiparticle gap on water in water.
+    """
+    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
+    if shift is not None:
+        return shift, np.diag(shift)
+    sigma_solvent = solvent_static_selfenergy(mf, mol)
+    if isinstance(sigma_solvent, tuple):
+        sigma_solvent = sigma_solvent[0 if spin_channel == 'alpha' else 1]
+    return None, sigma_solvent
+
+
+def _casida_setup(mf, mol, df, eta, shift, is_uhf, nocc):
+    """What the Casida route builds from the mean field before a spectrum screens.
+
+    A dict: 'eps', the mean field's own spectrum; 'df_coeff' and 'eri', the
+    three-index factors or the chemist ERI, built with the environment off
+    where `shift` carries it (`bare_self_energy`); 'spin_mode'; 'lr_solver' and
+    'se_solver' on that spectrum; 'w_aux', the static RPA W_aux a vertex or a
+    BSE screening contracts against. None of it moves with the eigenvalues, so
+    an eigenvalue-self-consistent loop builds it once and rebuilds only the
+    Casida problem and the poles of Sigma_c per cycle.
+    """
+    eps = get_orbital_energies(mf, representation='spatial')
+    with bare_self_energy(mf, shift):
+        df_coeff, eri = _two_electron_integrals(mol, mf, df, is_uhf)
+    spin_mode = 'unrestricted' if is_uhf else 'restricted'
+    lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri,
+                                     spin_mode=spin_mode, eta=eta)
+    se_solver = SelfEnergySolver(eps, df_coeff=df_coeff, eri_chemist=eri,
+                                 spin_mode=spin_mode, eta=eta)
+    return {'eps': eps, 'df_coeff': df_coeff, 'eri': eri, 'spin_mode': spin_mode,
+            'lr_solver': lr_solver, 'se_solver': se_solver,
+            'w_aux': lr_solver.static_screening_aux(nocc)}
+
+
+def _channel_terms(mf, mol, setup, df, dm_correction, sigma_solvent, spin_channel,
+                   is_uhf, nocc, vertex=True):
+    """(eri_w_singlet, eri_w_triplet, xc_diagonal) of one spin channel.
+
+    A vertex contracts against W: the auxiliary form under DF, the explicit
+    four-index one otherwise, built only when `vertex` asks for it and None
+    without. <Sigma_Hx - v_Hxc> is one matrix for the whole spectrum; built per
+    state it costs a J/K and a grid build per orbital, which dominates a
+    cycle that asks for every orbital.
+    """
+    if df:
+        eri_w_singlet = eri_w_triplet = setup['w_aux']
+    elif not vertex:
+        eri_w_singlet = eri_w_triplet = None
+    else:
+        eri_w_singlet, eri_w_triplet = setup['lr_solver'].construct_4d_w_rpa(
+            nocc, spin_channel)
+    xc_diagonal = _static_correction(mf, mol, setup['se_solver'], dm_correction,
+                                     sigma_solvent, spin_channel, is_uhf)
+    return eri_w_singlet, eri_w_triplet, xc_diagonal
+
+
+def _move_poles(se_solver, eps):
+    """The poles of Sigma_c at `eps`; the amplitudes, the spectrum's, stay."""
+    if se_solver.spin_mode == 'unrestricted':
+        se_solver.eps_a, se_solver.eps_b = eps
+    else:
+        se_solver.eps = eps
 
 
 def _casida_spectrum(lr_solver, nocc, polarizability, w_aux, tda, method_infos,
@@ -648,7 +799,7 @@ def _positive_int_env(name):
 
 
 def _resolve_workers(n_workers, n_states):
-    """Threads for the per-state scan.
+    """Threads for the per-state scan, and for the qsGW static self-energy.
 
     The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
     too, else the CPUs in this thread's affinity mask. Never more than those
@@ -666,7 +817,7 @@ def _resolve_workers(n_workers, n_states):
     n_workers = int(n_workers)
     if n_workers > cpus:
         warnings.warn(
-            f'{n_workers} threads requested for the QP scan, but this thread may '
+            f'{n_workers} threads requested for a thread pool, but this thread may '
             f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
             f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
     return max(1, min(n_workers, cpus, n_states))
@@ -715,8 +866,7 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     qp_solver : str, root selection as in solve_qp_equation
     n_workers : int or None
         None takes OMP_NUM_THREADS, else the CPUs in the affinity mask; any
-        value is capped at that mask (see _resolve_workers); 1 is serial;
-        threadpoolctl not being installed also gives the serial scan.
+        value is capped at that mask (see _resolve_workers); 1 is serial.
 
     Returns
     -------
@@ -766,22 +916,8 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
     p0, out0 = solve_state(0)
     results[p0] = out0
     rest = range(1, len(states))
-    requested_workers = n_workers
     n_workers = _resolve_workers(n_workers, len(states))
     run_parallel = n_workers > 1 and len(states) > 1
-    if run_parallel:
-        try:
-            from threadpoolctl import threadpool_limits
-        except ImportError as exc:
-            if requested_workers is not None:
-                raise ImportError(
-                    "qp_energies_from_spectrum with n_workers > 1 needs "
-                    "threadpoolctl (pip install threadpoolctl); n_workers=1 "
-                    "is the serial scan") from exc
-            warnings.warn(
-                "threadpoolctl is not installed; running the per-state QP scan "
-                "serially.")
-            run_parallel = False
     if run_parallel:
         with threadpool_limits(limits=1, user_api='blas'):
             with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -792,6 +928,113 @@ def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
             p, out = solve_state(i)
             results[p] = out
     return results
+
+
+def casida_evgw_step(mf, mol, screening, df=True, eta=DEFAULT_BROADENING_ETA,
+                     dm_correction=None, tda=False, qp_solver='pole_strength',
+                     n_workers=None, eps_anchor=None, fixed_spectrum=None,
+                     fixed_rho=None):
+    """The map eps -> eps_new of an eigenvalue-self-consistent loop on the Casida
+    route: GW@RPA, every orbital, in Hartree, its setup built once.
+
+    screening: 'updated' (evGW) solves the RPA Casida problem on `eps` every
+        cycle; 'fixed' (evGW0) keeps the mean field's. Both put the poles of
+        Sigma_c at `eps` and anchor w = eps_p + <Sigma_x - v_xc> + Re Sigma_c(w)
+        on the mean field's eps_p.
+    eps_anchor: the eps_p the equation is anchored on, in place of the mean
+        field's eigenvalues; what a quasiparticle-self-consistent fixed point
+        needs, the Kohn-Sham Fock diagonal of its rotated density.
+    fixed_spectrum, fixed_rho: under 'fixed', the Casida solution (a dict as
+        _casida_spectrum returns) and its DF transition density (naux,
+        nexciton) to screen with, in place of the one built from `mf`; the
+        amplitudes are then that density contracted with `mf`'s own DF
+        factors, which is how the mean field's W meets rotated orbitals.
+        Both or neither; `mf` must carry `with_df`, whose auxiliary basis
+        does not move with the orbitals.
+    The other keywords are `calc_qp_energy`'s.
+
+    Built once, since none of it moves with the eigenvalues: the DF factors,
+    the static W (a vertex would read it; the loop refuses one) and
+    <Sigma_Hx - v_Hxc> of every spin channel. 'fixed' also keeps the one
+    self-energy solver, whose amplitude cache keys on the identity of X and Y;
+    'updated' takes a fresh one per spectrum for the same reason. The reaction
+    field of an attached environment does move: its Delta W screens with the
+    eigenvalues it is built at, so 'updated' rebuilds its term every cycle at
+    the iterate, as the imaginary-axis routes do through calc_qp_energy on the
+    shifted view, and 'fixed' keeps the mean field's with the rest of W.
+    """
+    if screening not in ('updated', 'fixed'):
+        raise ValueError(f"screening={screening!r}: choose 'updated' or 'fixed'")
+    if screening != 'fixed' and (fixed_spectrum is not None or fixed_rho is not None):
+        raise ValueError("fixed_spectrum and fixed_rho belong to screening='fixed'")
+    if (fixed_spectrum is None) != (fixed_rho is None):
+        raise ValueError('fixed_spectrum and fixed_rho come together: the Casida '
+                         'solution and its DF transition density')
+    if fixed_rho is not None and getattr(mf, 'with_df', None) is None:
+        # without with_df the factors decompose the MO-basis ERI, and their
+        # auxiliary index follows mf's orbitals, not the one fixed_rho was built in
+        raise NotImplementedError(
+            'fixed_rho is an auxiliary-space object and needs a fixed auxiliary '
+            'basis: attach one with mf.density_fit() or mf.with_df = df.DF(mol)')
+    is_uhf = isinstance(mf, scf.uhf.UHF)
+    nocc = mf.nelec if is_uhf else mol.nelectron // 2
+    channels = ('alpha', 'beta') if is_uhf else ('alpha',)
+    methods = ['GW']
+    method_infos = {'GW': get_method_info('GW')}
+
+    fields = {ch: _reaction_field_terms(mf, mol, _channel(nocc, ch, is_uhf), ch)
+              for ch in channels}
+    setup = _casida_setup(mf, mol, df, eta, fields['alpha'][0], is_uhf, nocc)
+    eps0 = np.asarray(setup['eps'], float)
+    states = list(range(eps0.shape[-1]))
+    # the reaction field screens with the iterate under 'updated', so there it
+    # is added per cycle and left out of the terms built once
+    follow = screening == 'updated' and any(f[1] is not None for f in fields.values())
+    # the loop refuses every vertex, so no four-index W is built for one
+    terms = {ch: _channel_terms(mf, mol, setup, df, dm_correction,
+                                None if follow else fields[ch][1], ch, is_uhf, nocc,
+                                vertex=False)
+             for ch in channels}
+    if screening == 'fixed' and fixed_spectrum is None:
+        spectrum_mf = _casida_spectrum(setup['lr_solver'], nocc, 'RPA',
+                                       setup['w_aux'], tda, method_infos, methods,
+                                       is_uhf, df)
+    elif screening == 'fixed':
+        spectrum_mf = fixed_spectrum
+        _, X_f, Y_f = fixed_spectrum['singlet']
+        setup['se_solver'].preset_transition_density(nocc, X_f, Y_f, fixed_rho)
+    anchor = eps0 if eps_anchor is None else np.asarray(eps_anchor, float)
+
+    def step(eps):
+        eps = np.asarray(eps, float)
+        if screening == 'fixed':
+            spectrum, se_solver = spectrum_mf, setup['se_solver']
+            _move_poles(se_solver, eps)
+        else:
+            lr_solver = LinearResponseSolver(eps, coeff_df=setup['df_coeff'],
+                                             eri_chemist=setup['eri'],
+                                             spin_mode=setup['spin_mode'], eta=eta)
+            spectrum = _casida_spectrum(lr_solver, nocc, 'RPA', setup['w_aux'], tda,
+                                        method_infos, methods, is_uhf, df)
+            se_solver = SelfEnergySolver(eps, df_coeff=setup['df_coeff'],
+                                         eri_chemist=setup['eri'],
+                                         spin_mode=setup['spin_mode'], eta=eta)
+        view = evGW.shifted_mean_field(mf, eps) if follow else None
+        out = []
+        for ch in channels:
+            eri_w_singlet, eri_w_triplet, xc_diagonal = terms[ch]
+            if follow:
+                sigma_solvent = _reaction_field_terms(
+                    view, mol, _channel(nocc, ch, is_uhf), ch)[1]
+                xc_diagonal = xc_diagonal + np.diag(np.asarray(sigma_solvent))
+            energies = qp_energies_from_spectrum(
+                se_solver, nocc, spectrum, method_infos, methods, ch, states,
+                eri_w_singlet, eri_w_triplet, is_uhf, df, _channel(anchor, ch, is_uhf),
+                xc_diagonal, qp_solver=qp_solver, n_workers=n_workers)
+            out.append([energies[p]['GW'] for p in states])
+        return np.asarray(out, float).reshape(eps0.shape)
+
+    return step
 
 
 def _print_spectral_function(se_solver, p_state, method, qp_ev, nocc, omega_val,

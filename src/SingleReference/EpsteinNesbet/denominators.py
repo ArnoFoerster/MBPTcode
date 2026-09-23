@@ -8,12 +8,14 @@ determinant-wise (Jiang & Engel) distinction.
 """
 import numpy as np
 
+from src.Base.pyscf_interface import get_two_electron_integrals_chemist
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import _denom_restricted
 from src.SingleReference.EpsteinNesbet.shifts import (
     epstein_nesbet_shift_restricted_spinadapted,
     epstein_nesbet_shift_restricted_spinresolved)
 from src.SingleReference.LinearResponse.linear_response import (
-    static_screened_coulomb_aux, static_screened_coulomb_chemist)
+    static_screened_coulomb_aux, static_screened_coulomb_chemist,
+    static_screened_coulomb_chemist_uhf)
 
 
 def restricted_channel_shifts(dress, B_aa, g_oooo, g_vvvv, O, vidx_abs,
@@ -493,9 +495,6 @@ def _build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bb
                 "u2_denom_dress={'singles': 'screened', ...} needs mol= and "
                 "mf_eval= (the raw per-spin chemist ERI and RPA screening are "
                 "built from them) -- not passed to _build_dressed_denoms_uhf.")
-        from src.Base.pyscf_interface import get_two_electron_integrals_chemist
-        from src.SingleReference.LinearResponse.linear_response import (
-            static_screened_coulomb_chemist_uhf)
         eri_aa, eri_ab, eri_bb = get_two_electron_integrals_chemist(
             mol, mf_eval, representation='spatial')
         eri_aa_w, eri_bb_w, eri_ab_w = eri_aa[w, w, w, w], eri_bb[w, w, w, w], eri_ab[w, w, w, w]

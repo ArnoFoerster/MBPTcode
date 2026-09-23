@@ -54,15 +54,28 @@ def check_ccsd_limit_vs_pyscf():
     eom = EOMCC(mf, level='ccsd', t_amps=(t1, t2, t3))
     ok_ecc = abs(eom.e_cc - (mycc.e_tot - mol.energy_nuc())) < 1e-10
 
-    res_ee = eom.kernel('ee', nroots=6)
+    # LiH's EE spectrum has a 6-fold degenerate cluster starting right at the
+    # 5th root (0.1659177594 Ha, x6), just past nroots=6's cutoff: request a
+    # few extra roots from BOTH non-Hermitian Davidson solvers (the same
+    # margin eom.py's transition_densities() uses for its left-vector solve,
+    # see eom.py:413) and compare only the lowest 6, since either solver can
+    # otherwise land partway into that cluster and silently swap a member.
+    # max_space is raised because reaching further into a 6-dimensional
+    # degenerate subspace needs a bigger Krylov space to convergence to the
+    # same default tol -- confirmed directly: at the default max_space=30,
+    # nroots=10 here converges the lowest state to only 8.6e-6 of the exact
+    # value; max_space=60 recovers it to 9.2e-9.
+    nstates = 6
+    margin = 4
+    res_ee = eom.kernel('ee', nroots=nstates + margin, max_space=60)
     res_ip = eom.kernel('ip', nroots=4)
     res_ea = eom.kernel('ea', nroots=4)
 
-    e_ee = np.sort(np.atleast_1d(mycc.eeccsd(nroots=6)[0]))
+    e_ee = np.sort(np.atleast_1d(mycc.eeccsd(nroots=nstates + margin)[0]))[:nstates]
     e_ip = np.sort(np.atleast_1d(mycc.ipccsd(nroots=4)[0]))
     e_ea = np.sort(np.atleast_1d(mycc.eaccsd(nroots=4)[0]))
 
-    d_ee = np.max(np.abs(np.sort(res_ee.omega) - e_ee))
+    d_ee = np.max(np.abs(np.sort(res_ee.omega)[:nstates] - e_ee))
     d_ip = np.max(np.abs(np.sort(res_ip.omega) - e_ip))
     d_ea = np.max(np.abs(np.sort(res_ea.omega) - e_ea))
 
@@ -100,7 +113,13 @@ def check_ccsdt_vs_determinant_space():
     ok_t3 = np.linalg.norm(t3) > 1e-3
     print(f"T3 genuinely nonzero for LiH (|t3|={np.linalg.norm(t3):.2e}): {'OK' if ok_t3 else 'FAIL'}")
 
-    res_ee = eom.kernel('ee', nroots=6)
+    # see check_ccsd_limit_vs_pyscf(): request extra EE roots so a dropped
+    # member of a degenerate cluster doesn't land inside the compared window,
+    # and a wider Krylov space so reaching that cluster still converges the
+    # lowest 6 roots to the default tol.
+    nstates_ee = 6
+    margin = 4
+    res_ee = eom.kernel('ee', nroots=nstates_ee + margin, max_space=60)
     res_ip = eom.kernel('ip', nroots=4)
     res_ea = eom.kernel('ea', nroots=4, tol=1e-12, max_cycle=200, max_space=40)
 
@@ -120,7 +139,7 @@ def check_ccsdt_vs_determinant_space():
     idx = basis_ea.manifold_indices(3)
     w_ea = np.sort(np.linalg.eigvals(np.asarray(Hbar_ea[np.ix_(idx, idx)].todense())).real) - eom.e_cc
 
-    d_ee = np.max(np.abs(np.sort(res_ee.omega) - w_ee[:6]))
+    d_ee = np.max(np.abs(np.sort(res_ee.omega)[:nstates_ee] - w_ee[:nstates_ee]))
     d_ip = np.max(np.abs(np.sort(res_ip.omega) - w_ip[:4]))
     d_ea = np.max(np.abs(np.sort(res_ea.omega) - w_ea[:4]))
 

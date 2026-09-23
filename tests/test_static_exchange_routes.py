@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import dft, gto
+from threadpoolctl import threadpool_limits
 
 from src.Base.constants import HARTREE_TO_EV
 from src.Base.isdf_jk import isdf_jk
@@ -34,7 +35,16 @@ if __name__ == '__main__':
     nocc = mol.nelectron // 2
     states = list(range(nocc - 3, nocc + 3))
     mf = isdf_jk(dft.RKS(mol, xc='LRC-WPBEh'), auxbasis='cc-pvdz-ri', n_start=6)
-    mf.kernel()
+    # C and H at n_start=6 aren't in the shipped table, so this falls through
+    # to optimize_atomic_radii's live search (lazily run on first use, inside
+    # kernel()) or its git-ignored cache. That search is a numerically
+    # differentiated descent under threaded BLAS: a different reduction order
+    # moves L-BFGS-B onto a different local minimum (see
+    # optimize_atomic_radii's docstring in src/Base/separable_ri.py), and
+    # check 4 below moves by tens of meV between minima. Pin BLAS to one
+    # thread so the radii search -- and this test -- are reproducible.
+    with threadpool_limits(limits=1, user_api='blas'):
+        mf.kernel()
     all_ok = True
 
     # 1. Streamed and stored density fitting are one expression.
