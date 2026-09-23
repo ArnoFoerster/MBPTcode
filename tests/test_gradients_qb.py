@@ -1,7 +1,7 @@
 """Fast gates for src/gradients (Toelle-route analytic GW/BSE gradients).
 
-H4/sto-3g tier (seconds): the closed-form RPA layer against wicks
-production RPA, the diagonal qb-EOM QP solve against the dense supermatrix
+H4/sto-3g tier (seconds): the closed-form RPA layer against the production
+RPA solver, the diagonal qb-EOM QP solve against the dense supermatrix
 and the production graphical G0W0, the static BSE kernel against
 static_screened_coulomb_chemist, and a parameter-space FD gate on the
 RPA partials. The full nuclear-gradient FD battery (minutes) lives in
@@ -47,11 +47,11 @@ def test_rpa_closed_form(h4):
     lr = LinearResponseSolver(mf.mo_energy, eri_chemist=eri, spin_mode='restricted')
     assert abs(qb.e_corr() - rpa_correlation_energy_casida(lr, nocc)) < 1e-11
     Aw, Bw = lr.build_casida_matrices(nocc, lBSE=False)
-    om_wicks, _, _ = CasidaSolver(Aw, Bw).solve()
-    assert np.abs(np.sort(qb.omega) - np.sort(om_wicks)).max() < 1e-10
+    om_ref, _, _ = CasidaSolver(Aw, Bw).solve()
+    assert np.abs(np.sort(qb.omega) - np.sort(om_ref)).max() < 1e-10
 
 
-def test_qp_vs_dense_and_wicks(h4):
+def test_qp_diag_vs_dense_and_selfenergy_newton(h4):
     mol, mf, eri, nocc, norb = h4
     from src.SingleReference.GW.self_energy import SelfEnergySolver
     from src.Solvers.qp_equation import solve_qp_equation_newton
@@ -69,9 +69,9 @@ def test_qp_vs_dense_and_wicks(h4):
         chi_a = se.get_chi_a(nocc, X, Y, p_state=p)
         func = lambda w: w - mf.mo_energy[p] - np.real(
             se.calculate_self_energy(p, w, nocc, om, chi_a, None, vertex_mode='GW'))
-        w_wicks = solve_qp_equation_newton(func, mf.mo_energy[p], tol=1e-12,
-                                           max_iter=200)
-        assert abs(w_mine - w_wicks) < 1e-9
+        w_newton = solve_qp_equation_newton(func, mf.mo_energy[p], tol=1e-12,
+                                            max_iter=200)
+        assert abs(w_mine - w_newton) < 1e-9
 
 
 @pytest.fixture(scope='module')
@@ -202,13 +202,13 @@ def test_blocks_refuse_gradients_rather_than_guess(h4):
         correlation_gradients(mol, mf, [(gF, G4)], eri_mo=built)
 
 
-def test_bse_kernel_vs_wicks(h4):
+def test_bse_kernel_vs_static_screened_coulomb(h4):
     mol, mf, eri, nocc, norb = h4
     b = BSEqb(mf, eri, nocc, screening='rpa', bse_tda=False, qp_orbs='all')
     V = b.qp.Vbare
     W_mine = eri - 4.0 * np.einsum('pqI,IJ,rsJ->pqrs', V, b.Pinv, V, optimize=True)
-    W_wicks = np.asarray(static_screened_coulomb_chemist(mf.mo_energy, eri, nocc))
-    assert np.abs(W_mine - W_wicks).max() < 1e-10
+    W_ref = np.asarray(static_screened_coulomb_chemist(mf.mo_energy, eri, nocc))
+    assert np.abs(W_mine - W_ref).max() < 1e-10
 
 
 def test_rpa_partials_param_fd(h4):

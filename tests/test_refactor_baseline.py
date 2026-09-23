@@ -1,6 +1,6 @@
 """The refactor baseline still describes this tree.
 
-`tools/refactor_gates/record_baseline.py` recorded what the GW/BSE surface code
+The baseline recorder recorded what the GW/BSE surface code
 computes -- quasiparticle energies by eight routes, BSE roots by four drivers,
 the three pieces of E_0, every surface's energy, gradient and diagnostics, and
 the production drivers' own JSON -- on one frozen tree, as JSON text. Every
@@ -25,12 +25,12 @@ and the three E_0 terms on water/Hartree-Fock. The rest of the record --
 eight-route quasiparticle audits, the BSE drivers, every surface gradient, the
 campaign drivers -- is minutes to hours and runs only under
 REFACTOR_BASELINE_FULL=1, by re-running the recorder and comparing its output
-against the stored record with `tools/refactor_gates/compare_baselines.py`.
+against the stored record with the baseline comparison tool.
 
-`tests/baseline_3f09ac0.json` is wicks' own recorded baseline, copied here
-verbatim: `tools/refactor_gates/` (the recorder and `compare_baselines.py`)
-is out of scope for this port, so REFACTOR_BASELINE_FULL=1 has nothing to
-re-run against and that one test stays skipped.
+`tests/baseline_3f09ac0.json` is a recorded baseline, copied here
+verbatim: the recorder and the comparison tool are out of scope for this
+port, so REFACTOR_BASELINE_FULL=1 has nothing to re-run against and that
+one test stays skipped.
 """
 import glob
 import json
@@ -51,8 +51,8 @@ from src.properties.optimize import MeanFieldSurface
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 GATES = REPO / 'tools' / 'refactor_gates'
-#: Where the copied baseline lives: tests/, since tools/refactor_gates/ was not
-#: ported (record_baseline.py and compare_baselines.py are out of scope here).
+#: Where the copied baseline lives: tests/, since the recorder was not
+#: ported (it and the comparison tool are out of scope here).
 BASELINE_DIR = pathlib.Path(__file__).resolve().parent
 
 #: Set to 1 to re-run the whole record rather than the two cheap items.

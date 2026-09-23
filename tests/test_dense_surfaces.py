@@ -449,11 +449,11 @@ def test_the_quasiparticle_shift_reaches_a_kohn_sham_surface():
 
 
 def solvated_pair(mol):
-    """(PCM-relaxed mean field, mean field with a wicks environment attached).
+    """(PCM-relaxed mean field, mean field with an `Environment` attached).
 
     The two markers of a continuum, and NEITHER IMPLIES THE OTHER: pyscf's PCM
     relaxes the orbitals inside the reaction field and leaves `with_solvent`,
-    while a wicks environment is attached after the SCF as `with_screening` and
+    while an `Environment` is attached after the SCF as `with_screening` and
     dresses the interaction the post-SCF methods see. A guard that watched only
     one would let the other through.
     """

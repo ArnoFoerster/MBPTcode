@@ -41,7 +41,7 @@ def response_kernel(mf, environment=True):
     gradient, and a displaced geometry gets a new object, so the cache cannot
     go stale.
     """
-    key = '_wicks_response_kernel' + ('' if environment else '_gas')
+    key = '_cached_response_kernel' + ('' if environment else '_gas')
     fn = getattr(mf, key, None)
     if fn is None:
         if not hasattr(mf, 'with_solvent'):

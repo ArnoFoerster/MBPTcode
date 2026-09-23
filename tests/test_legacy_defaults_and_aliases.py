@@ -18,8 +18,8 @@ once, and each cost a comparison that looked sound:
               against; the old spelling is accepted for one release and sets
               the same number.
 
-`tools/gradient_tests/systems.py` (the `tier`/`size_class` alias on the
-benchmark table) is out of scope for this port, so that gate is not here.
+The benchmark table's `tier`/`size_class` alias is out of scope for this
+port, so that gate is not here.
 
 The qp_window default is NOT flipped: this class solves the frontier set the
 campaigns ran, QPStates('frontier', 2), and it is gated here so a later

@@ -1,6 +1,6 @@
 {
  "water": {
-  "driver": "tools/qp_route_audit/run_routes.py",
+  "driver": "route audit",
   "argv": [
    "--system",
    "water",
@@ -39,7 +39,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -337,7 +336,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -635,7 +633,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -916,7 +913,7 @@
   ]
  },
  "formaldehyde": {
-  "driver": "tools/qp_route_audit/run_routes.py",
+  "driver": "route audit",
   "argv": [
    "--system",
    "formaldehyde",
@@ -955,7 +952,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -1280,7 +1276,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -1605,7 +1600,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -1913,7 +1907,7 @@
   ]
  },
  "thioformaldehyde": {
-  "driver": "tools/qp_route_audit/run_routes.py",
+  "driver": "route audit",
   "argv": [
    "--system",
    "thioformaldehyde",
@@ -1952,7 +1946,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -2280,7 +2273,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",
@@ -2608,7 +2600,6 @@
     "eta_requested": 0.001,
     "qp_solver": "pole_strength",
     "study": "",
-    "wicks_commit": "unknown",
     "threads": "2",
     "slurm_job": "",
     "slurm_task": "",

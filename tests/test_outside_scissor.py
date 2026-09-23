@@ -76,8 +76,8 @@ from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.rpa_bse_surface import RPABSESurface
 from src.properties.surfaces import potential_energy_surface
 
-#: wicks' own baseline_3f09ac0.json, copied verbatim: tools/refactor_gates/
-#: was not ported, so the record lives beside the test that reads it.
+#: A recorded baseline, copied verbatim: the baseline recorder was not
+#: ported, so the record lives beside the test that reads it.
 GATES = pathlib.Path(__file__).resolve().parent
 
 #: The two tiers the default window calibrates to on water, in eV, and the

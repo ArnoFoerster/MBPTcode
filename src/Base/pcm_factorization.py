@@ -24,7 +24,7 @@ import numpy as np
 import scipy.linalg
 
 #: Attribute the factorization is cached under, on the PCM object itself.
-_CACHE = '_wicks_pcm_lu'
+_CACHE = '_cached_pcm_lu'
 
 
 def _factorization(obj, K):
@@ -82,8 +82,8 @@ def factorize_once(with_solvent):
     Idempotent, and safe on an object that is rebuilt: the cache is keyed on
     the identity of K, so a `build()` that replaces the matrix invalidates it.
     """
-    if with_solvent is None or getattr(with_solvent, '_wicks_factorized', False):
+    if with_solvent is None or getattr(with_solvent, '_cached_factorization', False):
         return with_solvent
     with_solvent._get_vind = _get_vind.__get__(with_solvent)
-    with_solvent._wicks_factorized = True
+    with_solvent._cached_factorization = True
     return with_solvent

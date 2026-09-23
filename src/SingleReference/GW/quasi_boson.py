@@ -308,7 +308,7 @@ def couplings_V(eri_mo, nocc):
 
     The singlet spin factor for the self-energy/supermatrix is applied at
     the point of use (sqrt(2) per coupling => factor 2 in |W|^2), pinned
-    against wicks SelfEnergySolver in the quasiparticle gate.
+    against `SelfEnergySolver` in the quasiparticle gate.
     """
     b = as_blocks(eri_mo, nocc)
     return b.pqov.reshape(b.norb, b.norb, b.n_ov)

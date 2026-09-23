@@ -1,6 +1,6 @@
 """`polarizable_sites_from_potfile`: a `PolarizableSites` built by cppe.
 
-Undamped, cppe's own dipole-dipole coupling and wicks's hand-rolled
+Undamped, cppe's own dipole-dipole coupling and `PolarizableSites`' hand-rolled
 `dipole_interaction_matrix` agree to machine precision (checked directly
 against the classes here), so that is the case that pins the interface
 against the environment it wraps rather than against a second, independent
@@ -80,7 +80,7 @@ def test_it_satisfies_the_environment_protocol(undamped_env):
 
 
 def test_undamped_matches_the_hand_built_environment_exactly(undamped_env):
-    """No exclusions, no damping: cppe's B and wicks's own are the same matrix,
+    """No exclusions, no damping: cppe's B and `PolarizableSites`' own are the same matrix,
     so the folded kernel is too -- this is what pins the interface's field
     integrals, coordinate units, and B convention against the object it wraps."""
     _, auxmol = molecules()

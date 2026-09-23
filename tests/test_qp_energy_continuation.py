@@ -3,8 +3,7 @@
 `mode` is the chi0 realization and `continuation` is how that chi0 reaches the
 real axis. The reference for the three continuation-free ones is
 `tests/qp_energy_continuation_baseline.json`, the `qp_routes` section of
-wicks' `tools/refactor_gates/baseline_3f09ac0.json`, which holds what
-`tools/qp_route_audit/run_routes.py` returned on water, formaldehyde and
+a recorded baseline of what the route audit returned on water, formaldehyde and
 thioformaldehyde -- cc-pVDZ, density-fitted RHF on cc-pvdz-ri, conv_tol 1e-12,
 conv_tol_grad 1e-11 -- through the gradient chain's
 `qp_gradient_space_time(want_grad=False)`. The geometries, the shell counts and

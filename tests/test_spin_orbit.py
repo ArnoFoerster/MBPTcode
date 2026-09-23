@@ -12,10 +12,9 @@ Run the cheap tier alone with
     -k "operator or el_sayed or rotation or hermitian or normalization or amfi
         or koseki or sublevels or ground_state or qdpt"
 
-Absolute magnitudes are NOT gated. The spin prefactors are derived
-(plans/SPIN_ORBIT_COUPLING_PLAN.md §2), not measured; G6 of that plan --
-perturbative 1c+SOC against a two-component X2C-TDA -- is what would let a
-number be quoted, and it is not built yet.
+Absolute magnitudes are NOT gated. The spin prefactors are derived, not
+measured; a perturbative 1c+SOC check against a two-component X2C-TDA is
+what would let a number be quoted, and it is not built yet.
 """
 import os
 import sys

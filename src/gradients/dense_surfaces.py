@@ -127,7 +127,7 @@ def refuse_a_solvated_mean_field(mf, mol, surface):
 
     TWO MARKERS, EITHER OF WHICH IS A CONTINUUM. pyscf's PCM sits on the mean
     field as `with_solvent` and has already relaxed the orbitals inside the
-    reaction field; a wicks environment reaches post-SCF code as the attached
+    reaction field; an `Environment` reaches post-SCF code as the attached
     `with_screening` and dresses the interaction. The second is asked through
     `dresses_interaction`, whose answer is a property of the environment and not
     of the basis it is asked in, so `mol` -- the basis this route expands

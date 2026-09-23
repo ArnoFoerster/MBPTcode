@@ -34,7 +34,7 @@ they differ by several tenths of a percent in B. Both are the same physical
 model (Thole, Chem. Phys. 59, 341 (1981)) at a different implementation
 convention, not a bug in either; a site list read through this module carries
 cppe's damping throughout, one built by hand through `PolarizableSites`
-carries wicks's own, and the two are not meant to be mixed.
+carries its own, and the two are not meant to be mixed.
 """
 import numpy as np
 
