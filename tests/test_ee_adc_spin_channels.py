@@ -38,12 +38,14 @@ NREF = 8        # roots of the spin=None and pyscf references, above NROOTS so
 
 
 def check(ok, label, detail=''):
+    """Print one verdict line and return `ok` as a bool."""
     tail = f'   ({detail})' if detail else ''
     print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
     return bool(ok)
 
 
 def build():
+    """Water / cc-pVDZ and its RHF, converged to 1e-10."""
     mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol)
@@ -71,11 +73,13 @@ def solve(mf, **kw):
 
 
 def residuals(aop, e, Z):
+    """||A z_k - e_k z_k|| for every column z_k of Z."""
     return np.array([np.linalg.norm(np.asarray(aop(Z[:, k])).ravel() - e[k] * Z[:, k])
                      for k in range(Z.shape[1])])
 
 
 def test_level(mol, mf, level, method):
+    """Both channels at one ADC level against spin=None and pyscf."""
     aop, diag, no, nv = operator(mol, mf, level)
     ok = check(np.abs(diag - ee_r_sigma.spin_flip_vector(diag, no, nv, level)).max()
                < 1e-12, 'the diagonal is flip-symmetric, so one entry per pair '
