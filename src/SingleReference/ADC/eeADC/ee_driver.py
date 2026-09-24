@@ -18,6 +18,8 @@ Routes:
 
 level in ('adc1', 'adc2', 'adc2x', 'adc3').
 """
+import warnings
+
 import numpy as np
 from pyscf import scf as _scf
 
@@ -207,6 +209,10 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
             return restrict(np.asarray(raw(embed(np.asarray(u).ravel()))).ravel())
 
         diag, n = diag[reps], len(reps)
+        if n < nroots:
+            warnings.warn(f"the {spin} channel holds {n} states, fewer than "
+                          f"nroots={nroots}; returning {n}", RuntimeWarning,
+                          stacklevel=3)
 
     if not matrix_free:
         H = np.column_stack([aop(np.eye(n)[:, k]) for k in range(n)])
