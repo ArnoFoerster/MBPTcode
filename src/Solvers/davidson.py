@@ -101,7 +101,9 @@ def davidson(A, diag, k=1, v0=None, follow=False, tol=1e-8,
             uKu = u @ Ku
             if abs(uKu) > 1e-300:
                 Kr = Kr - ((u @ Kr) / uKu) * Ku
-            t = Kr
+            # normalised first, so the 1e-9 below tests linear dependence, not size:
+            # a large diagonal shrinks Kr under it while r is still above tol
+            t = Kr / np.linalg.norm(Kr)
             # double modified Gram-Schmidt against subspace + accepted dirs
             for _ in range(2):
                 t -= V @ (V.T @ t)
