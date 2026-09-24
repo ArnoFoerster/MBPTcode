@@ -10,6 +10,9 @@ ADC(2)-x and ADC(3), for each channel:
     parity <z|F z>, and the singlets those of pyscf's RADC, to 1e-6 eV;
   * return_parity gives the spin=None roots that same parity.
 
+The channel checks repeat at ADC(1), with the 1s frozen, density fitted and EN
+dressed, and return_parity off the spin-free route must raise.
+
 And davidson itself must warn when it stops with a root above tol. The parity
 reference is computed here from spin_flip_vector, not through return_parity.
 
@@ -24,9 +27,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import adc, gto, scf
 
-from src.Base.pyscf_interface import (get_orbital_energies,
+from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                       get_two_electron_integrals_chemist)
-from src.SingleReference.ADC.eeADC import ee_r_sigma
+from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers.davidson import davidson
 
@@ -54,13 +57,20 @@ def build():
     return mol, mf
 
 
-def operator(mol, mf, level):
-    """The spin-free route's dense-integral operator, as _solve_spin_free builds it."""
-    eps = get_orbital_energies(mf, representation='spatial')
-    V = get_two_electron_integrals_chemist(
-        mol, mf, representation='spatial').transpose(0, 2, 1, 3)
-    no = mol.nelectron // 2
-    aop, diag, _ = ee_r_sigma.build_operator(eps, V, no, level=level)
+def operator(mol, mf, level, frozen=0, df=False, en_dress=None):
+    """The spin-free route's operator, as _solve_spin_free builds it."""
+    eps = get_orbital_energies(mf, representation='spatial')[frozen:]
+    no = mol.nelectron // 2 - frozen
+    act = slice(frozen, None)
+    if df:
+        B = DFIntegrals.from_scf(mol, mf.density_fit()).B_aa[:, act, act]
+        aop, diag, _ = ee_r_sigma_df.build_operator(eps, B, no, level=level,
+                                                    en_dress=en_dress)
+    else:
+        V = get_two_electron_integrals_chemist(
+            mol, mf, representation='spatial')[act, act, act, act]
+        aop, diag, _ = ee_r_sigma.build_operator(eps, V.transpose(0, 2, 1, 3), no,
+                                                 level=level, en_dress=en_dress)
     return aop, diag, no, len(eps) - no
 
 
@@ -78,14 +88,17 @@ def residuals(aop, e, Z):
                      for k in range(Z.shape[1])])
 
 
-def test_level(mol, mf, level, method):
-    """Both channels at one ADC level against spin=None and pyscf."""
-    aop, diag, no, nv = operator(mol, mf, level)
+def channels(mol, mf, level, **kw):
+    """The spin=None parity split and both channel solves at one setting.
+
+    Returns (ok, singlet energies, spin=None parities)."""
+    aop, diag, no, nv = operator(mol, mf, level, kw.get('frozen', 0),
+                                 kw.get('df', False), kw.get('en_dress'))
     ok = check(np.abs(diag - ee_r_sigma.spin_flip_vector(diag, no, nv, level)).max()
                < 1e-12, 'the diagonal is flip-symmetric, so one entry per pair '
                'preconditions the channel')
 
-    (e_all, Z_all), warned = solve(mf, level=level, nroots=NREF)
+    (e_all, Z_all), warned = solve(mf, level=level, nroots=NREF, **kw)
     parity = np.array([Z_all[:, k] @ ee_r_sigma.spin_flip_vector(Z_all[:, k], no,
                                                                   nv, level)
                        for k in range(NREF)])
@@ -95,14 +108,9 @@ def test_level(mol, mf, level, method):
     split = {'singlet': np.sort(e_all[parity > 0.99]),
              'triplet': np.sort(e_all[parity < -0.99])}
 
-    a = adc.RADC(mf)
-    a.method, a.method_type, a.verbose = method, 'ee', 0
-    # pyscf's defaults leave ~1e-6 eV at ADC(2)-x; tightened, ~1e-8
-    a.conv_tol, a.tol_residual, a.max_cycle = 1e-12, 1e-8, 500
-    pyscf_singlets = np.sort(np.asarray(a.kernel(nroots=NREF)[0]))
-
+    singlets = None
     for spin in ('singlet', 'triplet'):
-        (e, Z), warned = solve(mf, level=level, nroots=NROOTS, spin=spin)
+        (e, Z), warned = solve(mf, level=level, nroots=NROOTS, spin=spin, **kw)
         r = residuals(aop, e, Z)
         ok &= check(r.max() < 1e-6, f'{spin}: every root converged',
                     f'residuals {", ".join(f"{x:.1e}" for x in r)}')
@@ -114,9 +122,20 @@ def test_level(mol, mf, level, method):
         ok &= check(d < 1e-6, f'{spin}: the spin=None roots of that parity',
                     f'max |dE| {d:.1e} eV')
         if spin == 'singlet':
-            d = np.abs(np.sort(e) - pyscf_singlets[:NROOTS]).max() * HARTREE_TO_EV
-            ok &= check(d < 1e-6, "singlet: pyscf's RADC", f'max |dE| {d:.1e} eV')
+            singlets = np.sort(e)
+    return ok, singlets, parity
 
+
+def test_level(mol, mf, level, method):
+    """Both channels at one ADC level against spin=None and pyscf."""
+    ok, singlets, parity = channels(mol, mf, level)
+    a = adc.RADC(mf)
+    a.method, a.method_type, a.verbose = method, 'ee', 0
+    # pyscf's defaults leave ~1e-6 eV at ADC(2)-x; tightened, ~1e-8
+    a.conv_tol, a.tol_residual, a.max_cycle = 1e-12, 1e-8, 500
+    ref = np.sort(np.asarray(a.kernel(nroots=NREF)[0]))[:NROOTS]
+    d = np.abs(singlets - ref).max() * HARTREE_TO_EV
+    ok &= check(d < 1e-6, "singlet: pyscf's RADC", f'max |dE| {d:.1e} eV')
     try:
         (_, _, got), _ = solve(mf, level=level, nroots=NREF, return_parity=True)
         d = np.abs(np.asarray(got) - parity).max()
@@ -125,6 +144,27 @@ def test_level(mol, mf, level, method):
     except TypeError as exc:
         ok &= check(False, 'return_parity labels the spin=None roots', str(exc))
     return ok
+
+
+def test_variants(mol, mf):
+    """The channel basis at ADC(1), with a frozen core, DF and EN dressing."""
+    ok = True
+    for label, level, kw in (('adc1, singles only', 'adc1', {}),
+                             ('adc2, 1s frozen', 'adc2', {'frozen': 1}),
+                             ('adc2, density fitted', 'adc2', {'df': True}),
+                             ('adc2, EN dressed', 'adc2', {'en_dress': True})):
+        print(f'  --- {label} ---')
+        ok &= channels(mol, mf, level, **kw)[0]
+    try:
+        solve_ee_adc(mf, level='adc2', nroots=1, route='spinorbital',
+                     return_parity=True)
+        raised = 'no error'
+    except ValueError:
+        raised = ''
+    except TypeError as exc:
+        raised = str(exc)
+    return ok & check(not raised, 'return_parity off the spin-free route raises '
+                      'ValueError', raised)
 
 
 def test_davidson_warns():
@@ -152,6 +192,8 @@ if __name__ == '__main__':
     for level, method in LEVELS:
         print(f'\n=== water / cc-pVDZ, {level} ===')
         all_ok &= test_level(mol, mf, level, method)
+    print('\n=== water / cc-pVDZ, variants ===')
+    all_ok &= test_variants(mol, mf)
     print('\n=== davidson ===')
     all_ok &= test_davidson_warns()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
