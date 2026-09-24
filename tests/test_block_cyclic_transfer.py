@@ -4,7 +4,7 @@
 point-to-point Send/Recv. An MPI count is a C int, so one message holds at most
 2**31 - 1 elements; above that Recv raises MPI_ERR_ARG. At 8 ranks that is any
 matrix past N = 131071, e.g. a Casida matrix of 134640 pair states. The transfers
-therefore go in row slabs of at most `_MAX_MESSAGE` elements.
+therefore go in pieces of at most `_MAX_MESSAGE` elements.
 
 No MPI here: eight threads stand in for eight ranks on a 4 x 2 grid, joined by a
 comm that refuses any message over a limit. With the cap lowered to that limit,
