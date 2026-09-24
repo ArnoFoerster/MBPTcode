@@ -7,17 +7,23 @@ ADC(2)-x and ADC(3), for each channel:
   * every returned root is converged, ||A z - e z|| < 1e-6 with A the route's
     own operator, and the solve raises no RuntimeWarning;
   * its energies are those of the unprojected solve (spin=None) split by the
-    parity <z|F z>, and the singlets those of pyscf's RADC, to 1e-6 eV;
-  * return_parity gives the spin=None roots that same parity.
+    parity <z|F z>, and the singlets those of pyscf's RADC, to 1e-6 eV, with
+    pyscf's own convergence flag read from its log;
+  * return_parity gives the spin=None roots that same parity;
+  * a spin=None solve from randomised seeds finds the same roots, so the
+    unit-vector guess the references share skipped no symmetry block.
 
 The channel checks repeat at ADC(1), with the 1s frozen, density fitted and EN
-dressed, and return_parity off the spin-free route must raise.
+dressed; a channel smaller than nroots must warn, and return_parity off the
+spin-free route must raise. The two channel bases must split the vector space
+orthonormally at every level, checked without a molecule.
 
 And davidson itself must warn when it stops with a root above tol. The parity
 reference is computed here from spin_flip_vector, not through return_parity.
 
 Run: python tests/test_ee_adc_spin_channels.py
 """
+import io
 import os
 import sys
 import warnings
@@ -26,6 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import adc, gto, scf
+from pyscf.lib import logger
 
 from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                       get_two_electron_integrals_chemist)
@@ -123,17 +130,41 @@ def channels(mol, mf, level, **kw):
                     f'max |dE| {d:.1e} eV')
         if spin == 'singlet':
             singlets = np.sort(e)
-    return ok, singlets, parity
+    return ok, singlets, parity, np.sort(e_all)
+
+
+def random_guess(mol, mf, level):
+    """The spin=None roots from seeds with a random admixture: every symmetry
+    block carries weight from the start, which unit-vector seeds do not."""
+    aop, diag, _, _ = operator(mol, mf, level)
+    want = 2 * NREF + 4
+    V = np.zeros((len(diag), want))
+    V[np.argsort(diag)[:want], np.arange(want)] = 1.0
+    V += 1e-2 * np.random.default_rng(3).standard_normal(V.shape)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        e, _ = davidson(aop, diag, k=NREF, v0=V)
+    return np.sort(e), [w for w in caught if issubclass(w.category, RuntimeWarning)]
 
 
 def test_level(mol, mf, level, method):
     """Both channels at one ADC level against spin=None and pyscf."""
-    ok, singlets, parity = channels(mol, mf, level)
+    ok, singlets, parity, e_all = channels(mol, mf, level)
+    e_rand, warned = random_guess(mol, mf, level)
+    d = np.abs(e_rand - e_all).max() * HARTREE_TO_EV
+    ok &= check(not warned and d < 1e-6, 'spin=None: a randomised guess finds '
+                'the same roots, so no symmetry block was skipped',
+                f'max |dE| {d:.1e} eV')
     a = adc.RADC(mf)
-    a.method, a.method_type, a.verbose = method, 'ee', 0
-    # pyscf's defaults leave ~1e-6 eV at ADC(2)-x; tightened, ~1e-8
-    a.conv_tol, a.tol_residual, a.max_cycle = 1e-12, 1e-8, 500
+    a.method, a.method_type = method, 'ee'
+    # pyscf's defaults leave ~1e-6 eV at ADC(2)-x; this setting its own flag
+    # calls converged (1e-12 / 1e-8 it does not), and it says so only in its log
+    a.conv_tol, a.tol_residual, a.max_cycle = 1e-10, 1e-7, 500
+    log = io.StringIO()
+    a.verbose, a.stdout = logger.WARN, log
     ref = np.sort(np.asarray(a.kernel(nroots=NREF)[0]))[:NROOTS]
+    ok &= check('did not converge' not in log.getvalue(),
+                "pyscf's RADC reference converged by its own flag")
     d = np.abs(singlets - ref).max() * HARTREE_TO_EV
     ok &= check(d < 1e-6, "singlet: pyscf's RADC", f'max |dE| {d:.1e} eV')
     try:
@@ -155,6 +186,13 @@ def test_variants(mol, mf):
                              ('adc2, EN dressed', 'adc2', {'en_dress': True})):
         print(f'  --- {label} ---')
         ok &= channels(mol, mf, level, **kw)[0]
+    h2 = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
+    (e, _), warned = solve(scf.RHF(h2).run(), level='adc1', nroots=3,
+                           spin='singlet')
+    ok &= check(len(e) == 1 and any('fewer than nroots' in str(w.message)
+                                    for w in warned),
+                'a channel smaller than nroots warns and returns what it holds',
+                f'{len(e)} root(s), {len(warned)} warning(s)')
     try:
         solve_ee_adc(mf, level='adc2', nroots=1, route='spinorbital',
                      return_parity=True)
@@ -167,10 +205,40 @@ def test_variants(mol, mf):
                       'ValueError', raised)
 
 
+def test_channel_basis():
+    """Both channel bases, molecule-free: each orthonormal and inside its flip
+    eigenspace, restrict the adjoint of embed, together a basis of the space."""
+    try:
+        from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+    except ImportError as exc:
+        return check(False, 'the channel bases exist', str(exc))
+    ok = True
+    rng = np.random.default_rng(5)
+    for level in ('adc1', 'adc2', 'adc3'):
+        err, count = 0.0, True
+        for no, nv in ((1, 1), (2, 3), (3, 4)):
+            n = ee_r_sigma.dimensions(no, nv, level)['nH']
+            cols = []
+            for sgn in (+1.0, -1.0):
+                embed, restrict, reps = _channel_basis(n, no, nv, level, sgn)
+                U = np.column_stack([embed(c) for c in np.eye(len(reps))])
+                FU = np.column_stack([ee_r_sigma.spin_flip_vector(u, no, nv, level)
+                                      for u in U.T])
+                v = rng.standard_normal(n)
+                err = max(err, np.abs(FU - sgn * U).max(),
+                          np.abs(restrict(v) - U.T @ v).max())
+                cols.append(U)
+            Q = np.column_stack(cols)
+            count &= Q.shape == (n, n)
+            err = max(err, np.abs(Q.T @ Q - np.eye(n)).max() if count else np.inf)
+        ok &= check(count and err < 1e-14, f'{level}: singlet and triplet bases '
+                    'split the space orthonormally', f'max error {err:.1e}')
+    return ok
+
+
 def test_davidson_warns():
     """A root left above tol is named in a RuntimeWarning; a converged run is silent."""
-    # Hartree-scale diagonal, as an excitation spectrum: a correction below
-    # davidson's absolute 1e-9 cutoff ends a wider spectrum above tol=1e-8
+    # a Hartree-scale diagonal, as an excitation spectrum
     rng = np.random.default_rng(7)
     M = 1e-3 * rng.standard_normal((300, 300))
     A = np.diag(np.linspace(0.2, 2.0, 300)) + M + M.T
@@ -194,6 +262,8 @@ if __name__ == '__main__':
         all_ok &= test_level(mol, mf, level, method)
     print('\n=== water / cc-pVDZ, variants ===')
     all_ok &= test_variants(mol, mf)
+    print('\n=== channel bases ===')
+    all_ok &= test_channel_basis()
     print('\n=== davidson ===')
     all_ok &= test_davidson_warns()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
