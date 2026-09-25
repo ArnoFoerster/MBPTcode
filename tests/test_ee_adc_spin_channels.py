@@ -15,7 +15,9 @@ ADC(2)-x and ADC(3), for each channel:
 
 The channel checks repeat at ADC(1), with the 1s frozen, density fitted and EN
 dressed; a channel smaller than nroots must warn, and return_parity off the
-spin-free route must raise. The two channel bases must split the vector space
+spin-free route must raise. The dense path (matrix_free=False) must give the
+triplets of a dense spin=None solve, each with return_parity -1, on water /
+STO-3G where it is cheap. The two channel bases must split the vector space
 orthonormally at every level, checked without a molecule.
 
 And davidson itself must warn when it stops with a root above tol. The parity
@@ -41,6 +43,7 @@ from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers.davidson import davidson
 
 HARTREE_TO_EV = 27.211386245988
+WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 LEVELS = [('adc2', 'adc(2)'), ('adc2x', 'adc(2)-x'), ('adc3', 'adc(3)')]
 NROOTS = 3
 NREF = 8        # roots of the spin=None and pyscf references, above NROOTS so
@@ -54,10 +57,9 @@ def check(ok, label, detail=''):
     return bool(ok)
 
 
-def build():
-    """Water / cc-pVDZ and its RHF, converged to 1e-10."""
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
-                basis='cc-pvdz', verbose=0)
+def build(basis='cc-pvdz'):
+    """Water and its RHF, converged to 1e-10."""
+    mol = gto.M(atom=WATER, basis=basis, verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-10
     mf.kernel()
@@ -186,13 +188,14 @@ def test_variants(mol, mf):
                              ('adc2, EN dressed', 'adc2', {'en_dress': True})):
         print(f'  --- {label} ---')
         ok &= channels(mol, mf, level, **kw)[0]
-    h2 = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
-    (e, _), warned = solve(scf.RHF(h2).run(), level='adc1', nroots=3,
-                           spin='singlet')
-    ok &= check(len(e) == 1 and any('fewer than nroots' in str(w.message)
-                                    for w in warned),
-                'a channel smaller than nroots warns and returns what it holds',
-                f'{len(e)} root(s), {len(warned)} warning(s)')
+    h2 = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)).run()
+    for path, matrix_free in (('davidson', True), ('dense', False)):
+        (e, _), warned = solve(h2, level='adc1', nroots=3, spin='singlet',
+                               matrix_free=matrix_free)
+        ok &= check(len(e) == 1 and any('fewer than nroots' in str(w.message)
+                                        for w in warned),
+                    f'{path}: a channel smaller than nroots warns and returns '
+                    'what it holds', f'{len(e)} root(s), {len(warned)} warning(s)')
     try:
         solve_ee_adc(mf, level='adc2', nroots=1, route='spinorbital',
                      return_parity=True)
@@ -203,6 +206,38 @@ def test_variants(mol, mf):
         raised = str(exc)
     return ok & check(not raised, 'return_parity off the spin-free route raises '
                       'ValueError', raised)
+
+
+def test_dense():
+    """The triplet channel on the dense path, against a dense spin=None solve
+    split by the parity computed here, which uses neither the Davidson nor the
+    channel basis; water / STO-3G keeps both solves cheap."""
+    mol, mf = build('sto-3g')
+    ok = True
+    for level in ('adc2', 'adc3'):
+        aop, _, no, nv = operator(mol, mf, level)
+        (e_all, Z_all), _ = solve(mf, level=level, nroots=NREF, matrix_free=False)
+        parity = np.array([Z_all[:, k] @ ee_r_sigma.spin_flip_vector(Z_all[:, k], no,
+                                                                      nv, level)
+                           for k in range(NREF)])
+        ref = np.sort(e_all[parity < -0.99])[:NROOTS]
+        try:
+            (e, Z, got), warned = solve(mf, level=level, nroots=NROOTS,
+                                        spin='triplet', matrix_free=False,
+                                        return_parity=True)
+        except TypeError as exc:
+            ok &= check(False, f'{level}: dense triplet with return_parity', str(exc))
+            continue
+        r = residuals(aop, e, Z)
+        d = (np.abs(np.sort(e) - ref).max() * HARTREE_TO_EV
+             if len(ref) == NROOTS else np.inf)
+        ok &= check(not warned and r.max() < 1e-6 and d < 1e-6,
+                    f'{level}: dense triplets are those of a dense spin=None solve',
+                    f'max |dE| {d:.1e} eV, max residual {r.max():.1e}')
+        dp = np.abs(np.asarray(got) + 1.0).max()
+        ok &= check(dp < 1e-8, f'{level}: return_parity gives -1 on each',
+                    f'max |p + 1| {dp:.1e}')
+    return ok
 
 
 def test_channel_basis():
@@ -262,6 +297,8 @@ if __name__ == '__main__':
         all_ok &= test_level(mol, mf, level, method)
     print('\n=== water / cc-pVDZ, variants ===')
     all_ok &= test_variants(mol, mf)
+    print('\n=== water / STO-3G, dense path ===')
+    all_ok &= test_dense()
     print('\n=== channel bases ===')
     all_ok &= test_channel_basis()
     print('\n=== davidson ===')
