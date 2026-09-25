@@ -5,6 +5,8 @@ Distinct from ADC's own solve.py::davidson_follow, which is built on pyscf's
 davidson1 and root-follows a single state (the HOMO IP/EA) by overlap with a
 reference vector.
 """
+import warnings
+
 import numpy as np
 
 
@@ -29,7 +31,8 @@ def davidson(A, diag, k=1, v0=None, follow=False, tol=1e-8,
         (Robust interior targeting of a blind energy shift is NOT provided --
         these operators have clustered/degenerate interior spectra; use follow
         with a physically-motivated guess instead.)
-    tol: residual-norm convergence threshold (all k roots).
+    tol: residual-norm convergence threshold (all k roots). Roots still above
+        it when the iterations end are named in a RuntimeWarning.
     Returns (w,) or (w, X): eigenvalues ascending and, if return_vectors, the
         (n, k) eigenvectors.
     """
@@ -65,6 +68,7 @@ def davidson(A, diag, k=1, v0=None, follow=False, tol=1e-8,
 
     theta = np.zeros(k)
     X = V[:, :k].copy()
+    rnorm = np.full(k, np.inf)
     for _ in range(max_iter):
         H = V.T @ AV
         w, S = np.linalg.eigh(0.5 * (H + H.T))
@@ -97,7 +101,9 @@ def davidson(A, diag, k=1, v0=None, follow=False, tol=1e-8,
             uKu = u @ Ku
             if abs(uKu) > 1e-300:
                 Kr = Kr - ((u @ Kr) / uKu) * Ku
-            t = Kr
+            # normalised first, so the 1e-9 below tests linear dependence, not size:
+            # a large diagonal shrinks Kr under it while r is still above tol
+            t = Kr / np.linalg.norm(Kr)
             # double modified Gram-Schmidt against subspace + accepted dirs
             for _ in range(2):
                 t -= V @ (V.T @ t)
@@ -136,6 +142,15 @@ def davidson(A, diag, k=1, v0=None, follow=False, tol=1e-8,
         V = np.column_stack([V, Nd])
         AV = np.column_stack([AV, AN])
 
+    bad = np.flatnonzero(rnorm >= tol)
+    if bad.size:
+        # an unconverged Ritz pair is otherwise indistinguishable from a
+        # converged one to the caller
+        warnings.warn(
+            f"davidson: {bad.size} of {k} roots still above tol={tol:g} when "
+            f"the iterations stopped (max_iter={max_iter}): " + ", ".join(
+                f"{theta[i]:.8g} (residual {rnorm[i]:.2e})" for i in bad),
+            RuntimeWarning, stacklevel=2)
     order = np.argsort(theta)
     theta, X = theta[order], X[:, order]
     return (theta, X) if return_vectors else theta

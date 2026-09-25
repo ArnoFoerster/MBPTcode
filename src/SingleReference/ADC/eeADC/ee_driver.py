@@ -18,6 +18,8 @@ Routes:
 
 level in ('adc1', 'adc2', 'adc2x', 'adc3').
 """
+import warnings
+
 import numpy as np
 from pyscf import scf as _scf
 
@@ -34,7 +36,6 @@ DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
                         # open-shell sector hit exactly that
 
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
-_PROJECT_SHIFT = 1.0e4          # pushes the unwanted channel out of the way
 
 
 def spin_orbital_arrays(mf, mol=None):
@@ -63,16 +64,24 @@ def spin_orbital_arrays(mf, mol=None):
 def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  df=False, spin=None, matrix_free=True, conv_tol=1e-8,
                  en_dress=None, frozen=0, auxbasis=None,
-                 ms_sector='auto', max_subspace=None):
+                 ms_sector='auto', max_subspace=None, return_parity=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors.
 
     en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
     hole-hole + particle-particle dressing. It dresses the DOUBLES amplitude
     denominators only -- the singles amplitude and the supermatrix keep their
-    MP zeroth order, matching the IP/EA side's en_dress convention."""
+    MP zeroth order, matching the IP/EA side's en_dress convention.
+
+    return_parity: spin-free route only; returns (e, Z, parity) with
+    parity[k] = <Z_k | F Z_k> under the alpha<->beta flip F: +1 for a singlet
+    (or the Ms = 0 part of a quintet, which only the doubles can form), -1 for
+    an Ms = 0 triplet. It labels the roots of a spin=None solve."""
     mol = mol if mol is not None else mf.mol
     if spin is not None and spin not in _CHANNEL:
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
+    if return_parity and route != 'spinfree':
+        raise ValueError("return_parity is defined on route='spinfree' only, "
+                         "where the alpha<->beta flip acts on the vector layout")
     from src.SingleReference.ADC.eeADC.ee_en import validate_dress
     en_dress = validate_dress(en_dress)
     if en_dress is not None and level == 'adc1':
@@ -100,7 +109,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
         raise ValueError(f"route={route!r}; expected 'spinfree', "
                          "'unrestricted' or 'spinorbital'")
     return _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
-                            conv_tol, en_dress, frozen, auxbasis, max_subspace)
+                            conv_tol, en_dress, frozen, auxbasis, max_subspace,
+                            return_parity)
 
 
 def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
@@ -148,7 +158,7 @@ def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
 
 def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                      conv_tol, en_dress=None, frozen=0, auxbasis=None,
-                     max_subspace=None):
+                     max_subspace=None, return_parity=False):
     """max_subspace caps the Davidson subspace. It is a MEMORY knob, and at
     scale the dominant one: the doubles vector is no^2 nv^2, so naphthalene at
     aug-cc-pVTZ carries 2.5 GB per trial vector and the default subspace of
@@ -187,49 +197,71 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
             eps, V, no, level=level, en_dress=en_dress)
 
     n = dims['nH']
-    v0 = None
+    embed = None
     if spin is not None:
-        sgn = _CHANNEL[spin]
-
-        def project(v):
-            return 0.5 * (v + sgn * ee_r_sigma.spin_flip_vector(
-                np.asarray(v).ravel(), no, nv, level))
-
+        # one channel: solve in its flip-pair basis, where it is a coordinate
+        # subspace; shifting the other channel away instead stalls the
+        # Davidson, as the Ms-sector note in _solve_spin_orbital records
+        embed, restrict, reps = _channel_basis(n, no, nv, level, _CHANNEL[spin])
         raw = aop
 
-        def aop(v):
-            v = np.asarray(v).ravel()
-            p = project(v)
-            # the complement is shifted far away rather than left at zero, so
-            # a lowest-root Davidson cannot converge onto the other channel
-            return raw(p) + _PROJECT_SHIFT * (v - p)
+        def aop(u):
+            return restrict(np.asarray(raw(embed(np.asarray(u).ravel()))).ravel())
 
-        # seed inside the channel: a raw unit vector is half in the shifted
-        # complement, which costs the Davidson several iterations to shed
-        v0 = _channel_guess(diag, project, n, nroots)
+        diag, n = diag[reps], len(reps)
+        if n < nroots:
+            warnings.warn(f"the {spin} channel holds {n} states, fewer than "
+                          f"nroots={nroots}; returning {n}", RuntimeWarning,
+                          stacklevel=3)
 
     if not matrix_free:
         H = np.column_stack([aop(np.eye(n)[:, k]) for k in range(n)])
         e, Z = np.linalg.eigh(0.5 * (H + H.T))
-        return e[:nroots], Z[:, :nroots]
-    e, Z = davidson(aop, diag, k=nroots, v0=v0, tol=conv_tol,
-                    max_subspace=max_subspace)
-    return np.asarray(e), np.asarray(Z)
+        e, Z = e[:nroots], Z[:, :nroots]
+    else:
+        e, Z = davidson(aop, diag, k=nroots, tol=conv_tol,
+                        max_subspace=max_subspace)
+        e, Z = np.asarray(e), np.asarray(Z)
+    if embed is not None:
+        Z = np.column_stack([embed(Z[:, k]) for k in range(Z.shape[1])])
+    if not return_parity:
+        return e, Z
+    parity = np.array([Z[:, k] @ ee_r_sigma.spin_flip_vector(Z[:, k], no, nv, level)
+                       for k in range(Z.shape[1])])
+    return e, Z, parity
 
 
-def _channel_guess(diag, project, n, nroots, pool=4):
-    """Orthonormal starting vectors already inside the requested spin
-    channel: project the lowest-diagonal unit vectors and re-orthonormalize,
-    dropping anything the projector annihilated."""
-    order = np.argsort(diag)[:max(pool * nroots, nroots)]
-    cols = []
-    for k in order:
-        e = np.zeros(n); e[k] = 1.0
-        cols.append(project(e))
-    Q, R = np.linalg.qr(np.column_stack(cols))
-    keep = np.abs(np.diag(R)) > 1e-8
-    Q = Q[:, keep]
-    return Q[:, :nroots] if Q.shape[1] >= nroots else None
+def _channel_basis(n, no, nv, level, sgn):
+    """(embed, restrict, reps): an orthonormal basis of one spin channel.
+
+    The alpha<->beta flip F permutes the vector's entries, so its sgn
+    eigenspace is spanned by (e_k + sgn e_F(k)) / sqrt(2) over the pairs
+    k < F(k), plus e_k at every fixed point k = F(k) when sgn = +1. The +1
+    space holds the singlets and the Ms = 0 part of the quintets the doubles
+    can form; the -1 space holds the Ms = 0 triplets. embed maps coefficients
+    in that basis to the full vector, restrict(embed(u)) == u, and reps picks
+    one full-vector entry per basis vector (the operator diagonal is the same
+    on both entries of a pair)."""
+    mate = ee_r_sigma.spin_flip_vector(np.arange(n), no, nv, level)
+    k = np.arange(n)
+    fixed = mate == k
+    reps = k[(k < mate) | (fixed & (sgn > 0))]
+    pair = ~fixed[reps]
+    mate = mate[reps[pair]]
+    w = np.where(pair, np.sqrt(0.5), 1.0)
+
+    def embed(u):
+        v = np.zeros(n)
+        v[reps] = w * u
+        v[mate] = sgn * w[pair] * u[pair]
+        return v
+
+    def restrict(v):
+        u = w * v[reps]
+        u[pair] += sgn * w[pair] * v[mate]
+        return u
+
+    return embed, restrict, reps
 
 
 def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
@@ -281,9 +313,9 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
         # so restrict rather than shift: build the operator on the selected
         # indices only. Shifting the complement to a large value instead makes
         # the Davidson subspace matrix span ~1e4 against ~0.1 and it fails to
-        # converge. (The singlet/triplet projection elsewhere is NOT a
-        # coordinate subspace -- it mixes the two singles blocks -- so the
-        # shift is the right tool there.)
+        # converge. (The spin-free singlet/triplet channel is not a coordinate
+        # subspace of the configurations either, but it is one of the flip-pair
+        # basis, which is how _channel_basis restricts it.)
         raw, keep = aop, mask
         n_full = len(mask)
 
