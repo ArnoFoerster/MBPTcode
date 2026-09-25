@@ -81,12 +81,12 @@ def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
 def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
                      converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
                      diis_size=EVGW_DIIS_SIZE, diis_start=EVGW_DIIS_START,
-                     damping=EVGW_DAMPING, eps_init=None, verbose=False,
-                     **route_kw):
+                     damping=EVGW_DAMPING, eps_init=None, update=None,
+                     verbose=False, **route_kw):
     """(eps_qp, info): the eigenvalue-self-consistent GW spectrum, in Hartree.
 
-    `eps_qp` is the full array -- every orbital is updated and every orbital
-    screens.
+    `eps_qp` is the full array -- every orbital is updated (unless `update`
+    holds some at the mean field) and every orbital screens.
 
     mode: 'casida', 'imagfrequency' or 'space-time', and `route_kw` goes to
         that route: the Casida route's step takes it by name, the others
@@ -102,6 +102,18 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
         DIIS is off.
     eps_init: the first iterate, default the mean field's eigenvalues; a
         converged spectrum handed in tests whether it is a fixed point.
+    update: orbitals allowed to move, as flat (channel, orbital) indices.
+        Default None updates every one, which is evGW as defined. Restricting
+        it holds the rest at their mean-field values in G and P0, and hence in
+        W -- the windowed self-consistency several codes use. It exists because
+        a deep core state 300-500 eV from mu is continued to the real axis by
+        Pade, where that continuation is least reliable: G0W0 reports such an
+        energy but never uses it, while evGW feeds it back into the screening.
+        Freezing the states outside a frontier window is how that feedback is
+        separated from the self-consistency itself. Under evGW0 the screening
+        is the mean field's anyway, so a frozen orbital is held in G alone. An
+        `eps_init` is taken at the mean field on the frozen orbitals, so the
+        first cycle already screens with them held.
 
     An unrestricted reference is driven channel by channel: the spectrum is
     (2, nmo), the anchor and the convergence test are per channel, DIIS runs
@@ -135,6 +147,13 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
         raise ValueError('converge_on and states do not overlap, so nothing '
                          'would decide convergence')
     untested = np.setdiff1d(flat, tested)
+    moving = (flat if update is None
+              else np.intersect1d(np.atleast_1d(update).astype(int), flat))
+    if moving.size == 0:
+        raise ValueError('update selects no orbital, so the spectrum could '
+                         'never move and the loop would be a fixed point of '
+                         'nothing')
+    frozen = np.setdiff1d(flat, moving)
 
     if mode == 'casida':
         step = qp_energy.casida_evgw_step(mf, mol, screening, **route_kw)
@@ -148,11 +167,19 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
     eps = eps0.copy() if eps_init is None else np.asarray(eps_init, float).copy()
     if eps.shape != eps0.shape:
         raise ValueError(f'eps_init has shape {eps.shape}, the spectrum {eps0.shape}')
+    if frozen.size:
+        np.put(eps, frozen, eps0.ravel()[frozen])
     history, untested_history = [], []
     converged = False
     accel = DIIS(int(diis_size), start_iter=int(diis_start)) if diis_size else None
     for cycle in range(int(max_cycle)):
         eps_new = step(eps)
+        if frozen.size:
+            # Held at the mean field, so they screen but never carry their own
+            # correction back into W.
+            flat_new = np.array(eps_new, float).ravel()
+            flat_new[frozen] = eps0.ravel()[frozen]
+            eps_new = flat_new.reshape(eps0.shape)
         residual = (eps_new - eps).ravel()
         delta = float(np.abs(residual[tested]).max())
         rest = (float(np.abs(residual[untested]).max())
@@ -186,6 +213,7 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
             RuntimeWarning, stacklevel=2)
 
     return eps, {'cycles': len(history), 'converged': converged,
+                 'frozen': frozen,
                  'history': history, 'states': states, 'mode': mode,
                  'screening': screening, 'converge_on': tested,
                  'residual_untested': untested_history[-1],

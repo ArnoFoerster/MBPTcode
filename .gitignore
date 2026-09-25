@@ -14,3 +14,4 @@ __pycache__/
 # optimization (see separable_ri.optimize_atomic_radii), machine-specific, and
 # regenerated on demand -- the shipped tables in data/ are the portable ones.
 src/Base/data/radii_cache/
+.claude/

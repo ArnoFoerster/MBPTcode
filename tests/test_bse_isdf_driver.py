@@ -60,10 +60,18 @@ def main():
                                       factors=info['factors'])
     # Regression pins: the ISDF grid is deterministic, so these hold to far
     # better than the tolerance.
-    d_gw = abs(np.sort(om)[0] * HARTREE_TO_EV - 7.8613)
-    d_ks = abs(np.sort(om0)[0] * HARTREE_TO_EV - 5.0724)
-    ok &= check(d_gw < 5e-3, "qp='G0W0' lowest root pin 7.8613 eV", f'|d| {d_gw:.1e}')
-    ok &= check(d_ks < 5e-3, 'qp=False lowest root pin 5.0724 eV', f'|d| {d_ks:.1e}')
+    #
+    # Up from 7.8613 and 5.0724, which were fitted on H and O radii from a
+    # single ungated descent. The radii table holds one row per
+    # (element, basis, auxbasis, counts) now, so one request can no longer be
+    # served different grids, and the probe-gated multi-start row wins. Against
+    # `solve_bse_df` on the same mean field the lowest root sits 18.2 meV out,
+    # where the ungated radii sat 11.3 meV: the gated grid is the
+    # better-evidenced one, not the closer one on this molecule.
+    d_gw = abs(np.sort(om)[0] * HARTREE_TO_EV - 7.8682)
+    d_ks = abs(np.sort(om0)[0] * HARTREE_TO_EV - 5.0778)
+    ok &= check(d_gw < 5e-3, "qp='G0W0' lowest root pin 7.8682 eV", f'|d| {d_gw:.1e}')
+    ok &= check(d_ks < 5e-3, 'qp=False lowest root pin 5.0778 eV', f'|d| {d_ks:.1e}')
     ok &= check((np.asarray(om) > 0).all() and info['min_eig_amb'] > 0
                 and np.isfinite(info['oscillator_strength']).all()
                 and 'qp' in info['timings'] and 'factors' not in info0['timings'],
@@ -104,6 +112,15 @@ def main():
     ok &= check(abs(amb_probe - amb_dense) < 1e-8,
                 'matrix-free probe == dense min eig(A-B)',
                 f'|d| {abs(amb_probe - amb_dense):.1e}')
+    # The probe starts its Lanczos from a FIXED vector, 1/d, so it is a
+    # function of the data alone: the same call again in the same process is
+    # the same number bit for bit. ARPACK's own start comes from a seed it
+    # keeps between calls, so without it the second call starts elsewhere and
+    # lands elsewhere inside its tolerance.
+    amb_again = float(lowest_amb_eigenvalue(lr_e, nocc_e, polarizability='TDHF')[0])
+    ok &= check(amb_again == amb_probe,
+                'the probe is reproducible bitwise within one process',
+                f'|d| {abs(amb_again - amb_probe):.1e}')
     try:
         solve_casida_davidson(lr_e, nocc_e, nroots=3, polarizability='TDHF')
         ok &= check(False, 'solver raises on the unstable reference')

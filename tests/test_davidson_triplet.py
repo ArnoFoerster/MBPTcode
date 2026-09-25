@@ -7,7 +7,10 @@ contraction absent -- not scaled to zero, absent, since it is two of the
 contractions in each step.
 
 The reference is `LinearResponseSolver.build_casida_matrices(triplet=True)`,
-which is the dense builder and owes nothing to the code under test.
+which is the dense builder and owes nothing to the code under test. The last
+two checks go through the excited-state chain: 'auto' lets a triplet reach the
+matrix-free solve above the memory rule (and refuses a Tamm-Dancoff one there),
+and the BSE@G0W0 excitation is the same number from either solver.
 
 Run: python tests/test_davidson_triplet.py
 """
@@ -27,6 +30,7 @@ from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          isdf_block_action,
                                                          solve_casida_davidson)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.gradients.excited_state import ExcitedStateChain
 
 NROOTS = 3
 
@@ -113,6 +117,70 @@ def test_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr):
                       f'{d:.1e}')
 
 
+def _chain_factory(m):
+    x = scf.RHF(m)
+    x.conv_tol, x.conv_tol_grad = 1e-12, 1e-11
+    x.kernel()
+    return x
+
+
+def test_chain_lets_a_triplet_reach_davidson(mol):
+    """'auto' used to send every triplet to the dense solver; at production
+    sizes that is a dense (n_ov)^2 matrix instead of a matrix-free solve.
+
+    THE TAMM-DANCOFF FORM IS NOT EXEMPT FROM THE MEMORY RULE and is refused
+    above it rather than served densely. `solver_choice`'s docstring says why
+    the boundary does not move for it: the dense route BUILDS both blocks
+    either way (`build_casida_matrices` returns the pair; only
+    `CasidaSolver.solve` drops B), so a TDA solve holds the same memory. And it
+    cannot go matrix-free instead, because `solve_casida_davidson` takes no
+    `tda` and solves the full Casida problem -- routing there would return
+    roots of a different kernel from the declared one. So 'auto' above the rule
+    raises with the memory in the message, which is what it costs; the
+    construction-time refusal of an explicit solver='davidson' stands
+    unchanged.
+    """
+    chain = ExcitedStateChain(mol, _chain_factory, spin='triplet',
+                              solver='auto', dense_max_nov=1)
+    ok = check(chain.solver_used(10_000) == 'davidson',
+               "'auto' sends a triplet above the memory rule to the Davidson")
+    tda = ExcitedStateChain(mol, _chain_factory, spin='triplet', solver='auto',
+                            bse_tda=True, dense_max_nov=1)
+    for label, call in (
+            ("'auto' above the rule refuses a Tamm-Dancoff triplet",
+             lambda: tda.solver_used(10_000)),
+            ("solver='davidson' refuses a Tamm-Dancoff triplet at construction",
+             lambda: ExcitedStateChain(mol, _chain_factory, spin='triplet',
+                                       solver='davidson', bse_tda=True))):
+        try:
+            call()
+            ok &= check(False, label)
+        except NotImplementedError as exc:
+            ok &= check('Tamm-Dancoff' in str(exc), label)
+    return ok
+
+
+def test_chain_gives_the_same_excitation_either_solver(mol):
+    """End to end: the BSE@G0W0 excitation must not depend on how it was solved.
+
+    The Davidson returns `nroots` lowest roots and the dense one returns all of
+    them, so this compares the lowest -- which is the state the surface is
+    built on anyway.
+    """
+    ok = True
+    for spin in ('singlet', 'triplet'):
+        kw = dict(spin=spin, state=0, basis='cc-pvdz')
+        dense = ExcitedStateChain(mol, _chain_factory, solver='dense', **kw)
+        david = ExcitedStateChain(mol, _chain_factory, solver='davidson',
+                                  nroots=4, bse_conv_tol=1e-10, **kw)
+        om_dense = dense.excitation(mol)
+        om_david = david.excitation(mol)
+        d = abs(om_dense - om_david)
+        ok &= check(d < 1e-7, f'{spin}: the chain gives one excitation from '
+                    f'either solver', f'|d| {d:.1e} Ha')
+    return ok
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mol, mf, nocc, lr = build()
@@ -121,5 +189,8 @@ if __name__ == '__main__':
     all_ok &= test_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr)
     all_ok &= test_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr)
     all_ok &= test_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr)
+    print('\n-- the excited-state chain')
+    all_ok &= test_chain_lets_a_triplet_reach_davidson(mol)
+    all_ok &= test_chain_gives_the_same_excitation_either_solver(mol)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

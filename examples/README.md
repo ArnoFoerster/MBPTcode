@@ -18,6 +18,9 @@ All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
 | `12_evgw.py` | the eigenvalue-self-consistent loop: cycle 1 is G0W0, the fixed point sits above it |
 | `13_solvated_gw_bse.py` | GW and BSE in a continuum, with the ground-state and response halves separated |
 | `14_cp2k_aug_molopt.py` | CP2K's aug-SZV-MOLOPT-ae basis with its RI tier, read from CP2K at run time; G0W0 and dense BSE |
+| `15_excited_state_geometry_optimization.py` | two high-level entry points: S1 relaxed against S0 (`calc_adiabatic_excitation`) and the adiabatic S1-T1 gap (`calc_adiabatic_gap`), dense vs cubic-scaling ISDF/SOP |
+| `16_numerical_hessian_from_gradient.py` | a vibrational analysis built by central-differencing the analytic gradient, cross-checked against pyscf's own analytic Hessian |
+| `17_spin_orbit_coupling.py` | <S1\|H_SO\|T1/T2> at both relaxed minima from `15`'s adiabatic gap (El-Sayed's rule), plus the Herzberg-Teller dV/dq scan over the ground-state modes that finds the promoting mode |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE
@@ -78,6 +81,17 @@ only valid for the bare amplitude.
 14  G0W0 HOMO = -9.754 eV   LUMO = 1.659 eV   BSE@G0W0 = 2.733, 6.158, 7.199 eV
     (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4;
     that tier is 27 meV from the exact tensor on the singlets, the tightest 1.6 meV)
+15  S1 vertical/emission/adiabatic = 4.518/3.546/4.125 eV (dense); Delta-E_ST
+    (adiabatic, S1-T1) = 0.805 eV; ISDF/SOP agrees to ~10 meV on S1 and ~1 meV
+    on Delta-E_ST (formaldehyde/cc-pVDZ, n->pi* S1 and T1)
+16  frequencies 1802.87, 3959.80, 4056.93 cm-1, exact against pyscf's own
+    analytic Hessian (water/cc-pVDZ RHF)
+17  <S1|H_SO|T1> = 0.000 cm-1 at both R*_S1 and R*_T1 (n->pi*/n->pi*, same
+    configuration, vanishes by El-Sayed's rule); <S1|H_SO|T2> = 42.6 cm-1
+    (n->pi*/pi->pi*, different configuration); the Herzberg-Teller scan over
+    the 6 ground-state modes puts the largest |dV/dq| = 0.20 cm-1 at 1325
+    cm-1, the out-of-plane wag -- the textbook promoting mode for this
+    channel -- against 0.00-0.06 cm-1 for the rest (formaldehyde/cc-pVDZ)
 ```
 
 ## Large systems

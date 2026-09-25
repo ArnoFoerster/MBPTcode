@@ -10,10 +10,11 @@ solve_qp_energy_imaginary_axis integrates the self-energy on an imaginary
 frequency grid (O(N^4)), and solve_qp_energy_space_time forms it as a
 pointwise product in imaginary time on a separable (ISDF) factorization of
 the ERIs (O(N^3)). solve_bse_isdf is the BSE built on the same factors, and
-solve_bse_df its twin on pyscf's own density fitting. Every one of them
-evaluates the self-energy once, on the mean field's eigenvalues; evgw_eigen-
-values reinjects the quasiparticle energies into G and P0 to a fixed point,
-and is reached from the same front door as self_consistency='evGW'.
+solve_bse_df its twin on pyscf's own density fitting; solve_bse is the one
+front end over every BSE route, choosing the solver and the integrals. Every
+one of them evaluates the self-energy once, on the mean field's eigenvalues;
+evgw_eigenvalues reinjects the quasiparticle energies into G and P0 to a fixed
+point, and is reached from the same front door as self_consistency='evGW'.
 """
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
@@ -22,6 +23,7 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.evGW import evgw_eigenvalues
+from src.SingleReference.LinearResponse.bse import solve_bse
 from src.SingleReference.LinearResponse.davidson import (solve_casida_davidson,
                                                         solve_bse_isdf,
                                                         solve_bse_df,

@@ -4,11 +4,15 @@ Sigma is any frequency-dependent quantity (GW/PSD self-energy, ADC static
 correction, embedding self-energy). Every root search in the codebase goes
 through these routines.
 """
+import warnings
+
 import numpy as np
 from src.Base.constants import (
     QP_BISECTION_TOL, QP_BISECTION_MAX_ITER,
+    QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL,
     QP_NEWTON_TOL, QP_NEWTON_MAX_ITER,
     QP_GRAPHICAL_TOL, QP_GRAPHICAL_N_OMEGA, QP_GRAPHICAL_MAX_BISECTION,
+    QP_POLE_OFFSET, QP_POLE_OFFSET_MIN, QP_POLE_STRENGTH_MIN,
     QP_Z_MIN, QP_Z_DERIV_STEP,
 )
 
@@ -130,6 +134,226 @@ def solve_qp_equation_newton_batch(func, e_start, deriv_func=None, tol=QP_NEWTON
         w = np.where(overshoot, w - damp * step, w_next)
 
     return w
+
+
+def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
+                                     xc_correction=0.0, w0=None,
+                                     tol=QP_CD_NEWTON_TOL,
+                                     max_iter=QP_CD_NEWTON_MAX_ITER,
+                                     pole_offset=QP_POLE_OFFSET,
+                                     relax_offset=True,
+                                     linearize_on_capture=True, guard_out=None,
+                                     offset_min=QP_POLE_OFFSET_MIN,
+                                     z_min=QP_POLE_STRENGTH_MIN,
+                                     linear_offset=QP_POLE_OFFSET):
+    """(w, Z) of w = eps_p + xc_correction + Sigma(w), Newton HELD OFF THE POLES.
+
+    f(w) = w - eps_p - xc_correction - Sigma(w) has a pole at every orbital
+    energy, because the self-energy does: a quasiparticle route that deforms
+    the frequency contour (`GW.contour_deformation`) puts the pole of G at
+    omega = eps_q ON the contour, where the imaginary-axis integrand collapses
+    onto nu = 0 and no quadrature resolves it. The iterate is therefore kept
+    `pole_offset` away from every eps_q, and the three things that can go wrong
+    around such a pole are each answered here rather than returned as a number.
+
+    sigma, slope : callbacks Sigma(w) and dSigma/dw at fixed everything else.
+                   Each decides its own residue set, so the branch of Sigma
+                   being solved is the one the caller's route defines.
+    xc_correction: <Sigma_x - v_xc>, zero on a Hartree-Fock reference.
+    w0 :           the start; the default eps_p pushed `pole_offset` toward the
+                   chemical potential, the direction the correction takes, since
+                   eps_p is itself exactly on a pole.
+    relax_offset:  whether a root INSIDE the guard may shrink it. The guard and
+                   the Newton step then fight -- the step carries the iterate
+                   off the guard and the guard puts it back, forever -- and the
+                   tell is the same pushed value twice. True halves the band
+                   toward `offset_min`, which is decided per call and so per
+                   geometry; False holds a band the caller froze and warns
+                   before leaving it, so a surface is differentiated along one
+                   Newton path rather than whichever one each geometry took.
+    linearize_on_capture:
+                   what to do when the iteration ends on a POLE instead of a
+                   root. Newton near a pole takes ever smaller steps and
+                   converges onto it, and the pole strength there goes to zero
+                   because dSigma/dw diverges. Two fallbacks share this flag:
+                   an iterate pinned against q != p, and a converged root with
+                   Z < `z_min`. Both are replaced by ONE Newton step from a
+                   point a full `linear_offset` away from every pole, which
+                   cannot be captured -- a different approximation from the
+                   self-consistent root, and it says so. False refuses instead.
+    guard_out:     a dict, if given, receives 'pole_offset', the band actually
+                   in force -- what a caller has to record to pin this path.
+
+    Z = 1/(1 - dSigma/dw) comes from the same slope as the step, so it is the
+    exact derivative of the equation that was solved and not a difference of it.
+    """
+    w = float(eps[p] + (pole_offset if p < nocc else -pole_offset)
+              if w0 is None else w0)
+    offset = float(pole_offset)
+    frozen = not relax_offset
+    if guard_out is not None:
+        guard_out['pole_offset'] = offset
+    last_push = None
+    blocker = None
+    was_pinned = False
+    for _ in range(max_iter):
+        gaps = np.abs(eps - w)
+        pinned = gaps.min() < offset
+        if pinned:
+            q = int(np.argmin(gaps))
+            w_push = float(eps[q] + np.sign(w - eps[q] or 1.0) * offset)
+            # A root INSIDE the band makes this a two-cycle, not a fixed
+            # point: the Newton step carries the iterate off the guard and the
+            # guard puts it back, forever. The tell is the SAME pushed value
+            # twice. Yield the margin rather than the answer -- shrinking costs
+            # quadrature accuracy, cycling costs the whole calculation.
+            if (last_push is not None and abs(w_push - last_push) < tol
+                    and offset > offset_min):
+                if frozen:
+                    # A FROZEN GUARD THAT DOES NOT REACH THE ROOT IS NEWS. The
+                    # caller pinned it so every geometry takes the same Newton
+                    # path; shrinking it here is still the only way to the
+                    # root, but doing it silently would move this geometry onto
+                    # another path while the surface looked frozen.
+                    warnings.warn(
+                        f'the frozen {offset:.1e} Ha pole guard of orbital {p} '
+                        f'does not reach its quasiparticle root, so this '
+                        f'geometry is not on the frozen Newton path: the guard '
+                        f'is relaxed from here as an unpinned one would be.',
+                        RuntimeWarning, stacklevel=2)
+                    frozen = False
+                offset = max(0.5 * offset, offset_min)
+                if guard_out is not None:
+                    guard_out['pole_offset'] = offset
+                w_push = float(eps[q] + np.sign(w - eps[q] or 1.0) * offset)
+            last_push = w_push
+            blocker = q
+            w = w_push
+        was_pinned = pinned
+        s = sigma(w)
+        sp = slope(w)
+        step = -(w - eps[p] - xc_correction - s) / (1.0 - sp)
+        w += step
+        # A SMALL STEP FROM A PINNED POINT IS NOT CONVERGENCE. The guard
+        # overwrites w at the top of the iteration and the step is measured
+        # from there, so an iterate the guard is holding against a pole
+        # produces a tiny step and looks converged -- while sitting exactly
+        # `offset` from eps_q, which is the guard's position and not a root of
+        # f. Keep shrinking instead; the floor is what decides when to give up.
+        if abs(step) < tol and not was_pinned:
+            break
+    else:
+        # Name the orbital that actually blocked it. The guard fires on the
+        # NEAREST eps to the iterate, which is p only at the very first step;
+        # after that the root is usually walking through OTHER levels. Blaming
+        # eps_p reads as "the quasiparticle correction is tiny", which for a
+        # frontier orbital is both false and misleading -- the real statement
+        # is that the root is nearly degenerate with a different level, which
+        # is a property of the SPECTRUM and says which one to look at.
+        where = ('' if blocker is None else
+                 f' The iterate was pinned against orbital {blocker} at '
+                 f'eps={eps[blocker]:.6f} Ha with the root near {w:.6f} Ha, '
+                 f'{abs(w - eps[blocker]):.1e} Ha away'
+                 + (' -- the same orbital.' if blocker == p else
+                    f', not p={p} (eps={eps[p]:.6f}).'))
+        if blocker is not None and blocker != p and linearize_on_capture:
+            # CAPTURE BY A POLE, NOT A ROOT. f(w) = w - eps_p - xc - Sigma(w)
+            # has a pole at every eps_q, where it runs to +-infinity; Newton
+            # near one takes ever smaller steps and converges ONTO it. The tell
+            # is a pin against q != p: a genuine quasiparticle root of orbital
+            # p has no reason to sit 1e-4 Ha from a DIFFERENT orbital energy,
+            # and the pole strength there goes to zero because dSigma/dw
+            # diverges.
+            #
+            # The linearized solution is one Newton step from a point a full
+            # guard away from every pole, so it cannot be captured. It is a
+            # different approximation from the self-consistent root and says
+            # so; the caller records which orbitals used it.
+            # The DEFAULT guard fixes that point, not a band a caller pinned
+            # smaller to hold one Newton path: that one sits on the pole, where
+            # the slope diverges and one step from it means nothing.
+            w_lin = float(eps[p] + (linear_offset if p < nocc
+                                    else -linear_offset))
+            s_lin = sigma(w_lin)
+            sp_lin = slope(w_lin)
+            w = w_lin - (w_lin - eps[p] - xc_correction - s_lin) / (1.0 - sp_lin)
+            warnings.warn(
+                f'the CD Newton for orbital {p} was captured by the pole of '
+                f'the self-energy at orbital {blocker} (eps='
+                f'{eps[blocker]:.6f} Ha), not by a root of its own. Falling '
+                f'back to the LINEARIZED quasiparticle energy '
+                f'{w:.6f} Ha, one step from eps_{p}+/-{linear_offset:.0e}. That '
+                f'is a different approximation from the self-consistent root '
+                f'and is not interchangeable with the other orbitals here.',
+                RuntimeWarning, stacklevel=2)
+            sp = slope(w)
+            return w, 1.0 / (1.0 - sp)
+        raise RuntimeError(
+            f"CD quasiparticle Newton for p={p} did not converge in "
+            f"{max_iter} steps; the last pole guard was {offset:.1e} Ha."
+            + where +
+            f" A root within {offset_min:.0e} Ha of an orbital energy "
+            f"cannot be resolved by this quadrature and no offset resolves "
+            f"both.")
+    if offset != pole_offset:
+        warnings.warn(
+            f'the quasiparticle root of orbital {p} lies inside the '
+            f'{pole_offset:.0e} Ha pole guard, so the guard was relaxed to '
+            f'{offset:.1e} Ha to reach it. The self-energy quadrature is less '
+            f'accurate that close to the pole; the root is still converged to '
+            f'{tol:.0e}.', RuntimeWarning, stacklevel=2)
+    sp = slope(w)
+    z = 1.0 / (1.0 - sp)
+    if z < z_min and linearize_on_capture:
+        # CONVERGENCE IS NOT EVIDENCE OF THE RIGHT ROOT. f has a zero just to
+        # either side of every pole and Newton is drawn to them; those are
+        # satellites, and Z collapses because dSigma/dw diverges there. This
+        # catches the case the guard does NOT -- where the iteration converged
+        # cleanly onto one instead of cycling against it, which is the same
+        # situation resolved by rounding rather than by the physics.
+        w_lin = float(eps[p] + (linear_offset if p < nocc
+                                else -linear_offset))
+        s_lin = sigma(w_lin)
+        sp_lin = slope(w_lin)
+        w_new = w_lin - (w_lin - eps[p] - xc_correction - s_lin) / (1.0 - sp_lin)
+        warnings.warn(
+            f'the CD Newton for orbital {p} converged on a root with pole '
+            f'strength Z={z:.3f}, below {z_min}: that is a '
+            f'satellite at {w:.6f} Ha, not the quasiparticle. Falling back to '
+            f'the LINEARIZED quasiparticle energy {w_new:.6f} Ha. That is a '
+            f'different approximation from the self-consistent root and is '
+            f'not interchangeable with the other orbitals here.',
+            RuntimeWarning, stacklevel=2)
+        w = w_new
+        sp = slope(w)
+        z = 1.0 / (1.0 - sp)
+    return w, z
+
+
+def solve_fixed_point(step, x0, carry=None, tol=QP_NEWTON_TOL, max_iter=QP_NEWTON_MAX_ITER):
+    """Direct iteration x_{n+1} = step(x_n) for a self-consistent eigenvalue problem.
+
+    The root search for an operator that depends on the energy it is evaluated at:
+    build H(x), diagonalize, take the target eigenvalue as the next x. Used by the
+    dynamical downfolded Hamiltonians (solve_dynamical_hamiltonian).
+
+    step(x, carry) -> (x_new, carry_new). `carry` threads auxiliary state between
+    iterations -- typically the eigenvector, so the next step can follow the SAME
+    root by overlap instead of re-picking by eigenvalue proximity -- and whatever
+    the last step returned comes back to the caller.
+
+    Returns (x, carry, converged, n_iter). n_iter is the number of steps taken;
+    converged is False if max_iter was exhausted.
+    """
+    x, it, converged = x0, 0, False
+    for it in range(1, max_iter + 1):
+        x_new, carry = step(x, carry)
+        if not np.isfinite(x_new):
+            return x_new, carry, False, it
+        if abs(x_new - x) < tol:
+            return x_new, carry, True, it
+        x = x_new
+    return x, carry, converged, it
 
 
 def calculate_z_factor(dsigma_dw):

@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
+from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.Base.constants import HARTREE_TO_EV
 
 
@@ -80,8 +81,55 @@ def run_case(atom, basis, xc, which, nfreqs):
     return ref, qps, min_abs_eps
 
 
+def test_a_range_separated_reference_gets_full_range_exchange_back():
+    """G0W0 on LRC-wPBEh, which is the point of using it.
+
+    The quasiparticle equation replaces the reference's whole exchange-
+    correlation potential by the self-energy, so the static part that comes
+    back is the FULL-range exact exchange while the part subtracted is the
+    functional's own -- which for a range-separated hybrid is short-range
+    density-functional exchange plus long-range exact exchange. Getting that
+    backwards would silently return only one range of the exchange, so the
+    two halves are asserted separately here rather than through their
+    difference.
+    """
+    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='sto-3g',
+                verbose=0)
+    mf = dft.RKS(mol, xc='lrc-wpbeh')
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    omega, alpha, hyb = mf._numint.rsh_and_hybrid_coeff(mf.xc, mol.spin)
+    assert omega > 0.0 and alpha > hyb, 'this test needs a range-separated hybrid'
+
+    dm = mf.make_rdm1()
+    # the exchange added back is full-range, not the functional's long-range part
+    assert np.abs(mf.get_k(mol, dm)
+                  - scf.hf.get_jk(mol, dm, hermi=1, with_j=False)[1]).max() < 1e-12
+    # and the potential taken out is the functional's own, range separation and all
+    v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
+    assert np.abs(v_xc).max() > 1e-3
+
+    states = np.arange(mf.mo_coeff.shape[1])
+    correction = static_exchange_diagonal(mf, mol, states, exchange='mf')
+    assert correction.shape == states.shape
+    assert np.all(np.isfinite(correction))
+    # on Hartree-Fock the same quantity cancels; on a hybrid it must not
+    hf = scf.RHF(mol)
+    hf.conv_tol = 1e-12
+    hf.kernel()
+    assert np.abs(static_exchange_diagonal(hf, mol, states, exchange='mf')).max() < 1e-8
+    assert np.abs(correction).max() > 1e-2
+
+
 if __name__ == '__main__':
     all_ok = True
+    try:
+        test_a_range_separated_reference_gets_full_range_exchange_back()
+        print("LRC-wPBEh reference: full-range exchange back, the functional's "
+              "own potential out  OK")
+    except AssertionError as exc:
+        all_ok = False
+        print(f"LRC-wPBEh reference: full-range exchange back  FAIL ({exc})")
     for label, atom, basis, xc, which, nfreqs in CASES:
         ref, qps, min_abs_eps = run_case(atom, basis, xc, which, nfreqs)
         diffs_mev = [(q - ref) * 1000 for q in qps]

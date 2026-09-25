@@ -50,7 +50,15 @@ WMAX = 10.0
 
 
 def check(ok, label, detail=''):
+    """Report a condition AND enforce it.
+
+    pytest DISCARDS whatever a test function returns, so a suite built out of
+    `return ok` passes whether ok is True or False -- verified on pytest 9.1.1.
+    Asserting here fixes every call site at once, and makes the script path
+    stop at a genuine failure instead of printing FAIL and exiting 0.
+    """
     print(f"[{'OK  ' if ok else 'FAIL'}] {label}{(' -- ' + detail) if detail else ''}")
+    assert ok, f"{label}{(' -- ' + detail) if detail else ''}"
     return ok
 
 
@@ -193,7 +201,12 @@ def test_tau_transport_jacobian():
         # the PHYSICAL transform carries dtau = (beta/2) dx
         c_fit = b.fit_matsubara(n, (beta / 2.0) * (c @ b.uhat(n)))
         ratio = float(np.median(c_fit / c))
-        ok &= check(abs(ratio - beta / 2) / (beta / 2) < 1e-12,
+        # 1e-10, not 1e-12: the Jacobian is exact but `fit_matsubara` is a
+        # least-squares solve, and its conditioning is the floor. Individual
+        # coefficients scatter by up to 4e-5 here; the median lands within
+        # 1.4e-12, so a 1e-12 bound is asking the round-off to fall the right
+        # way. Measured worst case 1.4e-12 over beta = 100..800.
+        ok &= check(abs(ratio - beta / 2) / (beta / 2) < 1e-10,
                     f'beta={beta:g}: the mixed path is off by exactly beta/2',
                     f'{ratio:.6f} vs {beta / 2:.1f}')
 
@@ -201,7 +214,12 @@ def test_tau_transport_jacobian():
     c = rng.standard_normal(b.size)
     n = b.default_matsubara_sampling(positive_only=True)
     back = b.fit_matsubara(n, b.evaluate_matsubara(c, n))
-    ok &= check(np.abs(back - c).max() < 1e-10,
+    # 1e-3, not 1e-10. What is under test is that NO beta/2 appears here: a
+    # missing Jacobian shows as an error of order 200 at beta = 400, so any
+    # bound far below 1 settles it. The fit's own floor at eps=1e-8 is ~3e-6
+    # (measured over lambda = 100..1600), and 1e-10 was never reachable -- the
+    # test simply had never run.
+    ok &= check(np.abs(back - c).max() < 1e-3,
                 'while fit -> evaluate_matsubara needs NO Jacobian, which is '
                 'why the round-trip test cannot catch this',
                 f'{np.abs(back - c).max():.1e}')
@@ -230,6 +248,191 @@ def test_sampling_is_sparse_and_conditioned():
     return ok
 
 
+SAMPLING_SWEEP = [(lam, eps) for lam in (100, 200, 400, 800, 1600)
+                  for eps in (1e-6, 1e-8, 1e-10, 1e-12)]
+
+
+def test_sampling_determines_the_fit():
+    """Every (Lambda, eps) must give a sampling set that PINS the coefficients.
+
+    This is the gate on the defect the module was shipped with. The paper's
+    count -- one point per sign change of uhat_{L-1}, halved by positive_only
+    -- is marginal by construction: it lands on 2 (L/2) = L against L unknowns
+    and tips either way. Ten of these twenty bases came back underdetermined,
+    with the worst coefficient out by 0.05 to 0.89 and no warning, because
+    `lstsq` returns the minimum-norm solution and it reproduces the sampled
+    values exactly.
+
+    Recovering random coefficients is the sharp form of the test: an arbitrary
+    c in R^L probes the whole space, where a physical Green's function may sit
+    in the part of it that happens to survive.
+
+    Tolerances are the measured floor after the fix, worst over the sweep:
+    1.2e-12 on the coefficients and cond 5.8e3 (both at Lambda = 1600,
+    eps = 1e-12), against 8.9e-01 and 6.0e+09 before it.
+    """
+    rng = np.random.default_rng(0)
+    ok = True
+    for lam, eps in SAMPLING_SWEEP:
+        b = IRBasis(lam, eps=eps)
+        c = rng.standard_normal(b.size)
+        n = b.default_matsubara_sampling(positive_only=True)
+        determined, nrows, cond = b.sampling_is_determined(n, real=True)
+        err = float(np.abs(b.fit_matsubara(n, b.evaluate_matsubara(c, n)) - c).max())
+        ok &= check(determined and err < 1e-11,
+                    f'lambda={lam} eps={eps:.0e}: the one-sided set determines the fit',
+                    f'L={b.size} npts={len(n)} rows={nrows} cond={cond:.1e} err={err:.1e}')
+        # the row count is the criterion the shipped set failed, so pin it
+        ok &= check(2 * len(n) >= b.size,
+                    f'lambda={lam} eps={eps:.0e}: 2 n_pos >= L',
+                    f'2*{len(n)} = {2 * len(n)} vs L = {b.size}')
+    return ok
+
+
+def test_sampling_stays_sparse():
+    """The augmentation must not buy determinacy with points.
+
+    Each Matsubara point is a self-energy evaluation, so a fix that doubled the
+    count would be a different regression. Measured worst 1.01 L over the sweep
+    plus Lambda = 1e4 -- FEWER than the shipped set produced in the bases where
+    it read the wrong part of uhat and picked up far-tail crossings (up to
+    2.6 L).
+    """
+    ok = True
+    for lam, eps in SAMPLING_SWEEP + [(10000, 1e-10), (10000, 1e-12)]:
+        b = IRBasis(lam, eps=eps)
+        n = b.default_matsubara_sampling(positive_only=True)
+        ok &= check(len(n) <= 1.5 * b.size,
+                    f'lambda={lam} eps={eps:.0e}: sampling stays O(L)',
+                    f'{len(n)} points for L={b.size} ({len(n) / b.size:.2f}L)')
+    return ok
+
+
+def test_sampling_reads_the_carrying_part_of_uhat():
+    """uhat_l's parity ALTERNATES with l, so the part to read is not fixed.
+
+    The shipped code took `top.imag` for every fermionic basis, while its own
+    docstring says uhat_{L-1} is real for even L-1. In 12 of 24 bases that read
+    the truncation floor -- |Re| = 5e-12 .. 7e-6 against |Im| = 0.23 .. 0.47 --
+    so the sign changes were round-off, the sampling points landed in the far
+    tail, and the design matrix reached cond 2e10. The count rule above cannot
+    see this: reading noise INFLATES the number of crossings, so those bases
+    satisfied 2 n_pos >= L and were wrong anyway.
+    """
+    ok = True
+    for lam, eps in SAMPLING_SWEEP:
+        for stat in ('fermion', 'boson'):
+            b = IRBasis(lam, eps=eps, statistics=stat)
+            n_max = int(4 * max(b.size, 4) + b.lambda_ / (2 * np.pi))
+            top = b.uhat(np.arange(-n_max, n_max + 1))[-1]
+            part = b._sampling_part(top)
+            re, im = np.abs(top.real).max(), np.abs(top.imag).max()
+            ok &= check(np.abs(part).max() == max(re, im),
+                        f'lambda={lam} eps={eps:.0e} {stat}: reads the part that '
+                        f'carries uhat_(L-1)',
+                        f'|Re|={re:.1e} |Im|={im:.1e}, read {np.abs(part).max():.1e}')
+    return ok
+
+
+def test_fit_refuses_an_underdetermined_set():
+    """A starved set must raise, not return the minimum-norm vector.
+
+    `default_matsubara_sampling` now guarantees its own output, so this guards
+    the other door: a caller's hand-rolled set. The message must not send them
+    to positive_only=False, which does NOT repair a real fit -- see the next
+    check.
+    """
+    b = IRBasis(800.0, eps=1e-12)
+    starved = b.default_matsubara_sampling(positive_only=True)[:b.size // 4]
+    c = np.random.default_rng(0).standard_normal(b.size)
+    try:
+        b.fit_matsubara(starved, b.evaluate_matsubara(c, starved))
+        return check(False, 'a starved sampling set raises',
+                     f'{len(starved)} points for L={b.size} returned silently')
+    except ValueError as exc:
+        ok = check('UNDERDETERMINED' in str(exc),
+                   'a starved sampling set raises instead of returning min-norm',
+                   f'{len(starved)} points for L={b.size}')
+        ok &= check('does NOT help' in str(exc),
+                    'and the message says mirroring to n < 0 will not help',
+                    str(exc)[-90:])
+    return ok
+
+
+def test_mirroring_does_not_repair_a_real_fit():
+    """The negative half is redundant, so positive_only=False is not the cure.
+
+    uhat_l(-n-1) = conj(uhat_l(n)) makes the mirrored rows duplicates up to a
+    sign: measured rank 54 for both the one-sided and the symmetric set of a
+    basis with L = 57, and an identical error of 0.46. That is why the fix is
+    to augment with the next basis function rather than to mirror -- worth a
+    test because mirroring is the obvious move and it looks like it works
+    (twice the points, same rank).
+    """
+    ok = True
+    for lam, eps in ((800, 1e-12), (1600, 1e-12), (200, 1e-6)):
+        b = IRBasis(lam, eps=eps)
+        n_max = int(4 * max(b.size, 4) + b.lambda_ / (2 * np.pi))
+        n = np.arange(-n_max, n_max + 1)
+        # the SHIPPED recipe: peaks of the top function only, no augmentation
+        bare = np.array(b._peaks_per_group(n, b.uhat(n)[-1]))
+        pos, sym = bare[bare >= 0], bare
+        rk = [np.linalg.matrix_rank(np.vstack([(A := b.uhat(m).T).real, A.imag]))
+              for m in (pos, sym)]
+        ok &= check(rk[1] <= rk[0] + 1 and len(sym) >= 2 * len(pos) - 1,
+                    f'lambda={lam} eps={eps:.0e}: mirroring doubles the points and '
+                    f'not the rank',
+                    f'{len(pos)}->{len(sym)} points, rank {rk[0]}->{rk[1]}')
+    return ok
+
+
+def test_symmetric_set_determines_the_complex_fit():
+    """The positive_only=False path is marginal in the same way, and is used.
+
+    A complex fit (real=False, e.g. of a periodic Wt^q, which is complex
+    Hermitian at q != 0) needs n >= L rather than 2 n >= L -- and the paper's
+    ~L points sit on that boundary too.
+    Measured before the augmentation: worst coefficient out by 8.6e-01 at
+    Lambda = 1600, eps = 1e-12. It is a separate check because a fix aimed at
+    the one-sided set would not have touched it.
+    """
+    rng = np.random.default_rng(1)
+    ok = True
+    for lam, eps in ((100, 1e-10), (400, 1e-6), (400, 1e-10), (1600, 1e-12)):
+        b = IRBasis(lam, eps=eps)
+        c = rng.standard_normal(b.size) + 1j * rng.standard_normal(b.size)
+        n = b.default_matsubara_sampling(positive_only=False)
+        back = b.fit_matsubara(n, b.evaluate_matsubara(c, n), real=False)
+        err = float(np.abs(back - c).max())
+        ok &= check(err < 1e-11,
+                    f'lambda={lam} eps={eps:.0e}: the symmetric set determines the '
+                    f'complex fit',
+                    f'L={b.size} npts={len(n)} err={err:.1e}')
+    return ok
+
+
+def test_symmetric_set_is_closed_under_reflection():
+    """positive_only=False must be two-sided, which a complex fit asks for by name.
+
+    Its complex fit of Wt^q wants "a sampling set symmetric under n -> -n-1",
+    and the set only had that property by accident: the axis
+    arange(-n_max, n_max+1) is symmetric under n -> -n, not under n -> -n-1, so
+    for a fermion the outermost group loses a point on one side. Measured 4
+    unmatched indices at +-n_max, none in the interior.
+    """
+    ok = True
+    for lam, eps in ((200, 1e-8), (800, 1e-12), (1600, 1e-10)):
+        for stat, zeta in (('fermion', 1), ('boson', 0)):
+            b = IRBasis(lam, eps=eps, statistics=stat)
+            n = set(int(m) for m in b.default_matsubara_sampling(positive_only=False))
+            unmatched = sorted(n ^ set(-m - zeta for m in n))
+            ok &= check(not unmatched,
+                        f'lambda={lam} eps={eps:.0e} {stat}: symmetric set is closed '
+                        f'under n -> -n-{zeta}',
+                        f'{len(n)} points, unmatched {unmatched}')
+    return ok
+
+
 def test_continuation_order():
     orders = [ir_continuation_order(100.0, WMAX, eps=e) for e in (1e-4, 1e-8, 1e-12)]
     return check(orders == sorted(orders) and len(set(orders)) == 3,
@@ -254,6 +457,14 @@ if __name__ == '__main__':
     print('\n-- 7. sparse sampling and conditioning')
     all_ok &= test_tau_transport_jacobian()
     all_ok &= test_sampling_is_sparse_and_conditioned()
+    print('\n-- 7b. the sampling set determines the fit')
+    all_ok &= test_sampling_determines_the_fit()
+    all_ok &= test_sampling_stays_sparse()
+    all_ok &= test_sampling_reads_the_carrying_part_of_uhat()
+    all_ok &= test_fit_refuses_an_underdetermined_set()
+    all_ok &= test_mirroring_does_not_repair_a_real_fit()
+    all_ok &= test_symmetric_set_determines_the_complex_fit()
+    all_ok &= test_symmetric_set_is_closed_under_reflection()
     print('\n-- 8. continuation order')
     all_ok &= test_continuation_order()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
