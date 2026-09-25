@@ -24,6 +24,7 @@ from pyscf import qmmm
 from pyscf.qmmm import itrf as qmmm_itrf
 
 from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.utils.threads import blas_single_threaded
 
 
 @runtime_checkable
@@ -209,7 +210,8 @@ class PointCharges:
             self._check(mf)
             return mf
         wrapped = qmmm.mm_charge(mf, self.coords, self.charges, unit=self.unit)
-        wrapped.kernel(dm0=mf.make_rdm1())
+        with blas_single_threaded():
+            wrapped.kernel(dm0=mf.make_rdm1())
         if not wrapped.converged:
             raise RuntimeError('the SCF did not re-converge with the point '
                                'charges attached')

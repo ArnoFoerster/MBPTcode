@@ -135,24 +135,20 @@ def projected_quasiparticle_shift(a_dressed, w_dressed, a_bare, w_bare, nocc):
 def separable_quasiparticle_shift(x_mo, d_mo, w_dressed, transform, nocc):
     """Eq. (18) for every orbital from the separable factors, in Hartree.
 
-    Delta W on the interpolation grid is (M, M) in a rank that grows with the
-    system -- 1.4e9 entries at a 500-atom solute. Nothing needs that matrix:
-    Eq. (18) contracts it twice against the SAME orbital density, so projecting
-    the density onto the auxiliary index first leaves nothing bigger than
-    (naux, nmo).
+    ONE chi0 and a congruence: the bare screening is `bare_screening` of the
+    dressed one and the bare density its congruent partner, which is what a
+    forward pass wants. The contraction itself is
+    `projected_quasiparticle_shift`, so Delta W on the interpolation grid --
+    (M, M) in a rank that grows with the system -- never forms.
 
     Zero when `transform` is None, which is the gas phase.
     """
     if transform is None:
         return np.zeros(x_mo.shape[1])
     a = d_mo.T @ (x_mo ** 2)
-    a_bare = transform.T @ a
-    shift = 0.5 * (
-        np.einsum('Qp,QR,Rp->p', a, w_dressed, a, optimize=True)
-        - np.einsum('Qp,QR,Rp->p', a_bare, bare_screening(w_dressed, transform),
-                    a_bare, optimize=True))
-    shift[:nocc] *= -1.0
-    return shift
+    return projected_quasiparticle_shift(a, w_dressed, transform.T @ a,
+                                         bare_screening(w_dressed, transform),
+                                         nocc)
 
 
 def environment_quasiparticle_shift(mf, mol=None, nocc=None, auxbasis=None):

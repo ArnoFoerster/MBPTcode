@@ -17,6 +17,10 @@ for the whole loop and on its gap landing between G0W0 and evGW. In a
 continuum the reaction field's term follows the iterate under evGW, as W does,
 and stays the mean field's under evGW0.
 
+The `update=` window is gated on water, which owns a core state: outside the
+window every orbital stays at its Kohn-Sham energy, while the default moves the
+oxygen 1s by electronvolts.
+
 Run: python tests/test_evgw.py
 """
 import os
@@ -587,6 +591,57 @@ def test_the_reaction_field_follows_the_iterate():
     return ok
 
 
+def build_water():
+    """H2 has no core state, so the update window has to be tested on a
+    molecule that owns one."""
+    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='cc-pvdz',
+                verbose=0)
+    m = dft.RKS(mol)
+    m.xc = 'pbe0'
+    m.conv_tol = 1e-11
+    m.kernel()
+    return m
+
+
+def test_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
+    """`update` holds every other orbital at its Kohn-Sham energy, so a deep
+    core state screens but never carries its own Pade-continued correction back
+    into W. The frontier pair still moves."""
+    nocc = water.mol.nelectron // 2
+    window = [nocc - 1, nocc]
+    eps, info = evgw_eigenvalues(water, water.mol, mode='space-time',
+                                 update=window)
+    eps0 = np.asarray(water.mo_energy, float)
+    outside = np.setdiff1d(np.arange(eps.size), window)
+    ok = check(np.array_equal(eps[outside], eps0[outside])
+               and np.array_equal(info['frozen'], outside),
+               'every orbital outside the window stays at its Kohn-Sham energy',
+               f'{outside.size} held, {info["cycles"]} cycles')
+    ok &= check(abs(eps[nocc - 1] - eps0[nocc - 1]) > 1e-4,
+                'and the frontier pair still moves',
+                f'HOMO {(eps[nocc - 1] - eps0[nocc - 1]) * HARTREE_TO_EV:+.3f} eV')
+    return ok
+
+
+def test_the_full_update_is_the_default_and_moves_the_core(water):
+    """Default evGW moves every orbital, which is what the windowed run is
+    contrasted against; the oxygen 1s moves by electronvolts."""
+    eps, info = evgw_eigenvalues(water, water.mol, mode='space-time')
+    shift = (eps[0] - water.mo_energy[0]) * HARTREE_TO_EV
+    return check(info['frozen'].size == 0 and abs(shift) > 1.0,
+                 'the default updates every orbital, and the oxygen 1s moves by '
+                 'electronvolts', f'1s {shift:+.2f} eV')
+
+
+def test_an_empty_update_window_is_refused(water):
+    try:
+        evgw_eigenvalues(water, water.mol, mode='space-time', update=[])
+    except ValueError as exc:
+        return check('selects no orbital' in str(exc),
+                     'an empty update window is refused', str(exc)[:60])
+    return check(False, 'an empty update window is refused')
+
+
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
     mf = build_reference()
@@ -617,5 +672,10 @@ if __name__ == '__main__':
     all_ok &= test_evgw0_keeps_w_and_moves_the_poles()
     print('\n-- 8. in a continuum: the reaction field follows the iterate')
     all_ok &= test_the_reaction_field_follows_the_iterate()
+    print('\n-- 9. the update window')
+    water = build_water()
+    all_ok &= test_orbitals_outside_the_update_window_stay_at_the_mean_field(water)
+    all_ok &= test_the_full_update_is_the_default_and_moves_the_core(water)
+    all_ok &= test_an_empty_update_window_is_refused(water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

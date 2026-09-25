@@ -68,10 +68,13 @@ from pyscf import solvent as pyscf_solvent
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
-from src.Base.constants import HARTREE_TO_EV, ISDF_TILE_GB, SOLVENT_PLASMON_EV
+from src.Base.constants import (HARTREE_TO_EV, ISDF_TILE_GB,
+                                PCM_LEBEDEV_ORDER, SOLVENT_PLASMON_EV)
 from src.Base.environment import attach_environment, environment_of
 from src.Base.pcm_derivatives import by_atom, solver_bilinear_gradient
+from src.Base.pcm_factorization import factorize_once
 from src.Base.separable_ri import auxmol_key
+from src.Base.utils.threads import blas_single_threaded
 
 # n^2 below this is not a plausible optical dielectric constant for a
 # condensed phase; above it the caller almost certainly passed a static eps by
@@ -180,13 +183,17 @@ class SolventScreening:
     """
 
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
-                 lebedev_order=29, vdw_scale=1.2, r_probe=0.0,
+                 lebedev_order=PCM_LEBEDEV_ORDER, vdw_scale=1.2, r_probe=0.0,
                  radii_table=None, allow_static_eps=False, eps_static=None,
                  omega_p=None):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
         pyscf's SMD table, whose refractive index sets eps = n^2), not both.
         method/lebedev_order/vdw_scale/r_probe/radii_table are handed straight
-        to pyscf's PCM and carry its meanings and defaults.
+        to pyscf's PCM and carry its meanings and defaults, lebedev_order
+        aside: `PCM_LEBEDEV_ORDER`, 50 points per sphere against the 302 of
+        pyscf's order 29, since the surface potential is the continuum's cost
+        and refining it moves formaldehyde's solvation energy in toluene by
+        0.4 meV at four times the cost.
 
         eps_static: the constant the GROUND STATE relaxes in, which `mean_field`
         puts the SCF inside. A solvent name supplies it; an explicit optical eps
@@ -241,6 +248,7 @@ class SolventScreening:
         self._pcm.radii_table = radii_table
         self._pcm.verbose = 0
         self._pcm.build()
+        factorize_once(self._pcm)
 
         self._response = None
         self._v_ao = None
@@ -563,11 +571,13 @@ class SolventScreening:
         wrapped = pyscf_solvent.PCM(mf)
         wrapped.with_solvent.method = self.method
         wrapped.with_solvent.eps = self.eps_static
+        factorize_once(wrapped.with_solvent)
         wrapped.with_solvent.lebedev_order = self._cavity['lebedev_order']
         wrapped.with_solvent.vdw_scale = self._cavity['vdw_scale']
         wrapped.with_solvent.r_probe = self._cavity['r_probe']
         wrapped.with_solvent.radii_table = self._cavity['radii_table']
-        wrapped.kernel(dm0=mf.make_rdm1())
+        with blas_single_threaded():
+            wrapped.kernel(dm0=mf.make_rdm1())
         if not wrapped.converged:
             raise RuntimeError(
                 f'the SCF did not re-converge inside PCM(eps = '
@@ -915,3 +925,8 @@ def solvent_static_selfenergy(mf, mol=None):
     unconditionally, the way build_ks_static_correction is added)."""
     return environment_of(mf).static_self_energy(mf, mol)
 
+
+def get_solvent_screening(mf):
+    """The SolventScreening attached to mf, or None. The hook every integral
+    chokepoint calls -- gas-phase callers pay one getattr."""
+    return getattr(mf, 'with_screening', None)

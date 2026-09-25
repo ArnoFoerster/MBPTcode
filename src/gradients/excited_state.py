@@ -42,9 +42,26 @@ production's ISDF Davidson (`solve_casida_davidson`) above it, for either
 spin -- kappa = 0 drops the bare-exchange term from the block action and the
 screened term is spin-independent. A named `solver` is not vetoed by the rule:
 'dense' at size is a caller paying the memory deliberately. The
-adjoint is matrix-free either way: `bse_backward`
-reads the eigenvectors and the three-index blocks of `bse_cache`, and the
-static W it differentiates is the one the Davidson solved with.
+adjoint is matrix-free either way, and the static W it differentiates is the
+one the Davidson solved with. `bse_adjoint` names its realization:
+'explicit' (`bse_backward`) contracts the eigenvectors against the
+three-index blocks of `bse_cache`, built at the first reverse call off a
+forward pass and kept with it, so an energy never pays for them; 'grid'
+(`isdf_bse_adjoint`) is the reverse of the ISDF block action and forms no
+three-index block, forward or reverse. The two agree to rounding, not in
+the bits.
+
+SLICED FACTORS (`sliced=True`, over more than one rank) reach every stage
+as ONE `SlicedFactors`: the Davidson block action reads its rows, and the
+static W, the quasiparticle solve, the BSE cache and adjoint, the chi0 adjoint
+and the nuclear assembly each gather what they read whole once and drop it,
+so between geometries a rank holds its grid rows alone and every number is
+the whole layout's bit for bit. A continuum that dresses the interaction is
+refused on them at construction: Eq. (18) needs the bare gauge beside the
+dressed one. On the row fit (`fit='rows'`) the same stages read the rows the
+fit itself built, never a whole fit: bitwise the same at every rank count,
+and another realization -- and, where the pair screen drops a pair, another
+estimator -- than the replicated fit's (`FrozenFactorization`).
 
 Everything computed FROM this surface -- geometry optimization, normal modes,
 Huang-Rhys factors, adiabatic gaps, reorganization energies, rates -- lives in
@@ -54,32 +71,35 @@ import warnings
 
 import numpy as np
 
-from src.Base.isdf_jk import mean_field_skeleton_force
+from src.Base.sliced_factors import SlicedFactors
 from src.Base.constants import (ROOT_FOLLOW_MARGIN_MIN,
                                 ROOT_FOLLOW_WEIGHT_MIN)
-from src.Base.constants import (BSE_DAVIDSON_CONV_TOL, BSE_DAVIDSON_NROOTS,
+from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
+                                BSE_DAVIDSON_NROOTS,
                                 BSE_DENSE_MAX_NOV, CD_NFREQ, CD_NFREQ_MAX,
                                 CD_POLE_RESOLUTION, HARTREE_TO_EV,
-                                OUTSIDE_TREATMENTS)
+                                OUTSIDE_TREATMENTS, SOP_N_POLES)
 from src.Base.declaration import Excitation, SurfacePhysics
 from src.Base.environment import attached_environment, environment_label
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range,
-                                                        cd_grid_resolves)
+                                                        cd_grid_resolves,
+                                                        root_pole_distance)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               frozen_scissor)
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+    isdf_bse_backward, isdf_interstate_backward)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
 from src.SingleReference.base import get_occ_virt_indices
 from src.gradients.bse_isdf import (bse_backward, bse_blocks, bse_cache,
                                     bse_solve, interstate_backward,
                                     screening_backward)
-from src.gradients.contour_deformation import root_pole_distance
 from src.gradients.factor_chain import FactorChain
 from src.gradients.factor_chain import check_scf_quality  # noqa: F401
 from src.gradients.reaction_field_adjoint import (reaction_field_backward,
@@ -89,7 +109,6 @@ from src.gradients.isdf_derivatives import (qp_xc_correction,
                                             qp_xc_correction_Y,
                                             qp_xc_correction_skeleton,
                                             xc_hybrid_coeff)
-from src.gradients.sum_over_poles import SOP_N_POLES
 from src.properties.nonadiabatic import (follow_state, mo_overlap,
                                          state_overlap)
 from src.gradients.qp_space_time import (qp_gradient_space_time,
@@ -116,6 +135,13 @@ class ExcitedStateChain(FactorChain):
     stand: a residue backend decided per state, or per geometry, is not one
     surface.
 
+    `bse_adjoint` is how the Hellmann-Feynman adjoint of the root is
+    realized (BSE_ADJOINTS): 'explicit' through the three-index blocks of
+    `bse_cache`, (naux, nocc, nvir) each, built at the first reverse call;
+    'grid' closed over the ISDF grid (`isdf_bse_adjoint`), which forms none.
+    The same surface: the forward pass does not read it, and the two forces
+    agree to rounding.
+
     `qp_window=2` is the frontier set, QPStates('frontier', 2) by the declared
     name: the two occupied and two virtual orbitals around the gap, widened
     over degenerate blocks. It is what this class solves explicitly, and the
@@ -128,7 +154,23 @@ class ExcitedStateChain(FactorChain):
     NUMBER, so d eps^QP_p/dR = d eps_p/dR for those orbitals and the adjoint
     chain carries no term for it. The `scissor` keyword is a different thing:
     a tier for the states INSIDE the set whose pole model is inadmissible.
+
+    Under ranks (`with distributed(comm):`) every rank runs the chain whole
+    and the kernels it calls divide the M^2 sweeps of the quasiparticle
+    solve and of the static screening -- the tau points of proj(tau) and of
+    the quasiparticle solve's adjoint, the contour-deformation frequencies,
+    the rows of Zt in the Davidson block action -- and hand every rank the
+    same bits. The static-W adjoint's sweep (`chi0_backward`) is not divided:
+    every rank runs all of its tau points. What the chain forms on its own
+    from them, the three branches that carry (eps_bar, X_bar, D_bar) to the
+    nuclei, ends in the one `lockstep` of `FactorChain.nuclear_gradient`, so
+    both forces here are rank 0's on every rank; the mean-field force
+    `total_gradient` adds is `FactorChain.mean_field_gradient`'s, rank 0's on
+    every rank as well.
     """
+
+    READS_SLICED_FACTORS = True
+    READS_BARE_GAUGE = True
 
     def __init__(self, mol, scf_factory, spin='singlet', state=0, bse_tda=False,
                  track=None,
@@ -141,11 +183,14 @@ class ExcitedStateChain(FactorChain):
                  solver='auto', dense_max_nov=BSE_DENSE_MAX_NOV,
                  nroots=BSE_DAVIDSON_NROOTS, bse_conv_tol=BSE_DAVIDSON_CONV_TOL,
                  cd_pole_resolution=CD_POLE_RESOLUTION,
-                 mf=None, environment=None, factorization=None, radii=None):
+                 mf=None, environment=None, factorization=None, radii=None,
+                 sliced=None, fit=None, fit_block=None,
+                 bse_adjoint='explicit'):
         super().__init__(mol, scf_factory, basis=basis, auxbasis=auxbasis,
                          counts=counts, n_start=n_start, frames=frames, mf=mf,
                          environment=environment, factorization=factorization,
-                         radii=radii)
+                         radii=radii, sliced=sliced, fit=fit,
+                         fit_block=fit_block)
         self.spin, self.state, self.bse_tda = spin, state, bse_tda
         # `track='overlap'` follows the STATE; None follows the index.
         self.track = track
@@ -193,6 +238,10 @@ class ExcitedStateChain(FactorChain):
                                       'BSE only, not the Tamm-Dancoff form; '
                                       'use solver=\'dense\'')
         self.solver, self.dense_max_nov = solver, dense_max_nov
+        if bse_adjoint not in BSE_ADJOINTS:
+            raise ValueError(f'bse_adjoint={bse_adjoint!r} not in '
+                             f'{BSE_ADJOINTS}')
+        self.bse_adjoint = bse_adjoint
         self.nroots, self.bse_conv_tol = nroots, bse_conv_tol
         # Kept verbatim so `refreeze` can rebuild the same surface elsewhere:
         # a setting that is re-derived instead of preserved makes the refrozen
@@ -688,33 +737,46 @@ class ExcitedStateChain(FactorChain):
 
     def _casida(self, x_mo, d, eps_qp, w_aux):
         """(Omega, X, Y, cache): every root densely, or the lowest `nroots`
-        matrix-free on the SAME static W, sorted; the cache is what the adjoint
-        needs either way."""
+        matrix-free on the SAME static W, sorted.
+
+        The cache is what the explicit adjoint reads. The dense route's blocks
+        are the ones its Casida matrices were built from and ride along on the
+        explicit route; the matrix-free route returns it empty and
+        `_casida_seeds` fills it at the first reverse call, so an energy
+        never builds a three-index block. On the grid route it stays empty.
+        """
         n_ov = self.nocc * (len(eps_qp) - self.nocc)
         if self.solver_used(n_ov) == 'dense':
             a, b, cache = bse_blocks(x_mo, d, eps_qp, w_aux, self.nocc,
                                      spin=self.spin, bse_tda=self.bse_tda)
             om, xn, yn = bse_solve(a, b)
-            return om, xn, yn, cache
+            return om, xn, yn, (cache if self.bse_adjoint == 'explicit'
+                                else {})
         if self.nroots <= self.state:
             raise ValueError(f'nroots={self.nroots} does not reach state {self.state}')
         lr = LinearResponseSolver(np.asarray(eps_qp, float), spin_mode='restricted')
+        # Sliced, the block action reads the rows themselves: D and X_o are
+        # gathered once per build, never per trial vector.
+        factors = x_mo if isinstance(x_mo, SlicedFactors) else (x_mo, d)
+        # Hellmann-Feynman reads the eigenvectors, so an unconverged root is a
+        # wrong force rather than a slightly wrong energy: refused, not warned.
         om, xn, yn = solve_casida_davidson(lr, self.nocc, nroots=self.nroots,
                                            polarizability='BSE', W_aux=w_aux,
-                                           isdf_factors=(x_mo, d),
+                                           isdf_factors=factors,
                                            conv_tol=self.bse_conv_tol,
-                                           spin=self.spin)
+                                           spin=self.spin,
+                                           refuse_unconverged=True)
         order = np.argsort(om)
-        cache = bse_cache(x_mo, d, eps_qp, w_aux, self.nocc, spin=self.spin,
-                          bse_tda=self.bse_tda)
-        return om[order], xn[:, order], yn[:, order], cache
+        return om[order], xn[:, order], yn[:, order], {}
 
     def _forward(self, mol, mf):
         x_mo, d, eps, mu, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
         # ONE STATIC SCREENING. The BSE kernel's W and the dressed half of
-        # Eq. (18) are the same [1 - chi0(0)]^-1 on the same axis.
+        # Eq. (18) are the same [1 - chi0(0)]^-1 on the same axis; the orbital
+        # densities are Eq. (18)'s alone.
         with self.phase('t_screening'):
-            dressed = static_screening(x_mo, d, eps, self.nocc, self.w_grid)
+            dressed = static_screening(x_mo, d, eps, self.nocc, self.w_grid,
+                                       densities=d_bare is not None)
             w_aux = dressed[1]
             pair = (None if d_bare is None else
                     (dressed, static_screening(x_mo, d_bare, eps, self.nocc,
@@ -833,6 +895,31 @@ class ExcitedStateChain(FactorChain):
          _, _, _, _) = pieces
         return x_mo, d, eps_qp, w_aux, self.nocc, cache, xn, yn
 
+    def _casida_seeds(self, pieces, n, m=None):
+        """(eps_qp_bar, X_bar, D_bar, W_aux_bar) of Omega_n, or of the
+        interstate element <m| dH |n>, by the realization `bse_adjoint` names.
+
+        The explicit route fills the forward pass's cache in place the first
+        time it is asked, so every root reversed off one pinned forward pass
+        reads the same blocks and builds them once.
+        """
+        x_mo, d, eps_qp, w_aux, nocc, cache, xn, yn = self._casida_args(pieces)
+        if self.bse_adjoint == 'grid':
+            kw = dict(spin=self.spin, bse_tda=self.bse_tda)
+            if m is None:
+                return isdf_bse_backward(n, x_mo, d, eps_qp, w_aux, nocc, xn,
+                                         yn, **kw)
+            return isdf_interstate_backward(m, n, x_mo, d, eps_qp, w_aux, nocc,
+                                            xn, yn, **kw)
+        if not cache:
+            cache.update(bse_cache(x_mo, d, eps_qp, w_aux, nocc,
+                                   spin=self.spin, bse_tda=self.bse_tda))
+        if m is None:
+            return bse_backward(n, x_mo, d, eps_qp, w_aux, nocc, cache, xn, yn,
+                                **self._tile_kw())
+        return interstate_backward(m, n, x_mo, d, eps_qp, w_aux, nocc, cache,
+                                   xn, yn, **self._tile_kw())
+
     def _fold_to_nuclei(self, pieces, eqp_bar, x_bar, d_bar, w_bar):
         """(natm, 3) from the four Casida-level adjoints, and diagnostics.
 
@@ -907,8 +994,7 @@ class ExcitedStateChain(FactorChain):
         om, pieces = self._forward(mol, mf)
         root = self.tracked_state(mol, mf, om, pieces)
         with self.phase('t_bse_backward'):
-            seeds = bse_backward(root, *self._casida_args(pieces),
-                                 **self._tile_kw())
+            seeds = self._casida_seeds(pieces, root)
         grad, diags = self._fold_to_nuclei(pieces, *seeds)
         return grad, dict(diags, omega=float(om[root]), root=int(root))
 
@@ -929,8 +1015,7 @@ class ExcitedStateChain(FactorChain):
         mol, mf = self.mean_field(mol, mf)
         om, pieces = self._forward(mol, mf)
         with self.phase('t_bse_backward'):
-            seeds = interstate_backward(m, n, *self._casida_args(pieces),
-                                        **self._tile_kw())
+            seeds = self._casida_seeds(pieces, n, m)
         grad, diags = self._fold_to_nuclei(pieces, *seeds)
         return grad, dict(diags, omega_m=float(om[m]), omega_n=float(om[n]),
                           gap=float(om[n] - om[m]))
@@ -1025,7 +1110,7 @@ class ExcitedStateChain(FactorChain):
         """
         mol, mf = self.mean_field(mol, mf)
         g_om, diags = self.excitation_gradient(mol, mf)
-        g_0 = mean_field_skeleton_force(mf)
+        g_0 = self.mean_field_gradient(mf)
         diags = dict(diags, e_scf=mf.e_tot, grad_scf_max=float(np.abs(g_0).max()),
                      grad_omega_max=float(np.abs(g_om).max()))
         return g_0 + g_om, mf.e_tot + diags['omega'], diags
@@ -1078,7 +1163,9 @@ class ExcitedStateChain(FactorChain):
             cd_pole_resolution=self.cd_pole_resolution, outside=self.outside,
             scissor=self.scissor, n_poles=self.n_poles,
             sop_stride=self.sop_stride,
-            environment=self.environment, factorization=factorization)
+            environment=self.environment, factorization=factorization,
+            sliced=self.sliced, fit=self.fit, fit_block=self.fit_block,
+            bse_adjoint=self.bse_adjoint)
         # The shifts themselves are not carried: this geometry calibrates its
         # own, on its own explicit roots. The old ones ride along only so the
         # record can say how far the frozen convention moved.

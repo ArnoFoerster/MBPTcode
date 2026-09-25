@@ -25,7 +25,9 @@ orbital response in the shared multiplier solve. Every starting point reaches
 the same E_0, and an excited-state geometry on this surface is on the dRPA
 ground state by construction.
 
-Both halves hold one `FrozenFactorization`, so a geometry costs one fit.
+Both halves hold one `FrozenFactorization`, so a geometry costs one fit; on
+sliced factors (`sliced=True`) they share one set of grid rows per geometry,
+cut from the replicated fit or built by the row fit (`fit='rows'`).
 """
 import numpy as np
 
@@ -56,7 +58,10 @@ def _one_factorization(mol, shared, ground, excited, given):
     return FrozenFactorization(
         mol, basis=shared.get('basis'), auxbasis=shared.get('auxbasis'),
         counts=shared.get('counts'), n_start=shared.get('n_start', 1),
-        frames=shared.get('frames', 'frozen'), radii=shared.get('radii'))
+        frames=shared.get('frames', 'frozen'), radii=shared.get('radii'),
+        sliced=bool(shared.get('sliced')),
+        fit=shared.get('fit') or 'replicated',
+        fit_block=shared.get('fit_block'))
 
 
 class RPAQPSurface:
@@ -87,12 +92,14 @@ class RPAQPSurface:
 
     def __init__(self, mol, scf_factory, state=0, mf=None, ground=None,
                  excited=None, factorization=None, **kw):
-        # `radii` is SHARED, not excited-only: it decides the factorization
-        # both halves read, so leaving it in kw builds the factorization
-        # without it and the chain then refuses the mismatch.
+        # `radii`, `sliced`, `fit` and `fit_block` are SHARED, not
+        # excited-only: they decide the factorization both halves read, so
+        # leaving one in kw builds the factorization without it and the chain
+        # then refuses the mismatch.
         shared = {k: kw.pop(k) for k in
                   ('basis', 'auxbasis', 'counts', 'n_start', 'frames',
-                   'environment', 'radii') if k in kw}
+                   'environment', 'radii', 'sliced', 'fit', 'fit_block')
+                  if k in kw}
         self.mol0, self._scf, self.state = mol, scf_factory, state
         shared['factorization'] = _one_factorization(mol, shared, ground,
                                                      excited, factorization)
@@ -178,7 +185,7 @@ class RPAQPSurface:
         silently reverts to two factorizations after the first refreeze and the
         sharing quietly stops holding for the rest of the optimization.
 
-        The five settings are read off the existing factorization, which is
+        The settings are read off the existing factorization, which is
         exactly what it owns -- no chain's own keyword list is duplicated here,
         so adding one upstream cannot make this drift.
         """
@@ -207,12 +214,13 @@ class RPABSESurface:
                  basis=None, auxbasis=None, counts=None, n_start=1,
                  frames='frozen', environment=None, ground=None, excited=None,
                  factorization=None, radii=None, outside='mean-field',
-                 **excited_kw):
-        # `radii` is named rather than left to **excited_kw: it decides the
-        # factorization BOTH halves read, so it has to reach the shared one.
+                 sliced=None, fit=None, fit_block=None, **excited_kw):
+        # `radii`, `sliced`, `fit` and `fit_block` are named rather than left
+        # to **excited_kw: they decide the factorization BOTH halves read, so
+        # they have to reach the shared one.
         shared = dict(basis=basis, auxbasis=auxbasis, counts=counts,
                       n_start=n_start, frames=frames, environment=environment,
-                      radii=radii)
+                      radii=radii, sliced=sliced, fit=fit, fit_block=fit_block)
         self.mol0, self._scf = mol, scf_factory
         shared['factorization'] = _one_factorization(mol, shared, ground,
                                                      excited, factorization)
@@ -312,7 +320,7 @@ class RPABSESurface:
         silently reverts to two factorizations after the first refreeze and the
         sharing quietly stops holding for the rest of the optimization.
 
-        The five settings are read off the existing factorization, which is
+        The settings are read off the existing factorization, which is
         exactly what it owns -- no chain's own keyword list is duplicated here,
         so adding one upstream cannot make this drift.
         """

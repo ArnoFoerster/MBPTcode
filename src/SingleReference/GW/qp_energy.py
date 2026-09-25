@@ -86,7 +86,7 @@ SOP_KEYWORDS = frozenset({'n_poles', 'sop_stride'})
 #: Route keywords only a Pade continuation's drivers read.
 PADE_KEYWORDS = frozenset({'nfreq', 'npade', 'w0', 'grid', 'greedy',
                            'tau_target', 'freq_block', 'scratch_dir', 'extras',
-                           'screen_r_cut', 'distribute', 'timings'})
+                           'screen_r_cut', 'distribute', 'comm', 'timings'})
 
 #: Route keywords naming the ISDF factorization or its imaginary-time grid,
 #: which no Casida route has.

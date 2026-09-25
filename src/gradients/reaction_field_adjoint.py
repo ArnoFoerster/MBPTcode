@@ -25,10 +25,13 @@ omega transform runs in that direction only.
 """
 import numpy as np
 
+from src.Base.sliced_factors import SlicedFactors
+from src.Base.utils.mpi_grid import agreement, current_comm, lockstep
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.reaction_field import projected_quasiparticle_shift
 from src.SingleReference.LinearResponse.davidson import (
     static_screening_grid, static_screening_matrix)
+from src.Base.sliced_factors import whole_factor
 from src.gradients.space_time_adjoint import chi0_backward
 
 
@@ -42,7 +45,8 @@ def static_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
     return static_screening_grid(eps, nocc, ntau=ntau, tau_target=tau_target)
 
 
-def static_screening(x_mo, d, eps, nocc, grid=None, mu=None):
+def static_screening(x_mo, d, eps, nocc, grid=None, mu=None, comm=None,
+                     densities=True):
     """(A, W): the orbital densities on the auxiliary index, A[Q,p] = sum_k
     D[k,Q] X[k,p]^2, and [1 - chi0(0)]^-1 in that factor's own gauge.
 
@@ -50,11 +54,41 @@ def static_screening(x_mo, d, eps, nocc, grid=None, mu=None):
     on the same axis, that gives the BSE kernel its static screening, so a
     solvated chain builds W once and hands the pair to both. Only A and the
     chemical potential `mu` are this side's: Eq. (18) contracts W twice
-    against A.
+    against A. `densities=False` leaves A None, for a caller that screens a
+    kernel and has no Eq. (18) to build.
+
+    comm: the ranks all call this in lockstep; the tau partition and the single
+    (naux, naux) all-reduce are `static_screening_matrix`'s, handed the comm
+    explicitly. None is `current_comm()`. A is a local contraction of the
+    factors and carries no partition at all. eps is a `lockstep` of rank 0's
+    at entry, since the default grid's point count is read off it; the
+    factors are identical by construction, and an audited run compares their
+    digests and those of (A, W).
+
+    `SlicedFactors`: D is gathered whole once and the sweep gathers the two
+    branches of X_mo, so W is the whole factors' bit for bit. A contracts the
+    whole X_mo beside them and is refused on slices, which serve W alone.
     """
+    comm = current_comm() if comm is None else comm
+    multi = comm is not None and comm.Get_size() > 1
+    sliced = isinstance(x_mo, SlicedFactors)
+    if sliced and densities:
+        raise ValueError(
+            'static_screening on sliced factors serves W alone: the orbital '
+            'densities of Eq. (18), A = D^T X_mo^2, read X_mo whole beside '
+            'the chi0 sweep; pass densities=False, or build the factors '
+            'unsliced for a reaction field')
+    d = whole_factor(d, 'D')
+    if multi:
+        eps = lockstep(np.asarray(eps, float), comm)
+        agreement((x_mo.coords if sliced else x_mo, d), comm, audit_only=True,
+                  label='static_screening inputs')
     grid = static_grid(eps, nocc) if grid is None else grid
-    return (d.T @ (x_mo ** 2),
-            static_screening_matrix(x_mo, d, eps, nocc, grid, mu=mu))
+    out = (d.T @ (x_mo ** 2) if densities else None,
+           static_screening_matrix(x_mo, d, eps, nocc, grid, mu=mu, comm=comm))
+    if multi:
+        agreement(out, comm, audit_only=True, label='static_screening outputs')
+    return out
 
 
 def reaction_field_shift(x_mo, d_dressed, d_bare, eps, nocc, grid=None,

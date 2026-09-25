@@ -44,17 +44,26 @@ class ExplicitRealScreeningAdjoint(ExplicitRealScreening):
 
     It SUMS, so a reverse pass that pushed onto an instance already used by an
     earlier one gets both; build a fresh instance per pass.
+
+    Cov_bar is C_ov's size, so it exists from the first push on and not
+    before: a backend built for a state that never pushes -- every state of a
+    forward pass, a state without residues -- holds no second block.
     """
 
     def __init__(self, C_ov, eps, nocc, eta=0.0):
         super().__init__(C_ov, eps, nocc, eta)
-        self.Cov_bar = np.zeros_like(C_ov)
+        self.Cov_bar = None
         self.d_bar = np.zeros_like(self.d)
 
     def push(self, freq, y, c):
         cb, db, _ = screening_chain(y[:, None], np.array([c]), self.C_ov,
                                     self.d, freq, False, self.eta)
-        self.Cov_bar += cb
+        if self.Cov_bar is None:
+            # 0 + cb, the first add into a zeroed accumulator, done in cb
+            cb += 0.0
+            self.Cov_bar = cb
+        else:
+            self.Cov_bar += cb
         self.d_bar += db
 
     def adjoints(self):
@@ -64,6 +73,8 @@ class ExplicitRealScreeningAdjoint(ExplicitRealScreening):
         d4 = self.d_bar.reshape(len(occ), len(virt))
         eps_bar[virt] += d4.sum(axis=0)
         eps_bar[occ] -= d4.sum(axis=1)
+        if self.Cov_bar is None:
+            return eps_bar, np.zeros_like(self.C_ov)
         return eps_bar, self.Cov_bar
 
 
@@ -79,23 +90,48 @@ class LaplaceRealScreeningAdjoint(LaplaceRealScreening):
 
     It SUMS, so a reverse pass that pushed onto an instance already used by an
     earlier one gets both; build a fresh instance per pass.
+
+    A push is RECORDED, (c_k(freq), y, c), and applied only when a slice is
+    read: applied at once it is a proj(tau)-sized array per backend, one per
+    state of a quasiparticle set, where the record is naux numbers. Each slice
+    sums the pushes in push order from zero, the association the applied
+    array had, so a caller folding the slices one at a time into its own
+    projbar (`slice_adjoint`) gets the same bits as one adding the whole array,
+    and a caller holding projbar by auxiliary rows reads its rows alone.
+
+    proj_tau may be `LinearResponse.space_time.ProjRows`: the forward half's
+    one whole read, chi0 at the real frequency, then comes back whole on every
+    rank from the ranks' rows, so the replicated Newton reads the same matrix
+    everywhere.
     """
 
     def __init__(self, proj_tau, grid, eps, nocc, tol=LAPLACE_SCREENING_TOL):
         super().__init__(proj_tau, grid, eps, nocc, tol)
-        self.proj_bar = np.zeros_like(proj_tau)
+        self.pushes = []
 
     def push(self, freq, y, c):
         ck, _ = self._weights(freq)
-        yy = c * np.outer(y, y)
-        for k in range(len(ck)):
-            self.proj_bar[k] += ck[k] * yy
+        self.pushes.append((ck, np.array(y, dtype=float), c))
+
+    def slice_adjoint(self, k, rows=None):
+        """The adjoint on proj(tau_k), (naux, naux), of every push so far;
+        rows = (r0, r1) gives those auxiliary rows alone, (r1 - r0, naux), the
+        same bits as the whole slice's, for a projbar held by rows."""
+        naux = self.proj_tau.shape[-1]
+        r0, r1 = (0, naux) if rows is None else rows
+        out = np.zeros((r1 - r0, naux))
+        for ck, y, c in self.pushes:
+            out += ck[k] * (c * np.outer(y[r0:r1], y))
+        return out
 
     def adjoints(self):
         """projbar, (ntau, naux, naux): the adjoint on proj(tau) of everything
         pushed since construction -- to be added to the integral term's before
         the one polarizability-sweep backward pass."""
-        return self.proj_bar
+        proj_bar = np.zeros_like(self.proj_tau)
+        for k in range(len(proj_bar)):
+            proj_bar[k] = self.slice_adjoint(k)
+        return proj_bar
 
 
 def _residue_backend(real_screening, C_ov, eps, nocc, eta):
@@ -124,7 +160,8 @@ def screening_chain(P, weights, C_ov, d, freq, imaginary, eta=0.0):
     CB = (P * weights) @ (P.T @ C_ov)                # chi0_bar @ C_ov, low rank
     f, df_dd, df_dw = frequency_factor(d, freq, imaginary, eta, slopes=True)
     f_bar = 2.0 * np.einsum('PI,PI->I', C_ov, CB)
-    return 4.0 * f * CB, f_bar * df_dd, \
+    np.multiply(4.0 * f, CB, out=CB)            # Cov_bar, in CB's own block
+    return CB, f_bar * df_dd, \
         (None if df_dw is None else float(f_bar @ df_dw))
 
 

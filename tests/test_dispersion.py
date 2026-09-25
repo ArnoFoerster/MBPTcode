@@ -12,17 +12,30 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import dft, gto
+from pyscf import dft, gto, scf
 
 from src.Base.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
                                  dispersion_gradient, dispersion_version,
                                  refuse_dispersion_under_rpa)
+from src.Base.isdf_jk import isdf_jk
+from src.SingleReference.LinearResponse.rpa_energy import reference_energy
+from src.gradients.dense_surfaces import kohn_sham_gradient_correction
+from src.gradients.isdf_derivatives import (
+    exx_double_counting, exx_double_counting_skeleton, rsh_split)
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 
 #: Fragments in van der Waals contact, which is the case dispersion decides.
 ETHANE = ('C 0 0 0; C 0 0 1.53; H 0 1.02 -0.36; H 0.88 -0.51 -0.36; '
           'H -0.88 -0.51 -0.36; H 0 -1.02 1.89; H 0.88 0.51 1.89; '
           'H -0.88 0.51 1.89')
+WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+#: C1, so that no symmetry zeroes a component a missing term would show in.
+H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
+#: The dRPA force gate's step pair, in Bohr: the finer step's h^2 error, 3.6e-8
+#: Ha/Bohr on H2O_C1, has to stand above the interpolated route's 1.5e-8 floor.
+FD_STEPS = (1e-3, 5e-4)
+#: Central-difference step for the fixed-density skeleton gate, in Bohr.
+STEP = 1e-4
 
 
 def backend():
@@ -154,26 +167,139 @@ def test_the_pcm_factorization_changes_nothing_it_computes():
     assert e2 != pytest.approx(e0, abs=1e-6)     # the new eps really took
 
 
-def test_the_drpa_ground_state_energy_is_exact_on_a_range_separated_reference():
-    """`exx_double_counting` sums one exact-exchange build per channel
-    (`exchange_channels`), so a range-separated hybrid's erf-attenuated term
-    and its full-range term are both added back and E_0 is exact on it too,
-    the same as on a global hybrid."""
-    from pyscf import scf
+def test_the_exact_exchange_repair_carries_every_range_separated_channel():
+    """E_KS -> E_HF at one density, and its skeleton, on range-separated hybrids.
 
-    from src.gradients.isdf_derivatives import exx_double_counting
-
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='cc-pvdz',
-                verbose=0)
-    hf = scf.RHF(mol)
-    range_separated = {'lrc-wpbeh', 'wb97x'}
+    The repair adds back each exact-exchange channel E_xc holds, the
+    erf-attenuated one included; one full-range build weighted by alpha, the
+    scalar `xc_hybrid_coeff` returns, misses E_HF by 6.3 Ha on LRC-wPBEh. The
+    skeleton is the repair's derivative at fixed density with the grid moving
+    with the atoms, so the dRPA ground state has a force on such a reference.
+    """
+    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     for xc in ('pbe0', 'b3lyp', 'lrc-wpbeh', 'wb97x'):
         mf = dft.RKS(mol, xc=xc)
         mf.grids.level, mf.conv_tol = 5, 1e-12
         mf.kernel()
-        if xc in range_separated:
-            assert mf._numint.rsh_and_hybrid_coeff(mf.xc, mol.spin)[0] > 0.0
         got = mf.e_tot + exx_double_counting(mf, mol)
-        assert got == pytest.approx(hf.energy_tot(dm=mf.make_rdm1()), abs=1e-10)
+        want = scf.RHF(mol).energy_tot(dm=mf.make_rdm1())
+        assert got == pytest.approx(want, abs=1e-10), xc
+    assert rsh_split(mf)[0] > 0.0
+    crd = mol.atom_coords()
+    fd = np.zeros((mol.natm, 3))
+    for ia in range(mol.natm):
+        for x in range(3):
+            v = []
+            for sign in (-1.0, 1.0):
+                c = crd.copy()
+                c[ia, x] += sign * STEP
+                m = gto.M(atom=[(mol.atom_symbol(i), tuple(c[i]))
+                                for i in range(mol.natm)],
+                          basis='cc-pvdz', unit='Bohr', verbose=0)
+                # the same AO density, so only the integrals and the grid move
+                moved = dft.RKS(m, xc=mf.xc)
+                moved.grids.level = mf.grids.level
+                moved.mo_coeff, moved.mo_occ = mf.mo_coeff, mf.mo_occ
+                v.append(exx_double_counting(moved, m))
+            fd[ia, x] = (v[1] - v[0]) / (2.0 * STEP)
+    assert np.abs(exx_double_counting_skeleton(mf, mol) - fd).max() < 1e-8
 
+
+def isdf_kohn_sham(xc, level):
+    """A factory of converged ISDF-exchange Kohn-Sham mean fields at XC grid `level`.
+
+    conv_tol_grad 1e-11 because the Lagrangian assumes F_ia = 0. Every
+    displaced SCF starts from the first one's density, which takes LRC-wPBEh at
+    level 6 from many more cycles to fewer and lands on the same minimum.
+    """
+    guess = []
+
+    def factory(m):
+        mf = isdf_jk(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri')
+        mf.grids.level = level
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+        mf.kernel(dm0=guess[0] if guess else None)
+        assert mf.converged
+        if not guess:
+            guess.append(mf.make_rdm1())
+        return mf
+    return factory
+
+
+def richardson_force(chain, mol, steps=FD_STEPS):
+    """(D_R, truncation): the Richardson limit of central differences of the
+    chain's REPORTED E_0 at two steps, on every Cartesian component, and the
+    finer step's own h^2 error, (D(h1) - D(h2)) / ((h1/h2)^2 - 1), at its largest.
+    """
+    diff = {}
+    for h in steps:
+        diff[h] = np.zeros((mol.natm, 3))
+        for ia in range(mol.natm):
+            for x in range(3):
+                e = []
+                for sign in (-1.0, 1.0):
+                    shift = np.zeros((mol.natm, 3))
+                    shift[ia, x] = sign * h
+                    m = mol.copy()
+                    m.set_geom_(mol.atom_coords() + shift, unit='Bohr')
+                    m.build(False, False)
+                    e.append(chain.energy(m)[0])
+                diff[h][ia, x] = (e[1] - e[0]) / (2.0 * h)
+    h1, h2 = steps
+    ratio = (h1 / h2) ** 2
+    return ((ratio * diff[h2] - diff[h1]) / (ratio - 1.0),
+            np.abs(diff[h1] - diff[h2]).max() / (ratio - 1.0))
+
+
+def test_the_reported_hartree_fock_energy_is_the_mean_fields_own():
+    """E_HF[rho] on the interaction each mean field converged with.
+
+    An ISDF Kohn-Sham reference is given its own ISDFJK, so E_HF is E_KS plus
+    the double counting built from the same operators, the functional the
+    gradient pair differentiates; a fresh density fit of the same auxiliary
+    basis is 5.5e-4 Ha away on this water. Hartree-Fock on ISDF reports its own
+    e_tot and a fitted Kohn-Sham reference its fitted mirror, both bitwise, and
+    on Hartree-Fock the gradient pair is exactly zero.
+    """
+    mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
+    nocc = mol.nelectron // 2
+    for xc in ('pbe0', 'lrc-wpbeh'):
+        mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri')
+        mf.kernel()
+        want = mf.e_tot + exx_double_counting(mf, mol)
+        assert reference_energy(mf, mol) == pytest.approx(want, abs=1e-12), xc
+    hf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri')
+    hf.kernel()
+    assert reference_energy(hf, mol) == float(hf.e_tot)
+    y, g = kohn_sham_gradient_correction(mol, hf, nocc)
+    assert not np.any(y) and not np.any(g)
+    fitted = dft.RKS(mol, xc='lrc-wpbeh').density_fit(auxbasis='cc-pvdz-ri')
+    fitted.kernel()
+    mirror = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    assert reference_energy(fitted, mol) == float(
+        mirror.energy_tot(dm=fitted.make_rdm1()))
+
+
+@pytest.mark.parametrize('xc, level', [('pbe0', 3), ('lrc-wpbeh', 6)])
+def test_the_drpa_force_follows_its_reported_energy_on_an_interpolated_kohn_sham_reference(
+        xc, level):
+    """dE_0/dR against a difference of the E_0 the chain REPORTS, per component.
+
+    E_0 takes E_HF from the mean field's own ISDF exchange. With a
+    density-fitted mirror in its place the force missed the reported surface by
+    9.46e-4 Ha/Bohr on both functionals; now the Richardson limit is met to
+    1.5e-8 on PBE0 at XC grid level 3, where a density-fitted PBE0 meets its
+    own to 2.0e-8, inside the finer step's measured truncation of 3.6e-8.
+
+    LRC-wPBEh is gated at level 6. At level 3 it misses by 3.7e-7, and a
+    density-fitted reference by 3.9e-7: the XC grid response the force does
+    not carry, not the reference energy, and at level 6 the miss is 1.7e-8.
+    """
+    mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
+    factory = isdf_kohn_sham(xc, level)
+    chain = RPAGroundStateChain(mol, factory, mf=factory(mol))
+    g, e, _ = chain.total_gradient()
+    assert e == pytest.approx(chain.energy()[0], abs=1e-12)
+    fd, truncation = richardson_force(chain, mol)
+    assert np.abs(g - fd).max() < truncation, (np.abs(g - fd).max(), truncation)
 

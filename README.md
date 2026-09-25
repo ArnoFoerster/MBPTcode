@@ -382,6 +382,71 @@ Write `elpa` for `elpa_openmp` where ELPA was built without OpenMP. To check
 the setup, run `tests/test_elpa_casida.py` under `srun` or `mpirun`: on more
 than one rank it fails if a solve fell back to `eigh`.
 
+## Running under MPI
+
+The space-time GW routes, the ISDF fit, the BSE Davidson and the
+density-fitted SCF divide their work over MPI ranks. Every rank runs the whole
+script -- the SCF loop, the Davidson, the gradient chains, the geometry walk --
+and MPI lives only inside the kernels that realize the physics: the tau and
+frequency sweeps of the GW self-energy and its adjoints, the three-centre pass
+of the ISDF fit, the rows of the screened kernel in the BSE block action, and
+the auxiliary rows and grid points of the SCF's J, K and exchange-correlation
+potential. A driver never takes a communicator; the kernels read it from the
+region the script opens once:
+
+```python
+from pyscf import dft, gto
+
+from src.Base.distributed_df import distributed_mean_field
+from src.Base.utils.mpi_grid import distributed, grid_comm
+from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+
+comm = grid_comm()[0]                  # COMM_WORLD, or None without mpi4py
+with distributed(comm):
+    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+                basis='cc-pvdz')
+    mf = dft.RKS(mol, xc='pbe0').density_fit()
+    distributed_mean_field(mf)         # J/K and the xc grid split over ranks
+    omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2, nroots=5)
+    if comm is None or comm.Get_rank() == 0:
+        print(omega)                   # the same bits on every rank
+```
+
+Launch it with `mpirun -n R python run.py`, or `srun --mpi=pmix` in a Slurm
+job, with `OMP_NUM_THREADS` set to the cores each rank may use (see
+[Threads](#threads)). Without `mpi4py`, or with `MBPT_USE_MPI=0`, `grid_comm`
+returns None and the same script runs serially, bit for bit the serial code.
+`mpi4py` is imported on first use, never at module import.
+
+WHY THE RANKS AGREE. Each rank converges its own arithmetic, and two nodes do
+not repeat each other's last bits: an orbital energy, an interpolation point
+or a Davidson residual can differ, and a discrete decision taken from it -- a
+grid size, a trial-vector count, when to stop -- then differs outright. So
+every kernel `lockstep`s at its entry the inputs that can differ between ranks
+(rank 0's copy is written into every rank's buffers), and gathers or
+all-reduces what it computes. Its output is then the same bits on every rank,
+every decision a driver takes from it is the same, and the replicated drivers
+stay in step without any protocol between them. Inputs one kernel hands the
+next are identical by construction and are not broadcast again;
+`with distributed(comm, audit=True):` makes the kernels compare 64-bit digests
+of them (`mpi_grid.agreement`) and count the repairs their locksteps made
+(`mpi_grid.lockstep_stats()`), which is how a run shows that every kernel held
+one set of bits on every rank.
+
+Two rules follow. A computation meant for one rank only, or a serial reference
+inside the region, runs under `with distributed(None):`, since a kernel that
+found the region's communicator would wait in a collective the other ranks
+never enter. And an exception that leaves the region on any rank prints its
+traceback and calls `comm.Abort(1)`, instead of leaving the other ranks waiting
+until the wall clock ends the job.
+
+The distributed eigensolve above is a different mode -- rank 0 runs the script
+alone and the other ranks serve its eigensolves -- and returns the
+eigenvectors on rank 0 only, so it does not combine with a distributed region:
+in a script that opens one, set `MBPT_USE_ELPA=0`. `tests/test_mpi_routes.py`
+under `mpirun` checks every distributed route against its serial reference;
+`tests/README.md` lists the tests that gate each split.
+
 ## Basis sets from CP2K
 
 CP2K's aug-MOLOPT families, all-electron bases with tiered RI sets built for GW

@@ -37,7 +37,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
     reference_energy)
 from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                           QuasiparticleSurface, mo_eri)
-from src.gradients.qp_qb import QPqb
+from src.gradients.quasi_boson_adjoint import QPqbAdjoint as QPqb
 from src.gradients.rpa_bse_surface import RPABSESurface
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import MeanFieldSurface

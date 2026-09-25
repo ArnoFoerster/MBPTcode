@@ -44,6 +44,10 @@ restored afterwards and `cmp`-verified byte-identical:
   * `declare_physics` skipping the comparison, which is a stamp in all but
     name: FAILED
     test_the_dispatcher_refuses_a_declaration_the_class_does_not_carry.
+  * `SurfaceSpec` given back a `comm: object = None` field: FAILED
+    test_a_spec_takes_no_communicator. A spec is a declaration, and a
+    communicator travelling in one is a second way to the ranks that the
+    context would have to agree with.
   * `nonadiabatic` importing `driven_chain` from `src.gradients.state_manifold`
     at module scope, which is the cycle: FAILED
     test_either_import_order_works_in_a_fresh_interpreter for properties-first
@@ -53,6 +57,7 @@ restored afterwards and `cmp`-verified byte-identical:
 import os
 import subprocess
 import sys
+from dataclasses import fields
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -64,8 +69,10 @@ from src.Base.constants import BSE_DENSE_MAX_NOV
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   SurfacePhysics)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.gradients.excited_state import ExcitedStateChain
+from src.properties.excitations import SurfaceSpec, surface_of
 from src.properties.surfaces import declare_physics, potential_energy_surface
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +93,14 @@ def water():
 def rhf(mol):
     mf = scf.RHF(mol)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-11, 200
+    mf.kernel()
+    return mf
+
+
+def chain_scf(mol):
+    """A density-fitted mean field, the one the cubic chains are built on."""
+    mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
     mf.kernel()
     return mf
 
@@ -316,3 +331,44 @@ def test_a_charged_state_declares_the_orbital_it_removes(mol, hf):
         excitation=ChargedExcitation(homo, -1))
     assert surface.physics.excitation == ChargedExcitation(homo, -1)
     assert np.sign(surface.sign) == -1
+
+
+# ------------------------------------------------------- spec under ranks
+def ground_energy(spec, factory):
+    """E_0 through `surface_of`, on this rank's OWN Mole.
+
+    A Mole per rank because two rank THREADS of one process sharing one
+    corrupt each other's `with_rinv_at_nucleus` origin; the spec is the same
+    declaration either way, which is the point of the comparison.
+    """
+    return surface_of(spec, None, water(), factory).total_energy()
+
+
+def test_a_spec_builds_one_surface_on_every_rank():
+    """Two simulated ranks read the SAME BITS as one: the context reaches the
+    kernels of the surface a spec builds, and nothing in the spec says how
+    many ranks there are."""
+    spec = SurfaceSpec(GroundState('rpa', 'hf'))
+    serial = ground_energy(spec, chain_scf)
+    for energy in run_simulated(lambda comm: ground_energy(spec, chain_scf),
+                                2):
+        assert energy == serial
+
+
+def test_a_spec_takes_no_communicator():
+    """How many ranks added the same terms up is not part of a declaration."""
+    assert 'comm' not in {f.name for f in fields(SurfaceSpec)}
+    with pytest.raises(TypeError, match='comm'):
+        SurfaceSpec(GroundState('rpa', 'hf'), comm=object())
+    assert 'comm' not in SurfaceSpec(GroundState('rpa', 'hf')).as_kwargs()
+
+
+def test_a_dense_row_runs_whole_on_every_rank():
+    """The dense quasi-boson route holds the whole (pq|rs) in one process and
+    reaches no distributed kernel, so under the context every rank computes
+    the serial surface on its own."""
+    spec = SurfaceSpec(GroundState('rpa', 'hf'), chi0='dense-qb',
+                       factorization='four-index')
+    serial = ground_energy(spec, rhf)
+    for energy in run_simulated(lambda comm: ground_energy(spec, rhf), 2):
+        assert energy == serial

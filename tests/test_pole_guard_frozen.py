@@ -38,7 +38,7 @@ from pyscf import dft, gto
 
 from src.Base.constants import QP_POLE_OFFSET
 from src.Base.solvent_screening import SolventScreening
-from src.gradients.contour_deformation import qp_energy_cd
+from src.SingleReference.GW.contour_deformation import qp_energy_cd
 from src.gradients.qp_space_time import frozen_pole_offset
 from src.gradients.rpa_bse_surface import RPABSESurface
 

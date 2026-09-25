@@ -1,17 +1,19 @@
-"""The dense quasi-boson route computes the same numbers from production.
+"""The dense quasi-boson route computes its numbers in production.
 
 The forward physics of the dense oracle -- the closed-form dRPA ground state,
 its bare boson couplings, the diagonal EOM G0W0 quasiparticle solve and the
 BSE@G0W0 eigenproblem, together with the MO integral blocks and the fitted
 interaction all four are built from -- lives in `SingleReference.GW.quasi_boson`,
 `SingleReference.LinearResponse.quasi_boson_bse` and `Base.eri_blocks`. The
-reverse mode stays in `gradients.quasi_boson_adjoint` as three subclasses, and
-the five old modules are re-export shims.
+reverse mode lives in `gradients.quasi_boson_adjoint` as three subclasses of
+production's classes.
 
-WHAT IS GATED. That the shim names ARE the production or adjoint objects
-(identity, not a copy); that every recorded quantity is bitwise the same
-through either import root; the four dedup verdicts as measured numbers; and
-that a fresh interpreter can import all three production modules without
+WHAT IS GATED. That the three adjoint classes subclass production's and build
+their own adjoint parts, and that `gradients.df_assembly` fits with
+production's builders rather than a copy; that every recorded forward quantity
+is bitwise the same on the adjoint class as on the forward one; the physics
+itself as pinned numbers; the dedup verdicts as measured numbers; and that a
+fresh interpreter can import all three production modules without
 `src.gradients` appearing in sys.modules.
 
 THE GATES WERE SHOWN TO FAIL. Four perturbations, each on a backup copy of
@@ -28,17 +30,15 @@ the tree, restored and verified with `cmp` afterwards:
     Ha/Bohr, and the quasiparticle set grows from 15 states to 19.
   * the boson seam reverted (`QPqbAdjoint.boson` removed, so a gradient object
     would carry the forward-only RPA) fails
-    `test_the_three_classes_the_shims_export_are_the_adjoint_subclasses`,
+    `test_the_adjoint_classes_subclass_production_and_build_their_own_parts`,
     `test_the_bse_partials_only_exist_on_the_adjoint_object` and
     `tests/test_gradients_qb.py::test_blocks_refuse_gradients_rather_than_guess`.
-  * a shim re-DEFINING `build_rpa_AB` instead of re-exporting it fails
-    `test_every_shim_name_is_the_production_or_adjoint_object`.
 
-The last one is why the pinned-physics gate is here at all: a bitwise gate
-between the shim and production compares two import roots of ONE body of code,
-so it sees a shim that drifted and CANNOT see a kernel that changed sign.
-Physics is held by the pinned numbers below, by the frozen baseline record and
-by the existing surface tests.
+A bitwise gate between the forward and the adjoint class compares one body of
+forward code reached two ways, so it sees an adjoint subclass that overrode
+the forward arithmetic and CANNOT see a kernel that changed sign. Physics is
+held by the pinned numbers below, by the frozen baseline record and by the
+existing surface tests.
 
 Recorded reference numbers are from H4/sto-3g and water/cc-pVDZ, both RHF
 converged to conv_tol_grad 1e-11.
@@ -55,11 +55,7 @@ from pyscf import ao2mo, gto, scf
 import src.Base.eri_blocks as production_eri
 import src.SingleReference.GW.quasi_boson as production_qb
 import src.SingleReference.LinearResponse.quasi_boson_bse as production_bse
-import src.gradients.bse_qb as shim_bse
-import src.gradients.df_assembly as shim_df
-import src.Base.eri_blocks as shim_eri
-import src.gradients.qb_core as shim_core
-import src.gradients.qp_qb as shim_qp
+import src.gradients.df_assembly as df_assembly
 import src.gradients.quasi_boson_adjoint as adjoint
 from src.Base.constants import QP_WINDOW_Z_MIN
 from src.Base.pyscf_interface import get_two_electron_integrals_chemist
@@ -144,36 +140,19 @@ def bitwise(a, b):
 
 
 # ---------------------------------------------------------------------------
-# the shims re-export the objects themselves
+# the gradient side holds no second copy of the forward
 # ---------------------------------------------------------------------------
 
-def test_every_shim_name_is_the_production_or_adjoint_object():
+def test_df_assembly_reuses_the_production_fit():
     """Identity, not equality: a copy would drift the next time one is edited."""
-    assert shim_core.build_rpa_AB is production_qb.build_rpa_AB
-    assert shim_core.couplings_V is production_qb.couplings_V
-    assert shim_core.eigh_sym is production_qb.eigh_sym
-    assert shim_core.funm_sym is production_qb.funm_sym
-    assert shim_core.sqrtm_sym is production_qb.sqrtm_sym
-    assert shim_core.invsqrtm_sym is production_qb.invsqrtm_sym
-    assert shim_core.frechet_funm_sym is adjoint.frechet_funm_sym
-    assert shim_qp.qp_energy_general is production_qb.qp_energy_general
-    assert shim_eri.MOEriBlocks is production_eri.MOEriBlocks
-    assert shim_eri.as_blocks is production_eri.as_blocks
-    assert shim_df.df_eri_mo is production_eri.df_eri_mo
-    assert shim_df.df_integrals is production_eri.df_integrals
+    assert df_assembly.df_eri_mo is production_eri.df_eri_mo
+    assert df_assembly.df_integrals is production_eri.df_integrals
 
 
-def test_the_three_classes_the_shims_export_are_the_adjoint_subclasses():
-    """A gradient caller reaches the reverse mode under the old names.
-
-    `RPA`, `QPqb` and `BSEqb` have always meant the differentiable objects on
-    the gradient side; the forward-only classes of the same names carry no
-    Frechet map and no partials, and a caller handed one would fail at its
-    first chain rule rather than return a different number.
-    """
-    assert shim_core.RPA is adjoint.RPAAdjoint
-    assert shim_qp.QPqb is adjoint.QPqbAdjoint
-    assert shim_bse.BSEqb is adjoint.BSEqbAdjoint
+def test_the_adjoint_classes_subclass_production_and_build_their_own_parts():
+    """The forward-only classes carry no Frechet map and no partials, so a
+    gradient object that built a forward part would fail at its first chain
+    rule rather than return a different number."""
     assert issubclass(adjoint.RPAAdjoint, production_qb.RPA)
     assert issubclass(adjoint.QPqbAdjoint, production_qb.QPqb)
     assert issubclass(adjoint.BSEqbAdjoint, production_bse.BSEqb)
@@ -185,61 +164,56 @@ def test_the_three_classes_the_shims_export_are_the_adjoint_subclasses():
 
 
 # ---------------------------------------------------------------------------
-# the numbers are bitwise through either import root
+# the adjoint classes compute the forward numbers bitwise
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
-def test_the_rpa_ground_state_is_bitwise_through_both_roots(tag, h4, water):
+def test_the_adjoint_rpa_is_bitwise_the_forward_one(tag, h4, water):
     _, mf, eri, nocc, _ = systems(h4, water)[tag]
-    A, B, d = production_qb.build_rpa_AB(mf.mo_energy, eri, nocc)
-    As, Bs, ds = shim_core.build_rpa_AB(mf.mo_energy, eri, nocc)
-    assert bitwise(A, As) and bitwise(B, Bs) and bitwise(d, ds)
-    prod, shim = production_qb.RPA(A, B), shim_core.RPA(A, B)
+    A, B, _ = production_qb.build_rpa_AB(mf.mo_energy, eri, nocc)
+    prod, adj = production_qb.RPA(A, B), adjoint.RPAAdjoint(A, B)
     for name in ('t', 'wt', 'Vt', 'exp_t', 'exp_mt', 'cosh_t', 'sinh_t',
                  'Abar', 'omega'):
-        assert bitwise(getattr(prod, name), getattr(shim, name)), name
-    assert bitwise(prod.eigAbar[1], shim.eigAbar[1])
-    assert prod.e_corr() == shim.e_corr()
-    assert prod.e_corr_plasmon() == shim.e_corr_plasmon()
-    assert bitwise(production_qb.couplings_V(eri, nocc),
-                   shim_core.couplings_V(eri, nocc))
+        assert bitwise(getattr(prod, name), getattr(adj, name)), name
+    assert bitwise(prod.eigAbar[1], adj.eigAbar[1])
+    assert prod.e_corr() == adj.e_corr()
+    assert prod.e_corr_plasmon() == adj.e_corr_plasmon()
 
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
-def test_the_quasiparticle_solve_is_bitwise_through_both_roots(tag, h4, water):
+def test_the_adjoint_quasiparticle_solve_is_bitwise_the_forward_one(tag, h4,
+                                                                    water):
     _, mf, eri, nocc, norb = systems(h4, water)[tag]
     prod = production_qb.QPqb(mf.mo_energy, eri, nocc, screening='rpa')
-    shim = shim_qp.QPqb(mf.mo_energy, eri, nocc, screening='rpa')
-    assert bitwise(prod.Wnu, shim.Wnu) and bitwise(prod.omega, shim.omega)
+    adj = adjoint.QPqbAdjoint(mf.mo_energy, eri, nocc, screening='rpa')
+    assert bitwise(prod.Wnu, adj.Wnu) and bitwise(prod.omega, adj.omega)
     for p in range(norb):
-        assert prod.solve_diag(p) == shim.solve_diag(p)
-        assert prod.sigma(p, mf.mo_energy[p]) == shim.sigma(p, mf.mo_energy[p])
+        assert prod.solve_diag(p) == adj.solve_diag(p)
+        assert prod.sigma(p, mf.mo_energy[p]) == adj.sigma(p, mf.mo_energy[p])
     p = nocc - 1
-    assert bitwise(prod.supermatrix_diag(p), shim.supermatrix_diag(p))
-    assert prod.solve_diag_dense(p) == shim.solve_diag_dense(p)
-    fock = np.diag(np.asarray(mf.mo_energy, float))
-    assert (production_qb.qp_energy_general(fock, eri, nocc, p)
-            == shim_qp.qp_energy_general(fock, eri, nocc, p))
+    assert bitwise(prod.supermatrix_diag(p), adj.supermatrix_diag(p))
+    assert prod.solve_diag_dense(p) == adj.solve_diag_dense(p)
 
 
 @pytest.mark.parametrize('screening,bse_tda', [('rpa', False), ('rpa', True),
                                                ('tda', False), ('tda', True)])
-def test_the_bse_eigenpairs_are_bitwise_through_both_roots(screening, bse_tda,
-                                                           water):
+def test_the_adjoint_bse_eigenpairs_are_bitwise_the_forward_ones(screening,
+                                                                 bse_tda,
+                                                                 water):
     _, mf, eri, nocc, _ = water
     kw = dict(screening=screening, bse_tda=bse_tda)
     for spin in ('singlet', 'triplet'):
         prod = production_bse.BSEqb(mf, eri, nocc, spin=spin, **kw)
-        shim = shim_bse.BSEqb(mf, eri, nocc, spin=spin, **kw)
-        assert bitwise(prod.A_bse, shim.A_bse)
-        assert (prod.B_bse is None) == (shim.B_bse is None)
+        adj = adjoint.BSEqbAdjoint(mf, eri, nocc, spin=spin, **kw)
+        assert bitwise(prod.A_bse, adj.A_bse)
+        assert (prod.B_bse is None) == (adj.B_bse is None)
         if prod.B_bse is not None:
-            assert bitwise(prod.B_bse, shim.B_bse)
-        assert bitwise(prod.Pinv, shim.Pinv)
-        assert bitwise(prod.eps_qp, shim.eps_qp)
-        assert prod.qp_roots == shim.qp_roots
-        assert bitwise(prod.Omega, shim.Omega)
-        assert bitwise(prod.X, shim.X) and bitwise(prod.Y, shim.Y)
+            assert bitwise(prod.B_bse, adj.B_bse)
+        assert bitwise(prod.Pinv, adj.Pinv)
+        assert bitwise(prod.eps_qp, adj.eps_qp)
+        assert prod.qp_roots == adj.qp_roots
+        assert bitwise(prod.Omega, adj.Omega)
+        assert bitwise(prod.X, adj.X) and bitwise(prod.Y, adj.Y)
 
 
 def test_the_pole_strength_filter_is_the_declared_constant(water):
@@ -260,19 +234,12 @@ def test_the_pole_strength_filter_is_the_declared_constant(water):
 
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
-def test_the_integral_blocks_are_bitwise_through_both_roots(tag, h4, water):
+def test_as_blocks_passes_blocks_through_and_mo_eri_is_the_dense_transform(
+        tag, h4, water):
     mol, mf, eri, nocc, _ = systems(h4, water)[tag]
     prod = production_eri.MOEriBlocks.from_dense(eri, nocc)
-    shim = shim_eri.MOEriBlocks.from_dense(eri, nocc)
-    for name in ('ovov', 'oovv', 'pqov', 'vovo'):
-        assert bitwise(getattr(prod, name), getattr(shim, name)), name
-    assert shim_eri.as_blocks(prod, nocc) is prod
+    assert production_eri.as_blocks(prod, nocc) is prod
     assert bitwise(production_eri.mo_eri(mf, mol), eri)
-    auxmol = gto.M(atom=[(mol.atom_pure_symbol(i), tuple(c)) for i, c
-                         in enumerate(mol.atom_coords())],
-                   unit='Bohr', basis='cc-pvdz-ri', verbose=0)
-    assert bitwise(production_eri.df_eri_mo(mol, auxmol, mf.mo_coeff),
-                   shim_df.df_eri_mo(mol, auxmol, mf.mo_coeff))
 
 
 def test_the_bse_partials_only_exist_on_the_adjoint_object(water):
@@ -281,7 +248,7 @@ def test_the_bse_partials_only_exist_on_the_adjoint_object(water):
     forward = production_bse.BSEqb(mf, eri, nocc)
     assert not hasattr(forward, 'partials')
     assert not hasattr(forward.qp.qb, 'gamma_A')
-    b = shim_bse.BSEqb(mf, eri, nocc)
+    b = adjoint.BSEqbAdjoint(mf, eri, nocc)
     gF, G4, tg = b.partials(0)
     gF2, G42, tg2 = adjoint.BSEqbAdjoint(mf, eri, nocc).partials(0)
     assert bitwise(gF, gF2) and bitwise(G4, G42) and bitwise(tg, tg2)

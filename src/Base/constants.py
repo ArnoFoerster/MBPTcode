@@ -16,6 +16,20 @@ DEFAULT_BROADENING_ETA = 1e-3
 # through.
 AUX_METRIC_LINDEP = 1e-10
 
+# Relative eigenvalue floor of the Coulomb metric's SQUARE ROOT, the gauge of
+# the separable factors (D = M^T V^1/2): a direction below it is the metric's
+# numerical null space and is dropped from the root rather than carried at
+# the rounding level. Far below AUX_METRIC_LINDEP because the root is never
+# inverted: a small eigenvalue enters it as w^1/2, which is harmless.
+AUX_METRIC_ROOT_FLOOR = 1e-12
+
+# How negative, relative to the largest eigenvalue, a DRESSED metric v + vtilde
+# may be before its root is refused. v + vtilde is a positive kernel, so a
+# negative eigenvalue beyond rounding means the discretized reaction field
+# over-screens the bare interaction -- an error of the cavity or of eps, not
+# a truncation to be dropped.
+AUX_METRIC_INDEFINITE_TOL = 1e-10
+
 # Validated ISDF interpolation grids: {basis: {level: (A1, A2, A3, B1)}}, the
 # Lebedev sub-shell replica counts measured to reach an accuracy. THE ONLY
 # PLACE A VALIDATED COUNT IS WRITTEN DOWN; a re-measured grid is corrected here
@@ -132,6 +146,41 @@ KAPPA = {'singlet': 2.0, 'triplet': 0.0}
 # routes: the polarizability sweep and the BSE block action. Memory only; the
 # flop count is unchanged.
 ISDF_TILE_GB = 4.0
+
+# Grid points per tile of the row-distributed ISDF fit (`fit_rows`): the Gram
+# tiles, the Cholesky panels and diagonal blocks, the substitution blocks, the
+# three-centre contraction and the projections all run on tiles of this edge,
+# owned block-cyclically. FIXED, never derived from the rank count: a GEMM's
+# bits depend on its call shape, so the same tile sequence whoever owns it is
+# what makes the factor, the solve and D bitwise identical at every rank
+# count. 512 keeps the trailing update's inner dimension at two BLAS panels
+# and cuts the chlorophyllide hexamer (117762 points) into 231 tiles -- 29 a
+# rank at 8 ranks, 0.48 GB a gathered panel -- and pentacene (5328) into 11.
+FIT_CHOLESKY_BLOCK = 512
+
+# How many times the replicated fit's own reassociation response a different
+# realization of the same fit may sit from it. The response is measured on the
+# run: the replicated fit re-run with its three-centre blocks cut per shell and
+# accumulated in reverse order, which moves D, the quasiparticle energies, W(0)
+# and the BSE roots by what one reordering of an eps-level sum costs once the
+# balanced Gram matrix (cond ~ 1e8) amplifies it. The row-distributed fit
+# differs from the replicated one by several such reorderings at once (Gram
+# tiles, a blocked Cholesky, per-tile contractions), so its distance is a few
+# responses; ten covers that and still fails a defect, which moves the fit by
+# whole digits.
+FIT_REASSOCIATION_K = 10
+
+# How many times a MEASURED repeat or reassociation response of a number that
+# number may move when a comparison spans two SCF runs, two threaded pyscf K
+# builds or a sum reduced in another order. pyscf's OpenMP GEMM (`lib.ddot`)
+# adds its K-split partials in thread-arrival order, so at 16 threads no pyscf
+# result repeats bit for bit, and a fixed tolerance gates one machine's BLAS
+# rather than the method; the response is measured where the comparison runs
+# (the serial force re-associated on one BLAS thread, or the spread of repeated
+# evaluations on one mean field). Three puts the BSE@GW excitation force's gate
+# at 5.4e-8 Ha/Bohr on water/cc-pVDZ, where that response is 1.8e-8, far under
+# the 1.49e-3 a real defect moved it (ranks differentiating two grids).
+COMPOSED_GRAD_K = 3
 
 # How far a Casida vector may sit from <X|X> - <Y|Y> = 1 before a consumer
 # refuses it. Loose enough for a Davidson root at conv_tol 1e-5, tight enough
@@ -565,3 +614,181 @@ def get_method_info(method):
     raise ValueError(
         f"Unknown self-energy method '{method}'. Available: {sorted(METHOD_REGISTRY)}"
     )
+
+
+# BLAS threads at or above which a pyscf-OpenMP kernel is worth running with
+# the BLAS pool held at one thread (`Base.utils.threads.blas_single_threaded`).
+# The two pools spin against each other, and the cost of that contention is
+# what the wrap removes: on sixteen cores the SCF is 117.5 s with both pools
+# wide and 9.4 s with BLAS at one. It scales with the cores there are to
+# contend over, so on two or three threads there is nothing to win and the
+# entry cost of the wrap is all that is left -- which is what this gates.
+BLAS_WRAP_MIN_THREADS = 4
+
+
+# Fraction of a SLURM allocation's memory that `Base.utils.memory.
+# allocation_max_memory_mb` hands to pyscf's own `max_memory`. pyscf's buffers
+# (the DF tensor, the numint grid) are not the whole process: the probe that
+# found the pentacene cc-pVTZ regression measured 7.8 GB RSS at anthracene
+# cc-pVTZ with `max_memory` itself capped at 4000 MB, so mo_coeff, the ISDF
+# factors and python's own overhead already run close to as large as the
+# capped buffers do. Handing pyscf the whole allocation would leave that other
+# half nowhere to go and the job would be killed for memory it never asked
+# pyscf for; 0.6 leaves it 40% of the node.
+ALLOCATION_MEMORY_FRACTION = 0.6
+
+
+# Pseudo-inverse cutoff of the minimax transform fits
+# (`Base.utils.time_frequency.minimax_transform_weights`), relative to the
+# largest singular value of that row's design matrix. The fit is a per-point
+# least squares solved through an SVD, and below `_REGULARIZATION_ABOVE` points
+# it carries NO Tikhonov term, so the filter is 1/S: an exactly zero singular
+# value gives 0/0 and one below 1.5e-162 squares to zero and gives an
+# infinity. Either fills a row of the transform with non-numbers that then
+# propagate into W(i.tau) and the self-energy. Both are reached in production
+# -- a minimax tau point large enough that exp(-x tau) underflows over the
+# whole node range leaves an exactly zero COLUMN in the design matrix.
+# This separates arithmetically zero from small: the smallest relative
+# singular value any grid in this code reaches is 2e-17, and GreenX inverts
+# those deliberately (conditioning is the regularization's business, not this
+# cutoff's), so the value sits far below anything a fit uses and drops only
+# what the arithmetic itself cannot invert.
+TRANSFORM_FIT_RCOND = 1e-100
+
+
+# Lebedev order of the cavity surface: 11 is 50 points per sphere against
+# pyscf's own default of 29, which is 302. The continuum's cost is the SURFACE
+# POTENTIAL of the density, n_ao^2 x n_surf, so this is the only knob that
+# moves it -- and it buys almost nothing to refine. Measured: formaldehyde's
+# solvation energy in toluene moves 0.4 meV between order 11 and order 29
+# while the potential costs four times more at 29, and biphenyl's relaxed
+# inter-ring torsion is IDENTICAL at orders 11 and 17 to a hundredth of a
+# degree. The worry that a gradient might be more sensitive than an energy,
+# the surface moving with the atoms, does not survive a full relaxation.
+PCM_LEBEDEV_ORDER = 11
+
+
+# The smallest residual the BSE/Casida Davidson (`LinearResponse.davidson`) may
+# be asked for, as a multiple of machine epsilon times the largest particle-hole
+# energy difference. The residual A x - omega x comes from block actions good to
+# eps * ||A||, and ||A|| is that diagonal: the ISDF action at
+# naphthalene/cc-pVDZ matches the dense blocks to 1.3 eps max(d). On
+# Casida-shaped model problems (500 to 12000 pairs, max(d) 14 and 63 Ha) the
+# solver reached 5e-14 to 1.5e-12 Ha, 15 to 110 eps max(d), and asked for less it
+# stopped for want of a new direction. A tolerance under this -- 3e-12 Ha at
+# max(d) = 15 Ha -- is refused before the first cycle.
+DAVIDSON_FLOOR_EPS_MULTIPLE = 1e3
+# pyscf `real_eig`'s own linear-dependence threshold, passed explicitly because
+# the Davidson's preconditioner sizes corrections against it.
+DAVIDSON_LINDEP = 1e-12
+# Hartree. The residual below which a Davidson correction is SIZED for
+# real_eig's linear-dependence test rather than handed over at its raw length
+# r / (d - omega). Above it the raw length clears pyscf's absolute test -- the
+# fabric probe converges anthracene/cc-pVTZ at 1e-5 on it in 18-22 cycles --
+# and leaving it raw there keeps every solve at conv_tol >= 1e-5 bitwise what
+# it was, since a root is only corrected while |r| > conv_tol.
+DAVIDSON_SIZED_RESIDUAL = 1e-5
+# The smallest part of a sized Davidson correction that may lie outside the
+# trial subspace, as a fraction of the correction, for it to be added; nearly
+# dependent directions fill the subspace and its projected (A-B) block loses
+# definiteness. With every correction sized, 1e-6 broke down on 1 of 24
+# Casida-shaped model problems at conv_tol 1e-8 and 2 at 1e-10, 1e-4 and 1e-3
+# on none of 48. As used, sized below DAVIDSON_SIZED_RESIDUAL, 1e-3 converges
+# 48 of 48 at 1e-8 and 47 at 1e-10.
+DAVIDSON_MIN_NEW_FRACTION = 1e-3
+
+
+# Share of a rank's own slice of the fitted tensor that the distributed DF
+# build (`Base.distributed_df`) may hold in the transients of its exchange.
+# The build cuts the three-centre integrals by AO-pair column and stores them
+# by auxiliary row, so every round holds four buffers of (naux, block width):
+# the two integral buffers, the piece this rank sends and the pieces it
+# receives. Sizing the block against the SLICE rather than against free memory
+# is what keeps the peak near the slice the split exists to fit -- at 0.5 the
+# build peaks at 1.5x the slice, where a single exchange of the whole column
+# layout would peak at 3x and give back what dividing the auxiliary index
+# bought.
+DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
+
+# The digest `mpi_grid.agreement` compares across ranks: an array's C-ordered
+# bytes as 64-bit words u_i, summed mod 2^64 against W[i mod L] c[i div L],
+# with W and c odd words of one PCG64 stream drawn from this seed and L the
+# block length below. One changed word always changes the sum (an odd weight is
+# invertible mod 2^64); changes in several words cancel only where their
+# differences stand in the ratio of pseudo-random weights, ~2^-64. Any fixed
+# seed serves: it changes every digest, never a verdict between ranks running
+# one tree.
+AGREEMENT_DIGEST_SEED = 1
+# 64-bit words per block of that digest. The uint64 matrix-vector product over
+# the blocks measured 18 GB/s at 4096 on the laptop (26 GB in 1.4 s) against
+# 12 GB/s at 16384 and 65536, where blake2b over the same bytes runs 0.29 GB/s;
+# the whole digest ran 10 to 15 GB/s with other jobs on the machine.
+AGREEMENT_DIGEST_BLOCK = 4096
+
+# The (A - B) probe replicated over ranks (`LinearResponse.davidson`) runs its
+# own Lanczos where serially it runs ARPACK: eigsh holds one process-wide lock
+# across its whole iteration, matvecs included, so rank threads cannot all be
+# inside it at once. Sized by eigsh's own defaults: a basis of
+# max(2k + 1, AMB_LANCZOS_NCV) vectors between thick restarts, and at most
+# AMB_LANCZOS_MAXITER_PER_DIM operator applications per pair.
+AMB_LANCZOS_NCV = 20
+AMB_LANCZOS_MAXITER_PER_DIM = 10
+
+# How the Hellmann-Feynman adjoint of a BSE root is realized. 'explicit'
+# contracts the Casida vectors against the three-index blocks B[P, i, a] of
+# `gradients.bse_isdf.bse_cache`, (naux, nocc, nvir) each, ten of them alive at
+# once; 'grid' is the reverse of the ISDF block action
+# (`LinearResponse.isdf_bse_adjoint`), which closes over the grid and forms no
+# three-index block at all. The same derivative to rounding, not the same
+# bits, so the vocabulary is spelled once for the chain and the record.
+BSE_ADJOINTS = ('explicit', 'grid')
+
+# Grid points per row tile of the grid BSE adjoint
+# (`LinearResponse.isdf_bse_adjoint`). FIXED, never derived from a memory
+# budget or a rank count: a GEMM's bits depend on its call shape, so one tile
+# sequence is what lets the rows be handed to their owners unchanged. Each
+# rank holds its own row tiles and streams the other ranks' column tiles,
+# so a pass keeps a handful of (256, M) and (256, naux) tiles alive: a few
+# GB at the chlorophyllide hexamer (M 117762), inside ISDF_TILE_GB.
+BSE_ADJOINT_TILE_ROWS = 256
+
+# GB of float64: the largest particle-hole block C_ov = B[:, occ, virt],
+# naux * nocc * nvir * 8 bytes, that the explicit residue backend of the
+# quasiparticle solves may build. The backend holds C_ov, the adjoint Cov_bar
+# of the state in its reverse pass and one more block of that size inside each
+# residue evaluation or push, three at once, whole on EVERY rank: at this limit
+# 768 GB a rank, a 1 TB node with nothing beside it. Above it the route cannot
+# run at any rank count -- the chlorophyllide hexamer's block is 2197 GB -- and
+# the answer is the Laplace backend (residues below the particle-hole gap, from
+# proj(tau)) or the pole model, which build no block.
+EXPLICIT_RESIDUE_MAX_GB = 256.0
+
+# Auxiliary rows per slab of W_bar in the distributed grid BSE adjoint
+# (`LinearResponse.isdf_bse_adjoint`): slab s is summed by rank s % nranks
+# over the grid tiles in tile order, and the slabs are then gathered verbatim.
+# FIXED, like BSE_ADJOINT_TILE_ROWS and for the same reason: a slab is a
+# GEMM's row count, so it must not follow the rank count. The grid index is
+# cut in BSE_ADJOINT_TILE_ROWS tiles on both sides of every M^2 product, so
+# one pass holds (2 nT + 4) (tile, tile) blocks, 6.3 MB, not (rows, M) tiles.
+BSE_ADJOINT_AUX_ROWS = 256
+
+# The largest count one MPI call may carry, in elements of the call's
+# datatype. mpi4py hands the library an MPI_Count only where the library has
+# the MPI-4 large-count routines (MPI_Allreduce_c, ...), which Open MPI 5.0.x
+# does not provide; its fallback narrows the count to a C int and raises
+# MPI_ERR_ARG past 2^31 - 1. proj(tau) at the chlorophyllide hexamer is 1.9e10
+# doubles and D 3.3e9, so every collective of `Base.utils.mpi_grid` moves at
+# most this many float64 per call, in windows; below it a call is one window,
+# the unchunked call itself.
+MPI_COUNT_MAX = 2 ** 31 - 1
+
+
+# Bohr within which an explicit set of ISDF shell radii counts as THE shipped
+# table row for the same (element, basis, auxbasis, counts). Both sides are
+# float64 -- one read back from the JSON table, one held by the caller -- so
+# agreement is either exact to the last bit or the two are different grids:
+# neighbouring rows differ in the second decimal, and a run-time
+# re-optimization onto another local minimum lands 1e-3 Bohr or further away.
+# This tolerance absorbs decimal round-tripping and nothing else; it is not a
+# statement that two grids this close are interchangeable.
+ISDF_RADII_MATCH_TOL = 1e-10

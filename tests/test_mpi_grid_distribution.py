@@ -1,4 +1,6 @@
-"""Distributed tau loops must reproduce the serial answer exactly.
+"""Distributed tau loops must reproduce the serial answer exactly, and every
+collective cut into windows at an artificial count limit the bits of its one
+call (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
 
     python tests/test_mpi_grid_distribution.py           # partition algebra
     mpirun -n 3 python tests/test_mpi_grid_distribution.py   # the real check
@@ -12,10 +14,12 @@ import warnings
 import numpy as np
 warnings.simplefilter('ignore')
 from pyscf import gto, scf
-from src.Base.utils.mpi_grid import grid_comm, partition
+import src.Base.utils.mpi_grid as mpi_grid
+from src.Base.utils.mpi_grid import grid_comm, partition, run_simulated
 from src.SingleReference.GW.space_time import (solve_qp_energy_space_time,
                                                separable_factors)
 from src.Base.constants import HARTREE_TO_EV
+from tests.test_proj_rows import LIMIT, collectives
 
 comm, rank, size = grid_comm()
 
@@ -33,6 +37,35 @@ for n in (14, 18, 40):
     for s in (1, 2, 3, 5, 8, 64):
         idx = np.sort(np.concatenate([partition(n, r, s) for r in range(s)]))
         all_ok &= check(np.array_equal(idx, np.arange(n)), f'n={n}, {s} ranks')
+
+if rank == 0:
+    print(f'\n-- every collective cut at MPI_COUNT_MAX = {LIMIT} gives the '
+          'bits of its one call')
+
+
+def windowed(run):
+    """(one call each, in windows): what `run` returns at the two limits."""
+    saved = mpi_grid.MPI_COUNT_MAX
+    whole = run()
+    mpi_grid.MPI_COUNT_MAX = LIMIT
+    try:
+        cut = run()
+    finally:
+        mpi_grid.MPI_COUNT_MAX = saved
+    return whole, cut
+
+
+if size > 1:
+    whole, cut = windowed(lambda: collectives(comm))
+    moved = [k for k in whole if whole[k].tobytes() != cut[k].tobytes()]
+    moved = [m for own in comm.allgather(moved) for m in own]
+    all_ok &= check(not moved, f'over {size} MPI ranks', f'moved: {moved}')
+else:
+    for s in (2, 3, 8):
+        whole, cut = windowed(lambda: run_simulated(collectives, s))
+        moved = [k for a, b in zip(whole, cut) for k in a
+                 if a[k].tobytes() != b[k].tobytes()]
+        all_ok &= check(not moved, f'over {s} simulated ranks', f'moved: {moved}')
 
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
             basis='cc-pvdz', verbose=0)

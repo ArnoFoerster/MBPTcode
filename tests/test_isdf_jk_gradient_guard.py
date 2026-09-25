@@ -71,6 +71,13 @@ def test_the_surfaces_that_move_nuclei_now_dispatch_instead():
     skeletons; both now come from the interpolation, so the correct force
     exists and the choice is a dispatch.
 
+    `factor_chain.FactorChain.mean_field_gradient` is where the dispatch
+    itself lives, on `with_df`'s type: `mean_field_skeleton_force` for an
+    ISDF one, pyscf's own fitted gradient otherwise. `excited_state`'s chain
+    does not override that method, so its own source calls
+    `mean_field_gradient(` and never spells `mean_field_skeleton_force(` --
+    the dispatch is reached through inheritance, not repeated.
+
     A source scan says only that the call is present, which is why
     tests/test_isdf_fock_partial.py carries the finite difference that says the
     dispatched force is right.
@@ -79,9 +86,10 @@ def test_the_surfaces_that_move_nuclei_now_dispatch_instead():
 
     from src.gradients import excited_state, factor_chain
     for module in (excited_state, factor_chain):
-        src = inspect.getsource(module)
-        assert 'refuse_isdf_jk_gradient(' not in src, module.__name__
-        assert 'mean_field_skeleton_force(' in src, module.__name__
+        assert 'refuse_isdf_jk_gradient(' not in inspect.getsource(module), \
+            module.__name__
+    assert 'mean_field_skeleton_force(' in inspect.getsource(factor_chain)
+    assert 'mean_field_gradient(' in inspect.getsource(excited_state)
 
 
 def test_the_guard_sends_the_caller_to_the_force_that_exists():
@@ -116,9 +124,12 @@ def test_pyscfs_gradient_misses_what_the_isdf_one_hits():
     pyscf_force.grid_response = True
     wrong = abs(pyscf_force.kernel()[1, 2] - fd['isdf'])
     right = abs(isdf_mean_field_gradient(mf)[1, 2] - fd['isdf'])
-    assert wrong > 1e-4, wrong
+    # pyscf's force is one functional evaluated on another, so its error IS
+    # the interpolation error and shrinks as the grid improves: 3.9e-4 on the
+    # grids before the re-gate, 8.4e-5 after it. What has to hold is that it
+    # stays resolvable above the difference, not that the grid stays bad.
     assert right < 1e-6, right
-    assert right < 1e-3 * wrong, (right, wrong)
+    assert wrong > 100.0 * right, (right, wrong)
     # and what a caller actually gets is the right one
     attached = mf.Gradients()
     attached.grid_response = True
@@ -151,3 +162,7 @@ def test_normal_modes_refuses_to_build_a_fitted_hessian():
     omega = normal_modes(df, hess=raw)[0]
     again = normal_modes(isdf, hess=raw)[0]
     assert np.allclose(again, omega, atol=0, rtol=0)
+
+
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))

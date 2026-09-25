@@ -31,8 +31,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df, dft, gto, scf
 
-from src.Base.isdf_jk import (ISDFJK, isdf_jk, range_coulomb,
+from src.Base.isdf_jk import (ISDFJK, isdf_grid, isdf_jk, range_coulomb,
                               separable_factors_from_jk)
+from src.Base.separable_ri import PUBLISHED_COUNTS
 from src.SingleReference.GW.space_time import separable_factors
 from src.Base.constants import HARTREE_TO_EV
 
@@ -191,6 +192,32 @@ def main():
         ok &= check(False, 'refuses a mean field that did not fit an ISDF')
     except TypeError:
         ok &= check(True, 'refuses a mean field that did not fit an ISDF')
+
+    # A requested grid SIZE must reach the grid, and so must the DEFAULT one.
+    # cc-pVTZ used to be special: the published Duchemin-Blase tables (H/C/N/O,
+    # one size each) were substituted for a caller who named no `counts`, so
+    # this basis alone answered with ~320 points per atom while every other
+    # basis answered with the 148 of DEFAULT_COUNTS. Those grids are ordinary
+    # rows in the radii table now, at their own counts, so reaching them means
+    # asking for them -- which is what the third check below pins. H2 keeps this
+    # cheap: hydrogen is in the published set.
+    print('\n=== grid size at cc-pVTZ: asked for, defaulted, published ===')
+    h2 = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvtz', verbose=0)
+    m_default = len(isdf_grid(h2))
+    m_small = len(isdf_grid(h2, counts={'A1': 5, 'A2': 3, 'A3': 2, 'B1': 0}))
+    m_large = len(isdf_grid(h2, counts={'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}))
+    # The published hydrogen grid is (5,5,4,2) with the cusp sampled: 167 points.
+    m_pub = len(isdf_grid(h2, counts=dict(zip(('A1', 'A2', 'A3', 'B1'),
+                                              PUBLISHED_COUNTS['H']))))
+    ok &= check(m_small == 2 * 78 and m_large == 2 * 148,
+                'explicit counts reach the grid at cc-pVTZ',
+                f'{m_small} and {m_large} points for 78 and 148 per atom')
+    ok &= check(m_default == 2 * 148,
+                'omitting counts takes DEFAULT_COUNTS, not a per-basis special '
+                'case', f'{m_default} points = 2 x 148')
+    ok &= check(m_pub == 2 * 167,
+                'the published grid is reached by asking for its counts',
+                f'{m_pub} points')
 
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1

@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.davidson import (
     isdf_bse_factors, minimax_points_for_bse, static_screening_grid,
@@ -29,6 +30,11 @@ from src.SingleReference.LinearResponse.davidson import (
 from src.gradients.reaction_field_adjoint import static_grid, static_screening
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
+SIZES = [2, 3]
+#: chi0 accumulates its tau points as they arrive, so a tau partition
+#: re-associates that sum: the ranks agree with the serial answer at the last
+#: bits, not in them. Measured 2.2e-16 relative on water/cc-pVDZ.
+RANK_REL = 2.3e-16
 #: A grid the caller sizes itself, so the ntau argument of both entry points is
 #: exercised and not only the shared default.
 NTAU_FIXED = 12
@@ -91,6 +97,28 @@ def test_static_screening_still_returns_the_orbital_densities(water):
     assert mat.shape == (w['D'].shape[1], w['D'].shape[1])
     assert np.array_equal(mat, static_screening_matrix(
         w['X'], w['D'], w['eps'], w['nocc'], static_grid(w['eps'], w['nocc'])))
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_the_entry_points_agree_under_ranks(water, size):
+    """Off the same tau partition the two entry points are still one matrix,
+    bitwise, and each sits at the re-associated sum's distance from serial."""
+    w = water
+    grid = static_grid(w['eps'], w['nocc'])
+    a0, w_serial = static_screening(w['X'], w['D'], w['eps'], w['nocc'], grid)
+
+    ranks_rf = run_simulated(
+        lambda c: static_screening(w['X'], w['D'], w['eps'], w['nocc'], grid,
+                                   comm=c), size)
+    ranks_bse = run_simulated(
+        lambda c: isdf_bse_factors(w['mf'], w['mol'], w['nocc'],
+                                   factors=w['factors'], distribute=True,
+                                   comm=c)[2], size)
+    for (a, w_rf), w_bse in zip(ranks_rf, ranks_bse):
+        assert np.array_equal(w_rf, w_bse)
+        assert np.array_equal(a, a0)            # no sweep, so bitwise
+        rel = np.abs(w_rf - w_serial).max() / np.abs(w_serial).max()
+        assert rel <= RANK_REL, f'{size} ranks moved W by {rel:.2e}'
 
 
 def test_production_does_not_import_the_gradient_package():

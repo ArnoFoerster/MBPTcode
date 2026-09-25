@@ -32,6 +32,11 @@ Casida step is a dense eigensolve, so this closes the ADJOINT CHAIN at small
 size, not yet the cost. Production already has the matrix-free Davidson that
 replaces it; wiring the adjoint to iterative eigenvectors does not change any
 of the algebra below.
+
+X and D may be `SlicedFactors`, each rank's grid rows of X_mo and D: every
+block is a sum over the grid, so each entry point gathers X_mo and D whole
+once and drops them on return, and its output is the whole factors' bit for
+bit.
 """
 import numpy as np
 
@@ -39,6 +44,7 @@ from src.Base.constants import ISDF_TILE_GB, KAPPA
 from src.SingleReference.LinearResponse.davidson import bse_pair_diagonal
 from src.SingleReference.LinearResponse.space_time import b_block  # noqa: F401
 from src.SingleReference.base import get_occ_virt_indices
+from src.Base.sliced_factors import whole_factor
 
 
 def b_block_backward(X, D, p_idx, q_idx, B_bar, X_bar, D_bar):
@@ -112,6 +118,7 @@ def bse_cache(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
     (naux, n_occ, n_vir) or smaller, so pairing this with the Davidson solver
     removes the last pair-space array from the route.
     """
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     occ, virt = get_occ_virt_indices(np.asarray(eps_qp, float), nocc)
     n_ov = len(occ) * len(virt)
     return {'occ': occ, 'virt': virt, 'kappa': KAPPA[spin],
@@ -122,6 +129,7 @@ def bse_cache(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
 
 def bse_blocks(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
     """(A, B, cache) of the BSE in ISDF variables; B is None for a TDA problem."""
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     kappa = KAPPA[spin]
     occ, virt = get_occ_virt_indices(np.asarray(eps_qp, float), nocc)
     n_ov = len(occ) * len(virt)
@@ -191,6 +199,7 @@ def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
     Flops stay at the level of a density-fitted exchange build; storage is
     three-index.
     """
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     occ, virt = cache['occ'], cache['virt']
     B_ov, B_oo = cache['B_ov'], cache['B_oo']
     kappa, B_vo = cache['kappa'], cache['B_vo']
@@ -236,17 +245,12 @@ def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
                                    -omega_bar * (D @ W_aux), w, wq,
                                    X_bar, D_bar, tile_gb=tile_gb)
 
-    # (iv) swap term, -W_aj,bi, only for a full BSE.
-    #
-    # NOT factorized on the grid, deliberately, and this was MEASURED rather
-    # than reasoned. The same trick as (iii) applies algebraically, but the
-    # swap needs FOUR (M, M) passes -- two B_vo slots x two rank-one pieces --
-    # each costing M^2 n_aux, against ONE pass of M n_aux n_vir n_occ for the
-    # explicit route: at nao = 96 the (M, M) route is 6.1e9 flops against
-    # 2.7e9. The (n_aux, n_vir, n_occ) block it keeps is three-index, so it
-    # costs storage that scales like the factors and nothing that blows up;
-    # the virtual-virtual block of (iii) was the only quartic-STORAGE object,
-    # and that one is gone.
+    # (iv) swap term, -W_aj,bi, only for a full BSE, through the
+    # (n_aux, n_vir, n_occ) block. Factorized on the grid term by term it
+    # needs four (M, M) passes of M^2 n_aux each; sharing ONE Hadamard weight
+    # and one Zt tile across every screened term instead is
+    # `LinearResponse.isdf_bse_adjoint`, which forms no three-index block and
+    # costs M^2 (4 n_aux + 32 n_occ) against M n_aux n_occ n_vir here.
     if B_vo is not None:
         g = np.zeros_like(B_vo)
         M1 = np.einsum('PQ,Qbi->Pbi', W_aux, B_vo, optimize=True)
@@ -279,6 +283,8 @@ def interstate_backward(m, n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn,
     if m == n:
         raise ValueError('an interstate element needs two different roots; '
                          'use bse_backward for dOmega_n')
+    # once for both orderings
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     out = None
     for bra, ket in ((m, n), (n, m)):
         part = bse_backward(ket, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn,

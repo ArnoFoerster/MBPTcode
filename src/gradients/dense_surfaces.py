@@ -13,6 +13,14 @@ inside the first has to be the second: the Tamm-Dancoff quasiparticle surface
 carries no correlation energy, so its partner is the bare mean field, not
 E_HF + E_c. Pairing them wrongly leaves -E_c in the difference, which wears the
 units of an ionization potential while being several eV of correlation energy.
+
+UNDER RANKS every rank runs these surfaces whole: nothing here divides, and
+every term -- the mean field's force, the four-index transform, the
+integral derivatives -- is pyscf's threaded arithmetic, whose OpenMP GEMM adds
+its partial sums in thread-arrival order and so does not repeat its bits from
+one rank to the next. Each energy and force a surface returns is therefore one
+`lockstep` of what the call computed: rank 0's on every rank, and serially the
+value itself.
 """
 import numpy as np
 from pyscf import gto, scf
@@ -23,6 +31,8 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
 from src.Base.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
 from src.Base.environment import dresses_interaction, environment_of
 from src.Base.isdf_jk import mean_field_skeleton_force
+from src.Base.utils.mpi_grid import lockstep
+from src.Base.utils.threads import blas_single_threaded
 from src.SingleReference.GW.qp_states import valence_qp_states
 from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, ground_state_energy, xc_hybrid_coeff)
@@ -70,7 +80,8 @@ def tight_rhf(mol):
     mf.conv_tol = 1e-14
     mf.conv_tol_grad = 1e-11
     mf.max_cycle = 200
-    mf.kernel()
+    with blas_single_threaded():
+        mf.kernel()
     if not mf.converged:
         raise RuntimeError('SCF did not converge; nothing follows from it')
     return mf
@@ -214,8 +225,9 @@ class DenseRPASurface:
     def total_energy(self, mol=None, mf=None):
         mol = self.mol0 if mol is None else mol
         mf, _, _, qp = self._build(mol, mf)
-        return ground_state_energy(declared_ground_state(mf, 'rpa'), mf, mol,
-                                   e_corr=qp.qb.e_corr()).total
+        return lockstep(ground_state_energy(declared_ground_state(mf, 'rpa'),
+                                            mf, mol,
+                                            e_corr=qp.qb.e_corr()).total)
 
     def total_gradient(self, mol=None, mf=None):
         """(dE_0/dR, E_0, diagnostics), fully analytic."""
@@ -229,10 +241,10 @@ class DenseRPASurface:
                                                    [(g_fock, g_eri, y_extra)],
                                                    eri_mo=eri)
         grad = mean_field_skeleton_force(mf) + g_corr + g_extra
-        return grad, e0.total, {
+        return lockstep((grad, e0.total, {
             'e_corr': float(qp.qb.e_corr()),
             'e0_terms': e0.terms,
-            'stationarity': float(diag['stationarity'])}
+            'stationarity': float(diag['stationarity'])}))
 
     def refreeze(self, mol):
         """Nothing is frozen on this surface; the copy is for the protocol."""
@@ -354,7 +366,8 @@ class QuasiparticleSurface:
         return e0.total + self.sign * w, w, mf, eri, nocc, qp, e0
 
     def total_energy(self, mol=None, mf=None):
-        return float(self._state(self.mol0 if mol is None else mol, mf)[0])
+        return lockstep(float(self._state(self.mol0 if mol is None else mol,
+                                          mf)[0]))
 
     def total_gradient(self, mol=None, mf=None):
         """(dE/dR, E, diagnostics) for the N-/+1 state, fully analytic."""
@@ -385,11 +398,11 @@ class QuasiparticleSurface:
                                                    [(g_fock, g_eri, y_extra)],
                                                    eri_mo=eri)
         grad = mean_field_skeleton_force(mf) + g_corr + g_extra
-        return grad, float(energy), {
+        return lockstep((grad, float(energy), {
             'qp_energy_eV': float(w) * HARTREE_TO_EV,
             'orbital': int(self.orbital),
             'e0_terms': e0.terms,
-            'stationarity': float(diag['stationarity'])}
+            'stationarity': float(diag['stationarity'])}))
 
     def refreeze(self, mol):
         """The same process with the orbital re-chosen at `mol`."""
@@ -572,7 +585,7 @@ class DenseBSESurface:
         if self.screening == 'rpa':
             refuse_a_solvated_mean_field(mf, mol, 'DenseBSESurface')
         b, _, _, _, e0 = self._solve(mol, mf)
-        return e0 + float(b.Omega[self.state])
+        return lockstep(e0 + float(b.Omega[self.state]))
 
     def excitation_gradient(self, mol=None, mf=None):
         """(dOmega/dR, Omega, diagnostics) -- the excitation energy alone.
@@ -595,9 +608,9 @@ class DenseBSESurface:
         Gs, diags = correlation_gradients(mol, mf, [(gF, G4)], eri_mo=eri,
                                           auxmol=aux)
         omega = float(b.Omega[self.state])
-        return Gs[0], omega, {'omega': omega,
-                              'stationarity': float(diags[0]['stationarity']),
-                              'n_qp': len(self.qp_set)}
+        return lockstep((Gs[0], omega, {
+            'omega': omega, 'stationarity': float(diags[0]['stationarity']),
+            'n_qp': len(self.qp_set)}))
 
     def _auxmol(self, mol):
         """The auxiliary basis on THIS geometry.
@@ -629,11 +642,11 @@ class DenseBSESurface:
         Gs, diags = correlation_gradients(mol, mf, [(gF, G4)], eri_mo=eri,
                                           auxmol=self._auxmol(mol))
         omega = float(b.Omega[self.state])
-        return (mf.Gradients().kernel() + Gs[0], e0 + omega,
-                {'omega': omega, 'e0': e0,
-                 'e0_terms': self._e0(mol, mf, b).terms,
-                 'stationarity': float(diags[0]['stationarity']),
-                 'n_qp': len(self.qp_set)})
+        return lockstep((mf.Gradients().kernel() + Gs[0], e0 + omega,
+                         {'omega': omega, 'e0': e0,
+                          'e0_terms': self._e0(mol, mf, b).terms,
+                          'stationarity': float(diags[0]['stationarity']),
+                          'n_qp': len(self.qp_set)}))
 
     def refreeze(self, mol):
         """The same surface with the quasiparticle set rebuilt at `mol`.

@@ -20,7 +20,8 @@ Checks:
   5. UHF: the same holds for the block-stacked spin-orbital factor.
   6. Static COHSEX reaction field: symmetric, occupied levels up / virtual
      levels down (the image-charge sign structure), so the IP falls and the EA
-     rises.
+     rises; streamed over surface-grid blocks it is the one-block answer to
+     round-off, and the streamed path never builds the dense AO potential.
   7. End to end: ADC(3) and GW IPs both drop, and the DF and dense routes
      agree on the shift.
   8. An eps large enough to be a *static* constant is rejected (the screening
@@ -29,7 +30,22 @@ Checks:
      routes through static_exchange_matrix, and the space-time route screens
      its ISDF auxiliary metric, so all three GW modes (casida, imagfrequency,
      space-time) agree on the solvent shift of the IP.
+ 10. The cavity is built at PCM_LEBEDEV_ORDER, not pyscf's 29, on the
+     screening's own surface and on the ground state's PCM alike, and both
+     carry the factorized reaction-field solve.
+
+The cavity order sets every solvated number here, and it moved from pyscf's 29
+(302 points per sphere) to PCM_LEBEDEV_ORDER = 11 (50), since the surface
+potential is the continuum's cost and refining it moves formaldehyde's
+solvation energy in toluene by 0.4 meV. Measured on this water in water
+(optical eps for the response): the casida GW IP shift -1.594 ->
+-1.592 eV, the DF/dense GW shift agreement 3.1 -> 2.9 meV, the space-time
+route 4.2 -> 4.0 meV off casida, the IEF-PCM analytic-sphere error 3.0e-7 ->
+1.1e-6 relative. No check here pins an absolute solvated number, so none was
+re-pinned: each compares two routes on one cavity, a sign, or an analytic
+limit, and every one still holds at its own tolerance.
 """
+import inspect
 import os
 import sys
 
@@ -51,7 +67,7 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_matrix
 from src.Base.separable_ri import optimize_atomic_radii
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
 
 
@@ -183,6 +199,52 @@ def test_static_cohsex(mol, mf):
     return ok
 
 
+def test_the_grid_potential_streams(mol, mf):
+    """The COHSEX term over grid blocks is the answer it is in one block.
+
+    The AO grid potential is (nao, nao, ngrids) -- ~10 GB at 100 atoms in a
+    double-zeta basis -- and the unstreamed COHSEX correction holds three
+    arrays of that size at once (AO, MO, responded). Blocking the surface grid
+    leaves one plus a block. The response matrix couples every grid point to
+    every other, so the reduction over the grid is SPLIT, and what the split
+    costs is round-off and nothing else: this pins it at the level a double
+    precision sum of a few thousand terms can be reordered by.
+    """
+    env = SolventScreening(mol, solvent='water')
+    nocc = mol.nelectron // 2
+    # the unstreamed form, written out: three dense (n, n, ngrids) arrays
+    v_ao = env.ao_grid_potential(mol)
+    half = np.tensordot(mf.mo_coeff, v_ao, axes=(0, 0))
+    v_mo = np.tensordot(mf.mo_coeff, half, axes=(0, 1)).transpose(1, 0, 2)
+    responded = np.tensordot(v_mo, env.response_matrix(), axes=(2, 1))
+    dense = 0.5 * (np.einsum('pak,aqk->pq', responded[:, nocc:], v_mo[nocc:],
+                             optimize=True)
+                   - np.einsum('pik,iqk->pq', responded[:, :nocc], v_mo[:nocc],
+                               optimize=True))
+    whole = env.cohsex_correction(mol, mf.mo_coeff, nocc)
+    ok = check(np.array_equal(whole, dense),
+               'the default budget is one block and reproduces it bitwise')
+    # one grid point per block: the most reordering the split can produce
+    fine = SolventScreening(mol, solvent='water')
+    blocks = fine.grid_blocks(mf.mo_coeff.shape[1], budget_gb=1e-9)
+    ok &= check(len(blocks) == fine.ngrids, 'the budget did not force a split',
+                f'{len(blocks)} blocks over {fine.ngrids} grid points')
+    streamed = fine.cohsex_correction(mol, mf.mo_coeff, nocc, budget_gb=1e-9)
+    err = float(np.abs(streamed - whole).max())
+    ok &= check(err < 1e-14 * max(float(np.abs(whole).max()), 1e-30) + 1e-18,
+                'streamed COHSEX correction matches the unstreamed one',
+                f'max |difference| = {err:.2e} Ha on |Sigma| = '
+                f'{np.abs(whole).max():.2e}')
+    # and the integrals of a slice ARE the slice of the integrals
+    v_block = fine.ao_grid_potential(mol, grids=slice(3, 9))
+    ok &= check(np.abs(v_block
+                       - env.ao_grid_potential(mol)[:, :, 3:9]).max() < 1e-12,
+                'a grid slice of the AO potential is its own integral')
+    ok &= check(fine._v_ao is None,
+                'the streamed path never built the dense AO potential')
+    return ok
+
+
 def test_end_to_end(mol):
     """ADC(3) and GW must both report a lower IP in solvent, by the same amount
     through the DF and the dense route."""
@@ -282,6 +344,31 @@ def test_optical_eps_guard(mol):
     return ok
 
 
+def test_cavity_order(mol, mf):
+    """The continuum's cost is the surface potential, n_ao^2 x n_surf, and
+    order 11 against 29 moves formaldehyde's solvation energy in toluene by
+    0.4 meV at a quarter of the cost -- so the order is the shipped constant,
+    below pyscf's own default, on BOTH surfaces a calculation builds."""
+    default = inspect.signature(SolventScreening).parameters['lebedev_order'].default
+    ok = check(PCM_LEBEDEV_ORDER < 29 and default == PCM_LEBEDEV_ORDER,
+               'SolventScreening defaults to PCM_LEBEDEV_ORDER, below pyscf\'s 29',
+               f'default {default}, constant {PCM_LEBEDEV_ORDER}')
+    env = SolventScreening(mol, solvent='water')
+    ok &= check(env._pcm.lebedev_order == PCM_LEBEDEV_ORDER
+                and 0 < env.ngrids <= 50 * mol.natm,
+                'the screening surface is built at that order',
+                f'{env.ngrids} surface points over {mol.natm} spheres')
+    ok &= check(getattr(env._pcm, '_cached_factorization', False),
+                'and its reaction-field solve is factorized once')
+    solvated = env.mean_field(mol, lambda _mol: mf)
+    ok &= check(solvated.with_solvent.lebedev_order == PCM_LEBEDEV_ORDER
+                and getattr(solvated.with_solvent, '_cached_factorization',
+                            False) and solvated.converged,
+                'the ground state relaxes in the same cavity, factorized',
+                f'E = {solvated.e_tot:.8f} Ha')
+    return ok
+
+
 if __name__ == '__main__':
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
@@ -301,12 +388,16 @@ if __name__ == '__main__':
     all_ok &= test_uhf()
     print('\n-- 6. static COHSEX reaction field')
     all_ok &= test_static_cohsex(mol, mf)
+    print('\n-- 6b. the COHSEX grid potential streams')
+    all_ok &= test_the_grid_potential_streams(mol, mf)
     print('\n-- 7. end to end (ADC(3), GW)')
     all_ok &= test_end_to_end(mol)
     print('\n-- 8. optical-eps guards')
     all_ok &= test_optical_eps_guard(mol)
     print('\n-- 9. all GW routes carry the solvent')
     all_ok &= test_all_gw_routes(mol)
+    print('\n-- 10. the cavity order')
+    all_ok &= test_cavity_order(mol, mf)
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

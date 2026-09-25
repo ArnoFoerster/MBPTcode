@@ -43,6 +43,7 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
                                   PhysicsMismatch, QPStates, SurfacePhysics)
 from src.Base.environment import environment_label, resolve_environment
 from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.utils.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.sum_over_poles import compressible
 from src.SingleReference.LinearResponse.bse import solver_choice
@@ -72,17 +73,23 @@ FACTORIZATIONS = ('isdf', 'df', 'four-index')
 NO_EXCITATION = 'none'
 
 #: Numeric keywords that name the ISDF interpolation grid and the basis it is
-#: fitted in. Shared by every space-time/ISDF row, because they all reach the
-#: same `FrozenFactorization`.
+#: fitted in, `sliced`, how the factors are laid out over the ranks (each
+#: rank its grid rows; the numbers are the whole layout's bit for bit), and
+#: `fit` and `fit_block`, how the fit is realized ('rows': by grid rows, no
+#: rank forming it whole, bitwise across rank counts and not the replicated
+#: fit's bits). Shared by every space-time/ISDF row, because they all reach
+#: the same `FrozenFactorization`.
 GRID_NUMERICS = frozenset({'basis', 'auxbasis', 'counts', 'radii', 'n_start',
-                           'grid_accuracy'})
+                           'grid_accuracy', 'sliced', 'fit', 'fit_block'})
 
 #: Numeric keywords `ExcitedStateChain` reads: the two imaginary-time grids,
-#: the contour-deformation quadrature, the pole model, and the Casida step.
+#: the contour-deformation quadrature, the pole model, the Casida step, and
+#: `bse_adjoint`, how the root's adjoint is realized (the same surface either
+#: way; 'grid' forms no three-index block).
 EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
                               'sop_stride', 'bse_conv_tol', 'degeneracy_tol',
                               'dense_max_nov', 'nroots', 'e_min_below_gap',
-                              'cd_pole_resolution', 'tile_gb'})
+                              'cd_pole_resolution', 'tile_gb', 'bse_adjoint'})
 
 #: Numeric keywords `RPAGroundStateChain` reads. Its imaginary-time count and
 #: its frequency quadrature are named apart from the GW ones: they integrate
@@ -124,6 +131,10 @@ class Realization:
         record 'mean-field' because they have no scissor of their own. The two
         treatments are not the same surface, which is why `compare_surfaces`
         reports the field.
+
+    How many ranks evaluated the surface is not a field: a surface carries no
+    communicator, every rank reads the same numbers, and a record that needs
+    the rank count takes it where the run was launched.
     """
     chi0: Optional[str]
     residues: Optional[str]
@@ -284,9 +295,10 @@ def resolve_grid(mol, numerics):
 
 
 def factorization_kwargs(setup):
-    """The basis, auxiliary basis and interpolation grid every ISDF row shares."""
+    """The basis, auxiliary basis, interpolation grid, factor layout and fit
+    realization every ISDF row shares."""
     kw = {}
-    for name in ('basis', 'auxbasis', 'radii'):
+    for name in ('basis', 'auxbasis', 'radii', 'sliced', 'fit', 'fit_block'):
         if name in setup.numerics:
             kw[name] = setup.numerics[name]
     if setup.counts is not None:
@@ -323,14 +335,16 @@ def excited_kwargs(setup, row):
 
 
 def excited_numerics(chain):
-    """The grids and caps an `ExcitedStateChain` resolved, as integers."""
+    """The grids and caps an `ExcitedStateChain` resolved, as numbers, and
+    the realization of its adjoint."""
     return {'ntau_gw': int(chain.ntau_gw), 'ntau_w': int(chain.ntau_w),
             'nfreq_cd': int(chain.nfreq_cd), 'n_poles': int(chain.n_poles),
             'sop_stride': chain.sop_stride, 'nroots': int(chain.nroots),
             'dense_max_nov': int(chain.dense_max_nov),
             'bse_conv_tol': float(chain.bse_conv_tol),
             'degeneracy_tol': float(chain.degeneracy_tol),
-            'cd_pole_resolution': float(chain.cd_pole_resolution)}
+            'cd_pole_resolution': float(chain.cd_pole_resolution),
+            'bse_adjoint': chain.bse_adjoint}
 
 
 def build_rpa_ground(row, setup):
@@ -687,14 +701,18 @@ def reference_mean_field(mol, scf_factory, environment):
     IT IS READ BEFORE ANY SURFACE EXISTS -- the solver, the quasiparticle set
     and the declared functional all come off this spectrum -- so a factory that
     hands back a mean field it has BUILT AND NOT RUN has to be converged here
-    as well as inside the chain (`converged_factory`). For a factory that
-    converges its own, this is the call the factory would have made.
+    as well as inside the chain, and over the same ranks
+    (`converged_factory`); under ranks its spectrum is rank 0's before any of
+    those is decided from it, since a factory that converges its own does so
+    on each rank alone. Serially, and for a factory that converges its own,
+    this is the call the factory would have made.
     """
     # cycle: src.gradients.excited_state imports src.properties.nonadiabatic
     from src.gradients.factor_chain import converged_factory
 
-    return resolve_environment(environment, None).mean_field(
+    mf = resolve_environment(environment, None).mean_field(
         mol, converged_factory(scf_factory))
+    return lockstep_mean_field(mf)
 
 
 def refuse_undeclared_functional(ground_state, mf):
@@ -795,7 +813,9 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
         is silently dropped is a setting the caller believes is in force.
 
     Returns the realizing class's own instance, carrying `physics`,
-    `realization`, `numerics` and `describe()`.
+    `realization`, `numerics` and `describe()`. It carries no communicator:
+    inside `with distributed(comm):` every rank builds it and the kernels it
+    reaches divide their sweeps over the ranks.
     """
     if chi0 not in CHI0_ROUTES:
         raise ValueError(f'chi0 {chi0!r} not in {CHI0_ROUTES}')

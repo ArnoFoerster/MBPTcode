@@ -66,7 +66,7 @@ def test_the_shift_is_frozen_not_recomputed():
 
 def test_the_excluded_set_is_read_off_reach_not_off_depth():
     """`compressible` decides, and it is not a depth threshold in disguise."""
-    from src.gradients.sum_over_poles import compressible
+    from src.SingleReference.GW.sum_over_poles import compressible
     eps = np.array([-11.0, -0.9, -0.62, -0.35, 0.18, 0.44, 0.83])
     nocc = 4
     gap = (eps[nocc:][None, :] - eps[:nocc][:, None]).min()

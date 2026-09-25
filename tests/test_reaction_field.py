@@ -13,6 +13,12 @@ a cache that keys on the spectrum alone hands the second one the first one's
 array. A solvatochromic shift is exactly that comparison, so the collision is
 not hypothetical.
 
+The cavity is PCM_LEBEDEV_ORDER = 11 (50 points per sphere) where pyscf's
+default is 29 (302). On this water at eps = 1.78 that moved the Eq. (18) gap
+closure from -3.222 to -3.196 eV and the COHSEX one from -3.609 to -3.568 eV,
+and no check here pins either value: they gate an exact congruence, signs, a
+cache, and the ordering of two operators, all of which hold on either cavity.
+
 Run: python tests/test_reaction_field.py
 """
 import os

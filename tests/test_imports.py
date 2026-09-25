@@ -10,12 +10,16 @@ that misses one caller passes all of them and fails at the front door.
     python tests/test_imports.py --all      everything under src/, slower
 
 The default set is the packages that change together -- Base, GW, BSE,
-LinearResponse, Solvers. `--all` adds ADC, CC and DensityMatrix, whose
-generated modules are large and slow to parse.
+LinearResponse, Solvers, and the gradients and properties built on them. `--all`
+adds ADC, CC and DensityMatrix, whose generated modules are large and slow to
+parse. Under pytest the default set runs in its own process
+(`test_all_core_modules_import`).
 """
 import argparse
 import importlib
+import os
 import pathlib
+import subprocess
 import sys
 import traceback
 
@@ -23,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 CORE = ['src/Base', 'src/Solvers', 'src/SingleReference/GW',
-        'src/SingleReference/LinearResponse']
+        'src/SingleReference/LinearResponse', 'src/gradients', 'src/properties']
 SKIP = {'__pycache__', 'data'}
 
 
@@ -76,6 +80,20 @@ def main():
         return 1
     print('ALL PASSED')
     return 0
+
+
+def test_all_core_modules_import():
+    """The import sweep, run as pytest collects it: in its own process, so a
+    module that fails at import cannot take the rest of the session with it,
+    and with mpi4py's initialization deferred, since only a module that starts
+    MPI at import would need it here."""
+    env = dict(os.environ, MPI4PY_RC_INITIALIZE='0')
+    done = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve())],
+                          capture_output=True, text=True, env=env, cwd=str(ROOT))
+    assert done.returncode == 0, (
+        f'import sweep failed (exit {done.returncode}):\n'
+        f'{done.stdout[-4000:]}\n{done.stderr[-2000:]}')
+    assert 'ALL PASSED' in done.stdout
 
 
 if __name__ == '__main__':

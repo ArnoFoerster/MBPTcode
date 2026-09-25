@@ -19,7 +19,7 @@ from src.Base.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
 from src.Base.declaration import PhysicsMismatch
 from src.Base.isdf_jk import refuse_isdf_jk_gradient
 from src.properties.optimize import relax, translation_rotation_basis
-from src.properties.surface import surface_mean_field
+from src.properties.surface import evaluate, surface_mean_field
 
 
 def normal_modes(mf, mol=None, hess=None, project=True, isotope_avg=True):
@@ -288,7 +288,9 @@ def vibronic_analysis(surface, state, mol_gs, mf_gs, hess=None, top=8,
     that approximation is for this molecule.
     """
     omega, modes, masses, hess = normal_modes(mf_gs, mol_gs, hess=hess)
-    g_fc, _, _ = surface.total_gradient(mol_gs, mf_gs)
+    # Through the boundary every property routine hands a geometry across, so
+    # the Franck-Condon force is rank 0's on every rank of a distributed run.
+    g_fc, _, _ = evaluate(surface, mol_gs, mf_gs)
     s_grad, gk = huang_rhys_from_gradient(g_fc, omega, modes, masses)
     aligned = align_to(mol_gs, state['mol'])
     s_disp, dqk = huang_rhys_from_displacement(mol_gs, aligned, omega, modes,

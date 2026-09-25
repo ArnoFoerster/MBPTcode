@@ -40,6 +40,12 @@ def response_kernel(mf, environment=True):
     solve. A mean field is converged and immutable for the length of one
     gradient, and a displaced geometry gets a new object, so the cache cannot
     go stale.
+
+    pyscf's closure holds the mean field, so the cache is a reference cycle:
+    an abandoned mean field -- its integrals, grids and xc kernel, and the fit
+    cached weakly on its Mole -- is freed by the cyclic collector alone, which
+    `FactorChain.mean_field` runs before each new geometry's SCF. No weak form
+    exists: whatever holds the closure holds the mean field.
     """
     key = '_cached_response_kernel' + ('' if environment else '_gas')
     fn = getattr(mf, key, None)

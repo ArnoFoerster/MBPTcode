@@ -12,9 +12,10 @@ import pytest
 from pyscf import gto, scf, ao2mo
 
 from src.Base.constants import KAPPA
-from src.gradients.qb_core import build_rpa_AB, RPA
-from src.gradients.qp_qb import QPqb
-from src.gradients.bse_qb import BSEqb
+from src.SingleReference.GW.quasi_boson import build_rpa_AB
+from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                               QPqbAdjoint as QPqb,
+                                               RPAAdjoint as RPA)
 from src.Base.eri_blocks import MOEriBlocks
 from src.gradients.targets import rpa_partials, qp_partials
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal

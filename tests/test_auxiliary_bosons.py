@@ -14,10 +14,12 @@ space the whole dRPA is re-solved in, and its truncation converges smoothly.
 import numpy as np
 import pytest
 
-from src.gradients.auxiliary_bosons import (ab_basis, ab_bosons, ab_couplings,
-                                            ab_from_factors, exact_bosons,
-                                            exact_from_factors)
-from src.gradients.sum_over_poles import sigma_sop
+from src.SingleReference.GW.auxiliary_bosons import (ab_basis, ab_bosons,
+                                                     ab_couplings,
+                                                     ab_from_factors,
+                                                     exact_bosons,
+                                                     exact_from_factors)
+from src.SingleReference.GW.sum_over_poles import sigma_sop
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -111,10 +113,12 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     from src.Base.pyscf_interface import get_density_fitting_coefficients
     from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
     from src.SingleReference.base import get_occ_virt_indices
-    from src.gradients.contour_deformation import (_ov_energies, _wc_explicit,
-                                                   qp_energy_cd)
-    from src.gradients.sum_over_poles import (compressible, qp_energy_sop,
-                                              sop_from_wc)
+    from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
+                                                            wc_explicit)
+    from src.SingleReference.GW.real_screening import ov_energies
+    from src.SingleReference.GW.sum_over_poles import (compressible,
+                                                       qp_energy_sop,
+                                                       sop_from_wc)
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -123,11 +127,11 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     b = get_density_fitting_coefficients(mol, mf, representation='spatial')
     occ, virt = get_occ_virt_indices(eps, nocc)
     c_ov = b[:, occ, :][:, :, virt].reshape(b.shape[0], -1)
-    d = _ov_energies(eps, nocc)
+    d = ov_energies(eps, nocc)
     nu, wt = gauss_legendre_grid(48, gap_scaled_w0(eps, nocc))
     p = 0                                              # the oxygen 1s
     bp = b[:, p, :]
-    wc = _wc_explicit(bp, c_ov, d, nu)
+    wc = wc_explicit(bp, c_ov, d, nu)
     w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov,
                               relax_offset=False)
     ok, reach = compressible(w_cd, eps, nocc)

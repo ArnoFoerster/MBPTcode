@@ -66,10 +66,18 @@ from scipy.special import spherical_jn
 #: Matsubara statistics -> the zeta in omega_n = (2n + zeta) pi / beta.
 _ZETA = {'fermion': 1, 'boson': 0}
 
-#: Largest design-matrix condition number a Matsubara sampling set may carry
-#: before `default_matsubara_sampling` adds the next basis function's peaks,
-#: and the value past which adding more of them has stopped helping.
+#: Largest condition number `default_matsubara_sampling` will hand back. The
+#: sampling set is accepted once the design matrix both DETERMINES the
+#: coefficients and reaches this, so the returned set is usable rather than
+#: merely large enough -- see `sampling_is_determined`. Measured: every basis
+#: over lambda = 100 .. 1e4 and eps = 1e-6 .. 1e-12 clears it within three
+#: rounds of augmentation, and the resulting fits land at 1e-11 or better.
 _COND_MAX = 1e6
+
+#: A fit above this is reported by `fit_matsubara`. It cannot refuse -- a
+#: caller's own sampling set may be ill conditioned for a reason -- but
+#: cond * eps_machine is the accuracy floor, so 1e8 is already 1e-8 on
+#: coefficients that the basis itself resolves to `eps`.
 _COND_WARN = 1e8
 
 
@@ -418,27 +426,37 @@ class IRBasis:
         real = positive_only if real is None else real
         n_max = int(n_max_factor * max(self.size, 4) + self.lambda_ / (2 * np.pi))
         n = np.arange(-n_max, n_max + 1)
-        rows = self.uhat(n)
-
-        picked = []
+        uhat = self.uhat(n)
+        # uhat_l(-n-zeta) = conj(uhat_l(n)), so the symmetric set is meant to be
+        # closed under that reflection -- a complex fit asks for "a sampling set
+        # symmetric under n -> -n-1" by name (`fit_matsubara`). It only ever was
+        # by accident: the axis `arange(-n_max, n_max+1)` is symmetric under
+        # n -> -n, NOT under n -> -n-1, so for a fermion the outermost group is
+        # clipped one point short on one side and its peak has no partner.
+        # Measured 4 unmatched points at +-n_max, and none anywhere else.
+        # Closing the set makes the documented property exact, and the extra
+        # rows can only add rank.
+        mirror = (lambda m: -m - _ZETA[self.statistics])
+        picked, tried = set(), []
         for l in range(self.size - 1, -1, -1):
-            picked = sorted(set(picked) | set(self._peaks_per_group(n, rows[l])))
-            out = np.array([p for p in picked if p >= 0]) if positive_only \
-                else np.array(picked)
-            ok, nrows, cond = self.sampling_is_determined(out, real=real,
-                                                          cond_max=cond_max)
+            picked.update(self._peaks_per_group(n, uhat[l]))
+            if not positive_only:
+                picked.update(mirror(m) for m in tuple(picked))
+            cand = np.array(sorted(m for m in picked
+                                   if m >= 0 or not positive_only))
+            ok, nrows, cond = self.sampling_is_determined(
+                cand, real=real, cond_max=cond_max)
+            tried.append((self.size - l, len(cand), nrows, cond))
             if ok:
-                return out
-            if cond > _COND_WARN and nrows >= self.size:
-                break
-        warnings.warn(
-            f'Matsubara sampling for lambda = {self.lambda_:.4g}, '
-            f'eps = {self.eps:.0e} did not become determined: {len(out)} '
-            f'points give {nrows} rows for {self.size} coefficients at '
-            f'condition {cond:.2e}. Raise n_max_factor, or loosen eps so the '
-            f'basis stops before the functions the quadrature cannot resolve.',
-            RuntimeWarning, stacklevel=2)
-        return out
+                return cand
+        raise RuntimeError(
+            f"default_matsubara_sampling: no sampling set over the retained "
+            f"basis functions determines all {self.size} coefficients of "
+            f"{self!r} to cond < {cond_max:.0e} (real={real}, "
+            f"positive_only={positive_only}). Rounds tried "
+            f"(functions used, points, rows, cond): {tried}. Raise "
+            f"n_max_factor to widen the axis, or loosen eps so the basis stops "
+            f"at functions the quadrature still resolves.")
 
     def fit_matsubara(self, n, values, rcond=1e-12, real=True):
         """Least-squares IR coefficients from values sampled at Matsubara n.
@@ -485,12 +503,50 @@ class IRBasis:
         A = self.uhat(n).T                                # (npoints, L)
         values = np.asarray(values)
         if not real:
-            coeffs, *_ = np.linalg.lstsq(A, values, rcond=rcond)
-            return coeffs
-        stacked = np.vstack([A.real, A.imag])
-        rhs = np.concatenate([values.real, values.imag])
-        coeffs, *_ = np.linalg.lstsq(stacked, rhs, rcond=rcond)
+            design, rhs = A, values
+        else:
+            design = np.vstack([A.real, A.imag])
+            rhs = np.concatenate([values.real, values.imag])
+        coeffs, _, rank, sv = np.linalg.lstsq(design, rhs, rcond=rcond)
+        self._check_fit_is_determined(rank, sv, n, real)
         return coeffs
+
+    def _check_fit_is_determined(self, rank, sv, n, real):
+        """Refuse a rank-deficient fit; report a merely ill-conditioned one.
+
+        `rank` and `sv` come free from the `lstsq` that has just run, so this
+        costs nothing beyond the comparison -- there is no second SVD.
+
+        Refusing is the point. Below full rank `lstsq` returns the minimum-norm
+        solution, which is a perfectly well-behaved vector that is not the
+        answer: measured errors of 0.05 .. 0.89 on O(1) coefficients, with no
+        residual to give it away, because the fit reproduces the sampled values
+        exactly and is wrong everywhere else.
+        """
+        if rank >= self.size:
+            cond = float(sv[0] / sv[self.size - 1])
+            if cond > _COND_WARN:
+                warnings.warn(
+                    f"IRBasis.fit_matsubara: the fit at these {len(np.atleast_1d(n))} "
+                    f"points is conditioned at {cond:.1e}, so about "
+                    f"{cond * np.finfo(float).eps:.0e} of the coefficients is "
+                    f"round-off against a basis truncated at eps={self.eps:.0e}. "
+                    f"`default_matsubara_sampling` returns a set held under "
+                    f"{_COND_MAX:.0e}.", RuntimeWarning, stacklevel=3)
+            return
+        npoints = len(np.atleast_1d(n))
+        nrows = (2 if real else 1) * npoints
+        raise ValueError(
+            f"IRBasis.fit_matsubara: {npoints} sampling points give {nrows} "
+            f"equations of rank {rank} for the {self.size} coefficients of "
+            f"{self!r}, so the fit is UNDERDETERMINED and its coefficients are "
+            f"the minimum-norm solution rather than the answer. Take the "
+            f"sampling set from `default_matsubara_sampling"
+            f"(positive_only={bool(real)})`, which augments until the design "
+            f"matrix has full rank. Note that mirroring these points to n < 0 "
+            f"does NOT help a real fit: uhat_l(-n-1) = conj(uhat_l(n)) makes "
+            f"the extra rows duplicates up to a sign, and the rank is "
+            f"unchanged -- only new |n| add information.")
 
     def evaluate_matsubara(self, coeffs, n):
         return np.asarray(coeffs) @ self.uhat(n)

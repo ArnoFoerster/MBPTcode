@@ -3,8 +3,8 @@
 The analytic gradient is differenced against E_HF + E_c of the chain's own
 function (SCF, factors and energy redone at each displacement), on a distorted
 C1 water so that no symmetry can hide a missing term, and with both the direct
-and the density-fitted skeleton, which are different code paths. The dense
-dense RPA gradient on the same density-fitted energy is the physical reference:
+and the density-fitted skeleton, which are different code paths. The
+RPA gradient on the same density-fitted energy is the physical reference:
 the two differ by the interpolation grid alone, so the difference has to
 shrink as the grid densifies.
 """
@@ -12,11 +12,13 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
+from src.Base.separable_ri import shipped_radii_lookup
+from src.SingleReference.GW.quasi_boson import build_rpa_AB
 from src.SingleReference.LinearResponse.space_time import (
     rpa_correlation_energy_space_time)
 from src.gradients.df_assembly import df_eri_mo
 from src.gradients.grad_engine import correlation_gradient
-from src.gradients.qb_core import RPA, build_rpa_AB
+from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.gradients.targets import rpa_partials
 
@@ -114,15 +116,25 @@ def test_grid_error_against_the_dense_rpa_gradient_shrinks_with_the_grid(water_d
     """ISDF against dense on one fitted energy: the interpolation grid is the only
     difference, and densifying it must close the gap in E_c AND in the force.
 
-    The force is the sensitive one: at 148 points/atom the correlation energy
-    is off by 1e-4 Ha while its gradient is off by 2%%, so a converged energy
-    says nothing about the gradient.
+    The force is the sensitive one: at 148 points/atom E_c is off by 6e-5 of
+    itself and the force by 0.6% of its largest component.
+
+    BOTH RUNGS ARE ROWS OF THE SHIPPED RADII TABLE. Its rows are optimized one
+    count at a time, so neighbouring counts are not a nested ladder -- 244 and
+    296 points/atom miss E_c by more than 148 does -- and an untabulated count
+    is re-optimized at run time into whatever local minimum the machine or its
+    radii cache holds. 148 against 592 points/atom is ordered by 3x in E_c and
+    by 100x in the force.
     """
     mol, mf, chain = water_df
     e_dense, g_dense = _dense_df_reference(mol, mf)
-    g_coarse, e_coarse, _ = chain.correlation_gradient()
     fine = RPAGroundStateChain(mol, scf_df, mf=mf,
-                               counts={'A1': 14, 'A2': 9, 'A3': 5, 'B1': 2})
+                               counts={'A1': 32, 'A2': 20, 'A3': 12, 'B1': 4})
+    for rung in (chain, fine):
+        for el in ('O', 'H'):
+            assert shipped_radii_lookup(el, BASIS, BASIS + '-ri',
+                                        rung.factorization.counts) is not None
+    g_coarse, e_coarse, _ = chain.correlation_gradient()
     g_fine, e_fine, _ = fine.correlation_gradient()
     assert abs(e_coarse - e_dense) < 5e-4
     assert abs(e_fine - e_dense) < abs(e_coarse - e_dense)

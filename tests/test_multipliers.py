@@ -45,11 +45,12 @@ from src.Base.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                                 ORBITAL_MULTIPLIER_MAX_ITER,
                                 ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                 ORBITAL_MULTIPLIER_TOL)
+from src.SingleReference.GW.quasi_boson import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
                                        solve_multipliers)
 from src.gradients.isdf_derivatives import fock_partial_Y, solve_lambda
 from src.gradients.multipliers import solve_orbital_multipliers
-from src.gradients.qb_core import RPA, build_rpa_AB
+from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.targets import rpa_partials
 
 BASIS = 'cc-pvdz'

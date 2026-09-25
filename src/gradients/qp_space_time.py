@@ -17,12 +17,36 @@ route is larger than proj(tau):
              adjoints folded into the SAME projbar; then one
              `polarizability_backward` and the Bp chain back to (X, D).
 
-Peak memory is proj(tau) + projbar(tau) + one frequency block + the M-row
-tiles, all governed by one `tile_gb`: at naux ~ 5000 a few GB, against the
-full three-index tensor's much larger footprint, and independent of how many
-frequencies the CD quadrature has. Rebuilding W Bp in the reverse pass costs
-one more LU per frequency than holding it would -- naux^3 each, against the
-sweep's M^2 (norb + naux) per tau -- and removes the (nfreq, naux, norb) array.
+Peak memory is this rank's rows of proj(tau) and projbar(tau) (`ProjRows`),
+one frequency's chi0 on the rank that factorizes it, one tau slice on the
+rank that sweeps it, and the M-row tiles, all governed by one `tile_gb`: at
+naux ~ 5000 a few GB, against the full three-index tensor's much larger
+footprint, and independent of how many frequencies the CD quadrature has.
+Rebuilding W Bp in the reverse pass costs one more LU per frequency than
+holding it would -- naux^3 each, against the sweep's M^2 (norb + naux) per
+tau -- and removes the (nfreq, naux, norb) array.
+
+At the chlorophyllide hexamer (M 117762, nmo 10980, nocc 972, nvir 10008,
+naux 28236, ntau 24, a four-state set, one frequency per block) proj(tau) is
+153.1 GB and a rank's auxiliary rows of it 19.1 at 8 ranks, 9.6 at 16. Whole
+on every rank stay X_mo + D gathered 36.9, the solve's X_bar + D_bar 36.9, the
+slices and their adjoints 19.8 and the sweep's branches, adjoints, E and tiles
+77.9 -- sums over the grid or over the tau partition -- and a frequency's or a
+tau point's (naux, naux) matrices, 6.4 each, on the rank working on it. The
+reverse call's peak per rank in GB: proj(tau), projbar and each block's
+(ntau, naux, naux) fold temporary whole on every rank; without the temporary
+(`fold_owned_frequencies`); and by rows at 8 / 16 ranks:
+
+    route      frequency pass                 reverse sweep
+               whole  no temporary  rows      whole  rows
+    sop         601       448    181 / 162     344   216 / 207
+    laplace     601       448    181 / 162     344   216 / 207
+    explicit   refused: C_ov alone is 2197 GB
+
+The frequency pass holds the two row blocks and, at the owner of a frequency,
+its chi0, LU and adjoint and the identity, 48.2 with the slices' solves; the
+sweep holds projbar's rows and one gathered slice. The forward pass, every
+weight zero, holds 262 whole and 129 / 119 by rows.
 
 Residues -- states whose root has crossed a neighbouring orbital energy, which
 is every state but the frontier pair -- need W at a REAL frequency. Below the
@@ -35,16 +59,26 @@ has real poles and no imaginary-time form; only the explicit backend serves it,
 through C_ov = B[:, occ, virt], (naux, nocc*nvirt), built from (X, D) and
 chained back to them -- the O(N^4) end of the route, and now confined to
 states whose residues lie above the gap (inner valence and core).
+
+X and D may be `SlicedFactors`, each rank's grid rows of X_mo and D. Every
+step above reads them whole -- the tau sweeps on both sides of each M^2 GEMM,
+the slices Bp and C_ov as sums over the grid -- so each solve gathers X_mo and
+D once at entry, holds them for the solve and its reverse pass and drops them
+on return; the gathered arrays are the whole ones verbatim and every output is
+the whole factors' bit for bit.
 """
 from collections.abc import Mapping
 
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (ISDF_TILE_GB, LAPLACE_SCREENING_TOL,
-                                QP_CD_NEWTON_TOL, QP_POLE_OFFSET)
-# cd_screening_contraction is re-exported, not used here: the routes below call
-# the multi-state form, which is what it is a one-state wrapper for.
+from src.Base.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
+                                LAPLACE_SCREENING_TOL, QP_CD_NEWTON_TOL,
+                                QP_POLE_OFFSET, SOP_N_POLES)
+from src.Base.utils.mpi_grid import (agreement, current_comm, lockstep,
+                                     partition, reduce_sum)
+# cd_screening_contraction is re-exported, not used here: the routes below
+# call the multi-state form, which is what it is a one-state wrapper for.
 from src.SingleReference.GW.contour_deformation import (  # noqa: F401
     cd_screening_contraction, cd_screening_contraction_multi,
     residue_route_auto)
@@ -52,17 +86,19 @@ from src.SingleReference.GW.contour_deformation import (  # noqa: F401
 # surface reaches the frozen shift through this module.
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               frozen_scissor, scissor_route)
-from src.gradients.contour_deformation import (ExplicitRealScreening,
-                                               integral_term_backward,
-                                               qp_energy_cd, residue_set,
-                                               residue_terms_backward)
-from src.gradients.sum_over_poles import (SOP_N_POLES, compressible,
-                                          qp_energy_sop, sigma_sop_backward,
-                                          sop_from_wc)
+from src.SingleReference.GW.contour_deformation import qp_energy_cd
+from src.SingleReference.GW.sum_over_poles import (compressible, qp_energy_sop,
+                                                   sop_from_wc)
+from src.gradients.contour_deformation_adjoint import (
+    ExplicitRealScreeningAdjoint as ExplicitRealScreening,
+    integral_term_backward, residue_terms_backward)
+from src.gradients.sum_over_poles_adjoint import sigma_sop_backward
+from src.Base.sliced_factors import whole_factor
+from src.SingleReference.LinearResponse.space_time import (
+    ProjRows, polarizability_projected_rows)
 from src.gradients.space_time_adjoint import (LaplaceRealScreening,
-                                              owned_frequency_blocks,
                                               polarizability_backward,
-                                              polarizability_tau, three_index_ov,
+                                              three_index_ov,
                                               three_index_ov_backward,
                                               three_index_slice,
                                               three_index_slice_backward)
@@ -140,6 +176,54 @@ def integral_term_reverse(state, WtB, k, nu, wt):
     return bb, cb, -coeff * wck * (nu ** 2 - de ** 2) / (de ** 2 + nu ** 2) ** 2
 
 
+def require_explicit_fits(naux, nocc, nvir, p):
+    """Refuse the explicit residue backend where its blocks cannot fit.
+
+    C_ov is (naux, nocc*nvir) and the backend holds up to three such blocks at
+    once on every rank (`EXPLICIT_RESIDUE_MAX_GB`); the Laplace backend and
+    the pole model serve the same residues from proj(tau) without one.
+    """
+    gb = naux * nocc * nvir * 8 / 1e9
+    if gb > EXPLICIT_RESIDUE_MAX_GB:
+        raise MemoryError(
+            f"residue_route 'explicit' (state {int(p)}) builds C_ov = "
+            f"B[:, occ, virt], ({naux}, {nocc}*{nvir}), {gb:.3g} GB, and "
+            f"holds up to three such blocks at once on every rank, above "
+            f"EXPLICIT_RESIDUE_MAX_GB = {EXPLICIT_RESIDUE_MAX_GB:g} GB. Use "
+            f"residue_route='laplace' (residues below the particle-hole gap, "
+            f"from proj(tau)) or 'sop' (the pole model, no residues).")
+
+
+def fold_residue_adjoints(proj_bar, backends, tau_indices=None):
+    """Add the Laplace residues' adjoints on proj(tau) into proj_bar, in place.
+
+    One (naux, naux) slice at a time: the backends' slices summed in state
+    order from zero, then added to proj_bar -- the association of a zeroed
+    projbar the whole per-state arrays were added into before the integral
+    term's, so the result is that sum bit for bit and no per-state array
+    exists. With no backend every slice gains an exact zero, as the zeroed
+    projbar gave it. tau_indices: the slices the reverse sweep reads (a tau
+    partition), the rest being unread.
+
+    proj_bar may be `ProjRows`: every slice then gains its rows alone, the
+    same elements with the same operations, for whichever rank sweeps it.
+    """
+    if isinstance(proj_bar, ProjRows):
+        for k in range(proj_bar.shape[0]):
+            s = np.zeros(proj_bar.rows.shape[1:])
+            for rs in backends:
+                s += rs.slice_adjoint(k, (proj_bar.r0, proj_bar.r1))
+            proj_bar.rows[k] += s
+        return
+    which = (range(len(proj_bar)) if tau_indices is None
+             else np.atleast_1d(tau_indices))
+    for k in which:
+        s = np.zeros(proj_bar.shape[1:])
+        for rs in backends:
+            s += rs.slice_adjoint(k)
+        proj_bar[k] += s
+
+
 def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                            mu=None, xc_correction=0.0, w0=None,
                            tol=QP_CD_NEWTON_TOL, residue_route='auto',
@@ -147,7 +231,7 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                            want_grad=True, tile_gb=ISDF_TILE_GB,
                            pole_offset=None, route_out=None,
                            n_poles=SOP_N_POLES, sop_stride=None,
-                           scissor=None):
+                           scissor=None, comm=None):
     """(eps^QP_p, Z, eps_bar, X_bar, D_bar), or (eps^QP_p, Z) with want_grad=False.
 
     grid:          TimeFrequencyGrid whose frequency axis IS the CD quadrature
@@ -170,17 +254,57 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                    frozen by the caller (`frozen_newton_seed`).
     route_out:     a dict, if given, receives 'residue_route', 'residues',
                    'pole_offsets' and 'roots'.
+    comm:          an MPI communicator (or `simulated_world` rank) whose ranks
+                   all call this in lockstep; None is `current_comm()`. eps is
+                   a `lockstep` of RANK 0's at entry, because the route and
+                   the Newton start are read off it; X and D are identical by
+                   construction (`separable_factors` leaves them so) and are
+                   not broadcast again -- an audited run compares their
+                   digests on entry and the outputs' on exit.
+                   `qp_set_gradient`'s partition on
+                   one state: proj(tau) and projbar held by auxiliary rows
+                   (`ProjRows`), the tau sweep split over tau and its slices
+                   exchanged into rows, its reverse split over tau and reduced
+                   once (the three adjoints); the forward contraction and the
+                   integral term's reverse pass split over the
+                   contour-deformation frequencies, each frequency's chi0
+                   gathered to its owner and its adjoint handed back as rows,
+                   reduced once (wc; then Bp_bar and the frequency part of
+                   eps_bar). The Newton, the route decision and the residues
+                   are replicated -- taken from eps and from the ALREADY
+                   REDUCED wc, never from a rank's own partial -- so they are
+                   identical on every rank and the collectives below them keep
+                   their shapes. Every transform over tau is one auxiliary row
+                   per call, so wc -- and with it the root and Z on every
+                   route -- and projbar are the serial ones bitwise at every
+                   rank count; the adjoints are partial sums over the
+                   partitions, exact up to summation order.
     """
     eps = np.asarray(eps, float)
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     p = int(p)
     nu_points = np.asarray(nu_points)
     if len(nu_points) != grid.cosft_wt.shape[0]:
         raise ValueError("the grid's frequency axis must be the CD quadrature")
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        eps = lockstep(eps, comm)
+        agreement((X, D, xc_correction, w0, pole_offset, scissor), comm,
+                  audit_only=True, label='qp_gradient_space_time inputs')
+    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
+    nu_mine = partition(len(nu_points), rank, nranks) if nranks > 1 else None
 
-    proj_tau = polarizability_tau(X, D, eps, nocc, grid, mu=mu, tile_gb=tile_gb)
+    proj_tau = polarizability_projected_rows(X, D, eps, nocc, grid.tau_points,
+                                             mu=mu, tile_memory_gb=tile_gb,
+                                             comm=comm)
     Bp = three_index_slice(X, D, p, tile_gb=tile_gb)
     wc = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, [Bp],
-                                        tile_gb=tile_gb)[0]
+                                        tile_gb=tile_gb,
+                                        freq_indices=nu_mine)[0]
+    if nranks > 1:
+        reduce_sum(wc, comm)                  # the others' rows are zero
 
     offset, relax = frozen_pole_offset(pole_offset, p)
     start = frozen_newton_seed(w0, p, eps, nocc, offset)
@@ -198,6 +322,7 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     elif route == 'laplace':
         rs = LaplaceRealScreening(proj_tau, grid, eps, nocc, tol=laplace_tol)
     elif route == 'explicit':
+        require_explicit_fits(D.shape[1], nocc, len(eps) - nocc, p)
         rs = ExplicitRealScreening(three_index_ov(X, D, eps, nocc, tile_gb=tile_gb),
                                    eps, nocc)
     elif route == 'none':
@@ -228,6 +353,9 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
         route_out['pole_offsets'] = {p: guard['pole_offset']}
         route_out['roots'] = {p: float(w_star)}
     if not want_grad:
+        if nranks > 1:
+            agreement((w_star, z), comm, audit_only=True,
+                      label='qp_gradient_space_time outputs')
         return w_star, z
 
     # Sigma^int's reverse pass, streamed over the same frequency blocks
@@ -236,7 +364,6 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     de = w_star - eps
     eps_bar = np.zeros_like(eps)
     Bp_bar = np.zeros_like(Bp)
-    proj_bar = np.zeros_like(proj_tau)
     if route == 'scissor':
         eps_bar[p] += z
         return w_star, z, eps_bar, np.zeros_like(X), np.zeros_like(D)
@@ -249,45 +376,59 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                                                 nu_points, sigma_bar=z)
         eps_bar += eps_sop
     state = dict(Bp=Bp, zw=z, de=de, wc_bar=wc_bar)
-    proj_bar_part = np.zeros_like(proj_tau)
+    proj_bar = proj_tau.zeros_like()
     eps_bar_part = np.zeros_like(eps)
-    for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb):
-        for m, k in enumerate(ks):
+    for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
+        for m, k in enumerate(fb.ks):
             # ONE state, so the factorization is used once and the plain solve
             # is it; `qp_set_gradient` takes the LU instead and shares it.
-            WtB = np.linalg.solve(eye - blk[m], Bp)
-            bb, blk[m], e_k = integral_term_reverse(state, WtB, k,
-                                                    nu_points[k], nu_weights[k])
+            WtB = np.linalg.solve(eye - fb.chi0[m], Bp)
+            bb, fb.chi0[m], e_k = integral_term_reverse(
+                state, WtB, k, nu_points[k], nu_weights[k])
             Bp_bar += bb
             eps_bar_part += e_k
-        proj_bar_part += np.tensordot(grid.cosft_wt[ks], blk, axes=(0, 0))
+        proj_bar.fold(grid.cosft_wt, fb)
+    fb = None
+    if nranks > 1:
+        reduce_sum(Bp_bar, comm)
+        reduce_sum(eps_bar_part, comm)
     eps_bar += eps_bar_part
     eps_bar[p] += z
 
     # Sigma^res: the shared part, then each backend's own chain
     X3 = D3 = None
+    pushed = []
     if res:
         e_r, b_r, _ = residue_terms_backward(p, w_star, Bp, eps, nocc, res, z, rs)
         eps_bar += e_r
         Bp_bar += b_r
         if route == 'laplace':
-            proj_bar += rs.adjoints()
+            pushed.append(rs)
         else:
             e_c, Cov_bar = rs.adjoints()
             eps_bar += e_c
             X3, D3 = three_index_ov_backward(X, D, eps, nocc, Cov_bar,
                                              tile_gb=tile_gb)
-    del proj_tau, rs
+            Cov_bar = None
+    fold_residue_adjoints(proj_bar, pushed)
+    del proj_tau, rs, pushed
 
-    proj_bar += proj_bar_part
-    e2, X_bar, D_bar = polarizability_backward(proj_bar, X, D, eps, nocc, grid,
-                                               mu=mu, tile_gb=tile_gb)
+    e2, X_bar, D_bar = polarizability_backward(proj_bar, X, D, eps, nocc,
+                                               grid, mu=mu, tile_gb=tile_gb,
+                                               tau_indices=tau_mine)
+    if nranks > 1:
+        for arr in (e2, X_bar, D_bar):
+            reduce_sum(arr, comm)
     del proj_bar
     if X3 is not None:
         X_bar += X3
         D_bar += D3
     X2, D2 = three_index_slice_backward(X, D, p, Bp_bar, tile_gb=tile_gb)
-    return w_star, z, eps_bar + e2, X_bar + X2, D_bar + D2
+    out = w_star, z, eps_bar + e2, X_bar + X2, D_bar + D2
+    if nranks > 1:
+        agreement(out, comm, audit_only=True,
+                  label='qp_gradient_space_time outputs')
+    return out
 
 
 def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
@@ -296,7 +437,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                     laplace_tol=LAPLACE_SCREENING_TOL,
                     tile_gb=ISDF_TILE_GB, pole_offset=None, route_out=None,
                     n_poles=SOP_N_POLES, sop_stride=None,
-                    scissor=None):
+                    scissor=None, comm=None):
     """(eps^QP values, eps_bar, X_bar, D_bar) for sum_p weights[p] eps^QP_p.
 
     A BSE@GW excitation energy carries a weight on EVERY quasiparticle on the
@@ -318,8 +459,33 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
     into projbar. The state loop used to sit outside and refactorize the same
     matrix once per state -- nstates naux^3 for nothing, the largest cost of
     the gradient at large naux. So the work is now three passes: every
-    state's root and route (cheap), the integral term's reverse over
-    frequencies, then each state's direct term, residues and slice adjoint.
+    state's root and route (replicated, cheap), the integral term's reverse
+    over frequencies, then each state's direct term, residues and slice
+    adjoint.
+
+    comm: an MPI communicator (or `simulated_world` rank) whose ranks all call
+    this in lockstep; None is `current_comm()`. eps and the weights are a
+    `lockstep` of RANK 0's at entry -- the routes are read off eps and the
+    active set off the weights; X and D are identical by construction and are
+    not broadcast again, an audited run comparing their digests on entry and
+    the outputs' on exit. proj(tau) and projbar are held by auxiliary rows
+    (`ProjRows`, 19.1 GB a rank at the chlorophyllide hexamer over 8 ranks
+    where the whole array is 153): the tau sweep is split over tau and its
+    slices exchanged into rows, its reverse split over tau and reduced once
+    (the three adjoints); the forward contraction and the reverse pass are
+    split over the contour-deformation frequencies, each frequency's chi0
+    gathered whole to its owner and its adjoint handed back as rows, and
+    reduced once (wc per state; then Bp_bar per state and the frequency part
+    of eps_bar). Everything decided per state --
+    the route, the guard band, the Newton itself -- is decided from eps and
+    from the ALREADY REDUCED wc, never from a rank's own partial, so the
+    decisions cannot diverge once the inputs agree. They are what fixes the
+    ACTIVE SET, and the active set fixes how many buffers pass 2 reduces:
+    ranks reading different eps would call that collective with different
+    shapes. Every transform over tau is one auxiliary row per call, a shape
+    no rank count changes, so every wc, every root and projbar itself are the
+    serial ones bitwise at every rank count; the adjoints are partial sums
+    over the partitions, exact up to summation order.
 
     pole_offset: the Newton's guard band, one value or a mapping orbital ->
                  offset frozen by the caller (`frozen_pole_offset`).
@@ -329,28 +495,45 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                  'roots'.
     """
     eps = np.asarray(eps, float)
+    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     states = np.atleast_1d(states)
     weights = np.atleast_1d(weights)
     nu_points = np.asarray(nu_points)
     if len(nu_points) != grid.cosft_wt.shape[0]:
         raise ValueError("the grid's frequency axis must be the CD quadrature")
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        # Before the routes are chosen: they are read off eps, and with the
+        # weights' zeros they set the active set whose adjoints pass 2 reduces
+        # as one buffer.
+        eps, weights = lockstep((eps, weights), comm)
+        agreement((X, D, xc_correction, w0, pole_offset, scissor), comm,
+                  audit_only=True, label='qp_set_gradient inputs')
+    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
+    nu_mine = partition(len(nu_points), rank, nranks) if nranks > 1 else None
 
-    proj_tau = polarizability_tau(X, D, eps, nocc, grid, mu=mu, tile_gb=tile_gb)
+    proj_tau = polarizability_projected_rows(X, D, eps, nocc, grid.tau_points,
+                                             mu=mu, tile_memory_gb=tile_gb,
+                                             comm=comm)
     naux = proj_tau.shape[-1]
     eye = np.eye(naux)
     eps_bar = np.zeros_like(eps)
     X_bar = np.zeros_like(X)
     D_bar = np.zeros_like(D)
-    proj_bar = np.zeros_like(proj_tau)
     w_stars = np.zeros(len(states))
     routes, offsets, roots, C_ov = {}, {}, {}, None
     z_of = np.zeros(len(states))
 
     Bps = [three_index_slice(X, D, int(p), tile_gb=tile_gb) for p in states]
     wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, Bps,
-                                         tile_gb=tile_gb)
+                                         tile_gb=tile_gb, freq_indices=nu_mine)
+    if nranks > 1:
+        wcs = list(reduce_sum(np.stack(wcs), comm))
 
-    # PASS 1 -- every state's route, root and residue set.
+    # PASS 1 -- every state's route, root and residue set. Replicated: a
+    # Newton on wc and, for a residue, a rank-one push into its backend.
     active = []
     for si, (p, wgt) in enumerate(zip(states, weights)):
         p = int(p)
@@ -378,6 +561,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
             rs = LaplaceRealScreening(proj_tau, grid, eps, nocc, tol=laplace_tol)
         elif route == 'explicit':
             if C_ov is None:
+                require_explicit_fits(D.shape[1], nocc, len(eps) - nocc, p)
                 C_ov = three_index_ov(X, D, eps, nocc, tile_gb=tile_gb)
             rs = ExplicitRealScreening(C_ov, eps, nocc)
         else:
@@ -422,15 +606,16 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         active.append(dict(si=si, p=p, zw=zw, de=w_star - eps, Bp=Bp,
                            wc_bar=wc_bar, res=res, rs=rs, route=route))
 
-    # PASS 2 -- the integral term's reverse pass, frequency outside.
+    # PASS 2 -- the integral term's reverse pass, frequency outside, over the
+    # frequencies this rank owns. Partial over frequencies: reduced once.
     Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
-    proj_bar_part = np.zeros_like(proj_tau)
     eps_bar_part = np.zeros_like(eps)
     if active:
-        for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb):
-            for m, k in enumerate(ks):
+        proj_bar = proj_tau.zeros_like()
+        for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
+            for m, k in enumerate(fb.ks):
                 nu, wt = nu_points[k], nu_weights[k]
-                lu = scipy.linalg.lu_factor(eye - blk[m])
+                lu = scipy.linalg.lu_factor(eye - fb.chi0[m])
                 chi0_bar = np.zeros((naux, naux))
                 for a in active:
                     WtB = scipy.linalg.lu_solve(lu, a['Bp'])
@@ -438,14 +623,26 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                     Bp_bars[a['si']] += bb
                     chi0_bar += cb
                     eps_bar_part += e_k
-                blk[m] = chi0_bar
-            proj_bar_part += np.tensordot(grid.cosft_wt[ks], blk, axes=(0, 0))
+                fb.chi0[m] = chi0_bar
+            proj_bar.fold(grid.cosft_wt, fb)
+        fb = lu = chi0_bar = None
+        if nranks > 1:
+            reduce_sum(eps_bar_part, comm)
+            stacked = reduce_sum(np.stack([Bp_bars[a['si']] for a in active]),
+                                 comm)
+            for a, bar in zip(active, stacked):
+                Bp_bars[a['si']] = bar
     eps_bar += eps_bar_part
 
     # PASS 3 -- per state: the direct term, the residues, the slice adjoint.
+    # Replicated, like pass 1. Each backend leaves with its state, so the
+    # explicit route holds one Cov_bar at a time; the Laplace backends keep
+    # only their recorded pushes, folded into projbar after the pass.
+    rs = C_ov = None
+    pushed = []
     for a in active:
-        p, zw, Bp, res, rs, route = (a['p'], a['zw'], a['Bp'], a['res'],
-                                     a['rs'], a['route'])
+        p, zw, Bp, res, route = a['p'], a['zw'], a['Bp'], a['res'], a['route']
+        rs = a.pop('rs')
         Bp_bar = Bp_bars[a['si']]
         eps_bar[p] += zw
         if res:
@@ -454,7 +651,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
             eps_bar += e_r
             Bp_bar += b_r
             if route == 'laplace':
-                proj_bar += rs.adjoints()
+                pushed.append(rs)
             else:
                 e_c, Cov_bar = rs.adjoints()
                 eps_bar += e_c
@@ -462,10 +659,14 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                                                  tile_gb=tile_gb)
                 X_bar += X3
                 D_bar += D3
+                Cov_bar = None
+        rs = None
         X2, D2 = three_index_slice_backward(X, D, p, Bp_bar, tile_gb=tile_gb)
         X_bar += X2
         D_bar += D2
-
+    if active:
+        fold_residue_adjoints(proj_bar, pushed)
+    pushed = None
     del proj_tau
     if route_out is not None:
         route_out['routes'] = routes
@@ -477,9 +678,19 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         # The converged roots, which the same caller hands back as `w0` so that
         # the displaced Newton starts on the branch this one found.
         route_out['roots'] = roots
-    proj_bar += proj_bar_part
-    e2, Xs, Ds = polarizability_backward(proj_bar, X, D, eps, nocc, grid, mu=mu,
-                                         tile_gb=tile_gb)
+    if active:
+        e2, Xs, Ds = polarizability_backward(proj_bar, X, D, eps, nocc,
+                                             grid, mu=mu, tile_gb=tile_gb,
+                                             tau_indices=tau_mine)
+        del proj_bar
+        if nranks > 1:
+            for arr in (e2, Xs, Ds):
+                reduce_sum(arr, comm)
+    else:
+        # Nothing carries a weight: the sweep would run on a zero projbar and
+        # return exact zeros, so it is not run. The active set is identical on
+        # every rank, so every rank skips the same collectives.
+        e2, Xs, Ds = np.zeros_like(eps), np.zeros_like(X), np.zeros_like(D)
     if route_out is not None:
         # The pole strengths, for callers that must weight a term the Newton
         # condition renormalizes. Anything added to the RIGHT of
@@ -488,4 +699,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         # Kohn-Sham reference) needs these and cannot reconstruct them.
         route_out['z'] = z_of
         route_out['routes'] = routes
-    return w_stars, eps_bar + e2, X_bar + Xs, D_bar + Ds
+    out = w_stars, eps_bar + e2, X_bar + Xs, D_bar + Ds
+    if nranks > 1:
+        agreement(out, comm, audit_only=True, label='qp_set_gradient outputs')
+    return out

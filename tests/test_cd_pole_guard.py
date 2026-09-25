@@ -21,8 +21,7 @@ import pytest
 
 from src.Base.constants import (QP_POLE_OFFSET, QP_POLE_OFFSET_MIN,
                                 QP_POLE_STRENGTH_MIN)
-from src.gradients import contour_deformation as cd
-from src.gradients.contour_deformation import qp_energy_cd
+from src.SingleReference.GW.contour_deformation import qp_energy_cd
 
 #: A flat imaginary-axis screening scales the quasiparticle shift, which is how
 #: the root is placed relative to the guard: 2e-3 puts it 5.1e-4 from the pole,
@@ -167,13 +166,13 @@ def test_a_pinned_iterate_is_not_accepted_as_converged():
     must be a real root: free of the guard, or refused."""
     p_idx, Bp, c_ov, wc = capture_model()
     for floor in (1e-4, 1e-6):
-        cd.QP_POLE_OFFSET_MIN = floor
         try:
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter('always')
                 w, _, _ = qp_energy_cd(p_idx, Bp, CAPTURE_EPS, NOCC, NU, WT,
                                        wc=wc, C_ov=c_ov,
-                                       linearize_on_capture=False)
+                                       linearize_on_capture=False,
+                                       offset_min=floor)
         except RuntimeError:
             continue                       # refusing is the other valid answer
         # Not sitting on any guard position: a returned root is a root.
@@ -181,4 +180,3 @@ def test_a_pinned_iterate_is_not_accepted_as_converged():
         assert gaps.min() > floor, (
             f'floor {floor:.0e}: returned w={w:.8f}, {gaps.min():.2e} from '
             f'orbital {int(np.argmin(gaps))} -- that is the guard, not a root')
-    cd.QP_POLE_OFFSET_MIN = QP_POLE_OFFSET_MIN

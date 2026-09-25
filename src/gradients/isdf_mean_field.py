@@ -62,11 +62,17 @@ because a frame rotation is translation-invariant.
 
 WHAT THIS DOES NOT COVER
 ------------------------
-A CORRELATED force on such a mean field, which `refuse_isdf_jk_gradient` still
-refuses: the rest of that Lagrangian -- the folded Fock partial
-(`fock_partial_skeleton_df`) and the exact-exchange double counting -- is built
-from the auxiliary basis, so a GW, BSE or dRPA force would still differentiate
-a different function even with this term in place.
+The analytic HESSIAN of a correlated energy on such a mean field, which
+`refuse_isdf_jk_gradient` still refuses (`src.properties.vibronic`): a second
+derivative of the factors is not built. The first-derivative correlated force
+IS covered: the folded Fock partial's exchange half comes from
+`isdf_fock_partial_exchange`, built from the ISDF factors rather than the
+auxiliary basis, and the exact-exchange double counting is built on the mean
+field's own `ISDFJK` (`exx_double_counting_skeleton`, `reference_energy`)
+rather than a fresh fit, so a GW, BSE or dRPA force reads the same exchange
+the energy did. The dRPA ground-state force is gated against a
+Richardson-extrapolated finite difference of its own reported energy to
+1.5e-8 Ha/Bohr on PBE0 and 1.7e-8 on LRC-wPBEh.
 
 `require_isdf_gradient_support` refuses, by name: `j_route='isdf'` (the Coulomb
 term would then be interpolated too, and the reference gradient's DF-J

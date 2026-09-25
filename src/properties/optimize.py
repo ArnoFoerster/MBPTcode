@@ -20,6 +20,16 @@ converged geometry and optimize again, until refreezing stops moving it. That
 converts an uncontrolled approximation into a measured one -- each reports how
 far the refreeze moved the geometry, and that number is the honest error bar on
 the minimum.
+
+ONE WALK, HOWEVER MANY RANKS. Inside `with distributed(comm):` every rank runs
+the walk below, and every evaluation goes through `surface.evaluate`, which
+locks the geometry to rank 0's on the way in and the energy, force and
+diagnostics on the way out. Every decision -- the step, the convergence test,
+the trust radius, whether a step was rejected, where the refreeze happens --
+is therefore taken on every rank from the same numbers, and the walk's result
+is locked to rank 0's once more at the end (`rank_zero_walk`), so every rank
+returns one geometry and one record. Outside a distributed region every
+lockstep is a no-op and the walk is bit for bit the serial one.
 """
 import os
 import tempfile
@@ -30,7 +40,9 @@ from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
 
 from src.Base.constants import BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_EV
 from src.Base.declaration import SurfacePhysics
+from src.Base.utils.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
+from src.properties.surface import evaluate, lockstep_geometry
 
 
 def translation_rotation_basis(coords, masses=None):
@@ -128,6 +140,18 @@ def at_geometry(mol, coords):
     return m
 
 
+def rank_zero_walk(mol_opt, info):
+    """(mol, info) of a finished walk, rank 0's on every rank.
+
+    Every rank took its steps from the same evaluated numbers, so the walks
+    agree as far as the optimizer's own arithmetic is bitwise across nodes --
+    the `eigh` of the augmented RFO matrix, the BFGS update -- and that is not
+    guaranteed there. Locking the result makes the returned geometry and
+    record one by construction, whatever that arithmetic did.
+    """
+    return lockstep_geometry(mol_opt), lockstep(info)
+
+
 def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
              trust_min=2e-3, hess_init=None, conv=None, refreeze=0,
              verbose=True):
@@ -175,10 +199,15 @@ def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
     A state that stops existing along the path -- dissociative, or a reference
     that goes singlet/triplet unstable -- is reported as `info['status']`, not
     raised: the geometries up to that point are still the useful output.
+
+    Under ranks every rank runs this walk on evaluations locked to rank 0's
+    (`surface.evaluate`), and every rank comes back holding rank 0's geometry
+    and record.
     """
     mol = surface.mol0 if mol is None else mol
-    return _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
-                              trust_min, hess_init, conv, refreeze, verbose)
+    return rank_zero_walk(*_trust_region_walk(
+        surface, mol, max_cycle, trust, trust_max, trust_min, hess_init, conv,
+        refreeze, verbose))
 
 
 def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
@@ -193,7 +222,7 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
 
     def at(xvec):
         m = at_geometry(mol, xvec)
-        g, e, d = surface.total_gradient(m)
+        g, e, d = evaluate(surface, m)
         return proj @ g.ravel(), e, d, m
 
     x = mol.atom_coords().ravel().copy()
@@ -333,10 +362,11 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     Cartesian `optimize` fallback, which keeps every result reachable with no
     dependency at all.
 
-    The engine below reports `surface.total_gradient`, so everything the frozen
-    conventions imply still holds: the whole optimization is one smooth
-    surface, and `refreeze` is still the way to measure the drift of that
-    surface from the one the fit would choose at the end.
+    The engine below reports `surface.total_gradient`, through
+    `surface.evaluate`, so everything the frozen conventions imply still
+    holds: the whole optimization is one smooth surface, and `refreeze` is
+    still the way to measure the drift of that surface from the one the fit
+    would choose at the end.
 
     refreeze: after convergence, rebuild the frozen conventions at the new
         geometry (`surface.refreeze`) and optimize again, up to this many
@@ -347,13 +377,20 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     `info['opt_grad_max']` is max |dE/dR| at the CONVERGED geometry R*, the
     residual, and not the driving force at R0 that `grad_max` means elsewhere;
     `info['grad_max']` is the same float, kept for callers that read it.
+
+    Under ranks every rank runs geomeTRIC on evaluations locked to rank 0's
+    (`surface.evaluate`, in the engine's `calc_new` callback), and every rank
+    comes back holding rank 0's geometry and record. geomeTRIC's files then go
+    to one `workdir` from every rank, so give each rank its own there or leave
+    it None, which makes a fresh directory per call.
     """
     # Probed before the walk starts, so a missing package raises before any
     # geometry is evaluated rather than partway through.
     geometric_engine()
     mol = surface.mol0 if mol is None else mol
-    return _geometric_walk(surface, mol, maxiter, converge, coordsys,
-                           refreeze, verbose, workdir)
+    return rank_zero_walk(*_geometric_walk(surface, mol, maxiter, converge,
+                                           coordsys, refreeze, verbose,
+                                           workdir))
 
 
 def geometric_engine():
@@ -390,7 +427,7 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
     class _Surface(Engine):
         def calc_new(self, coords, dirname):
             m = at_geometry(mol, coords)
-            g, e, d = surface.total_gradient(m)
+            g, e, d = evaluate(surface, m)
             omega = d.get('omega')
             trace.append({'e': float(e),
                           'omega': None if omega is None else float(omega),
@@ -403,15 +440,13 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
             return {'energy': float(e), 'gradient': np.asarray(g).ravel()}
 
     engine = _Surface(gm)
+    # geomeTRIC's files go under an absolute prefix rather than a chdir: the
+    # working directory belongs to the process, which the rank threads of
+    # `run_simulated` share, and a chdir on one would move the others' files.
     tmp = workdir or tempfile.mkdtemp(prefix='esopt_')
-    cwd = os.getcwd()
-    try:
-        os.chdir(tmp)
-        out = run_optimizer(customengine=engine, coordsys=coordsys,
-                            maxiter=maxiter, convergence_set=converge,
-                            input='es', check=0)
-    finally:
-        os.chdir(cwd)
+    out = run_optimizer(customengine=engine, coordsys=coordsys,
+                        maxiter=maxiter, convergence_set=converge,
+                        input='es', prefix=os.path.join(tmp, 'es'), check=0)
 
     xyz = np.asarray(out.xyzs[-1]) / BOHR_TO_ANGSTROM
     mol_opt = mol.copy()
@@ -482,11 +517,15 @@ def mean_field_force(mf):
     the correct one sits at 4.2e-15. A finite-difference Hessian differencing
     that force inherits the violation, and an optimizer walks downhill on a
     surface whose minimum is not the one whose energy it is printing.
+
+    Rank 0's force on every rank: pyscf's threaded GEMM adds its partial sums
+    in thread-arrival order and its density-fitted gradient blocks by each
+    process's free memory, so every rank's own call differs in its last bits.
     """
     # cycle: the gradient package imports the surface protocol this module defines
     from src.Base.isdf_jk import mean_field_skeleton_force
 
-    return mean_field_skeleton_force(mf)
+    return lockstep(mean_field_skeleton_force(mf))
 
 
 class MeanFieldSurface:
@@ -496,6 +535,17 @@ class MeanFieldSurface:
     conventions, so `refreeze` is the identity. This exists so `optimize` --
     which needs nothing outside this repository -- can relax a ground state on
     a machine with neither geomeTRIC nor pyberny installed.
+
+    THE SCF IS THE ONLY STAGE THERE IS, and it is what the ranks divide. There
+    is no post-SCF step to split over them, so a factory that hands back a
+    mean field it has BUILT AND NOT RUN leaves the convergence to
+    `converged_factory`: every rank runs pyscf's driver against the reduced
+    J/K and the reduced quadrature, contributing its block of the auxiliary
+    index and of the grid. A factory that converges its own is used as it is,
+    its orbitals locked to rank 0's, and outside a distributed region this is
+    the call the factory would have made. Each rank forms the force from rank
+    0's orbitals with its own node's arithmetic and `mean_field_force` hands
+    every rank rank 0's; the energy is the locked mean field's own.
     """
 
     def __init__(self, mol, scf_factory, mf=None):
@@ -510,11 +560,12 @@ class MeanFieldSurface:
         self._mf0 = mf
 
     def _mean_field(self, mol):
-        """The factory's mean field at `mol`, converged if it was not already."""
+        """The factory's mean field at `mol`, converged over the ranks if it
+        was not already, and rank 0's on every rank."""
         # cycle: the gradient package imports the surface protocol this module defines
         from src.gradients.factor_chain import converged_factory
 
-        return converged_factory(self._scf)(mol)
+        return lockstep_mean_field(converged_factory(self._scf)(mol))
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the mean field this surface evaluates on -- a gas-phase

@@ -207,7 +207,9 @@ def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
     wc stays zero, so the sum over ranks is the whole. A frequency's result is
     its own row and the LU is the cost, which makes this the reduction-free
     axis to split (nfreq x norb per state to gather, 8 MB at dodecacene).
-    Serial (None) is bitwise unchanged.
+    The chi0 rows are the serial block's rows on any BLAS
+    (`owned_frequency_blocks`), so the sum over ranks, which adds exact
+    zeros, is the serial wc bitwise. Serial (None) is bitwise unchanged.
     """
     nfreq, naux = cosft_wt.shape[0], proj_tau.shape[-1]
     eye = np.eye(naux)

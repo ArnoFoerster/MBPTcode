@@ -17,7 +17,7 @@ from pyscf import dft, gto, scf
 
 from src.Base.constants import CD_NFREQ, CD_POLE_RESOLUTION, HARTREE_TO_EV
 from src.Base.solvent_screening import SolventScreening
-from src.gradients.contour_deformation import root_pole_distance
+from src.SingleReference.GW.contour_deformation import root_pole_distance
 from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
 from src.gradients.isdf_derivatives import (exx_double_counting,
                                             exx_double_counting_Y,

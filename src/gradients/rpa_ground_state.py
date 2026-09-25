@@ -14,6 +14,16 @@ nuclei. The mean-field gradient is added here and never inside the chain:
 
 The imaginary-time grid and the frequency quadrature are fixed parameters of
 the surface, chosen once for the reference gap and range.
+
+On sliced factors (`sliced=True`, over more than one rank) the energy and its
+adjoint gather X_mo and D once for their sweeps and the nuclear assembly X_mo
+once more, so between geometries a rank holds its grid rows alone, and the
+layout adds no difference: on one mean field, and on a pyscf that repeats its
+bits, the force is the whole layout's bit for bit. pyscf's threaded K builds
+and mean-field force do not repeat their bits from run to run, so two
+evaluations are compared on an anchored bar. On the row fit (`fit='rows'`) the
+rows are the fit's own and no rank forms the fit whole; the force is then
+the derivative of that fit's estimator (`FrozenFactorization`).
 """
 import numpy as np
 
@@ -37,6 +47,9 @@ from src.gradients.space_time_adjoint import rpa_energy_and_adjoint
 class RPAGroundStateChain(FactorChain):
     """E_HF + E_c^dRPA and its nuclear gradient on a frozen factorization and quadrature.
 
+    Under ranks (`with distributed(comm):`) every rank runs the chain whole
+    and `rpa_energy_and_adjoint` divides its frequency loop over them.
+
     AN ABSOLUTE TOTAL ENERGY IN A CONTINUUM IS NOT TRUSTWORTHY under the
     default interaction. The exact block fold of the ACFDT log-determinant
     keeps the BARE interaction in the linear counter-term while the default
@@ -50,14 +63,18 @@ class RPAGroundStateChain(FactorChain):
     the solvent-accessible surface.
     """
 
+    READS_SLICED_FACTORS = True
+
     def __init__(self, mol, scf_factory, basis=None, auxbasis=None, counts=None,
                  n_start=1, ntau=None, nfreq=RPA_ENERGY_NFREQ, frames='frozen',
                  tile_gb=None, mf=None, environment=None, factorization=None,
-                 fold=False, radii=None):
+                 fold=False, radii=None, sliced=None, fit=None,
+                 fit_block=None):
         super().__init__(mol, scf_factory, basis=basis, auxbasis=auxbasis,
                          counts=counts, n_start=n_start, frames=frames, mf=mf,
                          environment=environment, factorization=factorization,
-                         radii=radii)
+                         radii=radii, sliced=sliced, fit=fit,
+                         fit_block=fit_block)
         self.tile_gb = tile_gb
         self.fold = bool(fold)
         refuse_dispersion_under_rpa(self.mf0, type(self).__name__)
@@ -218,7 +235,9 @@ class RPAGroundStateChain(FactorChain):
                           factorization=factorization, fold=self.fold,
                           radii=(self.radii
                                  if self.factorization.radii_tag is not None
-                                 else None))
+                                 else None),
+                          sliced=self.sliced, fit=self.fit,
+                          fit_block=self.fit_block)
 
     def label(self):
         """The state and the method, for a log line or a relaxation record."""

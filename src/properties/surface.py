@@ -21,12 +21,20 @@ enough leaves the geometry those choices were made for, and the only honest
 answer is to rebuild them at the new geometry and measure how far the minimum
 moves. Only the method knows what it froze, so `refreeze` is its method and the
 optimizer merely calls it.
+
+ONE EVALUATION, HOWEVER MANY RANKS. Inside `with distributed(comm):` every rank
+runs the property routine and the surface whole, and `evaluate` is where a
+property routine hands a geometry to the surface: it locksteps the geometry on
+the way in and the energy, force and diagnostics on the way out, so every rank
+evaluates rank 0's geometry and every rank's next decision -- a step, a trust
+radius, a convergence test -- is taken from rank 0's numbers.
 """
 from typing import Protocol, runtime_checkable
 
 import numpy as np
 
 from src.Base.constants import NUCLEAR_FD_STEP
+from src.Base.utils.mpi_grid import lockstep
 
 #: The attribute names a surface may use for its selected root, most specific
 #: first. Only consulted when the class declares no `ROOT_ATTR`.
@@ -102,8 +110,10 @@ class FiniteDifferenceGradient:
     and a loose one does not.
 
     `map_fn` takes `map`'s signature and runs the 6 natm displaced energies:
-    the default evaluates them in order in this process; a process pool
-    spreads them over workers, since no displaced energy depends on another.
+    the default evaluates them in order in this process; a process pool or
+    `functools.partial(mpi_grid.mpi_map, comm=comm)` spreads them over ranks,
+    since no displaced energy depends on another. The wrapped surface must
+    not itself distribute over the same communicator (see `mpi_map`).
     """
 
     def __init__(self, surface, h=NUCLEAR_FD_STEP, map_fn=None):
@@ -248,3 +258,44 @@ def surface_mean_field(surface, mol):
     if hasattr(surface, 'mean_field'):
         return surface.mean_field(mol)[1]
     return surface.scf_factory(mol)
+
+
+def lockstep_geometry(mol):
+    """`mol` at rank 0's nuclear coordinates, written into it where this rank's
+    differ; `mol` is returned.
+
+    The geometry is the one input of a surface evaluation that no kernel
+    locksteps: the SCF, the collocation and every integral derivative read the
+    nuclei straight off the Mole, so a rank whose optimizer arithmetic moved a
+    coordinate by one ulp would evaluate a different molecule and add its
+    partials to everyone's reductions -- measured on water/cc-pVDZ with the
+    SCF converged over two ranks, the BSE@GW force then moves 8.7e-9 Ha/Bohr
+    on every rank, rank 0 included. Written in Bohr, so the repaired Mole's
+    `unit` is 'Bohr' and its coordinates are rank 0's to the bit. Serially,
+    and on every rank that already agrees, the Mole is not touched.
+    """
+    coords = mol.atom_coords()
+    locked = lockstep(coords.copy())
+    if not np.array_equal(locked, coords):
+        mol.set_geom_(locked, unit='Bohr')
+    return mol
+
+
+def evaluate(surface, mol, mf=None):
+    """(dE/dR, E, diagnostics) of `surface` at `mol`: rank 0's on every rank.
+
+    THE BOUNDARY BETWEEN A PROPERTY ROUTINE AND THE KERNELS. The geometry is
+    locked to rank 0's on the way in (`lockstep_geometry`) and the result on
+    the way out: the kernels hand every rank the same bits, but the pieces a
+    surface adds on its own -- the mean-field force, a dense eigensolve, a sum
+    of two chains -- carry each node's last bits, and an optimizer stepping on
+    those would take a different step on every node. One `lockstep` of the
+    result makes the walk that follows one walk. Serially both are no-ops and
+    this is `surface.total_gradient(mol, mf)`.
+
+    `mf` is handed through untouched: a chain locks a given mean field to rank
+    0's orbitals itself (`FactorChain.mean_field`), and whatever a surface
+    forms from one it did not lock is covered by the lockstep of the result.
+    """
+    lockstep_geometry(mol)
+    return lockstep(surface.total_gradient(mol, mf))

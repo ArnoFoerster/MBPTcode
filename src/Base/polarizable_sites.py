@@ -62,6 +62,7 @@ from scipy.optimize import brentq
 from src.Base.constants import (BOHR_TO_ANGSTROM, MIN_SITE_TO_QM_DISTANCE,
                                 POLARIZABILITY_FIELD, POLARIZABILITY_SCF_TOL)
 from src.Base.separable_ri import auxmol_key
+from src.Base.utils.threads import blas_single_threaded
 
 #: Thole exponential-damping factor, dimensionless.
 THOLE_FACTOR = 2.5874
@@ -312,7 +313,8 @@ def finite_field_polarizability(mol, field=POLARIZABILITY_FIELD,
             mf = scf.RHF(mol)
             mf.get_hcore = lambda *args, s=sign, c=y, **kwargs: h0 + s * field * r[c]
             mf.conv_tol = conv_tol
-            mf.kernel()
+            with blas_single_threaded():
+                mf.kernel()
             if not mf.converged:
                 raise RuntimeError('the finite-field SCF did not converge; no '
                                    'polarizability follows from it')
@@ -337,7 +339,8 @@ def rpa_polarizability(mol, conv_tol=POLARIZABILITY_SCF_TOL):
     """
     mf = scf.RHF(mol)
     mf.conv_tol = conv_tol
-    mf.kernel()
+    with blas_single_threaded():
+        mf.kernel()
     if not mf.converged:
         raise RuntimeError('the SCF did not converge; no response follows '
                            'from its orbitals')

@@ -1,7 +1,8 @@
-"""The auxiliary-boson route must be the same numbers now that it lives in production.
+"""The auxiliary-boson route must be the same numbers as the quasi-boson closed form.
 
 `src.SingleReference.GW.auxiliary_bosons` replaced the quasi-boson closed form
-of `src.gradients.qb_core.RPA` -- e^t and the eigenvectors of
+of the dRPA class (`gradients.quasi_boson_adjoint.RPAAdjoint`, a subclass of
+`SingleReference.GW.quasi_boson.RPA`) -- e^t and the eigenvectors of
 Abar = [e^t (A+B) e^t + e^-t (A-B) e^-t]/2 -- by the production Casida solve.
 The two are the same object: with Abar = (P^1/2 e^t)^T (P^1/2 e^t), P = A+B,
 
@@ -19,10 +20,10 @@ sign-aligned columns. Every physical consumer squares the coupling, and those
 -- poles and amplitudes -- are compared with no gauge handling at all.
 
 Each gate is shown once to fail:
-  * the shim/production bitwise gate, on one input element moved by one ULP
   * the boson gate (Om and X+Y), on d shifted by 1e-9
   * the gauge-invariant pole/amplitude gate, on bp shifted by 1e-9
-  * the "production does not import src.gradients" gate, on the shim, which does
+  * the "production does not import src.gradients" gate, on a module of
+    src.gradients, which does
 """
 import os
 import subprocess
@@ -31,14 +32,10 @@ import sys
 import numpy as np
 import pytest
 
-from src.Base.constants import AB_RCOND
-from src.gradients import auxiliary_bosons as shim
-from src.gradients.qb_core import RPA
+from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.SingleReference.GW import auxiliary_bosons as prod
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NAMES = ('ab_basis', 'ab_bosons', 'ab_couplings', 'ab_from_factors',
-         'exact_bosons', 'exact_from_factors')
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -61,7 +58,7 @@ def inputs():
 
 
 def old_exact_bosons(c_ov, d):
-    """Verbatim pre-move body: the dRPA bosons from the qb_core closed form."""
+    """Verbatim pre-move body: the dRPA bosons from the quasi-boson closed form."""
     v = np.asarray(c_ov, float).T @ np.asarray(c_ov, float)
     rpa = RPA(np.diag(np.asarray(d, float)) + 2.0 * v, 2.0 * v)
     om, u = rpa.eigAbar
@@ -69,7 +66,7 @@ def old_exact_bosons(c_ov, d):
 
 
 def old_ab_bosons(c_ov, d, c_ab):
-    """Verbatim pre-move body: the dRPA re-solved inside the AB basis, via qb_core."""
+    """Verbatim pre-move body: the dRPA re-solved inside the AB basis, closed form."""
     cc = np.asarray(c_ov, float) @ c_ab
     v = cc.T @ cc
     a = (c_ab * np.asarray(d, float)[:, None]).T @ c_ab + 2.0 * v
@@ -79,14 +76,14 @@ def old_ab_bosons(c_ov, d, c_ab):
 
 
 def old_exact_from_factors(bp, c_ov, d):
-    """Verbatim pre-move body, on top of the qb_core bosons."""
+    """Verbatim pre-move body, on top of the closed-form bosons."""
     om, xy = old_exact_bosons(c_ov, d)
     w = np.sqrt(2.0) * ((np.asarray(bp, float).T @ c_ov) @ xy)
     return om, (w ** 2).T
 
 
 def old_ab_from_factors(bp, c_ov, d, c_ab):
-    """Verbatim pre-move body; ab_basis and ab_couplings never touched qb_core."""
+    """Verbatim pre-move body; ab_basis and ab_couplings never used RPA."""
     om, xy = old_ab_bosons(c_ov, d, c_ab)
     w = prod.ab_couplings(bp, c_ov, c_ab, xy)
     return om, (w ** 2).T
@@ -99,48 +96,10 @@ def aligned(x, y):
     return float(np.abs(x - y * s[None, :]).max())
 
 
-def all_outputs(m, bp, c_ov, d):
-    """Every function of module `m` on one input set, in call order."""
-    out = [m.ab_basis(c_ov), m.ab_basis(c_ov, n_bosons=6)]
-    c_ab = out[0]
-    out += list(m.ab_bosons(c_ov, d, c_ab))
-    out.append(m.ab_couplings(bp, c_ov, c_ab, out[-1]))
-    out += list(m.ab_from_factors(bp, c_ov, d, c_ab=c_ab))
-    out += list(m.ab_from_factors(bp, c_ov, d, n_bosons=6))
-    out += list(m.exact_bosons(c_ov, d))
-    out += list(m.exact_from_factors(bp, c_ov, d))
-    return out
-
-
-def test_the_shim_re_exports_the_production_objects():
-    """Every old name resolves to the production function, AB_RCOND to the constant."""
-    for name in NAMES:
-        assert getattr(shim, name) is getattr(prod, name), name
-    assert shim.AB_RCOND is AB_RCOND
-    assert prod.AB_RCOND is AB_RCOND
-
-
-def test_the_two_import_paths_agree_bitwise():
-    """Same objects, so every output is bit-identical -- nothing is recomputed."""
-    bp, c_ov, d = inputs()
-    for a, b in zip(all_outputs(prod, bp, c_ov, d), all_outputs(shim, bp, c_ov, d)):
-        assert np.array_equal(a, b)
-
-
-def test_the_bitwise_gate_can_fail():
-    """One ULP on a single C_ov element must break it."""
-    bp, c_ov, d = inputs()
-    bumped = c_ov.copy()
-    bumped[0, 0] = np.nextafter(bumped[0, 0], np.inf)
-    same = [np.array_equal(a, b) for a, b in
-            zip(all_outputs(prod, bp, c_ov, d), all_outputs(shim, bp, bumped, d))]
-    assert not all(same)
-
-
-def test_exact_bosons_reproduces_the_qb_core_closed_form():
+def test_exact_bosons_reproduces_the_quasi_boson_closed_form():
     """Casida X+Y == e^t U: 8.4e-15 on Om, 6.4e-14 on X+Y (different eigensolver path).
 
-    Not bitwise: qb_core diagonalizes Abar with numpy eigh, CasidaSolver
+    Not bitwise: the closed form diagonalizes Abar with numpy eigh, CasidaSolver
     diagonalizes (A-B)^1/2 (A+B) (A-B)^1/2 with scipy eigh. 3 of the 15 columns
     come back with the opposite sign, which is the eigenvector gauge.
     """
@@ -151,7 +110,7 @@ def test_exact_bosons_reproduces_the_qb_core_closed_form():
     assert aligned(xy_old, xy_new) < 1e-12
 
 
-def test_ab_bosons_reproduces_the_qb_core_closed_form():
+def test_ab_bosons_reproduces_the_quasi_boson_closed_form():
     """The compressed solve, same gate: 5.3e-15 on Om, 5.2e-14 on X+Y."""
     _, c_ov, d = inputs()
     for n_bosons in (None, 12, 6):
@@ -249,5 +208,6 @@ def test_production_does_not_reach_into_the_gradients_package():
 
 
 def test_the_sys_modules_gate_can_fail():
-    """The shim lives in src.gradients, so the same probe must report True there."""
-    assert imports_gradients('src.gradients.auxiliary_bosons')
+    """A module of src.gradients -- the one the closed form above comes from --
+    must report True under the same probe."""
+    assert imports_gradients('src.gradients.quasi_boson_adjoint')

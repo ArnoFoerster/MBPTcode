@@ -1,21 +1,21 @@
-"""The contour deformation's forward half moved to production, BITWISE.
+"""The contour deformation in production is the code it replaced, BITWISE.
 
-`SingleReference/GW/contour_deformation.py` now holds the forward physics,
+`SingleReference/GW/contour_deformation.py` holds the forward physics,
 `SingleReference/GW/real_screening.py` the explicit real-frequency screening,
 `Solvers/qp_equation.solve_qp_equation_newton_guarded` the pole-guarded Newton,
-and `gradients/contour_deformation.py` is a shim. A move is only a move if the
-numbers do not change, so every gate here is `array_equal`, not a tolerance.
+and `gradients/contour_deformation_adjoint.py` the adjoints. A move is only a
+move if the numbers do not change, so every gate here is `array_equal`, not a
+tolerance.
 
 Every gate below was shown to fail once, by breaking in the source what the
-gate watches and running the 16 cases of this file against it:
+gate watches and running this file against it:
 
   * the Newton step, -(w - eps_p - xc - s)/(1 - sp) signed + in
-    `Solvers.qp_equation`: 7 fail, 9 pass -- both flat-screening guards, the
-    refusal, the capture fallback, the frozen guard, water, and the
-    shim-against-production comparison. One step from the oxygen 1s start of
-    water/cc-pVDZ goes to -21.141598284733 Ha correctly and to
-    -19.956969423548 Ha flipped, 1.18 Ha apart, and the iterate lists then
-    share nothing past their first entry.
+    `Solvers.qp_equation`: both flat-screening guards, the refusal, the
+    capture fallback, the frozen guard and water fail. One step from the
+    oxygen 1s start of water/cc-pVDZ goes to -21.141598284733 Ha correctly
+    and to -19.956969423548 Ha flipped, 1.18 Ha apart, and the iterate lists
+    then share nothing past their first entry.
   * the residue term of Sigma dropped in `sigma_cd`: 2 fail. It is worth
     8.1e-3 Ha on that oxygen 1s, 0.519747765714 against 0.511673049707 Ha,
     and without it the capture model is no longer captured at all -- no
@@ -30,19 +30,17 @@ gate watches and running the 16 cases of this file against it:
     frequencies, which is why that gate picks a tile budget of two
     frequencies per block: at one per block the two indices coincide and the
     broken split passes.
-  * one name dropped from the shim's re-exports (`screening_applied`): 2 fail.
+  * the split transforming only the rows it owns instead of its serial
+    blocks: 1 fail, the same gate, on the row-count-sensitive tensordot.
   * `_f_rpa` delegating its real-axis eta = 0 branch as well: 1 fail. That
     branch is a/(a^2+0) - b/(b^2+0) against `frequency_factor`'s 1/a - 1/b,
     the same function up to 5.7e-14 apart, and the RPA numbers are pinned to
     its own spelling.
-  * the shim not handing its own QP_POLE_OFFSET_MIN to the solver: 1 fail.
-    tests/test_cd_pole_guard.py rebinds that module global and the Newton has
-    to see it.
   * the import gate cannot be broken from inside production -- importing
     anything of `src.gradients` there is circular and dies at import time --
-    so its sensitivity is shown on `Embedding.masked_self_energy`, which does
-    import the shim: the same probe returns the leaked `src.gradients.*` and
-    fails, while the two production modules leave sys.modules clean.
+    so its sensitivity is shown on `gradients.contour_deformation_adjoint`:
+    the same probe returns the leaked `src.gradients.*` and fails, while the
+    two production modules leave sys.modules clean.
 """
 import subprocess
 import sys
@@ -57,27 +55,18 @@ from src.Base.constants import (QP_POLE_OFFSET, QP_POLE_OFFSET_MIN,
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import contour_deformation as prod
 from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   ov_energies, screening_aux)
+                                                   ov_energies)
 from src.SingleReference.LinearResponse.imaginary_frequency import (
     _f_rpa, frequency_factor)
+from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     frequency_blocks, owned_frequency_blocks)
 from src.SingleReference.base import get_occ_virt_indices
 from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
-from src.gradients import contour_deformation as shim
 from src.gradients import contour_deformation_adjoint as adjoint
 from src.gradients import qp_space_time as qst
 from src.gradients import space_time_adjoint as sta
-
-#: Every name the gradient module exported before the move.
-OLD_NAMES = ['_f_imaginary', '_f_real', '_ov_energies', '_need',
-             '_wc_explicit', '_residue_backend', 'ExplicitRealScreening',
-             'screening_applied', 'screening_aux', 'screening_contraction',
-             'residue_set', 'residue_pole_distance', 'root_pole_distance',
-             'sigma_cd', 'sigma_cd_slope', 'screening_chain',
-             'integral_term_backward', 'residue_terms_backward',
-             'sigma_cd_backward', 'qp_energy_cd', 'qp_energy_cd_backward']
-
+from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
 
 # --------------------------------------------------------------- the old code
 # Verbatim copies of what was replaced. They are the reference: a gate that
@@ -312,49 +301,16 @@ def _traced_solve(p, Bp, eps, nocc, nu_points, nu_weights, wc, trace,
 
 # ------------------------------------------------------------------- the gates
 
-def test_every_name_the_gradient_module_exported_still_resolves():
-    for name in OLD_NAMES:
-        assert hasattr(shim, name), name
-    assert shim.ExplicitRealScreening is adjoint.ExplicitRealScreeningAdjoint
-    assert issubclass(shim.ExplicitRealScreening, ExplicitRealScreening)
-    # and the three names other modules import from the moved qp_space_time
+def test_the_gradient_side_holds_no_second_copy():
+    """A re-implementation on the gradient side would be a second route: the
+    adjoint screening subclasses the forward one, and what qp_space_time and
+    space_time_adjoint import back from production is production's object."""
+    assert issubclass(adjoint.ExplicitRealScreeningAdjoint,
+                      ExplicitRealScreening)
     for name in ('cd_screening_contraction', 'cd_screening_contraction_multi',
                  'residue_route_auto'):
         assert getattr(qst, name) is getattr(prod, name), name
-
-
-def test_the_shim_and_production_are_the_same_objects():
-    """A shim that re-implemented anything would be a second route. Every old
-    name is the one moved object, `_f_imaginary` and `_f_real` excepted: those
-    two are the only ones the shim spells out, and they are gated on the old
-    formulas below."""
-    for old, new in (('sigma_cd', prod.sigma_cd),
-                     ('sigma_cd_slope', prod.sigma_cd_slope),
-                     ('residue_set', prod.residue_set),
-                     ('residue_pole_distance', prod.residue_pole_distance),
-                     ('root_pole_distance', prod.root_pole_distance),
-                     ('screening_applied', prod.screening_applied),
-                     ('screening_contraction', prod.screening_contraction),
-                     ('_need', prod._need),
-                     ('_wc_explicit', prod.wc_explicit),
-                     ('_ov_energies', ov_energies),
-                     ('screening_aux', screening_aux),
-                     ('_residue_backend', adjoint._residue_backend),
-                     ('screening_chain', adjoint.screening_chain),
-                     ('integral_term_backward', adjoint.integral_term_backward),
-                     ('residue_terms_backward', adjoint.residue_terms_backward),
-                     ('sigma_cd_backward', adjoint.sigma_cd_backward),
-                     ('qp_energy_cd_backward', adjoint.qp_energy_cd_backward)):
-        assert getattr(shim, old) is new, old
     assert sta.owned_frequency_blocks is owned_frequency_blocks
-    rng = np.random.default_rng(3)
-    d = rng.uniform(0.05, 3.0, size=11)
-    for w in (0.017, 0.31, 2.5):
-        for a, b in zip(shim._f_imaginary(d, w), _old_f_imaginary(d, w)):
-            assert np.array_equal(a, b), w
-        for eta in (0.0, 0.05):
-            for a, b in zip(shim._f_real(d, w, eta), _old_f_real(d, w, eta)):
-                assert np.array_equal(a, b), (w, eta)
 
 
 def test_frequency_factor_reproduces_the_old_formulas():
@@ -498,7 +454,7 @@ def test_the_guarded_newton_reproduces_the_old_loop_on_water(water):
             warnings.simplefilter('always')
             w_new, z_new, res_new = _traced_solve(
                 p, bp, eps, nocc, nu, wt, wc, new_trace, C_ov=c_ov)
-        assert shim.qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc,
+        assert prod.qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc,
                                  C_ov=c_ov)[:2] == (w_new, z_new)
         assert new_trace == ref_trace, p
         assert w_new == w_ref and z_new == z_ref and res_new == res_ref, p
@@ -506,40 +462,10 @@ def test_the_guarded_newton_reproduces_the_old_loop_on_water(water):
                 == [str(c.message) for c in ref_caught]), p
 
 
-def test_the_shim_path_and_the_production_path_are_bitwise_equal(water):
-    """Sigma, its slope, the pole sets and the distances, on four states."""
-    eps, nocc, b, c_ov, nu, wt = water
-    d = ov_energies(eps, nocc)
-    assert np.array_equal(d, shim._ov_energies(eps, nocc))
-    for p in states(nocc):
-        bp = b[:, p, :]
-        wc_new = prod.wc_explicit(bp, c_ov, d, nu)
-        assert np.array_equal(wc_new, shim._wc_explicit(bp, c_ov, d, nu))
-        for shift in (-0.05, 0.02, 0.11):
-            omega = float(eps[p] + shift)
-            res = prod.residue_set(eps, nocc, omega)
-            assert res == shim.residue_set(eps, nocc, omega)
-            s_new = prod.sigma_cd(p, omega, bp, eps, nocc, nu, wt,
-                                  residues=res, wc=wc_new, C_ov=c_ov)
-            s_shim = shim.sigma_cd(p, omega, bp, eps, nocc, nu, wt,
-                                   residues=res, wc=wc_new, C_ov=c_ov)
-            assert s_new == s_shim
-            assert (prod.sigma_cd_slope(p, omega, bp, eps, nocc, nu, wt, res,
-                                        wc_new, C_ov=c_ov)
-                    == shim.sigma_cd_slope(p, omega, bp, eps, nocc, nu, wt,
-                                           res, wc_new, C_ov=c_ov))
-            assert np.array_equal(
-                prod.residue_pole_distance(eps, nocc, omega, res),
-                shim.residue_pole_distance(eps, nocc, omega, res))
-    w = [prod.qp_energy_cd(p, b[:, p, :], eps, nocc, nu, wt, C_ov=c_ov)[0]
-         for p in (nocc - 1, nocc)]
-    assert (prod.root_pole_distance(eps, w, [nocc - 1, nocc])
-            == shim.root_pole_distance(eps, w, [nocc - 1, nocc]))
-
-
 def test_the_residue_term_is_what_the_gate_is_worth(water):
-    """The gate above compares numbers the residue term moves by 8.1e-3 Ha on
-    the oxygen 1s; without that term it would compare the integral alone."""
+    """The water gate above compares numbers the residue term moves by 8.1e-3
+    Ha on the oxygen 1s; without that term it would compare the integral
+    alone."""
     eps, nocc, b, c_ov, nu, wt = water
     d = ov_energies(eps, nocc)
     bp = b[:, 0, :]
@@ -570,33 +496,7 @@ def test_a_flipped_newton_step_would_not_survive_the_gate(water):
     assert abs(good - flipped) > 1.0, abs(good - flipped)
 
 
-def test_the_shim_still_carries_a_rebound_guard_floor(water):
-    """tests/test_cd_pole_guard.py sets `contour_deformation.QP_POLE_OFFSET_MIN`
-    and expects the Newton to see it. The floor is a solver argument now, so
-    the shim has to read its own module global at call time."""
-    p, Bp, c_ov, wc = capture_model()
-    seen = {}
-
-    def spy(*args, **kwargs):
-        seen.update(kwargs)
-        raise RuntimeError('stop')
-
-    original = shim._qp_energy_cd
-    shim._qp_energy_cd = spy
-    shim.QP_POLE_OFFSET_MIN = 1e-9
-    try:
-        with pytest.raises(RuntimeError, match='stop'):
-            shim.qp_energy_cd(p, Bp, CAPTURE_EPS, GUARD_NOCC, GUARD_NU,
-                              GUARD_WT, wc=wc, C_ov=c_ov)
-    finally:
-        shim._qp_energy_cd = original
-        shim.QP_POLE_OFFSET_MIN = QP_POLE_OFFSET_MIN
-    assert seen['offset_min'] == 1e-9
-    assert seen['z_min'] == QP_POLE_STRENGTH_MIN
-    assert seen['linear_offset'] == QP_POLE_OFFSET
-
-
-def test_the_frequency_blocks_are_the_same_generator():
+def test_the_frequency_blocks_are_the_same_generator(monkeypatch):
     """`owned_frequency_blocks` moved to production; the gradient package
     imports it back, and both walk the same blocks.
 
@@ -605,7 +505,16 @@ def test_the_frequency_blocks_are_the_same_generator():
     block hides every index a split can get wrong: the block-local row is the
     global row there, and the frequencies a block names are trivially the ones
     it transformed.
+
+    Each row is pinned to the transform of its whole SERIAL block, not to a
+    transform of the owned rows alone. The owned-rows call is the defect, not
+    a gauge the split may choose: a GEMM's rows depend on the call's row count
+    on OpenBLAS, and that broke the bitwise quasiparticle roots over 8 ranks.
+    MKL keeps such rows bitwise, so the transform runs on a tensordot whose
+    rows depend on the row count (tests/test_frequency_rows_serial_shaped.py),
+    or the pin could not tell the two calls apart.
     """
+    monkeypatch.setattr(ls_space_time, 'np', RowCountSensitiveNumpy())
     rng = np.random.default_rng(11)
     a = rng.normal(size=(6, 12, 12))
     proj_tau = 0.02 * (a + a.transpose(0, 2, 1))
@@ -621,11 +530,17 @@ def test_the_frequency_blocks_are_the_same_generator():
         assert [k for k, _ in one] == [k for k, _ in two]
         for (_, x), (_, y) in zip(one, two):
             assert np.array_equal(x, y)
-        # each block is the transform of exactly the frequencies it names,
-        # and the blocks together carry every owned frequency once
+        # each row is its serial block's row, and the blocks together carry
+        # every owned frequency once
+        serial = {}
+        for k0, k1 in frequency_blocks(len(cosft_wt), proj_tau.shape[-1], tile,
+                                       kwargs.get('live', 3)):
+            ks = list(range(k0, k1))
+            serial.update(zip(ks, ls_space_time.np.tensordot(
+                cosft_wt[ks], proj_tau, axes=(1, 0))))
         for ks, blk in one:
-            assert np.array_equal(blk, np.tensordot(cosft_wt[ks], proj_tau,
-                                                    axes=(1, 0))), (kwargs, ks)
+            for k, row in zip(ks, blk):
+                assert np.array_equal(row, serial[k]), (kwargs, k)
         carried = [k for ks, _ in one for k in ks]
         assert carried == sorted(kwargs.get('freq_indices',
                                             range(len(cosft_wt)))), kwargs

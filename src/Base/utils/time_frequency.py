@@ -92,6 +92,7 @@ import warnings
 
 import numpy as np
 
+from src.Base.constants import TRANSFORM_FIT_RCOND
 from src.Base.utils.grids import (minimax_frequency_grid, minimax_time_grid,
                                   gauss_legendre_grid, _load_minimax_tau_data)
 from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
@@ -229,6 +230,56 @@ DEFAULT_TAU_TARGET = 1e-10
 SELF_ENERGY_PAD = (0.3, 3.0)
 
 
+def minimax_points_for_ranges(ratios, target=DEFAULT_TAU_TARGET,
+                              npoints_max=34):
+    """Smallest tabulated minimax grid resolving EVERY ratio; the widest binds.
+
+    A space-time route uses ONE point count for several transforms over
+    several ranges, so the worst of them sets it. R grows as the gap closes,
+    which is why a hardcoded ntau is wrong at one end of any size series:
+    naphthalene needs 16 points where hexacene needs 18
+    (`GW.imaginary_time.minimax_points_for_gw`, the three-range case of this).
+
+    Returns (npoints, worst_error). `target` is NOT guaranteed: if nothing
+    tabulated reaches it, the best available is returned with the accuracy
+    actually obtained, and the caller is expected to look. Discarding that
+    second value is how a grid that quietly missed its target reads as a
+    converged answer.
+    """
+    npoints, worst = 0, 0.0
+    for R in ratios:
+        n, err = minimax_points_for_accuracy(1.0, R, target=target,
+                                             npoints_max=npoints_max)
+        if n is None:                  # nothing tabulated resolved this ratio
+            return npoints_max, float('inf')
+        npoints, worst = max(npoints, n), max(worst, err)
+    return npoints, worst
+
+
+def resolve_grid_size(value, ratios, target=DEFAULT_TAU_TARGET,
+                      npoints_max=34):
+    """An explicit point count, or resolve the 'auto'/None SENTINEL.
+
+    The space-time route carries sentinels -- `GW.space_time.DEFAULT_NTAU` and
+    `DEFAULT_NFREQ` -- and a sentinel forwarded into a grid constructor
+    produces garbage rather than an error. Resolving them is therefore a
+    shared concern and gets one entry point.
+
+    Returns (npoints, worst_error), with worst_error None when an explicit
+    count was passed and nothing was measured.
+
+    NOT covered here, deliberately: a size defined by RELATION to another
+    grid rather than by accuracy -- `DEFAULT_NFREQ = 'auto'` resolves to the
+    already-resolved ntau. That is a one-line rule belonging to the caller
+    that knows both grids, and folding it in here would make this function
+    silently order-dependent.
+    """
+    if value is None or (isinstance(value, str) and value.lower() == 'auto'):
+        return minimax_points_for_ranges(ratios, target=target,
+                                         npoints_max=npoints_max)
+    return int(value), None
+
+
 def _psi_and_matrix(kind, tau, omega, i, x):
     """GreenX calculate_psi_and_mat_A: the fit target psi(x) and design matrix.
 
@@ -278,6 +329,20 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
     not a grid to fix -- and the range is set by core states and high-lying
     virtuals, so it does not bound the frontier energies anyone reads. The
     number is returned either way.
+
+    The per-point solve is a pseudo-inverse, cut at `TRANSFORM_FIT_RCOND`
+    relative to the largest singular value: below the regularization threshold
+    the filter is 1/S, and a design matrix whose exp(-x tau) column has
+    underflowed over the whole node range carries an exactly zero singular
+    value, where that is 0/0 -- and a singular value below 1.5e-162, whose
+    square underflows, gives an infinity. The row would be non-finite, the fit
+    error with it, and a NaN never wins a `max` -- so the fit-error warning
+    below would stay silent while W(i.tau) and every self-energy built on it
+    carried a bad row. The cutoff separates zero from small and nothing else:
+    small singular values are inverted exactly as GreenX inverts them, since
+    what answers for conditioning here is the regularization above. A row that
+    still comes out non-finite is refused rather than returned, with or without
+    `warn`.
     """
     # Each OUTPUT point is fitted independently, and the design matrix has one
     # column per INPUT point -- so the conditioning is governed by n_in alone
@@ -288,7 +353,8 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
     n_in = len(tau) if kind in (COSINE_TW, SINE_TW) else len(omega)
     n = n_in
     if regularization is None:
-        regularization = 0.0 if n < 20 else _DEFAULT_REGULARIZATION
+        regularization = (0.0 if n < _REGULARIZATION_ABOVE
+                          else _DEFAULT_REGULARIZATION)
 
     nx = max((int(np.log10(e_max / e_min)) + 1) * nodes_factor, n)
     x = e_min * (e_max / e_min) ** (np.arange(nx) / (nx - 1.0))
@@ -299,16 +365,27 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
         psi, A = _psi_and_matrix(kind, tau, omega, i, x)
         U, S, Vt = np.linalg.svd(A, full_matrices=False)
         # S/(reg^2 + S^2) is 0/0 at an exactly singular value when reg is 0,
-        # which is its default below _REGULARIZATION_ABOVE points. That NaNs
-        # the weights and the residual, and a NaN residual passes the threshold
-        # test below silently -- the diagnostic disables itself exactly where
-        # the fit is most degenerate. Drop the null space instead, as the
-        # pseudo-inverse does; every non-zero value is untouched.
+        # which is its default below _REGULARIZATION_ABOVE points, and S/0 = inf
+        # at one whose square underflows. That spoils the weights and the
+        # residual, and a NaN residual passes the threshold test below silently
+        # -- the diagnostic disables itself exactly where the fit is most
+        # degenerate. Drop those directions instead, as the pseudo-inverse
+        # does: a kept direction is divided exactly as it always was, one at
+        # or below the cutoff contributes zero.
         filt = np.zeros_like(S)
-        nz = S > 0.0
-        filt[nz] = S[nz] / (regularization**2 + S[nz]**2)
+        np.divide(S, regularization**2 + S**2, out=filt,
+                  where=S > TRANSFORM_FIT_RCOND * S[0])
         W[i] = Vt.T @ (filt * (U.T @ psi))
-        max_error = max(max_error, float(np.abs(A @ W[i] - psi).max()))
+        error = float(np.abs(A @ W[i] - psi).max())
+        if not (np.isfinite(error) and np.isfinite(W[i]).all()):
+            raise FloatingPointError(
+                f'the minimax transform (kind {kind}) fitted row {i} of '
+                f'{n_out} to a non-finite weight on a grid of {n} points over '
+                f'e_max/e_min = {e_max/e_min:.6g} (e_min = {e_min:.6g}, '
+                f'e_max = {e_max:.6g}, singular values {S[0]:.3e} down to '
+                f'{S[-1]:.3e}). The fit cannot be used and neither can any '
+                'W(i.tau) or self-energy built on it.')
+        max_error = max(max_error, error)
 
     if warn and not max_error <= _FIT_ERROR_WARN:   # NaN must not pass
         floor = minimax_convergence_floor(n)

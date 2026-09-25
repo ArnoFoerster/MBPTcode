@@ -31,12 +31,12 @@ from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
                                SCF_ENERGY_CONV_TOL,
                                SCF_ENERGY_GRAD_TOL,
                                XC_SHIFT_GRADIENT_TOL)
-from src.gradients.bse_qb import BSEqb
 from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                                 QuasiparticleSurface,
                                                 kohn_sham_gradient_correction,
                                                 mo_eri)
-from src.gradients.qp_qb import QPqb
+from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                               QPqbAdjoint as QPqb)
 from src.properties.optimize import MeanFieldSurface
 from src.properties.surface import (FiniteDifferenceGradient,
                                     PotentialEnergySurface)

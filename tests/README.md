@@ -22,20 +22,26 @@ optional third-party one.
 | area | tests |
 |---|---|
 | imports, constants, interfaces | `test_imports`, `test_constants_registry`, `test_base` |
+| thread and memory policy | `test_blas_single_threaded`, `test_allocation_memory` |
 | basis sets read from CP2K | `test_cp2k_basis` |
 | ADC solvers | `test_adc3`, `test_adc3_restricted`, `test_adc2x_df`, `test_adc3_df_memory_fix`, `test_spin_adapt`, `test_screened_adc2x`, `test_downfolded_seeds`, `test_unrestricted_neon`, `test_bn_unrestricted_excitations` |
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |
 | MPn densities and Laplace | `test_mp2_density_matrix`, `test_mp3_density_matrix`, `test_mp2_density_df`, `test_mp3_density_df`, `test_mpn_density_restricted`, `test_mpn_density_unrestricted`, `test_mp4_laplace_restricted`, `test_density_matrix_small` |
 | response derivatives (finite field) | `test_mp3_finite_field`, `test_uhf_mp2_relaxed_finite_field` |
-| GW self-energy and QP equation | `test_self_energy_formulas`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy` |
+| GW self-energy and QP equation | `test_self_energy_formulas`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy`, `test_static_exchange_reuse` |
 | eigenvalue self-consistency | `test_evgw` |
 | imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_sigma_blocking_and_screening`, `test_mpi_grid_distribution` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
-| ISDF factorization | `test_isdf_jk`, `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_static_exchange_routes` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization` |
+| ISDF factorization | `test_isdf_jk`, `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_static_exchange_routes`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings` |
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field` |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
+| MPI: the context, `lockstep` and the collectives | `test_mpi_context`, `test_mpi_grid_primitives`, `test_mpi_map`, `test_layering` |
+| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors` |
+| MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_davidson_lockstep` |
+| MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf` |
+| MPI: surfaces and the optimizer over ranks | `test_surface_comm`, `test_optimize_under_ranks` |
 
 ## The ISDF and BSE tests, in the order they build on each other
 
@@ -112,9 +118,29 @@ gitignored, because the radii optimizer is a numerically differentiated descent
 under threaded BLAS and does not reproduce across thread counts — the shipped
 table is what makes a clean clone reproduce the suite.
 
-## The multi-rank test
+## The multi-rank tests
 
-`test_elpa_casida` is the one script meant for several MPI ranks:
+The MPI rows of the table above are pytest files that also run as scripts
+(`python tests/test_kernel_lockstep.py`). They run every rank as a thread of
+one process (`mpi_grid.run_simulated`), with the real collectives moving real
+bytes, because MPI cannot initialize inside a sandboxed test runner; they gate
+the algebra of every split, not the wire. Several compare against the code as
+it stood before the port, extracted with `git archive` from a pinned commit
+and run in its own process, so they need the repository's history.
+
+`test_mpi_routes` is the wire check: every distributed route against its
+serial reference, inside one `with distributed(comm):`, under real ranks:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_mpi_routes.py
+```
+
+Every rank's verdicts are gathered at the end and the script exits non-zero
+if any check failed on any rank. Run serially it prints the serial references
+and checks the one-rank paths; `run_simulated(main, n)` from
+`tests/test_mpi_routes.py` runs the same checks over thread-ranks.
+
+`test_elpa_casida` is the other script meant for several MPI ranks:
 
 ```bash
 srun -n 4 --mpi=pmix python tests/test_elpa_casida.py

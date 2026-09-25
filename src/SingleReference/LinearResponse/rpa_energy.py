@@ -23,7 +23,9 @@ import numpy as np
 from pyscf import scf as pyscf_scf
 
 from src.Base.declaration import GroundState
+from src.Base.isdf_jk import ISDFJK
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
+from src.Base.utils.mpi_grid import lockstep
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.GW.imaginary_axis import solve_screening_imaginary_axis
@@ -201,14 +203,17 @@ def reference_energy(mf, mol=None):
     energy; RPA@KS therefore means E_HF[rho_KS] + E_c^RPA, which is what this
     returns.
 
-    E_HF IS REASSEMBLED, not corrected: the same auxiliary basis as the mean
-    field's, so E_HF and E_c are built from one set of integrals rather than
-    two. The mirror is a plain density fit: an ISDF-fitted mean field gets DF
-    here, close but not identical, since it reproduces the auxiliary basis and
-    not the interpolation. `exx_double_counting` is the same quantity taken
-    from the operators instead, E_x^exact - E_xc on the mean field's own K;
-    the two agree to 1e-14 on a density-fitted hybrid and it is that one the
-    nuclear-derivative skeleton differentiates.
+    E_HF IS REASSEMBLED, not corrected: a Hartree-Fock mirror at this density
+    on the mean field's own interaction. A density-fitted mean field gets a
+    fresh fit on the same auxiliary basis; an ISDF one gets ITS OWN `ISDFJK`
+    -- the interpolation points, collocation and fit matrix the SCF converged
+    with, J from the same integral-direct DF-J -- which is the Hartree-Fock
+    partner `exx_double_counting_skeleton` differentiates. A fresh density fit
+    there is a different functional: 5.5e-4 Ha off on a C1 water/cc-pVDZ at
+    148 points per atom, PBE0 and LRC-wPBEh alike, and the dRPA force missed a
+    difference of it by 9.46e-4 Ha/Bohr against 1.5e-8 now. `exx_double_counting`
+    is the same quantity taken from the operators instead, E_x^exact - E_xc on
+    the mean field's own K; the two agree to 1e-14 on either route.
 
     DO NOT TAKE THIS ENERGY WITHOUT ITS GRADIENT. A chain that adopts this and
     leaves `mf.Gradients()` alone is WORSE than one that adopts neither: with
@@ -221,6 +226,10 @@ def reference_energy(mf, mol=None):
     on the mean field's own Kohn-Sham gradient, which is differenced against
     it. All three vanish identically on Hartree-Fock, which is why that path
     stays bitwise unchanged.
+
+    The mirror's energy is rank 0's on every rank: each rank builds it with
+    pyscf's threaded J/K, whose OpenMP GEMM adds its partial sums in
+    thread-arrival order, so the ranks' own mirrors differ in their last bits.
     """
     mol = mf.mol if mol is None else mol
     if not xc_hybrid_coeff(mf)[0]:
@@ -230,7 +239,10 @@ def reference_energy(mf, mol=None):
     with_df = getattr(mf, 'with_df', None)
     if with_df is not None:
         hf = hf.density_fit(auxbasis=with_df.auxbasis)
-    e_hf = float(hf.energy_tot(dm=dm))
+    if isinstance(with_df, ISDFJK):
+        # the SCF's own factors: a new fit would carry its own interpolation
+        hf.with_df = with_df
+    e_hf = lockstep(float(hf.energy_tot(dm=dm)))
     if not hasattr(mf, 'with_solvent'):
         return e_hf
     # The reaction field is the same functional of the same density in both
@@ -239,7 +251,7 @@ def reference_energy(mf, mol=None):
     # surface with no solvation energy under a force that has one, which is
     # stationary for neither.
     gas = mf.undo_solvent()
-    return e_hf + (float(mf.e_tot) - float(gas.energy_tot(dm=dm)))
+    return e_hf + lockstep(float(mf.e_tot) - float(gas.energy_tot(dm=dm)))
 
 
 def declared_ground_state(mf, kind='rpa'):

@@ -1,13 +1,12 @@
-"""The sum-over-poles route moved to production, BITWISE.
+"""The sum-over-poles route in production is the code it replaced, BITWISE.
 
-`SingleReference/GW/sum_over_poles.py` now holds the forward physics -- the
+`SingleReference/GW/sum_over_poles.py` holds the forward physics -- the
 auxiliary-pole fit, the closed-form Sigma^c and its slope, the compression
-guards and the quasiparticle Newton -- `gradients/sum_over_poles_adjoint.py`
-the reverse pass, and `gradients/sum_over_poles.py` is a re-export shim. A move
-is only a move if the numbers do not change, so every gate here is
-`array_equal`, not a tolerance, and the reference each one compares against is
-a verbatim copy of the code that was replaced: recomputing it through the new
-module would gate nothing.
+guards and the quasiparticle Newton -- and `gradients/sum_over_poles_adjoint.py`
+the reverse pass. A move is only a move if the numbers do not change, so every
+gate here is `array_equal`, not a tolerance, and the reference each one
+compares against is a verbatim copy of the code that was replaced:
+recomputing it through the new module would gate nothing.
 
 The Newton of `qp_energy_sop` is the one piece NOT rerouted through
 `Solvers.qp_equation.solve_qp_equation_newton_guarded`. The two are the same
@@ -22,44 +21,31 @@ cases and the roots in five of six. `test_the_loop_is_not_the_guarded_newton`
 holds that equivalence at the level it really has.
 
 Every gate below was shown to fail once, by breaking in the source what the
-gate watches and running the 12 cases of this file against it; each run was
-restored from a backup copy and the restore checked with `cmp`:
+gate watches and running this file against it; each run was restored from a
+backup copy and the restore checked with `cmp`:
 
   * the occupied sign dropped in production `denominators`, so every
-    denominator reads omega - eps_q - Om_m: 6 fail, 6 pass. On water/cc-pVDZ it
+    denominator reads omega - eps_q - Om_m: 6 fail. On water/cc-pVDZ it
     moves Sigma^c(eps_HOMO) from 0.048752188370 to -0.163108404978 Ha and the
     HOMO's quasiparticle root from -0.446839342814 to -0.665725250931 Ha,
     5.96 eV.
-  * the sign of production `pole_amplitudes` flipped: 3 fail, 9 pass. It is the
+  * the sign of production `pole_amplitudes` flipped: 3 fail. It is the
     fit itself, so Sigma^c and every adjoint change sign, while the pole
     POSITIONS and `compressible` do not move at all -- neither ever sees an
     amplitude, which is what those two gates are separately for.
   * `sigma_sop_backward`'s wc_bar built on 1/D^2 instead of 1/D, the one
-    plausible confusion with the eps_bar branch beside it: 1 fail, 11 pass, and
-    only the adjoint gate. |wc_bar|max goes from 1.02e-01 to 3.48e-01. The
-    shim-vs-production gate CANNOT see it, because both names resolve to the
-    same perturbed object -- which is the limit of every shim gate and why the
-    reference here is the verbatim old code.
-  * the shim re-exporting a sign-flipped wrapper of `sigma_sop` instead of the
-    production object: 3 fail, 9 pass -- the identity gate, the old-code closed
-    form, and the shim-vs-production comparison. This is the failure mode a
-    shim actually has: a name that resolves to something merely resembling the
-    moved object.
-  * two names dropped from the shim's re-exports (`pole_basis`,
-    `_denominators`): 3 fail, 9 pass.
-  * the shim rebinding SOP_N_POLES to 13 instead of taking it from
-    `Base.constants`: 2 fail, 10 pass. Two spellings of one default is how the
-    fit a gradient froze stops matching the fit an energy used.
-  * xc_correction dropped from the production Newton step: 2 fail, 10 pass. On
+    plausible confusion with the eps_bar branch beside it: 1 fail, and only
+    the adjoint gate. |wc_bar|max goes from 1.02e-01 to 3.48e-01.
+  * xc_correction dropped from the production Newton step: 2 fail. On
     water's HOMO-1 with a 0.013 Ha correction the loop then lands at
     -0.530410948641 Ha against the -0.518042446697 Ha of the equation it was
     supposed to solve, 1.2e-02 Ha apart -- which is also what makes the
     comparison against the guarded solver a real check and not an identity.
   * the import gate cannot be broken from inside production -- importing
     anything of `src.gradients` there is circular and dies at import time --
-    so its sensitivity is a positive control inside the same test: the shim,
-    which does import the gradient package, must leak exactly the modules the
-    production module may not.
+    so its sensitivity is a positive control inside the same test: the
+    adjoint module, which does import the gradient package, must leak exactly
+    the modules the production module may not.
 """
 import subprocess
 import sys
@@ -77,19 +63,9 @@ from src.SingleReference.GW.contour_deformation import residue_set, wc_explicit
 from src.SingleReference.GW.real_screening import ov_energies, screening_aux
 from src.SingleReference.base import get_occ_virt_indices
 from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
-from src.gradients import sum_over_poles as shim
 from src.gradients import sum_over_poles_adjoint as adjoint
 from src.gradients.contour_deformation_adjoint import (integral_term_backward,
                                                        screening_chain)
-
-#: Every name the gradient module exported before the move.
-OLD_NAMES = ['SOP_CLEARANCE_MIN', 'SOP_FIT_RCOND', 'SOP_N_POLES',
-             'SOP_FIT_STRIDE', 'initial_poles', 'pole_basis',
-             'pole_pseudoinverse', 'pole_amplitudes', 'fit_poles',
-             '_denominators', 'pole_clearance', 'compressible', 'sigma_sop',
-             'sigma_sop_slope', 'qp_energy_sop', 'sigma_sop_backward',
-             'sop_from_wc', 'sop_partials', '_ov_energies', 'residue_set',
-             'screening_aux', 'integral_term_backward', 'screening_chain']
 
 #: The model spectrum and screening of tests/test_sum_over_poles.py, where the
 #: fit is exact and every quantity is a closed form of known numbers.
@@ -270,49 +246,11 @@ def fitted(eps, nocc, b, c_ov, nu, p):
 
 # ------------------------------------------------------------------ the gates
 
-def test_every_name_the_gradient_module_exported_still_resolves():
-    for name in OLD_NAMES:
-        assert hasattr(shim, name), name
-
-
-def test_the_shim_and_production_are_the_same_objects():
-    """A shim that re-implemented anything would be a second route."""
-    for old, new in (('initial_poles', prod.initial_poles),
-                     ('pole_basis', prod.pole_basis),
-                     ('pole_pseudoinverse', prod.pole_pseudoinverse),
-                     ('pole_amplitudes', prod.pole_amplitudes),
-                     ('fit_poles', prod.fit_poles),
-                     ('_denominators', prod.denominators),
-                     ('pole_clearance', prod.pole_clearance),
-                     ('compressible', prod.compressible),
-                     ('sigma_sop', prod.sigma_sop),
-                     ('sigma_sop_slope', prod.sigma_sop_slope),
-                     ('qp_energy_sop', prod.qp_energy_sop),
-                     ('sop_from_wc', prod.sop_from_wc),
-                     ('sigma_sop_backward', adjoint.sigma_sop_backward),
-                     ('sop_partials', adjoint.sop_partials),
-                     ('_ov_energies', ov_energies),
-                     ('screening_aux', screening_aux),
-                     ('residue_set', residue_set),
-                     ('integral_term_backward', integral_term_backward),
-                     ('screening_chain', screening_chain)):
-        assert getattr(shim, old) is new, old
-    for name, value in (('SOP_CLEARANCE_MIN', SOP_CLEARANCE_MIN),
-                        ('SOP_FIT_RCOND', SOP_FIT_RCOND),
-                        ('SOP_N_POLES', SOP_N_POLES),
-                        ('SOP_FIT_STRIDE', SOP_FIT_STRIDE)):
-        assert getattr(shim, name) == value, name
-
-
 def test_the_constants_kept_their_values():
-    """The four numbers moved to `Base.constants`; a move that changed one
-    would change every guard and every fit built on it, and a caller importing
-    them from the gradient module still has to get those objects."""
+    """The four numbers live in `Base.constants`; a move that changed one
+    would change every guard and every fit built on it."""
     assert (SOP_CLEARANCE_MIN, SOP_FIT_RCOND, SOP_N_POLES, SOP_FIT_STRIDE) \
         == (0.05, 1e-12, 12, 8)
-    assert (shim.SOP_CLEARANCE_MIN, shim.SOP_FIT_RCOND, shim.SOP_N_POLES,
-            shim.SOP_FIT_STRIDE) == (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
-                                     SOP_N_POLES, SOP_FIT_STRIDE)
     assert (prod.SOP_CLEARANCE_MIN, prod.SOP_FIT_RCOND, prod.SOP_N_POLES,
             prod.SOP_FIT_STRIDE) == (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
                                      SOP_N_POLES, SOP_FIT_STRIDE)
@@ -372,9 +310,8 @@ def test_the_closed_form_is_the_old_one(water):
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 s_new = prod.sigma_sop(omega, amp, poles, eps, nocc)
-                s_shim = shim.sigma_sop(omega, amp, poles, eps, nocc)
             s_old = _old_sigma_sop(omega, amp, poles, eps, nocc)
-            assert s_new == s_old == s_shim, (p, shift)
+            assert s_new == s_old, (p, shift)
             assert (prod.sigma_sop_slope(omega, amp, poles, eps, nocc)
                     == _old_sigma_sop_slope(omega, amp, poles, eps, nocc))
             assert (prod.pole_clearance(omega, poles, eps, nocc)
@@ -400,8 +337,6 @@ def test_the_quasiparticle_loop_is_the_old_loop(water):
             w_new, z_new = prod.qp_energy_sop(p, amp, poles, eps, nocc,
                                               xc_correction=xc, w0=w0)
             assert (w_new, z_new) == (w_old, z_old), (p, xc)
-            assert (w_new, z_new) == shim.qp_energy_sop(
-                p, amp, poles, eps, nocc, xc_correction=xc, w0=w0), (p, xc)
             # the root really is one: the residual of the equation solved
             s = prod.sigma_sop(w_new, amp, poles, eps, nocc, check=False)
             assert abs(w_new - eps[p] - xc - s) < 1e-10, (p, xc)
@@ -461,54 +396,6 @@ def test_the_adjoints_are_the_old_ones(water):
             assert np.array_equal(new, old), p
 
 
-def test_the_shim_path_and_the_production_path_are_bitwise_equal(water):
-    """Every recorded quantity, computed live through both import paths."""
-    eps, nocc, b, c_ov, nu, _ = water
-    d = ov_energies(eps, nocc)
-    assert np.array_equal(d, shim._ov_energies(eps, nocc))
-    gap, top = float(d.min()), float(d.max())
-    start = shim.initial_poles(SOP_N_POLES, gap, top)
-    assert np.array_equal(start, prod.initial_poles(SOP_N_POLES, gap, top))
-    assert np.array_equal(shim.pole_basis(nu, start),
-                          prod.pole_basis(nu, start))
-    for p in states(nocc):
-        bp = b[:, p, :]
-        wc = wc_explicit(bp, c_ov, d, nu)
-        assert np.array_equal(shim.pole_amplitudes(wc, start, nu),
-                              prod.pole_amplitudes(wc, start, nu))
-        poles_s, amp_s = shim.sop_from_wc(wc, nu, eps, nocc)
-        poles_p, amp_p = prod.sop_from_wc(wc, nu, eps, nocc)
-        assert np.array_equal(poles_s, poles_p) and np.array_equal(amp_s, amp_p)
-        for shift in (-0.05, 0.02, 0.11):
-            omega = float(eps[p] + shift)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                assert (shim.sigma_sop(omega, amp_s, poles_s, eps, nocc)
-                        == prod.sigma_sop(omega, amp_p, poles_p, eps, nocc))
-            assert (shim.sigma_sop_slope(omega, amp_s, poles_s, eps, nocc)
-                    == prod.sigma_sop_slope(omega, amp_p, poles_p, eps, nocc))
-            assert np.array_equal(shim._denominators(omega, poles_s, eps, nocc),
-                                  prod.denominators(omega, poles_p, eps, nocc))
-            assert (shim.pole_clearance(omega, poles_s, eps, nocc)
-                    == prod.pole_clearance(omega, poles_p, eps, nocc))
-            assert (shim.compressible(omega, eps, nocc)
-                    == prod.compressible(omega, eps, nocc))
-            for a, c in zip(shim.sigma_sop_backward(omega, amp_s, poles_s, eps,
-                                                    nocc, nu),
-                            adjoint.sigma_sop_backward(omega, amp_p, poles_p,
-                                                       eps, nocc, nu)):
-                assert np.array_equal(a, c), (p, shift)
-        if p != 0:
-            assert (shim.qp_energy_sop(p, amp_s, poles_s, eps, nocc)
-                    == prod.qp_energy_sop(p, amp_p, poles_p, eps, nocc))
-        omega = float(eps[p] + 0.02)
-        for a, c in zip(shim.sop_partials(omega, amp_s, poles_s, eps, nocc, nu,
-                                          bp, c_ov),
-                        adjoint.sop_partials(omega, amp_p, poles_p, eps, nocc,
-                                             nu, bp, c_ov)):
-            assert np.array_equal(a, c), p
-
-
 def test_the_model_screening_still_reproduces_the_contour_deformation():
     """The physics the move must not touch: on a screening that IS M poles,
     the closed form equals the integral-plus-residues split."""
@@ -540,8 +427,8 @@ def test_the_model_screening_still_reproduces_the_contour_deformation():
 def test_production_does_not_import_the_gradient_package():
     """The whole point of the move: `src.gradients` is the consumer, not the
     dependency. A fresh interpreter, because an already-imported module would
-    make this pass for the wrong reason, and the shim as the positive control
-    -- it imports the gradient package, so the same probe must see it."""
+    make this pass for the wrong reason, and the adjoint module as the positive
+    control -- it imports the gradient package, so the same probe must see it."""
     root = str(Path(__file__).resolve().parent.parent)
     probe = ('import sys; sys.path.insert(0, %r);'
              'import %s;'
@@ -553,6 +440,7 @@ def test_production_does_not_import_the_gradient_package():
         capture_output=True, text=True)
     assert clean.returncode == 0, clean.stderr
     leaks = subprocess.run(
-        [sys.executable, '-c', probe % (root, 'src.gradients.sum_over_poles')],
+        [sys.executable, '-c',
+         probe % (root, 'src.gradients.sum_over_poles_adjoint')],
         capture_output=True, text=True)
     assert leaks.returncode == 1, 'the probe cannot see a leak it should see'

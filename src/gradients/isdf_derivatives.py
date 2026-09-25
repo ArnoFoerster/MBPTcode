@@ -5,6 +5,13 @@ The space-time route returns sensitivities with respect to the factors,
 The derivative tensor dX/dR is never formed, only its contraction against a
 given adjoint.
 
+On the row-distributed fit both parts run in the fit's own tiles
+(`row_fit_adjoint` over `separable_ri.fit_rows_adjoint`, and X_mo^T X_bar by
+`orbital_rotation_rows`), so no rank forms an array of the grid by a
+factor's or the fit's width, and the result is the same bits at every rank
+count; the whole forms below (`dfactor_adjoint_gauges`,
+`collocation_adjoint`) are the replicated fit's.
+
 X depends on the geometry three times over, through the fit and the
 collocation, through the points translating with their atom, and through the
 local frames turning with the environment. All three are needed to gate below
@@ -21,7 +28,8 @@ built from them carries a minus.
 from dataclasses import dataclass
 
 import numpy as np
-from src.Base.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
+from src.Base.constants import (FIT_CHOLESKY_BLOCK,
+                                ORBITAL_MULTIPLIER_MAX_ITER,
                                 ORBITAL_MULTIPLIER_TOL,
                                 THREE_CENTER_BLOCK_BYTES)
 from src.Base.dispersion import refuse_dispersion_under_rpa
@@ -35,10 +43,14 @@ from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force, range_coulomb
 from src.Base.pcm_derivatives import reaction_field_fock_skeleton
 from src.Base.pyscf_interface import (aux_metric_inverse, fock_mo,
                                       response_kernel)
-from src.Base.separable_ri import (DEFAULT_PAIR_TOL, DEFAULT_REGULARIZATION,
-                                   _FRAME_DECAY, atomic_frames, atomic_points,
+from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_PAIR_TOL,
+                                   DEFAULT_REGULARIZATION, _FRAME_DECAY,
+                                   _ao_l_labels, atomic_frames, atomic_points,
                                    aux_metric_sqrt, build_D_F, fit_M_stable,
+                                   fit_rows_adjoint, rows_transpose_product,
                                    subshells, test_set_D, test_set_layout)
+from src.Base.sliced_factors import SlicedFactors
+from src.Base.utils.mpi_grid import current_comm
 from src.gradients.multipliers import solve_orbital_multipliers
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.LinearResponse.rpa_energy import (
@@ -235,21 +247,36 @@ def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
     G = Dt @ Dt.T
     G[np.diag_indices_from(G)] += regularization
     cho = scipy.linalg.cho_factor(G, lower=True)
+    del G
     A = F @ Dt.T
     B = scipy.linalg.cho_solve(cho, A.T).T      # A G^-1, G symmetric
 
     B_bar = M_bar * d[None, :]
     d_bar = np.einsum('bk,bk->k', M_bar, B)
+    del B
     A_bar = scipy.linalg.cho_solve(cho, B_bar.T).T
     Y = scipy.linalg.cho_solve(cho, A.T @ B_bar)          # G^-1 K
+    del A, B_bar
     G_bar = -scipy.linalg.cho_solve(cho, Y.T).T           # -G^-1 K G^-1
+    del Y, cho
     F_bar = A_bar @ Dt
-    Dt_bar = A_bar.T @ F + (G_bar + G_bar.T) @ Dt
+    # Dt_bar = A_bar^T F + (G_bar + G_bar^T) Dt, the Dt term formed first so
+    # that Dt is gone before the F term: three arrays of D's shape at most
+    S = G_bar + G_bar.T
+    del G_bar
+    Dt_bar = S @ Dt
+    del S, Dt
+    Dt_bar += A_bar.T @ F
+    del A_bar
 
-    D_bar = d[:, None] * Dt_bar
     d_bar = d_bar + np.einsum('kr,kr->k', Dt_bar, D)
     s_bar = -d_bar * d ** 2                    # d = 1/s
-    D_bar += (s_bar / s)[:, None] * D          # s = ||D[k,:]||
+    D_bar = Dt_bar
+    D_bar *= d[:, None]
+    c = s_bar / s                              # s = ||D[k,:]||
+    for r0 in range(0, len(c), FIT_CHOLESKY_BLOCK):
+        r1 = r0 + FIT_CHOLESKY_BLOCK
+        D_bar[r0:r1] += c[r0:r1, None] * D[r0:r1]
     return D_bar, F_bar
 
 
@@ -496,10 +523,27 @@ def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
                                   with_frames=with_frames)
 
 
+def product_pairs(mol, l_max_second=2):
+    """(mu, nu, weight) of EVERY pair of the test set's product basis, (all
+    AOs) x (AOs with l <= l_max_second), in `test_set_layout`'s order.
+
+    These are the columns the Gram matrix of `fit_M_streaming` and
+    `fit_rows` sums over, screened or not: S = (A A^T) o (B B^T) is the
+    product form of D D^T over all of them, while F D^T keeps the screened
+    ones. A frozen `test_set_layout` is a subsequence of this list.
+    """
+    l_ao = _ao_l_labels(mol)
+    second = np.flatnonzero(l_ao <= l_max_second)
+    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
+    nao = mol.nao_nr()
+    return (np.repeat(np.arange(nao), len(second)), np.tile(second, nao),
+            np.tile(w, nao))
+
+
 def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
                            atom_of_point, frames=None, decay=_FRAME_DECAY,
                            regularization=DEFAULT_REGULARIZATION,
-                           with_frames=True):
+                           with_frames=True, gram_layout=None):
     """(natm, 3) gradient of sum over `gauges` of sum_{gP} D_bar[g,P] D[g,P].
 
     The whole D branch. Split D into the fit and the metric root, run the fit's
@@ -519,22 +563,45 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     common to them, so the fit is built once and each gauge contributes its own
     adjoints to shared accumulators. Both bases collocate on the same points, so
     their centre terms differ but the point and frame chain is shared.
+
+    gram_layout: the (mu, nu, weight) pairs the Gram matrix and the row
+    balancing sum over, where they are more than the pairs F carries
+    (`layout`): `product_pairs(mol)` for the estimator of `fit_rows`, whose
+    Gram matrix is the unscreened product. Its extra columns enter D_test
+    and carry F = 0, so they reach the force through the collocation alone.
+    None: `layout` for both, the estimator of `FrozenFactorization._fit`.
     """
     mu, nu, wc = layout
     npair = len(mu)
+    naux = auxmol.nao_nr()
     ao = mol.eval_gto('GTOval_sph', coords)
     V = auxmol.intor('int2c2e', aosym='s1')
 
-    D_test = test_set_D(mol, auxmol, coords, layout)
     e3c = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1')
-    e3c = e3c.reshape(mol.nao_nr(), mol.nao_nr(), auxmol.nao_nr())
+    e3c = e3c.reshape(mol.nao_nr(), mol.nao_nr(), naux)
     g_cols = e3c[mu, nu, :].T                              # (naux, npair)
-    F = np.hstack([np.linalg.solve(V, g_cols) * wc[None, :],
-                   np.eye(auxmol.nao_nr())])
+    # the adjoint on (mu nu|P) in the integrals' own memory order, which the
+    # derivative contraction's BLAS calls read; zeros stay unmapped until used
+    G3 = np.zeros_like(e3c)
+    del e3c
+    F_pairs = np.linalg.solve(V, g_cols) * wc[None, :]
+    del g_cols
+    if gram_layout is None:
+        gmu, gnu, gw = mu, nu, wc
+        cols = slice(0, npair)
+        F = np.hstack([F_pairs, np.eye(naux)])
+    else:
+        gmu, gnu, gw = gram_layout
+        cols = pair_positions(layout, gram_layout, mol.nao_nr())
+        F = np.zeros((naux, len(gmu) + naux))
+        F[:, cols] = F_pairs
+        F[:, len(gmu):] = np.eye(naux)
+    del F_pairs
+    ngram = len(gmu)
+    D_test = test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
     M = fit_M_stable(D_test, F, regularization)
 
     V_bar = np.zeros_like(V)
-    G3 = np.zeros_like(e3c)
     ao_bar = np.zeros_like(ao)
     aux_bar = np.zeros((len(coords), auxmol.nao_nr()))
     env_grad = None
@@ -561,9 +628,9 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
         # inside F's pair columns. Y is the adjoint on V_env and reaches V and
         # vtilde alike.
         Y = sqrtm_adjoint(V_gauge, Vh_bar)
-        Fp_bar = F_bar[:, :npair]
+        Fp_bar = F_bar[:, cols]
         VinvFb = np.linalg.solve(V, Fp_bar)                # (naux, npair)
-        V_bar += Y - F[:, :npair] @ VinvFb.T
+        V_bar += Y - F[:, cols] @ VinvFb.T
         g_bar = VinvFb * wc[None, :]                       # adjoint on (mu nu|P)
         np.add.at(G3, (mu, nu), g_bar.T)
         if dressed:
@@ -574,11 +641,20 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
             k_grad = environment.aux_kernel_adjoint(auxmol, kernel_bar)
             env_grad = k_grad if env_grad is None else env_grad + k_grad
 
-        # --- the test set's collocations, sharing one point chain
-        pair_bar = Dtest_bar[:, :npair] * wc[None, :]
-        np.add.at(ao_bar.T, mu, (pair_bar * ao[:, nu]).T)  # chi_mu's slot
-        np.add.at(ao_bar.T, nu, (pair_bar * ao[:, mu]).T)  # chi_nu's slot
-        aux_bar += Dtest_bar[:, npair:]
+        # --- the test set's collocations, sharing one point chain, in blocks
+        # of grid rows: each element still adds its pairs in the same order
+        for r0 in range(0, len(coords), FIT_CHOLESKY_BLOCK):
+            r1 = r0 + FIT_CHOLESKY_BLOCK
+            pair_bar = Dtest_bar[r0:r1, :ngram] * gw[None, :]
+            np.add.at(ao_bar[r0:r1].T, gmu,
+                      (pair_bar * ao[r0:r1, gnu]).T)       # chi_mu's slot
+            np.add.at(ao_bar[r0:r1].T, gnu,
+                      (pair_bar * ao[r0:r1, gmu]).T)       # chi_nu's slot
+            del pair_bar
+        aux_bar += Dtest_bar[:, ngram:]
+        # nothing of this gauge's test-set width outlives it into the next
+        del Dtest_bar, F_bar, Fp_bar, VinvFb, g_bar
+    del D_test, F, M
 
     grad = two_centre_adjoint(auxmol, V_bar) + three_centre_adjoint(mol, auxmol, G3)
     if env_grad is not None:
@@ -589,6 +665,56 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     grad += point_chain(mol, P + P_aux, pts_local, atom_of_point, frames=frames,
                         decay=decay, with_frames=with_frames)
     return grad
+
+
+def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
+                    pts_local, atom_of_point, frames=None, decay=_FRAME_DECAY,
+                    with_frames=True, block=None):
+    """(g_collocation, g_fit, held): the collocation branch of X_bar and the
+    fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
+    the frozen `layout` (its Gram matrix over every product pair).
+
+    `separable_ri.fit_rows_adjoint` runs both in the fit's tiles and returns
+    their centre terms and point adjoints, the same bits on every rank at
+    every rank count; the point and frame chain closes them here, on the
+    (nk, 3) point adjoints, which are not grid-by-width. `dfactor_adjoint_gauges`
+    with `gram_layout=product_pairs(mol)` and `collocation_adjoint` are the
+    same derivatives formed whole, to the rounding of the fit's balanced
+    Gram matrix.
+    """
+    adjoint = fit_rows_adjoint(mol, auxmol, coords, d_bar, layout, x_bar=x_bar,
+                               mo_coeff=mo_coeff, block=block)
+    g_coll = adjoint.coll_centre + point_chain(
+        mol, adjoint.coll_points, pts_local, atom_of_point, frames=frames,
+        decay=decay, with_frames=with_frames)
+    g_fit = adjoint.fit_centre + point_chain(
+        mol, adjoint.fit_points, pts_local, atom_of_point, frames=frames,
+        decay=decay, with_frames=with_frames)
+    return g_coll, g_fit, adjoint.held
+
+
+def orbital_rotation_rows(x_mo, x_bar, block=None):
+    """Y = X_mo^T X_bar, the orbital-rotation gradient of an adjoint on
+    X_mo = X_ao C, from grid rows: `SlicedFactors` over the current ranks,
+    or X_mo whole on one. `separable_ri.rows_transpose_product` in fixed
+    tiles of `block` points: no rank holds X_mo whole, and Y is the same
+    bits at every rank count."""
+    if isinstance(x_mo, SlicedFactors):
+        comm = x_mo.require(current_comm()).comm
+        return rows_transpose_product(x_mo.X_mo, x_mo.rows[0], x_bar,
+                                      block=block, comm=comm)
+    return rows_transpose_product(x_mo, 0, x_bar, block=block)
+
+def pair_positions(layout, gram_layout, nao):
+    """Where each (mu, nu) of `layout` sits in `gram_layout`, both in
+    ascending (mu, nu) order; a pair the Gram layout lacks is refused."""
+    key = np.asarray(gram_layout[0]) * nao + np.asarray(gram_layout[1])
+    want = np.asarray(layout[0]) * nao + np.asarray(layout[1])
+    pos = np.searchsorted(key, want)
+    if (np.any(pos >= len(key))
+            or not np.array_equal(key[np.minimum(pos, len(key) - 1)], want)):
+        raise ValueError('the F test set holds pairs the Gram layout does not')
+    return pos
 
 
 # ---------------------------------------------------------------------------
@@ -1183,8 +1309,9 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
         matrix product a side.
         """
         left = (g_ao @ Tn.transpose(1, 0, 2).reshape(nao, naux * nao))
-        left = left.reshape(nao, naux, nao).transpose(1, 0, 2)
-        return (left.reshape(naux * nao, nao) @ D).reshape(naux, nao, nao)
+        left = left.reshape(nao, naux, nao).transpose(1, 0, 2).reshape(
+            naux * nao, nao)
+        return (left @ D).reshape(naux, nao, nao)
 
     # The Coulomb half is never range-separated and is built once. The exchange
     # half is built once per channel, each with its own fit and its own
@@ -1196,6 +1323,7 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
                   + D[:, :, None] * Va[None, None, :])
         grad += (three_centre_adjoint(mol, auxmol, Jbar_c)
                  + two_centre_adjoint(auxmol, -np.outer(Va, Vb)))
+        del Jbar_c
     for omega, weight in channels:
         if weight == 0.0:
             continue
@@ -1203,6 +1331,11 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
             grad += exchange_channel_skeleton(mf, g_ao, D, omega, weight)
             continue
         Jw, Vw = J, V
+        # T first and K^P after, each three-index tensor dropped at its last
+        # use: at most J and three more of its size are alive at once
+        GJ = _sandwich(Jw.transpose(2, 0, 1))
+        T = GJ.reshape(naux, -1) @ Jw.reshape(-1, naux)
+        del GJ
         # The LONG-RANGE metric is numerically singular, so it is inverted on
         # its numerical range and never solved through.
         if omega == 0.0:
@@ -1211,16 +1344,17 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
         else:
             Kw = (aux_metric_inverse(Vw)
                   @ Jw.reshape(-1, naux).T).reshape(naux, nao, nao)
-        GJ = _sandwich(Jw.transpose(2, 0, 1))
         GK = _sandwich(Kw)
-        T = GJ.reshape(naux, -1) @ Jw.reshape(-1, naux)
+        del Kw
         if omega == 0.0:
             VTV = np.linalg.solve(Vw, np.linalg.solve(Vw, T).T).T
         else:
             Vwi = aux_metric_inverse(Vw)
             VTV = Vwi @ T @ Vwi
+        GK_bar = -GK.transpose(1, 2, 0)
+        del GK
         grad += weight * (
-            three_centre_adjoint(mol, auxmol, -GK.transpose(1, 2, 0),
-                                 omega=omega)
+            three_centre_adjoint(mol, auxmol, GK_bar, omega=omega)
             + two_centre_adjoint(auxmol, 0.5 * VTV, omega=omega))
+        del GK_bar
     return grad

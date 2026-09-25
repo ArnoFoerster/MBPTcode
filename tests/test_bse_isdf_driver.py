@@ -112,6 +112,15 @@ def main():
     ok &= check(abs(amb_probe - amb_dense) < 1e-8,
                 'matrix-free probe == dense min eig(A-B)',
                 f'|d| {abs(amb_probe - amb_dense):.1e}')
+    # The probe starts its Lanczos from a FIXED vector, 1/d, so it is a
+    # function of the data alone: the same call again in the same process is
+    # the same number bit for bit. ARPACK's own start comes from a seed it
+    # keeps between calls, so without it the second call starts elsewhere and
+    # lands elsewhere inside its tolerance.
+    amb_again = float(lowest_amb_eigenvalue(lr_e, nocc_e, polarizability='TDHF')[0])
+    ok &= check(amb_again == amb_probe,
+                'the probe is reproducible bitwise within one process',
+                f'|d| {abs(amb_again - amb_probe):.1e}')
     try:
         solve_casida_davidson(lr_e, nocc_e, nroots=3, polarizability='TDHF')
         ok &= check(False, 'solver raises on the unstable reference')

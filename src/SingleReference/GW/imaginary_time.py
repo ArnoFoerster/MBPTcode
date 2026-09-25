@@ -18,9 +18,14 @@ import os
 import numpy as np
 
 from src.Base.constants import ISDF_TILE_GB
-from src.Base.utils.time_frequency import (minimax_transform_weights,
+from src.Base.sliced_factors import SlicedFactors
+from src.Base.utils.mpi_grid import (agreement, current_comm, partition,
+                                     reduce_sum)
+from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
+                                          minimax_transform_weights,
                                           minimax_points_for_accuracy,
-                                          COSINE_TW, COSINE_WT, SINE_TW)
+                                          COSINE_TW, COSINE_WT, SINE_TW,
+                                          SELF_ENERGY_PAD)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.LinearResponse.space_time import (
     owned_frequency_blocks, polarizability_projected_sweep,
@@ -86,18 +91,9 @@ def self_energy_fit_ranges(eps, nocc, mu=None):
     w_lo = eps[virt].min() - eps[occ].max()
     w_hi = eps[virt].max() - eps[occ].min()
     dG = np.abs(eps - mu)
-    return ((0.3 * w_lo, 3.0 * w_hi),
-            (0.3 * (dG.min() + w_lo), 3.0 * (dG.max() + w_hi)))
-
-
-#: Kaltak-Klimes-Kresse residual that buys ~0.1 meV on the quasiparticle
-#: energy. Calibrated on naphthalene/cc-pVDZ at R_Sigma = 486, against the
-#: ntau -> infinity limit of the space-time HOMO:
-#:     eta 1.2e-08 -> 1.96 meV     eta 6.0e-10 -> 0.32 meV
-#:     eta 4.8e-11 -> 0.08 meV     eta 3.7e-12 -> 0.03 meV
-#: The mapping is empirical -- eta bounds the quadrature, not the self-energy
-#: it is used to integrate -- so this is a calibrated default, not a bound.
-DEFAULT_TAU_TARGET = 1e-10
+    lo, hi = SELF_ENERGY_PAD
+    return ((lo * w_lo, hi * w_hi),
+            (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
 
 
 def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
@@ -161,7 +157,9 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                                      freq_block=None, scratch_dir=None,
                                      tile_memory_gb=ISDF_TILE_GB,
                                      wt_scratch=None, static_index=None,
-                                     static_out=None, transform=None):
+                                     static_out=None, transform=None,
+                                     tau_indices=None, tau_out_indices=None,
+                                     comm=None):
     """
     Wt(i.tau) = sum_w Ctw[.,w] ( [I - chi0(i.w)]^-1 - I ), in one blocked pass.
 
@@ -179,33 +177,68 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     captured `static_out['w_static']` stays DRESSED, because the BSE kernel it
     is carried for is built in the dressed gauge with the dressed factors.
 
-    Returns Wt(i.tau) with shape (Ctw.shape[0], naux, naux), matching what
-    `self_energy_matrix_imaginary_time` builds internally when Wt_tau is None.
-    """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    X_o = np.ascontiguousarray(X[:, occ])
-    X_v = np.ascontiguousarray(X[:, virt])
-    e_o, e_v = eps[occ] - mu, eps[virt] - mu
+    tau_indices / tau_out_indices / comm: THE TAU PARTITION, INSIDE EACH
+    FREQUENCY BLOCK. This rank projects only the input points `tau_indices`
+    into the block, the block is all-reduced over `comm` (nb x naux^2 per
+    block, nfreq x naux^2 over the sweep -- the same volume the in-core route
+    reduces, no more), every rank inverts the block, and this rank folds it
+    into ONLY ITS OWN output rows `tau_out_indices`. So the M^2 sweep is
+    divided, Wt is held rows-per-rank -- ntau/nranks x naux^2 instead of
+    ntau x naux^2, which is what makes 55 GB at the 476-atom hexamer/cc-pVDZ
+    fit beside anything -- and the proj(tau) cache holds this rank's points
+    alone. The self-energy sweep downstream reads Wt[k] only for the tau
+    points it owns, so the two partitions must coincide: hand it the same
+    `tau_out_indices`. Serial (all None) is bitwise unchanged. With all three
+    None the comm is `current_comm()`, and a context of several ranks splits
+    the INPUT points here (`partition`) while every rank folds every output
+    row, so the return is the whole Wt, identical on every rank; a partition
+    handed in without a comm stays the caller's own partial, never reduced
+    here. An audited run compares the inputs' digests, and on the way out
+    those of W(omega = 0) and of a whole Wt -- rows held per rank differ by
+    design and are not compared.
 
+    X is the MO collocation, or `SlicedFactors` over `comm`, whose occupied
+    and virtual columns `split_branches` gathers whole once for the sweep.
+
+    Returns Wt(i.tau) with shape (Ctw.shape[0], naux, naux) when
+    `tau_out_indices` is None, matching what `self_energy_matrix_imaginary_time`
+    builds internally when Wt_tau is None; otherwise a dict
+    {tau index: (naux, naux)} holding the owned rows, which every consumer
+    indexes as Wt[k] exactly as before.
+    """
     naux, nfreq, ntau = D.shape[1], grid.nfreq, grid.ntau
     nb = int(freq_block or nfreq)
+    if comm is None and tau_indices is None and tau_out_indices is None:
+        comm = current_comm()
+        if comm is not None and comm.Get_size() > 1:
+            tau_indices = partition(ntau, comm.Get_rank(), comm.Get_size())
+    rank = 0 if comm is None else comm.Get_rank()
+    nranks = 1 if comm is None else comm.Get_size()
+    if isinstance(X, SlicedFactors):
+        X.require(comm)
+    X_o, X_v, e_o, e_v, mu, _, _ = split_branches(X, eps, nocc, mu)
+    if nranks > 1:
+        agreement((X_o, X_v, D, eps, Ctw, transform), comm, audit_only=True,
+                  label='screened_interaction_tau_blocked inputs')
+    which_in = range(ntau) if tau_indices is None else np.atleast_1d(tau_indices)
+    rows_out = (np.arange(Ctw.shape[0]) if tau_out_indices is None
+                else np.atleast_1d(tau_out_indices))
     if wt_scratch is not None:
         os.makedirs(os.path.dirname(wt_scratch) or '.', exist_ok=True)
         Wt = np.lib.format.open_memmap(
             wt_scratch, mode='w+', dtype=np.float64,
-            shape=(Ctw.shape[0], naux, naux))
+            shape=(len(rows_out), naux, naux))
         Wt[:] = 0.0
     else:
-        Wt = np.zeros((Ctw.shape[0], naux, naux))
+        Wt = np.zeros((len(rows_out), naux, naux))
     eye = np.eye(naux)
     dg = np.diag_indices(naux)
 
     cache, path = None, None
     if scratch_dir is not None:
         os.makedirs(scratch_dir, exist_ok=True)
-        path = os.path.join(scratch_dir, f'proj_{ntau}_{naux}.npy')
+        # per rank: two ranks on one node must not share a cache file
+        path = os.path.join(scratch_dir, f'proj_{ntau}_{naux}_r{rank}.npy')
         cache = np.lib.format.open_memmap(path, mode='w+', dtype=np.float64,
                                           shape=(ntau, naux, naux))
     cached = False
@@ -213,7 +246,7 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
         for k0 in range(0, nfreq, nb):
             k1 = min(k0 + nb, nfreq)
             blk = np.zeros((k1 - k0, naux, naux))
-            for j in range(ntau):
+            for j in which_in:
                 if cached:
                     proj = cache[j]
                 else:
@@ -225,6 +258,8 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                 blk += grid.cosft_wt[k0:k1, j, None, None] * proj
             if cache is not None:
                 cached = True
+            if nranks > 1:
+                reduce_sum(blk, comm)         # every rank now holds chi0(block)
             for m in range(k1 - k0):
                 b = blk[m]
                 if static_index is not None and k0 + m == static_index:
@@ -233,11 +268,10 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                     b[:] = transform.T @ b @ transform     # chi0 into the bare gauge
                 b[:] = np.linalg.inv(eye - b)
                 b[dg] -= 1.0                  # the correlation part, W - I
-                
             # ONE OUTPUT TAU AT A TIME. `Wt += tensordot(Ctw[:, k0:k1], blk)`
             # materializes a temporary the size of Wt itself
-            for t in range(Ctw.shape[0]):
-                Wt[t] += np.tensordot(Ctw[t, k0:k1], blk, axes=(0, 0))
+            for i, t in enumerate(rows_out):
+                Wt[i] += np.tensordot(Ctw[t, k0:k1], blk, axes=(0, 0))
             del blk
     finally:
         if cache is not None:
@@ -247,7 +281,14 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     if wt_scratch is not None:
         Wt.flush()
         Wt = np.lib.format.open_memmap(wt_scratch, mode='r')
-    return Wt
+    if nranks > 1:
+        agreement(((static_out or {}).get('w_static'),
+                   Wt if tau_out_indices is None else None), comm,
+                  audit_only=True,
+                  label='screened_interaction_tau_blocked outputs')
+    if tau_out_indices is None:
+        return Wt
+    return {int(t): Wt[i] for i, t in enumerate(rows_out)}
 
 
 def _morton_order(coords):
@@ -444,25 +485,51 @@ def sigma_ao_to_mo_diagonal(sigma_ao, mo_coeff, states=None):
     return np.einsum('mp,wmn,np->wp', C, sigma_ao, C, optimize=True)
 
 
-def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB):
+def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
+                             comm=None):
     """Wt(tau) = sum_w Ctw[t, w] ([I - chi0_w]^-1 - I) from proj(tau), (ntau_out, naux, naux).
 
     W - I is folded into imaginary time one frequency block at a time, so no
     (nfreq, naux, naux) array exists; the transform weights Ctw are the
     omega -> tau half of `sigma_transforms`.
+
+    comm: an MPI communicator (or `simulated_world` rank) whose ranks all call
+    this in lockstep. proj(tau) arrives whole, so the only work left is the
+    naux^3 inversion at each frequency and frequency is the compute axis here;
+    tau_out carries no inversion and splitting it would replicate every one of
+    them. Unlike the contour-deformation contraction this axis is not
+    reduction-free -- Wt(tau) is a SUM over frequencies -- so the split ends in
+    one all-reduce of the result, ntau_out x naux^2. Each inversion is the
+    serial one bitwise, its chi0 rows cut from the serial block
+    (`owned_frequency_blocks`), so only that sum re-associates. None is
+    `current_comm()`. proj(tau) arrives identical on every rank by
+    construction and is not broadcast; an audited run compares its digest and
+    Wt's (`mpi_grid.agreement`).
     """
     naux = proj_tau.shape[-1]
     eye = np.eye(naux)
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        agreement((proj_tau, Ctw), comm, audit_only=True,
+                  label='screened_interaction_tau inputs')
+    nu_mine = partition(grid.nfreq, rank, nranks) if nranks > 1 else None
     Wt_tau = np.zeros((Ctw.shape[0], naux, naux))
-    for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb):
+    for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb,
+                                          nu_mine):
         for m in range(len(ks)):
             blk[m] = np.linalg.inv(eye - blk[m]) - eye
         Wt_tau += np.tensordot(Ctw[:, ks], blk, axes=(1, 0))
+    if nranks > 1:
+        reduce_sum(Wt_tau, comm)
+        agreement(Wt_tau, comm, audit_only=True,
+                  label='screened_interaction_tau outputs')
     return Wt_tau
 
 
 def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
-                     intermediate=None, tile_gb=ISDF_TILE_GB):
+                     intermediate=None, tile_gb=ISDF_TILE_GB, comm=None):
     """Sigma^c_pq(i.omega_out) for p, q in `states`: the self-energy MATRIX on a
     block, (nfreq_out, nstates, nstates), by the space-time route.
 
@@ -480,13 +547,36 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
     continued like a diagonal one.
 
     Returns (Sigma, cache) as `selfenergy_diag` does; the cache holds proj(tau),
-    Wt(tau) and the state slices B_p, which is what a reverse pass reads.
+    Wt(tau) and the state slices B_p, which is what the reverse pass
+    (`gradients.space_time_adjoint.selfenergy_block_backward`) reads.
+
+    comm: an MPI communicator (or `simulated_world` rank) whose ranks all call
+    this in lockstep. Three sweeps, each on the axis that carries its own
+    O(N^3) work: the M^2 polarizability sweep over tau (one reduction of
+    proj(tau), ntau x naux^2, over disjoint slots and so bitwise), the Dyson
+    inversions over frequency inside `screened_interaction_tau` (one reduction
+    of Wt(tau), ntau x naux^2), and the naux^2 norb self-energy GEMMs over tau
+    again (one reduction of Sigma^< and Sigma^> together, ntau x nstates^2).
+    The cache leaves reduced, so every rank reverses through the same tape.
+    None is `current_comm()`; the inputs are identical by construction and an
+    audited run compares their digests and the outputs' (`mpi_grid.agreement`).
     """
     Ctw, C, S = transforms
     _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        agreement((X, D, eps, transforms, states, intermediate), comm,
+                  audit_only=True, label='selfenergy_block inputs')
+    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
     proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
-                                              mu=mu, tile_memory_gb=tile_gb)
-    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb)
+                                              mu=mu, tau_indices=tau_mine,
+                                              tile_memory_gb=tile_gb)
+    if nranks > 1:
+        reduce_sum(proj_tau, comm)            # the others' slots are zero
+    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb,
+                                      comm=comm)
 
     states = np.atleast_1d(states)
     n_s = len(states)
@@ -501,7 +591,7 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
     ntau = len(grid.tau_points)
     sig_l = np.zeros((ntau, n_s, n_s))
     sig_g = np.zeros((ntau, n_s, n_s))
-    for k in range(ntau):
+    for k in (range(ntau) if tau_mine is None else tau_mine):
         tau = grid.tau_points[k]
         w, u = np.exp(e_o * tau) * w_occ, np.exp(-e_v * tau) * w_virt
         for s in range(n_s):
@@ -510,26 +600,48 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
                 bYb = np.einsum('Pq,Pq->q', Bs[t], Y)
                 sig_l[k, t, s] = bYb[occ] @ w
                 sig_g[k, t, s] = -(bYb[virt] @ u)
+    if nranks > 1:
+        sig_l, sig_g = reduce_sum(np.stack([sig_l, sig_g]), comm)
     sigma = -0.5 * (np.tensordot(C, sig_g + sig_l, axes=(1, 0))
                     + 1j * np.tensordot(S, sig_g - sig_l, axes=(1, 0)))
+    if nranks > 1:
+        agreement((sigma, Bs), comm, audit_only=True,
+                  label='selfenergy_block outputs')
     return sigma, (proj_tau, Wt_tau, Bs)
 
 
 def selfenergy_diag(X, D, eps, nocc, grid, states, transforms, mu,
-                    tile_gb=ISDF_TILE_GB):
+                    tile_gb=ISDF_TILE_GB, comm=None):
     """Sigma^c_pp(i.omega_out) by the space-time route, and the tape it needs.
 
-    Same quantity as `self_energy_frequency_from_time`, built in the auxiliary
-    basis: W - I is folded into Wt(tau) one frequency block at a time, then
-    per tau and state one (naux, norb) GEMM. Returns (Sigma, cache); the cache
-    holds proj(tau), Wt(tau) and the state slices B_p -- (naux, naux) and
-    (naux, norb) objects only.
+    The diagonal of `self_energy_matrix_imaginary_time`, built in the
+    auxiliary basis: W - I is folded into Wt(tau) one frequency block at a
+    time, then per tau and state one (naux, norb) GEMM. Returns (Sigma,
+    cache); the cache holds proj(tau), Wt(tau) and the state slices B_p --
+    (naux, naux) and (naux, norb) objects only.
+
+    comm: `selfenergy_block`'s three splits with one index of Sigma fixed --
+    tau for the polarizability sweep and for the self-energy GEMMs, frequency
+    for the Dyson inversions; the reductions are proj(tau), Wt(tau) and the
+    two branch sums. None is `current_comm()`; an audited run compares the
+    digests of the inputs and outputs, as `selfenergy_block` does.
     """
     Ctw, C, S = transforms
     _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        agreement((X, D, eps, transforms, states), comm, audit_only=True,
+                  label='selfenergy_diag inputs')
+    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
     proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
-                                              mu=mu, tile_memory_gb=tile_gb)
-    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb)
+                                              mu=mu, tau_indices=tau_mine,
+                                              tile_memory_gb=tile_gb)
+    if nranks > 1:
+        reduce_sum(proj_tau, comm)            # the others' slots are zero
+    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb,
+                                      comm=comm)
 
     states = np.atleast_1d(states)
     Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=tile_gb)
@@ -537,14 +649,19 @@ def selfenergy_diag(X, D, eps, nocc, grid, states, transforms, mu,
     ntau = len(grid.tau_points)
     sig_l = np.zeros((ntau, len(states)))
     sig_g = np.zeros((ntau, len(states)))
-    for k in range(ntau):
+    for k in (range(ntau) if tau_mine is None else tau_mine):
         tau = grid.tau_points[k]
         w, u = np.exp(e_o * tau), np.exp(-e_v * tau)
         for s in range(len(states)):
             bYb = np.einsum('Pq,Pq->q', Bs[s], Wt_tau[k] @ Bs[s])
             sig_l[k, s] = bYb[occ] @ w
             sig_g[k, s] = -(bYb[virt] @ u)
+    if nranks > 1:
+        sig_l, sig_g = reduce_sum(np.stack([sig_l, sig_g]), comm)
     sigma = -0.5 * ((sig_g + sig_l).T @ C.T + 1j * ((sig_g - sig_l).T @ S.T))
+    if nranks > 1:
+        agreement((sigma, Bs), comm, audit_only=True,
+                  label='selfenergy_diag outputs')
     return sigma, (proj_tau, Wt_tau, Bs)
 
 

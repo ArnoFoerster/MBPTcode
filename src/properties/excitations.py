@@ -43,7 +43,7 @@ from src.Base.constants import (GIT_PROVENANCE_TIMEOUT, HARTREE_TO_EV,
 from src.Base.declaration import GroundState, PhysicsMismatch, SurfacePhysics
 from src.SingleReference.LinearResponse.rpa_energy import (ground_state_energy,
                                                            reference_energy)
-from src.properties.surface import surface_mean_field
+from src.properties.surface import evaluate, surface_mean_field
 from src.properties.surfaces import (compare_surfaces, environment_label,
                                      find_row, potential_energy_surface)
 from src.properties.vibronic import adiabatic_gap, relax_state
@@ -89,6 +89,11 @@ class SurfaceSpec:
         normalized. One value that is itself a mapping -- an explicit ISDF
         `counts` -- travels verbatim and makes that spec unhashable rather than
         being rewritten into something the realizing class does not read.
+
+    A spec carries no communicator: how many ranks added the same terms up is
+    not part of what a surface computes. Inside `with distributed(comm):`
+    every rank builds both surfaces of the difference from the one spec, and
+    the kernels they reach divide their sweeps over the ranks.
     """
     ground_state: GroundState
     environment: object = None
@@ -285,13 +290,22 @@ def vertical_block(excited, ground, mol):
 
     Omega is the excited surface's OWN number, taken off the gradient that
     measures the driving force rather than recomputed: this layer records and
-    differences, and may not move a number by so much as a rounding.
+    differences, and may not move a number by so much as a rounding. The
+    gradient is `surface.evaluate`'s, rank 0's on every rank.
+
+    On sliced factors the record carries `factor_gathers`, the whole-array
+    gathers the factors at R0 made up to that force, by name: one per sweep
+    or solve, whatever the tau count or the Davidson's iterations; on the row
+    fit also `fit_held`, the most of each fit array rank 0 held at once, in
+    bytes.
     """
-    force, e_n, info = excited.total_gradient(mol)
+    force, e_n, info = evaluate(excited, mol)
     e_0 = ground_state_at(ground, mol)
     z, route = quasiparticle_diagnostics(info)
     omega = excitation_energy(info, e_n, e_0.total)
-    return {'omega_eV': omega * HARTREE_TO_EV,
+    layout = {name: dict(info[name]) for name in ('factor_gathers', 'fit_held')
+              if name in info}
+    return {**layout, 'omega_eV': omega * HARTREE_TO_EV,
             'e0_hartree': float(e_0.total), 'e0_terms': dict(e_0.terms),
             'en_hartree': float(e_n),
             'driving_force_max': float(np.abs(force).max()),

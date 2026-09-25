@@ -70,6 +70,10 @@ def mean_field(xc, shift=None, route='isdf', regularization=None):
     if xc:
         mf.grids.prune = None
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
+    # The default 50 cycles is too close: displaced B3LYP geometries need up
+    # to 46 at this gradient threshold, and an iteration cap is no reason for
+    # a force test to fail.
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -93,6 +97,23 @@ def richardson(residuals):
     removes the finite difference's truncation and leaves e.
     """
     return (4.0 * residuals[-1] - residuals[-2]) / 3.0
+
+
+def h_squared_fit(steps, residuals):
+    """(e, c, misfit) of residual = e + c h^2, fitted over every step.
+
+    e is the analytic gradient's own error and c h^2 the difference's
+    truncation. Requiring each halving to cut the WHOLE residual by four assumes
+    e is negligible at the finest step; e is the fit's conditioning floor and
+    moves with the grid, so that assumption fails on a grid whose gradient is
+    still right to 2e-8.
+    """
+    h = np.asarray(steps, dtype=float)
+    r = np.asarray(residuals, dtype=float)
+    A = np.stack([np.ones_like(h), h ** 2], axis=1)
+    (e, c), *_ = np.linalg.lstsq(A, r, rcond=None)
+    misfit = float(np.abs(r - A @ np.array([e, c])).max() / np.abs(r).max())
+    return float(e), float(c), misfit
 
 
 def exchange_energy(mf, dm):
@@ -169,9 +190,13 @@ def test_the_force_falls_as_h_squared_onto_its_own_energy(xc):
         out[route] = sweep(
             g[ia, x], lambda s: mean_field(xc, s, route=route).e_tot, ia, x)
     for route, res in out.items():
-        # h^2: each halving of the step cuts the residual by about four
-        for coarse, fine in zip(res, res[1:]):
-            assert abs(coarse) > 3.0 * abs(fine), (route, res)
+        e, c, misfit = h_squared_fit(STEPS, res)
+        # the residual IS e + c h^2 -- a missing term would leave an O(h) or
+        # an O(1) piece the fit cannot absorb
+        assert misfit < 0.05, (route, res, misfit)
+        # and the sweep resolves the truncation rather than fitting the floor
+        assert abs(c) * max(STEPS) ** 2 > 10.0 * abs(e), (route, res, e, c)
+        assert abs(e) < 1e-7, (route, res, e)
         assert abs(res[-1]) < 1e-7, (route, res)
     # what the interpolated route's residual falls TO, with the truncation
     # extrapolated away: 1.0e-09 on B3LYP and 1.0e-08 on Hartree-Fock, where

@@ -15,6 +15,11 @@ state, though: keeping it would put the optical response at eps on top of a
 reaction field built at the wrong constant, and nothing downstream can see that
 it happened.
 
+The cavity is PCM_LEBEDEV_ORDER = 11 (50 points per sphere) where pyscf's
+default is 29 (302): the re-converged water in water moved from -76.03784008
+to -76.03767760 Ha, a solvation energy of -9.94 -> -9.78 mHa, and no check
+here pins that number -- they gate which ground state is built, not its value.
+
 Run: python tests/test_solvent_mean_field.py
 """
 import os
