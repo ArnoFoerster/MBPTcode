@@ -137,7 +137,7 @@ def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None):
     _check_denominator(d_ijab)
     t2_1 = be.divide(gb['oovv'], d_ijab)
     out = {'t2_1': t2_1}
-    num = (be.ein('ijbc,jabc->ia', t2_1, gb['ovvv'])
+    num = (_ovvv_ia(be, gb, t2_1)
            + be.ein('jkab,jkib->ia', t2_1, gb['ooov']))
     out['t1_2'] = be.divide(num, d_ia)
     if order < 3:
@@ -257,7 +257,7 @@ def _dij(be, X_vv, eye_o):
 
 def sigma_s_from_d(be, gb, amps, zint, Y, order):
     """W^a_i(D) -- A41 (first order) and A42 (second)."""
-    w = (be.ein('jabc,ijbc->ia', gb['ovvv'], Y)
+    w = (_ovvv_ia(be, gb, Y)
          + be.ein('jkib,jkab->ia', gb['ooov'], Y))
     if order < 2:
         return w
@@ -273,7 +273,7 @@ def sigma_s_from_d(be, gb, amps, zint, Y, order):
 def sigma_d_from_s(be, gb, amps, zint, y1, order):
     """W^ab_ij(S) -- A54 (first order) and A55 (second)."""
     W = (-0.5 * _p_ab(be.ein('ijka,kb->ijab', gb['ooov'], y1))
-         - 0.5 * _p_ij(be.ein('icab,jc->ijab', gb['ovvv'], y1)))
+         - 0.5 * _p_ij(_ovvv_ijab(be, gb, y1)))
     if order < 2:
         return W
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
@@ -293,6 +293,22 @@ def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None):
         return W
     W = W + 0.5 * (vk.ladder(Y) + be.ein('ijkl,klab->ijab', gb['oooo'], Y))
     return W - _p_ij(_p_ab(be.ein('kaic,jkbc->ijab', gb['ovov'], Y)))
+
+
+def _ovvv_ia(be, gb, X):
+    """sum_jbc <ja||bc> X_ijbc -> (i, a). A closed-shell DF gb carries <ja|bc>
+    as 'ovvv_ajbc' and takes ee_spin_blocks.ovvv_ia; any other gb contracts
+    its 'ovvv' block."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ovvv_ia(gb['ovvv_ajbc'], X)
+    return be.ein('jabc,ijbc->ia', gb['ovvv'], X)
+
+
+def _ovvv_ijab(be, gb, x):
+    """sum_c <ic||ab> x_jc -> (i, j, a, b), routed as _ovvv_ia."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ovvv_ijab(gb['ovvv_ajbc'], x)
+    return be.ein('icab,jc->ijab', gb['ovvv'], x)
 
 
 def _p_ab(X):

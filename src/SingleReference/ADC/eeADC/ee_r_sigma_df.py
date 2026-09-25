@@ -45,8 +45,10 @@ def _phys(Bl, Br):
 
 
 def g_blocks_df(B, no, norb):
-    """The five blocks with at most two virtual indices, spin-blocked.
-    <ab||cd> is deliberately absent -- it goes through the kernels below."""
+    """The five blocks with at most three virtual indices: ovvv as the spatial
+    <ja|bc> stored [a, j, b, c] (ee_spin_blocks.ovvv_ia), the others
+    spin-blocked. <ab||cd> is deliberately absent -- it goes through the
+    kernels below."""
     o, v = slice(0, no), slice(no, norb)
     Boo, Bov, Bvo, Bvv = B[:, o, o], B[:, o, v], B[:, v, o], B[:, v, v]
     return {
@@ -54,7 +56,7 @@ def g_blocks_df(B, no, norb):
         'ooov': anti4(_phys(Boo, Bov), _phys(Bov, Boo).transpose(0, 1, 3, 2)),
         'oovv': anti4(_phys(Bov, Bov)),
         'ovov': anti4(_phys(Boo, Bvv), _phys(Bov, Bvo).transpose(0, 1, 3, 2)),
-        'ovvv': anti4(_phys(Bov, Bvv)),
+        'ovvv_ajbc': np.ascontiguousarray(_phys(Bov, Bvv).transpose(1, 0, 2, 3)),
     }
 
 
@@ -222,6 +224,9 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
 
     be = _eq.SPIN_BLOCKED
     order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    if order == 3 and 'ovvv' not in gb:
+        # the third-order ovvv terms still contract anti4's six spin blocks
+        gb['ovvv'] = anti4(gb['ovvv_ajbc'].transpose(1, 0, 2, 3))
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:

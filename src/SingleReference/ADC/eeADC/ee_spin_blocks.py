@@ -164,6 +164,59 @@ _G_BLOCKS = {'oooo': 'oooo', 'ooov': 'oovo', 'oovv': 'oovv',
              'ovov': 'ovvo', 'ovvv': 'ovvv', 'vvvv': 'vvvv'}
 
 
+def ovvv_ia(S, X):
+    """sum_jbc <ja||bc> X_ijbc for a closed-shell reference, per output spin.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c)
+        The spatial V[j, a, b, c] = <ja|bc>, stored so (j, b, c) is contiguous.
+    X : SB of the six doubles blocks, index order (i, j, b, c)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order
+    (i, a). anti4's blocks of <ja||bc> are V, V - Vx and -Vx with
+    Vx[j,a,b,c] = V[j,a,c,b]; moving every Vx onto X as a (b, c) transpose
+    leaves one V contraction per output spin,
+
+        sigma^a_ia = sum_jbc V_jabc (X^aaaa_ijbc - X^aaaa_ijcb
+                                     + X^abba_ijbc - X^abab_ijcb),
+
+    and alpha <-> beta for 'bb': one matmul on a reshape view of S, where the
+    block-wise einsum reorders (copies) the o v^3 block once per spin block."""
+    Sm = S.reshape(S.shape[0], -1)
+    out = {}
+    for s, (same, with_v, with_neg) in (('aa', ('aaaa', 'abba', 'abab')),
+                                         ('bb', ('bbbb', 'baab', 'baba'))):
+        Z = (X.get(same) - X.get(same).transpose(0, 1, 3, 2) + X.get(with_v)
+             - X.get(with_neg).transpose(0, 1, 3, 2))
+        out[s] = Z.reshape(Z.shape[0], -1) @ Sm.T
+    return SB(out)
+
+
+def ovvv_ijab(S, x):
+    """sum_c <ic||ab> x_jc for a closed-shell reference, per output spin block.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c), as in ovvv_ia
+    x : SB with blocks 'aa' and 'bb', shape (no, nv), index order (j, c)
+
+    Returns an SB of the six doubles blocks, index order (i, j, a, b). With
+    T^s_ijab = sum_c V_icab x^s_jc, one matmul per spin, every block follows
+    by an (a, b) transpose:
+
+        aaaa = T^a - T^a_ijba,   baba = T^a,   baab = -T^a_ijba,
+
+    and alpha <-> beta for bbbb, abab, abba."""
+    nv, no = S.shape[0], S.shape[1]
+    St = S.reshape(nv, -1).T
+
+    def t(xs):
+        return (St @ xs.T).reshape(no, nv, nv, no).transpose(0, 3, 1, 2)
+
+    Ta, Tb = t(x.get('aa')), t(x.get('bb'))
+    swap = (0, 1, 3, 2)
+    return SB({'aaaa': Ta - Ta.transpose(swap), 'bbbb': Tb - Tb.transpose(swap),
+               'baba': Ta, 'abab': Tb,
+               'baab': -Ta.transpose(swap), 'abba': -Tb.transpose(swap)})
+
+
 def g_blocks_sb(V, nocc_spatial, norb_spatial):
     """The six <pq||rs> occupied/virtual blocks the ADC(3) equations touch,
     spin-blocked, from the full spatial physicist tensor V[p,q,r,s]."""
