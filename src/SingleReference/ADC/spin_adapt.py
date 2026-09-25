@@ -34,6 +34,8 @@ Convention notes (locked in by the invariance test, not by trust):
   orbital block keeps the alpha rows (T_orb[2q, q] = 1).
 """
 import numpy as np
+
+from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
 from scipy import sparse
 
 from src.SingleReference.ADC import base  # module import: base.py imports this file
@@ -488,9 +490,15 @@ class ADCSolverCSF:
 
     def solve(self, nocc, static_correction=None, threshold=5000):
         """Dense-diagonalization solve in the CSF basis; same return
-        convention as ADCSolver.solve (each physical pole ONCE, not twice)."""
+        convention as ADCSolver.solve (each physical pole ONCE, not twice).
+
+        `threshold` was accepted and then ignored here while this route used a
+        bare np.linalg.eigh -- the CSF supermatrix is the same object the
+        Dyson route distributes, so it now goes to the same backend."""
         H = self.build_supermatrix(nocc, static_correction=static_correction)
-        eGF, Reigv = np.linalg.eigh(H)
+        eGF, Reigv, _ = eigh_symmetric(H, threshold=threshold)
+        if Reigv is None:
+            return eGF, None, None      # not this rank's eigenvectors
         Z = np.sum(Reigv[:self.norb, :] ** 2, axis=0)
         order = np.argsort(eGF)
         return eGF[order], Z[order], Reigv[:, order]

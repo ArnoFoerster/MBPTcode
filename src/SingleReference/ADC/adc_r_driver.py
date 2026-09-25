@@ -15,13 +15,18 @@ def solve(s, static_correction=None, nroots=1, homo_index=None, ref_vec=None,
         mod = adc_r_dense_df if s.df else adc_r_dense_full
         H = mod.build_supermatrix(s, nocc, static_correction)
         e, Z, vec = diag_dense(H, s.norb, threshold=threshold)
+        # dense: eigh either returns every root or raises, so this one
+        # really is all-True rather than a stand-in for an unread flag
         s.last_result = {'vec': vec, 'converged': np.ones_like(e, dtype=bool)}
         return e, Z
 
     mod = adc_r_sigma_df if s.df else adc_r_sigma_full
     aop, diag, dims = mod.build_operator(s, nocc, static_correction)
     homo = homo_index if homo_index is not None else nocc - 1
-    e, Z, vec = davidson_follow(aop, diag, dims['nH'], s.norb, homo, ref_vec,
-                                nroots, conv_tol=conv_tol, verbose=verbose)
-    s.last_result = {'vec': vec, 'converged': np.ones_like(e, dtype=bool)}
+    e, Z, vec, conv = davidson_follow(aop, diag, dims['nH'], s.norb, homo,
+                                      ref_vec, nroots, conv_tol=conv_tol,
+                                      verbose=verbose)
+    # the solver's own flag, not a placeholder: a Davidson that ran out of
+    # cycles still returns an energy for every root it was asked for
+    s.last_result = {'vec': vec, 'converged': conv}
     return e, Z

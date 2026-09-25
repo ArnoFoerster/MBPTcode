@@ -29,11 +29,14 @@ from src.Base.pyscf_interface import (
     DFIntegrals)
 from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_r_sigma, ee_r_sigma_df, ee_utils)
-from src.Solvers.davidson import davidson
+from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Solvers.davidson import solve_symmetric
 
 DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
                         # dependent long before it converges; a 59-dim
-                        # open-shell sector hit exactly that
+                        # open-shell sector hit exactly that. Every route
+                        # honours it -- the spin-free one used to skip the
+                        # check and hand a 20-dim operator to the solver.
 
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 
@@ -64,7 +67,8 @@ def spin_orbital_arrays(mf, mol=None):
 def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  df=False, spin=None, matrix_free=True, conv_tol=1e-8,
                  en_dress=None, frozen=0, auxbasis=None,
-                 ms_sector='auto', max_subspace=None, return_parity=False):
+                 ms_sector='auto', max_subspace=None, return_parity=False,
+                 dense_limit=DENSE_LIMIT, threshold=5000):
     """(e, Z): the lowest `nroots` excitation energies and their vectors.
 
     en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
@@ -75,7 +79,17 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     return_parity: spin-free route only; returns (e, Z, parity) with
     parity[k] = <Z_k | F Z_k> under the alpha<->beta flip F: +1 for a singlet
     (or the Ms = 0 part of a quintet, which only the doubles can form), -1 for
-    an Ms = 0 triplet. It labels the roots of a spin=None solve."""
+    an Ms = 0 triplet. It labels the roots of a spin=None solve.
+
+    dense_limit: configurations below which the supermatrix is built and
+    diagonalized instead of iterated on (see DENSE_LIMIT). Exposed so a test
+    can force the iterative route onto a system small enough to also solve
+    densely -- which is the only way to compare the two.
+
+    threshold: configurations above which a DENSE solve is distributed over
+    MPI ranks via ELPA, the same knob and the same backend the charged IP/EA
+    route uses (ADCSolver.solve). Below it the solve is local. Distributed,
+    the eigenvectors come back on rank 0 only and Z is None elsewhere."""
     mol = mol if mol is not None else mf.mol
     if spin is not None and spin not in _CHANNEL:
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
@@ -89,7 +103,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                          'nothing to dress')
     if route == 'unrestricted':
         return _solve_unrestricted(mf, mol, level, nroots, matrix_free,
-                                   conv_tol, en_dress, frozen, auxbasis, df)
+                                   conv_tol, en_dress, frozen, auxbasis, df,
+                                   dense_limit, threshold)
     if route == 'spinorbital':
         if df:
             # The dense spin-orbital route is the ARBITER -- it forms the full
@@ -104,17 +119,19 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
             raise NotImplementedError(
                 'frozen core is wired on the spin-free route only')
         return _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
-                                   conv_tol, en_dress, ms_sector)
+                                   conv_tol, en_dress, ms_sector, dense_limit,
+                                   threshold)
     if route != 'spinfree':
         raise ValueError(f"route={route!r}; expected 'spinfree', "
                          "'unrestricted' or 'spinorbital'")
     return _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                             conv_tol, en_dress, frozen, auxbasis, max_subspace,
-                            return_parity)
+                            return_parity, dense_limit, threshold)
 
 
 def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
-                        en_dress=None, frozen=0, auxbasis=None, df=True):
+                        en_dress=None, frozen=0, auxbasis=None, df=True,
+                        dense_limit=DENSE_LIMIT, threshold=5000):
     """Open-shell production route: unrestricted DF sigma, Delta-Ms = 0.
 
     The sector is enforced by the vector layout rather than by a mask -- there
@@ -148,21 +165,29 @@ def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
     aop, diag, d = _u.build_operator(eps_a, eps_b, Ba, Bb, no_a, no_b,
                                      level=level, en_dress=en_dress)
     n = d['nH']
-    if not matrix_free or n <= DENSE_LIMIT:
+    if not matrix_free or n <= dense_limit:
         H = np.column_stack([aop(np.eye(n)[:, k]) for k in range(n)])
-        e, Z = np.linalg.eigh(0.5 * (H + H.T))
-        return e[:nroots], Z[:, :nroots]
-    e, Z = davidson(aop, diag, k=nroots, tol=conv_tol)
+        e, Z, _ = eigh_symmetric(0.5 * (H + H.T), threshold=threshold)
+        return e[:nroots], None if Z is None else Z[:, :nroots]
+    e, Z, _ = solve_symmetric(aop, diag, nroots=nroots, tol_residual=conv_tol,
+                              label='ee-ADC (unrestricted)')
     return np.asarray(e), np.asarray(Z)
 
 
 def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                      conv_tol, en_dress=None, frozen=0, auxbasis=None,
-                     max_subspace=None, return_parity=False):
+                     max_subspace=None, return_parity=False,
+                     dense_limit=DENSE_LIMIT, threshold=5000):
     """max_subspace caps the Davidson subspace. It is a MEMORY knob, and at
     scale the dominant one: the doubles vector is no^2 nv^2, so naphthalene at
-    aug-cc-pVTZ carries 2.5 GB per trial vector and the default subspace of
-    6k+20 would need hundreds of GB of Krylov space alone."""
+    aug-cc-pVTZ carries 2.5 GB per trial vector, the solver holds the
+    operator's image alongside the subspace (so TWICE that per vector), and
+    the default 10*nroots+30 would need a terabyte of Krylov space alone.
+
+    Turning it down is not free: the solver restarts by collapsing onto the
+    nroots Ritz vectors, so a tight subspace is paid for in matrix-vector
+    products and, tight enough, in never converging at all (it says so).
+    Below 3*nroots+4 it warns."""
     if isinstance(mf, _scf.uhf.UHF):
         raise ValueError(
             "route='spinfree' is a closed-shell construction (spatial spin "
@@ -214,14 +239,19 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                           f"nroots={nroots}; returning {n}", RuntimeWarning,
                           stacklevel=3)
 
-    if not matrix_free:
+    if not matrix_free or n <= dense_limit:
         H = np.column_stack([aop(np.eye(n)[:, k]) for k in range(n)])
-        e, Z = np.linalg.eigh(0.5 * (H + H.T))
-        e, Z = e[:nroots], Z[:, :nroots]
+        e, Z, _ = eigh_symmetric(0.5 * (H + H.T), threshold=threshold)
+        e, Z = e[:nroots], None if Z is None else Z[:, :nroots]
     else:
-        e, Z = davidson(aop, diag, k=nroots, tol=conv_tol,
-                        max_subspace=max_subspace)
+        e, Z, _ = solve_symmetric(aop, diag, nroots=nroots,
+                                  tol_residual=conv_tol,
+                                  max_subspace=max_subspace,
+                                  label='ee-ADC (spin-free)')
         e, Z = np.asarray(e), np.asarray(Z)
+    if Z is None:
+        # a distributed dense solve: the eigenvectors are rank 0's alone
+        return (e, None, None) if return_parity else (e, None)
     if embed is not None:
         Z = np.column_stack([embed(Z[:, k]) for k in range(Z.shape[1])])
     if not return_parity:
@@ -265,7 +295,8 @@ def _channel_basis(n, no, nv, level, sgn):
 
 
 def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
-                        conv_tol, en_dress=None, ms_sector='auto'):
+                        conv_tol, en_dress=None, ms_sector='auto',
+                        dense_limit=DENSE_LIMIT, threshold=5000):
     eps, g, nocc = spin_orbital_arrays(mf, mol)
     norb = len(eps)
     is_uhf = isinstance(mf, _scf.uhf.UHF)
@@ -284,8 +315,8 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
         T = csf_isometry(nocc, len(eps), spin=spin, level=level)
         H = ee_u_dense_full.build_supermatrix(eps, g, nocc, level=level,
                                               en_dress=en_dress)
-        e, Z = np.linalg.eigh(T.T @ (H @ T))
-        return e[:nroots], Z[:, :nroots]
+        e, Z, _ = eigh_symmetric(T.T @ (H @ T), threshold=threshold)
+        return e[:nroots], None if Z is None else Z[:, :nroots]
     mask = None
     if ms_sector is not None:
         sz = ee_utils.spin_labels(mf, nocc, norb)
@@ -295,13 +326,15 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
 
     dim = int(mask.sum()) if mask is not None else \
         ee_utils.dimensions(nocc, norb)['nH' if level != 'adc1' else 'n_s']
-    if not matrix_free or dim <= DENSE_LIMIT:
+    if not matrix_free or dim <= dense_limit:
         H = ee_u_dense_full.build_supermatrix(eps, g, nocc, level=level,
                                               en_dress=en_dress)
         if mask is None:
-            e, Z = np.linalg.eigh(H)
-            return e[:nroots], Z[:, :nroots]
-        e, Z_sub = np.linalg.eigh(H[np.ix_(mask, mask)])
+            e, Z, _ = eigh_symmetric(H, threshold=threshold)
+            return e[:nroots], None if Z is None else Z[:, :nroots]
+        e, Z_sub, _ = eigh_symmetric(H[np.ix_(mask, mask)], threshold=threshold)
+        if Z_sub is None:
+            return e[:nroots], None     # not this rank's eigenvectors
         Z = np.zeros((len(mask), Z_sub.shape[1]))
         Z[mask, :] = Z_sub          # back to the full configuration basis
         return e[:nroots], Z[:, :nroots]
@@ -324,12 +357,15 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
             v[keep] = np.asarray(v_sub).ravel()
             return raw(v)[keep]
 
-        e, Z_sub = davidson(aop_sub, diag[keep], k=nroots, tol=conv_tol)
+        e, Z_sub, _ = solve_symmetric(aop_sub, diag[keep], nroots=nroots,
+                                      tol_residual=conv_tol,
+                                      label='ee-ADC (spin-orbital, Ms sector)')
         Z_sub = np.asarray(Z_sub)
         if Z_sub.ndim == 1:
             Z_sub = Z_sub[:, None]
         Z = np.zeros((n_full, Z_sub.shape[1]))
         Z[keep, :] = Z_sub          # back to the full configuration basis
         return np.asarray(e), Z
-    e, Z = davidson(aop, diag, k=nroots, tol=conv_tol)
+    e, Z, _ = solve_symmetric(aop, diag, nroots=nroots, tol_residual=conv_tol,
+                              label='ee-ADC (spin-orbital)')
     return np.asarray(e), np.asarray(Z)

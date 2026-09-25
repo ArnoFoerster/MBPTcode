@@ -10,7 +10,12 @@ every rank solves, as a driver that never parks its workers does: rank 0 must
 get the serial result, every other rank the eigenvalues and None for the rest.
 Served, ranks > 0 park in serve_distributed_solves and rank 0 solves alone.
 Cases: Casida A-B diagonal (the in-place branch), A-B full (the Cholesky
-branch) and TDA, and ADC's diag_dense, the dense solve both ADC drivers call.
+branch) and TDA, ADC's diag_dense, the dense solve both charged ADC drivers
+call, and a dense ee-ADC(2) solve. Every one of them reaches ELPA through
+diagonalization.eigh_symmetric -- that shared entry point is the thing under
+test as much as ELPA is, because its contract (eigenvalues everywhere,
+eigenvectors on rank 0 and None elsewhere) is what each route has to handle
+correctly on its own.
 Served only: a second solve on a solver that keeps its intermediates, and a
 complex Hermitian matrix, which must stay on the local solve. Eigenvectors are
 compared after aligning the sign of every column.
@@ -26,11 +31,25 @@ from src.Base.utils.linearAlgebra.diagonalization import (diagonalize_matrix,
                                                           release_workers)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.ADC import solve as adc_solve
+from src.Base.utils.linearAlgebra import diagonalization as _diag_backend
+from src.SingleReference.LinearResponse import casida as casida_mod
+from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 
 N = 300
 NORB = 20
 TOL = 1e-8
+NROOTS_EE = 4
 rng = np.random.default_rng(1)
+
+# A real ee-ADC supermatrix rather than a synthetic one: the ee routes slice
+# their eigenvectors (`Z[:, :nroots]`) where the charged route returns them
+# whole, and that slice is what has to survive rank 0 handing back None.
+# H2O/STO-3G is 140 configurations -- small enough to build densely on every
+# rank, large enough to clear any threshold the test sets.
+from pyscf import gto, scf                                    # noqa: E402
+_MOL_EE = gto.M(atom='O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471',
+                basis='sto-3g', verbose=0)
+_MF_EE = scf.RHF(_MOL_EE).run()
 
 
 def sym(scale):
@@ -54,18 +73,23 @@ cases = {'A-B diagonal': (D + K, K, False),
          'TDA': (D + K, K, True)}
 
 # diag_dense does not report its route, so record it where it asks for one.
+# Every dense solver in the tree -- Casida and both ADC routes -- now goes
+# through diagonalization.eigh_symmetric, so patching it there covers all of
+# them rather than only the name ADC happened to import.
 routes = []
-_diagonalize = adc_solve.diagonalize_matrix
+_eigh_symmetric = _diag_backend.eigh_symmetric
 
 
-def recording_diagonalize(M, threshold=5000):
-    """diagonalize_matrix, noting in `routes` whether it ran distributed."""
-    out = _diagonalize(M, threshold=threshold)
+def recording_eigh_symmetric(M, threshold=5000):
+    """eigh_symmetric, noting in `routes` whether it ran distributed."""
+    out = _eigh_symmetric(M, threshold=threshold)
     routes.append(out[2])
     return out
 
 
-adc_solve.diagonalize_matrix = recording_diagonalize
+_diag_backend.eigh_symmetric = recording_eigh_symmetric
+adc_solve.eigh_symmetric = recording_eigh_symmetric
+casida_mod.eigh_symmetric = recording_eigh_symmetric
 
 
 def solve_all(threshold):
@@ -79,6 +103,12 @@ def solve_all(threshold):
         out[label] = (r[0], r[1], r[2], r.is_distributed)
     e, Z, V = adc_solve.diag_dense(D + K, NORB, threshold=threshold)
     out['ADC diag_dense'] = (e, V, Z, routes[-1])
+    e_ee, Z_ee = solve_ee_adc(_MF_EE, _MOL_EE, level='adc2', nroots=NROOTS_EE,
+                              matrix_free=False, threshold=threshold)
+    # largest amplitude per root: a real quantity that must match between the
+    # two routes, and sign-free, so it needs no column alignment
+    top = None if Z_ee is None else np.max(np.abs(Z_ee), axis=0)
+    out['ee-ADC dense'] = (e_ee, Z_ee, top, routes[-1])
     return out
 
 
