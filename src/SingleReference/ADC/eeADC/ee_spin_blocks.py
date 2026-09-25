@@ -205,10 +205,11 @@ def ovvv_ijab(S, x):
 
     and alpha <-> beta for bbbb, abab, abba."""
     nv, no = S.shape[0], S.shape[1]
-    St = S.reshape(nv, -1).T
+    Sm = S.reshape(nv, -1)
 
     def t(xs):
-        return (St @ xs.T).reshape(no, nv, nv, no).transpose(0, 3, 1, 2)
+        # [j, (i, a, b)], so every (i, j) slab stays contiguous in (a, b)
+        return (xs @ Sm).reshape(no, no, nv, nv).transpose(1, 0, 2, 3)
 
     Ta, Tb = t(x.get('aa')), t(x.get('bb'))
     swap = (0, 1, 3, 2)
