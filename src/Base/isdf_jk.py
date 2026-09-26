@@ -106,7 +106,7 @@ from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    fit_M_stable, fit_M_streaming,
                                    molecular_points_covariant,
                                    optimize_atomic_radii, resolve_isdf_grid,
-                                   shipped_radii_lookup)
+                                   shipped_radii_lookup, default_auxbasis)
 
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
 #: one factorization when the caller wants that. 148 points per atom.
@@ -188,7 +188,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
         points were placed from. A nuclear derivative needs them, because a
         bare point cloud does not say which atom owns which row.
     """
-    auxbasis = auxbasis or (str(mol.basis) + '-ri')
+    auxbasis = auxbasis or default_auxbasis(mol.basis)
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     if grid_accuracy is not None:
         level_counts, n_start = resolve_isdf_grid(grid_accuracy, mol.basis,
@@ -236,7 +236,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
         origins = {el: False for el in radii}
         against_table = sorted(set(elements) & set(radii)) if named_counts else []
         for el in against_table:
-            hit = shipped_radii_lookup(el, str(mol.basis), str(auxbasis), counts)
+            hit = shipped_radii_lookup(el, mol.basis, auxbasis, counts)
             if hit is None:
                 continue                 # no row at these counts: nothing to contradict
             table_radii, _, origins[el] = hit
@@ -453,7 +453,7 @@ class ISDFJK(df.df.DF):
                  use_symmetry=True, j_route='df-direct', check_tol=1e-3,
                  l_max_second=2, regularization=DEFAULT_REGULARIZATION,
                  block_memory_gb=4.0, progress=None, n_start=1):
-        super().__init__(mol, auxbasis=auxbasis or (str(mol.basis) + '-ri'))
+        super().__init__(mol, auxbasis=auxbasis or default_auxbasis(mol.basis))
         # Caps the working set of the fit's blocked loops. It reaches here
         # because the fit is where the peak is: the Gram matrix is n_k^2, 14.9
         # GB at the dimer/cc-pVTZ, and everything else in the build is small
@@ -857,7 +857,7 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
     geometry optimizer that asks the mean field for its gradient would
     otherwise walk downhill on a different surface.
     """
-    out = mf.density_fit(auxbasis=auxbasis or (str(mf.mol.basis) + '-ri'))
+    out = mf.density_fit(auxbasis=auxbasis or default_auxbasis(mf.mol.basis))
     out.with_df = ISDFJK(mf.mol, auxbasis=auxbasis, counts=counts, radii=radii,
                          z_mode=z_mode, block=block, refit_omega=refit_omega,
                          use_symmetry=use_symmetry, j_route=j_route,
@@ -970,7 +970,19 @@ def mean_field_skeleton_force(mf):
     from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 
     if isinstance(getattr(mf, 'with_df', None), ISDFJK):
-        return np.asarray(isdf_mean_field_gradient(mf))
+        force = np.asarray(isdf_mean_field_gradient(mf))
+        # The ISDF force is assembled here, not by pyscf's gradient class, so
+        # pyscf's PCM mixin never adds the reaction field's Hellmann-Feynman
+        # part: the energy-weighted density already carries V_PCM through the
+        # orbital energies, but dE_PCM/dR at fixed density does not come for
+        # free. Without it the force is off by 1.0e-2 Ha/Bohr on water/cc-pVDZ
+        # in water.
+        with_solvent = getattr(mf, 'with_solvent', None)
+        if with_solvent is not None:
+            from src.Base.pcm_derivatives import solvation_gradient
+            force = force + np.asarray(solvation_gradient(with_solvent,
+                                                          mf.make_rdm1()))
+        return force
     g0 = mf.Gradients()
     if hasattr(mf, 'xc'):
         g0.grid_response = True

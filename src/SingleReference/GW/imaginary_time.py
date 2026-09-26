@@ -26,7 +26,7 @@ from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
                                           minimax_points_for_accuracy,
                                           COSINE_TW, COSINE_WT, SINE_TW,
                                           SELF_ENERGY_PAD)
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.LinearResponse.space_time import (
     FrequencyBlock, ProjRows, owned_frequency_blocks,
     polarizability_projected_sweep, polarizability_projected_tau,
@@ -189,7 +189,39 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
               / (eps[virt].min() - eps[occ].max()),
               rW[1] / rW[0],
               rS[1] / rS[0])
+    return _points_for_ratios(ratios, target, npoints_max)
 
+
+def unrestricted_fit_ranges(spectra, noccs):
+    """`self_energy_fit_ranges` of an unrestricted reference: the same rule on
+    the union of both spin channels, each at its own mid-gap.
+
+    W is built from both spins' transitions, so its range is theirs together;
+    Sigma_s = -G_s W decays at |eps_m,s - mu_s| + Omega_S, and ONE pair of
+    ranges covering both channels lets either channel's sweep read the same
+    transforms. A closed shell run unrestricted gets the restricted ranges.
+    """
+    w_lo, w_hi = transition_range(spectra, noccs)
+    dG = np.concatenate([np.abs(e - 0.5 * (e[n - 1] + e[n]))
+                         for e, n in zip(spectra, noccs)])
+    lo, hi = SELF_ENERGY_PAD
+    return ((lo * w_lo, hi * w_hi),
+            (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
+
+
+def minimax_points_for_gw_unrestricted(spectra, noccs,
+                                       target=DEFAULT_TAU_TARGET,
+                                       npoints_max=34):
+    """`minimax_points_for_gw` over both spin channels' ranges together."""
+    w_lo, w_hi = transition_range(spectra, noccs)
+    rW, rS = unrestricted_fit_ranges(spectra, noccs)
+    return _points_for_ratios((w_hi / w_lo, rW[1] / rW[0], rS[1] / rS[0]),
+                              target, npoints_max)
+
+
+def _points_for_ratios(ratios, target, npoints_max):
+    """(npoints, worst error): the smallest tabulated grid that fits every
+    range ratio in `ratios` to `target`, or the largest and inf if none does."""
     npoints, worst = 0, 0.0
     for R in ratios:
         n, err = minimax_points_for_accuracy(1.0, R, target=target,

@@ -19,6 +19,7 @@ from pyscf import df as _pyscf_df, scf as _pyscf_scf
 from pyscf.df import incore as _df_incore
 
 from src.Base.distributed_df import distributed_fock
+from src.Base.separable_ri import default_auxbasis
 from src.Base.solvent_screening import solvent_static_selfenergy
 from src.Base.utils.analyticalContinuation import (greedy_pade_order,
                                                    thiele_coefficients,
@@ -89,27 +90,60 @@ def _local_static_exchange(mf, mol, dm_correction, exchange):
 
     Serially that is the whole build; inside `distributed_fock` every Fock
     piece among them is a collective over the ranks.
+
+    UNRESTRICTED: (2, nmo, nmo), each spin in its own orbitals. The exchange
+    of a spin orbital is -K[D_s] of its own spin density alone, against
+    -K[D]/2 of the total density when the two spins coincide, and v_xc_s is
+    veff_s less the Coulomb potential of BOTH spin densities.
     """
     dm = mf.make_rdm1()
+    if isinstance(mf, _pyscf_scf.uhf.UHF):
+        return _local_static_exchange_unrestricted(mf, mol, dm, dm_correction,
+                                                   exchange)
     dm_for_hx = dm if dm_correction is None else dm_correction
     # K and the exchange-correlation potential are pyscf's own OpenMP -- the
     # fit's contraction and `nr_rks` on the DFT grid -- so BLAS is held at one
     # thread across them and the two pools stop spinning against each other.
     with blas_single_threaded():
-        if exchange == 'mf':
-            K = mf.get_k(mol, dm_for_hx)
-        elif exchange == 'exact':
-            K = _pyscf_scf.hf.get_jk(mol, dm_for_hx, hermi=1, with_j=False)[1]
-        elif exchange == 'df':
-            aux = getattr(mf.with_df, 'auxbasis', None) or (str(mol.basis) + '-ri')
-            K = _pyscf_df.DF(mol, auxbasis=aux).get_jk(dm_for_hx, hermi=1,
-                                                       with_j=False)[1]
-        else:
-            raise ValueError(f"exchange must be 'mf', 'exact' or 'df', got {exchange!r}")
-        sig_x = -0.5 * K
+        sig_x = -0.5 * _exchange_k(mf, mol, dm_for_hx, exchange)
         v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
     mo = mf.mo_coeff
     return mo.T @ (sig_x - v_xc) @ mo                    # a GEMM: BLAS wide
+
+
+def _exchange_k(mf, mol, dm, exchange):
+    """K[dm] by the build `exchange` names; dm may carry a leading spin axis."""
+    if exchange == 'mf':
+        return mf.get_k(mol, dm)
+    if exchange == 'exact':
+        return _pyscf_scf.hf.get_jk(mol, dm, hermi=1, with_j=False)[1]
+    if exchange == 'df':
+        aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
+        return _pyscf_df.DF(mol, auxbasis=aux).get_jk(dm, hermi=1,
+                                                      with_j=False)[1]
+    raise ValueError(f"exchange must be 'mf', 'exact' or 'df', got {exchange!r}")
+
+
+def _unrestricted_xc_potential(mf, mol, dm):
+    """(2, nao, nao) v_xc_s = veff_s - J[D_alpha + D_beta], exact exchange
+    included: the operator the unrestricted eigenvalues came from, less the
+    Hartree term every spin sees alike."""
+    vj = mf.get_j(mol, dm)
+    return np.asarray(mf.get_veff(mol, dm)) - (vj[0] + vj[1])[None]
+
+
+def _local_static_exchange_unrestricted(mf, mol, dm, dm_correction, exchange):
+    """(2, nmo, nmo) <p_s| Sigma_x,s - v_xc,s |q_s>; see `_local_static_exchange`."""
+    dm_for_hx = dm if dm_correction is None else np.asarray(dm_correction)
+    if dm_for_hx.shape != dm.shape:
+        raise ValueError(
+            f'an unrestricted dm_correction is one density per spin, shape '
+            f'{dm.shape}; got {dm_for_hx.shape}')
+    with blas_single_threaded():
+        K = np.asarray(_exchange_k(mf, mol, dm_for_hx, exchange))
+        v_xc = _unrestricted_xc_potential(mf, mol, dm)
+    return np.array([c.T @ (-K[s] - v_xc[s]) @ c
+                     for s, c in enumerate(mf.mo_coeff)])
 
 
 def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
@@ -147,7 +181,8 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
     the split is not a large term plus a small one.
 
     reaction_field REPLACES that operator when given; see
-    `static_exchange_diagonal`.
+    `static_exchange_diagonal`. Unrestricted, it is the (2, nmo) Eq. (18)
+    array and the matrix is (2, nmo, nmo), one per spin.
 
     sigma_x_matrix: a `static_exchange_mean_field_matrix` built earlier for
         this mean field, in place of rebuilding K and v_xc. The environment
@@ -168,14 +203,15 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
     else:
         out = np.asarray(sigma_x_matrix, float)
     if reaction_field is not None:
-        return out + np.diag(np.asarray(reaction_field, float))
+        shift = np.asarray(reaction_field, float)
+        if shift.ndim == 2:
+            return out + np.array([np.diag(s) for s in shift])
+        return out + np.diag(shift)
     sigma_solvent = solvent_static_selfenergy(mf, mol)
     if sigma_solvent is not None:
-        if isinstance(sigma_solvent, tuple):
-            raise NotImplementedError(
-                "solvent screening through static_exchange_matrix is "
-                "restricted-only, like its consumers")
-        out = out + sigma_solvent
+        # one (nmo, nmo) operator per spin when unrestricted
+        out = out + (np.array(sigma_solvent) if isinstance(sigma_solvent, tuple)
+                     else sigma_solvent)
     return out
 
 
@@ -224,8 +260,13 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
 
 def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
                              block_memory_gb=None, reaction_field=None,
-                             sigma_x_matrix=None, comm=None):
+                             sigma_x_matrix=None, comm=None, spin=None):
     """<p| Sigma_x - v_xc |p> for the requested states only.
+
+    spin: on an unrestricted reference, the channel (0 alpha, 1 beta) the
+        states belong to; required there and refused on a restricted one.
+        `reaction_field` and `sigma_x_matrix` are then the whole (2, ...)
+        arrays and are indexed here.
 
     reaction_field REPLACES the continuum's static term, it does not add to it.
     A route that has built W can form Duchemin et al.'s Eq. (18) shift, the
@@ -260,20 +301,31 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     """
     comm = current_comm() if comm is None else comm
     states = np.atleast_1d(states).astype(int)
+    unrestricted = isinstance(mf, _pyscf_scf.uhf.UHF)
+    if unrestricted and spin not in (0, 1):
+        raise ValueError(
+            f'an unrestricted reference has one static exchange per spin; pass '
+            f'spin=0 (alpha) or spin=1 (beta), got {spin!r}')
+    if not unrestricted and spin is not None:
+        raise ValueError(f'spin={spin!r} on a restricted reference')
     if sigma_x_matrix is not None and exchange == 'df-direct':
         raise ValueError(
             "exchange='df-direct' never forms <p|Sigma_x - v_xc|q>, so a "
             'handed-in sigma_x_matrix names a different static term than the '
             'one asked for')
     if exchange != 'df-direct':
-        return np.diag(static_exchange_matrix(
+        matrix = static_exchange_matrix(
             mf, mol, dm_correction=dm_correction, exchange=exchange,
             reaction_field=reaction_field,
-            sigma_x_matrix=sigma_x_matrix, comm=comm))[states]
+            sigma_x_matrix=sigma_x_matrix, comm=comm)
+        return np.diag(matrix[spin] if unrestricted else matrix)[states]
+    if unrestricted:
+        return _df_direct_unrestricted(mf, mol, states, dm_correction,
+                                       block_memory_gb, reaction_field, spin)
     dm = mf.make_rdm1()
     dm_for_hx = dm if dm_correction is None else dm_correction
     mo = mf.mo_coeff[:, states]
-    aux = getattr(mf.with_df, 'auxbasis', None) or (str(mol.basis) + '-ri')
+    aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
     if block_memory_gb is None:
         block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx, block_memory_gb)
@@ -291,8 +343,30 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     return out
 
 
+def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
+                            reaction_field, spin):
+    """'df-direct' for spin `spin`: -K[D_s]_pp from one streamed pass against
+    the channel's own state vectors, less v_xc,s."""
+    dm = mf.make_rdm1()
+    dm_for_hx = dm if dm_correction is None else np.asarray(dm_correction)
+    mo = mf.mo_coeff[spin][:, states]
+    aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
+    if block_memory_gb is None:
+        block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
+    k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx[spin],
+                                        block_memory_gb)
+    v_xc = _unrestricted_xc_potential(mf, mol, dm)[spin]
+    out = -k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
+    if reaction_field is not None:
+        return out + np.asarray(reaction_field, float)[spin][states]
+    sigma_solvent = solvent_static_selfenergy(mf, mol)
+    if sigma_solvent is not None:
+        out = out + np.diag(sigma_solvent[spin])[states]
+    return out
+
+
 def static_exchange_correction(mf, mol, p_state, dm_correction=None,
-                               exchange='mf'):
+                               exchange='mf', spin=None):
     """
     <p| Sigma_x - v_xc |p>:
     static_exchange_diagonal for a single state.
@@ -300,7 +374,7 @@ def static_exchange_correction(mf, mol, p_state, dm_correction=None,
     """
     return float(static_exchange_diagonal(mf, mol, [p_state],
                                           dm_correction=dm_correction,
-                                          exchange=exchange)[0])
+                                          exchange=exchange, spin=spin)[0])
 
 
 def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,

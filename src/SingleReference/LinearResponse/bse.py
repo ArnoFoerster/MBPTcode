@@ -36,7 +36,8 @@ import numpy as np
 from src.Base.constants import BSE_DENSE_MAX_GB, HARTREE_TO_EV, KAPPA
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+                                      get_two_electron_integrals_chemist,
+                                      require_closed_shell_or_unrestricted)
 from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import (_unpack_factors,
@@ -143,6 +144,7 @@ def solve_bse(mf, mol=None, nocc=None, nroots=5, solver='davidson',
     report a number that is not one.
     """
     mol = mf.mol if mol is None else mol
+    require_closed_shell_or_unrestricted(mf, 'solve_bse', mol=mol)
     nocc = mol.nelectron // 2 if nocc is None else nocc
     solver = str(solver).lower()
     integrals = str(integrals).lower()

@@ -57,14 +57,20 @@ class ExplicitRealScreening:
     `gradients.contour_deformation_adjoint.ExplicitRealScreeningAdjoint` adds
     the reverse half of the protocol, push/adjoints; nothing here records
     anything.
+
+    pair_energies: the pair index of C_ov when it is not the one (eps, nocc)
+    spans -- an unrestricted reference's alpha and beta blocks side by side,
+    each scaled by 1/sqrt(2) so the restricted factor 2 below counts each
+    spin's pairs once.
     """
 
-    def __init__(self, C_ov, eps, nocc, eta=0.0):
+    def __init__(self, C_ov, eps, nocc, eta=0.0, pair_energies=None):
         self.C_ov = C_ov
         self.eps = np.asarray(eps, float)
         self.nocc = nocc
         self.eta = eta
-        self.d = ov_energies(self.eps, nocc)
+        self.d = (ov_energies(self.eps, nocc) if pair_energies is None
+                  else np.asarray(pair_energies, float))
 
     def apply(self, freq, b):
         return screening_aux(self.C_ov, self.d, freq, False, self.eta)[1] @ b
@@ -93,24 +99,35 @@ class LaplaceRealScreening:
     the reverse half, push/adjoints, which lands the residues' adjoint on
     proj(tau) so they ride the same `polarizability_backward` sweep as the
     integral term.
+
+    pair_energies: the particle-hole energies proj(tau) was summed over, when
+    they are not the ones (eps, nocc) spans -- both spins of an unrestricted
+    reference.
     """
 
-    def __init__(self, proj_tau, grid, eps, nocc, tol=LAPLACE_SCREENING_TOL):
+    def __init__(self, proj_tau, grid, eps, nocc, tol=LAPLACE_SCREENING_TOL,
+                 pair_energies=None):
         self.proj_tau = proj_tau
         self.grid = grid
         self.eps = np.asarray(eps, float)
         self.nocc = nocc
         self.tol = tol
         self.eye = np.eye(proj_tau.shape[-1])
+        self.pair_energies = (None if pair_energies is None
+                              else np.asarray(pair_energies, float))
 
     def representation_error(self, freq):
-        return laplace_representation_error(self.grid, self.eps, self.nocc, freq)
+        return laplace_representation_error(self.grid, self.eps, self.nocc, freq,
+                                            pair_energies=self.pair_energies)
 
     def _weights(self, freq):
         err = self.representation_error(freq)
         if not err < self.tol:
-            occ, virt = get_occ_virt_indices(self.eps, self.nocc)
-            gap = self.eps[virt].min() - self.eps[occ].max()
+            if self.pair_energies is None:
+                occ, virt = get_occ_virt_indices(self.eps, self.nocc)
+                gap = self.eps[virt].min() - self.eps[occ].max()
+            else:
+                gap = float(self.pair_energies.min())
             raise ValueError(
                 f"real frequency {freq:.4f} Ha is not carried by the tau grid: "
                 f"bare-quadrature error {err:.1e} against tol {self.tol:.0e}; "

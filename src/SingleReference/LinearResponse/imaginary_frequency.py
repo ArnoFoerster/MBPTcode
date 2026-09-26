@@ -77,7 +77,8 @@ def _f_rpa(lr, d, w, is_imaginary):
 
 def solve_rpa_screening(lr, omega_grid, nocc, is_imaginary=False):
     """W(w), dispatched to the density-fitted or the full-ERI build."""
-    if (lr.spin_mode == 'unrestricted' and lr.coeff_a is not None) or \
+    if (lr.spin_mode == 'unrestricted'
+            and (lr.coeff_a is not None or lr.coeff_ov is not None)) or \
        (lr.spin_mode != 'unrestricted'
         and (lr.df_coeff is not None or lr.coeff_ov is not None)):
         return solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary)
@@ -95,8 +96,11 @@ def solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary=False):
         d_a = (lr.eps_a[virt_a][None, :] - lr.eps_a[occ_a][:, None]).ravel()
         d_b = (lr.eps_b[virt_b][None, :] - lr.eps_b[occ_b][:, None]).ravel()
         
-        C_ov_a = lr.coeff_a[:, occ_a[:, None], virt_a].reshape(lr.naux, -1)
-        C_ov_b = lr.coeff_b[:, occ_b[:, None], virt_b].reshape(lr.naux, -1)
+        if lr.coeff_ov is not None:
+            C_ov_a, C_ov_b = lr.coeff_ov
+        else:
+            C_ov_a = lr.coeff_a[:, occ_a[:, None], virt_a].reshape(lr.naux, -1)
+            C_ov_b = lr.coeff_b[:, occ_b[:, None], virt_b].reshape(lr.naux, -1)
         
         W_grid = []
         for w in omega_grid:

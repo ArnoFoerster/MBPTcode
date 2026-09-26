@@ -108,13 +108,13 @@ def test_the_shared_factorization_is_built_once_not_per_chain(mol, monkeypatch):
     """The cost claim, counted rather than timed. Radii optimization is the
     expensive part of freezing a factorization."""
     calls = {'n': 0}
-    original = fc_module.optimize_atomic_radii
+    original = fc_module.runtime_atomic_radii
 
     def counted(*a, **kw):
         calls['n'] += 1
         return original(*a, **kw)
 
-    monkeypatch.setattr(fc_module, 'optimize_atomic_radii', counted)
+    monkeypatch.setattr(fc_module, 'runtime_atomic_radii', counted)
 
     shared = FrozenFactorization(mol)
     once = calls['n']

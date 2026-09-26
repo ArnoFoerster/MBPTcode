@@ -119,9 +119,10 @@ from src.Base.constants import (ENVIRONMENT_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                 THREE_CENTER_BLOCK_BYTES)
 from src.Base.distributed_df import distributed_mean_field
 from src.Base.environment import dresses_interaction, resolve_environment
-from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt, fit_M_stable,
-                                   fit_M_streaming, optimize_atomic_radii,
-                                   resolve_isdf_grid, subshells, test_set_D,
+from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt,
+                                   default_auxbasis, fit_M_stable,
+                                   fit_M_streaming, resolve_isdf_grid,
+                                   runtime_atomic_radii, subshells, test_set_D,
                                    test_set_layout)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, lockstep, lockstep_mean_field
@@ -269,8 +270,8 @@ class FrozenFactorization:
             raise ValueError(
                 f"fit_block={fit_block} is the row fit's tile edge; "
                 f'fit={fit!r} has no tiles and would ignore it')
-        self.basis = basis or str(mol.basis)
-        self.auxbasis = auxbasis or (self.basis + '-ri')
+        self.basis = basis or mol.basis
+        self.auxbasis = auxbasis or default_auxbasis(self.basis)
         elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
         # The named way in. It is resolved HERE and stored as plain counts, so
         # the whole walk -- `rebuilt_at`, `settings`, `require_match` -- keeps
@@ -298,8 +299,8 @@ class FrozenFactorization:
         if radii is None:
             radii = {}
             for el in elements:
-                radii[el], fit_errors[el] = optimize_atomic_radii(
-                    el, self.basis, self.auxbasis, counts=self.counts,
+                radii[el], fit_errors[el], _ = runtime_atomic_radii(
+                    el, self.basis, self.auxbasis, self.counts,
                     n_start=n_start)
         # The radii come out of a local descent on a multi-modal objective
         # whose minimum moves with the BLAS reduction order, the frames out of
@@ -492,7 +493,7 @@ class FrozenFactorization:
                 'chains')
         other = FrozenFactorization.__new__(FrozenFactorization)
         other.basis = basis or self.basis
-        other.auxbasis = auxbasis or (other.basis + '-ri')
+        other.auxbasis = auxbasis or default_auxbasis(other.basis)
         other.counts = counts or DEFAULT_COUNTS
         other.n_start, other.frames_mode = n_start, frames
         # a chain with no opinion on radii accepts the factorization's
@@ -554,7 +555,7 @@ class FactorChain:
         # Resolved before the branch, so that building a factorization and
         # matching a shared one are handed the same counts and recipe.
         if grid_accuracy is not None:
-            basis = basis or str(mol.basis)
+            basis = basis or mol.basis
             counts, n_start = resolve_isdf_grid(
                 grid_accuracy, basis,
                 {mol.atom_pure_symbol(i) for i in range(mol.natm)},
@@ -821,6 +822,23 @@ class FactorChain:
         _, Mfit, V = self.factorization.shareable_factors(mol, auxmol, crd)
         return Mfit.T @ aux_metric_sqrt(auxmol, None, V=V)
 
+    def static_factor(self, mol, auxmol, crd):
+        """(the static partner of this geometry's continuum, D in its gauge).
+
+        The ion's equilibrium solvation reads Eq. (18) at eps_static on the
+        same cavity (`SolventScreening.static_partner`). It shares the fit M
+        with D and D_bare and differs only in the metric root,
+        (V + vtilde_static)^(1/2): one more naux eigendecomposition.
+        """
+        environment = self.environment_at(mol)
+        if not hasattr(environment, 'static_partner'):
+            raise ValueError(
+                f'equilibrium solvation needs a continuum with a static '
+                f'response; this chain carries {environment!r}')
+        partner = environment.static_partner()
+        _, Mfit, V = self.factorization.shareable_factors(mol, auxmol, crd)
+        return partner, Mfit.T @ aux_metric_sqrt(auxmol, partner, V=V)
+
     def factors_at(self, mol, mf):
         """(X_mo, D, eps, auxmol, coords, X_ao) at `mol`.
 
@@ -909,7 +927,7 @@ class FactorChain:
 
     def nuclear_gradient(self, mol, mf, auxmol, crd, x_mo, eps_bar, x_bar,
                          d_bar, y_extra=None, g_extra=None, d_bar_bare=None,
-                         root_bar=None, kernel_bar=None):
+                         root_bar=None, kernel_bar=None, extra_gauges=()):
         """(natm, 3) gradient from adjoints on (eps, X_mo, D), with diagnostics.
 
         X_mo = X_ao C depends on the geometry twice: through C, which enters the
@@ -934,6 +952,9 @@ class FactorChain:
             that one Frechet solve and one cavity derivative serve both it and
             D; differentiating them apart is the same number and twice the
             reaction-field work.
+        extra_gauges: further `GaugeAdjoint`s of the same fit -- the static
+            partner's factor of an equilibrium-solvated ion (`static_factor`)
+            -- each with its own environment and cavity derivative.
 
         x_mo may be `SlicedFactors`: the orbital-rotation gradient contracts
         the grid index, so X_mo is gathered whole for that product alone (on
@@ -963,6 +984,10 @@ class FactorChain:
         if g_extra is not None:
             g_orb = g_orb + g_extra
         if self.factorization.fit == 'rows':
+            if extra_gauges:
+                raise NotImplementedError(
+                    "a further gauge on the row fit: fit='rows' refuses every "
+                    'environment that dresses the interaction')
             g_coll, g_fit, held = self.row_fit_branches(
                 mol, mf, auxmol, crd, x_bar, d_bar, d_bar_bare=d_bar_bare,
                 root_bar=root_bar, kernel_bar=kernel_bar)
@@ -982,6 +1007,7 @@ class FactorChain:
                                    root_bar=root_bar, kernel_bar=kernel_bar)]
             if d_bar_bare is not None:
                 gauges.append(GaugeAdjoint(d_bar_bare, None))
+            gauges.extend(extra_gauges)
             g_fit = dfactor_adjoint_gauges(mol, auxmol, crd, gauges,
                                            self.layout, self.pts_local,
                                            self.owner, frames=self.frames,

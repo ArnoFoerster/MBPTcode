@@ -32,12 +32,14 @@ from threadpoolctl import threadpool_limits
 
 from src.Base.constants import (get_method_info, DEFAULT_BROADENING_ETA,
                                 HARTREE_TO_EV)
-from src.Base.pyscf_interface import (get_orbital_energies,
+from src.Base.pyscf_interface import (require_closed_shell_or_unrestricted,
+                                      unrestricted_reference_diagnostics,
+                                      get_orbital_energies,
                                       get_density_fitting_coefficients,
                                       get_two_electron_integrals_chemist)
 from src.Base.solvent_screening import solvent_static_selfenergy
 from src.SingleReference.GW.reaction_field import (
-    bare_self_energy, environment_quasiparticle_shift)
+    bare_self_energy, environment_quasiparticle_shift, equilibrium_level_shift)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver
@@ -256,7 +258,7 @@ def _qp_energy_evgw(mf, mol, mode_key, selfenergy, polarizability, state,
 
 
 def _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability, state,
-                    screening, route_kwargs):
+                    screening, route_kwargs, spin_channel='alpha'):
     """Quasiparticle energies in eV from the quasiparticle-self-consistent loop.
 
     The loop returns the whole converged spectrum and its orbitals; the
@@ -276,7 +278,12 @@ def _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability, state,
     eps_qp, mo_coeff, info = qsGW.qsgw_eigenvalues(mf, mol, screening=screening,
                                                    **route_kwargs)
     info['mo_coeff'] = mo_coeff
-    nocc = mol.nelectron // 2
+    if isinstance(mf, scf.uhf.UHF):
+        # the loop converges both channels at once; the caller asked for one
+        nocc = mf.nelec[0 if spin_channel == 'alpha' else 1]
+        eps_qp = eps_qp[0 if spin_channel == 'alpha' else 1]
+    else:
+        nocc = mol.nelectron // 2
     states = _resolve_states(state, nocc)
     out = {p: {'GW': float(eps_qp[p]) * HARTREE_TO_EV} for p in states}
     out['qsgw_info'] = info
@@ -291,7 +298,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    dm_correction=None, tda=False, qp_solver='pole_strength',
                    nroots=8, mode='casida', self_consistency='G0W0',
                    eps_anchor=None, n_workers=None, continuation=None,
-                   return_z=False, solver='auto', **route_kwargs):
+                   return_z=False, solver='auto', equilibrium=False,
+                   **route_kwargs):
     """Quasiparticle energies, in eV.
 
     The dispatch decides in this order, every refusal before an integral is
@@ -408,7 +416,27 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     threads, else one per CPU in the process's affinity mask,
                     never more than that mask holds. n_workers=1 gives the
                     serial scan.
+    equilibrium:    in a continuum with a static dielectric constant, add
+                    the solvent's equilibrium relaxation around the charged
+                    state to every level returned (`reaction_field.
+                    equilibrium_level_shift`): an occupied level rises and a
+                    virtual one falls by Eq18_p(eps_s) - Eq18_p(eps_inf), so
+                    E^(N-/+1) = E_0 -/+ eps_p is the ion in equilibrium with
+                    its solvent rather than the vertical one. A classical
+                    relaxation after the quasiparticle equation, on every
+                    route and on each self-consistency's converged levels;
+                    refused without a static response.
     """
+    if equilibrium:
+        return _equilibrium_levels(
+            mf, dict(selfenergy=selfenergy, polarizability=polarizability,
+                     df=df, eta=eta, state=state, spin_channel=spin_channel,
+                     printSpectralFunction=printSpectralFunction,
+                     dm_correction=dm_correction, tda=tda,
+                     qp_solver=qp_solver, nroots=nroots, mode=mode,
+                     self_consistency=self_consistency, eps_anchor=eps_anchor,
+                     n_workers=n_workers, continuation=continuation,
+                     return_z=return_z, solver=solver, **route_kwargs))
     mol = mf.mol
     mode_key = str(mode).lower().replace('_', '-')
     if mode_key not in MODE_CONTINUATIONS:
@@ -418,6 +446,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     # and then a refusal.
     continuation = _continuation_of(mode_key, continuation, route_kwargs,
                                     return_z)
+    require_closed_shell_or_unrestricted(mf, 'calc_qp_energy', mol=mol)
+    unrestricted_reference_diagnostics(mf, 'calc_qp_energy')
     # The eigensolver is decided before an integral is built, like the table
     # above: the alternative is a converged screening and then a refusal.
     if mode_key == 'casida':
@@ -475,7 +505,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
         route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda,
                             n_workers=n_workers)
         return _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability,
-                               state, QSGW_SCREENING[consistency], route_kwargs)
+                               state, QSGW_SCREENING[consistency], route_kwargs,
+                               spin_channel=spin_channel)
     if mode_key in IMAGINARY_AXIS_MODES:
         # the anchor is a named argument here and a route keyword there
         if eps_anchor is not None:
@@ -555,6 +586,44 @@ def _resolve_states(state, nocc_spin):
     raise ValueError(f"Invalid state parameter: {state}")
 
 
+def _equilibrium_levels(mf, kwargs):
+    """`calc_qp_energy(**kwargs)` with the equilibrium level shift added.
+
+    The shift is formed FIRST, so a continuum without a static response is
+    refused before any self-energy is built. It is added to every numeric
+    entry the route returns -- the level of each method on the Casida route --
+    and never to a pole strength.
+    """
+    mol = mf.mol
+    is_uhf = isinstance(mf, scf.uhf.UHF)
+    channel = kwargs['spin_channel']
+    level = equilibrium_level_shift(mf, mol,
+                                    auxbasis=kwargs.get('auxbasis'))
+    level = level[0 if channel == 'alpha' else 1] if is_uhf else level
+    out = calc_qp_energy(mf, equilibrium=False, **kwargs)
+
+    def moved(p, value):
+        return value + float(level[int(p)]) * HARTREE_TO_EV
+
+    state = kwargs['state']
+    nocc = _channel(mf.nelec if is_uhf else mol.nelectron // 2, channel,
+                    is_uhf)
+    states = _resolve_states(state, nocc)
+    z = None
+    if kwargs['return_z'] and not isinstance(out, dict):
+        out, z = out
+    if isinstance(out, dict):
+        return {p: ({m: (moved(p, v) if isinstance(v, (float, np.floating))
+                         else v) for m, v in entry.items()}
+                    if isinstance(entry, dict) and p in states else entry)
+                for p, entry in out.items()}
+    if isinstance(state, list):
+        out = [moved(p, e) for p, e in zip(states, out)]
+    else:
+        out = moved(states[0], out)
+    return out if z is None else (out, z)
+
+
 def _two_electron_integrals(mol, mf, df, is_uhf):
     """(df_coeff, eri): the three-index DF factors, or the full chemist ERI."""
     if not df:
@@ -581,16 +650,21 @@ def _reaction_field_terms(mf, mol, nocc_spin, spin_channel):
     """(shift, sigma_solvent): the environment's one-body terms, None in the gas
     phase.
 
-    Duchemin et al. Eq. (18) where it is available -- the self-polarization of
-    the orbital carrying the added charge in the SCREENED reaction field, built
-    once per spectrum a mean field carries, so this route and the imaginary-axis
-    ones read the same array, in every evGW cycle as well; `sigma_solvent` is
-    then its diagonal. `cohsex_correction` is
-    the unrestricted fallback: it sums the BARE vtilde over every orbital and
-    differs by 0.39 eV of quasiparticle gap on water in water.
+    Duchemin et al. Eq. (18) -- the self-polarization of the orbital carrying
+    the added charge in the SCREENED reaction field, built once per spectrum a
+    mean field carries, so this route and the imaginary-axis ones read the same
+    array, in every evGW cycle as well; `sigma_solvent` is then its diagonal.
+    Unrestricted, the screening is built once from both spins and this returns
+    the requested channel's row. `cohsex_correction`, which sums the BARE vtilde
+    over every orbital and differs by 0.39 eV of quasiparticle gap on water in
+    water, is left only for an environment that dresses no interaction.
     """
-    shift = environment_quasiparticle_shift(mf, mol, nocc_spin)
+    unrestricted = isinstance(mf, scf.uhf.UHF)
+    shift = environment_quasiparticle_shift(mf, mol,
+                                            None if unrestricted else nocc_spin)
     if shift is not None:
+        if unrestricted:
+            shift = shift[0 if spin_channel == 'alpha' else 1]
         return shift, np.diag(shift)
     sigma_solvent = solvent_static_selfenergy(mf, mol)
     if isinstance(sigma_solvent, tuple):
@@ -1074,15 +1148,26 @@ def _qp_energy_cc_polarizability(mf, states, level, selfenergy, eta, nroots,
             "amplitudes, which the EOM-CC route does not produce.")
     if is_uhf:
         raise NotImplementedError("CC polarizability is restricted (closed-shell RHF) only.")
+    if shift is not None:
+        # Eq. (18) needs the static screening in the DRESSED and the bare
+        # interaction; the only one available is the RPA's, and a CC-screened
+        # Sigma beside an RPA-screened shift is two screenings for one
+        # quasiparticle. The CC response in the dressed interaction is a CC
+        # ground state in the continuum, which is not built.
+        raise NotImplementedError(
+            'CC polarizability in a continuum: the Eq. (18) shift would be '
+            'screened by the RPA while Sigma is screened by EOM-CC -- two '
+            'screenings for one quasiparticle -- and the CC response in the '
+            "dressed interaction is not built. Use polarizability='RPA' in a "
+            'continuum.')
     if hasattr(mf, 'xc'):
         raise NotImplementedError(
             "CC polarizability assumes an HF reference; a KS starting point would "
             "additionally need a v_xc correction, which this route does not build.")
 
     # The CC screening is built from the BARE interaction, like the Casida
-    # route's: the reaction field enters once, through the Eq. (18) static
-    # shift below, and a self-energy screened with v + vtilde as well would
-    # count the same polarization twice.
+    # route's; a continuum that dresses the interaction is refused above, and
+    # one that does not arrives as the COHSEX `sigma_solvent`.
     with bare_self_energy(mf, shift):
         solver = GWCCSelfEnergy(mf, level=level, nroots=nroots)
     spin_offset = 0 if spin_channel == 'alpha' else 1
@@ -1105,10 +1190,12 @@ def _qp_energy_imaginary_axis_route(mf, mol, mode_key, continuation, selfenergy,
                                     route_kwargs):
     """Dispatch to the imaginary-frequency, space-time or contour driver.
 
-    All implement GW@RPA on a restricted, density-fitted reference and nothing
-    else, so every unsupported combination is rejected rather than quietly
-    returning a GW@RPA number under another name. `eta` is one of them and is
-    refused by the caller, since none of them broadens anything.
+    All implement GW@RPA on a density-fitted reference and nothing else, so
+    every unsupported combination is rejected rather than quietly returning a
+    GW@RPA number under another name. `eta` is one of them and is refused by
+    the caller, since none of them broadens anything. An unrestricted
+    reference runs on all of them: one W from both spins, the self-energy of
+    `spin_channel`.
 
     The three drivers differ in the CHI0 they build and in the continuation
     that takes it to the real axis; `continuation` has already been checked
@@ -1122,16 +1209,17 @@ def _qp_energy_imaginary_axis_route(mf, mol, mode_key, continuation, selfenergy,
         raise ValueError(
             f"mode='{mode_key}' implements RPA screening only, got "
             f"polarizability={polarizability!r}. BSE/TDHF/CCSD need mode='casida'.")
-    if isinstance(mf, scf.uhf.UHF):
-        raise NotImplementedError(f"mode='{mode_key}' is restricted-spin only.")
     if not df:
         raise ValueError(f"mode='{mode_key}' requires density fitting (df=True).")
     if tda:
         raise ValueError(f"tda has no meaning for mode='{mode_key}'; it never "
                          f"forms a Casida problem.")
 
-    nocc = mol.nelectron // 2
-    states = _resolve_states(state, nocc)
+    is_uhf = isinstance(mf, scf.uhf.UHF)
+    nocc = tuple(int(n) for n in mf.nelec) if is_uhf else mol.nelectron // 2
+    states = _resolve_states(state, _channel(nocc, spin_channel, is_uhf))
+    if is_uhf:
+        route_kwargs = dict(route_kwargs, spin_channel=spin_channel)
 
     if continuation in ('cd', 'laplace', 'sop'):
         # Deferred: contour_deformation.py's chi0 comes from

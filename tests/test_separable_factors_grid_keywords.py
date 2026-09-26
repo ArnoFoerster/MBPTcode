@@ -32,7 +32,7 @@ from pyscf import gto, scf
 from src.Base.constants import ISDF_GRID_ACCURACY, ISDF_RADII_MATCH_TOL
 from src.Base.separable_ri import (PUBLISHED_COUNTS, _SHELL_ORDER, atomic_grid,
                                    shipped_radii_lookup)
-from src.SingleReference.GW import space_time
+from src.Base import separable_ri
 from src.SingleReference.GW.space_time import DEFAULT_COUNTS, separable_factors
 
 BASIS = 'cc-pvtz'
@@ -247,7 +247,8 @@ def test_untabulated_counts_without_radii_name_what_the_table_holds(ethylene,
         asked.append((element, dict(counts)))
         return atomic_grid(element, basis, auxbasis, G2_COUNTS)[0], 0.0
 
-    monkeypatch.setattr(space_time, 'optimize_atomic_radii', stub)
+    # the search `runtime_atomic_radii` runs when the table holds no row
+    monkeypatch.setattr(separable_ri, 'optimize_atomic_radii', stub)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         separable_factors(mf, mol, counts=counts)

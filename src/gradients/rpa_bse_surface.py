@@ -36,6 +36,7 @@ from src.Base.environment import environment_label
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.properties.characters import orbital_fingerprint, track_orbital
 
 
 def _one_factorization(mol, shared, ground, excited, given):
@@ -64,7 +65,50 @@ def _one_factorization(mol, shared, ground, excited, given):
         fit_block=shared.get('fit_block'))
 
 
-class RPAQPSurface:
+class _FollowsOrbital:
+    """Which orbital a charged surface takes its quasiparticle at.
+
+    The declared one, `state` from the HOMO, at every geometry -- or, with
+    `track`, the orbital that continues it: fingerprinted on the reference
+    geometry's Pipek-Mezey localized orbitals and followed through the
+    cross-geometry overlap (`properties.characters.track_orbital`). An index
+    is the wrong label near a crossing: the canonical orbitals reorder and a
+    surface following the index steps onto the other state. Each followed
+    orbital is logged in `follow_log`; the declaration stays the reference's.
+    """
+
+    def offset_at(self, mol, mf):
+        """The quasiparticle's orbital at (mol, mf), as an offset from the HOMO."""
+        reference = self.nocc - 1 + self.state
+        if not self.track:
+            return self.state
+        if self._fingerprint is None:
+            _, mf0 = self.mean_field()
+            self._fingerprint = orbital_fingerprint(mf0, reference)
+        if mol is self.mol0:
+            return self.state
+        orbital, score = track_orbital(self._fingerprint, mf)
+        self.follow_log.append({'orbital': int(orbital), 'reference': reference,
+                                'similarity': float(score[orbital])})
+        return int(orbital) - (self.nocc - 1)
+
+    def _level(self, mol, mf, offset):
+        """eps^QP, plus Delta eps^eq when the solvent is in equilibrium."""
+        qp = float(self.excited.quasiparticle(offset, mol, mf))
+        if self.equilibrium:
+            qp += self.excited.equilibrium_shift(offset, mol, mf)
+        return qp
+
+    def _level_gradient(self, mol, mf, offset):
+        """(d level / dR, the quasiparticle's diagnostics)."""
+        g_qp, diagnostics = self.excited.quasiparticle_gradient(offset, mol, mf)
+        if self.equilibrium:
+            g_eq, _ = self.excited.equilibrium_shift_gradient(offset, mol, mf)
+            g_qp = np.asarray(g_qp) + np.asarray(g_eq)
+        return np.asarray(g_qp), diagnostics
+
+
+class RPAQPSurface(_FollowsOrbital):
     """E^{N-/+1} = E_0^dRPA -/+ eps_p^QP: the same ruling, for a QUASIPARTICLE.
 
     A G0W0 ionization or attachment geometry optimization has exactly the
@@ -88,10 +132,22 @@ class RPAQPSurface:
     leading solute-solvent dispersion term. Quasiparticle levels, excitation
     energies and any difference taken at a FIXED geometry are free of it, as is
     every gas-phase total energy.
+
+    equilibrium=True puts the ion in equilibrium with its solvent: the level
+    carries the chain's `equilibrium_shift`, Eq18(eps_s) - Eq18(eps_inf) on
+    the same factors, and the force its analytic gradient, so E^(N-/+1) =
+    E_0 -/+ (eps^QP + Delta eps^eq) -- the adiabatic ion a Marcus four-point
+    scheme compares with the vertical one. It is added after the quasiparticle
+    equation, unrenormalized by Z. Refused without a continuum carrying a
+    static dielectric constant.
+
+    track=True follows the orbital's character rather than its index
+    (`_FollowsOrbital`).
     """
 
     def __init__(self, mol, scf_factory, state=0, mf=None, ground=None,
-                 excited=None, factorization=None, **kw):
+                 excited=None, factorization=None, equilibrium=False,
+                 track=False, **kw):
         # `radii`, `sliced`, `fit` and `fit_block` are SHARED, not
         # excited-only: they decide the factorization both halves read, so
         # leaving one in kw builds the factorization without it and the chain
@@ -107,6 +163,19 @@ class RPAQPSurface:
                                                     **shared)
         self.excited = excited or ExcitedStateChain(
             mol, scf_factory, mf=self.ground.mf0, **shared, **kw)
+        self.equilibrium = bool(equilibrium)
+        if self.equilibrium:
+            environment = self.excited.environment
+            if not hasattr(environment, 'static_partner'):
+                raise ValueError(
+                    f'equilibrium=True needs a continuum with a static '
+                    f'response; this surface carries {environment!r}')
+            environment.static_partner()     # raises without eps_static
+        self.track, self._fingerprint, self.follow_log = bool(track), None, []
+
+    @property
+    def nocc(self):
+        return self.ground.nocc
 
     def scf_factory(self, mol):
         return self._scf(mol)
@@ -131,7 +200,8 @@ class RPAQPSurface:
         """E^{N-/+1}: the orbital eps^QP is taken at, and which way the
         electron count moves. `state` is the offset from the HOMO."""
         return ChargedExcitation(self.ground.nocc - 1 + self.state,
-                                 self.charge_change)
+                                 self.charge_change,
+                                 equilibrium=self.equilibrium)
 
     @property
     def physics(self):
@@ -155,10 +225,11 @@ class RPAQPSurface:
         return -1.0 if self.charge_change == -1 else +1.0
 
     def energy(self, mol=None, mf=None):
-        """(E^{N-/+1}, E_0, eps^QP) in Hartree."""
+        """(E^{N-/+1}, E_0, the level it takes) in Hartree; the level is
+        eps^QP, or eps^QP + Delta eps^eq with the solvent in equilibrium."""
         mol, mf = self.ground.mean_field(mol, mf)
         e_0 = self.ground.total_energy(mol, mf)
-        qp = float(self.excited.quasiparticle(self.state, mol, mf))
+        qp = self._level(mol, mf, self.offset_at(mol, mf))
         return e_0 + self.sign * qp, e_0, qp
 
     def total_energy(self, mol=None, mf=None):
@@ -167,8 +238,9 @@ class RPAQPSurface:
     def total_gradient(self, mol=None, mf=None):
         mol, mf = self.ground.mean_field(mol, mf)
         g_0, e_0, d0 = self.ground.total_gradient(mol, mf)
-        g_qp, d1 = self.excited.quasiparticle_gradient(self.state, mol, mf)
-        qp = float(self.excited.quasiparticle(self.state, mol, mf))
+        offset = self.offset_at(mol, mf)
+        g_qp, d1 = self._level_gradient(mol, mf, offset)
+        qp = self._level(mol, mf, offset)
         sign = self.sign
         return (np.asarray(g_0) + sign * np.asarray(g_qp), e_0 + sign * qp,
                 dict(d1, e_0=e_0, e_c=d0.get('e_c'), qp=qp,
@@ -189,14 +261,126 @@ class RPAQPSurface:
         exactly what it owns -- no chain's own keyword list is duplicated here,
         so adding one upstream cannot make this drift.
         """
+        # the followed orbital, not the constructor's, is the state here
+        state = self.offset_at(*self.mean_field(mol))
         fac = self.ground.factorization.rebuilt_at(mol)
-        return type(self)(mol, self._scf, state=self.state, factorization=fac,
+        return type(self)(mol, self._scf, state=state, factorization=fac,
                           ground=self.ground.refreeze(mol, factorization=fac),
-                          excited=self.excited.refreeze(mol, factorization=fac))
+                          excited=self.excited.refreeze(mol, factorization=fac),
+                          equilibrium=self.equilibrium, track=self.track)
 
     def label(self):
         kind = 'E^(N-1)' if self.charge_change == -1 else 'E^(N+1)'
-        return f'{kind} G0W0 state {self.state} on E_HF + E_c^dRPA'
+        solvent = ', solvent in equilibrium' if self.equilibrium else ''
+        return f'{kind} G0W0 state {self.state} on E_HF + E_c^dRPA{solvent}'
+
+
+class MeanFieldQPSurface(_FollowsOrbital):
+    """E^{N-/+1} = E_KS -/+ eps_p^QP: the charged state on the mean field's energy.
+
+    The ground state is the mean field's own, as on `ExcitedStateChain`, so in
+    a continuum E_KS is the SCF's in PCM at eps_static -- the neutral in
+    equilibrium with its solvent -- and no dRPA correlation energy enters.
+    That removes the caveat `RPAQPSurface` carries on absolute energies in a
+    continuum, where the plasmon fold keeps the bare interaction in its linear
+    counter-term; this surface's total energy is trustworthy there, and its
+    difference from the neutral's E_KS is the quasiparticle level itself.
+
+    eps^QP carries the vertical (optical) solvation through Eq. (18);
+    `equilibrium=True` adds the ion's relaxed solvent as on `RPAQPSurface`,
+    E_KS -/+ (eps^QP + Delta eps^eq), with its analytic gradient. `state` is
+    the offset from the HOMO, and `track` follows the orbital's character, as
+    there.
+    """
+
+    def __init__(self, mol, scf_factory, state=0, mf=None, excited=None,
+                 equilibrium=False, track=False, **kw):
+        self.mol0, self._scf, self.state = mol, scf_factory, state
+        self.excited = excited or ExcitedStateChain(mol, scf_factory, mf=mf,
+                                                    **kw)
+        self.equilibrium = bool(equilibrium)
+        if self.equilibrium:
+            environment = self.excited.environment
+            if not hasattr(environment, 'static_partner'):
+                raise ValueError(
+                    f'equilibrium=True needs a continuum with a static '
+                    f'response; this surface carries {environment!r}')
+            environment.static_partner()     # raises without eps_static
+        self.track, self._fingerprint, self.follow_log = bool(track), None, []
+
+    def scf_factory(self, mol):
+        return self._scf(mol)
+
+    def mean_field(self, mol=None, mf=None):
+        """(mol, mf) through the environment: the chain's own mean field."""
+        return self.excited.mean_field(mol, mf)
+
+    @property
+    def nocc(self):
+        return self.excited.nocc
+
+    @property
+    def physics_ground_state(self):
+        """E_0 = E_KS[xc], the mean field's own energy (`ExcitedStateChain`)."""
+        return self.excited.physics_ground_state
+
+    @property
+    def physics_excitation(self):
+        """E^{N-/+1} at the orbital `state` from the HOMO."""
+        return ChargedExcitation(self.nocc - 1 + self.state,
+                                 self.charge_change,
+                                 equilibrium=self.equilibrium)
+
+    @property
+    def physics(self):
+        """What this surface computes: E_KS -/+ eps^QP_p, in its environment."""
+        return SurfacePhysics(self.physics_ground_state,
+                              self.physics_excitation,
+                              environment_label(self.excited.environment))
+
+    @property
+    def charge_change(self):
+        """-1 for the ionization E^{N-1}, +1 for the attachment E^{N+1}."""
+        return -1 if self.state <= 0 else +1
+
+    @property
+    def sign(self):
+        """The sign eps^QP enters the total energy with."""
+        return -1.0 if self.charge_change == -1 else +1.0
+
+    def energy(self, mol=None, mf=None):
+        """(E^{N-/+1}, E_KS, the level it takes) in Hartree."""
+        mol, mf = self.mean_field(mol, mf)
+        qp = self._level(mol, mf, self.offset_at(mol, mf))
+        return mf.e_tot + self.sign * qp, mf.e_tot, qp
+
+    def total_energy(self, mol=None, mf=None):
+        return self.energy(mol, mf)[0]
+
+    def total_gradient(self, mol=None, mf=None):
+        """(dE/dR, E, diagnostics): pyscf's force for the mean field, which
+        carries its own PCM term, and the quasiparticle's with the sign the
+        electron count gives it."""
+        mol, mf = self.mean_field(mol, mf)
+        g_0 = self.excited.mean_field_gradient(mf)
+        offset = self.offset_at(mol, mf)
+        g_qp, d1 = self._level_gradient(mol, mf, offset)
+        qp = self._level(mol, mf, offset)
+        return (np.asarray(g_0) + self.sign * np.asarray(g_qp),
+                mf.e_tot + self.sign * qp,
+                dict(d1, e_0=mf.e_tot, qp=qp, charge_change=self.charge_change))
+
+    def refreeze(self, mol):
+        """The same surface with the chain's frozen conventions rebuilt at `mol`."""
+        return type(self)(mol, self._scf,
+                          state=self.offset_at(*self.mean_field(mol)),
+                          excited=self.excited.refreeze(mol),
+                          equilibrium=self.equilibrium, track=self.track)
+
+    def label(self):
+        kind = 'E^(N-1)' if self.charge_change == -1 else 'E^(N+1)'
+        solvent = ', solvent in equilibrium' if self.equilibrium else ''
+        return f'{kind} G0W0 state {self.state} on E_KS{solvent}'
 
 
 class RPABSESurface:

@@ -701,6 +701,36 @@ def fold_frequency_rows(out, c, blk):
         out[:, i, :] += np.tensordot(c, blk[:, i, :], axes=(0, 0))
 
 
+def spin_summed(kernel, X_mos, D, spectra, noccs, *args, **kwargs):
+    """`kernel`'s chi0 -- or proj(tau) -- of an unrestricted reference,
+    chi0_alpha + chi0_beta, from the kernel's restricted form.
+
+    Every kernel here carries the closed-shell spin factor 2 of
+    `polarizability_projected_tau`, so one spin's own contribution is HALF the
+    kernel called on that spin's collocation, spectrum and occupation. Each
+    spin sits at its own mid-gap, which cancels from the pair product
+    e^{(eps_i - mu) tau} e^{-(eps_a - mu) tau} and only keeps the two factors
+    bounded. `kernel` is `chi0_imaginary_frequency`, `chi0_frequency_rows`
+    (the sum then in this rank's rows) or `polarizability_projected_sweep`;
+    args and kwargs follow its `nocc`.
+    """
+    out = None
+    for X, eps, nocc in zip(X_mos, spectra, noccs):
+        part = kernel(X, D, eps, nocc, *args,
+                      mu=0.5 * (eps[nocc - 1] + eps[nocc]), **kwargs)
+        if out is None:
+            out = part
+        else:
+            _held(out)[...] += _held(part)
+    _held(out)[...] *= 0.5
+    return out
+
+
+def _held(a):
+    """What this rank holds of `a`: a `ProjRows`' rows, an array itself."""
+    return a.rows if isinstance(a, ProjRows) else a
+
+
 def three_index_slice(X, D, p, tile_gb=ISDF_TILE_GB):
     """B_p[P, q] = sum_k D[k,P] X[k,p] X[k,q]: one bra state's pair density in
     the auxiliary basis, (naux, norb), in O(M naux norb). Tiled over grid rows
@@ -808,18 +838,25 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
         yield ks, blk
 
 
-def laplace_representation_error(grid, eps, nocc, freq):
+def laplace_representation_error(grid, eps, nocc, freq, pair_energies=None):
     """max over y = d +- freq of |y sum_k w_k e^{-y tau_k} - 1|: how well the
     grid's bare quadrature carries this real frequency, on the pair energies
     that actually occur. inf when freq reaches the gap (a real pole).
+
+    pair_energies: d itself, in place of the pairs (eps, nocc) spans -- both
+    spins of an unrestricted reference.
 
     The gate on the imaginary-time form of W at a REAL frequency, which is what
     a contour-deformation residue below the particle-hole gap asks for:
     -2d/(d^2 - w^2) = -int 2 cosh(w tau) e^{-d tau} dtau holds only where the
     grid still represents e^{-y tau} on every y = d -/+ w.
     """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    d = (np.asarray(eps)[virt][None, :] - np.asarray(eps)[occ][:, None]).ravel()
+    if pair_energies is None:
+        occ, virt = get_occ_virt_indices(eps, nocc)
+        d = (np.asarray(eps)[virt][None, :]
+             - np.asarray(eps)[occ][:, None]).ravel()
+    else:
+        d = np.asarray(pair_energies, float)
     y = np.concatenate([d - freq, d + freq])
     if y.min() <= 0.0:
         return np.inf

@@ -277,10 +277,12 @@ def test_end_to_end(mol):
 
 
 def test_all_gw_routes(mol):
-    """Every GW route carries the solvent: same static reaction field through
-    static_exchange_matrix, and the same v -> v + vtilde in Sigma_c (whitened
-    DF congruence for the imaginary-frequency route, dressed ISDF metric for
-    space-time), so the three modes must agree on the IP shift."""
+    """Every GW route carries the solvent the same way: Sigma_c screened by the
+    bare interaction plus Duchemin et al.'s Eq. (18) shift, formed from the
+    dressed static screening of each route's own factors (DF for casida and
+    the imaginary-frequency route, the separable factors for space-time), so
+    the three modes must agree on the IP shift. The static_exchange_matrix
+    check below is the COHSEX operator a route without W (ADC) still uses."""
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
 
     # The mechanism itself: attaching the screening moves static_exchange_matrix

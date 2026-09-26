@@ -71,7 +71,8 @@ from src.Base.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
                                 DAVIDSON_SPACE_GB, HARTREE_TO_EV,
                                 ISDF_TILE_GB, KAPPA)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
+                                      get_orbital_energies,
+                                      require_closed_shell_or_unrestricted)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
                                      current_comm, grid_comm, lockstep,
@@ -80,7 +81,7 @@ from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
                                      replicate)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
 from src.SingleReference.GW.qp_energy import calc_qp_energy
@@ -93,7 +94,8 @@ from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
-from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_imaginary_frequency, spin_summed)
 
 
 #: Unit-vector guesses per requested root. One each is what a diagonal-dominant
@@ -708,6 +710,7 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     (`_QPStageTimings`, summed over evGW's cycles, whose count is
     `qp_cycles`).
     """
+    require_closed_shell_or_unrestricted(mf, 'solve_bse_isdf', mol=mol)
     t = {}
     stats = {}
     if W_aux is not None and (isinstance(qp, str) or screen_at == 'qp' or
@@ -957,6 +960,7 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
     transition_dipole and exciton_descriptors per root, per-stage timings (the
     Davidson's breakdown among them), and the evGW record.
     """
+    require_closed_shell_or_unrestricted(mf, 'solve_bse_df', mol=mol)
     t = {}
     stats = {}
     if progress is None:
@@ -1139,6 +1143,22 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
     if nranks > 1:
         reduce_sum(chi0, comm)
     chi0 = chi0[0]
+    return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
+
+
+def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,
+                                         tau_target=DEFAULT_TAU_TARGET):
+    """`static_screening_matrix` of an unrestricted reference: ONE W from
+    chi0_alpha + chi0_beta (`space_time.spin_summed`), each spin in its own
+    collocation X_mos[s] = X_ao C_s, on a grid spanning the transitions of
+    both spins and as many time points as the harder of the two needs."""
+    e_min, e_max = transition_range(spectra, noccs)
+    ntau = max(minimax_points_for_bse(e, n, tau_target=tau_target)[0]
+               for e, n in zip(spectra, noccs))
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                           with_sine=False, with_inverse=False)
+    chi0 = spin_summed(chi0_imaginary_frequency, X_mos, D, spectra, noccs,
+                       grid)[0]
     return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
 
 

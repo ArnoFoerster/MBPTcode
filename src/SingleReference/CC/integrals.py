@@ -8,6 +8,7 @@ since that pipeline is independently validated against NWChem's CCSDT.
 import numpy as np
 import pyscf
 from pyscf import scf
+from src.Base.environment import environment_of
 from src.Base.pyscf_interface import (
     get_effective_one_electron_integrals,
     get_antisymmetrized_spin_block_eri,
@@ -17,12 +18,38 @@ from src.Base.pyscf_interface import (
 )
 
 
+def refuse_environment(mf, who):
+    """Coupled cluster here has no continuum, and must not look as if it had.
+
+    Two ways a solvated mean field would reach these builders, both silent
+    without this: an attached screening dresses the ERIs the UHF and
+    restricted-CCSDT paths read through the integral chokepoint, while the RHF
+    spin-orbital path rebuilds its Fock and ERIs from bare integrals and never
+    sees it; and a pyscf PCM ground state enters the Fock on some paths and is
+    rebuilt away on others. Neither is a validated CC-in-continuum model, so
+    both are refused. A caller that needs a CC polarizability for a solvated
+    self-energy builds it with the environment detached
+    (`GW.reaction_field.bare_self_energy`) and adds the continuum itself.
+    """
+    if getattr(environment_of(mf), 'screens', False):
+        raise NotImplementedError(
+            f'{who}: coupled cluster here has no continuum model; detach the '
+            f'screening (bare_self_energy / detach_solvent_screening) and add '
+            f'the environment outside the CC amplitudes.')
+    if hasattr(mf, 'with_solvent'):
+        raise NotImplementedError(
+            f'{who}: this mean field converged inside a pyscf PCM, which the '
+            f'coupled-cluster integrals would keep on some paths and rebuild '
+            f'away on others; run CC on the gas-phase reference.')
+
+
 def build_spinorbital_integrals_from_mf(mf):
     """Build the spin-orbital integral dict from a converged pyscf mean-field object.
 
     Returns dict with fock, g (antisymmetrized <pq||rs>), hf_energy,
     nuclear_repulsion, nocc/nvir (spin-orbital counts), mo_coeff, mo_energy.
     """
+    refuse_environment(mf, 'build_spinorbital_integrals_from_mf')
     mol = mf.mol
 
     if isinstance(mf, scf.uhf.UHF):
@@ -135,6 +162,7 @@ def build_restricted_integrals_from_mf(mf):
     slice sizes, not on whether the space is spin-orbital or spatial.
     """
 
+    refuse_environment(mf, 'build_restricted_integrals_from_mf')
     mol = mf.mol
     mo_occ = np.asarray(mf.mo_occ)
     if mo_occ.ndim != 1 or not np.all(np.isin(mo_occ, (0.0, 2.0))):

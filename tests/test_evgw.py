@@ -425,10 +425,10 @@ def test_screen_at_selects_which_spectrum_builds_w(mf):
 
 
 def test_an_unrestricted_reference_is_driven_channel_by_channel():
-    """Both spin channels are updated and converged together on the Casida
-    route, and the dispatcher's evGW answer for one channel is that channel's
-    fixed point. The alpha HOMO of a radical is its ionization, so GW pushes
-    it down from the Kohn-Sham value."""
+    """Both spin channels are updated and converged together, on the Casida
+    route and on the space-time route alike, and the dispatcher's evGW answer
+    for one channel is that channel's fixed point. The alpha HOMO of a radical
+    is its ionization, so GW pushes it down from the Kohn-Sham value."""
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, verbose=0)
     mf = dft.UKS(mol)
     mf.xc = 'pbe0'
@@ -462,12 +462,16 @@ def test_an_unrestricted_reference_is_driven_channel_by_channel():
     ok &= check(fixed['converged'] and ordered,
                 'evGW0 converges both channels, G0W0 < evGW0 < evGW on each gap',
                 f"{fixed['cycles']} cycles")
-    try:
-        evgw_eigenvalues(mf, mol, mode='space-time')
-        ok &= check(False, 'the imaginary-axis routes refuse it themselves')
-    except NotImplementedError as exc:
-        ok &= check('restricted-spin only' in str(exc),
-                    'the imaginary-axis routes refuse it themselves')
+    # The space-time route drives the same loop: one W from both spins of the
+    # iterate, each channel's self-energy. Its frontier fixed points sit within
+    # the continuation's error of the Casida loop's -- 3.3 meV at most here,
+    # the beta pair, where Pade feeds every deep level back into W.
+    eps_st, st = evgw_eigenvalues(mf, mol, mode='space-time')
+    frontier = [(0, na - 1), (0, na), (1, nb - 1), (1, nb)]
+    worst = max(abs(eps_st[s, p] - eps[s, p]) for s, p in frontier) * HARTREE_TO_EV
+    ok &= check(st['converged'] and worst < 6e-3,
+                'the space-time route converges the same fixed point',
+                f"{st['cycles']} cycles, frontier {worst * 1e3:.2f} meV from Casida")
     return ok
 
 

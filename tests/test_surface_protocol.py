@@ -164,7 +164,8 @@ DECLARED = ('physics', 'realization', 'numerics', 'describe')
 #: derived, so that a row whose class gained no declaration shows up as a
 #: missing case instead of as nothing at all.
 DIRECT_NAMES = ('DenseBSESurface', 'DenseRPASurface', 'ExcitedStateChain',
-                'MeanFieldSurface', 'QuasiparticleSurface', 'RPABSESurface',
+                'MeanFieldQPSurface', 'MeanFieldSurface',
+                'QuasiparticleSurface', 'RPABSESurface',
                 'RPAGroundStateChain', 'RPAQPSurface')
 
 
@@ -204,7 +205,8 @@ def direct_surfaces(mol, hf, ks):
     from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                               QuasiparticleSurface)
     from src.gradients.excited_state import ExcitedStateChain
-    from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
+    from src.gradients.rpa_bse_surface import (MeanFieldQPSurface,
+                                               RPABSESurface, RPAQPSurface)
     from src.gradients.rpa_ground_state import RPAGroundStateChain
     from src.properties.optimize import MeanFieldSurface
 
@@ -214,6 +216,9 @@ def direct_surfaces(mol, hf, ks):
         'MeanFieldSurface': (
             MeanFieldSurface(mol, pbe0, mf=ks),
             SurfacePhysics(ks_pbe0, None)),
+        'MeanFieldQPSurface': (
+            MeanFieldQPSurface(mol, pbe0, mf=ks, state=0),
+            SurfacePhysics(ks_pbe0, ChargedExcitation(homo, -1))),
         'RPAGroundStateChain': (
             RPAGroundStateChain(mol, rhf, mf=hf),
             SurfacePhysics(rpa_hf, None)),

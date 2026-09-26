@@ -268,6 +268,88 @@ def reorganization(surface_target, state_from, state_target):
     return energy_at(surface_target, state_from['mol']) - state_target['e_total']
 
 
+#: The four energies of the four-point scheme: state a or b, at a's or b's
+#: geometry.
+FOUR_POINT_KEYS = ('a_at_a', 'a_at_b', 'b_at_a', 'b_at_b')
+
+
+def reorganization_four_point(surface_a=None, surface_b=None, mol_a=None,
+                              mol_b=None, state_a=None, state_b=None,
+                              energies=None, lambda_outer=None,
+                              outer_surfaces=None):
+    """Four-point reorganization energy between states a and b, in Hartree.
+
+        lambda_a = E_a(R_b) - E_a(R_a)    a relaxing from b's geometry
+        lambda_b = E_b(R_a) - E_b(R_b)    b relaxing from a's geometry
+        lambda_inner = lambda_a + lambda_b
+
+    (Nelsen, Blackstock and Kim, J. Am. Chem. Soc. 109, 677 (1987)), for a
+    neutral a and its ion b, say. Each energy is evaluated on its state's own
+    surface (`energy_at`, on the surface's own mean field), or TAKEN AS GIVEN
+    from `energies` -- {'a_at_a', 'a_at_b', 'b_at_a', 'b_at_b'} -- which is how
+    a geometry no quasiparticle surface reaches enters: the ring-opened
+    radical anion of a carbonate relaxes on a UKS-PCM surface
+    (`MeanFieldSurface` in the continuum), and its energies and geometry come
+    from there. A given energy is used as it is, never re-evaluated.
+
+    state_a, state_b: `relax_state` records; they supply the geometries and
+        the two diagonal energies.
+    mol_a, mol_b: the geometries, when there is no record.
+    lambda_outer: the solvent's (outer-sphere) reorganization, given; or
+    outer_surfaces: (vertical, equilibrium) surfaces of the CHARGED state --
+        the same surface with `equilibrium=False` and `True` -- whose
+        difference at R_b is lambda_s = -Delta E_ss >= 0, the slow
+        polarization's relaxation around the new charge.
+
+    Returns {'lambda_a', 'lambda_b', 'lambda_inner', 'lambda_outer',
+    'lambda', 'energies', 'sources'}; 'lambda' = inner + outer is the
+    `lambda_total` of `rates.marcus_rate`, and 'lambda_outer' the
+    `lambda_classical` of `rates.fc_weighted_dos` when the inner modes are
+    treated quantum mechanically.
+    """
+    mols = {'a': mol_a if mol_a is not None else (state_a or {}).get('mol'),
+            'b': mol_b if mol_b is not None else (state_b or {}).get('mol')}
+    surfaces = {'a': surface_a, 'b': surface_b}
+    given = dict(energies or {})
+    unknown = set(given) - set(FOUR_POINT_KEYS)
+    if unknown:
+        raise ValueError(f'unknown four-point energies {sorted(unknown)}; the '
+                         f'keys are {FOUR_POINT_KEYS}')
+    for name, record in (('a', state_a), ('b', state_b)):
+        if record is not None:
+            given.setdefault(f'{name}_at_{name}', record['e_total'])
+    out, sources = {}, {}
+    for key in FOUR_POINT_KEYS:
+        state, _, geometry = key.partition('_at_')
+        if key in given:
+            out[key], sources[key] = float(given[key]), 'given'
+            continue
+        if surfaces[state] is None or mols[geometry] is None:
+            raise ValueError(
+                f'{key}: neither given nor computable -- it needs '
+                f'surface_{state} and the geometry of state {geometry}')
+        out[key] = float(energy_at(surfaces[state], mols[geometry]))
+        sources[key] = 'surface'
+    if lambda_outer is not None and outer_surfaces is not None:
+        raise ValueError('lambda_outer and outer_surfaces both given; pass one')
+    outer, sources['lambda_outer'] = 0.0, None
+    if lambda_outer is not None:
+        outer, sources['lambda_outer'] = float(lambda_outer), 'given'
+    elif outer_surfaces is not None:
+        if mols['b'] is None:
+            raise ValueError('outer_surfaces needs the geometry of state b')
+        vertical, equilibrium = outer_surfaces
+        outer = (energy_at(vertical, mols['b'])
+                 - energy_at(equilibrium, mols['b']))
+        sources['lambda_outer'] = 'surface'
+    lambda_a = out['a_at_b'] - out['a_at_a']
+    lambda_b = out['b_at_a'] - out['b_at_b']
+    return {'lambda_a': lambda_a, 'lambda_b': lambda_b,
+            'lambda_inner': lambda_a + lambda_b, 'lambda_outer': outer,
+            'lambda': lambda_a + lambda_b + outer, 'energies': out,
+            'sources': sources}
+
+
 def vibronic_analysis(surface, state, mol_gs, mf_gs, hess=None, top=8,
                       verbose=True):
     """Huang-Rhys factors by BOTH routes, plus the sum rule that ties them.

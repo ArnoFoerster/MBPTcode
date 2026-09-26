@@ -68,18 +68,28 @@ from src.Base.constants import (CD_NFREQ, CD_NFREQ_MAX, CD_NTAU,
                                 QP_POLE_OFFSET_MIN, QP_POLE_STRENGTH_MIN,
                                 RESIDUE_FREQ_MARGIN, RESIDUE_ON_CONTOUR_TOL,
                                 SOP_FIT_STRIDE, SOP_N_POLES)
-from src.Base.pyscf_interface import get_orbital_energies
+from pyscf import scf as pyscf_scf
+
+from src.Base.environment import environment_of
+from src.Base.pyscf_interface import (get_orbital_energies,
+                                      require_closed_shell_or_unrestricted,
+                                      spin_index)
 from src.Base.utils.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.time_frequency import TimeFrequencyGrid
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
+from src.SingleReference.GW.reaction_field import (
+    separable_gauge_transform, separable_quasiparticle_shift)
 from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
                                                    LaplaceRealScreening,
                                                    ov_energies, screening_aux)
 from src.SingleReference.GW.space_time import separable_factors
+from src.SingleReference.LinearResponse.davidson import (
+    static_screening_matrix, static_screening_matrix_unrestricted)
 from src.SingleReference.LinearResponse.space_time import (
     laplace_representation_error, owned_frequency_blocks,
-    polarizability_projected_sweep, three_index_ov, three_index_slice)
+    polarizability_projected_sweep, spin_summed, three_index_ov,
+    three_index_slice)
 from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
 
 
@@ -359,7 +369,7 @@ def qp_energy_cd(p, Bp, eps, nocc, nu_points, nu_weights, xc_correction=0.0,
     return w, z, residue_set(eps, nocc, w)
 
 
-def cd_grid_range(eps, nocc, e_min_below_gap=None):
+def cd_grid_range(eps, nocc, e_min_below_gap=None, pair_energies=None):
     """(e_min, e_max) the contour's imaginary-time grid is fitted on.
 
     e_min reaches BELOW the particle-hole gap, to gap - e_min_below_gap and by
@@ -370,13 +380,22 @@ def cd_grid_range(eps, nocc, e_min_below_gap=None):
 
     Separate from `cd_frequency_grid` so that a caller recording WHAT RANGE a
     surface was fitted on reads the same rule the grid was built from.
+
+    pair_energies: the screening's particle-hole energies when they are not
+    the ones (eps, nocc) spans -- both spins of an unrestricted reference; the
+    range and the default shift then follow them.
     """
-    eps = np.asarray(eps, float)
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    gap = eps[virt].min() - eps[occ].max()
-    e_max = eps[virt].max() - eps[occ].min()
-    shift = (gap_scaled_w0(eps, nocc) if e_min_below_gap is None
-             else float(e_min_below_gap))
+    if pair_energies is not None:
+        d = np.asarray(pair_energies, float)
+        gap, e_max = float(d.min()), float(d.max())
+        shift = 0.5 * gap if e_min_below_gap is None else float(e_min_below_gap)
+    else:
+        eps = np.asarray(eps, float)
+        occ, virt = get_occ_virt_indices(eps, nocc)
+        gap = eps[virt].min() - eps[occ].max()
+        e_max = eps[virt].max() - eps[occ].min()
+        shift = (gap_scaled_w0(eps, nocc) if e_min_below_gap is None
+                 else float(e_min_below_gap))
     if gap - shift <= 0:
         raise ValueError(f'e_min_below_gap {shift} exceeds the gap {gap:.4f}: '
                          f'the imaginary-time grid would be asked to represent '
@@ -385,7 +404,7 @@ def cd_grid_range(eps, nocc, e_min_below_gap=None):
 
 
 def cd_frequency_grid(eps, nocc, ntau=CD_NTAU, nfreq_cd=CD_NFREQ, w0_cd=None,
-                      e_min_below_gap=None):
+                      e_min_below_gap=None, pair_energies=None):
     """(nu, nu_weights, grid, w0) of the contour-deformation quadrature.
 
     The nu axis is Gauss-Legendre scaled to w0, which defaults to half the
@@ -402,9 +421,16 @@ def cd_frequency_grid(eps, nocc, ntau=CD_NTAU, nfreq_cd=CD_NFREQ, w0_cd=None,
     cosine transform alone would want only [gap, e_max], and widening the range
     costs time points -- which is why `CD_NTAU` is 24 and not the 18 the
     imaginary axis alone converges at.
+
+    pair_energies: see `cd_grid_range`; w0 is then half their smallest.
     """
-    e_min, e_max = cd_grid_range(eps, nocc, e_min_below_gap)
-    w0 = gap_scaled_w0(eps, nocc) if w0_cd is None else float(w0_cd)
+    e_min, e_max = cd_grid_range(eps, nocc, e_min_below_gap, pair_energies)
+    if w0_cd is not None:
+        w0 = float(w0_cd)
+    elif pair_energies is not None:
+        w0 = 0.5 * float(np.min(pair_energies))
+    else:
+        w0 = gap_scaled_w0(eps, nocc)
     nu, nu_weights = gauss_legendre_grid(int(nfreq_cd), w0=w0)
     grid = TimeFrequencyGrid.minimax_split(int(ntau), e_min, e_max, nu,
                                            nu_weights, with_sine=False,
@@ -461,7 +487,7 @@ def _laplace_representation_error(real_screening, eps, omega, residues):
 
 def _contour_roots(continuation, states, seeds, admission, Bps, wcs, eps, nocc,
                    nu, nu_weights, xc_correction, offset, relax, n_poles,
-                   sop_stride, real_screening):
+                   sop_stride, real_screening, pair_energies=None):
     """(roots, pole strengths, per-state records) for one contour grid."""
     # cycle: `sum_over_poles` takes `residue_set` from this module.
     from src.SingleReference.GW.sum_over_poles import (qp_energy_sop,
@@ -477,7 +503,8 @@ def _contour_roots(continuation, states, seeds, admission, Bps, wcs, eps, nocc,
         if continuation == 'sop':
             poles, amplitudes = sop_from_wc(wcs[i], nu, eps, nocc,
                                             n_poles=n_poles,
-                                            stride=sop_stride)
+                                            stride=sop_stride,
+                                            pair_energies=pair_energies)
             w_star, z = qp_energy_sop(p, amplitudes, poles, eps, nocc,
                                       xc_correction=xc_p, w0=seed)
             residues = []
@@ -518,13 +545,16 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                             auxbasis=None, radii=None, counts=None,
                             factors=None, grid_accuracy=None, sigma_x='mf',
                             dm_correction=None, eps_anchor=None,
-                            tile_gb=ISDF_TILE_GB):
+                            tile_gb=ISDF_TILE_GB, spin_channel='alpha'):
     """(quasiparticle energies in eV, pole strengths, diagnostics), no continuation.
 
-    GW@RPA on a restricted, density-fitted reference, the same quantity as
+    GW@RPA on a density-fitted reference, the same quantity as
     `calc_qp_energy(selfenergy='GW', polarizability='RPA')` and the peer of
     `space_time.solve_qp_energy_space_time`, which reaches the real axis by
-    Pade instead. Three ways off the imaginary axis live here:
+    Pade instead. In a continuum the self-energy is screened with the bare
+    interaction and the environment enters as the Eq. (18) shift, exactly as on
+    that route, so the continuations differ in how they leave the imaginary
+    axis and in nothing else. Three ways off the imaginary axis live here:
 
       'cd'      the contour deformation of the module docstring -- exact for
                 any state, and O(N^4) per residue because each one evaluates W
@@ -556,6 +586,16 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                  a constant and nothing else, so it enters as an addition to
                  the static correction and leaves the residue set and the pole
                  guard, which belong to the poles of G, on the mean field.
+                 Unrestricted: (2, nmo), read at the channel's row.
+    spin_channel: on an unrestricted reference (nocc = (nalpha, nbeta)), the
+                 channel solved. W is ONE object from chi0_alpha + chi0_beta,
+                 each spin in its own collocation X_ao C_s: proj(tau) is
+                 `spin_summed`, the explicit residue backend reads both
+                 particle-hole blocks side by side, and the grid, the pole
+                 model's bounds and the compression test follow the pair
+                 energies of both spins. G, the residue set, the Newton and
+                 its guard, the static exchange and the Eq. (18) shift are the
+                 channel's own.
     """
     if continuation not in ('cd', 'laplace', 'sop'):
         raise ValueError(f"solve_qp_energy_contour runs continuation='cd', "
@@ -563,7 +603,17 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
     # cycle: `sum_over_poles` takes `residue_set` from this module.
     from src.SingleReference.GW.sum_over_poles import compressible
 
+    require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_contour', mol=mol)
+    unrestricted = isinstance(mf, pyscf_scf.uhf.UHF)
+    spin = spin_index(spin_channel) if unrestricted else None
     eps = get_orbital_energies(mf, representation='spatial')
+    pairs = None
+    if unrestricted:
+        spectra = tuple(np.asarray(e, float) for e in eps)
+        noccs = tuple(int(n) for n in nocc)
+        pairs = np.concatenate([ov_energies(e, n)
+                                for e, n in zip(spectra, noccs)])
+        eps, nocc = spectra[spin], noccs[spin]
     states = np.atleast_1d(states).astype(int)
     mu = 0.5 * (eps[nocc - 1] + eps[nocc])
 
@@ -573,7 +623,8 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
     # whole route spent on a refusal.
     seeds, offset, relax = newton_seeds(eps, nocc, states,
                                         pole_offset=pole_offset)
-    admission = [compressible(float(w), eps, nocc) for w in seeds]
+    admission = [compressible(float(w), eps, nocc, pair_energies=pairs)
+                 for w in seeds]
     if continuation == 'sop':
         for p, seed, (admits, reach) in zip(states, seeds, admission):
             if not admits:
@@ -586,26 +637,72 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                     f'rather than their envelope and no number of them '
                     f"converges; use continuation='cd'.")
 
-    X_mo, D = (tuple(factors)[:2] if factors is not None else
-               separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
-                                 counts=counts,
-                                 grid_accuracy=grid_accuracy)[:2])
+    parts = (tuple(factors) if factors is not None else
+             separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
+                               counts=counts, grid_accuracy=grid_accuracy))
+    X_mo, D = parts[:2]
+    if unrestricted:
+        if len(parts) < 3 or parts[2] is None:
+            raise ValueError(
+                'an unrestricted reference needs the AO collocation of the '
+                'factors, (X_mo, D, X_ao[, coords]): each spin projects it on '
+                'its own orbitals')
+        X_mos = [parts[2] @ c for c in mf.mo_coeff]
+        X_mo = X_mos[spin]
+    del parts                     # the AO collocation is not held past here
+
+    # A continuum rides Duchemin et al.'s Eq. (18), as on the Pade route: the
+    # static screening in the factors' own (dressed) gauge gives the shift, and
+    # the self-energy then screens with the BARE interaction, D @ transform.
+    # Screening Sigma with the dressed factors AND adding a static term would
+    # count the same polarization twice.
+    reaction_field = None
+    transform = separable_gauge_transform(mol, environment_of(mf),
+                                          auxbasis=auxbasis)
+    if transform is not None:
+        if unrestricted:
+            w_static = static_screening_matrix_unrestricted(X_mos, D, spectra,
+                                                            noccs)
+            reaction_field = np.array([
+                separable_quasiparticle_shift(X, D, w_static, transform, n)
+                for X, n in zip(X_mos, noccs)])
+        else:
+            w_static = static_screening_matrix(X_mo, D, eps, nocc, mu=mu)
+            reaction_field = separable_quasiparticle_shift(X_mo, D, w_static,
+                                                           transform, nocc)
+        D = D @ transform
 
     # <Sigma_x - v_xc>_pp: one exchange build for the whole window, zero to
-    # round-off on a gas-phase Hartree-Fock reference.
+    # round-off on a gas-phase Hartree-Fock reference; in a continuum it
+    # carries the Eq. (18) shift.
     xc_correction = static_exchange_diagonal(mf, mol, states,
                                              dm_correction=dm_correction,
-                                             exchange=sigma_x)
+                                             exchange=sigma_x,
+                                             reaction_field=reaction_field,
+                                             spin=spin)
     if eps_anchor is not None:
-        xc_correction = xc_correction + (np.asarray(eps_anchor, float)[states]
-                                         - eps[states])
+        anchor = np.asarray(eps_anchor, float)
+        if unrestricted:
+            if anchor.shape != (2, eps.size):
+                raise ValueError(
+                    f'an unrestricted eps_anchor is one spectrum per spin, '
+                    f'shape (2, {eps.size}); got {anchor.shape}')
+            anchor = anchor[spin]
+        xc_correction = xc_correction + (anchor[states] - eps[states])
 
     # The residue term's backend, built only where a residue can ask for it:
     # the pole model never evaluates W off the imaginary axis. The explicit one
     # holds C_ov, which depends on no state and on no grid, so it is built once
     # here; the cubic one reads proj(tau) and is rebuilt with it below.
     real_screening = None
-    if continuation == 'cd':
+    if continuation == 'cd' and unrestricted:
+        # both spins' particle-hole blocks side by side, each at 1/sqrt(2):
+        # the backend's restricted factor 2 then counts every pair once
+        C_ov = np.hstack([three_index_ov(X, D, e, n, tile_gb=tile_gb)
+                          for X, e, n in zip(X_mos, spectra, noccs)])
+        real_screening = ExplicitRealScreening(C_ov / np.sqrt(2.0), eps, nocc,
+                                               pair_energies=pairs)
+    elif continuation == 'cd':
         real_screening = ExplicitRealScreening(
             three_index_ov(X_mo, D, eps, nocc, tile_gb=tile_gb), eps, nocc)
 
@@ -613,10 +710,15 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
     while True:
         nu, nu_weights, grid, w0 = cd_frequency_grid(
             eps, nocc, ntau=ntau, nfreq_cd=nfreq, w0_cd=w0_cd,
-            e_min_below_gap=e_min_below_gap)
-        proj_tau = polarizability_projected_sweep(X_mo, D, eps, nocc,
-                                                  grid.tau_points, mu=mu,
-                                                  tile_memory_gb=tile_gb)
+            e_min_below_gap=e_min_below_gap, pair_energies=pairs)
+        if unrestricted:
+            proj_tau = spin_summed(polarizability_projected_sweep, X_mos, D,
+                                   spectra, noccs, grid.tau_points,
+                                   tile_memory_gb=tile_gb)
+        else:
+            proj_tau = polarizability_projected_sweep(X_mo, D, eps, nocc,
+                                                      grid.tau_points, mu=mu,
+                                                      tile_memory_gb=tile_gb)
         Bps = [three_index_slice(X_mo, D, int(p), tile_gb=tile_gb)
                for p in states]
         wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, Bps,
@@ -624,12 +726,13 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
         if continuation == 'laplace':
             # The residues read the SAME proj(tau) the imaginary-axis term did,
             # through cosh instead of cos; the backend keeps it alive.
-            real_screening = LaplaceRealScreening(proj_tau, grid, eps, nocc)
+            real_screening = LaplaceRealScreening(proj_tau, grid, eps, nocc,
+                                                  pair_energies=pairs)
         del proj_tau
         roots, pole_strengths, records = _contour_roots(
             continuation, states, seeds, admission, Bps, wcs, eps, nocc, nu,
             nu_weights, xc_correction, offset, relax, n_poles, sop_stride,
-            real_screening)
+            real_screening, pair_energies=pairs)
         # Sized against the roots it just produced, and doubled at most to the
         # ceiling: the sizing needs the roots and the roots need a grid.
         resolved = cd_grid_resolves(nu, eps, roots, states)

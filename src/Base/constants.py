@@ -134,6 +134,10 @@ QP_GRAPHICAL_MAX_BISECTION = 100
 QP_Z_MIN = 0.05
 # Central-difference step (Hartree) for dSigma/dw when evaluating Z.
 QP_Z_DERIV_STEP = 1e-3
+# <S^2> above S(S+1) by more than this on an unrestricted reference is warned:
+# the quasiparticle energies of a spin-contaminated determinant describe a
+# mixture of spin states, which no correction downstream undoes.
+UHF_SPIN_CONTAMINATION_WARN = 0.1
 
 # spin factor
 GW_DENSITY_SPIN_SUM = 4.0
@@ -492,6 +496,25 @@ HESSIAN_FD_ASYMMETRY_TOL = 1e-3
 # that converged to a symmetry-broken solution -- and the label is not
 # meaningful.
 PURITY_FLOOR = 0.99
+
+# Quasiparticle-orbital character (`properties.characters`). The window of
+# canonical orbitals Pipek-Mezey localizes, on the orbital's own side of the
+# gap and starting at the frontier; a localized orbital whose largest fragment
+# population is below the floor is reported as not cleanly assigned; two
+# candidates whose fingerprint similarities are closer than the margin make a
+# geometry-to-geometry track ambiguous.
+CHARACTER_WINDOW = 6
+LOCALIZED_ASSIGNMENT_FLOOR = 0.8
+TRACKING_MARGIN = 0.1
+
+# How many orbitals past the frontier are solved to find the lowest-energy
+# attachment or removal: G0W0 reorders states relative to the mean field, so
+# the quasiparticle LUMO is not always the first virtual, but it is never far.
+QP_ORDER_SEARCH = 4
+
+# Eq. (18) arrays kept per mean field (`reaction_field`): callers alternate
+# between the optical response and its static partner, per spin layout.
+REACTION_FIELD_CACHE_SIZE = 4
 
 # Above this nuclear charge a scalar-relativistic reference stops being
 # optional: the X2C spin-orbit operator and a non-relativistic mean field are

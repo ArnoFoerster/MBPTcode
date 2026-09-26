@@ -936,19 +936,21 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
     """
     calls = []
     local = threading.local()
-    real_radii = factor_chain.optimize_atomic_radii
+    real_radii = factor_chain.runtime_atomic_radii
     real_frames = factor_chain.atomic_frames
     real_fit = factor_chain.fit_M_stable
 
     def rank():
         return getattr(local, 'rank', 0)
 
-    def optimizer(element, basis, auxbasis, **kw):
+    def optimizer(element, basis, auxbasis, counts, **kw):
         calls.append(rank())
-        radii, error = real_radii(element, basis, auxbasis, **kw)
+        radii, error, origin = real_radii(element, basis, auxbasis, counts,
+                                          **kw)
         if rank() == 0:
-            return radii, error
-        return {k: 1.05 * np.asarray(v) for k, v in radii.items()}, error
+            return radii, error, origin
+        return ({k: 1.05 * np.asarray(v) for k, v in radii.items()}, error,
+                origin)
 
     def frames(mol, **kw):
         axes, degenerate = real_frames(mol, **kw)
@@ -958,7 +960,7 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
         out = real_fit(D, F, **kw)
         return out if rank() == 0 else out * (1.0 + 1e-6)
 
-    monkeypatch.setattr(factor_chain, 'optimize_atomic_radii', optimizer)
+    monkeypatch.setattr(factor_chain, 'runtime_atomic_radii', optimizer)
     monkeypatch.setattr(factor_chain, 'atomic_frames', frames)
     monkeypatch.setattr(factor_chain, 'fit_M_stable', fit)
 

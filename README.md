@@ -43,6 +43,12 @@ Three routes reach the same quasiparticle energy and differ only in cost:
 | `solve_qp_energy_imaginary_axis` | quadrature on an imaginary-frequency grid | O(N⁴) |
 | `solve_qp_energy_space_time` | pointwise product in imaginary time, on a separable (ISDF) factorization of the ERIs | O(N³) |
 
+All three take an unrestricted (UHF/UKS) reference, with `spin_channel=`
+naming the channel: one W from both spins' polarizabilities, the self-energy,
+static exchange and continuum shift of the channel asked for. The space-time
+route's blocked (`freq_block`, `scratch_dir`) and sliced paths stay
+restricted; ROHF/ROKS and fractional occupations are refused.
+
 A correlated density matrix is passed to any of them as
 `dm_correction=`; the old `dm_ccsd=` alias is not accepted and raises
 `TypeError`.
@@ -82,8 +88,11 @@ eigenvalues stop moving. Σ̃ is the SRG-regularized form of Marie and Loos
 ([J. Chem. Theory Comput. 19, 3943 (2023)](https://doi.org/10.1021/acs.jctc.3c00281))
 at flow s = 100 Ha⁻², since Kotani's mode A on the pole sum has no fixed
 point. `qsgw_eigenvalues` returns the spectrum, the orbitals and, for a BSE on
-top, the DF factors and static W of the result. Restricted closed shell, gas
-phase.
+top, the DF factors and static W of the result. Restricted or unrestricted
+(per-spin Fock and Σ̃ around one W), in the gas phase or a continuum: there
+the SCF's PCM potential stays in the Fock matrix every cycle and the solute's
+response to its own added charge enters as a static operator from the
+screened reaction field ΔW, whose diagonal is Duchemin et al.'s Eq. (18).
 
 **Low-scaling factorization** — the separable RI of Duchemin and Blase
 ([J. Chem. Phys. 150, 174120 (2019)](https://doi.org/10.1063/1.5090605)),
@@ -116,11 +125,31 @@ at the integral chokepoints.
 Inside GW the reaction field is then Duchemin, Guido, Jacquemin and Blase,
 Chem. Sci. 9, 4430 (2018), Eq. (18): the
 self-polarization of the orbital carrying the added charge in the *screened*
-reaction field, on every route, with Σ itself screened by the bare interaction
-— screening Σ dynamically as well counts the same polarization twice. The
+reaction field, on every route — the contour-deformation, Laplace and
+sum-over-poles continuations of the space-time route included — with Σ itself
+screened by the bare interaction; screening Σ dynamically as well counts the
+same polarization twice. The
 static COHSEX operator remains the fallback for the routes that never form W
-(ADC, an unrestricted reference); the two differ by 0.39 eV of quasiparticle
-gap on water in water. See `examples/13_solvated_gw_bse.py`.
+(ADC); the two differ by 0.39 eV of quasiparticle gap on water in water. An
+unrestricted reference takes Eq. (18) too, per spin orbital against the one W
+of both spins.
+
+A quasiparticle level in a continuum is vertical: the new charge polarizes the
+optical response only. `calc_qp_energy(..., equilibrium=True)` adds the
+solvent's relaxation around the charged state on every route,
+Eq18_p(ε_s) − Eq18_p(ε∞) on one cavity, so E^(N∓1) = E_0 ∓ ε_p is the ion in
+equilibrium with its solvent; `ChargedExcitation(..., equilibrium=True)` does
+the same on the charged surfaces, with its analytic gradient, and
+`vibronic.reorganization_four_point` turns the vertical and equilibrium
+surfaces into the outer-sphere λ_s beside the four-point inner one.
+
+An explicit polarizable first shell inside the continuum is
+`ContinuumWithSites(SolventScreening(mol, ..., cavity_atoms=shell),
+PolarizableSites(...))`: the cavity encloses the solute and the shell for the
+ground state's PCM and the optical response alike, and the surface charges
+and the induced dipoles polarize each other in one linear problem, folded into
+one kernel and so one Eq. (18) shift. Energies only; its force is refused.
+See `examples/13_solvated_gw_bse.py`.
 
 Both halves of the reaction field's nuclear derivative are analytic —
 `aux_kernel_adjoint` for the dressed metric, `static_self_energy_adjoint` for
@@ -176,8 +205,9 @@ differences of the analytic force, exact against pyscf's own analytic Hessian
 where that exists, and the only route where it does not (an ISDF mean field).
 
 **Potential-energy surfaces** — `src/properties/` computes FROM a surface
-rather than BY one. `potential_energy_surface(ground_state, excitation=None,
-charge=None, ...)` dispatches on the DECLARED physics (`src.Base.declaration`:
+rather than BY one. `potential_energy_surface(mol, scf_factory, *,
+ground_state, excitation=None, environment=None, ...)` dispatches on the
+DECLARED physics (`src.Base.declaration`:
 `GroundState`, `Excitation`, `ChargedExcitation`, `QPStates`) to the gradient
 chain that realizes it and records the realization; `compare_surfaces` refuses
 to difference two surfaces that do not share a ground-state functional and

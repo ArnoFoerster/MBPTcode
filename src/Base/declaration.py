@@ -85,11 +85,22 @@ class Excitation:
 
 @dataclass(frozen=True)
 class ChargedExcitation:
-    """E^{N-1} or E^{N+1}: E_0 -/+ eps^QP_p."""
+    """E^{N-1} or E^{N+1}: E_0 -/+ eps^QP_p.
+
+    equilibrium: the ion in equilibrium with its solvent -- the slow
+    polarization relaxed around the charge, E_0 -/+ (eps^QP_p + Delta eps^eq_p)
+    (`reaction_field.equilibrium_level_shift`) -- rather than the vertical,
+    non-equilibrium one. Meaningful in a continuum with a static response
+    only, and a different functional from the vertical surface.
+    """
     orbital: int
     charge_change: int
+    equilibrium: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.equilibrium, bool):
+            raise ValueError(f"ChargedExcitation.equilibrium="
+                             f"{self.equilibrium!r} must be a bool")
         if self.orbital < 0:
             raise ValueError(f"ChargedExcitation.orbital={self.orbital!r} must be >= 0")
         if self.charge_change not in _CHARGE_CHANGES:

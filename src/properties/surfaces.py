@@ -42,7 +42,7 @@ from src.Base.constants import OUTSIDE_TREATMENTS, SURFACE_GRID_ACCURACY
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   PhysicsMismatch, QPStates, SurfacePhysics)
 from src.Base.environment import environment_label, resolve_environment
-from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.separable_ri import default_auxbasis, resolve_isdf_grid
 from src.Base.utils.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.sum_over_poles import compressible
@@ -215,11 +215,13 @@ def realizing_classes():
     from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                               QuasiparticleSurface)
     from src.gradients.excited_state import ExcitedStateChain
-    from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
+    from src.gradients.rpa_bse_surface import (MeanFieldQPSurface,
+                                               RPABSESurface, RPAQPSurface)
     from src.gradients.rpa_ground_state import RPAGroundStateChain
     return {'DenseBSESurface': DenseBSESurface,
             'DenseRPASurface': DenseRPASurface,
             'ExcitedStateChain': ExcitedStateChain,
+            'MeanFieldQPSurface': MeanFieldQPSurface,
             'MeanFieldSurface': MeanFieldSurface,
             'QuasiparticleSurface': QuasiparticleSurface,
             'RPABSESurface': RPABSESurface,
@@ -271,8 +273,8 @@ def resolve_grid(mol, numerics):
     a `counts` that contradicts a named level is refused rather than resolved
     to either side -- `separable_factors`' rule, in the same words.
     """
-    basis = numerics.get('basis') or str(mol.basis)
-    auxbasis = numerics.get('auxbasis') or (basis + '-ri')
+    basis = numerics.get('basis') or mol.basis
+    auxbasis = numerics.get('auxbasis') or default_auxbasis(basis)
     elements = {mol.atom_pure_symbol(i) for i in range(mol.natm)}
     counts, n_start = numerics.get('counts'), numerics.get('n_start')
     radii, level = numerics.get('radii'), numerics.get('grid_accuracy')
@@ -377,6 +379,18 @@ def build_rpa_qp(row, setup):
     surface = row.cls(setup.mol, setup.scf_factory, mf=setup.mf,
                       environment=setup.environment,
                       state=setup.excitation.orbital - (nocc - 1),
+                      equilibrium=setup.excitation.equilibrium,
+                      **factorization_kwargs(setup), **excited_kwargs(setup, row))
+    return surface, excited_numerics(surface.excited)
+
+
+def build_dft_qp(row, setup):
+    """E_KS -/+ eps^QP_p, the charged state on the mean field's own energy."""
+    nocc = setup.mol.nelectron // 2
+    surface = row.cls(setup.mol, setup.scf_factory, mf=setup.mf,
+                      environment=setup.environment,
+                      state=setup.excitation.orbital - (nocc - 1),
+                      equilibrium=setup.excitation.equilibrium,
                       **factorization_kwargs(setup), **excited_kwargs(setup, row))
     return surface, excited_numerics(surface.excited)
 
@@ -417,6 +431,12 @@ def build_dense_bse(row, setup):
 
 def build_dense_qp(row, setup):
     """E_HF + E_c^dRPA -/+ eps^QP_p on the dense quasi-boson route."""
+    if setup.excitation.equilibrium:
+        raise NotImplementedError(
+            'ChargedExcitation(equilibrium=True) on the dense route: it is a '
+            'gas-phase surface, and an equilibrium-solvated ion needs a '
+            "continuum; use the isdf row, ('rpa', 'ChargedExcitation', "
+            "'space-time', 'isdf').")
     surface = row.cls(setup.mol, setup.scf_factory,
                       charge_change=setup.excitation.charge_change,
                       screening='rpa', orbital=setup.excitation.orbital)
@@ -429,7 +449,8 @@ def build_mean_field(row, setup):
     The reference mean field travels with it so that reading the declaration
     off the surface does not converge a second SCF.
     """
-    return row.cls(setup.mol, setup.scf_factory, mf=setup.mf), {}
+    return row.cls(setup.mol, setup.scf_factory, mf=setup.mf,
+                   environment=setup.environment), {}
 
 
 @functools.lru_cache(maxsize=1)
@@ -480,6 +501,10 @@ def dispatch_table():
             build_excited_chain, qp_keyword='qp_window',
             outside_treatment='scissor', reads_solver=True,
             reads_residues=True, isdf_grid=True),
+        Row('dft', 'ChargedExcitation', 'space-time', 'isdf',
+            cls['MeanFieldQPSurface'], GRID_NUMERICS | EXCITED_NUMERICS,
+            build_dft_qp, outside_treatment='mean-field', reads_residues=True,
+            isdf_grid=True),
     )
 
 

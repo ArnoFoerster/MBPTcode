@@ -40,6 +40,7 @@ from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
 
 from src.Base.constants import BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_EV
 from src.Base.declaration import SurfacePhysics
+from src.Base.environment import environment_label, resolve_environment
 from src.Base.utils.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
 from src.properties.surface import evaluate, lockstep_geometry
@@ -546,9 +547,17 @@ class MeanFieldSurface:
     the call the factory would have made. Each rank forms the force from rank
     0's orbitals with its own node's arithmetic and `mean_field_force` hands
     every rank rank 0's; the energy is the locked mean field's own.
+
+    IN A CONTINUUM (`environment`, a `SolventScreening`) every geometry's SCF
+    is the environment's own ground state -- PCM at eps_static on a cavity
+    rebuilt around that geometry (`for_geometry`) -- and the force is pyscf's
+    PCM gradient of it, or the ISDF one completed with the reaction field's
+    term. This is the surface a UKS geometry of an ion in solvent relaxes on,
+    where no correlated surface reaches: the ring-opened radical anion of a
+    carbonate, say.
     """
 
-    def __init__(self, mol, scf_factory, mf=None):
+    def __init__(self, mol, scf_factory, mf=None, environment=None):
         """`mf` is the reference mean field where the caller already has one.
 
         Only the DECLARATION reads it -- which functional E_0 is, which is a
@@ -558,18 +567,23 @@ class MeanFieldSurface:
         self.mol0 = mol
         self._scf = scf_factory
         self._mf0 = mf
+        self.environment = resolve_environment(environment, None)
 
     def _mean_field(self, mol):
-        """The factory's mean field at `mol`, converged over the ranks if it
-        was not already, and rank 0's on every rank."""
+        """The factory's mean field at `mol` in this surface's environment,
+        converged over the ranks if it was not already, and rank 0's on every
+        rank."""
         # cycle: the gradient package imports the surface protocol this module defines
         from src.gradients.factor_chain import converged_factory
 
-        return lockstep_mean_field(converged_factory(self._scf)(mol))
+        return lockstep_mean_field(
+            self.environment.for_geometry(mol).mean_field(
+                mol, converged_factory(self._scf)))
 
     def mean_field(self, mol=None, mf=None):
-        """(mol, mf): the mean field this surface evaluates on -- a gas-phase
-        surface, so the factory's own; `mf` given is used as it is."""
+        """(mol, mf): the mean field this surface evaluates on -- the
+        factory's own in this surface's environment; `mf` given is used as it
+        is."""
         mol = self.mol0 if mol is None else mol
         return mol, (self._mean_field(mol) if mf is None else mf)
 
@@ -585,13 +599,10 @@ class MeanFieldSurface:
 
     @property
     def physics(self):
-        """What this surface computes: E_0 alone, with no state on it.
-
-        No post-SCF step, so no environment of its own: whatever the factory
-        attached is already inside `mf.e_tot`, and `SurfacePhysics`'s default
-        is what a surface that resolves none declares.
-        """
-        return SurfacePhysics(self.physics_ground_state, None)
+        """What this surface computes: E_0 alone, with no state on it, in
+        the environment its SCF is converged in."""
+        return SurfacePhysics(self.physics_ground_state, None,
+                              environment_label(self.environment))
 
     def total_energy(self, mol=None, mf=None):
         mol = mol if mol is not None else self.mol0
@@ -603,7 +614,7 @@ class MeanFieldSurface:
         return np.asarray(mean_field_force(mf)), float(mf.e_tot), {}
 
     def refreeze(self, mol):
-        return MeanFieldSurface(mol, self._scf)
+        return MeanFieldSurface(mol, self._scf, environment=self.environment)
 
     def label(self):
         return 'mean-field ground state'

@@ -150,6 +150,7 @@ import json
 import os
 import tempfile
 import time
+import warnings
 
 import numpy as np
 import scipy.linalg
@@ -2605,9 +2606,53 @@ def shipped_radii():
     return raw['rows']
 
 
+def element_basis_name(basis, element):
+    """The name of the basis ONE element carries, lower-cased, for a table key.
+
+    A basis is a name for every element or a dict of per-element names (pyscf
+    accepts both; a lithium-containing molecule in an augmented set needs the
+    dict, since the auxiliary sets that cover Li differ from the rest). A dict
+    gives this element's entry, or its 'default'. Lower-cased because the
+    table's keys are and pyscf's names are case-insensitive: 'cc-pVDZ' and
+    'cc-pvdz' are one basis and must be one row. An explicit basis DEFINITION
+    (shells, not a name) has no row to look up and is refused by name.
+    """
+    name = basis.get(element, basis.get('default')) if isinstance(basis, dict) \
+        else basis
+    if not isinstance(name, str):
+        raise TypeError(f'the basis for {element} is not a named set '
+                        f'({type(name).__name__}); the radii table is keyed on '
+                        f'basis names, so pass a name or explicit radii.')
+    return name.strip().lower()
+
+
+def default_auxbasis(basis):
+    """<basis>-ri, element by element for a per-element basis."""
+    if isinstance(basis, dict):
+        return {el: element_basis_name(basis, el) + '-ri' for el in basis}
+    return str(basis) + '-ri'
+
+
+def single_basis_name(basis):
+    """The one basis name a whole molecule carries, for a per-basis setting.
+
+    Accuracy levels are defined per basis name; a dict whose elements all name
+    the same set is that set, and a genuinely mixed one has no level.
+    """
+    if not isinstance(basis, dict):
+        return str(basis).strip().lower()
+    names = {element_basis_name(basis, el) for el in basis}
+    if len(names) != 1:
+        raise ValueError(f'accuracy levels are defined per basis name, and this '
+                         f'per-element basis mixes {sorted(names)}; pass four '
+                         f'explicit shell counts instead.')
+    return names.pop()
+
+
 def _shipped_key(element, basis, auxbasis, counts):
     """Table key: the physics, and nothing about how the grid was found."""
-    return f'{element}|{basis}|{auxbasis}|' + \
+    return (f'{element}|{element_basis_name(basis, element)}|'
+            f'{element_basis_name(auxbasis, element)}|') + \
            ','.join(str(int((counts or {}).get(name, 0))) for name in _SHELL_ORDER)
 
 
@@ -2620,7 +2665,8 @@ def _tabulated_counts(element, basis, auxbasis):
     out = []
     for key, row in shipped_radii().items():
         el, bas, aux, counts = key.split('|')
-        if (el, bas, aux) != (str(element), str(basis), str(auxbasis)):
+        if (el, bas, aux) != (str(element), element_basis_name(basis, element),
+                              element_basis_name(auxbasis, element)):
             continue
         out.append((row['points'], f'({counts}) {row["points"]} pts'
                                    + ('' if row.get('gated', True)
@@ -2652,8 +2698,8 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
     the optimizer and takes recipe arguments this does not: the radii and
     whether the nuclear cusp is sampled, which together are the grid.
     """
-    auxbasis = auxbasis or (str(basis) + '-ri')
-    hit = shipped_radii_lookup(element, str(basis), str(auxbasis), counts)
+    auxbasis = auxbasis or default_auxbasis(basis)
+    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
     if hit is None:
         raise KeyError(
             f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
@@ -2661,6 +2707,37 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
             f'basis: {_tabulated_counts(element, basis, auxbasis)}.')
     radii, _, origin = hit
     return radii, origin
+
+
+def runtime_atomic_radii(element, basis, auxbasis, counts, n_start=1):
+    """(radii, fit_error, origin): the shipped row, or a run-time optimization.
+
+    A missing row is honoured, never silently: the warning says the grid is
+    not a validated one, and the search runs in the ELEMENT's box
+    (`search_r_max` of a multi-start search, `ELEMENT_R_MAX`) rather than the
+    5 Bohr a single descent defaults to. The two coincide for H and the
+    second row; for the diffuse-valence elements -- lithium, magnesium -- the
+    5 Bohr box cuts the density off, which is a worse grid than a missing row
+    deserves. The row itself is the fix, and it belongs in the table.
+    """
+    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
+    if hit is not None:
+        return hit
+    r_max = search_r_max(element, n_start=max(int(n_start), 2))
+    warnings.warn(
+        f'ISDF grid re-optimized at run time: no tabulated ISDF grid for '
+        f'{element}/{basis}/{auxbasis} at counts '
+        f'{sorted((counts or {}).items())} (held: '
+        f'{_tabulated_counts(element, basis, auxbasis)}); searching in a '
+        f'{r_max:g} Bohr box. That grid lands on one local '
+        f'minimum of a multi-modal surface, nothing validated it, and it is '
+        f'not reproducible from a clean checkout -- treat every number built '
+        f'on it as unvalidated until the row is in the table.',
+        RuntimeWarning, stacklevel=3)
+    radii, fit_error = optimize_atomic_radii(element, basis, auxbasis,
+                                             counts=counts, n_start=n_start,
+                                             r_max=r_max)
+    return radii, fit_error, False
 
 
 def _radii_settings(counts, r_min, r_max, l_max_second, regularization,
@@ -2718,7 +2795,9 @@ def write_json_atomic(path, payload):
 
 
 def _radii_cache_path(element, basis, auxbasis, settings):
-    key = json.dumps([element, str(basis), str(auxbasis), settings], sort_keys=True)
+    key = json.dumps([element, element_basis_name(basis, element),
+                      element_basis_name(auxbasis, element), settings],
+                     sort_keys=True)
     tag = hashlib.sha1(key.encode()).hexdigest()[:12]
     d = os.path.join(os.path.dirname(__file__), 'data', 'radii_cache')
     return os.path.join(d, f'{element}_{tag}.json')
@@ -2859,8 +2938,8 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         # Every rank of a distributed run that misses the table optimizes the
         # same radii into the same path, from as many nodes as the job holds.
         write_json_atomic(cache, {
-            'element': element, 'basis': str(basis),
-            'auxbasis': str(auxbasis), 'counts': counts,
+            'element': element, 'basis': element_basis_name(basis, element),
+            'auxbasis': element_basis_name(auxbasis, element), 'counts': counts,
             'settings': settings, 'fit_error': float(res.fun),
             'radii': {k: list(map(float, v)) for k, v in radii.items()}})
     except OSError:
@@ -2953,7 +3032,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
             'or four shell counts.')
     if isinstance(grid, str) and ',' not in grid:
         level = grid.strip().upper()
-        validated = ISDF_GRID_ACCURACY.get(str(basis).lower(), {})
+        validated = ISDF_GRID_ACCURACY.get(single_basis_name(basis), {})
         if level not in validated:
             raise ValueError(
                 f'grid does not exist: no interpolation grid is validated at '
@@ -2970,7 +3049,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
     else:
         counts = _explicit_counts(grid)
         asked = 'which is what was asked for explicitly'
-    auxbasis = auxbasis or (str(basis) + '-ri')
+    auxbasis = auxbasis or default_auxbasis(basis)
     # The counts naming a grid and the table HOLDING one are two questions: a
     # level validated at a basis can still have no row for one of these
     # elements. The lookup is the physics key, so this asks exactly what a
@@ -2978,7 +3057,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
     shape = ','.join(str(counts[name]) for name in _SHELL_ORDER)
     missing = []
     for element in sorted(set(elements)):
-        if shipped_radii_lookup(element, str(basis), str(auxbasis), counts) is None:
+        if shipped_radii_lookup(element, basis, auxbasis, counts) is None:
             held = _tabulated_counts(element, basis, auxbasis)
             missing.append(f'{element}: '
                            + (held if isinstance(held, str) else ', '.join(held)))
