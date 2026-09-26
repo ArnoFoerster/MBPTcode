@@ -1,7 +1,7 @@
 """The ONE entry point: every dispatch row, every refusal, and the numbers unchanged.
 
-`potential_energy_surface` exists because a surface used to be a constructor
-call with its physics implicit in it. Two relaxations of one molecule were 0.9
+`potential_energy_surface` exists because a constructor call leaves a
+surface's physics implicit in it. Two relaxations of one molecule were 0.9
 eV apart on an adiabatic energy because one E_0 was `mf.e_tot` and the other
 `mf.e_tot + (E_x^HF - E_xc) + E_c^dRPA`; two incompatible quasiparticle windows
 ran under one name; `solver` had three defaults; and an ISDF grid nobody

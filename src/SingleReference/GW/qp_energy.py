@@ -131,23 +131,8 @@ def refuse_unbuilt_casida_solver(solver, mf, mol, tda):
         return
     n_ov = casida_pair_count(mf, mol)
     if solver == 'auto':
-        # cycle: bse.py drives this dispatcher for the quasiparticle diagonal.
-        # LinearResponse.bse is a parallel, not-yet-landed port; solver='auto'
-        # is calc_qp_energy's default, so a hard import here would break every
-        # default mode='casida' call rather than only the ones this rule was
-        # meant to catch. Fall back to proceeding (dense) with a warning until
-        # it lands -- solver='dense'/'davidson' name the choice explicitly and
-        # need no such fallback.
-        try:
-            from src.SingleReference.LinearResponse.bse import solver_choice
-        except ImportError:
-            warnings.warn(
-                "LinearResponse.bse.solver_choice is not available yet, so "
-                "the dense (A, B) pair's memory rule cannot be checked for "
-                "solver='auto'; proceeding as if it fit. Pass solver='dense' "
-                "once you have confirmed the pair fits, to silence this.",
-                RuntimeWarning, stacklevel=3)
-            return
+        # cycle: bse.py drives this dispatcher for the quasiparticle diagonal
+        from src.SingleReference.LinearResponse.bse import solver_choice
         if solver_choice(n_ov, tda) == 'dense':
             return
     reached = ('the memory rule refuses the dense (A, B) pair at '
@@ -1225,10 +1210,9 @@ def _qp_energy_imaginary_axis_route(mf, mol, mode_key, continuation, selfenergy,
         # Deferred: contour_deformation.py's chi0 comes from
         # LinearResponse.space_time's polarizability_projected_sweep /
         # three_index_ov / three_index_slice / owned_frequency_blocks and
-        # LinearResponse.imaginary_frequency's frequency_factor, which are a
-        # parallel port and may not exist yet -- keeping this import out of
-        # the module top level means mode='casida'/'imagfrequency'/'space-time'
-        # with continuation='pade' stay unaffected either way.
+        # LinearResponse.imaginary_frequency's frequency_factor; kept out of
+        # the module top level, so mode='casida'/'imagfrequency'/'space-time'
+        # with continuation='pade' never import them.
         from src.SingleReference.GW.contour_deformation import \
             solve_qp_energy_contour
 

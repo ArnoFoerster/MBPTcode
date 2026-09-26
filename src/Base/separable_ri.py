@@ -71,38 +71,21 @@ grid index cut into fixed tiles of `FIT_CHOLESKY_BLOCK` points, owned
 block-cyclically, so that no rank holds an nk-indexed array whole: the Gram
 tiles, the right-hand side, the solve and the collocation (streamed one tile
 at a time, never whole) are the rank's own tiles, and D moves to the rank's
-contiguous rows at the end. Per rank at the chlorophyllide hexamer/cc-pVTZ
-(nk 117762, nao 10980, 9090 AOs with l <= 2, naux 28236), GB:
-
-  array                          replicated     rows, 8 ranks   16 ranks
-  Gram S, lower tiles            110.9          7.2             3.7
-  (F D^T)^T, then M^T            26.6           3.4             1.7
-  X and X[:, l<=2] w             10.3+10.3+8.6  1.3 + 1.1       0.7 + 0.6
-  X on the output rows           -              1.4             0.7
-  auxiliary collocation          26.6           3.4             1.7
-  gathered panel, update block   -              0.5 + 0.5       0.5 + 0.5
-  D, X_mo, X_ao                  47.2           5.9             3.0
-  metric LU, through the pass    6.4            6.4             6.4
-  a shell block's (mu nu|P)      17.4 + 14.4    1.7 + 1.7       1.7 + 1.7
-  its co-densities rho(r_k)      59.9           0.26 a tile     0.26 a tile
-  V^1/2 for D, rank 0 / others   44.7 / 44.7    12.8 / 0.12     12.8 / 0.12
-  peak: Gram/pass/Cholesky/D     ~300 (pass)    21/23/13/19     14/17/7/16
+contiguous rows at the end, so every nk-indexed array divides by the rank
+count and what stays whole on a rank is metric-sized.
 
 A shell block's three-centre integrals are those of the pairs it keeps
-(`KeptIntegrals`). Replicated, one f shell over every nu and its l <= 2
-copy; by rows, the largest kept block -- a diffuse Mg p shell, 7.6e3 pairs
--- and one integral call no larger. The screening keeps a pair by distance:
-1.0, 0.66, 0.12 and 0 of the pairs at 0-2, 2-4, 4-6 and beyond 6 A in
-naphthalene, pentacene and a Mg-chlorin alike, so the chlorophyllide
-dimer's per-shell counts with their cross-monomer part doubled bound the
-hexamer's: 8% of all pairs kept in the dimer, 28% of that Mg block's.
+(`KeptIntegrals`): replicated, one f shell over every nu and its l <= 2
+copy; by rows, the largest kept block and one integral call no larger. The
+screening keeps a pair by distance -- 1.0, 0.66, 0.12 and 0 of the pairs at
+0-2, 2-4, 4-6 and beyond 6 A -- so the kept count grows linearly with size.
 
 The metric root: `aux_metric_sqrt` holds up to seven metric-sized arrays at
 once on every rank (numpy's eigh copies the metric and asks 2 naux^2 of
 workspace; the root is formed from two more copies), where
 `RowFit.metric_root_rows` forms it on rank 0 alone in two (`metric_root`)
 and streams it in slabs of `block` rows, so the D step's peak is rank 0's
-12.8 GB beside its own tiles. The root is `aux_metric_sqrt`'s to 1e-13.
+metric root beside its own tiles. The root is `aux_metric_sqrt`'s to 1e-13.
 
 What stays replicated is the metric's LU through the pass. It cannot be
 cut: each block's coefficients are solved before the sum over blocks on the
@@ -123,20 +106,8 @@ the row tile's owner over the streamed column tiles, a shell block's
 (mu nu|P) adjoint by the block's owner over the streamed U, the metric's two
 (naux, naux) sums on rank 0; every (natm, 3) partial is gathered and added
 in its fixed order. The force is therefore the same bits at every rank
-count, and the old whole adjoint's (`isdf_derivatives.dfactor_adjoint_gauges`
-on every product pair) to the fit's conditioning. Per rank at the hexamer,
-GB, 8 / 16 ranks:
-
-  array                               8 ranks     16 ranks
-  Gram tiles, then the kept factor    7.2         3.7
-  metric LU, through the pass         6.4         6.4
-  MT_bar, Q_bar, Q, U, M^T, P_bar     3.4 each    1.7 each
-  X, B tiles; X_bar, B_bar            1.3, 1.1    0.7, 0.6
-  F_b broadcast / a block's (mu nu|P) 3.4         3.4
-  (mu nu|P)' adjoints of one batch    <= 4        <= 4
-  derivative integrals of a chunk     2 x 2.1     2 x 2.1
-  peak: pass / Gram / (mu nu|P)'      30/18/21    20/10/15
-  rank 0, the metric adjoint          25.5        25.5
+count, and matches the whole adjoint (`isdf_derivatives.dfactor_adjoint_gauges`
+on every product pair) to the fit's conditioning.
 
 The pass holds three row arrays beside the kept factor and the LU, which is
 its peak; the metric adjoint holds four metric-sized arrays on rank 0 alone
@@ -281,7 +252,7 @@ class RowFit:
 
     def _contiguous(self, tiles, ncol):
         """D's owned tiles moved to this rank's contiguous rows verbatim,
-        both sizes in the ledger."""
+        both sizes recorded in `held`."""
         self.held['D_tiles'] = sum(int(a.nbytes) for a in tiles.values())
         out = cyclic_tiles_to_blocks(tiles, self.npts, self.block, ncol,
                                      self.comm)
@@ -321,7 +292,7 @@ class KeptIntegrals:
     whole block over every nu shell and its l <= 2 copy held (nao + n2) naux
     per mu. The concatenated basis, its AO offsets and libcint's optimizer
     are built once for the pass, since `aux_e2` rebuilds all three per call
-    and a block now makes one call per run. The optimizer is the one a
+    and a block makes one call per run. The optimizer is the one a
     whole-block call builds (`getints3c` over bas[:max(i1, j1)], every
     orbital shell): its per-pair data exist only below a primitive count and
     libcint evaluates a triplet another way without them, so a call over
@@ -567,33 +538,22 @@ def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     max_k |chi_mu(r_k) chi_nu(r_k)|, is exact to the tolerance.
 
     BLOCKED over the first AO index, because the unscreened intermediates do not
-    fit. At dodecacene/cc-pVTZ the full D_ao is n_k x n_ao x n_second = 425 GB
-    and the three-centre array is 146 GB, against a 252 GB node; even hexacene
-    needs 63 + 22 GB, which is most of the 142 GB peak that run showed. Blocking
-    means only one block of each exists at a time, and screening is applied
-    per block so the surviving columns are all that accumulate. Column ORDER is
-    preserved -- blocks are processed in ascending mu -- so D and F stay aligned.
+    fit: D_ao is n_k x n_ao x n_second and the three-centre array naux x n_ao x
+    n_second. Blocking means only one block of each exists at a time, and
+    screening is applied per block so the surviving columns are all that
+    accumulate. Column ORDER is preserved -- blocks are processed in ascending
+    mu -- so D and F stay aligned.
 
     block_memory_gb caps the per-block working set, and it is BOTH a memory and
-    a speed knob -- the second half of that was got wrong once and is worth
-    stating precisely. The total INTEGRAL work does not depend on how the index
-    is cut up, but the number of `aux_e2` CALLS does, and each call rebuilds a
-    shell-pair list over mol.nbas x auxmol.nbas. That setup is invisible on a
-    small molecule and dominant on a large one:
-
-        naphthalene/cc-pVTZ   nbas  138, aux  310   one call vs 138: 3.26 vs 2.99 s
-        chl dimer/cc-pVTZ     nbas 1362, aux 3072   4 GB -> 2 AOs/block, 2034
-                                                    calls, 8.5e9 pair-setups
-
-    The measurement above was taken at nbas=138 and generalized to "block size
-    does not affect speed", which is false by an order of magnitude at nbas=1362
-    -- a production run sat in this loop for twenty minutes because of it. Size
-    the budget from the node, not from the default.
-    Every term is a sum over the first AO index -- the three-centre integrals,
-    the LU solve (2 naux^2 per kept column), the F D^T product -- so splitting
-    the index moves that work between calls without creating any. What it DOES
-    create is one shell-pair setup per call, which is what the naphthalene
-    measurement was too small to see.
+    a speed knob. The total INTEGRAL work does not depend on how the index is
+    cut up, but the number of `aux_e2` CALLS does, and each call rebuilds a
+    shell-pair list over mol.nbas x auxmol.nbas: invisible on a small molecule,
+    dominant on a large one, where a small budget means thousands of calls.
+    Size the budget from the memory available, not from the default. Every
+    term is a sum over the first AO index -- the three-centre integrals, the LU
+    solve (2 naux^2 per kept column), the F D^T product -- so splitting the
+    index moves that work between calls without creating any; what it DOES
+    create is one shell-pair setup per call.
 
     It does not change the answer. The screening keeps ~98% of columns at
     pair_tol=1e-10 at every block size -- the tolerance is far too tight to
@@ -714,9 +674,8 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     """M without ever holding D or F.
 
     `build_D_F` + `fit_M` is the readable form and stays the reference, but it
-    materializes D as n_k x n_rho. Even screened and blocked that is the largest
-    array in the whole method -- roughly 29 GB at hexacene and over 100 GB at
-    dodecacene, on a 252 GB node.
+    materializes D as n_k x n_rho, which even screened and blocked is the
+    largest array in the whole method.
 
     It is also unnecessary. Everything fit_M does contracts over rho:
 
@@ -725,8 +684,7 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
         row norms of D are diag(S), so the balancing comes free
 
     and both are sums over blocks of rho. So the blocks can be accumulated and
-    discarded, leaving a peak of one block plus S and FD -- at dodecacene about
-    3.2 + 0.8 GB instead of 100+.
+    discarded, leaving a peak of one block plus S and FD.
 
     Returns M identical to fit_M(*build_D_F(...)) up to floating-point summation
     order.
@@ -739,15 +697,14 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     caller has to know whether a comm was passed. None is `current_comm()`.
     The points are a `lockstep` of rank 0's at entry, IN PLACE: a caller that
     placed them itself (an `eigh` for the atomic frames, a run-time radius
-    search) may hold other last bits on another node, and the stripes of two
+    search) may hold other last bits on another rank, and the stripes of two
     grids do not add. An audited run compares the digest of M on the way out
     (`mpi_grid.agreement`), which says whether the replicated Cholesky tail
     repeated bitwise across the ranks.
 
     The accumulator is REPLICATED, not distributed: every rank holds the full
-    (naux, nk) array, 0.78 GB at the chlorophyllide dimer/cc-pVTZ. That is the
-    price of one reduction instead of a redistribution, and it is what makes
-    the pass -- hours at that size, ~2000 blocks -- the only part worth
+    (naux, nk) array. That is the price of one reduction instead of a
+    redistribution, and it is what makes the pass the only part worth
     splitting.
 
     The distributed answer is not bitwise the serial one: rank-ordered partial
@@ -956,11 +913,9 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     # definite (a Gram matrix plus a Tikhonov shift), so one Cholesky solves it
     # -- but `solve(..., overwrite_a=True)` DOES NOT OVERWRITE. Verified on
     # scipy 1.15.3: G comes back unmodified, so scipy copied it, and newer
-    # scipy routes through `_batched_linalg` which is no better. At the
-    # chlorophyllide dimer/cc-pVTZ that copy is a second 14.9 GB of Gram matrix
-    # and it is what a production run died on -- MemoryError inside
-    # scipy.linalg.solve, having asked for exactly the array this code was
-    # written to avoid allocating.
+    # scipy routes through `_batched_linalg` which is no better. That copy is a
+    # second Gram matrix, exactly the array this code is written to avoid
+    # allocating.
     #
     # `posv` factors AND solves in place. Both arrays are passed as .T, which
     # for a C-contiguous array is an F-contiguous VIEW and therefore free: G is
@@ -2311,10 +2266,9 @@ def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
                        with_Z=True):
     """Returns (X, Z, M) with X[k, mu] = chi_mu(r_k) and Z = M^T V M.
 
-    with_Z=False returns None for Z: an (nk, nk) array, 111 GB and
-    2 nk^2 naux + 2 nk naux^2 = 9.7e14 flops at the chlorophyllide hexamer
-    /cc-pVTZ (nk 117762, naux 28236) on every rank, for a caller that forms
-    D = M^T V^1/2 instead and never reads it.
+    with_Z=False returns None for Z: an (nk, nk) array and 2 nk^2 naux +
+    2 nk naux^2 flops on every rank, for a caller that forms D = M^T V^1/2
+    instead and never reads it.
 
     X is returned grid-major, matching `space_time.py`.
 
@@ -2325,7 +2279,7 @@ def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
 
     streaming=True accumulates D D^T and F D^T blockwise instead of holding D
     and F, which is what makes the large end of a size series run at all: D is
-    n_k x n_rho and reaches 341 GB at undecacene/cc-pVTZ, against a 252 GB node.
+    n_k x n_rho.
     The two agree to the accuracy of the linear solve (8e-9 relative on water,
     where the difference is `fit_M`'s explicit inverse against a Cholesky solve
     on the same regularized Gram matrix -- the streaming path is the better
@@ -2504,7 +2458,7 @@ def _flat_from_radii(radii):
 #:
 #:     7.59e-02   4.50e-04   3.03e-03   1.03e-01   1.47e-02   2.61e-02
 #:
-#: Shape 0 is the plain geometric ladder, so n_start=1 is the old single
+#: Shape 0 is the plain geometric ladder, so n_start=1 is a single
 #: descent -- and it is the worst of the six. Two variations that look like
 #: fixes are not: a monotone reparametrization making coincident radii
 #: unreachable was no better, and widening r_max acts only by moving where the
@@ -2769,9 +2723,9 @@ def write_json_atomic(path, payload):
     empty or half-written file; writing to a temporary in the SAME directory and
     renaming is atomic on POSIX.
 
-    THE TEMPORARY'S NAME MUST BE UNIQUE ACROSS NODES, not merely across
-    processes. A pid identifies a process on ONE machine and repeats on the next
-    node of a multi-node job, so two ranks that share a filesystem open the same
+    THE TEMPORARY'S NAME MUST BE UNIQUE ACROSS MACHINES, not merely across
+    processes. A pid identifies a process on ONE machine and repeats on another
+    machine of the same job, so two ranks that share a filesystem open the same
     pid-named temporary, each truncating the other, and the rename then publishes
     a torn file -- a collision that cannot happen on one machine, where pids are
     unique, and so cannot be reproduced there. `mkstemp` creates the file with
@@ -2890,7 +2844,7 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     cache = _radii_cache_path(element, basis, auxbasis, settings)
     if os.path.exists(cache) and not return_candidates:
         # Tolerate a damaged cache rather than trusting it. A truncated or
-        # half-written file is not hypothetical: a SLURM array starts every task
+        # half-written file is not hypothetical: a job array starts every task
         # at once and they all optimize the same H and C radii into the same
         # path. Anything unreadable is treated as a miss and recomputed.
         try:
@@ -2936,7 +2890,8 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     try:
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         # Every rank of a distributed run that misses the table optimizes the
-        # same radii into the same path, from as many nodes as the job holds.
+        # same radii into the same path, from as many machines as the job
+        # holds.
         write_json_atomic(cache, {
             'element': element, 'basis': element_basis_name(basis, element),
             'auxbasis': element_basis_name(auxbasis, element), 'counts': counts,
@@ -3010,7 +2965,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
         row in the shipped radii table, because a missing row does not make the
         run slower, it makes it a different grid: the radii are then
         re-optimized at run time onto another local minimum of a multi-modal
-        surface, which no scored campaign describes.
+        surface, which no validation describes.
 
     `n_start` is returned alongside the counts as the recipe to re-optimize
     with should a caller go on to build a row the table does not hold. It is
@@ -3209,7 +3164,7 @@ def molecular_points_covariant(mol, radii_by_element, origin_by_element=None,
 
     Same point count and same radii; only the shell ORIENTATIONS change, so the
     cost and the accuracy at a given grid size are unaffected -- what changes is
-    that `grid(R.M) = R.grid(M)` now holds.
+    that `grid(R.M) = R.grid(M)` holds.
     """
     global _SHELLS
     if _SHELLS is None:

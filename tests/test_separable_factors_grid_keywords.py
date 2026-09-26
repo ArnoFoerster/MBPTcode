@@ -135,8 +135,8 @@ def test_grid_accuracy_agreeing_with_counts_proceeds(ethylene):
 
 
 def test_grid_accuracy_contradicting_counts_is_refused(ethylene):
-    """The dropped keyword this pairs with: G2's counts used to overwrite the
-    caller's silently, so the returned factorization was at a grid the caller
+    """Counts that contradict grid_accuracy are refused: letting G2's counts
+    overwrite the caller's would return a factorization at a grid the caller
     had explicitly asked against."""
     mol, mf = ethylene
     with pytest.raises(ValueError) as excinfo:

@@ -157,9 +157,7 @@ ISDF_TILE_GB = 4.0
 # owned block-cyclically. FIXED, never derived from the rank count: a GEMM's
 # bits depend on its call shape, so the same tile sequence whoever owns it is
 # what makes the factor, the solve and D bitwise identical at every rank
-# count. 512 keeps the trailing update's inner dimension at two BLAS panels
-# and cuts the chlorophyllide hexamer (117762 points) into 231 tiles -- 29 a
-# rank at 8 ranks, 0.48 GB a gathered panel -- and pentacene (5328) into 11.
+# count. 512 keeps the trailing update's inner dimension at two BLAS panels.
 FIT_CHOLESKY_BLOCK = 512
 
 # How many times the replicated fit's own reassociation response a different
@@ -416,8 +414,8 @@ SCF_DIFFERENTIABLE_GRAD_TOL = 1e-11
 # What a mean field is converged to when only an ENERGY is taken from it. The
 # pair above is at or below the noise floor of an exchange-correlation
 # quadrature grid, so a Kohn-Sham reference spends its cycles chasing grid
-# noise: acrolein/def2-SVP at BHLYP takes 69 cycles and 33 s to reach 1e-14
-# against 13 cycles and 7.5 s to reach this, for the same excitation energy.
+# noise -- several times the cycles this pair takes, for the same excitation
+# energy.
 # Hartree-Fock carries no grid and does not care either way.
 SCF_ENERGY_CONV_TOL = 1e-10
 SCF_ENERGY_GRAD_TOL = 1e-7
@@ -642,22 +640,19 @@ def get_method_info(method):
 # BLAS threads at or above which a pyscf-OpenMP kernel is worth running with
 # the BLAS pool held at one thread (`Base.utils.threads.blas_single_threaded`).
 # The two pools spin against each other, and the cost of that contention is
-# what the wrap removes: on sixteen cores the SCF is 117.5 s with both pools
-# wide and 9.4 s with BLAS at one. It scales with the cores there are to
-# contend over, so on two or three threads there is nothing to win and the
-# entry cost of the wrap is all that is left -- which is what this gates.
+# what the wrap removes. It grows with the threads there are to contend over,
+# so on two or three threads there is nothing to win and the entry cost of
+# the wrap is all that is left -- which is what this gates.
 BLAS_WRAP_MIN_THREADS = 4
 
 
-# Fraction of a SLURM allocation's memory that `Base.utils.memory.
+# Fraction of the job allocation's memory that `Base.utils.memory.
 # allocation_max_memory_mb` hands to pyscf's own `max_memory`. pyscf's buffers
-# (the DF tensor, the numint grid) are not the whole process: the probe that
-# found the pentacene cc-pVTZ regression measured 7.8 GB RSS at anthracene
-# cc-pVTZ with `max_memory` itself capped at 4000 MB, so mo_coeff, the ISDF
-# factors and python's own overhead already run close to as large as the
+# (the DF tensor, the numint grid) are not the whole process: mo_coeff, the
+# ISDF factors and python's own overhead can run close to as large as the
 # capped buffers do. Handing pyscf the whole allocation would leave that other
 # half nowhere to go and the job would be killed for memory it never asked
-# pyscf for; 0.6 leaves it 40% of the node.
+# pyscf for; 0.6 leaves it 40% of the allocation.
 ALLOCATION_MEMORY_FRACTION = 0.6
 
 
@@ -706,10 +701,9 @@ DAVIDSON_FLOOR_EPS_MULTIPLE = 1e3
 DAVIDSON_LINDEP = 1e-12
 # Hartree. The residual below which a Davidson correction is SIZED for
 # real_eig's linear-dependence test rather than handed over at its raw length
-# r / (d - omega). Above it the raw length clears pyscf's absolute test -- the
-# fabric probe converges anthracene/cc-pVTZ at 1e-5 on it in 18-22 cycles --
-# and leaving it raw there keeps every solve at conv_tol >= 1e-5 bitwise what
-# it was, since a root is only corrected while |r| > conv_tol.
+# r / (d - omega). Above it the raw length clears pyscf's absolute test, and
+# leaving it raw there keeps every solve at conv_tol >= 1e-5 bitwise what it
+# was, since a root is only corrected while |r| > conv_tol.
 DAVIDSON_SIZED_RESIDUAL = 1e-5
 # The smallest part of a sized Davidson correction that may lie outside the
 # trial subspace, as a fraction of the correction, for it to be added; nearly
@@ -743,9 +737,8 @@ DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
 # one tree.
 AGREEMENT_DIGEST_SEED = 1
 # 64-bit words per block of that digest. The uint64 matrix-vector product over
-# the blocks measured 18 GB/s at 4096 on the laptop (26 GB in 1.4 s) against
-# 12 GB/s at 16384 and 65536, where blake2b over the same bytes runs 0.29 GB/s;
-# the whole digest ran 10 to 15 GB/s with other jobs on the machine.
+# the blocks runs 18 GB/s at 4096 against 12 GB/s at 16384 and 65536, where
+# blake2b over the same bytes runs 0.29 GB/s.
 AGREEMENT_DIGEST_BLOCK = 4096
 
 # The (A - B) probe replicated over ranks (`LinearResponse.davidson`) runs its
@@ -771,8 +764,7 @@ BSE_ADJOINTS = ('explicit', 'grid')
 # budget or a rank count: a GEMM's bits depend on its call shape, so one tile
 # sequence is what lets the rows be handed to their owners unchanged. Each
 # rank holds its own row tiles and streams the other ranks' column tiles,
-# so a pass keeps a handful of (256, M) and (256, naux) tiles alive: a few
-# GB at the chlorophyllide hexamer (M 117762), inside ISDF_TILE_GB.
+# so a pass keeps a handful of (256, M) and (256, naux) tiles alive.
 BSE_ADJOINT_TILE_ROWS = 256
 
 # GB of float64: the largest particle-hole block C_ov = B[:, occ, virt],
@@ -780,9 +772,8 @@ BSE_ADJOINT_TILE_ROWS = 256
 # quasiparticle solves may build. The backend holds C_ov, the adjoint Cov_bar
 # of the state in its reverse pass and one more block of that size inside each
 # residue evaluation or push, three at once, whole on EVERY rank: at this limit
-# 768 GB a rank, a 1 TB node with nothing beside it. Above it the route cannot
-# run at any rank count -- the chlorophyllide hexamer's block is 2197 GB -- and
-# the answer is the Laplace backend (residues below the particle-hole gap, from
+# 768 GB a rank. Above it the route cannot run at any rank count, and the
+# answer is the Laplace backend (residues below the particle-hole gap, from
 # proj(tau)) or the pole model, which build no block.
 EXPLICIT_RESIDUE_MAX_GB = 256.0
 
@@ -799,10 +790,9 @@ BSE_ADJOINT_AUX_ROWS = 256
 # datatype. mpi4py hands the library an MPI_Count only where the library has
 # the MPI-4 large-count routines (MPI_Allreduce_c, ...), which Open MPI 5.0.x
 # does not provide; its fallback narrows the count to a C int and raises
-# MPI_ERR_ARG past 2^31 - 1. proj(tau) at the chlorophyllide hexamer is 1.9e10
-# doubles and D 3.3e9, so every collective of `Base.utils.mpi_grid` moves at
-# most this many float64 per call, in windows; below it a call is one window,
-# the unchunked call itself.
+# MPI_ERR_ARG past 2^31 - 1, a count proj(tau) and D pass at large M, so every
+# collective of `Base.utils.mpi_grid` moves at most this many float64 per
+# call, in windows; below it a call is one window, the unchunked call itself.
 MPI_COUNT_MAX = 2 ** 31 - 1
 
 # Fraction of what max_memory leaves that the distributed ISDF-K SCF
@@ -816,39 +806,34 @@ ISDF_SCF_KERNEL_MEMORY_FRACTION = 0.33
 # Auxiliary functions per slab of the metric V (or its attenuated form) that
 # the distributed ISDF-K SCF evaluates at a time to form G = M^T V: a slab is
 # a GEMM's column count, so it is fixed by the basis and not by the rank
-# count, and no rank holds V whole (7.8 GB at the chlorophyllide hexamer,
-# naux 31260; a slab is 128 MB).
+# count, and no rank holds V whole: naux^2 doubles, where a slab is 512 naux.
 ISDF_SCF_METRIC_SLAB = 512
 
 # Bytes of one thread's temporary in the element-wise work of the ISDF fit's
 # three-centre pass (`Base.separable_ri`): a shell block's test co-densities
 # are screened and built a slab of grid rows at a time, and its kept
 # (mu nu|P) rows gathered a slab of auxiliary functions at a time, so no
-# block is ever whole (3 GB of co-densities at the chlorophyllide dimer) and
-# each slab is made, scaled and reduced while it is still in cache. A cost
+# block is ever whole and each slab is made, scaled and reduced while it is still in cache. A cost
 # knob only: every element is the same product whatever the slab.
 FIT_ROW_CHUNK_BYTES = 4 << 20
 
 # Edge, in grid points, of the square tiles in which the replicated ISDF fit
 # (`Base.separable_ri`) writes the transpose of its Gram matrix's lower block
 # triangle into the upper one while balancing it: a tile's transposed read
-# touches one cache line and one page per source row, 256 of each, and 256
-# measured fastest of 32..512 at two threads. A cost knob only: every element
-# is the same two products whatever the tile.
+# touches one cache line and one page per source row, 256 of each. A cost
+# knob only: every element is the same two products whatever the tile.
 FIT_TRANSPOSE_TILE = 256
 
 # The trial space the Casida/BSE Davidson (`LinearResponse.davidson`) holds
 # before pyscf's `real_eig` collapses it. real_eig sizes that space from its
-# process-wide MAX_MEMORY (4000 MB), 103 trial pairs at the chlorophyllide
-# dimer/cc-pVDZ (504,804 pairs), and a collapse keeps only the nroots Ritz
-# vectors and applies the action to them again: under that bound 12 roots of
-# anthracene/cc-pVDZ took 49 cycles and 1294 block actions where the solve
-# never collapsed took 21 and 716, its top roots converging last. The space is
-# raised to DAVIDSON_SPACE_CYCLES of real_eig's per-cycle increment (converged
-# 12- and 16-root solves there held 353 and 379 pairs, 18 and 19 increments),
-# never past DAVIDSON_SPACE_GB of its four pair-space-long holders per trial
-# pair (990 pairs at the dimer) and never below real_eig's own bound, so every
-# solve pyscf already held whole runs exactly as it did.
+# process-wide MAX_MEMORY (4000 MB), so the trial pairs it holds fall as the
+# pair space grows, and a collapse keeps only the nroots Ritz vectors and
+# applies the action to them again: a solve that collapses takes more cycles
+# and block actions than one that never does, its top roots converging last.
+# The space is raised to DAVIDSON_SPACE_CYCLES of real_eig's per-cycle
+# increment, never past DAVIDSON_SPACE_GB of its four pair-space-long holders
+# per trial pair and never below real_eig's own bound, so every solve pyscf
+# already held whole runs exactly as it did.
 DAVIDSON_SPACE_CYCLES = 50
 DAVIDSON_SPACE_GB = 16
 
@@ -865,8 +850,7 @@ ISDF_RADII_MATCH_TOL = 1e-10
 
 # Bytes of W(i.omega) - I per chunk of the omega -> tau transform of the
 # space-time self-energy (`GW.imaginary_time`): the frequencies are folded into
-# Wt(i.tau) a chunk at a time, two at the chlorophyllide dimer/cc-pVTZ (0.87 GB
-# a frequency). The chunk is also the association of that sum -- one GEMM per
+# Wt(i.tau) a chunk at a time, naux^2 doubles a frequency. The chunk is also the association of that sum -- one GEMM per
 # chunk, added in chunk order -- which the row-distributed transform keeps, so
 # it is fixed by naux alone and never by the rank count.
 SCREENED_CHUNK_BYTES = 2 << 30

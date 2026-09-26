@@ -372,13 +372,9 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
     """The occupied-virtual block of B_Q,pq, and optionally whole rows B_Q,p:.
 
     `get_density_fitting_coefficients` returns the full (naux, norb, norb)
-    tensor: 140 GB at dodecacene/cc-pVTZ
-
-    The imaginary-frequency GW route never uses more than two slices of it: 
-    B[:, occ, virt] for chi0
-    B[:, p, :] for the self-energy--> 11 GB for dodecacene/cc-pVTZ
-
-    So we build only those
+    tensor, and the imaginary-frequency GW route never uses more than two
+    slices of it -- B[:, occ, virt] for chi0 and B[:, p, :] for the
+    self-energy -- so only those are built.
 
     Returns (C_ov, C_rows): C_ov is (naux, nocc*nvirt), already flattened the
     way the RPA kernel wants it and index-compatible with
@@ -474,14 +470,13 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             # Fallback: decompose the AO-basis (spin-independent) ERI ONCE,
             # then transform by mo_a/mo_b separately -- mirrors the has_df
             # branch's own ao_3c-then-per-spin-transform structure exactly.
-            # Decomposing eri_aa and eri_bb independently (as an earlier
-            # version of this fallback did) gives alpha and beta unrelated
-            # auxiliary bases: the aa/bb diagonal blocks come back exact
-            # either way, but the abab cross block is then unreproducible by
-            # construction (no shared Q to contract alpha against beta) --
-            # caught by DFIntegrals.reconstruct_g's cross-check against
-            # get_antisymmetrized_spin_block_eri (~0.08 max abs error on a
-            # UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
+            # Decomposing eri_aa and eri_bb independently would give alpha
+            # and beta unrelated auxiliary bases: the aa/bb diagonal blocks
+            # come back exact either way, but the abab cross block is then
+            # unreproducible by construction (no shared Q to contract alpha
+            # against beta) -- caught by DFIntegrals.reconstruct_g's
+            # cross-check against get_antisymmetrized_spin_block_eri (~0.08 max
+            # abs error on a UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
             eri_ao = mol.intor('int2e')
             kernel = environment.kernel_ao(mol)
             if kernel is not None:
@@ -643,14 +638,12 @@ def get_antisymmetrized_spin_block_eri(mol, mf, eri_chemist=None):
 
     g_aaaa = get_antisymmetrized_integrals(phys_aa)
     # For RHF, alias g_bbbb = g_aaaa (same object) instead of building an
-    # independent, numerically identical norb^4 copy (~1.2GB at cc-pVQZ CO).
+    # independent, numerically identical norb^4 copy.
     # This makes `self.g_aaaa is self.g_bbbb` true, activating
     # MP3DensityMatrixSolverUnrestricted._is_restricted()'s symmetry-reduced
-    # fast-path in compute_t3_2/compute_t1_3/compute_gamma3_blocks; that fast
-    # path's abb-from-aab relabeling had a sign/transpose bug (fixed in
-    # density_matrix.py, see compute_t3_2's abb branch) and is now verified
-    # to reproduce the full (non-fast-path) UHF branch to ~1e-18 -- see
-    # tests/test_mp3_density_matrix.py.
+    # fast-path in compute_t3_2/compute_t1_3/compute_gamma3_blocks, which
+    # reproduces the full (non-fast-path) UHF branch to ~1e-18
+    # (tests/test_mp3_density_matrix.py).
     g_bbbb = g_aaaa if not is_uhf else get_antisymmetrized_integrals(phys_bb)
     g_abab = phys_ab
     return g_aaaa, g_bbbb, g_abab

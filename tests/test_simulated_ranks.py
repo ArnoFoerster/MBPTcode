@@ -913,26 +913,24 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
 
     THE ROUTES REPLICATE THEIR INPUTS; THE CHAIN DECIDES ITS OWN. Every
     distributed entry point starts by overwriting the ranks' mean field and
-    factors with rank 0's, which is why they agree across nodes. A chain does
+    factors with rank 0's, which is why they agree across ranks. A chain does
     not: it freezes radii, interpolation points, frames and a pair layout at
-    the reference geometry, and across nodes each rank froze its own -- the
-    route gates passed on every rank of two and four nodes while the
-    end-to-end forces missed by 1.5e-3 and 5.7e-3 Ha/Bohr on the non-root
-    ranks.
+    the reference geometry, and each rank would freeze its own -- ranks on
+    different machines then carry different surfaces, whose forces differ by
+    1e-3 Ha/Bohr and more.
 
     Rank 1 is given an atomic optimizer that returns radii 5% larger, frames
-    and a fit off in their last bits -- the three ways a node differs: a local
-    descent on a multi-modal objective landing on another minimum, an `eigh`,
-    and a dense solve. None may survive: the radii, the clouds, the frames,
-    the points, the pair layout and the fit come back bitwise rank 0's. Every
-    rank runs the search, as serial code, and the counter shows it did -- the
-    lockstep after it is what makes the answer one.
+    and a fit off in their last bits -- the three ways a rank on another
+    machine differs: a local descent on a multi-modal objective landing on
+    another minimum, an `eigh`, and a dense solve. None may survive: the radii,
+    the clouds, the frames, the points, the pair layout and the fit come back
+    bitwise rank 0's. Every rank runs the search, as serial code, and the
+    counter shows it did -- the lockstep after it is what makes the answer one.
 
     A perturbation is needed to see any of this at all. Two rank THREADS run
-    the same arithmetic on the same libraries and agree bit for bit, which is
-    exactly why the defect was invisible on a laptop and appeared only across
-    nodes -- so the divergence is INJECTED here, and what is gated is that the
-    lockstep erases it.
+    the same arithmetic on the same libraries and agree bit for bit, where
+    separate processes on separate machines need not -- so the divergence is
+    INJECTED here, and what is gated is that the lockstep erases it.
     """
     calls = []
     local = threading.local()
@@ -998,7 +996,7 @@ def test_placed_points_are_rank_zeros(monkeypatch):
     Frozen frames place the points by one small matmul of the locked clouds,
     which two rank threads compute bit for bit alike; CONTINUED frames are
     re-derived at every geometry (`continued_frames`, through the `eigh` of
-    `atomic_frames`), which is where a node's own bits enter. Rank 1's
+    `atomic_frames`), which is where a rank's own bits enter. Rank 1's
     continued frames are moved in their last bits here, and every rank must
     still place rank 0's points.
     """
@@ -1025,13 +1023,13 @@ def test_placed_points_are_rank_zeros(monkeypatch):
 def test_cache_write_survives_a_shared_path(tmp_path):
     """Two ranks writing one cache path leave a whole file, and the same one.
 
-    The radii cache is written by whichever rank optimizes first, and a SLURM
-    array optimizes the same element from every node at once onto one shared
-    filesystem. A temporary named on the pid is not unique across NODES --
-    pids repeat from one node to the next -- so the two writers open the same
-    temporary, each truncating the other's bytes, and the rename then publishes
-    a torn file that every reader takes for a cache hit. Two threads of one
-    process reproduce it exactly, since they share a pid.
+    The radii cache is written by whichever rank optimizes first, and a job
+    array optimizes the same element from every machine at once onto one
+    shared filesystem. A temporary named on the pid is not unique across
+    MACHINES -- pids repeat from one machine to the next -- so the two writers
+    open the same temporary, each truncating the other's bytes, and the rename
+    then publishes a torn file that every reader takes for a cache hit. Two
+    threads of one process reproduce it exactly, since they share a pid.
 
     The payload is large enough that one `json.dump` is several writes, which
     is what gives the interleaving something to tear.
@@ -1089,17 +1087,16 @@ def test_bse_is_rank_zeros_with_perturbed_ranks(water, size):
     """The whole ISDF BSE returns RANK 0's roots when the other ranks arrive
     with different numbers -- and every rank takes rank 0's iteration.
 
-    Two defects at once, both measured across two nodes at this very
-    setting. (1) The ranks' data: rank 1's spectrum and factors are replaced
-    by rank 0's, so the reduced exchange partials belong to one calculation.
-    (2) The ranks' decisions: every rank runs the Davidson, on trial vectors
-    the block action locksteps at entry and an action output identical on
-    every rank, so every rank takes rank 0's decisions and the batch shapes
-    cannot diverge -- under real ranks the divergence showed as
-    MPI_ERR_TRUNCATE in the batch reduction and as a subspace Cholesky
-    failing on one rank alone. The vind-call and iteration counts are
-    therefore rank 0's on every rank, and the roots, locked to rank 0's on
-    the way out, are rank 0's bits.
+    Two defects at once, both seen under real ranks at this very setting. (1)
+    The ranks' data: rank 1's spectrum and factors are replaced by rank 0's, so
+    the reduced exchange partials belong to one calculation. (2) The ranks'
+    decisions: every rank runs the Davidson, on trial vectors the block action
+    locksteps at entry and an action output identical on every rank, so every
+    rank takes rank 0's decisions and the batch shapes cannot diverge -- under
+    real ranks the divergence showed as MPI_ERR_TRUNCATE in the batch reduction
+    and as a subspace Cholesky failing on one rank alone. The vind-call and
+    iteration counts are therefore rank 0's on every rank, and the roots,
+    locked to rank 0's on the way out, are rank 0's bits.
 
     Not bitwise against the serial call, and cannot be: the row split
     re-associates the sum over grid points inside the block action. 1e-10 is

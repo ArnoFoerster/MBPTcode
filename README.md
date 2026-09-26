@@ -134,8 +134,8 @@ static COHSEX operator remains the fallback for the routes that never form W
 unrestricted reference takes Eq. (18) too, per spin orbital against the one W
 of both spins.
 
-A quasiparticle level in a continuum is vertical: the new charge polarizes the
-optical response only. `calc_qp_energy(..., equilibrium=True)` adds the
+A quasiparticle level in a continuum is vertical: the added charge polarizes
+the optical response only. `calc_qp_energy(..., equilibrium=True)` adds the
 solvent's relaxation around the charged state on every route,
 Eq18_p(ε_s) − Eq18_p(ε∞) on one cavity, so E^(N∓1) = E_0 ∓ ε_p is the ion in
 equilibrium with its solvent; `ChargedExcitation(..., equilibrium=True)` does

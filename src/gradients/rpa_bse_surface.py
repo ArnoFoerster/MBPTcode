@@ -109,7 +109,7 @@ class _FollowsOrbital:
 
 
 class RPAQPSurface(_FollowsOrbital):
-    """E^{N-/+1} = E_0^dRPA -/+ eps_p^QP: the same ruling, for a QUASIPARTICLE.
+    """E^{N-/+1} = E_0^dRPA -/+ eps_p^QP: the same E_0, for a QUASIPARTICLE.
 
     A G0W0 ionization or attachment geometry optimization has exactly the
     ground-state problem the BSE one has -- the total energy of the N-/+1

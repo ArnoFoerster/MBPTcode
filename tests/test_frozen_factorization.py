@@ -52,8 +52,8 @@ def displaced(mol):
 
 
 def test_a_chain_with_no_factorization_builds_its_own(mol):
-    """The default path must not change: every existing chain constructs
-    exactly as before and simply owns a factorization now."""
+    """The default path: a chain handed no factorization builds its own and
+    owns it."""
     chain = RPAGroundStateChain(mol, rhf)
     assert isinstance(chain.factorization, FrozenFactorization)
     assert chain.basis == chain.factorization.basis

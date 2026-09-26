@@ -41,8 +41,7 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
     cycle of an eigenvalue self-consistency, where only the eigenvalues move.
     Its cost is one K -- naux nao^2 nocc through the fit -- plus the
     exchange-correlation potential on the DFT grid, and on a hybrid the grid is
-    the larger of the two: on naphthalene/cc-pVDZ/PBE0 the split is 1.00 s for
-    `nr_rks` against 0.08 s for K. Neither part divides by the number of states
+    the larger of the two. Neither part divides by the number of states
     asked for, which is what makes rebuilding it per window the waste it is.
 
     comm: defaults to `current_comm()`. Over more than one rank the matrix
@@ -53,12 +52,11 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
         the density and adds every rank's rows of the fitted tensor and block
         of the grid. Without those handles, or for another `exchange`, it is
         the replicated build: each rank's own calls on rank 0's orbitals,
-        occupations and `dm_correction`, locked at entry. The slices cost the
-        whole build to make (15 s at pentacene on four ranks against the 7.4 s
-        this stage takes), so a mean field converged one rank at a time gains
-        nothing by paying for them here. Under a multi-rank context this is a
-        COLLECTIVE in every branch: a caller running it on rank 0 alone must
-        do so under `distributed(None)`.
+        occupations and `dm_correction`, locked at entry. The slices cost more
+        to make than this whole stage, so a mean field converged one rank at a
+        time gains nothing by paying for them here. Under a multi-rank context
+        this is a COLLECTIVE in every branch: a caller running it on rank 0
+        alone must do so under `distributed(None)`.
 
     The environment's static term is NOT included, so one cached matrix serves
     every environment; `static_exchange_matrix` adds it.
@@ -74,13 +72,12 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
             if handles is not None:
                 out = _local_static_exchange(mf, mol, dm_correction, exchange)
     if handles is None:
-        # A mean field converged on each rank holds each node's own last
-        # bits: 1.3e-10 Ha apart across two nodes.
+        # A mean field converged on each rank holds that rank's own last bits.
         lockstep_mean_field(mf, comm)
         dm_correction = lockstep(dm_correction, comm)
         out = _local_static_exchange(mf, mol, dm_correction, exchange)
     # Each rank's own K, quadrature and final GEMM, even on rank 0's inputs,
-    # are its own node's arithmetic; this makes the product rank 0's.
+    # are its own arithmetic; this makes the product rank 0's.
     return lockstep(out, comm)
 
 

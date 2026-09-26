@@ -42,66 +42,39 @@ from run to run (its OpenMP GEMM adds the partial sums in thread-arrival
 order), so two evaluations, of either layout, agree to that re-association
 and are compared on an anchored bar.
 
-Per rank, factor arrays only, at the chlorophyllide hexamer/cc-pVTZ over 8
-ranks (M 117762, nmo = nao 10980, nocc 972, naux
-28236; 14721 rows): X_mo and X_ao 10.34 GB whole and 1.29 GB as rows, D 26.60
-and 3.33, X_o 0.92, X_v 9.43, the fit's (P|Q) 6.38; whole -> sliced:
-
-  stage                   read whole              GB whole -> sliced
-  between steps           -                       43.3 -> 5.9 per geometry
-  factor build            X_ao, M, (P|Q), X_mo, D 80.3 -> 86.2, then 5.9
-  factor build, row fit   one shell's (mu nu|P)   86.2 -> ~51 peak, then 5.9
-  static W, chi0 sweep    X_o, X_v, D             90.6 -> 42.9
-  QP self-energy solve    X_mo, D (+ branches)    90.6 -> 53.2
-  BSE Davidson setup      D (Zt rows), X_o        90.6 -> 34.6
-  BSE Davidson, per trial X_o                     90.6 -> 8.0
-  BSE cache               X_mo, D                 80.3 -> 42.9
-  BSE adjoint             X_mo, D + adjoints      117.2 -> 79.8
-  chi0/W adjoint sweep    X_o, X_v, D + adjoints  127.6 -> 79.8
-  dRPA energy + adjoint   X_mo, D (+ branches)    127.6 -> 90.1
-  nuclear assembly        X_mo + adjoints         117.2 -> 53.2
-  assembly on the row fit X_bar, D_bar            9.4e4 -> 72.4 (60.0 at 16)
-
-Whole, the fit (X_ao, M, (P|Q)) stays cached for every live geometry and the
-chain holds X_mo and D for the whole gradient. The adjoints X_bar and D_bar
-(36.9 GB) are whole in both layouts: they are all-reduced sums over the tau
-partition, and the orbital response and the fit adjoint contract them over
-the grid. Larger than any factor, and untouched by the layout: the fit's own
-nk^2 Gram matrix (111 GB), proj(tau) of the quasiparticle solve (ntau naux^2,
-6.4 GB per tau point) and the BSE adjoint's (naux, nocc, nvir) blocks (2.2
-TB), which is what bounds the excited-state force at this size.
+Per rank, the sliced layout holds its own rows of X_mo, X_ao and D; whole,
+the fit (X_ao, M, (P|Q)) stays cached for every live geometry and the chain
+holds X_mo and D for the whole gradient. The adjoints X_bar and D_bar are whole
+in both layouts: they are all-reduced sums over the tau partition, and the
+orbital response and the fit adjoint contract them over the grid. Larger than
+any factor, and untouched by the layout: the fit's own nk^2 Gram matrix,
+proj(tau) of the quasiparticle solve (ntau naux^2) and the BSE adjoint's
+(naux, nocc, nvir) blocks, which is what bounds the excited-state force on a
+large molecule.
 
 THE ROW FIT. `fit='rows'` (with `sliced=True`) builds the rows with
 `separable_ri.fit_rows` on the frozen points instead of cutting them from a
 whole fit: the Gram matrix, F D^T, the solve and the collocation exist only as
-each rank's tiles, and nothing whole is formed or cached at any geometry. At
-the hexamer over 8 ranks the build then peaks at about 51 GB per rank in the
-three-centre pass, every array of the fit counted (the 86.2 above counts the
-factor arrays alone; the replicated fit's own pass peaks near 300): one f
-shell's (mu nu|P) over every nu and P beside the metric's LU sets it, the
-fit's blocking decides that and no rank count lowers it, against 21 GB for the
-Gram tiles and 13 for the Cholesky (the table in `separable_ri`), and the same
-5.9 GB of rows remain. The rows are bitwise the same at every rank count, one
-rank included, and they realize the row fit's own estimator
+each rank's tiles, and nothing whole is formed or cached at any geometry.
+The build then peaks in the three-centre pass, where one f shell's (mu nu|P)
+over every nu and P beside the metric's LU sets it: the fit's blocking decides
+that and no rank count lowers it. The rows are bitwise the same at every
+rank count, one rank included, and they realize the row fit's own estimator
 (`FrozenFactorization`), which the fit adjoint then differentiates.
 
 The row fit's nuclear assembly runs in the same tiles (`row_fit_branches`,
-`separable_ri.fit_rows_adjoint`, whose table has the arrays): the fit adjoint,
-the X_mo collocation adjoint and X_mo^T X_bar, the same bits at every rank
-count. Where the whole adjoint formed on every rank the Gram matrix (111 GB),
-the test set's collocation over every product pair (nk x 1.0e8 doubles) and
-the dense (mu nu|P), it peaks per rank at 29.6 GB over 8 ranks and 20.1 over
-16, in its three-centre pass: the Gram tiles' kept factor (7.2 / 3.7), the
-metric's LU (6.4, replicated as in the forward pass), three (rows, naux)
-arrays (3 x 3.4 / 3 x 1.7) and one block's coefficients broadcast (3.4, the
-fit's blocking); beside it the X_bar and D_bar it is handed (36.9) and the
-factor rows (5.9 / 3.0) make the row above, the whole adjoint's 9.4e4 GB
-being its test-set collocation. Rank 0 alone holds four metric-sized
-arrays for the root's adjoint (25.5, at any rank count), and reads D_bar
-whole for M D_bar. What stays whole, and why: X_bar and D_bar, the kernels'
-all-reduced sums over the tau partition; and the pair layout, screened once
-per reference on the whole AO collocation (10.3 GB, when the factorization
-is built, never at a force).
+`separable_ri.fit_rows_adjoint`): the fit adjoint, the X_mo collocation adjoint
+and X_mo^T X_bar, the same bits at every rank count. Where the whole adjoint
+formed on every rank the Gram matrix, the test set's collocation over every
+product pair and the dense (mu nu|P), it peaks per rank in its three-centre
+pass: the Gram tiles' kept factor, the metric's LU (replicated as in the
+forward pass), three (rows, naux) arrays and one block's coefficients
+broadcast, beside the X_bar and D_bar it is handed and the factor rows. Rank 0
+alone holds four metric-sized arrays for the root's adjoint, at any rank
+count, and reads D_bar whole for M D_bar. What stays whole, and why: X_bar and
+D_bar, the kernels' all-reduced sums over the tau partition; and the pair
+layout, screened once per reference on the whole AO collocation (when the
+factorization is built, never at a force).
 """
 import time
 import warnings
@@ -156,7 +129,7 @@ def converged_factory(scf_factory):
     rank 0's spectrum and orbitals end on all of them. That is the one stage
     of a displaced geometry that does not otherwise divide -- every rank
     converges the same SCF, so its wall is what it was at one rank however
-    many there are, 128 s of a rank's 227 s at pentacene/cc-pVTZ on four.
+    many there are.
     Outside a region it is `mf.kernel()`, the call the factory would have made
     itself, so the serial arithmetic is bit for bit what it was. Inside one the
     mean field it builds must be density-fitted with pyscf's own DF, since the
@@ -222,11 +195,10 @@ class FrozenFactorization:
     frames on all of them; the placed points, the pair layout and the fit are
     locksteps of their own, taken where they are built. Deciding them per rank
     is invisible on one machine -- two processes there run the same arithmetic
-    on the same libraries and agree bit for bit -- and across NODES it puts
-    the ranks on different surfaces: the route gates passed on every rank of
-    two and four nodes while the end-to-end forces missed by 1.5e-3 and
-    5.7e-3 Ha/Bohr on the ranks that had frozen their own. Serially every
-    lockstep is a no-op and the arithmetic is what it was.
+    on the same libraries and agree bit for bit -- and across machines it puts
+    the ranks on different surfaces, whose end-to-end forces differ by 1e-3
+    Ha/Bohr and more. Serially every lockstep is a no-op and the arithmetic is
+    what it was.
 
     `sliced` is the LAYOUT of the factors, not a choice of functional, and is
     not among `settings`: over more than one rank each rank keeps its grid
@@ -406,7 +378,7 @@ class FrozenFactorization:
         functional, and ranks whose points differ even in the last bits carry
         forward quantities and adjoints of two different surfaces. Continued
         frames are re-derived at every geometry through an `eigh`, which is
-        where a node's own bits enter.
+        where a rank's own bits enter.
         """
         fr = continued_frames(mol, self.frames) if self.with_frames \
             else self.frames
@@ -522,8 +494,8 @@ class FactorChain:
     locked to rank 0's orbitals, and its share of the gradient -- the orbital
     response, the collocation and the fit branch it forms itself -- is one
     `lockstep` at the end of `nuclear_gradient`. Without these each rank would
-    decide its own grid and add its own node's last bits, which agrees between
-    two processes of one machine and not between two nodes.
+    decide its own grid and add its own last bits, which agree between two
+    processes of one machine and need not otherwise.
 
     `sliced` asks for a factorization whose factors are grid rows over the
     ranks (`FrozenFactorization`); None takes the given factorization's
@@ -652,7 +624,7 @@ class FactorChain:
                         mol, converged_factory(self.scf_factory))
         # Rank 0's orbitals on every rank: the chain forms X_mo = X_ao C and
         # contracts the kernels' adjoints with THIS mean field's coefficients,
-        # and another node's SCF differs from rank 0's by the phases and
+        # and another rank's SCF can differ from rank 0's by the phases and
         # degenerate rotations of its orbitals. A mean field the ranks
         # converged together arrives locked and this rewrites the same bits;
         # one each rank converged alone does not.
@@ -1061,7 +1033,7 @@ class FactorChain:
             diags['adjoint_held'] = dict(adjoint_held)
         # Rank 0's gradient on every rank: the kernels returned one set of
         # adjoints, and the orbital response, collocation and fit branches each
-        # rank forms from them carry its node's last bits, so without this the
+        # rank forms from them carry its own last bits, so without this the
         # ranks would disagree by what they added alone.
         return lockstep((grad, diags))
 

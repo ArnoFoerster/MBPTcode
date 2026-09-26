@@ -145,7 +145,7 @@ def rank_zero_walk(mol_opt, info):
     """(mol, info) of a finished walk, rank 0's on every rank.
 
     Every rank took its steps from the same evaluated numbers, so the walks
-    agree as far as the optimizer's own arithmetic is bitwise across nodes --
+    agree as far as the optimizer's own arithmetic is bitwise across ranks --
     the `eigh` of the augmented RFO matrix, the BFGS update -- and that is not
     guaranteed there. Locking the result makes the returned geometry and
     record one by construction, whatever that arithmetic did.
@@ -545,7 +545,7 @@ class MeanFieldSurface:
     index and of the grid. A factory that converges its own is used as it is,
     its orbitals locked to rank 0's, and outside a distributed region this is
     the call the factory would have made. Each rank forms the force from rank
-    0's orbitals with its own node's arithmetic and `mean_field_force` hands
+    0's orbitals with its own arithmetic and `mean_field_force` hands
     every rank rank 0's; the energy is the locked mean field's own.
 
     IN A CONTINUUM (`environment`, a `SolventScreening`) every geometry's SCF

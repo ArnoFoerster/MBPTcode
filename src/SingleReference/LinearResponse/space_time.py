@@ -131,11 +131,10 @@ class ProjRows:
     needs a whole matrix gets one frequency or one tau point at a time: the
     rank that factorizes a frequency gathers that chi0, the rank that sweeps a
     tau point gathers that slice. The adjoints come back the same way, so
-    projbar lives in the same rows (`zeros_like`, `fold`). At the
-    chlorophyllide hexamer the whole array is 153 GB and a rank's rows 19.1 at
-    eight ranks. The grid-row split of the GW stage holds chi0(i.nu) and
-    Wt(i.tau) the same way, the first axis a frequency or a tau point
-    (`gather_slices` hands a rank any slices it names).
+    projbar lives in the same rows (`zeros_like`, `fold`). The grid-row split
+    of the GW stage holds chi0(i.nu) and Wt(i.tau) the same way, the first
+    axis a frequency or a tau point (`gather_slices` hands a rank any slices
+    it names).
 
     THE ROWS ARE THE SAME BITS AT EVERY RANK COUNT. A GEMM's rows depend on
     the call's shape (`owned_frequency_blocks`), and a rank's row block is a
@@ -797,14 +796,14 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
     EVERY ROW IS THE SERIAL ROW, on any BLAS. A GEMM row is not a function of
     that row alone: OpenBLAS picks its tail kernel and its threading from the
     call's shape, so rows a rank transforms on their own differ from the
-    serial block's in the last bits. At 8 ranks on water/cc-pVDZ, 3 of 24
-    frequencies a rank, OpenBLAS 0.3.18 moves 30% of the contour-deformation
-    wc by 1 to 224 ulp where MKL 2021.4 moves none, and that broke the bitwise
-    quasiparticle roots over 8 ranks. So every serial block holding one of the
-    caller's frequencies is transformed with the serial call and the owned
-    rows are compacted to its front, in place; one rank is that call alone.
-    An output partition over frequencies therefore gathers to the serial
-    result bitwise, while a sum over frequencies still re-associates.
+    serial block's in the last bits: on water/cc-pVDZ at 3 of 24 frequencies a
+    rank, OpenBLAS moves 30% of the contour-deformation wc by 1 to 224 ulp
+    where MKL moves none, enough to break bitwise quasiparticle roots. So every
+    serial block holding one of the caller's frequencies is transformed with
+    the serial call and the owned rows are compacted to its front, in place;
+    one rank is that call alone. An output partition over frequencies therefore
+    gathers to the serial result bitwise, while a sum over frequencies still
+    re-associates.
 
     Each row a rank transforms and does not own costs 2 ntau naux^2 flops
     against the (2/3) naux^3 factorization it pays per frequency it owns, a

@@ -103,7 +103,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
       counts alone          tabulated -> the row; not tabulated -> a warning
                             and a run-time re-optimization onto another local
                             minimum of a multi-modal surface, which is a grid
-                            no campaign scored.
+                            nothing validated.
       radii alone           the radii ARE the grid; no row is consulted.
       radii+counts          where a row exists for those counts the two must
                             agree to `ISDF_RADII_MATCH_TOL` or the call is
@@ -122,8 +122,8 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
     block_memory_gb: caps the working set of the fit's blocked loops. It does
                      not change the answer, but it IS a speed knob as well as a
                      memory one -- one `aux_e2` call per block, each rebuilding
-                     a shell-pair list over nbas x auxnbas. See `build_D_F`,
-                     which carries the measurement; size it from the node.
+                     a shell-pair list over nbas x auxnbas. See `build_D_F`;
+                     size it from the memory available.
     comm:            spreads the fit's three-centre pass over ranks
                      (`build_separable_ri`); `current_comm()` when None, serial
                      without either. The call is RANK 0's on every rank twice
@@ -131,10 +131,10 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      points it placed are locksteps of rank 0's -- each rank
                      converged its own SCF, and a run-time radius
                      re-optimization or the `eigh` of the atomic frames can
-                     place the points elsewhere on another node -- and at exit
+                     place the points elsewhere on another rank -- and at exit
                      the factors are (`replicate_factors`), since the fit's
                      replicated Cholesky tail is dense arithmetic that need not
-                     repeat bitwise across nodes. Every consumer downstream
+                     repeat bitwise across ranks. Every consumer downstream
                      therefore receives identical factors and does not
                      broadcast them again.
     timings:         dict, filled at phase boundaries on every rank, same
@@ -351,10 +351,9 @@ def replicate_factors(factors, comm):
     from two different fits are not a sum of anything.
 
     Checked (`mpi_grid.lockstep(check=True)`): a fit on lockstepped orbitals
-    and points repeats bitwise across identical nodes -- the audited
-    eight-node pentacene cc-pVTZ fit found no rank apart here -- so digests
-    stand in for the 167 MB broadcast there (~47 GB at the chlorophyllide
-    hexamer), and only an array some rank holds differently is sent.
+    and points repeats bitwise across ranks on identical hardware, so digests
+    stand in for the broadcast, and only an array some rank holds differently
+    is sent.
 
     `SlicedFactors` differ between ranks by design: they are cut from arrays
     `separable_factors` already locked whole, so only the grid points they
@@ -373,13 +372,13 @@ def replicate_factors(factors, comm):
 def _ao_collocation(X_mo, mf):
     """X_ao[k, mu] = chi_mu(r_k), inverted from the MO collocation X_mo = X_ao C.
 
-    FALLBACK ONLY -- `separable_factors` now returns X_ao directly, because the
+    FALLBACK ONLY -- `separable_factors` returns X_ao directly, because the
     inversion is not always available. It is exact where it works: MO
     coefficients are S-orthonormal, C^T S C = I, so C^-1 = C^T S. But it needs a
     square C, and a mean field that dropped linear dependencies gives only a
-    left inverse, i.e. a silent projection. cc-pVQZ on the 178-atom
-    chlorophyllide dimer is past that line -- cond(S) = 1.8e7 with four
-    eigenvalues below 1e-6 -- so the AO route there must take X_ao from the fit.
+    left inverse, i.e. a silent projection. A large molecule in a
+    quadruple-zeta basis is past that line, so the AO route there must take
+    X_ao from the fit.
     """
     C = mf.mo_coeff
     if C.shape[0] != C.shape[1]:
@@ -595,7 +594,7 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     comm: rank r takes states r, r + nranks, ... and the roots are all-gathered
     back into state order, so every rank returns the whole window. The static
     term is replicated from rank 0 first: the loop must solve one calculation's
-    equation wherever a state lands, and a K built independently per node
+    equation wherever a state lands, and a K built independently per rank
     agrees only to its last bits. Nothing else changes -- Sigma arrives
     all-reduced and identical, and each root is the same scalar iteration on
     the same numbers -- so a partitioned window is BITWISE the serial one,

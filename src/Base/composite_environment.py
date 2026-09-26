@@ -104,8 +104,8 @@ class CompositeEnvironment:
 
         NOT a sum: a congruence B -> T B does not add, so a composite of two
         responding members has no single one and refuses rather than picking.
-        Today at most one member screens, so this is the delegation it looks
-        like.
+        At most one member of a composite screens (a second responding member
+        is refused), so this is the delegation it looks like.
         """
         screening = [m for m in self.members if getattr(m, 'screens', True)]
         if not screening:
