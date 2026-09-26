@@ -43,6 +43,16 @@ optional third-party one.
 | MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_davidson_lockstep` |
 | MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf` |
 | MPI: surfaces and the optimizer over ranks | `test_surface_comm`, `test_optimize_under_ranks` |
+| periodic: GDF integrals, response, W, BSE, self-energy | `test_pbc_df_integrals`, `test_pbc_casida`, `test_pbc_w`, `test_pbc_bse`, `test_pbc_amplitudes`, `test_pbc_self_energy`, `test_pbc_sigma_folding`, `test_pbc_rpa`, `test_pbc_kpath` |
+| periodic: ISDF / THC | `test_pbc_isdf_gamma`, `test_pbc_isdf_kpts`, `test_pbc_isdf_kindex`, `test_pbc_isdf_symm`, `test_pbc_isdf_rpa`, `test_pbc_isdf_gw`, `test_pbc_isdf_2d`, `test_thc_rank_grids`, `test_thc_metallic_frequency_grid` |
+| periodic: metals | `test_pbc_occupations`, `test_metallic_grid_wiring` |
+| periodic: slabs | `test_pbc_rpa_damping`, `test_pbc_low_dim_support_wiring`, `test_pbc_2d_head`, `test_pbc_smallq`, `test_pbc_wav`, `test_pbc_solvent_screening` |
+
+The periodic tests run the same way (`python tests/test_pbc_isdf_gw.py`); the
+pytest-style ones hand themselves to `pytest.main` and return its exit code.
+`test_pbc_isdf_kindex`, `test_pbc_kpath`, `test_pbc_2d_head`,
+`test_thc_metallic_frequency_grid`, `test_pbc_df_integrals`, `test_pbc_casida`
+and `test_pbc_w` take seconds; the metal and slab tests take minutes.
 
 ## The ISDF and BSE tests, in the order they build on each other
 

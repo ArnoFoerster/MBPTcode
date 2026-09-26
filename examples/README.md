@@ -2,7 +2,8 @@
 
 Each file is self-contained and runnable: `python examples/01_adc3.py`.
 All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
-(`11_bse_davidson_vs_dense.py` is cc-pVTZ).
+(`11_bse_davidson_vs_dense.py` is cc-pVTZ; `18_periodic_slab_gw.py` is a
+periodic H2 slab).
 
 | file | what it shows |
 |---|---|
@@ -21,6 +22,7 @@ All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
 | `15_excited_state_geometry_optimization.py` | two high-level entry points: S1 relaxed against S0 (`calc_adiabatic_excitation`) and the adiabatic S1-T1 gap (`calc_adiabatic_gap`), dense vs cubic-scaling ISDF/SOP |
 | `16_numerical_hessian_from_gradient.py` | a vibrational analysis built by central-differencing the analytic gradient, cross-checked against pyscf's own analytic Hessian |
 | `17_spin_orbit_coupling.py` | <S1\|H_SO\|T1/T2> at both relaxed minima from `15`'s adiabatic gap (El-Sayed's rule), plus the Herzberg-Teller dV/dq scan over the ground-state modes that finds the promoting mode |
+| `18_periodic_slab_gw.py` | the continuum of `13` for a periodic **slab** — electrolyte above, metal electrode below |
 | `19_ee_adc.py` | electronic-excitation ADC(2)/ADC(3): spin-free, matrix-free, DF, and the singlet and triplet channels |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
@@ -93,6 +95,7 @@ only valid for the bare amplitude.
     the 6 ground-state modes puts the largest |dV/dq| = 0.20 cm-1 at 1325
     cm-1, the out-of-plane wag -- the textbook promoting mode for this
     channel -- against 0.00-0.06 cm-1 for the rest (formaldehyde/cc-pVDZ)
+18  HOMO +0.309 eV / LUMO -0.427 eV  (H2 slab, water | metal electrode)
 19  adc2: S1 = 6.979 eV   T1 = 6.646 eV   E_ST = 0.333 eV
     adc3: S1 = 7.861 eV   T1 = 7.417 eV   E_ST = 0.444 eV
     (water/aug-cc-pVDZ, density-fitted)
@@ -106,3 +109,23 @@ both the cheaper choice and the correct one — pairing factors from one fit wit
 a screened interaction from another stays self-consistent and silently moves the
 spectrum. Pass `freq_block=` or `scratch_dir=` to `solve_qp_energy_space_time`
 when even the frequency-axis W does not fit; the answer is unchanged.
+
+## Periodic slabs
+
+`SlabDielectricEnvironment` + `build_dfintegrals_screened`
+(`src/SingleReference/Periodic/pbc_solvent_screening.py`) are the periodic
+counterpart of the PCM continuum in `13`. A 3D crystal has no outside, so there
+is no cavity; a slab does — the environment fills the vacuum. The closed cavity
+is replaced by an **image-charge boundary condition** at each planar interface,
+which is exactly rank 2 per in-plane momentum, so it enters the RI-V metric as a
+rank-2 update of `J(q)` and `B(q)`. Everything downstream reads only
+`PBCDFIntegrals.L`, so screened RPA / W^Q / BSE / Σ_c all follow.
+`eps_bot=np.inf` is a metal electrode; `eps_top=solvent` is the electrolyte.
+
+Slab-specific requirements: a non-negative Coulomb kernel (use the damped
+kernel from `pbc_rpa_damping` — pyscf's `get_coulG` is negative at G=0 for
+`dimension < 3`, and `low_dim_ft_type='inf_vacuum'` breaks pyscf's own
+periodic SCF), and a cavity that encloses the density
+(`leaked_density_fraction`). The single in-plane channel at q∥+G∥ = 0 is
+dropped — a mixed-representation head cannot be regularized against a
+G-diagonal `coulG`; see the module docstring.

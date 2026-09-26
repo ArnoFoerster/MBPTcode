@@ -10,9 +10,9 @@ that misses one caller passes all of them and fails at the front door.
     python tests/test_imports.py --all      everything under src/, slower
 
 The default set is the packages that change together -- Base, GW, BSE,
-LinearResponse, Solvers, and the gradients and properties built on them. `--all`
-adds ADC, CC and DensityMatrix, whose generated modules are large and slow to
-parse. Under pytest the default set runs in its own process
+LinearResponse, Solvers, Periodic, and the gradients and properties built on
+them. `--all` adds ADC, CC and DensityMatrix, whose generated modules are large
+and slow to parse. Under pytest the default set runs in its own process
 (`test_all_core_modules_import`).
 """
 import argparse
@@ -27,7 +27,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 CORE = ['src/Base', 'src/Solvers', 'src/SingleReference/GW',
-        'src/SingleReference/LinearResponse', 'src/gradients', 'src/properties']
+        'src/SingleReference/LinearResponse', 'src/SingleReference/Periodic',
+        'src/gradients', 'src/properties']
 SKIP = {'__pycache__', 'data'}
 
 
