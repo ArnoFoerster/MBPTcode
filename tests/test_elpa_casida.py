@@ -73,7 +73,7 @@ cases = {'A-B diagonal': (D + K, K, False),
          'TDA': (D + K, K, True)}
 
 # diag_dense does not report its route, so record it where it asks for one.
-# Every dense solver in the tree -- Casida and both ADC routes -- now goes
+# Every dense solver in the tree -- Casida and both ADC routes -- goes
 # through diagonalization.eigh_symmetric, so patching it there covers all of
 # them rather than only the name ADC happened to import.
 routes = []

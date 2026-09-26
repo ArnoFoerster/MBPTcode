@@ -19,10 +19,10 @@ def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
     the pole strength computed here. Everything about the quasiparticle
     targeting is in overlap_pick; everything about Z is in this function.
 
-    conv_tol is a RESIDUAL NORM (see the solver's tolerance contract). It used
-    to be handed to pyscf as its eigenvalue `tol`, from which pyscf derives a
-    residual tolerance of sqrt(tol) -- so the default 1e-6 was converging
-    roots at |r| <= 1e-3, a thousand times looser than it reads.
+    conv_tol is a RESIDUAL NORM (see the solver's tolerance contract), not
+    pyscf's eigenvalue `tol`, from which pyscf derives a residual tolerance of
+    sqrt(tol): passed there, the default 1e-6 would converge roots at
+    |r| <= 1e-3.
     """
     if ref_vec is None:
         x0 = np.zeros(nH)

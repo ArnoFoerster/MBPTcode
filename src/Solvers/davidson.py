@@ -120,10 +120,9 @@ def _default_subspace(nroots):
     Generous on purpose. davidson1 restarts by collapsing onto the nroots Ritz
     vectors alone, so a subspace only a little wider than the seed restarts
     almost immediately and then again and again, re-climbing from nroots every
-    time. That is not a slow convergence, it is a stalled one: the singlet
-    channel of ee-ADC(2)/6-31g burns 673 matrix-vector products and still
-    reports unconverged at 6*nroots+20, and converges in 46 at 10*nroots+30.
-    A 15x saving for ~40% more Krylov space is not a close call.
+    time. That is not a slow convergence, it is a stalled one: an ee-ADC(2)
+    channel that stays unconverged at 6*nroots+20 converges at 10*nroots+30 in
+    a small fraction of the matrix-vector products.
 
     Memory-limited callers pass max_subspace explicitly; that is what the knob
     is for, and the cost of turning it down is exactly the thrashing above.
@@ -180,10 +179,8 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         memory answer, and setting it low is paid for in matrix-vector
         products (see _default_subspace).
     max_cycle: davidson1 restarts by collapsing the subspace onto the nroots
-        Ritz vectors alone, where the hand-written solver this replaced kept
-        2*nroots+2 of them -- so it re-climbs out of a restart more slowly and
-        wants a budget to match (~1.5x the matrix-vector products on a
-        diagonally dominant operator, measured).
+        Ritz vectors alone, so it re-climbs out of a restart slowly and wants
+        a generous budget.
     precond: override the default Jacobi-Davidson preconditioner.
     lindep: davidson1's linear-dependence threshold, on SQUARED norms. It is
         scaled with tol_residual by default and you almost certainly want
@@ -210,8 +207,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     # davidson1 inflates its own max_space by 4*(nroots-1) and holds nroots
     # more Ritz vectors on top of it, so the trial vectors actually held
     # number max_space + 4*(nroots-1) + nroots. Invert that, so max_subspace
-    # means what it says -- the hand-written solver this replaced advertised
-    # the same knob and then overran it by up to nroots vectors per restart.
+    # means what it says.
     max_space = max(nroots, max_subspace - nroots - 4 * (nroots - 1))
     if lindep is None:
         lindep = _lindep_for(tol_residual)

@@ -492,9 +492,9 @@ class ADCSolverCSF:
         """Dense-diagonalization solve in the CSF basis; same return
         convention as ADCSolver.solve (each physical pole ONCE, not twice).
 
-        `threshold` was accepted and then ignored here while this route used a
-        bare np.linalg.eigh -- the CSF supermatrix is the same object the
-        Dyson route distributes, so it now goes to the same backend."""
+        `threshold` distributes the dense solve as on the Dyson route: the CSF
+        supermatrix is the same object, so it goes to the same backend
+        (`eigh_symmetric`)."""
         H = self.build_supermatrix(nocc, static_correction=static_correction)
         eGF, Reigv, _ = eigh_symmetric(H, threshold=threshold)
         if Reigv is None:

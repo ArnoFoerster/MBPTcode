@@ -32,9 +32,7 @@ three eigenproblems, not three tastes --
   CC/eom.py                   non-Hermitian biorthogonal (davidson_nosym1)
 Neither of the last two reduces to the first: the Casida form needs the
 (A-B) Cholesky reduction and X^2-Y^2 normalization, EOM-CC needs left/right
-biorthogonalization. A fourth, hand-written symmetric Davidson once sat
-beside the ee-ADC route; it was folded onto Solvers/davidson.py because it
-was solving the identical problem the charged route already solved, and the
-duplication had drifted three different meanings of conv_tol and three
-different answers to whether an unconverged root gets reported.
+biorthogonalization. A fourth symmetric solver would duplicate the first:
+both ADC routes solve the same problem, and one call keeps one meaning of
+conv_tol and one answer to whether an unconverged root is reported.
 """

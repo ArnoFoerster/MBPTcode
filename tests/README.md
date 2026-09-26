@@ -144,7 +144,7 @@ and checks the one-rank paths; `run_simulated(main, n)` from
 `test_elpa_casida` is the other script meant for several MPI ranks:
 
 ```bash
-srun -n 4 --mpi=pmix python tests/test_elpa_casida.py
+mpirun -n 4 python tests/test_elpa_casida.py
 ```
 
 It solves the three Casida branches and ADC's dense matrix once with every rank

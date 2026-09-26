@@ -35,8 +35,7 @@ from src.Solvers.davidson import solve_symmetric
 DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
                         # dependent long before it converges; a 59-dim
                         # open-shell sector hit exactly that. Every route
-                        # honours it -- the spin-free one used to skip the
-                        # check and hand a 20-dim operator to the solver.
+                        # honours it.
 
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 
@@ -179,10 +178,10 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                      max_subspace=None, return_parity=False,
                      dense_limit=DENSE_LIMIT, threshold=5000):
     """max_subspace caps the Davidson subspace. It is a MEMORY knob, and at
-    scale the dominant one: the doubles vector is no^2 nv^2, so naphthalene at
-    aug-cc-pVTZ carries 2.5 GB per trial vector, the solver holds the
-    operator's image alongside the subspace (so TWICE that per vector), and
-    the default 10*nroots+30 would need a terabyte of Krylov space alone.
+    scale the dominant one: the doubles vector is no^2 nv^2, the solver holds
+    the operator's image alongside the subspace (so TWICE that per trial
+    vector), and in an augmented triple-zeta basis the default 10*nroots+30
+    outgrows any memory.
 
     Turning it down is not free: the solver restarts by collapsing onto the
     nroots Ritz vectors, so a tight subspace is paid for in matrix-vector

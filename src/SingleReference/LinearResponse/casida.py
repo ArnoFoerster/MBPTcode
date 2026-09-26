@@ -115,8 +115,8 @@ class CasidaSolver:
         # Check if A-B is diagonal: only check off-diagonal norm.
         # Computed from the Frobenius norms rather than by forming
         # AmB - diag(diag(AmB)), which allocates a whole extra n_ov x n_ov array
-        # purely to be normed and discarded -- 50 GB at hexacene/cc-pVTZ, where
-        # the solve is already memory-bound. Identical value to 1e-8 relative.
+        # purely to be normed and discarded, where the solve is already
+        # memory-bound. Identical value to 1e-8 relative.
         diag_AmB_full = np.diag(AmB)
         offdiag_sq = (np.linalg.norm(AmB)**2 - np.linalg.norm(diag_AmB_full)**2)
         offdiag_norm = np.sqrt(max(offdiag_sq, 0.0))
@@ -137,8 +137,7 @@ class CasidaSolver:
             # Target matrix: (A-B)^{1/2} (A+B) (A-B)^{1/2}, formed IN PLACE in
             # ApB's buffer. ApB is dead after this line in this branch, and the
             # out-of-place form costs two further n_ov x n_ov temporaries (one
-            # per multiply) on top of the result -- at hexacene/cc-pVTZ that is
-            # the difference between ~220 GB and ~270 GB on a 252 GB node.
+            # per multiply) on top of the result.
             M = ApB
             M *= sqrt_AmB_diag[:, None]
             M *= sqrt_AmB_diag[None, :]

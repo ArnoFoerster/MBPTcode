@@ -1,12 +1,9 @@
 """The one symmetric Davidson (src/Solvers/davidson.py) that both ADC routes
 iterate on, and the two routes' use of it.
 
-There was no test here at all while the ee route carried its own hand-written
-solver, and the route that used it (spin-free, matrix-free) reached the
-iteration only on systems the other routes send to a dense eigh -- so the
-iterative path was exercised only at a dimension where the subspace nearly
-spans the problem. `dense_limit=0` forces it on a system small enough to also
-solve densely, which is the only way to compare the two.
+The iterative path is reached only on systems large enough that no dense
+reference is affordable. `dense_limit=0` forces it on a system small enough to
+also solve densely, which is the only way to compare the two.
 
 Checks:
   1. lowest-k against a dense eigh, with a degenerate pair among the roots
@@ -73,8 +70,8 @@ def check_dense_reference():
 
 
 def check_convergence_flag_is_real():
-    """Starve the solve and it must SAY so. The flag this replaced was
-    np.ones_like(e) -- a check that cannot fail."""
+    """Starve the solve and it must SAY so: a flag that is always True is a
+    check that cannot fail."""
     A = _test_matrix()
     d = np.diag(A).copy()
     with warnings.catch_warnings(record=True) as rec:
@@ -172,7 +169,7 @@ def check_charged_adc_matrix_free_matches_dense():
     print(f"charged ADC(3) dense HOMO pole vs root-following Davidson: {d:.2e} "
           f"converged={np.all(conv)}: {'OK' if ok else 'FAIL'}")
 
-    # and that flag is the solver's own, not the np.ones_like it replaced
+    # and that flag is the solver's own
     A = _test_matrix(n=200)
     dg = np.diag(A).copy()
     ref = np.zeros(200)

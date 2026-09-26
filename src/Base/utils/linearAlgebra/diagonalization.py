@@ -10,21 +10,20 @@ import scipy.linalg as la
 # mpi4py/ELPA are imported ON DEMAND, never at module import time.
 #
 # WHY (this is not a style preference): `from mpi4py import MPI` runs MPI_Init at
-# import. If the interconnect is unavailable -- e.g. a compute node whose IB
+# import. If the interconnect is unavailable -- e.g. a machine whose IB
 # device returns I/O errors -- MPI ABORTS THE PROCESS from C. It does not raise,
-# so the try/except that used to wrap this import could never catch it, and
-# merely importing this module killed the job with a bare
+# so a try/except around this import cannot catch it, and merely importing this
+# module would kill the job with a bare
 #     Abort(...) Fatal error in internal_Init_thread ... ucx function returned
 #     with failed status
-# and no Python traceback. It reached callers that never use ELPA at all, via
+# and no Python traceback, in callers that never use ELPA at all, via
 # casida.py -> diagonalization.py.
 #
 # Deferring the import is the whole fix: code that never asks for a large
-# diagonalization now never initializes MPI, so it cannot abort. Code that
-# DOES cross the ELPA threshold still gets ELPA automatically,
-# exactly as before -- no behaviour change where ELPA was actually wanted.
+# diagonalization never initializes MPI, so it cannot abort. Code that DOES
+# cross the ELPA threshold still gets ELPA automatically.
 # Set MBPT_USE_ELPA=0 to force the scipy path even above the threshold (useful
-# on a node with a broken interconnect, where MPI_Init would abort).
+# on a machine with a broken interconnect, where MPI_Init would abort).
 MPI = None
 ElpaEigensolver = None
 HAS_MPI = False
@@ -228,7 +227,7 @@ def eigh_symmetric(M, threshold=5000):
     an ISDF/RI fitting matrix, a cavity operator, a W_aux eigendecomposition.
     Those must stay local, or gain an explicit broadcast first; handing them a
     None on rank 1 is how a replicated calculation silently diverges across
-    nodes. Small-by-construction blocks (a few-configuration S^2 block, a
+    ranks. Small-by-construction blocks (a few-configuration S^2 block, a
     downfolded seed window) stay local too -- there is nothing to distribute,
     and diagonalize_matrix would short-circuit anyway.
     """
