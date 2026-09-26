@@ -31,7 +31,9 @@ Checks, water/cc-pVDZ Hartree-Fock, tiles of `TILE` points (7 tiles):
   * the quasiparticle window [explicit] and the whole ISDF BSE [context] on
     the row `SlicedFactors`: bitwise the same distributed solves on the
     one-rank fit's whole arrays, rank 0's on every rank, and within the
-    anchored bar of the same solves on the replicated fit's `SlicedFactors`
+    anchored bar of the same solves on the replicated fit's `SlicedFactors`,
+    the roots' anchor floored at what the Davidson resolves
+    (`roots_resolution`)
   * the shell block [context]: the rank that evaluated water's one block
     held its kept pairs' integrals and one call over them, the others none
   * the metric root on rank 0 [context]: D = M^T V^1/2 with the root formed
@@ -59,7 +61,9 @@ from src.Base.utils.mpi_grid import distributed, grid_comm, partition
 from src.SingleReference.GW.space_time import (_row_factors,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
+from src.SingleReference.LinearResponse.davidson import (_residual_floor,
+                                                         bse_pair_diagonal,
+                                                         isdf_bse_factors,
                                                          solve_bse_isdf)
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -178,13 +182,32 @@ def reassociated_replicated_fit(gate, mf, mol):
         separable_ri.ao_blocks = real
 
 
+def roots_resolution(eps, nocc, roots):
+    """The relative distance below which two Davidson solves' roots are the
+    solves' own round-off, on the pair diagonal of the energies `eps`.
+
+    A Ritz value is certified only to its residual: some eigenvalue lies
+    within |A x - omega x| of it. The smallest residual the solver forms is
+    its floor `_residual_floor` (DAVIDSON_FLOOR_EPS_MULTIPLE eps max|d|, 5.4e-12
+    Ha on water), its block actions being good to eps max|d|; so NROOTS roots
+    are resolved to sqrt(NROOTS) floors in the 2-norm, over |roots|. Water's
+    roots move by 2.4e-13 of |roots| when conv_tol alone goes from 1e-5 to
+    1e-9, and one reassociation of the replicated fit moved them by 5.2e-14
+    and 9.7e-14 in two 8-node jobs and by 3.2e-13 to 7.9e-13 over five
+    reorderings on a laptop: below the floor the anchor is the solves' noise.
+    """
+    floor = _residual_floor(bse_pair_diagonal(eps, nocc))
+    return float(np.sqrt(len(roots)) * floor / np.linalg.norm(roots))
+
+
 def solves(mf, mol, nocc, factors, comm=None):
-    """(quasiparticle window, BSE roots) on these factors in this region."""
+    """(quasiparticle window, BSE roots, the roots' `roots_resolution`) on
+    these factors in this region."""
     qp = solve_qp_energy_space_time(mf, mol, nocc, np.array([nocc - 1, nocc]),
                                     factors=factors, comm=comm)
-    om = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, factors=factors,
-                        progress=False)[0]
-    return qp, om
+    om, _, _, info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS,
+                                    factors=factors, progress=False)
+    return qp, om, roots_resolution(info['eps'], nocc, om)
 
 
 def rows_only(gate, part, mol, nao, naux):
@@ -281,8 +304,11 @@ def anchored(gate, mf, mol, nocc, part, whole):
                'ranks\' rows, within the anchored bar of the replicated fit',
                f'{dist:.2e} against a reassociation of {anchor:.2e} '
                f'(bar {FIT_REASSOCIATION_K} x)')
-    bar = [relative(a, b) for a, b in zip(serial(solves, mf, mol, nocc, moved),
-                                          serial(solves, mf, mol, nocc, old))]
+    on_moved = serial(solves, mf, mol, nocc, moved)
+    on_replicated = serial(solves, mf, mol, nocc, old)
+    measured = [relative(a, b) for a, b in zip(on_moved[:2], on_replicated[:2])]
+    # the roots' anchor is never below what the Davidson resolves
+    bar = [measured[0], max(measured[1], on_replicated[2])]
     W_old = serial(isdf_bse_factors, mf, mol, nocc, factors=old)[2]
     W_moved = serial(isdf_bse_factors, mf, mol, nocc, factors=moved)[2]
     W_rows = isdf_bse_factors(mf, mol, nocc, factors=part)[2]
@@ -303,12 +329,13 @@ def anchored(gate, mf, mol, nocc, part, whole):
     sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True)
                   if gate.size > 1 else old)
     on_old = solves(mf, mol, nocc, sliced_old, comm=gate.comm)
-    for name, got, ref, anchor in zip(('window', 'BSE roots'), on_rows, on_old,
-                                      bar):
+    for name, got, ref, anchor, seen in zip(('window', 'BSE roots'), on_rows,
+                                            on_old, bar, measured):
         dist = relative(got, ref)
         gate.check(within_bar(dist, anchor), f'{name} on the row factors '
                    'within the anchored bar of the replicated fit\'s sliced '
-                   'factors', f'{dist:.2e} against {anchor:.2e}, max |dE| '
+                   'factors', f'{dist:.2e} against {anchor:.2e} (reassociation '
+                   f'{seen:.2e}), max |dE| '
                    f'{np.abs(got - ref).max() * HARTREE_TO_EV:.2e} eV')
 
 

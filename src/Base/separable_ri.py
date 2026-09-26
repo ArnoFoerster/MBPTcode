@@ -159,6 +159,7 @@ from pyscf.dft import gen_grid
 
 from src.Base.constants import (AUX_METRIC_INDEFINITE_TOL,
                                 AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
+                                FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
                                 ISDF_GRID_ACCURACY, ISDF_GRID_N_START,
                                 THREE_CENTER_BLOCK_BYTES)
 from src.Base.utils.mpi_grid import (agreement, allgather_ranges, broadcast,
@@ -166,7 +167,8 @@ from src.Base.utils.mpi_grid import (agreement, allgather_ranges, broadcast,
                                      current_comm, cyclic_tiles_to_blocks,
                                      exchange_blocks, lockstep, partition,
                                      reduce_max, reduce_sum)
-from src.Base.utils.threads import blas_single_threaded
+from src.Base.utils.threads import (blas_single_threaded, openmp_threads,
+                                    row_map)
 
 #: Pair-screening threshold: a test co-density is dropped when its peak
 #: amplitude anywhere on the interpolation grid falls below this times the
@@ -309,7 +311,8 @@ class RowFitAdjoint:
 
 class KeptIntegrals:
     """(mu nu|P) of a shell block's kept pairs alone, for the row fit's pass,
-    or with `intor` and `comp` their derivative integrals, for its adjoint.
+    or with `intor` and `comp` their derivative integrals, for its adjoint;
+    `block` is a whole block, for the replicated fit's pass.
 
     Only the nu shells holding a kept pair are evaluated, in runs of
     consecutive shells cut so that no call holds more pairs than the block
@@ -382,6 +385,16 @@ class KeptIntegrals:
                     out[:, r] = e3c[:, i, nu[r] - ao_loc[j0]]
             del e3c
         return out, call
+
+    def block(self, shells):
+        """(mu nu|P) of a shell block over every nu shell, (a, nao, naux) F
+        order: the bits `aux_e2` gives, from the environment built once
+        rather than once per call."""
+        with blas_single_threaded():                 # libcint's OpenMP only
+            return gto.moleintor.getints3c(
+                self.intor, self.atm, self.bas, self.env,
+                tuple(shells) + (0, self.aux[0]) + self.aux, comp=self.comp,
+                aosym='s1', ao_loc=self.ao_loc, cintopt=self.cintopt)
 
 
 def auxmol_key(auxmol):
@@ -828,25 +841,21 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     # unscreened S built here and the screened one it replaces agree to far
     # better than the regularization. FD keeps the screened columns.
     #
-    # Only the LOWER triangle is built -- S is a Gram matrix -- and mirrored
-    # afterwards, halving what is left. Row-blocked, so neither GEMM
-    # intermediate ever reaches n_k x n_k.
+    # Only the LOWER block triangle is built -- S is a Gram matrix -- and its
+    # transpose balanced into the upper one, halving what is left.
+    # Row-blocked, so neither GEMM buffer ever reaches n_k x n_k.
     _t = time.time()
     A = np.ascontiguousarray(ao)
     B = np.ascontiguousarray(ao[:, second] * w[None, :])
     S = np.zeros((nk, nk))
     FD = np.zeros((naux, nk))
     rows = max(1, min(nk, int(block_memory_gb * 1e9 / max(2 * nk * 8, 1))))
-    for i0b in range(0, nk, rows):
-        i1b = min(i0b + rows, nk)
-        P = A[i0b:i1b] @ A[:i1b].T
-        P *= B[i0b:i1b] @ B[:i1b].T
-        P += aux_on_grid[i0b:i1b] @ aux_on_grid[:i1b].T   # auxiliary block
-        S[i0b:i1b, :i1b] = P
-        del P
-    for i0b in range(0, nk, rows):                        # mirror lower -> upper
-        i1b = min(i0b + rows, nk)
-        S[i0b:i1b, i1b:] = S[i1b:, i0b:i1b].T
+    # The GEMMs are BLAS's; the Hadamard product, the auxiliary sum, the
+    # transpose and the balancing are O(n_k^2) element-wise passes numpy runs
+    # on one core, so they run in `row_map`'s threads, each element the same
+    # operations in the same order.
+    threads = openmp_threads()
+    _gram_lower(S, A, B, aux_on_grid, rows, threads)
     if timings is not None:
         timings['fit_gram'] = time.time() - _t
     _say(f'Gram matrix built ({nk}x{nk}, {S.nbytes / 1e9:.1f} GB)')
@@ -860,18 +869,24 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     # and a shell holds 2l+1 per contraction, so the blocks of one molecule are
     # ragged -- and they are ordered by atom, so contiguous slices would hand
     # one rank the heavy atoms and another the hydrogens. Striping spreads that.
-    # Nothing here wants contiguity: each block is an independent `aux_e2` call
+    # Nothing here wants contiguity: each block is an independent int3c2e call
     # contracted into the same accumulator, with no slab GEMM to keep whole.
     mine = partition(len(blocks), rank, nranks)
+    # The integrals are libcint's OpenMP and the solve and product BLAS's;
+    # numpy's element-wise work -- the co-densities, their screen, the kept
+    # (mu nu|P) rows, the accumulation -- runs on one core unless cut, so it
+    # runs in `row_map`'s threads a slab of rows at a time, each element the
+    # same product, on A: a slab of pyscf's F-order `ao` is strided.
 
     _say(f'three-centre pass: {len(blocks)} blocks of '
          f'<={max(ao_loc[s1] - ao_loc[s0] for s0, s1 in blocks)} AOs over '
          f'{nranks} rank(s) (mol.nbas={mol.nbas}, auxmol.nbas={auxmol.nbas}); '
-         f'each block is one aux_e2 call and its shell-pair setup scales with '
-         f'nbas*auxnbas, so the COUNT matters at large nbas even though the '
-         f'total integral work does not')
+         f'each block is one int3c2e call on an optimizer built once, its '
+         f'element-wise work on {threads} thread(s)')
     _t_blocks = time.time()
     _n_kept = [0]
+    integrals = KeptIntegrals(mol, auxmol)
+    product = np.empty_like(FD)
     for _done, _ib in enumerate(mine):
         sh0, sh1 = blocks[_ib]
         if progress and len(mine) > 20 and _done and _done % max(1, len(mine) // 10) == 0:
@@ -879,28 +894,22 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
             _say(f'  block {_done}/{len(mine)}  {_el:.0f} s elapsed, '
                  f'~{_el * (len(mine) - _done) / _done:.0f} s left')
         a0, a1 = ao_loc[sh0], ao_loc[sh1]
-        D_blk = (ao[:, a0:a1, None] * ao[:, None, second]).reshape(nk, -1)
-        D_blk *= np.tile(w, a1 - a0)[None, :]
-        # Column maxima without materializing |D_blk|. The obvious form calls
-        # np.abs(D_blk) TWICE, each a full n_k x n_rho temporary, and that
-        # screening line measured 19.6% of the whole factorization. Two
-        # reductions over the existing array allocate nothing, and the global
-        # max is just the max of the column maxima.
-        col_max = np.maximum(D_blk.max(axis=0), -D_blk.min(axis=0))
-        keep = col_max > pair_tol * screen_ref
+        keep = (_pair_peaks(A, a0, a1, second, w, threads)
+                > pair_tol * screen_ref)
         if not keep.any():
             continue
-        _n_kept[0] += int(keep.sum())
-        D_blk = np.ascontiguousarray(D_blk[:, keep])
-        with blas_single_threaded():                     # libcint's OpenMP only
-            e3c = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
-                                   shls_slice=(sh0, sh1, 0, mol.nbas,
-                                               0, auxmol.nbas))
-        e3c = e3c.reshape(a1 - a0, nao, naux)[:, second, :].reshape(-1, naux)
-        F_blk = scipy.linalg.lu_solve(lu, e3c[keep].T)
-        F_blk *= np.tile(w, a1 - a0)[keep][None, :]
-        FD += F_blk @ D_blk.T
-        del D_blk, e3c, F_blk
+        kept = np.flatnonzero(keep)
+        _n_kept[0] += len(kept)
+        D_blk = _pair_columns(A, a0 + kept // n2, second[kept % n2],
+                              w[kept % n2], threads)
+        rhs = _kept_integrals(integrals.block((sh0, sh1)), kept // n2,
+                              second[kept % n2], threads)
+        F_blk = scipy.linalg.lu_solve(lu, rhs.T, overwrite_b=True)
+        F_blk *= w[kept % n2][None, :]
+        np.matmul(F_blk, D_blk.T, out=product)
+        _accumulate(FD, product, threads)
+        del D_blk, rhs, F_blk
+    del product, integrals
     if timings is not None:
         timings['fit_integrals'] = time.time() - _t
         timings['fit_blocks'] = len(mine)
@@ -912,7 +921,7 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     # it enters once.
     _t = time.time()
     reduce_sum(FD, comm)
-    FD += aux_on_grid.T
+    _accumulate(FD, aux_on_grid.T, threads)
     # Screening is reported over the whole test set, not over this rank's share.
     _kept = int(reduce_sum(np.array([_n_kept[0]]), comm)[0])
     if timings is not None:
@@ -929,11 +938,14 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     scale = np.sqrt(np.clip(np.diag(S), 0.0, None))
     scale[scale == 0] = 1.0
     d = 1.0 / scale
-    # Balance IN PLACE. `G = (S * d[:, None]) * d[None, :]` allocates two more
-    # n_k x n_k arrays and S is dead afterwards; at 10k basis functions n_k is
-    # ~106k, so each of those is 90 GB.
-    S *= d[:, None]
-    S *= d[None, :]
+    # Balance IN PLACE, S[r, c] d_r d_c. `G = (S * d[:, None]) * d[None, :]`
+    # allocates two more n_k x n_k arrays and S is dead afterwards; at 10k
+    # basis functions n_k is ~106k, so each of those is 90 GB. Only the
+    # diagonal blocks and what lies right of them are balanced, the lower
+    # block triangle's transpose written there first: that is the lower
+    # triangle of the F-order view `posv` factors, and LAPACK never
+    # references the rest.
+    _balanced_upper(S, d, rows, threads)
     G = S
     G[np.diag_indices_from(G)] += regularization
     if timings is not None:
@@ -956,7 +968,7 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     # to time: `fit_cholesky` carries the whole call and `fit_solve` is always
     # 0.0.
     _t = time.time()
-    FD *= d[None, :]
+    _scale_columns(FD, d, threads)
     posv = scipy.linalg.lapack.get_lapack_funcs('posv', (G, FD))
     _, Y, info = posv(G.T, FD.T, lower=1, overwrite_a=1, overwrite_b=1)
     if info != 0:
@@ -969,7 +981,8 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
         timings['fit_cholesky'] = time.time() - _t
         timings['fit_solve'] = 0.0
     _say('fit done')
-    M = Y.T * d[None, :]
+    M = Y.T                          # (naux, nk) C order, scaled in place
+    _scale_columns(M, d, threads)
     if nranks > 1:
         agreement(M, comm, audit_only=True, label='fit_M_streaming output')
     return M
@@ -1108,6 +1121,8 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     R = {i: np.zeros((tiles[i][1] - tiles[i][0], naux)) for i in mine}
     hold('FD_rows', total(R.values()))
     n_mine = n_kept = 0
+    # the co-densities in `row_map`'s threads, as in the replicated pass
+    threads = openmp_threads()
     for c0 in range(0, len(order), nranks):
         batch = order[c0:c0 + nranks]
         spans = [(ao_loc[blocks[ib][0]], ao_loc[blocks[ib][1]])
@@ -1119,12 +1134,8 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
             for a0, a1 in spans:
                 peak = np.zeros((a1 - a0) * n2)
                 for i in mine:
-                    D_t = (X_own[i][:, a0:a1, None] * X_own[i][:, None, second]
-                           ).reshape(len(X_own[i]), -1)
-                    D_t *= np.tile(w, a1 - a0)[None, :]
-                    np.maximum(peak, np.maximum(D_t.max(axis=0),
-                                                -D_t.min(axis=0)), out=peak)
-                    del D_t
+                    np.maximum(peak, _pair_peaks(X_own[i], a0, a1, second, w,
+                                                 threads), out=peak)
                 keeps.append(peak)
             col_max = np.concatenate(keeps)
             _tc = time.time()
@@ -1156,8 +1167,7 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
             nu = second[kept % n2]
             wk = w[kept % n2]
             for i in mine:
-                D_t = X_own[i][:, mu] * X_own[i][:, nu]
-                D_t *= wk[None, :]
+                D_t = _pair_columns(X_own[i], mu, nu, wk, threads)
                 R[i] += D_t @ Ft
                 del D_t
             del Ft
@@ -1176,7 +1186,11 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     _say(f'three-centre pass done: {len(blocks)} blocks, {n_kept:,} of '
          f'{nao * n2:,} columns survived screening')
 
-    # Right-looking Cholesky, the forward substitution in the same sweep.
+    # Right-looking Cholesky, the forward substitution in the same sweep. Its
+    # GEMMs are BLAS's; each update's subtraction -- one flop an element
+    # against the GEMM's 2 `block`, which on a pool is as slow as the GEMM --
+    # is numpy's and runs in `row_map`'s threads, the same difference an
+    # element.
     _t = time.time()
     t_solve = 0.0
     diagonal, panels = {}, {}
@@ -1212,7 +1226,7 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
             _trsm(L, Lcol[i].T, side=0, trans_a=0)       # L L_ij^T = S_ij^T
         _ts = time.time()
         for i in below:
-            R[i] -= Lcol[i] @ y
+            _subtract(R[i], Lcol[i] @ y, threads)
         t_solve += time.time() - _ts
         del y
         panel = np.empty((nk - j1, j1 - j0))
@@ -1224,7 +1238,7 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
         for i in below:
             # one GEMM per row tile; the consumed column block is dropped
             U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
-            S[i] = S[i][:, j1 - j0:] - U
+            S[i] = _difference(S[i][:, j1 - j0:], U, threads)
             del U
         if rank == owner:
             panels[j] = panel
@@ -1246,7 +1260,7 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
         for i in mine:
             if i < j:
                 i1 = tiles[i][1]
-                R[i] -= panels[i][j0 - i1:j1 - i1].T @ z
+                _subtract(R[i], panels[i][j0 - i1:j1 - i1].T @ z, threads)
         del z
     for i in mine:
         R[i] *= d[slice(*tiles[i]), None]
@@ -1693,6 +1707,192 @@ def _block_coefficients(integrals, lu, shells, a0, keep, second, w, hold):
     F_b = scipy.linalg.lu_solve(lu, E.T, overwrite_b=True)
     F_b *= np.tile(w, len(keep) // n2)[keep][None, :]
     return np.ascontiguousarray(F_b.T)
+
+
+def _chunk_rows(ncol):
+    """Rows of `ncol` doubles in one `FIT_ROW_CHUNK_BYTES` slab, at least 1."""
+    return max(FIT_ROW_CHUNK_BYTES // (8 * max(int(ncol), 1)), 1)
+
+
+def _pair_peaks(X, a0, a1, second, w, threads):
+    """max_k |D[k, (mu, j)]| of a shell block's test co-densities
+    D = X[:, mu] X[:, second[j]] w_j, mu in [a0, a1), one slab of rows of X
+    at a time on `threads` threads, so the block is never whole.
+
+    The bits np.maximum(D.max(0), -D.min(0)) gives the whole block, from one
+    product and one maximum an element instead of two products and two
+    extrema: |fl(fl(a b) w)| = fl(fl(|a| |b|) |w|), rounding being symmetric,
+    and x -> fl(x |w|) is monotone, so the maximum over k is taken before the
+    weight and the weight applied to the maxima alone; a maximum is exact in
+    any order.
+    """
+    na, n2 = a1 - a0, len(second)
+    whole = n2 == X.shape[1] and np.array_equal(second, np.arange(n2))
+    step = _chunk_rows(na * n2)
+
+    def peaks(r0, r1):
+        buf = np.empty((min(step, r1 - r0), na, n2))
+        hi = None
+        for c0 in range(r0, r1, step):
+            c1 = min(c0 + step, r1)
+            rows = np.abs(X[c0:c1])
+            pair = rows if whole else rows[:, second]
+            prod = np.multiply(rows[:, a0:a1, None], pair[:, None, :],
+                               out=buf[:c1 - c0]).reshape(c1 - c0, -1)
+            if hi is None:
+                hi = prod.max(axis=0)
+            else:
+                np.maximum(hi, prod.max(axis=0), out=hi)
+        return hi
+
+    parts = row_map(peaks, len(X), threads)
+    hi = parts[0]
+    for h in parts[1:]:
+        np.maximum(hi, h, out=hi)
+    return hi * np.tile(np.abs(w), na)
+
+
+def _pair_columns(X, mu, nu, wk, threads):
+    """D[:, kept] = X[:, mu] X[:, nu] wk, a block's kept test co-densities,
+    (rows, kept) C order, one slab of rows at a time on `threads` threads:
+    the elements the whole block holds for those columns. The kept pairs come
+    in runs of one mu, so a run is one column times its nu columns."""
+    out = np.empty((len(X), len(mu)))
+    starts = np.flatnonzero(np.r_[True, mu[1:] != mu[:-1]])
+    runs = list(zip(starts, np.r_[starts[1:], len(mu)]))
+    step = _chunk_rows(len(mu))
+
+    def fill(r0, r1):
+        for c0 in range(r0, r1, step):
+            c1 = min(c0 + step, r1)
+            rows = np.ascontiguousarray(X[c0:c1])
+            for s, e in runs:
+                np.multiply(rows[:, mu[s], None], rows[:, nu[s:e]],
+                            out=out[c0:c1, s:e])
+            out[c0:c1] *= wk
+
+    row_map(fill, len(X), threads)
+    return out
+
+
+def _kept_integrals(e3c, i, nu, threads):
+    """(kept, naux) C order, row c the (i_c nu_c|P) of a block's (a, nao,
+    naux) F-order integrals: one gather in slabs of P, each reading the
+    contiguous (nu, i) planes of its P, on `threads` threads."""
+    a, nao, naux = e3c.shape
+    planes = e3c.T.reshape(naux, nao * a)      # a view: libcint writes P last
+    flat = nu * a + i
+    out = np.empty((len(flat), naux))
+    step = _chunk_rows(len(flat))
+
+    def fill(p0, p1):
+        for q0 in range(p0, p1, step):
+            q1 = min(q0 + step, p1)
+            out[:, q0:q1] = np.take(planes[q0:q1], flat, axis=1).T
+
+    row_map(fill, naux, threads)
+    return out
+
+
+def _accumulate(acc, part, threads):
+    """acc += part, element by element, rows on `threads` threads."""
+    def add(r0, r1):
+        np.add(acc[r0:r1], part[r0:r1], out=acc[r0:r1])
+
+    row_map(add, len(acc), threads)
+
+
+def _subtract(acc, part, threads):
+    """acc -= part, element by element, rows on `threads` threads."""
+    def sub(r0, r1):
+        np.subtract(acc[r0:r1], part[r0:r1], out=acc[r0:r1])
+
+    row_map(sub, len(acc), threads)
+
+
+def _difference(a, b, threads):
+    """a - b, a new C-order array, rows on `threads` threads."""
+    out = np.empty(b.shape)
+
+    def sub(r0, r1):
+        np.subtract(a[r0:r1], b[r0:r1], out=out[r0:r1])
+
+    row_map(sub, len(out), threads)
+    return out
+
+
+def _scale_columns(X, d, threads):
+    """X *= d[None, :], element by element, rows on `threads` threads."""
+    def scale(r0, r1):
+        np.multiply(X[r0:r1], d[None, :], out=X[r0:r1])
+
+    row_map(scale, len(X), threads)
+
+
+def _gram_lower(S, A, B, P, rows, threads):
+    """S's lower block triangle over row blocks of `rows`,
+    (A A^T) o (B B^T) + P P^T: the first product written by BLAS into S
+    itself, the other two into two buffers made once, then combined a slab
+    of rows at a time on `threads` threads -- each element the three whole
+    products' bits, multiplied and then added."""
+    nk = len(S)
+    buffers = np.empty((2, min(rows, nk), nk))
+    for i0 in range(0, nk, rows):
+        i1 = min(i0 + rows, nk)
+        out = S[i0:i1, :i1]
+        q, x = buffers[0, :i1 - i0, :i1], buffers[1, :i1 - i0, :i1]
+        np.matmul(A[i0:i1], A[:i1].T, out=out)
+        np.matmul(B[i0:i1], B[:i1].T, out=q)
+        np.matmul(P[i0:i1], P[:i1].T, out=x)       # auxiliary block
+        _hadamard_sum(out, q, x, threads)
+
+
+def _hadamard_sum(out, q, x, threads):
+    """out = out o q + x, element by element, a slab of rows at a time on
+    `threads` threads: the product rounded, then the sum."""
+    step = _chunk_rows(out.shape[1])
+
+    def combine(r0, r1):
+        for c0 in range(r0, r1, step):
+            c1 = min(c0 + step, r1)
+            np.multiply(out[c0:c1], q[c0:c1], out=out[c0:c1])
+            np.add(out[c0:c1], x[c0:c1], out=out[c0:c1])
+
+    row_map(combine, len(out), threads)
+
+
+def _balanced_upper(S, d, rows, threads):
+    """S[r, c] d_r d_c over the diagonal blocks of `_gram_lower`'s `rows` and
+    everything right of them, which is first the lower block triangle's
+    transpose: the bits the whole mirror and then the row and the column
+    scaling give there. Rows on `threads` threads, each writing its own and
+    reading only columns left of the blocks still to come."""
+    nk = len(S)
+    for i0 in range(0, nk, rows):
+        i1 = min(i0 + rows, nk)
+
+        def balance(r0, r1):
+            _balance_rows(S, d, i0 + r0, i0 + r1, i0, i1)
+
+        row_map(balance, i1 - i0, threads)
+
+
+def _balance_rows(S, d, r0, r1, i0, i1):
+    """Rows [r0, r1) of `_balanced_upper` in the diagonal block [i0, i1), in
+    square tiles of `FIT_TRANSPOSE_TILE`, so a transposed read stays in
+    cache."""
+    tile = FIT_TRANSPOSE_TILE
+    for t0 in range(r0, r1, tile):
+        t1 = min(t0 + tile, r1)
+        rows = d[t0:t1, None]
+        own = S[t0:t1, i0:i1]
+        np.multiply(own, rows, out=own)
+        np.multiply(own, d[None, i0:i1], out=own)
+        for c0 in range(i1, len(S), tile):
+            c1 = min(c0 + tile, len(S))
+            out = S[t0:t1, c0:c1]
+            np.multiply(S[c0:c1, t0:t1].T, rows, out=out)
+            np.multiply(out, d[None, c0:c1], out=out)
 
 
 def _cholesky_tiles(S, tiles, owners, rank, comm, rhs, regularization, hold):

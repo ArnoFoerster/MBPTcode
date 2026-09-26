@@ -20,7 +20,9 @@ owns a different set of them:
     energies, W(0) and the BSE roots of the row fit sit within
     `FIT_REASSOCIATION_K` times the distance the replicated fit itself moves
     when its three-centre blocks are cut per shell and summed in reverse --
-    a bar measured on this run, never a fixed number;
+    a bar measured on this run, never a fixed number, the roots' anchor
+    floored at what the Davidson resolves (`roots_resolution` of
+    tests/test_distributed_fit_mpi.py);
   * the new collectives the fit rests on (`reduce_max`, `broadcast_rows`,
     `allgather_ranges`, `cyclic_tiles_to_blocks`) against their serial
     meaning;
@@ -56,7 +58,10 @@ the same bits at every call shape, which OpenBLAS does not, so that class of
 defect shows under tests/test_distributed_fit_mpi.py on the cluster.
 """
 import os
+import subprocess
 import sys
+import tarfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -81,6 +86,7 @@ from src.SingleReference.GW.space_time import (DEFAULT_COUNTS,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf)
+from tests.test_distributed_fit_mpi import roots_resolution
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -91,6 +97,59 @@ BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 TILE = 64
 SIZES = [1, 2, 3, 8]
 NROOTS = 3
+
+REPO = Path(__file__).resolve().parents[1]
+#: The pass before its co-densities ran in `row_map`'s threads: every tile
+#: of M^T it made is the tile this tree must still make, bit for bit.
+ONE_THREAD_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
+#: The thread caps of the subprocess gate; `OMP_NUM_THREADS` alone is set per
+#: probe, which moves the pass's pool and neither BLAS nor Accelerate.
+THREAD_CAPS = {name: '2' for name in
+               ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
+#: (name, geometry, block_memory_gb): budgets that cut the AO index one or
+#: two AOs per block, so the pass walks many blocks.
+PROBE_CASES = (('water', WATER, 2e-4), ('ethylene', ETHYLENE, 1e-3))
+PROBE_SIZES = (1, 2, 3)
+#: The row fit's M^T, assembled from every rank's tiles, from the tree on
+#: `sys.path`, at every case and rank count.
+ROW_FIT_PROBE = '''
+import sys
+import warnings
+
+sys.path.insert(0, {tree!r})
+
+import numpy as np
+from pyscf import df, gto
+
+from src.Base.separable_ri import (atomic_grid, fit_M_streaming,
+                                   molecular_points_covariant)
+from src.Base.utils.mpi_grid import run_simulated
+from src.SingleReference.GW.space_time import DEFAULT_COUNTS
+
+warnings.simplefilter('ignore')
+fits = {{}}
+for name, atom, budget in {cases!r}:
+    mol = gto.M(atom=atom, basis={basis!r}, verbose=0)
+    auxmol = df.addons.make_auxmol(mol, auxbasis={auxbasis!r})
+    radii, origins = {{}}, {{}}
+    for el in sorted({{mol.atom_pure_symbol(i) for i in range(mol.natm)}}):
+        radii[el], origins[el] = atomic_grid(el, mol.basis, {auxbasis!r},
+                                             DEFAULT_COUNTS)
+    coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
+
+    def fit(comm):
+        return fit_M_streaming(mol, auxmol, coords, block_memory_gb=budget,
+                               comm=comm, fit='rows', block={tile!r}).mt
+
+    for size in {sizes!r}:
+        mt = np.full((len(coords), auxmol.nao_nr()), np.nan)
+        for tiles in run_simulated(fit, size):
+            for t, rows in tiles.items():
+                mt[t * {tile!r}:t * {tile!r} + len(rows)] = rows
+        fits[f'{{name}}_{{size}}'] = mt
+np.savez({out!r}, **fits)
+'''
 
 
 def mean_field(atom):
@@ -152,14 +211,15 @@ def tile_layout(npts, block, rank, size):
 
 def observables(mf, mol, nocc, factors):
     """D, the quasiparticle window, W(0) and the BSE roots of whole
-    factors, serially."""
+    factors, serially, and the roots' `roots_resolution`."""
     with distributed(None):
         window = np.array([nocc - 1, nocc])
         qp = solve_qp_energy_space_time(mf, mol, nocc, window, factors=factors)
         W = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
-        om = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, factors=factors,
-                            progress=False)[0]
-    return {'D': factors[1], 'qp': qp, 'W0': W, 'bse': om}
+        om, _, _, info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS,
+                                        factors=factors, progress=False)
+    return ({'D': factors[1], 'qp': qp, 'W0': W, 'bse': om},
+            roots_resolution(info['eps'], nocc, om))
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -245,9 +305,9 @@ def test_row_fit_within_the_reassociation_bar(case, block, request,
         with distributed(None):
             reassociated = separable_factors(mf, mol, auxbasis=AUXBASIS)
     new = one_rank(mol, mf, block)
-    ref = observables(mf, mol, nocc, old)
-    bar = observables(mf, mol, nocc, reassociated)
-    got = observables(mf, mol, nocc, new)
+    ref, resolution = observables(mf, mol, nocc, old)
+    bar = observables(mf, mol, nocc, reassociated)[0]
+    got = observables(mf, mol, nocc, new)[0]
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     ref['D_root'], bar['D_root'] = ref['D'], bar['D']
     with distributed(None):
@@ -255,11 +315,15 @@ def test_row_fit_within_the_reassociation_bar(case, block, request,
                                         block=block).metric_root_rows(auxmol)
     lines = []
     for key in ref:
-        anchor = relative(bar[key], ref[key])
+        measured = relative(bar[key], ref[key])
+        # the roots' anchor is never below what the Davidson resolves
+        anchor = max(measured, resolution) if key == 'bse' else measured
         dist = relative(got[key], ref[key])
         # A quantity the reordering leaves bitwise must stay bitwise: its
         # bar is zero, and so must the row fit's distance be.
-        lines.append(f'{key}: reassociation {anchor:.2e}, row fit {dist:.2e}'
+        lines.append(f'{key}: reassociation {measured:.2e}'
+                     + (f', anchor {anchor:.2e}' if anchor != measured else '')
+                     + f', row fit {dist:.2e}'
                      + (f' ({dist / anchor:.2f} x)' if anchor else ''))
         assert dist <= FIT_REASSOCIATION_K * anchor, lines[-1]
     worst = {k: float(np.abs(np.asarray(got[k]) - np.asarray(ref[k])).max())
@@ -525,6 +589,61 @@ def test_a_frozen_layout_replaces_the_screen(ethylene, size):
         assert relative(c[1], a[1]) > 1e-3, (r, relative(c[1], a[1]))
     with distributed(None), pytest.raises(ValueError, match="fit='rows'"):
         fit_M_streaming(mol, auxmol, coords, layout=own)
+
+
+def extracted(tmp_path_factory, commit):
+    """The tree of `commit`, unpacked into a temporary directory."""
+    out = tmp_path_factory.mktemp(f'row_fit_{commit[:7]}')
+    tar = out.parent / f'row_fit_{commit}.tar'
+    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
+                           '-o', str(tar), commit],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    with tarfile.open(tar) as fh:
+        fh.extractall(out)
+    assert (out / 'src' / 'Base' / 'separable_ri.py').is_file()
+    return out
+
+
+def probe_row_fits(tree, tmp_path, omp_threads):
+    """Every case's M^T from `tree` at `PROBE_SIZES`, in its own process with
+    the thread caps and `omp_threads` OpenMP threads."""
+    tag = f'{tree.name}_{omp_threads}'
+    script = tmp_path / f'row_fits_{tag}.py'
+    out = tmp_path / f'row_fits_{tag}.npz'
+    script.write_text(ROW_FIT_PROBE.format(
+        tree=str(tree), cases=PROBE_CASES, basis=BASIS, auxbasis=AUXBASIS,
+        tile=TILE, sizes=PROBE_SIZES, out=str(out)))
+    env = dict(os.environ, **THREAD_CAPS, OMP_NUM_THREADS=str(omp_threads))
+    env.pop('PYTHONPATH', None)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return dict(np.load(out))
+
+
+@pytest.fixture(scope='module')
+def row_fits_three_ways(tmp_path_factory):
+    """(the one-thread tree's M^T, this tree's on a pool of two, of one)."""
+    tmp = tmp_path_factory.mktemp('row_fits')
+    old = extracted(tmp_path_factory, ONE_THREAD_COMMIT)
+    return (probe_row_fits(old, tmp, 2), probe_row_fits(REPO, tmp, 2),
+            probe_row_fits(REPO, tmp, 1))
+
+
+@pytest.mark.parametrize('size', PROBE_SIZES)
+@pytest.mark.parametrize('name', [c[0] for c in PROBE_CASES])
+def test_row_fit_is_the_one_thread_trees_bits(row_fits_three_ways, name,
+                                             size):
+    """Every tile of M^T the ranks own is the bytes the pass made when its
+    screening and its kept co-densities ran on one thread, on a pool of two
+    threads and of one, and the tiles cover the grid."""
+    old, two, one = row_fits_three_ways
+    key = f'{name}_{size}'
+    assert not np.isnan(two[key]).any(), key
+    for new in (two, one):
+        assert old[key].shape == new[key].shape, key
+        assert old[key].tobytes() == new[key].tobytes(), key
 
 
 if __name__ == '__main__':

@@ -64,7 +64,8 @@ from pyscf import gto, scf
 
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import (_QPStageTimings,
+from src.SingleReference.LinearResponse.davidson import (COMM_KINDS,
+                                                         _QPStageTimings,
                                                          solve_bse_isdf)
 
 SIZES = [2, 3]
@@ -78,7 +79,9 @@ TIMER_SLACK = 1e-3
 TIMING_KEYS = ('davidson_block_action', 'davidson_subspace', 'davidson_comm',
                'davidson_setup', 'davidson_iterations',
                'davidson_subspace_max', 'davidson_vectors_applied',
-               'davidson_lockstep_mb', 'davidson_lockstep_skipped_mb')
+               'davidson_lockstep_mb', 'davidson_lockstep_skipped_mb',
+               'davidson_max_space', 'davidson_collapses',
+               *(f'davidson_comm_{kind}' for kind in COMM_KINDS))
 #: Every rank fills these too: chi0/sigma/the exchange build/the root search
 #: of the space-time QP solve all run -- and time -- on every rank.
 QP_TIMING_KEYS = ('qp_chi0', 'qp_dyson', 'qp_sigma', 'qp_static', 'qp_states')
@@ -243,6 +246,13 @@ def test_distributed_davidson_timings(water, size):
             assert t[key] == t0[key], key
         assert t['davidson_comm'] > 0.0             # the lockstep and reductions
         assert t['davidson_comm'] <= t['davidson'] + TIMER_SLACK
+        # Split by collective, the kinds are the whole of it, and the ISDF
+        # action's per-vector gather and grid-length reduce both ran.
+        parts = [t[f'davidson_comm_{kind}'] for kind in COMM_KINDS]
+        assert min(parts) >= 0.0
+        assert abs(sum(parts) - t['davidson_comm']) <= TIMER_SLACK
+        assert t['davidson_comm_gather'] > 0.0
+        assert t['davidson_comm_reduce_grid'] > 0.0
         assert t['davidson_block_action_by_rank'] == by_rank
         assert by_rank[r] == t['davidson_block_action']
         assert t['davidson_setup'] > 0.0
@@ -300,8 +310,7 @@ def test_evgw_qp_stage_sums_over_cycles(water):
 @pytest.fixture(scope='session')
 def archive(tmp_path_factory):
     """The BSE Davidson's own code before the `qp_*` timers were added,
-    extracted with `git archive` rather than a checkout: the working tree
-    must not move, and a concurrent session may be editing it."""
+    unpacked into a temporary directory."""
     out = tmp_path_factory.mktemp('qp_timings_baseline')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
