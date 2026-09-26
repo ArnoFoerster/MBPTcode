@@ -58,8 +58,8 @@ import time
 import warnings
 
 import numpy as np
-from pyscf.lib import logger
-from pyscf.tdscf._lr_eig import real_eig
+from pyscf.lib import logger, param
+from pyscf.tdscf._lr_eig import MAX_SPACE_INC, real_eig
 from scipy.linalg import solve_triangular
 from scipy.sparse.linalg import LinearOperator, eigsh
 
@@ -67,7 +67,8 @@ from src.Base.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
                                 BSE_DENSE_MAX_NOV,
                                 DAVIDSON_FLOOR_EPS_MULTIPLE, DAVIDSON_LINDEP,
                                 DAVIDSON_MIN_NEW_FRACTION,
-                                DAVIDSON_SIZED_RESIDUAL, HARTREE_TO_EV,
+                                DAVIDSON_SIZED_RESIDUAL, DAVIDSON_SPACE_CYCLES,
+                                DAVIDSON_SPACE_GB, HARTREE_TO_EV,
                                 ISDF_TILE_GB, KAPPA)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
@@ -129,6 +130,14 @@ QP_TIMING_RENAME = {'t_chi0': 'qp_chi0', 't_dyson': 'qp_dyson',
                     't_sigma': 'qp_sigma', 't_qp_static': 'qp_static',
                     't_qp_states': 'qp_states'}
 
+#: The collectives of a distributed block action, each timed apart as
+#: `davidson_comm_<kind>`: the checked lockstep of the trial vectors (a digest,
+#: and a broadcast only where one differs) and of the result; the all-gather of
+#: z X_v^T, M x n_occ per vector; the all-reduce of X_o^T (Zt * P), n_occ x M
+#: per vector; and those of p D, naux per vector, and of the batch's
+#: (n_occ, n_vir) output slabs.
+COMM_KINDS = ('lockstep', 'gather', 'reduce_grid', 'reduce_pairs')
+
 
 class _QPStageTimings:
     """`timings=` target for the space-time QP solve, G0W0 or one evGW cycle.
@@ -161,12 +170,14 @@ class _QPStageTimings:
 
 class _CommClock:
     """Wall seconds one block action spends inside its collectives, read by
-    the Davidson as `davidson_comm`; nothing is timed without a rank count."""
+    the Davidson as `davidson_comm`, and the same seconds by collective in
+    `by_kind` (COMM_KINDS); nothing is timed without a rank count."""
 
-    __slots__ = ('seconds',)
+    __slots__ = ('seconds', 'by_kind')
 
     def __init__(self):
         self.seconds = 0.0
+        self.by_kind = dict.fromkeys(COMM_KINDS, 0.0)
 
 
 def solve_casida_davidson(lr_solver, nocc, nroots=3, polarizability='RPA',
@@ -341,10 +352,14 @@ def _davidson_counters():
     locksteps moved, the volume ONE rank sends or receives, and
     `lockstep_skipped_bytes` what the checked ones did not move because every
     rank's digest agreed; every rank reports the same two numbers.
+    `space_bound` is the trial pairs real_eig holds before it collapses its
+    subspace (`_trial_space_memory`) and `collapses` how often it did.
+    `comm_by_kind` splits `comm_s` by collective (COMM_KINDS).
     """
     return {'action_s': 0.0, 'comm_s': 0.0, 'loop_s': 0.0,
             'lockstep_bytes': 0, 'lockstep_skipped_bytes': 0, 'vectors': 0,
-            'iterations': 0, 'space_max': 0}
+            'iterations': 0, 'space_max': 0, 'space_bound': 0, 'collapses': 0,
+            'comm_by_kind': dict.fromkeys(COMM_KINDS, 0.0)}
 
 
 def _block_action_by_rank(value, comm):
@@ -1311,7 +1326,8 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
 
     def apply_AB(z):
         if nranks > 1:
-            z = _timed(comm_clock, lockstep, z, comm, check=True)  # rank 0's
+            z = _timed(comm_clock, 'lockstep', lockstep, z, comm,
+                       check=True)                     # rank 0's
         # The Hartree term enters A and B identically, so it is contracted once
         # per trial vector rather than once per block. A triplet has kappa = 0
         # and drops it entirely -- not merely scaled to zero, skipped, since it
@@ -1357,14 +1373,16 @@ def _screened_rows(D_mine, D, W_aux, comm=None):
     return D_mine @ (W_aux @ D.T)
 
 
-def _timed(clock, fn, *args, **kwargs):
-    """fn(*args, **kwargs), its wall seconds added to `clock` when there is
-    one."""
+def _timed(clock, kind, fn, *args, **kwargs):
+    """fn(*args, **kwargs), its wall seconds added to `clock`, and to its
+    `kind` of collective (COMM_KINDS), when there is one."""
     if clock is None:
         return fn(*args, **kwargs)
     t0 = time.time()
     out = fn(*args, **kwargs)
-    clock.seconds += time.time() - t0
+    dt = time.time() - t0
+    clock.seconds += dt
+    clock.by_kind[kind] += dt
     return out
 
 
@@ -1537,7 +1555,8 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
             # Rank 0's batch, computed on as a C-ordered array: MKL's GEMM
             # kernels follow operand layout, and a view into the driver's
             # buffer moved water's roots 2e-13 Ha off the root-driven solve's.
-            z = np.require(_timed(comm_clock, lockstep, z, comm, check=True),
+            z = np.require(_timed(comm_clock, 'lockstep', lockstep, z, comm,
+                                  check=True),
                            requirements='C')
         Az = diag_d[None, :, :] * z
         Bz = np.zeros_like(z)
@@ -1551,7 +1570,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
                 # partition, so no row is formed twice and the gathered array
                 # is the same bits on every rank.
                 np.matmul(X_v_mine, zn.T, out=zXv_rows[r0:r1])
-                _timed(comm_clock, allgather_blocks, zXv_rows, comm)
+                _timed(comm_clock, 'gather', allgather_blocks, zXv_rows, comm)
                 zXv = zXv_rows.T                          # (n_occ, M)
             else:
                 zXv = zn @ X_v.T                          # (n_occ, M)
@@ -1566,7 +1585,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
                      np.einsum('kj,jk->k', X_o, zXv, optimize=True))
                 pD = p @ D_mine
                 if nranks > 1:
-                    _timed(comm_clock, reduce_sum, pD, comm)
+                    _timed(comm_clock, 'reduce_pairs', reduce_sum, pD, comm)
                 u = D_mine @ pD
                 hartree = factor * (X_o_mine.T @ (u[:, None] * X_v_mine))
                 if nranks > 1:
@@ -1590,7 +1609,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
             # every rank. Reduced first, it is the same T everywhere and each
             # rank takes only its own columns of it.
             if nranks > 1:
-                _timed(comm_clock, reduce_sum, T, comm)
+                _timed(comm_clock, 'reduce_grid', reduce_sum, T, comm)
             ex[0, n] = T[:, r0:r1] @ X_v_mine
             # The B block wants Zt * P^T. Forming that Hadamard product directly
             # reads Zt against a transposed operand and measured as costly as
@@ -1602,7 +1621,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
             ex[1, n] = U.T @ X_v_mine
         if n_reduced:
             if nranks > 1:
-                _timed(comm_clock, reduce_sum, ex, comm)
+                _timed(comm_clock, 'reduce_pairs', reduce_sum, ex, comm)
                 if factor:
                     Az += ex[i_hartree]
                     Bz += ex[i_hartree]
@@ -1647,6 +1666,33 @@ def _guess_indices(diag_d, nroots, guess_factor=GUESS_FACTOR, deg_tol=GUESS_DEG_
     return order[:n]
 
 
+def _real_eig_space(max_memory, nroots, n_pair):
+    """(space_inc, max_space): the corrections real_eig adds per cycle and the
+    trial pairs it holds before collapsing, by its own rule on `max_memory` MB.
+    """
+    space_inc = (nroots if MAX_SPACE_INC is None
+                 else max(nroots, min(MAX_SPACE_INC, n_pair // 2)))
+    max_space = int(max_memory * 1e6 / 8 / (4 * n_pair) / 2 - space_inc)
+    if max_space < nroots * 4 < n_pair:
+        max_space = space_inc * 2
+    return space_inc, min(max(max_space, nroots * 4), n_pair)
+
+
+def _trial_space_memory(nroots, n_pair):
+    """MB handed to real_eig: pyscf's own MAX_MEMORY, raised until the trial
+    space holds DAVIDSON_SPACE_CYCLES increments within DAVIDSON_SPACE_GB.
+
+    real_eig's four holders take 32 n_pair bytes per trial pair, and its rule
+    budgets half of max_memory for them.
+    """
+    space_inc = _real_eig_space(param.MAX_MEMORY, nroots, n_pair)[0]
+    target = min(DAVIDSON_SPACE_CYCLES * space_inc,
+                 int(DAVIDSON_SPACE_GB * 1e9 / (32 * n_pair)))
+    # the inverse of real_eig's rule, half a pair clear of its floor
+    return max(param.MAX_MEMORY,
+               (target + space_inc + 0.5) * 2 * 32 * n_pair / 1e6)
+
+
 def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
                   guess_factor=GUESS_FACTOR, stats=None, comm=None,
                   timings=None, refuse_unconverged=False):
@@ -1688,6 +1734,12 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     solve at pentacene/cc-pVTZ),
     `davidson_subspace` what every rank runs whole, and `davidson_iterations`
     with `davidson_vectors_applied` the work the guess asked for.
+    `davidson_subspace_max` is the largest trial subspace in pairs,
+    `davidson_max_space` the bound real_eig collapses it at and
+    `davidson_collapses` how often it did (`_trial_space_memory`).
+    `davidson_comm_<kind>` splits `davidson_comm` by collective (COMM_KINDS),
+    which says whether the digest, a broadcast or the action's reductions
+    carry it.
     `davidson_block_action_by_rank` (under a comm) lists every rank's action
     time, which is where load imbalance in the row split shows.
 
@@ -1698,6 +1750,7 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     counters = _davidson_counters()
     comm_clock = getattr(apply_AB, 'comm_clock', None)   # the ISDF action's
     clock0 = comm_clock.seconds if comm_clock is not None else 0.0
+    kinds0 = dict(comm_clock.by_kind) if comm_clock is not None else None
     stats0 = lockstep_stats()
     omega, X, Y, converged, cycles, limit = _davidson_root(
         apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym, guess_factor,
@@ -1706,9 +1759,14 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         t0 = time.time()
         omega, X, Y, converged, cycles, limit = lockstep(
             (omega, X, Y, converged, cycles, limit), comm, check=True)
-        counters['comm_s'] += time.time() - t0
+        dt = time.time() - t0
+        counters['comm_s'] += dt
+        counters['comm_by_kind']['lockstep'] += dt
         if comm_clock is not None:
             counters['comm_s'] += comm_clock.seconds - clock0
+            for kind in COMM_KINDS:
+                counters['comm_by_kind'][kind] += (comm_clock.by_kind[kind]
+                                                   - kinds0[kind])
         stats1 = lockstep_stats()
         counters['lockstep_bytes'] = stats1['bytes'] - stats0['bytes']
         counters['lockstep_skipped_bytes'] = (stats1['skipped_bytes']
@@ -1722,11 +1780,15 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
             'davidson_comm': counters['comm_s'],
             'davidson_iterations': counters['iterations'],
             'davidson_subspace_max': counters['space_max'],
+            'davidson_max_space': counters['space_bound'],
+            'davidson_collapses': counters['collapses'],
             'davidson_vectors_applied': counters['vectors'],
             # MB as 1e6 bytes, the unit pyscf's max_memory is in.
             'davidson_lockstep_mb': counters['lockstep_bytes'] / 1e6,
             'davidson_lockstep_skipped_mb':
-                counters['lockstep_skipped_bytes'] / 1e6})
+                counters['lockstep_skipped_bytes'] / 1e6,
+            **{f'davidson_comm_{kind}': counters['comm_by_kind'][kind]
+               for kind in COMM_KINDS}})
         if by_rank is not None:
             timings['davidson_block_action_by_rank'] = by_rank
     # A root that never converged still comes back with an energy attached, and
@@ -1787,13 +1849,19 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     nvec = [0]
     t_action = [0.0]
     t_total = [0.0]
-    # real_eig's subspace is the trial vectors it has handed over since it last
-    # collapsed the space, and a collapse is invisible from this side -- it
-    # takes max_space vectors, thousands at production sizes -- so this count
-    # is that dimension, and past a collapse an upper bound on it. The pair
-    # dimension bounds it either way: real_eig caps max_space at A_size.
+    # real_eig's subspace is the trial pairs it has handed over since it last
+    # collapsed the space, which it does when a cycle's kept corrections would
+    # overrun max_space, handing over its nroots Ritz vectors instead. So a
+    # batch that overruns the bound, or one of nroots after a cycle that asked
+    # for more corrections than the bound had room for, starts the count again;
+    # exact unless the partner test left exactly nroots of such a cycle's
+    # corrections.
+    max_memory = _trial_space_memory(nroots, n_pair)
+    max_space = _real_eig_space(max_memory, nroots, n_pair)[1]
     space = [0]
     space_max = [0]
+    collapses = [0]
+    asked = [0]                      # corrections the last cycle asked for
     batch_max = [0]                  # the widest batch the action was handed
     # THE PAIR SPACE CAN RUN OUT BEFORE THE TOLERANCE DOES. real_eig adds each
     # correction with its x/y-swapped partner, so m trial pairs span 2m of the
@@ -1815,7 +1883,13 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         xys = np.asarray(xys).reshape(-1, 2, no, nv)
         ncall[0] += 1
         nvec[0] += 2 * xys.shape[0]          # a block action per X and per Y
-        space[0] += xys.shape[0]
+        n = xys.shape[0]
+        if ncall[0] > 1 and (space[0] + n > max_space or
+                             (n == nroots and space[0] + asked[0] > max_space)):
+            collapses[0] += 1
+            space[0] = n
+        else:
+            space[0] += n
         space_max[0] = max(space_max[0], space[0])
         batch_max[0] = max(batch_max[0], xys.shape[0])
         t0 = time.time()
@@ -1833,6 +1907,7 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
 
     def precond(dx, e):
         e = np.atleast_1d(e)
+        asked[0] = len(e)
         if len(e) > n_pair - space[0]:
             limit[0] = (space[0], len(e))
         d = hdiag[None, :] - e[:, None]
@@ -1876,6 +1951,7 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     try:
         converged, e, xy = real_eig(vind, x0, precond, tol_residual=conv_tol,
                                      nroots=nroots, x0sym=x0sym, max_cycle=max_cycle,
+                                     max_memory=max_memory,
                                      lindep=DAVIDSON_LINDEP,
                                      verbose=logger.Logger(sys.stdout, 0))
     except np.linalg.LinAlgError as exc:
@@ -1916,6 +1992,8 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         counters['iterations'] = ncall[0]
         counters['vectors'] = nvec[0]
         counters['space_max'] = min(space_max[0], n_pair)
+        counters['space_bound'] = max_space
+        counters['collapses'] = collapses[0]
     if limit[0] is not None:
         limit[0] = (int(limit[0][0]), int(limit[0][1]), dense is not None)
     if dense is not None:

@@ -782,6 +782,53 @@ BSE_ADJOINT_AUX_ROWS = 256
 # the unchunked call itself.
 MPI_COUNT_MAX = 2 ** 31 - 1
 
+# Fraction of what max_memory leaves that the distributed ISDF-K SCF
+# (`Base.distributed_isdf_jk`) lets this rank's rows of Z take, for the two
+# operators a range-separated functional asks for; above it Z's blocks are
+# formed per K build from G = M^T V instead ('factored'). The serial ISDFJK's
+# 'auto' mode takes a third, and so does this: the SCF's own buffers, the
+# DFT grid and the fit's peak need the rest. Rank 0's decision.
+ISDF_SCF_KERNEL_MEMORY_FRACTION = 0.33
+
+# Auxiliary functions per slab of the metric V (or its attenuated form) that
+# the distributed ISDF-K SCF evaluates at a time to form G = M^T V: a slab is
+# a GEMM's column count, so it is fixed by the basis and not by the rank
+# count, and no rank holds V whole (7.8 GB at the chlorophyllide hexamer,
+# naux 31260; a slab is 128 MB).
+ISDF_SCF_METRIC_SLAB = 512
+
+# Bytes of one thread's temporary in the element-wise work of the ISDF fit's
+# three-centre pass (`Base.separable_ri`): a shell block's test co-densities
+# are screened and built a slab of grid rows at a time, and its kept
+# (mu nu|P) rows gathered a slab of auxiliary functions at a time, so no
+# block is ever whole (3 GB of co-densities at the chlorophyllide dimer) and
+# each slab is made, scaled and reduced while it is still in cache. A cost
+# knob only: every element is the same product whatever the slab.
+FIT_ROW_CHUNK_BYTES = 4 << 20
+
+# Edge, in grid points, of the square tiles in which the replicated ISDF fit
+# (`Base.separable_ri`) writes the transpose of its Gram matrix's lower block
+# triangle into the upper one while balancing it: a tile's transposed read
+# touches one cache line and one page per source row, 256 of each, and 256
+# measured fastest of 32..512 at two threads. A cost knob only: every element
+# is the same two products whatever the tile.
+FIT_TRANSPOSE_TILE = 256
+
+# The trial space the Casida/BSE Davidson (`LinearResponse.davidson`) holds
+# before pyscf's `real_eig` collapses it. real_eig sizes that space from its
+# process-wide MAX_MEMORY (4000 MB), 103 trial pairs at the chlorophyllide
+# dimer/cc-pVDZ (504,804 pairs), and a collapse keeps only the nroots Ritz
+# vectors and applies the action to them again: under that bound 12 roots of
+# anthracene/cc-pVDZ took 49 cycles and 1294 block actions where the solve
+# never collapsed took 21 and 716, its top roots converging last. The space is
+# raised to DAVIDSON_SPACE_CYCLES of real_eig's per-cycle increment (converged
+# 12- and 16-root solves there held 353 and 379 pairs, 18 and 19 increments),
+# never past DAVIDSON_SPACE_GB of its four pair-space-long holders per trial
+# pair (990 pairs at the dimer) and never below real_eig's own bound, so every
+# solve pyscf already held whole runs exactly as it did.
+DAVIDSON_SPACE_CYCLES = 50
+DAVIDSON_SPACE_GB = 16
+
 
 # Bohr within which an explicit set of ISDF shell radii counts as THE shipped
 # table row for the same (element, basis, auxbasis, counts). Both sides are

@@ -11,6 +11,16 @@ integral passes -- in `blas_single_threaded`, and never the GEMM-dominated ones
 (chi0, Sigma, the BSE block action, the Gram and Cholesky of the ISDF fit),
 which need every core inside BLAS.
 
+A wrapped region may still hold GEMM-bound stages: the distributed ISDF-K SCF
+runs inside the SCF's wrap, and its row fit, its interaction's rows
+Z = (M^T V) M and its K builds are numpy GEMMs -- at one thread the fit alone
+costs a sixteen-core node three times its wall (98 s against 31.5 s at
+pentacene/cc-pVTZ). `blas_full_pool` gives such a stage back the count the
+innermost enclosing `blas_single_threaded` found on entry, and leaves the pool
+alone where no wrap took one, so the stage runs on one count inside the SCF
+and outside it, the count a one-rank reference ran on. A libcint or pyscf pass
+nested inside it takes `blas_single_threaded` again and drops to one.
+
 The gain is a contention effect, so it needs cores to appear, and below
 `BLAS_WRAP_MIN_THREADS` there are too few to contend over: the wrap buys
 nothing and costs its entry, 1-2 ms of rescanning the loaded pools. So the
@@ -34,13 +44,27 @@ exchange build unconditionally scattered the excited-state chain's force by
 the main thread the wrap is therefore a no-op, which costs a real MPI rank
 nothing: ranks are processes and each calls this from its own main thread.
 
-threadpoolctl is a SOFT dependency. Absent, `blas_single_threaded` is a no-op
-and `blas_threads` returns None: the process keeps whatever its environment set
-and every result is unchanged, since thread counts move only the summation
-order inside BLAS, never the arithmetic pyscf does.
+A THIRD POOL: numpy's element-wise work. A ufunc runs on the thread that
+calls it, so an element-wise stage between the libcint and the BLAS calls --
+the ISDF fit's test co-densities, a shell block of them 3 GB at the
+chlorophyllide dimer -- runs on one core whatever OMP_NUM_THREADS says, and
+more ranks are the only thing that divides it. `row_map` cuts such a stage's
+rows over Python threads (numpy releases the GIL inside its loops), as many
+as the process's OpenMP pool (`openmp_threads`). Every element is still made
+by the one sequence of operations the unsplit call applies to it, and a
+maximum is exact in any order, so the result is the same bits at every count.
+It moves no library's thread count, so any thread may call it.
+
+threadpoolctl is a SOFT dependency. Absent, `blas_single_threaded` and
+`blas_full_pool` are no-ops, `blas_threads` returns None and `openmp_threads`
+1: the process keeps whatever its environment set and every result is
+unchanged, since thread counts move only the summation order inside BLAS,
+never the arithmetic pyscf does.
 """
 import contextlib
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from src.Base.constants import BLAS_WRAP_MIN_THREADS
 
@@ -51,25 +75,89 @@ except ImportError:                      # soft dependency: every routine no-ops
     threadpool_limits = None
 
 
+#: Per thread, the BLAS count each enclosing `blas_single_threaded` found on
+#: entry, innermost last: what `blas_full_pool` gives back. Only a thread
+#: that owns the pool (`_pool_is_ours`) ever fills it.
+_TAKEN = threading.local()
+
+#: The executors `row_map` runs on, one per (process, thread count), made on
+#: first use and kept: a pass calls it several times per shell block.
+_ROW_POOLS = {}
+_ROW_POOLS_LOCK = threading.Lock()
+
+
+class _BlasLimit:
+    """Every BLAS pool at `limit` threads from entry to exit, the counts found
+    put back on exit, raise or no raise; `taken`, the count a one-thread wrap
+    took away, is on `_TAKEN` while it holds."""
+
+    def __init__(self, limit, taken=None):
+        self.limit, self.taken = limit, taken
+        self._limits = None
+
+    def __enter__(self):
+        self._limits = threadpool_limits(limits=self.limit, user_api='blas')
+        if self.taken is not None:
+            _taken().append(self.taken)
+        return self
+
+    def __exit__(self, *exc):
+        if self.taken is not None:
+            _taken().pop()
+        self._limits.__exit__(*exc)
+        return False
+
+
 def blas_single_threaded(min_threads=BLAS_WRAP_MIN_THREADS):
     """Context manager holding every BLAS pool at one thread, OpenMP untouched.
 
-    Use it as a context manager and nothing else: threadpoolctl applies the
-    limit when the object is MADE and gives it back on exit, so one that is
-    built and never entered leaves the whole process at a single thread.
-    Restores the counts it found on exit, including when the body raises.
-    `contextlib.nullcontext()` in the three cases where the limit is not this
-    caller's to set or not worth setting: threadpoolctl absent, a thread other
-    than the main one -- the count is process-global -- and a BLAS pool already
-    below `min_threads`, where there is nothing to win and a re-associated sum
-    to lose.
+    The limit is applied on entry and the counts it found are given back on
+    exit, including when the body raises; while it holds, the count it found
+    is what `blas_full_pool` restores. `contextlib.nullcontext()` in the three
+    cases where the limit is not this caller's to set or not worth setting:
+    threadpoolctl absent, a thread other than the main one -- the count is
+    process-global -- and a BLAS pool already below `min_threads`, where there
+    is nothing to win and a re-associated sum to lose.
     """
-    off_main = threading.current_thread() is not threading.main_thread()
-    if threadpool_limits is None or off_main:
+    if not _pool_is_ours():
         return contextlib.nullcontext()
-    if (blas_threads() or 1) < min_threads:
+    found = blas_threads() or 1
+    if found < min_threads:
         return contextlib.nullcontext()
-    return threadpool_limits(limits=1, user_api='blas')
+    return _BlasLimit(1, taken=found)
+
+
+@contextlib.contextmanager
+def blas_full_pool():
+    """Context manager giving a GEMM-bound stage the BLAS pool the innermost
+    enclosing `blas_single_threaded` took away, until exit.
+
+    Yields the count the stage's GEMMs run on (None where it cannot be read).
+    Where no wrap holds the pool -- none entered, one that stayed a no-op, a
+    thread other than the main one, threadpoolctl absent -- the pool is the
+    caller's and is left as it is, so a stage takes one count inside a wrapped
+    region and outside it.
+    """
+    taken = _taken() if _pool_is_ours() else None
+    if not taken:
+        yield blas_threads()
+        return
+    with _BlasLimit(taken[-1]):
+        yield blas_threads()
+
+
+def _pool_is_ours():
+    """Whether this thread may move the BLAS pool: threadpoolctl loaded and
+    the main thread, since the count is process-global."""
+    return (threadpool_limits is not None
+            and threading.current_thread() is threading.main_thread())
+
+
+def _taken():
+    """This thread's stack of the counts its wraps took away."""
+    if not hasattr(_TAKEN, 'counts'):
+        _TAKEN.counts = []
+    return _TAKEN.counts
 
 
 def blas_threads():
@@ -84,3 +172,35 @@ def blas_threads():
     counts = [lib['num_threads'] for lib in threadpool_info()
               if lib.get('user_api') == 'blas' and lib.get('num_threads')]
     return max(counts) if counts else None
+
+
+def openmp_threads():
+    """Threads the process's OpenMP pools are set to, the largest of them --
+    the count OMP_NUM_THREADS gave the run, which no wrap here moves -- or 1
+    where none can be read."""
+    if threadpool_info is None:
+        return 1
+    counts = [lib['num_threads'] for lib in threadpool_info()
+              if lib.get('user_api') == 'openmp' and lib.get('num_threads')]
+    return max(counts) if counts else 1
+
+
+def row_map(fn, n, threads):
+    """[fn(r0, r1)] over contiguous ranges tiling [0, n), one per thread of a
+    pool of `threads`, in order; inline where one range is all there is."""
+    parts = min(int(threads), n)
+    if parts < 1:
+        return []
+    ranges = [(p * n // parts, (p + 1) * n // parts) for p in range(parts)]
+    if parts == 1:
+        return [fn(*ranges[0])]
+    return list(_row_pool(int(threads)).map(lambda r: fn(*r), ranges))
+
+
+def _row_pool(threads):
+    """This process's executor of `threads` workers, made once."""
+    key = (os.getpid(), threads)
+    with _ROW_POOLS_LOCK:
+        if key not in _ROW_POOLS:
+            _ROW_POOLS[key] = ThreadPoolExecutor(threads)
+        return _ROW_POOLS[key]

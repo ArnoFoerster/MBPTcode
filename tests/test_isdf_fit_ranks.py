@@ -69,7 +69,10 @@ restored and `cmp`-verified afterwards:
       bitwise under all three, being collocation the fit never touches.
 """
 import os
+import subprocess
 import sys
+import tarfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -77,6 +80,7 @@ import numpy as np
 import pytest
 from pyscf import df, gto, scf
 
+from src.Base import separable_ri
 from src.Base.separable_ri import (_ao_l_labels, ao_blocks, atomic_grid,
                                    build_separable_ri,
                                    molecular_points_covariant)
@@ -103,6 +107,59 @@ RANKS = (2, 3)
 #: measured, and below the discrepancy between the repo's two fit
 #: realizations on ethylene. Not a measurement to re-baseline.
 FIT_TOL = 1e-7
+
+REPO = Path(__file__).resolve().parents[1]
+#: The fit before its element-wise work ran in `row_map`'s threads -- the
+#: pass with one `aux_e2` call and one whole co-density block per shell
+#: block, the Gram matrix combined, mirrored and balanced as whole arrays:
+#: every M it returned is the M this tree must still return, bit for bit.
+ONE_THREAD_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
+#: The thread caps of every subprocess gate; `OMP_NUM_THREADS` alone is set
+#: per probe, which moves the pass's pool and neither BLAS nor Accelerate.
+THREAD_CAPS = {name: '2' for name in
+               ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
+#: Bytes of one slab in the kernel gate: seven rows of thirteen doubles, so
+#: every kernel runs ragged slabs over ragged thread ranges.
+KERNEL_SLAB_BYTES = 8 * 7 * 13
+#: Serial and 1, 2 and 3 simulated ranks: the rank counts the probe runs.
+PROBE_SIZES = (None, 1, 2, 3)
+#: M from the tree on `sys.path`, at every case and rank count.
+FIT_PROBE = '''
+import sys
+import warnings
+
+sys.path.insert(0, {tree!r})
+
+import numpy as np
+from pyscf import df, gto
+
+from src.Base.separable_ri import (atomic_grid, build_separable_ri,
+                                   molecular_points_covariant)
+from src.Base.utils.mpi_grid import run_simulated
+from src.SingleReference.GW.space_time import DEFAULT_COUNTS
+
+warnings.simplefilter('ignore')
+fits = {{}}
+for name, (atom, basis, budget) in {cases!r}.items():
+    mol = gto.M(atom=atom, basis=basis, verbose=0)
+    auxbasis = basis + '-ri'
+    auxmol = df.addons.make_auxmol(mol, auxbasis=auxbasis)
+    radii, origins = {{}}, {{}}
+    for el in sorted({{mol.atom_pure_symbol(i) for i in range(mol.natm)}}):
+        radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
+                                             DEFAULT_COUNTS)
+    coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
+
+    def fit(comm=None):
+        return build_separable_ri(mol, coords, auxmol=auxmol,
+                                  block_memory_gb=budget, comm=comm)[2]
+
+    for size in {sizes!r}:
+        fits[f'{{name}}_{{size}}'] = (fit() if size is None else
+                                      np.stack(run_simulated(fit, size)))
+np.savez({out!r}, **fits)
+'''
 
 
 def reldiff(a, b):
@@ -164,6 +221,26 @@ def test_the_pass_is_many_blocks(case):
     assert len(blocks) > max(RANKS)
 
 
+def test_the_gram_is_many_row_blocks(case, monkeypatch):
+    """The Gram matrix's lower block triangle, its transpose and its
+    balancing are cut into row blocks here, so the bitwise gates below read
+    the blocked path and not one whole block."""
+    seen = []
+    real = separable_ri._gram_lower
+
+    def spy(S, A, B, P, rows, threads):
+        seen.append((len(S), rows))
+        real(S, A, B, P, rows, threads)
+
+    monkeypatch.setattr(separable_ri, '_gram_lower', spy)
+    separable_ri.fit_M_streaming(case['mol'], case['auxmol'], case['coords'],
+                                 block_memory_gb=case['block_memory_gb'])
+    (nk, rows), = seen
+    print(f"\n{case['name']}: Gram of {nk} points in {-(-nk // rows)} row "
+          f'blocks of {rows}')
+    assert -(-nk // rows) >= 8
+
+
 def test_one_rank_is_the_serial_factorization(case, serial):
     """A comm of size 1 owns every block and reduces nothing, so the arithmetic
     is the serial arithmetic -- no tolerance belongs here."""
@@ -220,6 +297,154 @@ def test_separable_factors_passes_the_comm_through(case):
     dd = reldiff(ser[1], per_rank[0][1])
     print(f"\n{case['name']}, separable_factors on 3 ranks: D {dd:.2e} relative")
     assert dd < FIT_TOL
+
+
+def extracted(tmp_path_factory, commit):
+    """The tree of `commit`, unpacked into a temporary directory."""
+    out = tmp_path_factory.mktemp(f'fit_{commit[:7]}')
+    tar = out.parent / f'fit_{commit}.tar'
+    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
+                           '-o', str(tar), commit],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    with tarfile.open(tar) as fh:
+        fh.extractall(out)
+    assert (out / 'src' / 'Base' / 'separable_ri.py').is_file()
+    return out
+
+
+def probe_fits(tree, tmp_path, omp_threads):
+    """Every case's M from `tree` at `PROBE_SIZES`, in its own process with
+    the thread caps and `omp_threads` OpenMP threads."""
+    tag = f'{tree.name}_{omp_threads}'
+    script = tmp_path / f'fits_{tag}.py'
+    out = tmp_path / f'fits_{tag}.npz'
+    script.write_text(FIT_PROBE.format(tree=str(tree), cases=CASES,
+                                       sizes=PROBE_SIZES, out=str(out)))
+    env = dict(os.environ, **THREAD_CAPS, OMP_NUM_THREADS=str(omp_threads))
+    env.pop('PYTHONPATH', None)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return dict(np.load(out))
+
+
+@pytest.fixture(scope='module')
+def fits_three_ways(tmp_path_factory):
+    """(the one-thread tree's M, this tree's on a pool of two, of one)."""
+    tmp = tmp_path_factory.mktemp('fits')
+    old = extracted(tmp_path_factory, ONE_THREAD_COMMIT)
+    return (probe_fits(old, tmp, 2), probe_fits(REPO, tmp, 2),
+            probe_fits(REPO, tmp, 1))
+
+
+@pytest.mark.parametrize('size', PROBE_SIZES)
+@pytest.mark.parametrize('name', sorted(CASES))
+def test_m_is_the_one_thread_trees_bits(fits_three_ways, name, size):
+    """M, serial and on every rank, is the bytes the fit returned when its
+    co-densities, its kept integrals and its accumulation ran on one thread
+    and its integrals came from one `aux_e2` call per block, and its Gram
+    matrix was combined, mirrored and balanced as whole arrays -- on a pool
+    of two threads and of one: every element is the same product in any slab
+    and on any thread, and a maximum is exact in any order."""
+    old, two, one = fits_three_ways
+    key = f'{name}_{size}'
+    for new in (two, one):
+        assert old[key].shape == new[key].shape, key
+        assert old[key].tobytes() == new[key].tobytes(), key
+
+
+@pytest.mark.parametrize('threads', (1, 2, 3))
+def test_pass_kernels_are_the_whole_block_arithmetic(monkeypatch, threads):
+    """The pass's slabbed, threaded kernels give the whole-block numpy they
+    replaced: the column peaks equal np.maximum(D.max(0), -D.min(0)) (equal,
+    not byte-equal: a column of signed zeros may come back +0), and the kept
+    co-densities, the kept (mu nu|P) rows and the accumulation are its bytes.
+
+    On an F-order collocation spanning 1e-156..1, so that products reach the
+    subnormal range, and weights that are not powers of two, where
+    (a b) w and a (b w) differ: what the peaks rest on is that |fl(ab)| w
+    rounds monotonically, not that a weight is exact.
+    """
+    monkeypatch.setattr(separable_ri, 'FIT_ROW_CHUNK_BYTES', KERNEL_SLAB_BYTES)
+    rng = np.random.default_rng(7)
+    nk, nao, naux, (a0, a1) = 101, 17, 11, (3, 7)
+    X = np.asfortranarray(rng.standard_normal((nk, nao))
+                          * np.exp(rng.uniform(-360.0, 0.0, (nk, nao))))
+    second = np.array([0, 2, 3, 5, 8, 9, 12, 16])
+    n2 = len(second)
+    w = rng.uniform(0.3, 5.0, n2)
+    D = (X[:, a0:a1, None] * X[:, None, second]).reshape(nk, -1)
+    D *= np.tile(w, a1 - a0)[None, :]
+    assert (np.abs(D) < np.finfo(float).tiny).any()      # subnormals reached
+    peaks = separable_ri._pair_peaks(X, a0, a1, second, w, threads)
+    assert np.array_equal(peaks, np.maximum(D.max(axis=0), -D.min(axis=0)))
+    keep = peaks > np.quantile(peaks, 0.6)
+    kept = np.flatnonzero(keep)
+    cols = separable_ri._pair_columns(X, a0 + kept // n2, second[kept % n2],
+                                      w[kept % n2], threads)
+    assert cols.tobytes() == np.ascontiguousarray(D[:, keep]).tobytes()
+    e3c = np.asfortranarray(rng.standard_normal((a1 - a0, nao, naux)))
+    rows = separable_ri._kept_integrals(e3c, kept // n2, second[kept % n2],
+                                        threads)
+    whole = e3c.reshape(a1 - a0, nao, naux)[:, second, :].reshape(-1, naux)
+    assert rows.tobytes() == whole[keep].tobytes()
+    acc, part = rng.standard_normal((2, naux, nk))
+    added = acc + part
+    separable_ri._accumulate(acc, part, threads)
+    assert acc.tobytes() == added.tobytes()
+
+
+@pytest.mark.parametrize('threads', (1, 2, 3))
+def test_gram_kernels_are_the_whole_array_arithmetic(monkeypatch, threads):
+    """The Gram matrix built, transposed and balanced a slab and a tile at a
+    time is the whole-array code's bytes where `posv` reads it -- the upper
+    triangle and the diagonal -- and the column scaling is its bytes
+    everywhere: GEMMs of the same shapes into S or a buffer, then each
+    element multiplied, added and scaled in the same order.
+
+    Ragged: 101 points in row blocks of 23, slabs of seven rows, transpose
+    tiles of five, on collocations spanning 1e-156..1 and a balancing that is
+    not a power of two, where scaling the columns first gives other bytes.
+    """
+    monkeypatch.setattr(separable_ri, 'FIT_ROW_CHUNK_BYTES', KERNEL_SLAB_BYTES)
+    monkeypatch.setattr(separable_ri, 'FIT_TRANSPOSE_TILE', 5)
+    rng = np.random.default_rng(11)
+    nk, rows = 101, 23
+
+    def collocation(n):
+        return (rng.standard_normal((nk, n))
+                * np.exp(rng.uniform(-360.0, 0.0, (nk, n))))
+
+    A, B, P = collocation(17), collocation(8), np.asfortranarray(collocation(11))
+    whole = np.zeros((nk, nk))
+    for i0 in range(0, nk, rows):
+        i1 = min(i0 + rows, nk)
+        G = A[i0:i1] @ A[:i1].T
+        G *= B[i0:i1] @ B[:i1].T
+        G += P[i0:i1] @ P[:i1].T
+        whole[i0:i1, :i1] = G
+    lower = whole.copy()
+    for i0 in range(0, nk, rows):
+        i1 = min(i0 + rows, nk)
+        whole[i0:i1, i1:] = whole[i1:, i0:i1].T
+    d = 1.0 / np.sqrt(np.diag(whole))
+    swapped = (whole * d[None, :]) * d[:, None]
+    whole *= d[:, None]
+    whole *= d[None, :]
+    upper = np.triu_indices(nk)
+    assert swapped[upper].tobytes() != whole[upper].tobytes()
+
+    S = np.zeros((nk, nk))
+    separable_ri._gram_lower(S, A, B, P, rows, threads)
+    assert S.tobytes() == lower.tobytes()
+    separable_ri._balanced_upper(S, d, rows, threads)
+    assert S[upper].tobytes() == whole[upper].tobytes()
+
+    X = collocation(13).T.copy()
+    scaled = X * d[None, :]
+    separable_ri._scale_columns(X, d, threads)
+    assert X.tobytes() == scaled.tobytes()
 
 
 if __name__ == '__main__':

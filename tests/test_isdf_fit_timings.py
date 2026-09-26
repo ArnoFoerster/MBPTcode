@@ -74,9 +74,7 @@ ALL_TIMING_KEYS = PHASE_KEYS + ('fit_total', 'fit_blocks', 'fit_blocks_total')
 TIMER_SLACK = 1e-3
 
 REPO = Path(__file__).resolve().parents[1]
-#: The commit before these timers were added, extracted with `git archive`
-#: rather than checked out: the working tree must not move, and a concurrent
-#: session may be editing it. Pinned rather than `HEAD`: once this file's own
+#: The commit before these timers were added. Pinned rather than `HEAD`: once this file's own
 #: change lands, `HEAD` would include it and the comparison would stop
 #: meaning anything.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
@@ -225,9 +223,8 @@ def test_blocks_sum_to_the_total_under_a_comm(case, size):
 
 @pytest.fixture(scope='session')
 def archive(tmp_path_factory):
-    """`separable_factors` before the timing phases were added, extracted
-    with `git archive` rather than checked out: the working tree must not
-    move, and a concurrent session may be editing it."""
+    """`separable_factors` before the timing phases were added, unpacked
+    into a temporary directory."""
     out = tmp_path_factory.mktemp('isdf_fit_timings_baseline')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',

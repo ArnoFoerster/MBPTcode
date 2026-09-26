@@ -229,8 +229,7 @@ def serial_roots(cases):
 
 @pytest.fixture(scope='session')
 def archive(tmp_path_factory):
-    """The block action before the split, extracted with `git archive` rather
-    than a checkout: the working tree must not move while the gate runs."""
+    """The block action before the split, unpacked into a temporary directory."""
     out = tmp_path_factory.mktemp('block_action_baseline')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',

@@ -53,6 +53,17 @@ indexed in blocks of the array it was made for) and runs pyscf's own
 units of `ALIGNMENT_UNIT` points, because `NumInt.block_loop` turns the sparse
 AO kernels off on a grid whose length is not a multiple of it.
 
+THE LONG-RANGE OPERATOR IS A SECOND TENSOR. A range-separated hybrid asks
+for the exchange of erf(omega r)/r beside the bare one (LRC-wPBEh: 0.2 of the
+bare K and 0.8 of the long-range one at omega = 0.2), and pyscf answers it
+from a second fitted tensor, built from the attenuated three- and two-centre
+integrals (`pyscf/df/df.py::range_coulomb`). Here that is a second
+`DistributedDF` for that omega, built the same way inside the attenuated
+operator the first time the SCF asks for it and cut by the same rule into
+the rows of ITS metric factor -- the attenuated metric is singular, so it
+takes pyscf's eigen-replacement and has fewer rows than the bare one. Its
+partials reduce exactly as the bare one's. It doubles a rank's slice.
+
 What the split does NOT buy is the resident grid memory: `block_loop` already
 streams the AO values in blocks capped at 1200 x BLKSIZE points and by
 max_memory, so the buffer is ~1.2 GB at anthracene and ~1.8 GB at pentacene
@@ -175,17 +186,19 @@ from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 from pyscf.lib import logger
 
 from src.Base.constants import DF_EXCHANGE_TRANSIENT_FRACTION
+from src.Base.isdf_jk import ISDFJK, range_coulomb
 from src.Base.utils.mpi_grid import (broadcast, contiguous_block,
                                      current_comm, exchange_blocks, lockstep,
                                      lockstep_stats, partition, reduce_sum,
                                      replicate)
-from src.Base.utils.threads import blas_single_threaded
+from src.Base.utils.threads import blas_full_pool, blas_single_threaded
 
 #: What a distributed run leaves on `mf._distributed_timings`, on every rank.
 #: Seconds, except the counts in `_COUNT_KEYS` and the two `_mb` volumes. The
 #: stages: `scf_build_slices` is this rank's rows of cderi, start to finish --
 #: the metric broadcast plus `scf_build_integrals`, the column blocks this rank
-#: evaluated, plus `scf_build_exchange`, the transposition of those columns
+#: evaluated and solved against the metric factor (the solve is most of it),
+#: plus `scf_build_exchange`, the transposition of those columns
 #: into everyone's rows; `scf_guess` is pyscf's initial guess; `scf_grid` is
 #: the grid -- rank 0's build and density pruning, and on every rank the wait
 #: for a new grid's header, its share of the broadcast and its own mask;
@@ -363,6 +376,14 @@ def _solve_column_block(env, low, mode, block, bufs):
 
     The result ALIASES the integral buffer the solve overwrote, so the next
     block destroys it: consume it before asking for another.
+
+    TWO POOLS. The integrals are libcint's, OpenMP over the block's (i, P)
+    shell jobs, and run inside the caller's `blas_single_threaded`; the solve
+    is BLAS's, naux^2 flops per column against naux for the integrals, and
+    runs on the pool that wrap took (`blas_full_pool`). Held at one thread it
+    was the whole of `scf_build_integrals` at the chlorophyllide dimer: the
+    bare trsm and the attenuated GEMM, 1.0e14 flops over two ranks in 986 s,
+    50 GFLOP/s, one core's peak, at 16 threads a rank and at 128.
     """
     mol, auxmol, int3c, atm, bas, benv, ao_loc, cintopt = env
     bufs1, bufs2 = bufs
@@ -377,6 +398,13 @@ def _solve_column_block(env, low, mode, block, bufs):
         bufs[0], bufs[1] = bufs2, bufs1
     else:
         ints = ints.reshape((-1, naoaux)).T
+    with blas_full_pool():
+        return _metric_solve(low, mode, ints)
+
+
+def _metric_solve(low, mode, ints):
+    """L^-1 (P|mu nu) of one column block, or the eigen-replacement's product,
+    overwriting `ints` where LAPACK solves in place."""
     if mode != 'cd':
         return lib.dot(low, ints)
     if ints.flags.c_contiguous:
@@ -536,9 +564,10 @@ class DistributedDF(df.df.DF):
     returns the total, which is what pyscf's SCF asked for.
     """
 
-    _keys = {'comm', 'row_slice', 'column_blocks', 'timings'}
+    _keys = {'comm', 'row_slice', 'column_blocks', 'timings', 'omega'}
 
-    def __init__(self, mol, auxbasis=None, comm=None, timings=None):
+    def __init__(self, mol, auxbasis=None, comm=None, timings=None,
+                 omega=None):
         super().__init__(mol, auxbasis=auxbasis)
         comm = current_comm() if comm is None else comm
         if comm is None or comm.Get_size() == 1:
@@ -555,8 +584,13 @@ class DistributedDF(df.df.DF):
         self.column_blocks = ()
         #: Filled at stage boundaries when a caller wants the wall clock.
         self.timings = timings
+        #: The operator the rows are fitted with, pyscf's `range_coulomb`
+        #: convention: 0 bare, > 0 long-range erf(omega r)/r, < 0 its
+        #: short-range complement.
+        self.omega = 0.0 if omega is None else float(omega)
         self._blocks = ()
         self._replaced = None
+        self._range_separated = {}
 
     # -- construction --------------------------------------------------------
 
@@ -564,6 +598,14 @@ class DistributedDF(df.df.DF):
         """This rank's rows of cderi, from the column blocks it evaluates."""
         if self._cderi is not None:
             return self
+        # The attenuated operator is read from both molecules' environments
+        # while the integrals are evaluated, and from nowhere after.
+        with (range_coulomb(self.mol, None, self.omega) if self.omega
+              else contextlib.nullcontext()):
+            return self._build()
+
+    def _build(self):
+        """`build` under whichever operator the molecule carries now."""
         log = logger.new_logger(self)
         t0 = (logger.process_clock(), logger.perf_counter())
         t_build = time.time()
@@ -609,22 +651,38 @@ class DistributedDF(df.df.DF):
         if mol is not None:
             self.row_slice = None
             self.column_blocks = ()
+            self._range_separated = {}
         return self
+
+    def range_separated(self, omega):
+        """This rank's rows of the tensor fitted with the attenuated operator
+        `omega`, one object per omega, built on the first request -- which
+        every rank makes at the same point of its SCF, since the build is
+        collective."""
+        key = '%.6f' % omega
+        rows = self._range_separated.get(key)
+        if rows is None:
+            rows = DistributedDF(self.mol, auxbasis=self.auxbasis,
+                                 comm=self.comm, timings=self.timings,
+                                 omega=omega)
+            rows.max_memory = self.max_memory
+            rows.stdout, rows.verbose = self.stdout, self.verbose
+            with blas_single_threaded():
+                rows.build()
+            self._range_separated[key] = rows
+        rows.timings = self.timings
+        return rows
 
     # -- the interface _DFHF calls ------------------------------------------
 
     def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
                direct_scf_tol=1e-13, omega=None):
-        """The whole J and K of rank 0's density, from every rank's rows.
+        """The whole J and K of rank 0's density, from every rank's rows of
+        the tensor fitted with the operator `omega` (None or 0 the bare one).
         Collective: every rank calls it at the same point of its SCF."""
-        if omega:
-            raise NotImplementedError(
-                'a range-separated hybrid builds a SECOND fitted tensor for '
-                'the attenuated operator, which this object does not carry: '
-                "its rows are the bare metric's. Use a global hybrid here, or "
-                'give the long-range operator its own DistributedDF.')
         dms = _lockstep_density(dm, self.comm, self.timings)
-        vj, vk = self.partial_jk(dms, hermi, with_j, with_k, direct_scf_tol)
+        rows = self.range_separated(omega) if omega else self
+        vj, vk = rows.partial_jk(dms, hermi, with_j, with_k, direct_scf_tol)
         return self._reduce_jk(vj, vk, with_j, with_k)
 
     def partial_jk(self, dm, hermi=1, with_j=True, with_k=True,
@@ -688,8 +746,12 @@ class DistributedDF(df.df.DF):
         return self
 
     def release(self):
-        """Drop this rank's rows of the tensor, and the object with them."""
+        """Drop this rank's rows of every tensor it holds, the attenuated
+        operators' included, and the object with them."""
         self.uninstall()
+        for rows in self._range_separated.values():
+            rows.release()
+        self._range_separated = {}
         self._cderi = None
         self.row_slice, self.column_blocks, self._blocks = None, (), ()
         return self
@@ -904,11 +966,13 @@ def distributed_df_jk(mf, comm=None, timings=None):
     own DF object while the slice stays. `distributed_fock` is that bracket
     and `distributed_mean_field` the whole sequence for an SCF.
 
-    Only pyscf's own `DF` is replaced: its J/K is the contraction of the
-    fitted three-centre tensor that the slices divide. A subclass answers J/K
-    its own way -- `ISDFJK` from interpolated factors -- and swapping in plain
-    density-fitted rows would converge a different mean field without a word,
-    so it is refused on every rank.
+    Only pyscf's own `DF` is replaced by fitted rows: its J/K is the
+    contraction of the fitted three-centre tensor that the slices divide. An
+    `ISDFJK` answers J/K from interpolated factors, and gets the handle that
+    divides THOSE (`distributed_isdf_jk.DistributedISDFJK`: its grid tiles
+    and auxiliary shells). Any other subclass answers J/K its own way, and
+    swapping in plain density-fitted rows would converge a different mean
+    field without a word, so it is refused on every rank.
     """
     comm = current_comm() if comm is None else comm
     if comm is None or comm.Get_size() == 1:
@@ -920,6 +984,11 @@ def distributed_df_jk(mf, comm=None, timings=None):
             'Build it with mf.density_fit(), identically on every rank.')
     if isinstance(with_df, DistributedDF):
         return with_df
+    if (isinstance(with_df, ISDFJK)
+            or isinstance(getattr(with_df, 'source', None), ISDFJK)):
+        # cycle: distributed_isdf_jk imports this module's lockstep and sum
+        from src.Base.distributed_isdf_jk import distributed_isdf_jk
+        return distributed_isdf_jk(mf, comm, timings)
     if type(with_df) is not df.df.DF:
         raise NotImplementedError(
             f"{type(with_df).__name__} is not pyscf's DF: the distributed SCF "
@@ -1080,9 +1149,18 @@ def distributed_df_storage(mf, comm=None):
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))
     start, stop = contiguous_block(naux, rank, size)
+    # The attenuated operators' rows, read off the handles a range-separated
+    # SCF left on the mean field: their metric has its own rank.
+    handles = distributed_handles(mf, comm)
+    attenuated = ([] if handles is None or handles[0] is None
+                  else list(getattr(handles[0], '_range_separated',
+                                    {}).values()))
     return dict(naux=naux, ranks=size, rows=stop - start,
                 slice_gb=(stop - start) * nao_pair * 8 / 1e9,
-                whole_gb=naux * nao_pair * 8 / 1e9)
+                whole_gb=naux * nao_pair * 8 / 1e9,
+                range_separated_gb=sum(int(np.size(r._cderi)) * 8 / 1e9
+                                       for r in attenuated
+                                       if r._cderi is not None))
 
 
 def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
@@ -1134,9 +1212,11 @@ def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
         before = {key: timings.get(key, 0.0) for key in _KERNEL_STAGES}
         t_kernel = time.time()
         try:
-            # pyscf's own OpenMP runs the Fock build (the fit's contraction,
+            # pyscf's own OpenMP runs the Fock build (the DF contraction,
             # `nr_rks` on the DFT grid), so BLAS is held at one thread and the
-            # two pools stop spinning against each other.
+            # two pools stop spinning against each other; the ISDF handle's
+            # GEMM stages (its row fit, Z, K) take the pool back inside
+            # (`blas_full_pool`).
             with blas_single_threaded():
                 mf.kernel(dm0=dm0)
         finally:

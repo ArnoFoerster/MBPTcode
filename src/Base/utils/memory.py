@@ -13,6 +13,7 @@ path, which reads `0.25 * mf.max_memory` into `block_memory_gb` when the caller
 leaves it unset) size themselves against, so raising it is the whole fix.
 """
 import os
+import re
 
 import numpy as np
 
@@ -28,20 +29,47 @@ def allocation_max_memory_mb(fraction=ALLOCATION_MEMORY_FRACTION, default=None):
     tensor, the numint grid) and not the mo_coeff/ISDF-factor arrays and
     python overhead the rest of the process holds beside them: the probe that
     found the pentacene regression measured 7.8 GB RSS at anthracene with
-    `max_memory` capped at 4000 MB. Neither SLURM variable set (no allocation,
-    or a laptop) returns `default` unchanged, so an off-cluster run keeps
-    whatever pyscf's own default or a caller's own value was.
+    `max_memory` capped at 4000 MB. A whole-node allocation (`--mem=0`) can
+    leave both SLURM variables unset, or `SLURM_MEM_PER_NODE` at `0`, which a
+    whole-node cc-pVDZ job once had read back as pyscf's 4000 MB default and
+    died in the DF build on a node with hundreds of GB free; inside a SLURM
+    job (`SLURM_JOB_ID` set), that case reads the node's own physical memory
+    instead. Off SLURM (no `SLURM_JOB_ID`), neither variable set still returns
+    `default` unchanged, so a laptop run keeps whatever pyscf's own default or
+    a caller's own value was. The per-node figure and a whole node's physical
+    memory are the NODE's, shared by every rank SLURM places on it
+    (`tasks_per_node`), so with eight ranks per node each process targets an
+    eighth; the per-CPU form is already per task.
     """
     node_mb = os.environ.get('SLURM_MEM_PER_NODE')
-    if node_mb is not None:
-        total_mb = float(node_mb)
+    if node_mb is not None and float(node_mb) > 0:
+        total_mb = float(node_mb) / tasks_per_node()
     else:
         cpu_mb = os.environ.get('SLURM_MEM_PER_CPU')
-        if cpu_mb is None:
+        if cpu_mb is not None:
+            cpus = float(os.environ.get('SLURM_CPUS_PER_TASK', 1))
+            total_mb = float(cpu_mb) * cpus
+        elif 'SLURM_JOB_ID' in os.environ:
+            total_mb = (os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+                        / 2 ** 20) / tasks_per_node()
+        else:
             return default
-        cpus = float(os.environ.get('SLURM_CPUS_PER_TASK', 1))
-        total_mb = float(cpu_mb) * cpus
     return int(total_mb * fraction)
+
+
+def tasks_per_node():
+    """Ranks SLURM places on each node of this job, 1 when it does not say.
+
+    `SLURM_NTASKS_PER_NODE` is set when the job asked for it
+    (`--ntasks-per-node`); `SLURM_TASKS_PER_NODE` is set for every job and
+    reads like `8(x2)` or `8,4`, whose leading integer is the count on the
+    first node and, for the homogeneous layouts used here, on every node.
+    """
+    explicit = os.environ.get('SLURM_NTASKS_PER_NODE', '').strip()
+    if explicit.isdigit():
+        return max(int(explicit), 1)
+    match = re.match(r'\s*(\d+)', os.environ.get('SLURM_TASKS_PER_NODE', ''))
+    return max(int(match.group(1)), 1) if match else 1
 
 
 def describe_df_storage(mf):

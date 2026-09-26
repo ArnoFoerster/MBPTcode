@@ -20,12 +20,14 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.constants import ALLOCATION_MEMORY_FRACTION
-from src.Base.utils.memory import allocation_max_memory_mb, describe_df_storage
+from src.Base.utils.memory import (allocation_max_memory_mb, describe_df_storage,
+                                   tasks_per_node)
 
 #: SLURM_* variables the parser reads; cleared before every case so a test
 #: run under an actual allocation does not leak into these, and cleared after
 #: it so the values a case sets do not leak into the rest of a pytest session.
-SLURM_VARS = ('SLURM_MEM_PER_NODE', 'SLURM_MEM_PER_CPU', 'SLURM_CPUS_PER_TASK')
+SLURM_VARS = ('SLURM_MEM_PER_NODE', 'SLURM_MEM_PER_CPU', 'SLURM_CPUS_PER_TASK',
+              'SLURM_JOB_ID', 'SLURM_NTASKS_PER_NODE', 'SLURM_TASKS_PER_NODE')
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +84,88 @@ def test_the_shipped_fraction_is_the_constants_module_value():
     read from `constants.py`, not re-spelled here."""
     os.environ['SLURM_MEM_PER_NODE'] = '100000'
     assert allocation_max_memory_mb() == int(100000 * ALLOCATION_MEMORY_FRACTION)
+
+
+def _sysconf(page_size, phys_pages):
+    """A monkeypatched `os.sysconf` returning a known page size/count pair."""
+    values = {'SC_PAGE_SIZE': page_size, 'SC_PHYS_PAGES': phys_pages}
+    return lambda name: values[name]
+
+
+def test_whole_node_allocation_inside_slurm_both_unset(monkeypatch):
+    """A whole-node `--mem=0` allocation can leave both SLURM_MEM_PER_NODE and
+    SLURM_MEM_PER_CPU unset; inside a SLURM job (`SLURM_JOB_ID` set) that
+    reads the node's own physical memory rather than falling through to
+    `default`, which is what let a whole-node job read pyscf's 4000 MB
+    default and die building its DF tensor on a node with hundreds of GB
+    free."""
+    os.environ['SLURM_JOB_ID'] = '12345'
+    monkeypatch.setattr(os, 'sysconf', _sysconf(4096, 2 ** 20))
+    physical_mb = 4096 * 2 ** 20 / 2 ** 20     # = 4096 MB, by construction
+    assert (allocation_max_memory_mb(fraction=0.6, default=8000)
+            == int(physical_mb * 0.6))
+
+
+def test_whole_node_allocation_inside_slurm_node_var_zero(monkeypatch):
+    """SLURM can also report SLURM_MEM_PER_NODE=0 for a whole-node request:
+    the same whole-node case, not literally zero memory."""
+    os.environ['SLURM_JOB_ID'] = '12345'
+    os.environ['SLURM_MEM_PER_NODE'] = '0'
+    monkeypatch.setattr(os, 'sysconf', _sysconf(4096, 2 ** 20))
+    physical_mb = 4096 * 2 ** 20 / 2 ** 20
+    assert (allocation_max_memory_mb(fraction=0.6, default=8000)
+            == int(physical_mb * 0.6))
+
+
+def test_per_node_memory_is_shared_by_the_ranks_on_the_node():
+    """SLURM_MEM_PER_NODE is the node's memory; with --ntasks-per-node=8 eight
+    processes share it, so each one's max_memory is an eighth. With one
+    rank per node (the case every earlier job had) nothing changes."""
+    os.environ['SLURM_MEM_PER_NODE'] = '122880'
+    os.environ['SLURM_NTASKS_PER_NODE'] = '8'
+    assert allocation_max_memory_mb(fraction=0.6) == int(122880 / 8 * 0.6)
+    os.environ['SLURM_NTASKS_PER_NODE'] = '1'
+    assert allocation_max_memory_mb(fraction=0.6) == int(122880 * 0.6)
+
+
+def test_tasks_per_node_reads_the_slurm_layout_string():
+    """Without SLURM_NTASKS_PER_NODE the count comes from the leading integer
+    of SLURM_TASKS_PER_NODE, which SLURM writes as `8(x2)` for two nodes of
+    eight; unset or unparsable means one."""
+    assert tasks_per_node() == 1
+    os.environ['SLURM_TASKS_PER_NODE'] = '8(x2)'
+    assert tasks_per_node() == 8
+    os.environ['SLURM_MEM_PER_NODE'] = '122880'
+    assert allocation_max_memory_mb(fraction=0.6) == int(122880 / 8 * 0.6)
+    os.environ['SLURM_TASKS_PER_NODE'] = 'nonsense'
+    assert tasks_per_node() == 1
+
+
+def test_whole_node_physical_memory_is_shared_by_the_ranks_on_the_node(monkeypatch):
+    """The whole-node fallback is the node's physical memory, shared the same
+    way: eight ranks on an exclusive --mem=0 node each get an eighth."""
+    os.environ['SLURM_JOB_ID'] = '12345'
+    os.environ['SLURM_NTASKS_PER_NODE'] = '8'
+    monkeypatch.setattr(os, 'sysconf', _sysconf(4096, 2 ** 20))
+    assert (allocation_max_memory_mb(fraction=0.6, default=8000)
+            == int(4096 / 8 * 0.6))
+
+
+def test_per_cpu_form_is_already_per_task():
+    """SLURM_MEM_PER_CPU times the task's CPUs is one process's share
+    already; the ranks per node do not divide it again."""
+    os.environ['SLURM_MEM_PER_CPU'] = '7680'
+    os.environ['SLURM_CPUS_PER_TASK'] = '16'
+    os.environ['SLURM_NTASKS_PER_NODE'] = '8'
+    assert allocation_max_memory_mb(fraction=0.6) == int(7680 * 16 * 0.6)
+
+
+def test_outside_slurm_both_unset_still_returns_the_default():
+    """No `SLURM_JOB_ID` at all (a laptop): the whole-node fallback must not
+    fire, so `default` still comes back unscaled, same as
+    `test_neither_variable_returns_the_default_unscaled`."""
+    assert 'SLURM_JOB_ID' not in os.environ
+    assert allocation_max_memory_mb(default=8000) == 8000
 
 
 @pytest.fixture(scope='module')

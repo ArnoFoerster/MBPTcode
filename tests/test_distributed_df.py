@@ -42,8 +42,9 @@ times what running the serial SCF again moves the energy, the density and the
 orbital energies, one ulp at the least, floored at `E_TOL`, `DM_TOL` and
 `MO_TOL`; where two distributed runs of one layout are compared, within
 `COMPOSED_GRAD_K` times the repeat alone, which is bitwise here, where pyscf
-repeats its bits. The checks that the serial path IS pyscf's own SCF are `==`
-on two runs: laptop gates by design, met where pyscf repeats its bits.
+repeats its bits. The checks that the serial path IS pyscf's own SCF, and the
+subprocess probe against the archived tree, are `==` on two runs: laptop
+gates by design, met where pyscf repeats its bits.
 
 EVERY GATE HERE WAS SHOWN TO FAIL:
 
@@ -80,10 +81,9 @@ EVERY GATE HERE WAS SHOWN TO FAIL:
                                          settings' lockstep taken out, rank 1
                                          stops early and the next lockstep
                                          refuses on every rank
-  the refusal of a with_df that is not   the interpolated-exchange gate: both
-  pyscf's DF taken out                   ranks converge an ISDFJK mean field
-                                         on plain density-fitted rows and
-                                         report nothing
+  the refusal of a with_df that is       the with_df gate: both ranks converge a
+  neither pyscf's DF nor ISDF's          foreign with_df mean field on plain
+  taken out                              density-fitted rows and report nothing
 
 THE TIMERS read the clock at stage boundaries and are gated the way every
 other instrumented route in this repo is: every key present on every rank,
@@ -92,13 +92,16 @@ JSON-clean for a caller that records it.
 """
 import json
 import os
+import subprocess
 import sys
+import tarfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-from pyscf import dft, gto, scf
+from pyscf import df, dft, gto, scf
 from pyscf.df import addons
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 
@@ -114,6 +117,7 @@ from src.Base.isdf_jk import isdf_jk
 from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
                                      distributed, lockstep_stats,
                                      run_simulated)
+from src.Base.utils.threads import blas_single_threaded, blas_threads
 
 SIZES = [2, 3]
 #: The widest world the gates run: more ranks than water's density fit has
@@ -155,6 +159,49 @@ CASES = [('water', WATER, 'cc-pvdz', None),
          ('ethylene', ETHYLENE, 'cc-pvtz', None),
          ('ethylene', ETHYLENE, 'cc-pvtz', 'pbe0')]
 
+REPO = Path(__file__).resolve().parents[1]
+#: The build before its metric solve ran on the pool the build's wrap took:
+#: every row it made is the row this tree must still make. The attenuated
+#: operator's rows have no such tree -- that build refused a range-separated
+#: functional over ranks -- so the rows compared are the bare operator's.
+ONE_POOL_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
+#: The molecules the rows probe builds, at every rank count of `SIZES`.
+ROWS_CASES = (('water', WATER, 'cc-pvdz'),
+              ('ethylene', ETHYLENE, 'cc-pvtz'))
+#: This rank's bare rows from the tree on `sys.path`, at every case and rank
+#: count, in its own process.
+ROWS_PROBE = '''
+import sys
+import warnings
+
+sys.path.insert(0, {tree!r})
+
+import numpy as np
+from pyscf import dft
+
+from src.Base.distributed_df import distributed_df_jk
+from src.Base.utils.mpi_grid import run_simulated
+
+warnings.simplefilter('ignore')
+rows = {{}}
+for name, atom, basis in {cases!r}:
+    for size in {sizes!r}:
+        mfs = [dft.RKS(dft.gto.M(atom=atom, basis=basis, verbose=0),
+                       xc='pbe0').density_fit() for _ in range(size)]
+
+        def one_rank(comm):
+            return distributed_df_jk(mfs[comm.Get_rank()], comm)._cderi.copy()
+
+        out = run_simulated(one_rank, size)
+        rows[f'{{name}}_{{size}}_bare'] = np.concatenate(out)
+np.savez({out!r}, **rows)
+'''
+#: A shared machine: the archived probe is capped rather than left to size
+#: itself against the whole node, as every subprocess gate in this repo is.
+THREAD_CAPS = {name: '2' for name in
+               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
+
 #: The stage keys that must sum to no more than `scf_total`.
 STAGE_KEYS = ('scf_build_slices', 'scf_guess', 'scf_grid', 'scf_fock_jk',
               'scf_fock_xc', 'scf_reduce', 'scf_lockstep', 'scf_driver')
@@ -162,6 +209,12 @@ STAGE_KEYS = ('scf_build_slices', 'scf_guess', 'scf_grid', 'scf_fock_jk',
 #: the whole by the reads between them rather than exceeding it; the slack is
 #: for the other direction, where a stage ends after the total was started.
 TIMER_SLACK = 1e-3
+
+
+class ForeignDF(df.df.DF):
+    """A `with_df` subclass that answers J/K exactly as pyscf's own `DF`
+    does, but is not pyscf's exact type -- the refusal it triggers catches it
+    by class rather than by what it computes."""
 
 
 def mean_field(atom, basis, xc, charge=0, spin=0):
@@ -727,13 +780,26 @@ def isdf_mean_field():
     return mf
 
 
-def test_an_interpolated_exchange_is_refused_over_ranks():
-    """An ISDF `with_df` answers J/K from its own interpolated factors, which
-    the slices would silently replace by plain density-fitted rows: over two
-    ranks it is refused on every rank, by class name, before any slice is
-    built or any cycle run; without a communicator the same mean field is its
-    own serial kernel, bit for bit."""
-    mfs = [isdf_mean_field() for _ in range(2)]
+def foreign_mean_field():
+    """Water/cc-pVDZ Hartree-Fock whose `with_df` is `ForeignDF`, built on
+    the same molecule and auxbasis pyscf's own `density_fit` chose, unrun."""
+    mf = mean_field(WATER, 'cc-pvdz', None)
+    mf.with_df = ForeignDF(mf.mol, auxbasis=mf.with_df.auxbasis)
+    return mf
+
+
+def test_a_foreign_with_df_is_refused_while_isdf_is_dispatched():
+    """A `with_df` whose exact type is neither pyscf's own `DF` nor an
+    `ISDFJK` answers J/K some way the row slices cannot repeat, so it is
+    refused on every rank, by class name, before any slice is built or any
+    cycle run. An ISDF `with_df` is no longer refused here: it is dispatched
+    to `distributed_isdf_jk.DistributedISDFJK` instead, which divides its
+    grid tiles and auxiliary shells rather than a fitted tensor's rows;
+    `tests/test_distributed_isdf_scf.py` gates that SCF itself, so this only
+    checks that the dispatch reaches a converged mean field and does not
+    raise. Without a communicator the refusal does not run at all -- the
+    foreign mean field is its own serial kernel, bit for bit."""
+    mfs = [foreign_mean_field() for _ in range(2)]
 
     def one_rank(comm):
         mf = mfs[comm.Get_rank()]
@@ -744,15 +810,22 @@ def test_an_interpolated_exchange_is_refused_over_ranks():
         return None, type(mf.with_df).__name__, mf.mo_coeff
 
     for message, with_df, mo_coeff in run_simulated(one_rank, 2):
-        assert message is not None, 'an ISDF mean field ran distributed'
-        assert "ISDFJK is not pyscf's DF" in message
+        assert message is not None, 'a foreign with_df ran distributed'
+        assert f"{with_df} is not pyscf's DF" in message
         assert 'density-fitted three-centre tensor' in message
-        assert with_df == 'ISDFJK' and mo_coeff is None
-    ref = isdf_mean_field()
+        assert with_df == 'ForeignDF' and mo_coeff is None
+
+    isdf_mfs = [isdf_mean_field() for _ in range(2)]
+    out = run_simulated(
+        lambda comm: distributed_mean_field(isdf_mfs[comm.Get_rank()], comm),
+        2)
+    assert all(mf is not None for mf in out), 'ISDF was refused over ranks'
+
+    ref = foreign_mean_field()
     ref.kernel()
-    mf = isdf_mean_field()
+    mf = foreign_mean_field()
     distributed_mean_field(mf, comm=None)
-    assert type(mf.with_df).__name__ == 'ISDFJK'
+    assert type(mf.with_df).__name__ == 'ForeignDF'
     assert mf.e_tot == ref.e_tot
     assert np.array_equal(mf.mo_coeff, ref.mo_coeff)
     assert getattr(mf, '_distributed_timings', None) is None
@@ -826,6 +899,101 @@ def test_timings_survive_split_grid_off():
         assert t['scf_requests_xc'] == t['scf_requests_jk'] > 0
         assert sum(t[k] for k in STAGE_KEYS) <= t['scf_total'] + TIMER_SLACK
     assert out[0]['timings']['scf_grid'] > 0        # rank 0 builds it
+
+
+def extracted(tmp_path_factory, commit):
+    """The tree of `commit`, unpacked into a temporary directory."""
+    out = tmp_path_factory.mktemp(f'distributed_df_{commit[:7]}')
+    tar = out.parent / f'{commit}.tar'
+    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
+                           '-o', str(tar), commit],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    with tarfile.open(tar) as fh:
+        fh.extractall(out)
+    assert (out / 'src' / 'Base' / 'distributed_df.py').is_file()
+    return out
+
+
+def probe_rows(tree, tmp_path):
+    """Every rank's bare rows from `tree` at `ROWS_CASES` and `SIZES`, in its
+    own process with the thread caps."""
+    script = tmp_path / f'rows_{tree.name}.py'
+    out = tmp_path / f'rows_{tree.name}.npz'
+    script.write_text(ROWS_PROBE.format(tree=str(tree), cases=ROWS_CASES,
+                                        sizes=SIZES, out=str(out)))
+    env = dict(os.environ, **THREAD_CAPS)
+    env.pop('PYTHONPATH', None)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return dict(np.load(out))
+
+
+@pytest.fixture(scope='module')
+def rows_both_trees(tmp_path_factory):
+    """(the one-pool tree's rows, this tree's), keyed case_size_operator."""
+    tmp = tmp_path_factory.mktemp('rows')
+    old = extracted(tmp_path_factory, ONE_POOL_COMMIT)
+    return probe_rows(old, tmp), probe_rows(REPO, tmp)
+
+
+@pytest.mark.parametrize('size', SIZES)
+@pytest.mark.parametrize('name', [c[0] for c in ROWS_CASES])
+def test_rows_are_the_one_pool_trees_bits(rows_both_trees, name, size):
+    """The bare rows the ranks build, reassembled, are the bytes the build
+    made before its metric solve took the wrap's BLAS pool.
+
+    Under the thread caps no wrap engages (`BLAS_WRAP_MIN_THREADS`), so what
+    this pins is the integrals and everything around the solve; that the
+    solve does take the pool is the next gate's.
+    """
+    old, new = rows_both_trees
+    key = f'{name}_{size}_bare'
+    assert old[key].shape == new[key].shape, key
+    assert old[key].tobytes() == new[key].tobytes(), key
+
+
+def test_the_metric_solve_runs_on_the_pool_the_wrap_took(serial, monkeypatch):
+    """Inside the build's `blas_single_threaded` the libcint pass holds BLAS
+    at one thread and every block's metric solve runs on the count the wrap
+    found, with the rows it gives unchanged.
+
+    The solve is naux^2 flops per column against naux for the integrals: at
+    the chlorophyllide dimer, held at one thread, it was the whole 986 s of
+    `scf_build_integrals`. The wrap is entered here with `min_threads=1` on a
+    pool of two, on the main thread, where it holds; the blocks are walked
+    the way one rank walks them.
+    """
+    threadpoolctl = pytest.importorskip('threadpoolctl')
+    mf = serial[('water', None)]['mf']
+    mol = mf.mol
+    auxmol = addons.make_auxmol(mol, mf.with_df.auxbasis)
+    nao = mol.nao_nr()
+    blocks = distributed_df._column_blocks(mol, nao * (nao + 1) // 2,
+                                           auxmol.nao_nr(), 2)
+    seen = {'ints': [], 'solve': []}
+    getints3c = distributed_df.gto.moleintor.getints3c
+    solve = distributed_df._metric_solve
+
+    def counted_ints(*args, **kwargs):
+        seen['ints'].append(blas_threads())
+        return getints3c(*args, **kwargs)
+
+    def counted_solve(*args):
+        seen['solve'].append(blas_threads())
+        return solve(*args)
+
+    with threadpoolctl.threadpool_limits(limits=2, user_api='blas'):
+        reference = serial_column_walk(mf, blocks)
+        monkeypatch.setattr(distributed_df.gto.moleintor, 'getints3c',
+                            counted_ints)
+        monkeypatch.setattr(distributed_df, '_metric_solve', counted_solve)
+        with blas_single_threaded(min_threads=1):
+            wrapped = serial_column_walk(mf, blocks)
+    assert seen['ints'] == [1] * len(blocks)
+    assert seen['solve'] == [2] * len(blocks)
+    assert np.array_equal(wrapped, reference)
 
 
 if __name__ == '__main__':
