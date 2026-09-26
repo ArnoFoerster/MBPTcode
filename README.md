@@ -4,7 +4,7 @@ Many-body perturbation theory for molecular systems, on top of
 [PySCF](https://pyscf.org/): Dyson IP/EA-ADC, MPn density matrices, coupled
 cluster, GW and linear response, and the analytic nuclear gradients and
 potential-energy-surface properties built on top of them. GW, BSE and RPA also
-run with k-point sampling, for crystals and slabs. Co-authored by Claude.
+run with k-point sampling, for crystals and slabs.
 
 ## Methods
 
@@ -44,8 +44,7 @@ Three routes reach the same quasiparticle energy and differ only in cost:
 | `solve_qp_energy_space_time` | pointwise product in imaginary time, on a separable (ISDF) factorization of the ERIs | O(N³) |
 
 A correlated density matrix is passed to any of them as
-`dm_correction=`. The `dm_ccsd=` alias for that argument has been **removed**;
-it was already marked deprecated, and callers that still use it now raise
+`dm_correction=`; the old `dm_ccsd=` alias is not accepted and raises
 `TypeError`.
 
 The imaginary-axis routes reach the real axis by one of four continuations,
@@ -296,18 +295,8 @@ scan then warns and shrinks the pool. With the pip wheels, export
 `OMP_WAIT_POLICY=PASSIVE`: otherwise PySCF's OpenMP threads and NumPy's OpenBLAS
 threads spin against each other on small calls.
 
-In a Slurm job:
-
-```bash
-#SBATCH --cpus-per-task=16
-#SBATCH --hint=nomultithread       # 16 cores; without it, 8 cores and their SMT siblings
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export OMP_WAIT_POLICY=PASSIVE
-unset OMP_PROC_BIND
-```
-
-Several processes in one job step each get their own cores with
-`srun --ntasks=R --cpus-per-task=T --hint=nomultithread` and `OMP_NUM_THREADS=T`.
+Several processes on one machine each take `OMP_NUM_THREADS=T` and their own
+T cores, bound by the launcher.
 
 ## Distributed eigensolve
 
@@ -346,24 +335,18 @@ Rank 0 still builds and holds each matrix and its eigenvectors, and runs
 everything outside the eigensolve on its own threads. ELPA spreads the
 eigensolver's work and workspace over the ranks, not the matrices' memory.
 
-In a Slurm job, one node as 8 ranks of 24 cores:
+R ranks of T threads each:
 
 ```bash
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
-#SBATCH --cpus-per-task=24
-#SBATCH --hint=nomultithread
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_NUM_THREADS=T
 export ELPA_DEFAULT_omp_threads=$OMP_NUM_THREADS
-srun --mpi=pmix --cpus-per-task=$SLURM_CPUS_PER_TASK --cpu-bind=cores python run.py
+mpirun -n R --bind-to core --map-by slot:PE=T python run.py
 ```
 
 ELPA's own OpenMP threads default to one per rank, and `OMP_NUM_THREADS` does
 not reach them; `ELPA_DEFAULT_omp_threads` does, if `pyelpa` is linked against
-the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores, with
-`--cpu-bind=cores` or `mpirun --bind-to core --map-by slot:PE=24`: unbound, a
-test solve ran at least ten times slower. `--mpi=pmix` suits Open MPI 5;
-`srun --mpi=list` shows what your Slurm offers.
+the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores: unbound,
+a test solve ran at least ten times slower.
 
 `pyelpa` is on neither PyPI nor conda-forge. Build it from `python/pyelpa` in
 the source of the installed ELPA version: with ELPA's own
@@ -398,8 +381,8 @@ setup(name='pyelpa', version='2025.01.002',     # the ELPA release
 ```
 
 Write `elpa` for `elpa_openmp` where ELPA was built without OpenMP. To check
-the setup, run `tests/test_elpa_casida.py` under `srun` or `mpirun`: on more
-than one rank it fails if a solve fell back to `eigh`.
+the setup, run `tests/test_elpa_casida.py` under `mpirun`: on more than one
+rank it fails if a solve fell back to `eigh`.
 
 ## Running under MPI
 
@@ -431,13 +414,13 @@ with distributed(comm):
         print(omega)                   # the same bits on every rank
 ```
 
-Launch it with `mpirun -n R python run.py`, or `srun --mpi=pmix` in a Slurm
-job, with `OMP_NUM_THREADS` set to the cores each rank may use (see
-[Threads](#threads)). Without `mpi4py`, or with `MBPT_USE_MPI=0`, `grid_comm`
-returns None and the same script runs serially, bit for bit the serial code.
+Launch it with `mpirun -n R python run.py`, with `OMP_NUM_THREADS` set to the
+cores each rank may use (see [Threads](#threads)). Without `mpi4py`, or with
+`MBPT_USE_MPI=0`, `grid_comm` returns None and the same script runs serially,
+bit for bit the serial code.
 `mpi4py` is imported on first use, never at module import.
 
-WHY THE RANKS AGREE. Each rank converges its own arithmetic, and two nodes do
+WHY THE RANKS AGREE. Each rank converges its own arithmetic, and two ranks need
 not repeat each other's last bits: an orbital energy, an interpolation point
 or a Davidson residual can differ, and a discrete decision taken from it -- a
 grid size, a trial-vector count, when to stop -- then differs outright. So
