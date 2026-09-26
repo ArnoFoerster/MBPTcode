@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.linalg as la
-from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
+from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
 from src.Base.constants import CASIDA_NUMERICAL_EPS
 
 class CasidaResult(tuple):
@@ -90,14 +90,11 @@ class CasidaSolver:
             if not self.keep_intermediates:
                 self.A = None
                 self.B = None
-            omega, Z_res, is_distributed, solver, comm = diagonalize_matrix(
-                A, threshold=threshold)
+            omega, Z_res, is_distributed = eigh_symmetric(A, threshold=threshold)
             del A
-            if is_distributed:
-                solver.destroy()
-                if comm.Get_rank() != 0:
-                    self.is_distributed = True
-                    return CasidaResult(omega, None, None, True)
+            if Z_res is None:
+                self.is_distributed = True
+                return CasidaResult(omega, None, None, True)
             X = Z_res
             # calloc'd zeros stay unresident until written; zeros_like writes them.
             Y = np.zeros(Z_res.shape, dtype=Z_res.dtype,
@@ -118,8 +115,8 @@ class CasidaSolver:
         # Check if A-B is diagonal: only check off-diagonal norm.
         # Computed from the Frobenius norms rather than by forming
         # AmB - diag(diag(AmB)), which allocates a whole extra n_ov x n_ov array
-        # purely to be normed and discarded -- 50 GB at hexacene/cc-pVTZ, where
-        # the solve is already memory-bound. Identical value to 1e-8 relative.
+        # purely to be normed and discarded, where the solve is already
+        # memory-bound. Identical value to 1e-8 relative.
         diag_AmB_full = np.diag(AmB)
         offdiag_sq = (np.linalg.norm(AmB)**2 - np.linalg.norm(diag_AmB_full)**2)
         offdiag_norm = np.sqrt(max(offdiag_sq, 0.0))
@@ -140,26 +137,23 @@ class CasidaSolver:
             # Target matrix: (A-B)^{1/2} (A+B) (A-B)^{1/2}, formed IN PLACE in
             # ApB's buffer. ApB is dead after this line in this branch, and the
             # out-of-place form costs two further n_ov x n_ov temporaries (one
-            # per multiply) on top of the result -- at hexacene/cc-pVTZ that is
-            # the difference between ~220 GB and ~270 GB on a 252 GB node.
+            # per multiply) on top of the result.
             M = ApB
             M *= sqrt_AmB_diag[:, None]
             M *= sqrt_AmB_diag[None, :]
             del ApB
 
             # Perform diagonalization via backend
-            omega2, Z_res, is_distributed, solver, comm = diagonalize_matrix(M, threshold=threshold)
+            omega2, Z_res, is_distributed = eigh_symmetric(M, threshold=threshold)
             del M
 
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
-            
-            if is_distributed:
+
+            if Z_res is None:
                 # Z came back whole on rank 0; the other ranks are done.
-                solver.destroy()
-                if comm.Get_rank() != 0:
-                    self.is_distributed = True
-                    return CasidaResult(omega, None, None, True)
+                self.is_distributed = True
+                return CasidaResult(omega, None, None, True)
             sqrt_omega = np.sqrt(omega)
             X_plus_Y = Z_res * sqrt_AmB_diag[:, None]
             X_plus_Y /= sqrt_omega[None, :]
@@ -183,18 +177,16 @@ class CasidaSolver:
             del AmB
 
             # Perform diagonalization via backend
-            omega2, Z_res, is_distributed, solver, comm = diagonalize_matrix(M, threshold=threshold)
+            omega2, Z_res, is_distributed = eigh_symmetric(M, threshold=threshold)
             del M
 
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
-            
-            if is_distributed:
+
+            if Z_res is None:
                 # Z came back whole on rank 0; the other ranks are done.
-                solver.destroy()
-                if comm.Get_rank() != 0:
-                    self.is_distributed = True
-                    return CasidaResult(omega, None, None, True)
+                self.is_distributed = True
+                return CasidaResult(omega, None, None, True)
             sqrt_omega = np.sqrt(omega)
             X_plus_Y = la.solve_triangular(L, Z_res, lower=True, trans='C')
             X_plus_Y *= sqrt_omega[None, :]

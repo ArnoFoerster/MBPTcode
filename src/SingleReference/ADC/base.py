@@ -424,7 +424,7 @@ class ADCSolverUnrestricted:
     # ---- unified entry point ----
 
     def solve(self, static_correction=None, nroots=1, homo_index=None,
-              ref_vec=None, conv_tol=1e-6, tol=1e-8, threshold=5000, verbose=0,
+              ref_vec=None, conv_tol=1e-6, threshold=5000, verbose=0,
               method='davidson', omega_range=None):
         """(e, Z) for the configured route; details on self.last_result.
         static_correction is spin-orbital sized ((nso, nso)).
@@ -652,7 +652,7 @@ class ADCSolverRestricted:
     # ---- unified entry point ----
 
     def solve(self, static_correction=None, nroots=1, homo_index=None,
-              ref_vec=None, conv_tol=1e-6, tol=1e-8, threshold=5000, verbose=0,
+              ref_vec=None, conv_tol=1e-6, threshold=5000, verbose=0,
               method='davidson', omega_range=None):
         """(e, Z) for the configured route; eigenvectors on self.last_result.
         Dense routes return all poles; matrix-free routes the nroots

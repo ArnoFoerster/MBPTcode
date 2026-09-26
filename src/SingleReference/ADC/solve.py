@@ -2,54 +2,41 @@
 dense diagonalization, the downfolded/satellite seed builders, and the
 Lanczos/continued-fraction spectral solver."""
 import numpy as np
-from pyscf import lib as pyscf_lib
 
-from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
+from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Solvers.davidson import overlap_pick, solve_symmetric
+
 
 def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
-                    conv_tol=1e-6, max_cycle=100, max_space=30, verbose=0):
+                    conv_tol=1e-6, max_cycle=200, max_subspace=40, verbose=0):
     """Root-following Davidson on a matrix-free operator: Ritz pairs are
     picked by |overlap| with the reference vector (Koopmans unit vector at
-    homo_index unless ref_vec is given). Returns (eGF, Z, Reigv) sorted
-    ascending in eGF."""
+    homo_index unless ref_vec is given). Returns (eGF, Z, Reigv, conv) sorted
+    ascending in eGF.
+
+    The iteration is src.Solvers.davidson.solve_symmetric -- the same call the
+    ee (neutral-excitation) route makes, differing only in the `pick` and in
+    the pole strength computed here. Everything about the quasiparticle
+    targeting is in overlap_pick; everything about Z is in this function.
+
+    conv_tol is a RESIDUAL NORM (see the solver's tolerance contract), not
+    pyscf's eigenvalue `tol`, from which pyscf derives a residual tolerance of
+    sqrt(tol): passed there, the default 1e-6 would converge roots at
+    |r| <= 1e-3.
+    """
     if ref_vec is None:
         x0 = np.zeros(nH)
         x0[homo_index] = 1.0
     else:
         x0 = np.asarray(ref_vec, dtype=float)
         x0 = x0 / np.linalg.norm(x0)
-    ref = x0.copy()
 
-    def precond(dx, e, x0_):
-        d = diag - e
-        d[np.abs(d) < 1e-8] = 1e-8
-        return dx / d
-
-    def pick(w, v, nroots_, envs):
-        xs = envs['xs']
-        ref_coeff = np.array([np.dot(ref, x) for x in xs])
-        overlap = np.abs(ref_coeff @ v)
-        idx = np.argsort(-overlap)[:nroots_]
-        order = idx[np.argsort(w[idx])]
-        return w[order], v[:, order], order
-
-    def aop(xs):
-        return [aop_vec(x) for x in xs]
-
-    conv, e, c = pyscf_lib.davidson1(
-        aop, x0, precond, nroots=nroots, pick=pick,
-        tol=conv_tol, max_cycle=max_cycle, max_space=max_space,
-        verbose=verbose)
-
-    e = np.atleast_1d(np.asarray(e, dtype=float))
-    c = np.asarray(c)
-    if c.ndim == 1:
-        c = c[None, :]
-    order = np.argsort(e)
-    eGF = e[order]
-    Reigv = c[order].T
+    eGF, Reigv, conv = solve_symmetric(
+        aop_vec, diag, nroots=nroots, x0=x0, pick=overlap_pick(x0),
+        tol_residual=conv_tol, max_cycle=max_cycle,
+        max_subspace=max_subspace, verbose=verbose, label='ADC Davidson')
     Z = np.sum(Reigv[:norb, :] ** 2, axis=0)
-    return eGF, Z, Reigv
+    return eGF, Z, Reigv, conv
 
 
 def downfolded_seed_vectors(aop_vec, diag, nH, norb, orbital_window, omega0,
@@ -164,14 +151,12 @@ def dominant_satellite_seed(e_eff, seeds, full_idx, window_size):
 
 
 def diag_dense(H, norb, threshold=5000):
-    """Dense diagonalization (scalapack-distributed above threshold);
-    (eGF, Z, Reigv) sorted ascending. Only rank 0 gets Reigv/Z distributed."""
-    eGF, Reigv, is_distributed, solver, comm = diagonalize_matrix(H, threshold=threshold)
-    if is_distributed:
-        # Reigv came back whole on rank 0; the other ranks are done.
-        solver.destroy()
-        if comm.Get_rank() != 0:
-            return eGF, None, None
+    """Dense diagonalization on the shared backend (ELPA-distributed above
+    threshold); (eGF, Z, Reigv) sorted ascending. Only rank 0 gets Reigv/Z
+    when the solve was distributed."""
+    eGF, Reigv, _ = eigh_symmetric(H, threshold=threshold)
+    if Reigv is None:
+        return eGF, None, None      # not this rank's eigenvectors
     Z = np.sum(Reigv[:norb, :] ** 2, axis=0)
     order = np.argsort(eGF)
     return eGF[order], Z[order], Reigv[:, order]
@@ -243,7 +228,8 @@ def lanczos_spectral(A, diag, v0, omega_range, eta=None, npts=2000,
                      min_steps=40, max_steps=800, step_block=40,
                      peak_tol=1e-3, z_threshold=1e-5, reorth=True):
     """Matrix-free Lanczos/continued-fraction spectral solver -- an
-    alternative to davidson() that computes the FULL spectral function for a
+    alternative to davidson_follow() that computes the FULL spectral function
+    for a
     single starting channel v0 (main peak + every satellite) in ONE pass,
     converged over a requested frequency window, instead of root-following
     one state at a time. No seed-quality dependence, no energy-window
@@ -255,12 +241,12 @@ def lanczos_spectral(A, diag, v0, omega_range, eta=None, npts=2000,
         adc_r_sigma_* / adc_u_sigma_* build_operator functions produce works
         unchanged here (DF dispatch happens inside those builders, not here
         -- this function has no level/DF awareness at all).
-    diag: (n,) diagonal -- SAME convention as davidson(); not used by
-        Lanczos itself (no preconditioner needed), kept purely so callers
+    diag: (n,) diagonal -- SAME convention as solve_symmetric(); not used
+        by Lanczos itself (no preconditioner needed), kept purely so callers
         can build (op, diag) once and pass the identical pair to either
         solver.
-    v0: (n,) starting vector. PHYSICALLY MEANINGFUL here, unlike davidson's
-        v0 (a root-following seed/guess): G_v0(omega) = <v0|(omega-A)^-1|v0>
+    v0: (n,) starting vector. PHYSICALLY MEANINGFUL here, unlike the
+        Davidson's x0 (a root-following seed/guess): G_v0(omega) = <v0|(omega-A)^-1|v0>
         is the EXACT spectral function for whatever channel v0 represents,
         e.g. a unit vector on one orbital row = that orbital's complete
         removal spectrum (main peak + satellites), or any other physically

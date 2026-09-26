@@ -10,21 +10,20 @@ import scipy.linalg as la
 # mpi4py/ELPA are imported ON DEMAND, never at module import time.
 #
 # WHY (this is not a style preference): `from mpi4py import MPI` runs MPI_Init at
-# import. If the interconnect is unavailable -- e.g. a compute node whose IB
+# import. If the interconnect is unavailable -- e.g. a machine whose IB
 # device returns I/O errors -- MPI ABORTS THE PROCESS from C. It does not raise,
-# so the try/except that used to wrap this import could never catch it, and
-# merely importing this module killed the job with a bare
+# so a try/except around this import cannot catch it, and merely importing this
+# module would kill the job with a bare
 #     Abort(...) Fatal error in internal_Init_thread ... ucx function returned
 #     with failed status
-# and no Python traceback. It reached callers that never use ELPA at all, via
+# and no Python traceback, in callers that never use ELPA at all, via
 # casida.py -> diagonalization.py.
 #
 # Deferring the import is the whole fix: code that never asks for a large
-# diagonalization now never initializes MPI, so it cannot abort. Code that
-# DOES cross the ELPA threshold still gets ELPA automatically,
-# exactly as before -- no behaviour change where ELPA was actually wanted.
+# diagonalization never initializes MPI, so it cannot abort. Code that DOES
+# cross the ELPA threshold still gets ELPA automatically.
 # Set MBPT_USE_ELPA=0 to force the scipy path even above the threshold (useful
-# on a node with a broken interconnect, where MPI_Init would abort).
+# on a machine with a broken interconnect, where MPI_Init would abort).
 MPI = None
 ElpaEigensolver = None
 HAS_MPI = False
@@ -106,6 +105,55 @@ def scatter_block_cyclic(matrix_full, solver, comm):
             comm.Send(chunk, dest=dest, tag=2)
     return own
 
+_FALLBACK_WARNED = False
+
+# Every common launcher advertises its size in the environment. Read it from
+# there rather than from MPI: this is the path where mpi4py is absent or
+# unusable, so there is nothing to ask.
+_LAUNCHER_RANK_VARS = ('OMPI_COMM_WORLD_SIZE', 'PMI_SIZE', 'MV2_COMM_WORLD_SIZE',
+                       'MPI_LOCALNRANKS', 'SLURM_NTASKS')
+
+
+def _launcher_ranks():
+    """How many ranks the launcher started, or 1 if it did not say."""
+    for var in _LAUNCHER_RANK_VARS:
+        value = os.environ.get(var, '')
+        if value.isdigit():
+            return int(value)
+    return 1
+
+
+def _warn_elpa_unavailable(global_N):
+    """Say so, ONCE, when a matrix cleared the threshold and ELPA was missing.
+
+    Without this the fallback is silent, and silence here is expensive: under
+    `mpirun -n 4` every rank runs the whole calculation serially and gets the
+    same answer, so nothing looks wrong -- the numbers agree to the last bit
+    and a four-way redundant job burns its allocation to no effect. The only
+    visible symptom was a test asserting `distributed=True`, which a
+    production run does not do.
+
+    Silent for an explicit MBPT_USE_ELPA=0: that is the caller saying they
+    know. Silent below the threshold too -- a small matrix was never going to
+    distribute.
+    """
+    global _FALLBACK_WARNED
+    if _FALLBACK_WARNED or os.environ.get(
+            'MBPT_USE_ELPA', '').lower() in ('0', 'false', 'no'):
+        return
+    _FALLBACK_WARNED = True
+    n_ranks = _launcher_ranks()
+    where = (f'and this job has {n_ranks} ranks, so every one of them is now '
+             f'solving it redundantly on its own'
+             if n_ranks > 1 else 'so it is being solved locally')
+    warnings.warn(
+        f'ELPA is unavailable (mpi4py and/or pyelpa did not import), {where}. '
+        f'The N={global_N} eigensolve cleared the distribution threshold and '
+        f'would otherwise have been spread over the ranks. Install pyelpa (see '
+        f'the README\'s "Distributed eigensolve"), or set MBPT_USE_ELPA=0 to '
+        f'silence this.', RuntimeWarning, stacklevel=3)
+
+
 def diagonalize_matrix(M, threshold=5000):
     """Diagonalize symmetric M: distributed ELPA if dim >= threshold and MPI available, else local scipy.linalg.eigh.
 
@@ -117,7 +165,8 @@ def diagonalize_matrix(M, threshold=5000):
 
     # size check FIRST, so MPI is never initialized for small matrices; elpa.py
     # solves real matrices only, so a complex Hermitian M stays local
-    if global_N >= threshold and not np.iscomplexobj(M) and _try_init_mpi():
+    wants_elpa = global_N >= threshold and not np.iscomplexobj(M)
+    if wants_elpa and _try_init_mpi():
         try:
             comm = MPI.COMM_WORLD
             comm.bcast(global_N, root=0)          # served workers read it here
@@ -139,6 +188,9 @@ def diagonalize_matrix(M, threshold=5000):
             warnings.warn(f'distributed ELPA diagonalization unavailable at '
                           f'N={global_N} ({type(exc).__name__}: {exc}); falling '
                           f'back to a local solve', RuntimeWarning, stacklevel=2)
+    elif wants_elpa:
+        # above the threshold, real, and ELPA never came up
+        _warn_elpa_unavailable(global_N)
 
     # Driver choice is a correctness matter, not a tuning knob. 'evd'
     # (divide-and-conquer) needs 1 + 6N + 2N^2 workspace, which crosses
@@ -151,6 +203,41 @@ def diagonalize_matrix(M, threshold=5000):
     driver = 'evd' if 1 + 6*global_N + 2*global_N**2 <= 2**31 - 1 else 'evr'
     eigenvalues, Z = la.eigh(M, driver=driver)
     return eigenvalues, Z, False, None, None
+
+
+def eigh_symmetric(M, threshold=5000):
+    """THE dense symmetric eigensolver for a method's final matrix. Every
+    route that ends in a dense diagonalization -- ADC (charged and ee),
+    Casida -- goes through here, so they share one backend, one threshold and
+    one distributed convention instead of a mix of this and bare
+    `np.linalg.eigh`.
+
+    Wraps diagonalize_matrix and absorbs the bookkeeping every caller was
+    repeating: destroying the ELPA solver, and returning early on the ranks
+    that do not own the eigenvectors.
+
+    Returns (w, Z, is_distributed). `w` is on EVERY rank; `Z` is the full
+    eigenvector matrix on rank 0 and **None on every other rank** when the
+    solve was distributed.
+
+    That None is the whole reason this is not a drop-in replacement for every
+    eigh in the tree. It is correct for a SOLVER ENDPOINT, where rank 0 owns
+    the answer and the other ranks are done. It is wrong for an intermediate
+    FACTORIZATION whose result every rank needs to continue computing with --
+    an ISDF/RI fitting matrix, a cavity operator, a W_aux eigendecomposition.
+    Those must stay local, or gain an explicit broadcast first; handing them a
+    None on rank 1 is how a replicated calculation silently diverges across
+    ranks. Small-by-construction blocks (a few-configuration S^2 block, a
+    downfolded seed window) stay local too -- there is nothing to distribute,
+    and diagonalize_matrix would short-circuit anyway.
+    """
+    w, Z, is_distributed, solver, comm = diagonalize_matrix(M, threshold=threshold)
+    if is_distributed:
+        # Z came back whole on rank 0; the other ranks are done.
+        solver.destroy()
+        if comm.Get_rank() != 0:
+            return w, None, True
+    return w, Z, is_distributed
 
 
 _SERVING = False

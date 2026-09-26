@@ -20,8 +20,9 @@ triplets of a dense spin=None solve, each with return_parity -1, on water /
 STO-3G where it is cheap. The two channel bases must split the vector space
 orthonormally at every level, checked without a molecule.
 
-And davidson itself must warn when it stops with a root above tol. The parity
-reference is computed here from spin_flip_vector, not through return_parity.
+And the symmetric Davidson itself (`solve_symmetric`) must warn when it stops
+with a root unconverged. The parity reference is computed here from
+spin_flip_vector, not through return_parity.
 
 Run: python tests/test_ee_adc_spin_channels.py
 """
@@ -40,7 +41,7 @@ from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                       get_two_electron_integrals_chemist)
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
-from src.Solvers.davidson import davidson
+from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
@@ -145,7 +146,8 @@ def random_guess(mol, mf, level):
     V += 1e-2 * np.random.default_rng(3).standard_normal(V.shape)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        e, _ = davidson(aop, diag, k=NREF, v0=V)
+        e, _, _ = solve_symmetric(aop, diag, nroots=NREF, x0=V,
+                                  tol_residual=1e-8)
     return np.sort(e), [w for w in caught if issubclass(w.category, RuntimeWarning)]
 
 
@@ -272,21 +274,23 @@ def test_channel_basis():
 
 
 def test_davidson_warns():
-    """A root left above tol is named in a RuntimeWarning; a converged run is silent."""
+    """A root left unconverged is named in a RuntimeWarning; a converged run is
+    silent."""
     # a Hartree-scale diagonal, as an excitation spectrum
     rng = np.random.default_rng(7)
     M = 1e-3 * rng.standard_normal((300, 300))
     A = np.diag(np.linspace(0.2, 2.0, 300)) + M + M.T
     runs = {}
-    for max_iter in (2, 200):
+    for max_cycle in (2, 200):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            davidson(lambda v: A @ v, np.diag(A).copy(), k=2, max_iter=max_iter)
-        runs[max_iter] = [str(w.message) for w in caught
-                          if issubclass(w.category, RuntimeWarning)]
-    ok = check(len(runs[2]) == 1 and 'still above tol' in runs[2][0],
-               'max_iter=2 warns', runs[2][0] if runs[2] else 'no warning')
-    return ok & check(not runs[200], 'max_iter=200 converges without one')
+            solve_symmetric(lambda v: A @ v, np.diag(A).copy(), nroots=2,
+                            tol_residual=1e-8, max_cycle=max_cycle)
+        runs[max_cycle] = [str(w.message) for w in caught
+                           if issubclass(w.category, RuntimeWarning)]
+    ok = check(len(runs[2]) == 1 and 'unconverged' in runs[2][0],
+               'max_cycle=2 warns', runs[2][0] if runs[2] else 'no warning')
+    return ok & check(not runs[200], 'max_cycle=200 converges without one')
 
 
 if __name__ == '__main__':

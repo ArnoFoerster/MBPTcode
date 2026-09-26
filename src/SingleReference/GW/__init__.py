@@ -21,10 +21,18 @@
     evGW.py                   the eigenvalue-self-consistent loop over any of
                               the routes above
 
-Davidson note: the three iterative eigensolvers in this tree --
-LinearResponse/davidson.py (symplectic Casida via pyscf real_eig), ADC
-(root-following pyscf davidson1), CC/eom.py (non-Hermitian pyscf
-davidson_nosym1 + biorthogonalization) -- all delegate the iterative core to
-pyscf and differ only in problem-specific setup, so there is no shared
-Davidson core worth extracting.
+Davidson note, and it is a RULE: every iterative eigensolver in this tree
+delegates its core to pyscf, and there are three of them because there are
+three eigenproblems, not three tastes --
+  Solvers/davidson.py         real symmetric (pyscf davidson1). BOTH ADC
+                              routes: charged IP/EA root-following and
+                              neutral ee lowest-k go through the one
+                              solve_symmetric call.
+  LinearResponse/davidson.py  non-Hermitian paired Casida (pyscf real_eig)
+  CC/eom.py                   non-Hermitian biorthogonal (davidson_nosym1)
+Neither of the last two reduces to the first: the Casida form needs the
+(A-B) Cholesky reduction and X^2-Y^2 normalization, EOM-CC needs left/right
+biorthogonalization. A fourth symmetric solver would duplicate the first:
+both ADC routes solve the same problem, and one call keeps one meaning of
+conv_tol and one answer to whether an unconverged root is reported.
 """

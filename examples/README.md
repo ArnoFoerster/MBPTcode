@@ -21,6 +21,7 @@ All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
 | `15_excited_state_geometry_optimization.py` | two high-level entry points: S1 relaxed against S0 (`calc_adiabatic_excitation`) and the adiabatic S1-T1 gap (`calc_adiabatic_gap`), dense vs cubic-scaling ISDF/SOP |
 | `16_numerical_hessian_from_gradient.py` | a vibrational analysis built by central-differencing the analytic gradient, cross-checked against pyscf's own analytic Hessian |
 | `17_spin_orbit_coupling.py` | <S1\|H_SO\|T1/T2> at both relaxed minima from `15`'s adiabatic gap (El-Sayed's rule), plus the Herzberg-Teller dV/dq scan over the ground-state modes that finds the promoting mode |
+| `19_ee_adc.py` | electronic-excitation ADC(2)/ADC(3): spin-free, matrix-free, DF, and the singlet and triplet channels |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE
@@ -92,6 +93,9 @@ only valid for the bare amplitude.
     the 6 ground-state modes puts the largest |dV/dq| = 0.20 cm-1 at 1325
     cm-1, the out-of-plane wag -- the textbook promoting mode for this
     channel -- against 0.00-0.06 cm-1 for the rest (formaldehyde/cc-pVDZ)
+19  adc2: S1 = 6.979 eV   T1 = 6.646 eV   E_ST = 0.333 eV
+    adc3: S1 = 7.861 eV   T1 = 7.417 eV   E_ST = 0.444 eV
+    (water/aug-cc-pVDZ, density-fitted)
 ```
 
 ## Large systems
