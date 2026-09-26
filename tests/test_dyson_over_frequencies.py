@@ -1,40 +1,41 @@
 """The space-time GW Dyson step split over frequencies, under simulated ranks.
 
 `solve_qp_energy_space_time(distribute=True)` turns chi0(i.omega) into
-W(i.omega) = [I - chi0(i.omega)]^-1 one frequency at a time. Each rank inverts
-its own contiguous block of frequencies and the inverted rows are all-gathered
-verbatim (`allgather_blocks`): nothing is summed across ranks by that step, so
-every rank holds the owner's bits, and those are the bits the replicated
-inversion computed.
+W(i.omega) = [I - chi0(i.omega)]^-1 one frequency at a time. Over more than one
+rank each frequency is inverted by its round-robin owner (`partition`) and held
+there alone (`_dyson_owned`), W(0) is broadcast from its owner, and the
+screened interaction the self-energy reads is assembled from the owners' W:
+nothing is summed across ranks by the Dyson step itself.
 
 Gated on water/cc-pVDZ and ethylene/cc-pVTZ Hartree-Fock, on the GW window
 (no omega = 0 passenger) and on the whole diagonal with the static W a BSE
-takes from it (the passenger row, owned by the last non-empty rank):
+takes from it (the passenger row, inverted by its round-robin owner):
   * serially BITWISE against the code before the split, extracted with
     `git archive` and run in its own process on the same mean field and
     factors;
-  * at 2, 3 and 8 simulated ranks BITWISE against that code's own distributed
-    run at the same rank count -- its tau split with the Dyson inversion
-    replicated on every rank -- the quasiparticle energies within `QP_TOL` of
-    serial -- measured 0.0 Ha at every size on both molecules -- and
-    W(i.omega), W(0) and the energies the same bits on every rank. That code
-    predates the simulated communicator, so the extracted tree is run with
-    this tree's `Base/utils/mpi_grid.py` laid over its own (the primitives it
-    calls, `grid_comm`, `partition` and `reduce_sum`, keep their contracts)
-    and the two constants that module reads appended to its constants;
-  * `t_dyson` on every rank, and every rank's `dyson_frequencies` its own
-    contiguous block, so a return to the replicated inversion, which would
-    move no bit, is still seen;
-  * 8 ranks on 6 frequencies, where the last ranks own an EMPTY block, invert
-    nothing and leave the answer unchanged;
-  * rank 1's inverted block perturbed, which must move rank 0's answer out of
-    `QP_TOL`: the gate reads the rows that rank inverted.
+  * at 2, 3 and 8 simulated ranks BITWISE against the serial run: the
+    quasiparticle energies and W(0) the same bits on every rank and the serial
+    ones -- at these sizes each (tau, grid tile) and (tau, block pair) item of
+    the route's two reduced sums is a single tile, so the reductions add exact
+    zeros -- and each frequency's W, on the one rank that owns it, the serial
+    W;
+  * `t_dyson` on every rank, and every rank's inverted frequencies exactly its
+    round-robin share, the omega = 0 passenger apart, so a return to the
+    replicated inversion, which would move no bit, is still seen;
+  * 8 ranks on 6 frequencies, where the surplus ranks own nothing, invert
+    nothing and leave W(0) and every W the serial bits. With more ranks than
+    tau points the route also splits each point's self-energy pairs over the
+    ranks, which re-associates their sums, so the energies there are gated as
+    the grid-row route's own tests gate them: within `COMPOSED_GRAD_K` times
+    what relabelling the grid points moves the serial ones (6.4e-9 Ha on two
+    deep ethylene states), floored at `QP_BISECTION_TOL`;
+  * rank 1's inverted frequencies perturbed, which must move rank 0's answer
+    out of `QP_TOL`: the gate reads the W that rank inverted.
 
-Shown to fail: `allgather_blocks` made a no-op (still called, on a copy, so
-the ranks stay in step) puts water's quasiparticle energies 1.1e-2 to 1.7e-1
-Ha off serial on the window and 2.4 to 4.6 Ha on the diagonal, at 2, 3 and 8
-ranks. Every rank inverting every row again (`contiguous_block` bypassed)
-moves no bit and fails the `dyson_frequencies` gates alone.
+Shown to fail: every rank inverting every frequency again (`partition`
+bypassed in `_dyson_owned`) moves no bit and fails the ownership gates alone,
+at 2, 3 and 8 ranks and on the surplus ranks; W(0) left on its owner (the
+broadcast dropped) fails the W(0) gates on the diagonal.
 """
 import copy
 import os
@@ -50,8 +51,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
-                                     run_simulated)
+from src.Base.constants import COMPOSED_GRAD_K, QP_BISECTION_TOL
+from src.Base.utils.mpi_grid import partition, run_simulated
 from src.SingleReference.GW import space_time
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time,
@@ -69,11 +70,13 @@ SIZES = [2, 3, 8]
 #: 8 ranks on 6 frequencies, 7 rows with the omega = 0 passenger: ranks 6 and 7
 #: own nothing on the window, rank 7 nothing on the diagonal.
 EMPTY_SIZE, EMPTY_NTAU = 8, 6
-#: Ha. The frequency split moves no bit; what separates a distributed run from
-#: the serial one is the tau reduction of chi0 upstream of it.
+#: Ha. A perturbed rank's W must move the energies past this.
 QP_TOL = 1e-10
 #: Added to the diagonal of rank 1's inverted rows: far above the gate.
 PERTURBATION = 1e-6
+#: Random orders of the grid points whose largest move of the serial energies
+#: anchors the bar where a rank count re-associates them.
+PERMUTATIONS = 3
 
 #: Six points is a partition fixture, not a converged grid, and says so.
 pytestmark = pytest.mark.filterwarnings(
@@ -81,10 +84,8 @@ pytestmark = pytest.mark.filterwarnings(
 
 REPO = Path(__file__).resolve().parents[1]
 #: The last commit with the replicated inversion. Pinned rather than `HEAD`,
-#: which after this change would compare the tree with itself.
+#: which would compare the tree with itself.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
-#: The constants this tree's `mpi_grid` imports, which the baseline lacks.
-OVERLAY_CONSTANTS = ('AGREEMENT_DIGEST_SEED', 'AGREEMENT_DIGEST_BLOCK')
 THREAD_CAPS = {name: '2' for name in
                ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
@@ -100,7 +101,6 @@ sys.path.insert(0, {archive!r})
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import (solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
 
@@ -116,12 +116,12 @@ for name, (atom, basis) in MOLECULES.items():
     factors = (d['X_mo'], d['D'], d['X_ao'], d['coords'])
     nocc = mol.nelectron // 2
 
-    def route(kind, ntau, comm=None):
+    def route(kind, ntau):
         m = copy.copy(mf)
         m.mo_energy = np.asarray(mf.mo_energy, float).copy()
         m.mo_coeff = np.asarray(mf.mo_coeff, float).copy()
         f = tuple(np.array(a, copy=True) for a in factors)
-        kw = dict(factors=f, ntau=ntau, distribute=comm is not None, comm=comm)
+        kw = dict(factors=f, ntau=ntau)
         if kind == 'window':
             return solve_qp_energy_space_time(
                 m, mol, nocc, np.array([nocc - 1, nocc]), **kw), np.zeros(0)
@@ -130,14 +130,10 @@ for name, (atom, basis) in MOLECULES.items():
         return qp, extras['w_static']
 
     for kind in {kinds!r}:
-        for ntau, sizes in (('auto', {sizes!r}), ({empty_ntau!r}, [{empty_size!r}])):
+        for ntau in ('auto', {empty_ntau!r}):
             qp, ws = route(kind, ntau)
             out[f'{{name}}_{{kind}}_{{ntau}}_0_qp'] = qp
             out[f'{{name}}_{{kind}}_{{ntau}}_0_ws'] = ws
-            for size in sizes:
-                qp, ws = run_simulated(lambda c: route(kind, ntau, c), size)[0]
-                out[f'{{name}}_{{kind}}_{{ntau}}_{{size}}_qp'] = qp
-                out[f'{{name}}_{{kind}}_{{ntau}}_{{size}}_ws'] = ws
 np.savez({out!r}, **out)
 '''
 
@@ -184,22 +180,53 @@ def _bitwise(a, b):
             and a.tobytes() == b.tobytes())
 
 
-def _gathered_rows(monkeypatch):
-    """{rank: W(i.omega) as that rank holds it after the gather}."""
-    seen = {}
+def _owned_rows(monkeypatch, perturb_rank=None):
+    """{rank: ({frequency: W - I}, W(0), frequency count)} as each rank's
+    `_dyson_owned` returns them; `perturb_rank`'s W are moved by PERTURBATION
+    on the diagonal after its inversion."""
+    seen, dyson = {}, space_time._dyson_owned
 
-    def gather(a, comm):
-        allgather_blocks(a, comm)
-        seen[0 if comm is None else comm.Get_rank()] = a.copy()
-        return a
+    def owned(chi0, static_index=None, transform=None):
+        W_minus_I, w_static = dyson(chi0, static_index, transform)
+        size, rank = chi0._size_rank()
+        if rank == perturb_rank:
+            for W in W_minus_I.values():
+                W[np.diag_indices(W.shape[-1])] += PERTURBATION
+        seen[rank] = ({k: W.copy() for k, W in W_minus_I.items()},
+                      None if w_static is None else w_static.copy(),
+                      chi0.shape[0])
+        return W_minus_I, w_static
 
-    monkeypatch.setattr(space_time, 'allgather_blocks', gather)
+    monkeypatch.setattr(space_time, '_dyson_owned', owned)
     return seen
+
+
+def _serial_rows(s, kind, ntau, monkeypatch):
+    """The serial W(i.omega) - I, frequency by frequency, as `_dyson_owned`
+    forms it from W: the diagonal less one after the inversion."""
+    rows, dyson = {}, space_time._dyson_in_place
+
+    def recorded(chi0, rng, static_index=None, transform=None):
+        W = dyson(chi0, rng, static_index, transform)
+        for k in rng:
+            if k != static_index:
+                Wk = W[k].copy()
+                Wk[np.diag_indices(Wk.shape[-1])] -= 1.0
+                rows[k] = Wk
+        return W
+
+    monkeypatch.setattr(space_time, '_dyson_in_place', recorded)
+    try:
+        _route(s, kind, ntau)
+    finally:
+        monkeypatch.setattr(space_time, '_dyson_in_place', dyson)
+    return rows
 
 
 @pytest.fixture(scope='module')
 def archived(systems, tmp_path_factory):
-    """Every call of this file on the code before the split, in one process."""
+    """The serial calls of this file on the code before the split, in one
+    process."""
     tmp = tmp_path_factory.mktemp('dyson_baseline')
     tar = tmp / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
@@ -210,7 +237,6 @@ def archived(systems, tmp_path_factory):
     with tarfile.open(tar) as fh:
         fh.extractall(tree)
     assert (tree / 'src' / 'SingleReference' / 'GW' / 'space_time.py').is_file()
-    _overlay_communicator(tree)
     for name, s in systems.items():
         X_mo, D, X_ao, coords = s['factors']
         np.savez(tmp / f'inputs_{name}.npz', mo_energy=s['mf'].mo_energy,
@@ -219,8 +245,8 @@ def archived(systems, tmp_path_factory):
     out = tmp / 'archived.npz'
     script = tmp / 'probe.py'
     script.write_text(ARCHIVED_PROBE.format(
-        archive=str(tree), molecules=MOLECULES, kinds=KINDS, sizes=SIZES,
-        empty_ntau=EMPTY_NTAU, empty_size=EMPTY_SIZE,
+        archive=str(tree), molecules=MOLECULES, kinds=KINDS,
+        empty_ntau=EMPTY_NTAU,
         inputs=str(tmp / 'inputs_{name}.npz'), out=str(out)))
     env = dict(os.environ, **THREAD_CAPS)
     env.pop('PYTHONPATH', None)
@@ -230,45 +256,50 @@ def archived(systems, tmp_path_factory):
     return dict(np.load(out))
 
 
-def _overlay_communicator(tree):
-    """This tree's `mpi_grid` over the baseline's, and the constants it reads.
-
-    The baseline's distributed path is the one under comparison; its own
-    `mpi_grid` has no simulated communicator to run it on. The overlay changes
-    none of the calls that path makes -- `grid_comm`, `partition` and
-    `reduce_sum` keep their contracts -- only what carries them.
-    """
-    grid = Path('src') / 'Base' / 'utils' / 'mpi_grid.py'
-    (tree / grid).write_text((REPO / grid).read_text())
-    constants = tree / 'src' / 'Base' / 'constants.py'
-    ours = (REPO / 'src' / 'Base' / 'constants.py').read_text().splitlines()
-    added = [line for line in ours
-             if line.split(' = ')[0] in OVERLAY_CONSTANTS]
-    assert len(added) == len(OVERLAY_CONSTANTS), added
-    constants.write_text(constants.read_text() + '\n' + '\n'.join(added)
-                         + '\n')
+def _relabelled_bar(s, kind, ntau, serial_qp):
+    """COMPOSED_GRAD_K times the largest move of the serial energies over
+    PERMUTATIONS relabellings of the grid points, floored at
+    QP_BISECTION_TOL: what re-associating the route's sums may move them."""
+    moved = 0.0
+    for seed in range(PERMUTATIONS):
+        perm = np.random.default_rng(seed).permutation(s['factors'][0].shape[0])
+        relabelled = dict(s, factors=tuple(a[perm] for a in s['factors']))
+        moved = max(moved, np.abs(_route(relabelled, kind, ntau)[0]
+                                  - serial_qp).max())
+    return COMPOSED_GRAD_K * max(moved, QP_BISECTION_TOL)
 
 
-def _check_ranks(outs, gathered, serial, archived_key, archived, kind, ntau):
-    """Every rank's answer and W: one set of bits, the archived distributed
-    ones, within QP_TOL of serial; t_dyson on every rank and each rank's
-    inversion count its own contiguous block."""
+def _check_ranks(outs, owned, serial, serial_rows, kind, ntau, qp_bar=None):
+    """Every rank's answer and W(0) one set of bits, W(0) the serial one and
+    the energies too, or within `qp_bar` of them where the rank count
+    re-associates the self-energy; each frequency inverted once, by its
+    round-robin owner, into the serial W; t_dyson on every rank and each
+    rank's inversion count its own share."""
     size = len(outs)
     qp0, ws0, _ = outs[0]
-    assert _bitwise(qp0, archived[archived_key + '_qp'])
-    assert _bitwise(ws0, archived[archived_key + '_ws'])
-    assert np.abs(qp0 - serial[0]).max() <= QP_TOL
-    assert sorted(gathered) == list(range(size))
+    if qp_bar is None:
+        assert _bitwise(qp0, serial[0])
+    else:
+        assert np.abs(qp0 - serial[0]).max() <= qp_bar
+    assert _bitwise(ws0, serial[1])
+    assert sorted(owned) == list(range(size))
     nrows = outs[0][2].get('ntau_auto', ntau) + (kind == 'diagonal')
-    assert gathered[0].shape[0] == nrows
+    static = nrows - 1 if kind == 'diagonal' else None
+    assert sorted(serial_rows) == [k for k in range(nrows) if k != static]
     for r, (qp, ws, t) in enumerate(outs):
+        W_minus_I, w_static, n = owned[r]
+        assert n == nrows
         assert _bitwise(qp, qp0)
         assert _bitwise(ws, ws0)
-        assert _bitwise(gathered[r], gathered[0])
+        if static is not None:
+            assert _bitwise(w_static, ws0)
+        mine = [k for k in partition(nrows, r, size) if k != static]
+        assert sorted(W_minus_I) == mine
+        for k, W in W_minus_I.items():
+            assert _bitwise(W, serial_rows[k]), (r, k)
         assert t['t_dyson'] >= 0.0
-        start, stop = contiguous_block(nrows, r, size)
-        assert t['dyson_frequencies'] == stop - start
-    assert sum(t['dyson_frequencies'] for _, _, t in outs) == nrows
+        assert t['dyson_frequencies'] == len(mine)
+    assert sum(t['dyson_frequencies'] for _, _, t in outs) == len(serial_rows)
 
 
 @pytest.mark.parametrize('kind', KINDS)
@@ -288,54 +319,42 @@ def test_serial_is_the_archived_code(systems, archived, name, kind):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('kind', KINDS)
 @pytest.mark.parametrize('name', list(MOLECULES))
-def test_dyson_over_frequencies(systems, archived, monkeypatch, name, kind,
-                                size):
-    """Each rank inverts its own block; the gathered W is one set of bits."""
+def test_dyson_over_frequencies(systems, monkeypatch, name, kind, size):
+    """Each rank inverts its own frequencies into the serial W; the answer is
+    one set of bits."""
     s = systems[name]
     serial = _route(s, kind)
-    gathered = _gathered_rows(monkeypatch)
+    serial_rows = _serial_rows(s, kind, 'auto', monkeypatch)
+    owned = _owned_rows(monkeypatch)
     outs = run_simulated(lambda c: _route(s, kind, comm=c), size)
-    _check_ranks(outs, gathered, serial, f'{name}_{kind}_auto_{size}',
-                 archived, kind, 'auto')
+    _check_ranks(outs, owned, serial, serial_rows, kind, 'auto')
 
 
 @pytest.mark.parametrize('kind', KINDS)
 @pytest.mark.parametrize('name', list(MOLECULES))
-def test_empty_frequency_blocks(systems, archived, monkeypatch, name, kind):
-    """More ranks than frequencies: the surplus own an empty block, invert
-    nothing, and the answer is the one the ranks with rows produce."""
+def test_empty_frequency_blocks(systems, monkeypatch, name, kind):
+    """More ranks than frequencies: the surplus own nothing, invert nothing,
+    and the answer is the one the ranks with frequencies produce."""
     s = systems[name]
     serial = _route(s, kind, EMPTY_NTAU)
-    gathered = _gathered_rows(monkeypatch)
+    serial_rows = _serial_rows(s, kind, EMPTY_NTAU, monkeypatch)
+    owned = _owned_rows(monkeypatch)
     outs = run_simulated(lambda c: _route(s, kind, EMPTY_NTAU, c), EMPTY_SIZE)
     assert outs[-1][2]['dyson_frequencies'] == 0
-    _check_ranks(outs, gathered, serial,
-                 f'{name}_{kind}_{EMPTY_NTAU}_{EMPTY_SIZE}', archived, kind,
-                 EMPTY_NTAU)
+    _check_ranks(outs, owned, serial, serial_rows, kind, EMPTY_NTAU,
+                 qp_bar=_relabelled_bar(s, kind, EMPTY_NTAU, serial[0]))
 
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_one_ranks_block_trips_the_gate(systems, monkeypatch, kind):
-    """Rank 1's inverted rows, perturbed after its inversion, reach every rank
+    """Rank 1's inverted W, perturbed after its inversion, reach every rank
     and move rank 0's energies out of QP_TOL."""
     s, size = systems['water'], 3
     serial = _route(s, kind)
-    dyson = space_time._dyson_in_place
-
-    def perturbed(chi0, rows, static_index=None, transform=None):
-        dyson(chi0, rows, static_index, transform)
-        if rows == range(*contiguous_block(chi0.shape[0], 1, size)):
-            for k in rows:
-                chi0[k][np.diag_indices(chi0.shape[-1])] += PERTURBATION
-        return chi0
-
-    monkeypatch.setattr(space_time, '_dyson_in_place', perturbed)
-    gathered = _gathered_rows(monkeypatch)
+    owned = _owned_rows(monkeypatch, perturb_rank=1)
     outs = run_simulated(lambda c: _route(s, kind, comm=c), size)
-    start, stop = contiguous_block(gathered[0].shape[0], 1, size)
-    assert stop > start
+    assert owned[1][0], 'rank 1 owns frequencies'
     for r in range(size):
-        assert _bitwise(gathered[r], gathered[0])
         assert _bitwise(outs[r][0], outs[0][0])
     assert np.abs(outs[0][0] - serial[0]).max() > QP_TOL
 
