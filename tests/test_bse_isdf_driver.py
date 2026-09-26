@@ -15,6 +15,10 @@ Covers what landed with `solve_bse_isdf`:
      different Hessian and no substitute for the probe.
   4. The DF block action is invariant to the trial-vector chunking that keeps
      its (nvec, naux, nvirt, nvirt) exchange intermediate bounded.
+  5. A GW stage handed over: the diagonal and W(0) of the call `qp='G0W0'`
+     makes, given as `qp=` and `W_aux=`, return that entry's roots bitwise with
+     no quasiparticle solve of their own, and the contradictory requests are
+     refused.
 
 Run: python tests/test_bse_isdf_driver.py
 """
@@ -29,6 +33,8 @@ from pyscf import dft, gto, scf
 
 from src.Base.pyscf_interface import (get_orbital_energies,
                                       get_density_fitting_coefficients)
+from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
+from src.SingleReference.GW.space_time import solve_qp_diagonal_space_time
 from src.SingleReference.LinearResponse.davidson import (
     df_block_action, lowest_amb_eigenvalue, oscillator_strengths,
     solve_bse_isdf, solve_casida_davidson)
@@ -168,6 +174,37 @@ def main():
     d_c = max(np.abs(a - a1).max() / np.abs(a).max(),
               np.abs(b - b1).max() / np.abs(b).max())
     ok &= check(d_c < 1e-12, 'chunk-per-vector == one batch', f'rel {d_c:.1e}')
+
+    print('\n=== the GW stage handed over: qp= and W_aux= ===')
+    factors = info['factors']
+    sigma_x = static_exchange_mean_field_matrix(mf, mol)
+    om_g, X_g, Y_g, info_g = solve_bse_isdf(mf, mol, nocc, nroots=3,
+                                            factors=factors,
+                                            sigma_x_matrix=sigma_x)
+    gw_out = {}
+    eps_qp, _ = solve_qp_diagonal_space_time(mf, mol, nocc, factors=factors,
+                                             extras=gw_out,
+                                             sigma_x_matrix=sigma_x)
+    om_h, X_h, Y_h, info_h = solve_bse_isdf(mf, mol, nocc, nroots=3,
+                                            factors=factors, qp=eps_qp,
+                                            W_aux=gw_out['w_static'])
+    ok &= check(all(np.array_equal(a, b) for a, b in
+                    ((om_h, om_g), (X_h, X_g), (Y_h, Y_g),
+                     (info_h['W_aux'], info_g['W_aux'])))
+                and 'qp' not in info_h['timings'],
+                "handed diagonal and W(0) == qp='G0W0', bitwise, no QP solve")
+    for label, kwargs in (("beside qp='G0W0'", {}),
+                          ("beside screen_at='qp'",
+                           dict(qp=eps_qp, screen_at='qp')),
+                          ('of the wrong shape',
+                           dict(qp=eps_qp, W_aux=gw_out['w_static'][:-1, :-1]))):
+        kwargs.setdefault('W_aux', gw_out['w_static'])
+        try:
+            solve_bse_isdf(mf, mol, nocc, nroots=3, factors=factors,
+                           probe=False, **kwargs)
+            ok &= check(False, f'W_aux {label} refused')
+        except ValueError:
+            ok &= check(True, f'W_aux {label} refused')
 
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1

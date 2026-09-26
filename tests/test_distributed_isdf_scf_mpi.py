@@ -18,14 +18,17 @@ fails on rank 2 fails the run.
 Checks, water/cc-pVDZ at 148 points per atom, tiles of `TILE` points (7):
   * the SCF [context], PBE0 and LRC-wPBEh: the energy within CONV_TOL of the
     serial ISDFJK SCF, and one energy and one set of orbitals on every rank
-  * J, K and K_lr of one density [explicit] against the one-rank handle
-    within COMPOSED_GRAD_K of the measured reassociation response, the same
-    bits on every rank. K is a sum over row tiles, so its response is the
-    largest move of the one-rank K when ITS OWN tile addends are
-    re-associated as ranks re-associate them (`reassociation_response`:
-    added last to first, and `REGROUPINGS` random orders cut into as many
-    runs as ranks), or when the ranks' partials are added in reverse; J's is
-    the ranks' partials reversed, floored at one ulp of its largest element
+  * J, K and K_lr of one density [explicit] against the one-rank handle,
+    the same bits on every rank. K is a sum over row tiles of the one-rank
+    handle's tile addends: every rank's partial is its own tiles' addends
+    added in tile order, bitwise, and the reduced K lies at every element
+    within `rounding_bound` of the addends' exact sum -- half an ulp of each
+    partial sum a rank forms and of each join of two ranks' partials, the
+    most ANY order of the reduction can move it, floored at one ulp of
+    |K|max. A bound, not a measured response, so COMPOSED_GRAD_K does not
+    multiply it: three times it would pass K moved 8 ulp at 8 ranks and up.
+    J's bar is COMPOSED_GRAD_K times the ranks' partials reversed, floored
+    at one ulp of its largest element
   * the interaction's tiles [explicit]: every rank's tiles of both
     operators' Z the one-rank tiles bitwise, and together the whole grid
   * the handle built inside the SCF [context] (`build=False`):
@@ -38,6 +41,19 @@ Checks, water/cc-pVDZ at 148 points per atom, tiles of `TILE` points (7):
     stages taking the pool back (`blas_full_pool`)
   * rows only [context]: what every rank holds after the SCF
     (`memory_faults`) is its own tiles' rows, nothing grid-indexed whole
+
+SHOWN TO FAIL over 2, 3, 8, 32 and 64 simulated ranks, where the bound is
+2.06 ulp of |K|max at 2 and 3 ranks and 3.00 from 8 up (K_lr 2.12, 3.00): a
+tile dropped from rank 1's partial, or added to it twice, failed the bitwise
+partial on rank 1 and the bound on every rank; K moved 8 ulp at its largest
+element failed at 2.4-3.5 times the bound (K_lr 3.1-3.9), 4 ulp at 8 ranks
+at 1.1 (1.8). The sampled anchor it replaces (the largest move of the
+one-rank K over random regroupings of its addends into as many runs as
+ranks) fell to a quarter ulp of
+|K|max on 1.7-2.5 percent of 600 densities moved by an SCF's run-to-run
+drift at 32 ranks, and failed 11 of 16800 correct reductions of them
+(recursive doubling, binomial, hierarchical, rings), as it failed a 32-rank
+run on four nodes (1.78e-15 = 4.00 x 4.44e-16).
 """
 import hashlib
 import os
@@ -59,6 +75,8 @@ from src.Base.isdf_jk import isdf_jk
 from src.Base.utils.mpi_grid import (distributed, grid_comm,
                                      lockstep_mean_field)
 from src.Base.utils.threads import blas_threads
+from tests.reduction_bounds import (ULP, exact_offset, regrouped,
+                                    rounding_bound)
 from tests.test_distributed_fit_mpi import Gate, serial
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -71,11 +89,6 @@ CONV_TOL = 1e-10
 CONV_TOL_GRAD = 1e-6
 #: LRC-wPBEh's range-separation parameter in pyscf.
 OMEGA = 0.2
-ULP = np.finfo(float).eps
-#: Random regroupings of the one-rank K's tile addends per rank count: on
-#: water the largest move stops growing by 32 (K 3.6e-15, K_lr 1.1e-16),
-#: where the seven fixed orders reach 1.8e-15 and 5.6e-17.
-REGROUPINGS = 32
 
 
 def fresh(xc):
@@ -135,7 +148,8 @@ def memory_faults(storage, nocc, slab=None):
 def tile_addends(handle, dm, omega=None):
     """The one-rank handle's K addends X_i^T T_i of `dm`, one per row tile in
     its order: `exchange_partial` with `mine` that one tile, which adds the
-    addend to zeros, so the addends summed in order are its K bitwise."""
+    addend to zeros, so the addends summed in order are its K bitwise, and a
+    rank's partial is its own tiles' addends summed in order."""
     stack = np.asarray(dm).reshape(1, *dm.shape)
     factors = dist_isdf._occupied_factors(dm)
     mine, out = handle.mine, []
@@ -148,36 +162,30 @@ def tile_addends(handle, dm, omega=None):
     return out
 
 
-def regrouped(addends, groups):
-    """The addends summed run by run, and the runs' sums added in turn."""
-    total = np.zeros_like(addends[0])
-    for group in groups:
-        run = np.zeros_like(addends[0])
-        for i in group:
-            run = run + addends[i]
-        total = total + run
-    return total
-
-
-def reassociation_response(addends, whole, sizes, seed=0):
-    """The largest element of |K' - K| over re-associations K' of the
-    one-rank K `whole` from its tile addends: added last to first, and for
-    each rank count n of `sizes`, `REGROUPINGS` random tile orders cut at
-    random into n runs, each run summed and the runs added -- how a K over n
-    ranks re-associates the same addends. Refuses addends that do not sum to
-    `whole` bitwise in tile order."""
-    n = len(addends)
-    if not np.array_equal(regrouped(addends, [range(n)]), whole):
-        raise ValueError('the tile addends do not sum to the one-rank K')
-    rng = np.random.default_rng(seed)
-    groupings = [[[i] for i in reversed(range(n))]]
-    for size in sizes:
-        for _ in range(REGROUPINGS):
-            cuts = np.sort(rng.choice(np.arange(1, n), min(size, n) - 1,
-                                      replace=False))
-            groupings.append(np.split(rng.permutation(n), cuts))
-    return max(float(np.abs(regrouped(addends, g) - whole).max())
-               for g in groupings)
+def exchange_check(gate, name, addends, whole, got, partial, owners, mine):
+    """K or K_lr over the ranks against the one-rank handle's tile addends:
+    they sum to its K `whole` in tile order, bitwise; this rank's `partial`
+    is the addends of its tiles `mine` added in tile order, bitwise; and the
+    reduced `got` lies within `rounding_bound` of the addends' exact sum at
+    every element, the bound floored at one ulp of |whole|max. `owners`:
+    every rank's tiles, rank-ordered."""
+    gate.check(np.array_equal(regrouped(addends, [range(len(addends))]),
+                              whole),
+               f'{name}: the one-rank tile addends added in tile order are '
+               f'the one-rank {name}, bitwise')
+    gate.check(np.array_equal(partial, regrouped(addends, [list(mine)])),
+               f"{name}: this rank's partial is its tiles' one-rank addends "
+               'added in tile order, bitwise', f'tiles {list(mine)}')
+    ulp = np.spacing(np.abs(whole).max())
+    bound = np.maximum(rounding_bound(addends, owners), ulp)
+    off = np.abs(exact_offset(got, addends))
+    worst = float((off / bound).max())
+    gate.check(worst <= 1, f'{name} within the rounding bound of its tile '
+               'sum at every element',
+               f'{off.max():.2e} off, {worst:.2f} x the bound, which is at '
+               f'most {bound.max():.2e} = {bound.max() / ulp:.2f} ulp of '
+               f'|{name}|max; {np.abs(got - whole).max():.2e} from the '
+               f'one-rank {name}')
 
 
 def one_rank(xc, ref):
@@ -243,26 +251,27 @@ def jk_check(gate, xc):
                                  omega=OMEGA)[1])
     tiles = {(key, t): rows for key, kernel in handle.omega_kernels.items()
              for t, rows in kernel.items()}
-    everyone = gate.everyone(partials)
+    parts = gate.everyone(partials[0])
+    owners = gate.everyone(list(handle.mine))
     for n, name in enumerate(('J', 'K', 'K_lr')):
-        parts = [p[n] for p in everyone]
-        forward, backward = parts[0].copy(), parts[-1].copy()
-        for p in parts[1:]:
-            forward = forward + p
-        for p in parts[-2::-1]:
-            backward = backward + p
-        anchor = float(np.abs(forward - backward).max())
         if n == 0:
             # J is no sum over tiles: the ranks' partials reversed, one ulp
-            anchor = max(anchor, ULP * np.abs(one[n]).max())
+            forward, backward = parts[0].copy(), parts[-1].copy()
+            for p in parts[1:]:
+                forward = forward + p
+            for p in parts[-2::-1]:
+                backward = backward + p
+            anchor = max(float(np.abs(forward - backward).max()),
+                         ULP * np.abs(one[n]).max())
+            diff = float(np.abs(got[n] - one[n]).max())
+            gate.check(diff <= COMPOSED_GRAD_K * anchor, f'{name} within '
+                       f'COMPOSED_GRAD_K = {COMPOSED_GRAD_K} of the '
+                       'reassociation response',
+                       f'{diff:.2e} = {ratio(diff, anchor):.2f} x '
+                       f'{anchor:.2e}')
         else:
-            anchor = max(anchor, reassociation_response(
-                addends[n - 1], one[n], [gate.size]))
-        diff = float(np.abs(got[n] - one[n]).max())
-        gate.check(diff <= COMPOSED_GRAD_K * anchor, f'{name} within '
-                   f'COMPOSED_GRAD_K = {COMPOSED_GRAD_K} of the reassociation '
-                   'response', f'{diff:.2e} = {ratio(diff, anchor):.2f} x '
-                   f'{anchor:.2e}')
+            exchange_check(gate, name, addends[n - 1], one[n], got[n],
+                           partials[n], owners, handle.mine)
         gate.check(len(set(gate.everyone(digest(got[n])))) == 1,
                    f'{name}: the same bits on every rank')
     gate.check(all(np.array_equal(rows, one_tiles[key])

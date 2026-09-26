@@ -40,6 +40,16 @@ the ranks (`ProjRows`), which is how the quasiparticle solves keep it: each
 rank its rows of every tau slice, every transform over tau made one auxiliary
 row per call so that a row is the same bits at every rank count.
 
+THE GRID-ROW SPLIT. A tau split leaves every rank past ntau idle and hands each
+rank whole (naux, naux) slices of every frequency. `chi0_frequency_rows`
+splits the (tau point, grid-row tile) pairs of the sweep instead, the tiles
+being the serial kernel's (`polarizability_tiles`), so the work divides past
+ntau ranks and a rank forms only its tiles' (rows, M) Green's-function blocks.
+proj(tau) is then a SUM over the ranks' tiles, reduce-scattered to auxiliary
+rows (re-associated, the one reduced sum of the sweep), and chi0(i.nu) is
+accumulated on those rows with the serial elementwise update, so every row of
+chi0 is the serial update of its proj rows, bitwise.
+
 `three_index_slice`, `b_block` and `three_index_ov` sit here for the same
 reason: one bra state's pair density, an arbitrary index block and the
 particle-hole block are the forward halves of the three-index chain, read by
@@ -73,7 +83,8 @@ from src.Base.constants import ISDF_TILE_GB
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (agreement, allgather_rows,
                                      contiguous_block, current_comm,
-                                     exchange_rows, partition, reduce_sum)
+                                     exchange_rows, partition,
+                                     reduce_scatter_rows, reduce_sum)
 from src.SingleReference.base import get_occ_virt_indices
 
 
@@ -122,7 +133,9 @@ class ProjRows:
     tau point gathers that slice. The adjoints come back the same way, so
     projbar lives in the same rows (`zeros_like`, `fold`). At the
     chlorophyllide hexamer the whole array is 153 GB and a rank's rows 19.1 at
-    eight ranks.
+    eight ranks. The grid-row split of the GW stage holds chi0(i.nu) and
+    Wt(i.tau) the same way, the first axis a frequency or a tau point
+    (`gather_slices` hands a rank any slices it names).
 
     THE ROWS ARE THE SAME BITS AT EVERY RANK COUNT. A GEMM's rows depend on
     the call's shape (`owned_frequency_blocks`), and a rank's row block is a
@@ -290,6 +303,33 @@ class ProjRows:
             if ks[rank] < ntau:
                 yield ks[rank], slab
 
+    def gather_slices(self, wants):
+        """(k, slice k whole) for every k of `wants`, this rank's own list in
+        its order, whatever the other ranks ask for: round t hands each rank
+        the t-th slice of its list from every rank's rows, verbatim. The
+        lists travel first (one small allgather), so the rounds pair. The
+        slice buffer is reused: read it before asking for the next."""
+        size, rank = self._size_rank()
+        wants = [int(k) for k in wants]
+        if size == 1:
+            for k in wants:
+                yield k, self.rows[k]
+            return
+        lists = self.comm.allgather(wants)
+        nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
+        flat = self.rows.reshape(self.rows.shape[0] * nrows, self.naux)
+        slab = np.empty((self.naux, self.naux))
+        for t in range(max(len(own) for own in lists)):
+            ks = [own[t] if t < len(own) else None for own in lists]
+            here = ks[rank] is not None
+            exchange_rows(
+                flat, [(k * nrows, (k + 1) * nrows) if k is not None
+                       else (0, 0) for k in ks],
+                slab if here else empty,
+                [b if here else (0, 0) for b in self.bounds], self.comm)
+            if here:
+                yield ks[rank], slab
+
 
 def polarizability_imaginary_time(X_o, X_v, eps_o, eps_v, tau_points,
                                   out=None, beta=None):
@@ -335,6 +375,28 @@ def polarizability_work(M, tile_memory_gb=ISDF_TILE_GB):
     return np.empty((rows, M)), np.empty((rows, M))
 
 
+def polarizability_tiles(M, tile_memory_gb=ISDF_TILE_GB):
+    """[(p0, p1)] grid-row tiles of `polarizability_projected_tau`, set by M
+    and the budget alone: the addends of proj(tau), whoever sums them."""
+    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    return [(p0, min(p0 + rows, M)) for p0 in range(0, M, rows)]
+
+
+def sweep_waves(ntau, size):
+    """[(k0, k1)] windows of at most `size` tau points: a (tau, item) sweep
+    split over the ranks one window at a time, so a rank's contiguous share of
+    a window spans at most two tau points (one alone serially)."""
+    return [(k0, min(k0 + size, ntau)) for k0 in range(0, ntau, size)]
+
+
+def wave_items(k0, k1, nitems, rank, size):
+    """This rank's (k, j) of the window [k0, k1) with `nitems` items per tau
+    point: the `contiguous_block` of the tau-major pairs, so the ranks' work
+    differs by at most one item whatever divides what."""
+    i0, i1 = contiguous_block((k1 - k0) * nitems, rank, size)
+    return [(k0 + i // nitems, i % nitems) for i in range(i0, i1)]
+
+
 def split_branches(X, eps, nocc, mu=None):
     """(X_o, X_v, e_o, e_v, mu, occ, virt): the collocation split at the gap.
 
@@ -362,7 +424,7 @@ def split_branches(X, eps, nocc, mu=None):
 
 def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
                                  tile_memory_gb=ISDF_TILE_GB, out=None,
-                                 work=None):
+                                 work=None, tiles=None):
     """chi0 at ONE imaginary time, already projected to the auxiliary basis:
 
         proj_ab(tau) = -2 sum_PQ D[P,a] (Go_PQ Gv_PQ) D[Q,b]
@@ -382,10 +444,14 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
           None.
     work: the two (rows, M) tiles from `polarizability_work`, reused across
           calls for the same reason. Their contents are never read.
+    tiles: the `polarizability_tiles` to sum, in order; None is all of them,
+          the whole proj(tau), and a subset is that subset's partial sum.
     """
     M = X_o.shape[0]
     naux = D.shape[1]
     rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    if tiles is None:
+        tiles = polarizability_tiles(M, tile_memory_gb)
     if work is None:
         work = polarizability_work(M, tile_memory_gb)
     Go_buf, Gv_buf = work
@@ -400,8 +466,7 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
             raise ValueError(f'out is {out.shape}, need ({naux}, {naux})')
         out[...] = 0.0
     eo_t, ev_t = np.exp(e_o * tau), np.exp(-e_v * tau)
-    for p0 in range(0, M, rows):
-        p1 = min(p0 + rows, M)
+    for p0, p1 in tiles:
         b = p1 - p0
         Go, Gv = Go_buf[:b], Gv_buf[:b]
         np.matmul(X_o[p0:p1] * eo_t, X_o.T, out=Go)   # (b, M)
@@ -503,7 +568,9 @@ def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
 
         chi0(i.w) = -2 sum_tau cosft_wt[w,tau] (D^T Pi(tau) D),
 
-    but the peak drops from (ntau, M, M) to one (M, M).
+    but the peak drops from (ntau, M, M) to chi0 itself, one (nfreq, naux,
+    naux) update of it and the two (rows, M) tiles of the kernel: every rank
+    of a tau split holds all of that, which `chi0_frequency_rows` does not.
     """
     X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
     npts = X_o.shape[0]
@@ -527,6 +594,78 @@ def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
                                      work=work)
         chi0 += grid.cosft_wt[:, k, None, None] * proj
     return chi0
+
+
+def polarizability_rows_sweep(X_o, X_v, e_o, e_v, D, tau_points, comm=None,
+                              tile_memory_gb=ISDF_TILE_GB):
+    """(k, this rank's auxiliary rows of proj(tau_k)) for every tau point in
+    order, (r1 - r0, naux), the rows its `contiguous_block` of naux owns.
+
+    The (tau point, `polarizability_tiles` tile) pairs go over the ranks in
+    `sweep_waves` windows (`wave_items`): a rank sums its tiles of each of its
+    at most two tau points of the window into one (naux, naux) partial, and
+    each point's partials are reduce-scattered to rows (a rank without tiles
+    of it hands in zeros). So the work divides past ntau ranks, a rank holds
+    two partials and one zero slice besides its (rows, M) tiles, and proj is
+    a sum re-associated over the ranks' tiles. Serially the window is one tau
+    point and its whole kernel call, bitwise. The row buffer is reused: read
+    it before asking for the next point.
+    """
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    M, naux = X_o.shape[0], D.shape[1]
+    tiles = polarizability_tiles(M, tile_memory_gb)
+    r0, r1 = contiguous_block(naux, rank, size)
+    rows = np.empty((r1 - r0, naux))
+    work = polarizability_work(M, tile_memory_gb)
+    zero = None
+    for k0, k1 in sweep_waves(len(tau_points), size):
+        mine = wave_items(k0, k1, len(tiles), rank, size)
+        partial = {}
+        for k in sorted({k for k, _ in mine}):
+            partial[k] = polarizability_projected_tau(
+                X_o, X_v, e_o, e_v, D, tau_points[k],
+                tile_memory_gb=tile_memory_gb, work=work,
+                tiles=[tiles[j] for kk, j in mine if kk == k])
+        for k in range(k0, k1):
+            send = partial.pop(k, None)
+            if send is None:
+                if zero is None:
+                    zero = np.zeros((naux, naux))
+                send = zero
+            reduce_scatter_rows(send, comm, out=rows)
+            del send
+            yield k, rows
+
+
+def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
+                        tile_memory_gb=ISDF_TILE_GB):
+    """chi0(i.omega) held by auxiliary rows, `ProjRows` over the frequency
+    axis: this rank's rows of every frequency, (nfreq, r1 - r0, naux).
+
+    The M^2 sweep is split over grid-row tiles as well as tau points
+    (`polarizability_rows_sweep`); each point's proj rows are folded in with
+    `chi0_imaginary_frequency`'s own update, elementwise, so a rank's chi0
+    rows are the serial update of the reduced proj rows bitwise and no rank
+    holds a whole (naux, naux) slice of chi0. Serially it is
+    `chi0_imaginary_frequency`, bitwise.
+
+    X: the MO collocation or `SlicedFactors`, whose two branches
+    `split_branches` gathers whole once; D whole. comm: None is
+    `current_comm()`.
+    """
+    comm = current_comm() if comm is None else comm
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
+    naux = D.shape[1]
+    r0, r1 = contiguous_block(naux, rank, size)
+    chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
+    for k, rows in polarizability_rows_sweep(X_o, X_v, e_o, e_v, D,
+                                             grid.tau_points, comm,
+                                             tile_memory_gb):
+        chi0 += grid.cosft_wt[:, k, None, None] * rows
+    return ProjRows(chi0, naux, comm)
 
 
 def frequency_blocks(nfreq, naux, tile_gb, live):

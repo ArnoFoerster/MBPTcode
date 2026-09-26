@@ -28,13 +28,18 @@ construction, and a serial reference on rank r is of the same numbers as rank
 0's. The chain gates compare against rank 0's serial force, since each rank
 converges the chain's SCF on its own.
 
-THREE STANDARDS, each where the design puts it:
+FOUR STANDARDS, each where the design puts it:
   bitwise   a lockstepped output, or an output partition (rows computed once
             and gathered verbatim): identical on every rank, and identical to
             serial where the only reductions add exact zeros
   reduced   a sum re-associated over the partition: a bar at the summation
             order (1e-12 or 1e-11 relative, 1e-10 Ha, 1e-9 eV), `SIGMA_REL`
             for the cancelling Wt(tau) sum
+  bounded   a sum reduced over the ranks from the serial kernel's own
+            addends: every rank's partial its addends in the kernel's order,
+            bitwise, and the reduced sum within the rounding bound of the
+            partials' exact sum, the most any reduction tree can move it
+            (tests/reduction_bounds.py)
   anchored  a bar measured on this run: `COMPOSED_GRAD_K` times the one-thread
             repeat of the serial force, `SOP_ANCHOR_K` times the pole model's
             own ulp response. Also wherever two evaluations each ran pyscf's
@@ -64,11 +69,40 @@ Checks (path; standard):
     factors (explicit): roots against serial (reduced), the perturbation
     overwritten with rank 0's arrays (bitwise), rank 0's roots and Davidson on
     every rank (bitwise, exact)
+  * the BSE block action's grid reduction (explicit), recorded on the
+    communicator it is handed: per trial vector one reduce-scatter of the
+    (n_occ, M) partial X_o^T (Zt * P), each rank receiving its
+    `contiguous_block` rows alone and the ranks' rows tiling the grid once,
+    no all-reduce as long as that intermediate, and A and B the bits of the
+    same action on the unrecorded communicator (exact, bitwise)
   * the factors held as grid-point slices, `separable_factors(sliced=True)`
     (context): each rank's rows of the fixture and nothing more (bitwise,
     exact); the GW window (explicit) and the BSE (context) on them against
     the fixture's factors (bitwise), rank 0's Davidson on every rank, and
     each whole-array gather once per solve or sweep (exact)
+  * the in-core GW window split over grid rows (`_qp_grid_rows`), on sliced
+    factors at tiles and blocks small enough that the ranks share a tau
+    point's tiles and block pairs (explicit): traced line by line in every
+    frame between the solve and the running line, no array whole along the
+    grid twice (an (M, M) block), no whole stack of (naux, naux) slices and
+    no (n, nao, nao) AO self-energy, and no more whole (naux, naux) slices
+    at once than the rank's own frequencies and `ROW_SPARE_SLICES` (exact);
+    the same trace with a whole Pi(tau) slice planted in the sweep finds it
+    on every rank (exact, shown failing); the window against serial
+    (anchored: `COMPOSED_GRAD_K` times what relabelling the grid points moves
+    it serially, floored at the root finder's `QP_BISECTION_TOL`), the window
+    and W(0) rank 0's on every rank (bitwise)
+  * the route's two reduced sums on this run's ranks (explicit, recorded on
+    the communicator): proj(tau) over the grid-row tiles and the branch sums
+    of Sigma over the block pairs, each against the serial kernel's own
+    addends -- in its order they are its result (bitwise), this rank's
+    partial of every tau point is its own items' addends in that order
+    (bitwise), and what it receives lies within `join_bound` of the exact
+    sum of the ranks' partials, half an ulp per join, floored at one ulp of
+    the sum's largest element (bounded: the most any reduction tree can
+    move it, tests/reduction_bounds.py); chi0's rows the update of the
+    received proj rows, W(0) the inversion of their chi0(0) and the route's
+    W(0) that one (bitwise)
   * `qp_set_gradient` (explicit): roots against serial (bitwise), adjoints
     (reduced)
   * `rpa_energy_and_adjoint` (context): energy and adjoints (reduced)
@@ -156,21 +190,36 @@ except ImportError:  # without it the excitation gate keeps its bare floor
     threadpool_limits = None
 
 from src.Base.constants import (COMPOSED_GRAD_K, FIT_REASSOCIATION_K,
+                                QP_BISECTION_TOL,
                                 HARTREE_TO_EV, ISDF_GRADIENT_FLOOR)
 from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import (broadcast, contiguous_block, distributed,
+from src.Base.utils.grids import (gauss_legendre_grid, minimax_frequency_grid,
+                                  minimax_time_grid)
+from src.Base.utils.mpi_grid import (SimulatedComm, broadcast,
+                                     contiguous_block, distributed,
                                      grid_comm, lockstep_stats, partition)
 from src.Base import separable_ri
 from src.Base.separable_ri import DEFAULT_REGULARIZATION
 from src.Base.sliced_factors import SlicedFactors, whole_factor
-from src.Base.utils.time_frequency import TimeFrequencyGrid
-from src.SingleReference.GW.space_time import (separable_factors,
+from src.Base.utils.time_frequency import (COSINE_WT, TimeFrequencyGrid,
+                                           minimax_transform_weights)
+from src.SingleReference.GW.imaginary_time import (SigmaPairs,
+                                                   screened_interaction_rows,
+                                                   self_energy_branch_sums,
+                                                   self_energy_fit_ranges)
+from src.SingleReference.GW.space_time import (DEFAULT_NPADE, _dyson_owned,
+                                               separable_factors,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
+                                                         isdf_block_action,
                                                          solve_bse_isdf)
+from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse import space_time as ls_space_time
+from src.SingleReference.LinearResponse.space_time import (
+    ProjRows, chi0_frequency_rows, polarizability_projected_tau,
+    polarizability_tiles, split_branches, wave_items)
 from src.gradients import factor_chain, isdf_derivatives
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain, FrozenFactorization
@@ -189,6 +238,7 @@ from src.gradients.space_time_adjoint import (polarizability_tau,
                                               selfenergy_diag,
                                               selfenergy_diag_backward,
                                               sigma_transforms)
+from tests.reduction_bounds import reduced_sum_verdict
 
 warnings.simplefilter('ignore')
 
@@ -253,6 +303,23 @@ ROW_FIT_BLOCK = 64
 #: a root by more than one reassociation of the fit does
 #: (tests/test_chain_row_fit.py).
 ROW_FIT_BSE_CONV_TOL = 1e-9
+#: Trial vectors in the batch the recorded block action is applied to.
+RECORDED_BATCH = 3
+#: The grid-row section's working-set budget: water's 444 points in 16 chi0
+#: tiles and 4 self-energy blocks, so ranks share a tau point's tiles and
+#: block pairs, not whole points.
+ROW_TILE_GB = 3e-4
+#: Its tau points: 3 and 8 ranks leave a last window of the sweep that splits
+#: a point's tiles and block pairs over the ranks.
+ROW_NTAU = 14
+#: Whole (naux, naux) slices a rank of the grid-row route may hold at once
+#: beside its own frequencies' W - I: W(0), a gathered chi0 slice and the
+#: identity it is inverted against, or the two Wt(tau) slices of a window
+#: and W(0).
+ROW_SPARE_SLICES = 3
+#: Random grid orders the grid-row section's relabelling anchor takes the
+#: largest response over.
+ROW_PERMUTATIONS = 3
 
 
 class Gate:
@@ -308,6 +375,134 @@ class Gate:
             print('\n' + ('All checks passed on every rank.' if not failures
                           else 'FAILURES above.'), flush=True)
         return 0 if not failures else 1
+
+
+class HeldCensus:
+    """This thread's census of the arrays bound to a name in every frame
+    between a call of `root` and the running line: the shapes found whole
+    along the grid twice ('grid square'), a whole stack of (naux, naux)
+    slices ('aux stack') or of (nao, nao) ones ('ao stack'), and the most
+    whole (naux, naux) slices and the most bytes alive at one line."""
+
+    def __init__(self, root, M, naux, nao):
+        self.root, self.M, self.naux, self.nao = root, M, naux, nao
+        self.flags, self.slices, self.bytes = {}, 0, 0
+
+    def kind(self, a):
+        shape = a.shape
+        if sum(n == self.M for n in shape) >= 2:
+            return 'grid square'
+        if a.ndim == 3 and shape[0] > 1 and shape[1:] == (self.naux,) * 2:
+            return 'aux stack'
+        if a.ndim == 3 and shape[0] > 1 and shape[1:] == (self.nao,) * 2:
+            return 'ao stack'
+        return None
+
+    def visit(self, obj, found, depth=0):
+        if isinstance(obj, np.ndarray):
+            base = obj
+            while isinstance(base.base, np.ndarray):
+                base = base.base
+            found[id(base)] = base
+        elif depth < 3 and isinstance(obj, dict):
+            for v in obj.values():
+                self.visit(v, found, depth + 1)
+        elif depth < 3 and isinstance(obj, (list, tuple)) and len(obj) < 256:
+            for v in obj:
+                self.visit(v, found, depth + 1)
+        elif depth < 3 and isinstance(obj, ProjRows):
+            self.visit(getattr(obj, 'rows', None), found, depth + 1)
+        elif depth < 3 and type(obj).__name__ in ('SigmaPairs',
+                                                  'SlicedFactors'):
+            self.visit(vars(obj), found, depth + 1)
+
+    def take(self, frame):
+        chain = []
+        while frame is not None and frame.f_code is not self.root:
+            chain.append(frame)
+            frame = frame.f_back
+        if frame is None:
+            return
+        found = {}
+        for f in chain + [frame]:
+            for v in list(f.f_locals.values()):
+                self.visit(v, found)
+        for a in found.values():
+            kind = self.kind(a)
+            if kind is not None:
+                self.flags.setdefault(kind, set()).add(a.shape)
+        self.slices = max(self.slices, sum(
+            a.shape == (self.naux, self.naux) for a in found.values()))
+        self.bytes = max(self.bytes, sum(a.nbytes for a in found.values()))
+
+    def trace(self, fn, *args, **kwargs):
+        """fn(*args, **kwargs) with every line of every frame under src/, or
+        of this file, taken into the census."""
+        here = os.path.abspath(__file__)
+
+        def local(frame, event, arg):
+            if event == 'line':
+                self.take(frame)
+            return local
+
+        def tracer(frame, event, arg):
+            name = frame.f_code.co_filename
+            return (local if name.startswith(SRC)
+                    or os.path.abspath(name) == here else None)
+
+        sys.settrace(tracer)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sys.settrace(None)
+
+
+class RecordedSimulatedComm(SimulatedComm):
+    """A simulated rank whose sums are recorded in `log`: ('allreduce',
+    elements, elements) and ('reduce_scatter', elements in, elements out);
+    and in `sums`, each sum's (kind, what this rank handed in, what it
+    received), copies."""
+
+    def __init__(self, comm, log):
+        super().__init__(comm._world, comm.Get_rank())
+        self.log, self.sums = log, []
+
+    def allreduce_sum(self, buf):
+        self.log.append(('allreduce', buf.size, buf.size))
+        sent = buf.copy()
+        super().allreduce_sum(buf)
+        self.sums.append(('allreduce', sent, buf.copy()))
+
+    def reduce_scatter_sum(self, send, recv, counts):
+        self.log.append(('reduce_scatter', send.size, recv.size))
+        super().reduce_scatter_sum(send, recv, counts)
+        self.sums.append(('reduce_scatter', send.copy(), recv.copy()))
+
+
+class RecordedComm:
+    """An mpi4py communicator whose sums are recorded in `log` and `sums`
+    as `RecordedSimulatedComm` records them, the all-reduce being the
+    in-place one `reduce_sum` makes; every other call passes through."""
+
+    def __init__(self, comm, log):
+        self._comm, self.log, self.sums = comm, log, []
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def Allreduce(self, sendbuf, recvbuf, op):
+        n = np.asarray(recvbuf).size
+        self.log.append(('allreduce', n, n))
+        sent = np.array(recvbuf, copy=True)
+        self._comm.Allreduce(sendbuf, recvbuf, op=op)
+        self.sums.append(('allreduce', sent, np.array(recvbuf, copy=True)))
+
+    def Reduce_scatter(self, sendbuf, recvbuf, recvcounts=None, op=None):
+        self.log.append(('reduce_scatter', sendbuf[0].size, recvbuf[0].size))
+        self._comm.Reduce_scatter(sendbuf, recvbuf, recvcounts=recvcounts,
+                                  op=op)
+        self.sums.append(('reduce_scatter', np.array(sendbuf[0], copy=True),
+                          np.array(recvbuf[0], copy=True)))
 
 
 def serial(fn, *args, **kwargs):
@@ -666,6 +861,45 @@ def bse_routes(gate, mf, mol, F):
     same_davidson(gate, 'BSE [explicit] with rank != 0 perturbed', om_p, info_p)
 
 
+def grid_reduction_rows(gate, mf, mol, F):
+    """The BSE block action's grid-length reduction hands each rank its own
+    rows of X_o^T (Zt * P) and nothing longer, read off the communicator."""
+    gate.section('the BSE block action\'s grid reduction')
+    if gate.size == 1:
+        gate.info('one rank: nothing is reduced')
+        return
+    nocc = mol.nelectron // 2
+    npts, nmo = F[0].shape
+    W = isdf_bse_factors(mf, mol, nocc, factors=F)[2]
+    lr = LinearResponseSolver(np.asarray(mf.mo_energy, float),
+                              spin_mode='restricted')
+    z = np.random.default_rng(3).normal(size=(RECORDED_BATCH, nocc,
+                                              nmo - nocc))
+    log = []
+    recorded = (RecordedSimulatedComm(gate.comm, log)
+                if isinstance(gate.comm, SimulatedComm)
+                else RecordedComm(gate.comm, log))
+    act = isdf_block_action(lr, nocc, True, W, F, comm=recorded)[0]
+    plain = isdf_block_action(lr, nocc, True, W, F, comm=gate.comm)[0]
+    del log[:]
+    A, B = act(z.copy())
+    A0, B0 = plain(z.copy())
+    r0, r1 = contiguous_block(npts, gate.rank, gate.size)
+    scattered = [e for e in log if e[0] == 'reduce_scatter']
+    long_sums = [e for e in log if e[0] == 'allreduce' and e[1] >= npts * nocc]
+    own = (len(scattered) == RECORDED_BATCH and not long_sums
+           and all(e[1:] == (npts * nocc, (r1 - r0) * nocc) for e in scattered))
+    tiled = sum(gate.everyone(sum(e[2] for e in scattered)))
+    gate.check(own and tiled == RECORDED_BATCH * npts * nocc
+               and np.array_equal(A, A0) and np.array_equal(B, B0),
+               "BSE block action [explicit]: each rank receives its rows of "
+               "the grid reduction alone, and the same A and B",
+               f'{len(scattered)} reduce-scatters of {npts * nocc} into '
+               f'{(r1 - r0) * nocc} on rank {gate.rank}, {len(long_sums)} '
+               f'grid-length all-reduces, {tiled} elements received over the '
+               f'ranks against {RECORDED_BATCH} x M x n_occ')
+
+
 def sliced_factors_routes(gate, mf, mol, F):
     """The factors held as grid-point slices: the window and the BSE on them.
 
@@ -716,6 +950,242 @@ def sliced_factors_routes(gate, mf, mol, F):
     gate.check(all(g == once for g in gathers),
                'each whole-array gather once per solve or sweep, every rank',
                f'{gathers[0]} on rank 0')
+
+
+def grid_row_axes(eps, nocc):
+    """The in-core driver's axes at ROW_NTAU: the chi0 grid with its
+    omega = 0 passenger, the self-energy's tau points, the Pade points, the
+    omega -> tau weights of W - I, the chi0 frequencies and mu."""
+    e_min, e_max = eps[nocc] - eps[nocc - 1], eps[-1] - eps[0]
+    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
+    fp, fw = minimax_frequency_grid(ROW_NTAU, e_min, e_max)
+    grid = TimeFrequencyGrid.minimax_split(ROW_NTAU, e_min, e_max,
+                                           np.append(fp, 0.0),
+                                           np.append(fw, 0.0))
+    rW, rS = self_energy_fit_ranges(eps, nocc, mu=mu)
+    tau = 0.5 * minimax_time_grid(ROW_NTAU, *rS)[0]
+    Ctw = minimax_transform_weights(COSINE_WT, tau, fp, *rW)[0]
+    pade = gauss_legendre_grid(DEFAULT_NPADE, w0=1.0)[0]
+    return dict(grid=grid, tau=tau, Ctw=Ctw, pade=pade, fp=fp, mu=mu)
+
+
+def sweep_owners(k, ntau, nitems, size):
+    """Every rank's items of tau point k, rank-ordered, in the order it adds
+    them, when a (tau point, item) sweep goes over `size` ranks in
+    `sweep_waves` windows (`wave_items`): the grid-row tiles of proj(tau_k),
+    the block pairs of its branch sums."""
+    k0 = k - k % size
+    k1 = min(k0 + size, ntau)
+    return [[j for kk, j in wave_items(k0, k1, nitems, r, size) if kk == k]
+            for r in range(size)]
+
+
+def proj_tile_addends(X_o, X_v, e_o, e_v, D, tau):
+    """proj(tau) of the serial kernel at ROW_TILE_GB and its addends, one per
+    grid-row tile in tile order: the kernel on that tile alone, which adds
+    it onto zeros."""
+    kw = dict(tile_memory_gb=ROW_TILE_GB)
+    whole = polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau, **kw)
+    return whole, [polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
+                                                tiles=[tile], **kw)
+                   for tile in polarizability_tiles(X_o.shape[0],
+                                                    ROW_TILE_GB)]
+
+
+def branch_pair_addends(pairs, Wk, tau):
+    """The serial branch sums (Sigma^<, Sigma^>)_pp(tau) of `pairs`
+    (`SigmaPairs`) on Wt(tau) = Wk, (2, nstates), and their addends, one per
+    block pair in pair order: `SigmaPairs.add` of that pair alone onto
+    zeros."""
+    shape = (2, pairs.X_s.shape[1])
+    whole = np.zeros(shape)
+    pairs.add(whole, Wk, tau, range(len(pairs.pairs)))
+    each = []
+    for j in range(len(pairs.pairs)):
+        one = np.zeros(shape)
+        pairs.add(one, Wk, tau, [j])
+        each.append(one)
+    return whole, each
+
+
+def recording(comm):
+    """`comm` with its sums recorded (`sums`), simulated or mpi4py."""
+    if isinstance(comm, SimulatedComm):
+        return RecordedSimulatedComm(comm, [])
+    return RecordedComm(comm, [])
+
+
+def bounded_sum_checks(gate, name, item, verdicts, recorded):
+    """The three parts of a reduced sum over every tau point, from this
+    rank's `reduced_sum_verdict`s; `recorded`: the recorded communicator saw
+    the sums the kernel makes, one per point or one for all."""
+    ratios = gate.everyone(max((v.ratio for v in verdicts), default=np.inf))
+    bounds = gate.everyone(max((v.bound_ulp for v in verdicts),
+                               default=np.inf))
+    gate.check(recorded and all(v.serial for v in verdicts),
+               f'{name}: the serial {item} addends in {item} order are the '
+               'serial sum at every tau point, bitwise')
+    gate.check(recorded and all(v.partial for v in verdicts),
+               f"{name}: this rank's partial of every tau point is its own "
+               f"{item}s' serial addends in order, bitwise, zeros where it "
+               'owns none', f'{len(verdicts)} tau points')
+    gate.check(recorded and all(v.ratio <= 1 for v in verdicts),
+               f"{name}: what this rank receives lies within the join bound "
+               "of the ranks' partials at every element",
+               f'at most {max(ratios):.2f} x the bound over the ranks, which '
+               f'is at most {max(bounds):.2f} ulp of the largest element')
+
+
+def grid_row_sums(gate, mf, mol, F, w0_route):
+    """The grid-row route's two reduced sums on their rounding bound, and
+    W(0) on them bitwise.
+
+    proj(tau) through `chi0_frequency_rows` and the branch sums of Sigma
+    through `self_energy_branch_sums` on this run's communicator, recorded:
+    the serial kernel's addends -- one per grid-row tile, one per block pair
+    -- in its order are its result, bitwise; this rank's partial of every
+    tau point is its own items' addends in that order, bitwise; and what it
+    receives lies within `join_bound` of the exact sum of the ranks'
+    partials at every element, floored at one ulp of the serial sum's
+    largest element (tests/reduction_bounds.py). The branch sums are those
+    of the Wt(tau) this chi0 screens. W(0) is the inversion of chi0(0)
+    folded from the received proj rows, and the route's W(0), bitwise.
+    """
+    gate.section('the grid-row GW sums on their rounding bound')
+    if gate.size == 1:
+        gate.info('one rank: nothing is reduced')
+        return
+    nocc = mol.nelectron // 2
+    eps = np.asarray(mf.mo_energy, float)
+    ax = grid_row_axes(eps, nocc)
+    grid, mu = ax['grid'], ax['mu']
+    X_mo, D, X_ao = F[0], F[1], F[2]
+    naux = D.shape[1]
+    r0, r1 = contiguous_block(naux, gate.rank, gate.size)
+    X_o, X_v, e_o, e_v = split_branches(X_mo, eps, nocc, mu)[:4]
+    rec = recording(gate.comm)
+    chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=mu, comm=rec,
+                               tile_memory_gb=ROW_TILE_GB)
+    fold, verdicts = np.zeros_like(chi0.rows), []
+    for k, (tau, (_, sent, got)) in enumerate(zip(grid.tau_points,
+                                                   rec.sums)):
+        whole, adds = proj_tile_addends(X_o, X_v, e_o, e_v, D, tau)
+        rows = got.reshape(r1 - r0, naux)
+        verdicts.append(reduced_sum_verdict(
+            whole, adds, sweep_owners(k, grid.ntau, len(adds), gate.size),
+            gate.rank, sent.reshape(naux, naux), rows, rows=(r0, r1)))
+        fold += grid.cosft_wt[:, k, None, None] * rows
+    bounded_sum_checks(gate, 'proj(tau) [explicit]', 'tile', verdicts,
+                       [s[0] for s in rec.sums]
+                       == ['reduce_scatter'] * grid.ntau)
+    gate.check(np.array_equal(chi0.rows, fold), "chi0's rows the serial "
+               'update of the received proj rows, bitwise')
+    owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
+    c0 = np.concatenate(gate.everyone(chi0.rows[-1]))
+    gate.check(np.array_equal(w0, np.linalg.inv(np.eye(naux) - c0)),
+               'W(0) the inversion of chi0(0) folded from them, bitwise')
+    gate.check(np.array_equal(w0_route, w0), "the route's W(0) this one, "
+               'bitwise', f'{np.abs(w0_route - w0).max():.2e} apart')
+
+    ntau = len(ax['tau'])
+    Wt = screened_interaction_rows(owned, ax['Ctw'], naux, gate.comm)
+    pairs = SigmaPairs(X_ao, D, mf.mo_coeff, eps, nocc, np.arange(len(eps)),
+                       mu, block_memory_gb=ROW_TILE_GB)
+    slabs = [slab.copy() for _, slab in Wt.gather_slices(range(ntau))]
+    rec = recording(gate.comm)
+    self_energy_branch_sums(pairs, ProjRows(Wt.rows, naux, rec), ax['tau'])
+    recorded = [s[0] for s in rec.sums] == ['allreduce']
+    verdicts = []
+    if recorded:
+        shape = (2, ntau, len(eps))
+        sent, got = (a.reshape(shape) for a in rec.sums[0][1:])
+        for k, tau in enumerate(ax['tau']):
+            whole, adds = branch_pair_addends(pairs, slabs[k], tau)
+            verdicts.append(reduced_sum_verdict(
+                whole, adds, sweep_owners(k, ntau, len(adds), gate.size),
+                gate.rank, sent[:, k], got[:, k]))
+    bounded_sum_checks(gate, 'the branch sums of Sigma [explicit]',
+                       'block pair', verdicts, recorded)
+
+
+def planted_whole_slice(kernel):
+    """`kernel` with the whole Pi(tau) = Go * Gv of its tau point formed
+    beside it, (M, M): what the grid-row sweep exists not to hold."""
+    def whole_slice(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs):
+        Pi = ((X_o * np.exp(e_o * tau)) @ X_o.T) * ((X_v * np.exp(-e_v * tau))
+                                                    @ X_v.T)
+        out = kernel(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs)
+        del Pi
+        return out
+    return whole_slice
+
+
+def gw_grid_rows(gate, mf, mol, F):
+    """The in-core GW window split over grid rows: what a rank holds at
+    every line, the window against serial, and the route's two reduced sums
+    and W(0) on them (`grid_row_sums`)."""
+    gate.section('the GW window split over grid rows (_qp_grid_rows)')
+    nocc = mol.nelectron // 2
+    window = np.array([nocc - 1, nocc])
+    kw = dict(ntau=ROW_NTAU, tile_gb=ROW_TILE_GB)
+
+    def window_and_w0(factors, comm=None):
+        extras = {}
+        qp = solve_qp_energy_space_time(mf, mol, nocc, window, factors=factors,
+                                        comm=comm, extras=extras, **kw)
+        return qp, extras['w_static']
+
+    ref = serial(window_and_w0, F)
+    if gate.size == 1:
+        gate.info(f'serial reference {ref[0] * HARTREE_TO_EV} eV')
+        return
+    moved = np.zeros(2)
+    for seed in range(ROW_PERMUTATIONS):
+        perm = np.random.default_rng(seed).permutation(F[0].shape[0])
+        got = serial(window_and_w0, tuple(a[perm] for a in F))
+        moved = np.maximum(moved, [np.abs(a - b).max()
+                                   for a, b in zip(got, ref)])
+    Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True)
+    M, naux, nao = F[1].shape[0], F[1].shape[1], F[2].shape[1]
+    census = HeldCensus(solve_qp_energy_space_time.__code__, M, naux, nao)
+    qp, w0 = census.trace(window_and_w0, Fs, gate.comm)
+    owned = len(partition(ROW_NTAU + 1, gate.rank, gate.size))
+    flags = gate.everyone(census.flags)
+    gate.check(not any(flags), 'GW window [explicit] on sliced factors: no '
+               'whole (M, M) block, stack of (naux, naux) slices or AO stack '
+               'bound at any line, every rank', f'{flags}')
+    slices = gate.everyone((census.slices, owned))
+    gate.check(all(n <= own + ROW_SPARE_SLICES for n, own in slices),
+               'at most the own frequencies and ROW_SPARE_SLICES whole '
+               '(naux, naux) slices at once, every rank',
+               f'(slices, own frequencies) per rank {slices}')
+    gate.info(f'rank 0 held at most {census.bytes / 1e6:.3f} MB of named '
+              f'arrays; the serial W(0) alone is {naux * naux * 8 / 1e6:.3f} '
+              'MB a slice')
+    bar_qp = COMPOSED_GRAD_K * max(moved[0], QP_BISECTION_TOL)
+    d_qp, d_w0 = np.abs(qp - ref[0]).max(), np.abs(w0 - ref[1]).max()
+    gate.check(d_qp <= bar_qp, 'the window within the anchored bar of serial',
+               f'{d_qp:.2e} of {bar_qp:.2e} Ha (relabelling {moved[0]:.2e})')
+    gate.info(f'W(0) {d_w0:.2e} from serial, where relabelling the grid moves '
+              f'it {moved[1]:.2e}: gated on the sums it inverts, below')
+    n = gate.distinct(qp, w0)
+    gate.check(n == 1, "the window and W(0) rank 0's on every rank, bitwise",
+               f'{n} distinct of {gate.size}')
+
+    real = ls_space_time.polarizability_projected_tau
+    gate.everyone(None)                        # every rank's run is done
+    ls_space_time.polarizability_projected_tau = planted_whole_slice(real)
+    gate.everyone(None)                        # ...and every rank is planted
+    try:
+        planted = HeldCensus(solve_qp_energy_space_time.__code__, M, naux, nao)
+        planted.trace(window_and_w0, Fs, gate.comm)
+    finally:
+        gate.everyone(None)                    # every planted run is done
+        ls_space_time.polarizability_projected_tau = real
+    found = gate.everyone(sorted(planted.flags.get('grid square', ())))
+    gate.check(all((M, M) in f for f in found), 'the census finds a planted '
+               'whole Pi(tau) slice on every rank', f'{found}')
+    grid_row_sums(gate, mf, mol, F, w0)
 
 
 def qp_set_and_rpa(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
@@ -1641,7 +2111,9 @@ def main(comm):
         gw_low_memory(gate, mf, mol, F)
         static_w(gate, mf, mol, F)
         bse_routes(gate, mf, mol, F)
+        grid_reduction_rows(gate, mf, mol, F)
         sliced_factors_routes(gate, mf, mol, F)
+        gw_grid_rows(gate, mf, mol, F)
 
         X_mo, D = F[0], F[1]
         eps = np.asarray(mf.mo_energy, float)

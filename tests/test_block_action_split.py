@@ -16,16 +16,16 @@ asks for:
   p, p D    a reduction -- p is per grid point, so a rank forms its own rows
             and contracts them with its own rows of D; naux doubles cross.
   the tail  a reduction -- X_o^T (Zt * P) is partial over the rows in its
-            first index and whole in its second, so one reduce of (n_occ, M)
-            makes it the same everywhere and each rank then contracts only its
-            own columns with X_v.
+            first index and whole in its second, so one reduce-scatter of
+            (n_occ, M), laid out in owner order, hands each rank only its own
+            columns, which it contracts with X_v.
 
 Gated here, on water/cc-pVDZ and ethylene/cc-pVDZ Hartree-Fock (888 grid points
 against water's 444, so the row blocks are not a handful of rows):
 
   * the SERIAL action is bitwise what it was, against the roots and vectors of
-    the code before any rank split existed (`BASELINE_COMMIT`), extracted with
-    `git archive` and run in its own process. Serially the whole split
+    the code before any rank split existed (`BASELINE_COMMIT`), unpacked into
+    a temporary directory and run in its own process. Serially the whole split
     collapses -- the row block is the whole grid -- and every expression must
     be the one it replaces, character for character in the arithmetic if not
     in the source;
@@ -113,7 +113,7 @@ BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
 THREAD_CAPS = {name: '2' for name in
                ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
-#: Built fresh in its own process against the extracted tree, on the same two
+#: Built fresh in its own process against the unpacked tree, on the same two
 #: molecules the fixture below builds.
 SERIAL_PROBE = '''
 import sys
@@ -390,8 +390,9 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
 
     clean = run_simulated(one_rank, size)[0]
 
-    real_gather, real_reduce = davidson.allgather_blocks, davidson.reduce_sum
-    tail_shape = (c['nocc'], c['npts'])
+    real_gather = davidson.allgather_blocks
+    real_reduce = davidson.reduce_scatter_rows
+    tail_shape = (c['npts'], c['nocc'])                 # in owner order
 
     def gather(a, comm):
         if (piece == 'gathered_zXv' and comm is not None
@@ -401,15 +402,15 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
             fired.append(1)
         return real_gather(a, comm)
 
-    def reduce(a, comm):
+    def reduce(a, comm, out=None):
         if (piece == 'reduced_tail' and comm is not None
                 and comm.Get_rank() == target and a.shape == tail_shape):
             a *= SLICE_SCALE
             fired.append(1)
-        return real_reduce(a, comm)
+        return real_reduce(a, comm, out=out)
 
     monkeypatch.setattr(davidson, 'allgather_blocks', gather)
-    monkeypatch.setattr(davidson, 'reduce_sum', reduce)
+    monkeypatch.setattr(davidson, 'reduce_scatter_rows', reduce)
     moved = run_simulated(one_rank, size)[0]
     assert fired, f'the {piece} perturbation never ran'
     assert np.abs(moved - clean).max() > MOVED

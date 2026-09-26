@@ -33,7 +33,13 @@ Gated, water/cc-pVDZ Hartree-Fock:
     the adjoints within `REL`;
   * on the same BLAS at 2, 3 and 8 ranks, the routes whose frequency rows feed
     a SUM over frequencies -- the dRPA energy and its adjoint, Wt(tau) and its
-    adjoint -- within `SUM_REL` of serial.
+    adjoint -- within `SUM_REL` of serial;
+  * on the same BLAS at 2, 3, 8 and 16 ranks, Wt(tau) held by auxiliary rows
+    from each frequency's W - I whole on its owner (`screened_interaction_rows`,
+    the GW stage's grid-row route): every rank's rows the one-rank rows
+    bitwise, each row being one (block, (nb, naux)) call; the fold made one
+    call over a rank's whole row block (planted) moves every distributed
+    rank and not the one-rank rows.
 
 Shown to fail: `owned_frequency_blocks` transforming only the rows a rank owns
 (the code before this gate) fails all 20 distributed gates on the
@@ -55,6 +61,7 @@ from src.Base.utils.mpi_grid import partition, run_simulated
 from src.Base.utils.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.contour_deformation import \
     cd_screening_contraction_multi
+from src.SingleReference.GW.imaginary_time import screened_interaction_rows
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
@@ -238,6 +245,58 @@ def test_frequency_sums(water, row_count_sensitive, size):
         for name, a, b in zip(('E_c', 'dRPA adjoints', 'Wt', 'Wt adjoint'),
                               serial, got):
             assert worst_rel(a, b) <= SUM_REL, (name, worst_rel(a, b))
+
+
+def screening_rows(w, Ctw, W_minus_I, comm=None):
+    """This rank's rows of Wt(tau) from its round-robin frequencies' W - I."""
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    mine = {k: W_minus_I[k] for k in partition(NFREQ, rank, size)}
+    Wt = screened_interaction_rows(mine, Ctw, w['proj'].shape[-1], comm)
+    return Wt.r0, Wt.rows
+
+
+def one_call_per_row_block(out, c, blk):
+    """The fold as one call over a rank's whole row block, its first operand
+    the rows: a shape that follows the rank count."""
+    out += ls_space_time.np.tensordot(blk.transpose(1, 0, 2), c,
+                                      axes=(1, 0)).transpose(2, 0, 1)
+
+
+def _screening_inputs(w):
+    grid = w['grid']
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        Ctw = sigma_transforms(w['eps'], w['nocc'], grid.tau_points,
+                               grid.omega_points, grid.omega_points,
+                               mu=w['mu'])[0]
+    eye = np.eye(w['proj'].shape[-1])
+    chi0 = np.tensordot(grid.cosft_wt, w['proj'], axes=(1, 0))
+    return Ctw, {k: np.linalg.inv(eye - chi0[k]) - eye for k in range(NFREQ)}
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_grid_row_screening_rows_are_one_ranks(water, row_count_sensitive,
+                                               size):
+    Ctw, W_minus_I = _screening_inputs(water)
+    _, whole = screening_rows(water, Ctw, W_minus_I)
+    for r0, rows in run_simulated(
+            lambda comm: screening_rows(water, Ctw, W_minus_I, comm), size):
+        assert np.array_equal(rows, whole[:, r0:r0 + rows.shape[1]]), r0
+
+
+def test_a_row_block_shaped_screening_fold_is_caught(water, row_count_sensitive,
+                                                     monkeypatch):
+    Ctw, W_minus_I = _screening_inputs(water)
+    monkeypatch.setattr(ls_space_time, 'fold_frequency_rows',
+                        one_call_per_row_block)
+    _, whole = screening_rows(water, Ctw, W_minus_I)
+    for size in SIZES:
+        got = run_simulated(
+            lambda comm: screening_rows(water, Ctw, W_minus_I, comm), size)
+        moved = [r0 for r0, rows in got if not np.array_equal(
+            rows, whole[:, r0:r0 + rows.shape[1]])]
+        assert len(moved) == size, (size, moved)
 
 
 if __name__ == '__main__':
