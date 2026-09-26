@@ -75,7 +75,8 @@ from src.Base.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
                                      current_comm, grid_comm, lockstep,
-                                     lockstep_stats, partition, reduce_sum,
+                                     lockstep_stats, partition,
+                                     reduce_scatter_rows, reduce_sum,
                                      replicate)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
@@ -133,9 +134,9 @@ QP_TIMING_RENAME = {'t_chi0': 'qp_chi0', 't_dyson': 'qp_dyson',
 #: The collectives of a distributed block action, each timed apart as
 #: `davidson_comm_<kind>`: the checked lockstep of the trial vectors (a digest,
 #: and a broadcast only where one differs) and of the result; the all-gather of
-#: z X_v^T, M x n_occ per vector; the all-reduce of X_o^T (Zt * P), n_occ x M
-#: per vector; and those of p D, naux per vector, and of the batch's
-#: (n_occ, n_vir) output slabs.
+#: z X_v^T, M x n_occ per vector; the reduce-scatter of X_o^T (Zt * P), n_occ x M
+#: in and each rank's own columns out, per vector; and the all-reduces of p D,
+#: naux per vector, and of the batch's (n_occ, n_vir) output slabs.
 COMM_KINDS = ('lockstep', 'gather', 'reduce_grid', 'reduce_pairs')
 
 
@@ -584,7 +585,7 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
                    gw_kwargs=None, progress=None, n_start=1,
                    self_consistency='G0W0', screen_at='mean-field',
                    spin='singlet', grid_accuracy=None, distribute=None,
-                   comm=None, sigma_x_matrix=None):
+                   comm=None, sigma_x_matrix=None, W_aux=None):
     """BSE by the ISDF matrix-free Davidson: mean field in, excitations out.
 
     The production calling sequence is three lines --
@@ -631,7 +632,8 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     qp: 'G0W0' (default) puts every quasiparticle energy from ONE space-time
     self-energy on the BSE diagonal (`solve_qp_diagonal_space_time`, which
     applies <Sigma_x - v_xc> per state for a KS reference); an ARRAY of
-    energies is used as the diagonal directly (an evGW result, say);
+    energies is used as the diagonal directly (an evGW result, say, or the
+    G0W0 diagonal a caller already solved, handed over with `W_aux`);
     False/None solves BSE@mean-field.
     spin: 'singlet' (kappa = 2) or 'triplet' (kappa = 0); the screened term is
     spin-independent, so both read the same W.
@@ -654,6 +656,13 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     window size divides. Left None the GW stage builds it once here, before
     the spectrum starts moving, and hands it to every cycle; the build is
     timed as its own `sigma_x` stage.
+    W_aux: the kernel's static screening W(omega = 0) on `factors`, already
+    built -- `extras['w_static']` of the `solve_qp_diagonal_space_time` call
+    whose diagonal is handed in as `qp`. That call is the one `qp='G0W0'`
+    makes here, so a caller that ran its GW stage that way hands over both and
+    gets the same roots bit for bit without a second chi0 and self-energy
+    sweep. Refused beside `qp='G0W0'`, `self_consistency='evGW'` and
+    `screen_at='qp'`, which each build their own W.
     distribute, comm: split the M^2 work over the ranks of `comm`, by default
     the current `distributed` region's. None (the default) follows that
     communicator; True also falls back to COMM_WORLD; False gives this call no
@@ -701,6 +710,13 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     """
     t = {}
     stats = {}
+    if W_aux is not None and (isinstance(qp, str) or screen_at == 'qp' or
+                              str(self_consistency).lower() in ('evgw', 'ev')):
+        raise ValueError(
+            f'W_aux handed in beside qp={qp!r}, screen_at={screen_at!r}, '
+            f'self_consistency={self_consistency!r}, each of which builds its '
+            'own W; hand the G0W0 diagonal in as qp= with the W(0) its solve '
+            'carried out.')
     comm = current_comm() if comm is None else comm
     mpi_comm, rank, nranks = (grid_comm(comm) if _takes_comm(distribute, comm)
                               else (None, 0, 1))
@@ -829,7 +845,16 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     # is the cost -- `polarizability_projected_tau` per tau -- and it was 1320 s
     # at the chlorophyllide dimer/cc-pVTZ for a single frequency.
     w_shared = gw_extras.get('w_static')
-    if w_shared is not None:
+    if W_aux is not None:
+        naux = (factors.naux if isinstance(factors, SlicedFactors)
+                else factors[1].shape[1])
+        if np.shape(W_aux) != (naux, naux):
+            raise ValueError(f'W_aux has shape {np.shape(W_aux)}; the factors '
+                             f'screen in naux = {naux}.')
+        if progress:
+            print(f'[bse {time.strftime("%H:%M:%S")}] static W handed in, not '
+                  'rebuilt', flush=True)
+    elif w_shared is not None:
         W_aux = w_shared
         if progress:
             print(f'[bse {time.strftime("%H:%M:%S")}] static W taken from the '
@@ -1437,11 +1462,16 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         only the naux-long p D crosses, 11 kB at anthracene against the
         M naux flops it removes.
       X_o^T (Zt * P) X_v is a partial over the rows in its FIRST index and
-        whole in its second, so the tail contraction over that second index
-        ran at full length on every rank. One reduce of (n_occ, M) makes that
-        intermediate the same everywhere and each rank then contracts its own
-        columns of it: 1.3 MB per trial vector at anthracene against
-        n_occ M n_vir flops, the cheap side at every size this route reaches.
+        whole in its second, and a rank contracts only its own columns of it
+        with its own rows of X_v. So the (n_occ, M) partial is REDUCE-
+        SCATTERED (`reduce_scatter_rows`): each rank receives the summed
+        (n_occ, its columns) block alone, one partial's worth of traffic
+        where an all-reduce of the whole moved two, and never holds the rest
+        of the sum. The partial is accumulated straight into owner order,
+        rank s's columns filling rows [s0, s1) of an (M, n_occ) buffer, so
+        the GEMMs are the ones an all-reduce read and nothing is copied. The
+        partial is 1.3 MB per trial vector at anthracene against the
+        n_occ M n_vir flops it stands for.
         Contracting X_v first instead would need no reduce at all and costs
         M n_vir per row in place of n_occ M -- ten times more here, since the
         virtual space is the wide one.
@@ -1546,7 +1576,14 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         rows = max(1, min(max(nmine, 1),
                           int(tile_memory_gb * 1e9 / max(npts * 8, 1))))
         S = np.empty((rows, npts))            # one row block of Zt * P
-        T = np.empty((no, npts))              # X_o^T (Zt * P), accumulated
+        # X_o^T (Zt * P), accumulated; under a rank count in owner order, rank
+        # s's (n_occ, its columns) block in rows [s0, s1) of an (M, n_occ) one
+        T = np.empty((npts, no) if nranks > 1 else (no, npts))
+        if nranks > 1:
+            owners = [contiguous_block(npts, s, nranks) for s in range(nranks)]
+            T_owned = [T[s0:s1].reshape(no, s1 - s0) for s0, s1 in owners]
+            T_mine = np.empty((nmine, no))    # this rank's rows of the sum...
+            T_cols = T_mine.reshape(no, nmine)  # ...its columns of T
         Tb = np.empty((no, npts))
         U = np.empty((nmine, no))             # (Zt * P) X_o, this rank's rows
 
@@ -1602,15 +1639,21 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
                 np.matmul(X_o[p0:p1], zXv, out=blk)       # P's rows
                 blk *= Zt[p0 - r0:p1 - r0]                # the Hadamard product
                 np.matmul(X_o[p0:p1].T, blk, out=Tb)
-                np.add(T, Tb, out=T)          # not T += Tb: that rebinds T
+                if nranks > 1:
+                    for (s0, s1), Ts in zip(owners, T_owned):
+                        np.add(Ts, Tb[:, s0:s1], out=Ts)
+                else:
+                    np.add(T, Tb, out=T)      # not T += Tb: that rebinds T
                 np.matmul(blk, X_o, out=U[p0 - r0:p1 - r0])
             # T is a partial over this rank's rows and WHOLE in the column
-            # index, so contracting it with X_v runs at full grid length on
-            # every rank. Reduced first, it is the same T everywhere and each
-            # rank takes only its own columns of it.
+            # index, and this rank contracts only its own columns of the sum:
+            # those are all it receives.
             if nranks > 1:
-                _timed(comm_clock, 'reduce_grid', reduce_sum, T, comm)
-            ex[0, n] = T[:, r0:r1] @ X_v_mine
+                _timed(comm_clock, 'reduce_grid', reduce_scatter_rows, T, comm,
+                       out=T_mine)
+                ex[0, n] = T_cols @ X_v_mine
+            else:
+                ex[0, n] = T[:, r0:r1] @ X_v_mine
             # The B block wants Zt * P^T. Forming that Hadamard product directly
             # reads Zt against a transposed operand and measured as costly as
             # everything else in the step put together; with Zt symmetric --

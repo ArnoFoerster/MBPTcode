@@ -30,7 +30,13 @@ region:
     collective: unpacking them as a tuple, a serial consumer, a reaction
     field;
   * `mpi_grid.allgather_rows`, the row-counted gather the slices travel
-    through, returns what `allgather_blocks` does, bitwise.
+    through, returns what `allgather_blocks` does, bitwise;
+  * `mpi_grid.reduce_scatter_rows`, the block action's grid reduction: each
+    rank's `contiguous_block` rows of the all-reduce, within the spread of
+    the summed partials over the orders a reduction adds them in (zero at two
+    ranks, where one addition commutes) and, the simulated communicator
+    adding both in rank order, bitwise; the partial untouched; cut at a
+    count limit the one call's bits; and a block one row off fails the bar.
 
 Collectives are counted by wrapping `sliced_factors.allgather_rows`, per rank.
 """
@@ -45,11 +51,13 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+import src.Base.utils.mpi_grid as mpi_grid
 from src.Base import sliced_factors
 from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (allgather_blocks, allgather_rows,
-                                     contiguous_block, distributed,
-                                     run_simulated)
+from src.Base.utils.mpi_grid import (SimulatedComm, allgather_blocks,
+                                     allgather_rows, contiguous_block,
+                                     distributed, reduce_scatter_rows,
+                                     reduce_sum, run_simulated)
 from src.SingleReference.GW.space_time import (_sliced_solve_factors,
                                                separable_factors,
                                                solve_qp_energy_space_time)
@@ -59,6 +67,8 @@ from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf,
                                                          solve_casida_davidson)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+
+from tests.test_proj_rows import LIMIT
 
 SIZES = [2, 3, 8]
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -102,6 +112,64 @@ def both_fits(mol, mf):
 def bitwise(a, b):
     """Every array of `a` holds the bits of the same array of `b`."""
     return len(a) == len(b) and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def scatter_shapes(size):
+    """Arrays a reduce-scatter is checked on: uneven blocks, no trailing
+    axis, several, an empty row, and fewer rows than ranks."""
+    return [(37, 5), (37,), (37, 2, 3), (37, 0), (size - 1, 4)]
+
+
+def rank_partials(size, shape):
+    """Every rank's partial of a reduce-scatter: its own normal draws."""
+    return [np.random.default_rng(100 + r).normal(size=shape)
+            for r in range(size)]
+
+
+def added(partials, order):
+    """The partials summed left to right in `order`."""
+    total = partials[order[0]].copy()
+    for r in order[1:]:
+        total = total + partials[r]
+    return total
+
+
+def pairwise(partials):
+    """The partials summed as a binary tree of neighbours."""
+    parts = list(partials)
+    while len(parts) > 1:
+        parts = [parts[i] + parts[i + 1] if i + 1 < len(parts) else parts[i]
+                 for i in range(0, len(parts), 2)]
+    return parts[0]
+
+
+def reassociation_bar(partials):
+    """The largest elementwise spread of the summed partials over the orders
+    a reduction adds them in: the rank order started at every rank, as a ring
+    does, each also reversed, and a binary tree."""
+    n = len(partials)
+    orders = [np.roll(np.arange(n), -s) for s in range(n)]
+    sums = np.stack([added(partials, o) for o in orders + [o[::-1]
+                                                        for o in orders]]
+                    + [pairwise(partials)])
+    return float((sums.max(axis=0) - sums.min(axis=0)).max(initial=0.0))
+
+
+def scattered(shapes, size, reduce_scatter=reduce_scatter_rows):
+    """Per rank, per shape: (its reduce-scatter rows, the same written into
+    `out`, whether `out` came back, the all-reduce, the partial untouched)."""
+    def rank(comm):
+        out = []
+        for shape in shapes:
+            mine = rank_partials(size, shape)[comm.Get_rank()]
+            kept = mine.copy()
+            rows = reduce_scatter(mine, comm)
+            into = np.full(rows.shape, np.nan)
+            returned = reduce_scatter(mine, comm, out=into) is into
+            out.append((rows, into, returned, reduce_sum(mine.copy(), comm),
+                        np.array_equal(mine, kept)))
+        return out
+    return run_simulated(rank, size)
 
 
 def test_serial_call_returns_the_tuple(water):
@@ -301,6 +369,59 @@ def test_allgather_rows_is_allgather_blocks(size):
     for per_rank in run_simulated(rank, size):
         for whole, (a, b) in zip(wholes, per_rank):
             assert np.array_equal(a, whole) and np.array_equal(a, b)
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_reduce_scatter_rows_are_the_allreduce_rows(size):
+    shapes = scatter_shapes(size)
+    res = scattered(shapes, size)
+    for i, shape in enumerate(shapes):
+        bar = reassociation_bar(rank_partials(size, shape))
+        for r, per_shape in enumerate(res):
+            rows, into, returned, summed, untouched = per_shape[i]
+            r0, r1 = contiguous_block(shape[0], r, size)
+            want = summed[r0:r1]
+            assert rows.shape == want.shape and returned and untouched
+            assert np.abs(rows - want).max(initial=0.0) <= bar
+            assert np.array_equal(rows, want) and np.array_equal(into, rows)
+    live = reassociation_bar(rank_partials(size, shapes[0]))
+    assert live == 0.0 if size == 2 else live > 0.0
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_reduce_scatter_rows_in_windows_is_one_call(size, monkeypatch):
+    shapes = scatter_shapes(size)
+    whole = scattered(shapes, size)
+    sizes, lock = [], threading.Lock()
+    real = SimulatedComm.reduce_scatter_sum
+
+    def counted(comm, send, recv, counts):
+        with lock:
+            sizes.append(send.size)
+        return real(comm, send, recv, counts)
+
+    monkeypatch.setattr(SimulatedComm, 'reduce_scatter_sum', counted)
+    monkeypatch.setattr(mpi_grid, 'MPI_COUNT_MAX', LIMIT)
+    cut = scattered(shapes, size)
+    for per_rank, cut_rank in zip(whole, cut):
+        for a, b in zip(per_rank, cut_rank):
+            assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+    assert max(sizes) <= LIMIT
+    assert len(sizes) > 2 * len(shapes) * size        # more than one a call
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_a_wrong_row_block_fails_the_bar(size):
+    shape = scatter_shapes(size)[0]
+
+    def one_row_off(a, comm, out=None):
+        return reduce_scatter_rows(np.roll(a, 1, axis=0), comm, out=out)
+
+    bar = reassociation_bar(rank_partials(size, shape))
+    for r, [(rows, _, _, summed, _)] in enumerate(
+            scattered([shape], size, one_row_off)):
+        r0, r1 = contiguous_block(shape[0], r, size)
+        assert np.abs(rows - summed[r0:r1]).max() > bar
 
 
 def test_sliced_factors_refuse_one_rank(water):

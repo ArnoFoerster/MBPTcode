@@ -24,6 +24,8 @@ simulated ranks:
 
   * each rank's rows are bitwise the rows of the zero-padded Allreduce the
     solves ran before (`polarizability_tau` split over tau, `reduce_sum`);
+  * `gather_slices` hands every rank the whole slices of its own list, in
+    its order, whatever the other ranks ask for -- the serial slices bitwise;
   * every frequency a rank owns comes out of `ProjRows.blocks` as the serial
     ProjRows' chi0, bitwise, for one block of all frequencies and blocks of
     five; the real-frequency transform is the serial one on every rank; the
@@ -294,10 +296,14 @@ def rows_routes(w, tile, comm=None):
             fb.chi0[m] = chi0_bar_of(k, proj.naux)
         proj_bar.fold(cosft, fb)
     slices = {k: slab.copy() for k, slab in proj_bar.tau_slices(tau_mine)}
+    # each rank asks for its own list, of its own length, repeats and all
+    wants = [(3 * rank + 5 * j) % NTAU for j in range(rank % 3 + 1)]
+    gathered = [(k, slab.copy()) for k, slab in proj.gather_slices(wants)]
     c = np.cos(np.arange(NTAU) + 0.5)
     return dict(rows=proj.rows.copy(), r0=proj.r0, chi0=chi0,
                 bar_rows=proj_bar.rows.copy(), slices=slices,
-                real=np.tensordot(c, proj, axes=(0, 0)))
+                real=np.tensordot(c, proj, axes=(0, 0)), wants=wants,
+                gathered=gathered)
 
 
 def distributed_rows(w, tile, size):
@@ -317,6 +323,9 @@ def same_as_serial(serial, ranks):
                    for k, v in got['chi0'].items()]
         checks += [(f'slice[{k}]', v, serial['slices'][k])
                    for k, v in got['slices'].items()]
+        assert [k for k, _ in got['gathered']] == got['wants']
+        checks += [(f'gathered[{k}]', v, serial['rows'][k])
+                   for k, v in got['gathered']]
         moved += [(name, rank) for name, a, b in checks
                   if a.tobytes() != b.tobytes()]
         assert got['rows'].shape == (NTAU, r1 - r0, naux)

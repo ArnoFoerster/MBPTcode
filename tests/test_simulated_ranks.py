@@ -25,7 +25,25 @@ Gates, all against the serial call in the same process:
     diagonal with their adjoints (`screened_interaction_tau`,
     `selfenergy_block`, `selfenergy_diag`);
   * static W and the whole ISDF BSE (`isdf_bse_factors`, `solve_bse_isdf`),
-    including the Davidson on the row-split block action;
+    including the Davidson on the row-split block action, and the BSE handed
+    its GW stage's diagonal and W(0), bitwise the BSE that solves them itself;
+  * the in-core GW route split over grid rows (`_qp_grid_rows`) at 2, 3, 8,
+    32 and 64 ranks, on tiles and blocks small enough that from 3 ranks up
+    the ranks share a tau point's tiles and block pairs: its two REDUCED sums
+    -- proj(tau) over the grid-row tiles, the branch sums of Sigma over the
+    block pairs -- on their rounding bound (tests/reduction_bounds.py): the
+    serial kernel's addends in its order are its result, every rank's
+    partial its own items' addends in that order, bitwise, and the reduced
+    sum within `join_bound` of the exact sum of the ranks' partials, half an
+    ulp per join of two of them, floored at one ulp of its largest element;
+    its OUTPUT PARTITIONS bitwise: chi0's rows the serial update of the
+    gathered proj rows, each W and W(0) the serial inversion of its gathered
+    chi0, Wt's rows those of one rank on the same W, the pair-built Sigma the
+    transform of its reduced branch sums, the driver's W(0) the kernels';
+    the quasiparticle energies against serial on COMPOSED_GRAD_K times what
+    relabelling the grid points moves them, floored at the root finder's
+    `QP_BISECTION_TOL`; one rank's pair-built Sigma against the AO-built one
+    on the same relabelling anchor; every rank rank 0's, bitwise;
   * the BSE@GW surface end to end (`ExcitedStateChain`), both forces at the
     routes test's anchored bar, `COMPOSED_GRAD_K` times what re-associating
     the serial force's sums on one BLAS thread moves it, floored at
@@ -124,16 +142,28 @@ from pyscf import gto, scf
 
 from src.Base import separable_ri
 from src.Base.constants import (COMPOSED_GRAD_K, ISDF_GRADIENT_FLOOR,
-                                TRANSFORM_FIT_RCOND)
+                                QP_BISECTION_TOL, TRANSFORM_FIT_RCOND)
 from src.Base.utils import time_frequency
 from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import (distributed, lockstep_stats, replicate,
+from src.Base.utils.mpi_grid import (contiguous_block, distributed,
+                                     lockstep_stats, partition, replicate,
                                      run_simulated)
-from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT,
+from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
                                            TimeFrequencyGrid,
                                            minimax_transform_weights)
-from src.SingleReference.GW.space_time import (separable_factors,
+from src.SingleReference.GW import imaginary_time
+from src.SingleReference.GW.imaginary_time import (
+    SigmaPairs, screened_interaction_rows, self_energy_diagonal_rows,
+    self_energy_fit_ranges)
+from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
+from src.SingleReference.GW.space_time import (_dyson_in_place, _dyson_owned,
+                                               _sigma_mo_diagonal,
+                                               separable_factors,
+                                               solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
+from src.SingleReference.LinearResponse.space_time import (
+    ProjRows, chi0_frequency_rows, chi0_imaginary_frequency,
+    polarizability_rows_sweep, split_branches, wave_items)
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf)
 from src.gradients import factor_chain
@@ -150,8 +180,13 @@ from src.gradients.space_time_adjoint import (polarizability_tau,
                                               selfenergy_diag,
                                               selfenergy_diag_backward,
                                               sigma_transforms)
-from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, one_thread,
-                                   one_thread_scatter)
+from tests.reduction_bounds import reduced_sum_verdict
+from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, ROW_NTAU,
+                                   ROW_PERMUTATIONS, ROW_TILE_GB,
+                                   RecordedSimulatedComm, branch_pair_addends,
+                                   grid_row_axes, one_thread,
+                                   one_thread_scatter, proj_tile_addends,
+                                   sweep_owners)
 
 NTAU, NFREQ = 8, 24
 REL = 1e-11
@@ -171,6 +206,13 @@ SIZES = [2, 3]
 MANY = [8, 16]
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+#: Rank counts of the grid-row gates, on the routes script's ROW_TILE_GB
+#: (water's 444 points in 16 chi0 tiles and 4 self-energy blocks, 16 block
+#: pairs) and its ROW_NTAU tau points: at 2 every rank owns whole points, at
+#: 3 and 8 the sweep's last window splits a point's tiles and block pairs over
+#: two ranks, at 32 and 64 every point over three to six, most ranks owning
+#: none of a given point.
+ROW_SIZES = [2, 3, 8, 32, 64]
 
 
 @pytest.fixture(scope='module')
@@ -439,6 +481,37 @@ def test_static_w_and_bse(water, size):
 
 
 @pytest.mark.parametrize('size', SIZES)
+def test_bse_takes_the_gw_stage_diagonal(water, size):
+    """The diagonal and W(0) of the GW call `qp='G0W0'` makes, handed to the
+    BSE as `qp=` and `W_aux=`, give that entry's roots, vectors, diagonal and
+    kernel bitwise on every rank, and the handed BSE solves no quasiparticle
+    equation of its own."""
+    w = water
+    sigma_x = static_exchange_mean_field_matrix(w['mf'], w['mol'])
+
+    def one_rank(comm):
+        om0, X0, Y0, info0 = solve_bse_isdf(
+            w['mf'], w['mol'], w['nocc'], nroots=3, factors=w['factors'],
+            probe=False, progress=False, sigma_x_matrix=sigma_x)
+        gw_out = {}
+        eps, _ = solve_qp_diagonal_space_time(w['mf'], w['mol'], w['nocc'],
+                                              factors=w['factors'],
+                                              extras=gw_out,
+                                              sigma_x_matrix=sigma_x)
+        om, X, Y, info = solve_bse_isdf(
+            w['mf'], w['mol'], w['nocc'], nroots=3, factors=w['factors'],
+            qp=eps, W_aux=gw_out['w_static'], probe=False, progress=False)
+        return (om0, X0, Y0, info0), (om, X, Y, info)
+
+    for (om0, X0, Y0, info0), (om, X, Y, info) in run_simulated(one_rank, size):
+        for a, b in ((om, om0), (X, X0), (Y, Y0), (info['eps'], info0['eps']),
+                     (info['W_aux'], info0['W_aux'])):
+            assert np.array_equal(a, b)
+        assert info['nranks'] == size
+        assert 'qp' in info0['timings'] and 'qp' not in info['timings']
+
+
+@pytest.mark.parametrize('size', SIZES)
 def test_blocked_gw_path(water, size):
     w = water
     homo = solve_qp_energy_space_time(w['mf'], w['mol'], w['nocc'], w['nocc'] - 1,
@@ -452,6 +525,290 @@ def test_blocked_gw_path(water, size):
 
     for qp in run_simulated(one_rank, size):
         assert abs(qp - homo) < 1e-12
+
+
+# ----------------------------------------- the GW stage split over grid rows
+def _rel(a, b):
+    """max |a - b| over max |b|."""
+    return float(np.abs(np.asarray(a) - np.asarray(b)).max()
+                 / np.abs(np.asarray(b)).max())
+
+
+def _serial_gw(w, g, X_mo, D, X_ao):
+    """(chi0, W(0), Wt, Sigma_pp) of the serial in-core route: the AO-built
+    self-energy of every state."""
+    eps, nocc = w['eps'], w['nocc']
+    grid = g['grid']
+    chi0 = chi0_imaginary_frequency(X_mo, D, eps, nocc, grid, mu=g['mu'],
+                                    tile_memory_gb=ROW_TILE_GB)
+    W = _dyson_in_place(chi0.copy(), range(grid.nfreq), grid.nfreq - 1)
+    Wt = imaginary_time._transform_screened(g['Ctw'], W[:-1])
+    sigma = _sigma_mo_diagonal(X_mo, D, W[:-1], w['mf'], eps, nocc, g['tau'],
+                               g['fp'], g['pade'], g['mu'],
+                               np.arange(len(eps)), X_ao=X_ao,
+                               block_memory_gb=ROW_TILE_GB)
+    return chi0, W[-1], Wt, sigma
+
+
+def _gw_window(w, factors, comm=None):
+    """The whole diagonal and W(0) by the driver at ROW_NTAU on
+    ROW_TILE_GB, over `comm` (serially without one)."""
+    extras = {}
+    kwargs = {} if comm is None else dict(distribute=True, comm=comm)
+    qp, _ = solve_qp_diagonal_space_time(w['mf'], w['mol'], w['nocc'],
+                                         factors=factors, ntau=ROW_NTAU,
+                                         tile_gb=ROW_TILE_GB, extras=extras,
+                                         **kwargs)
+    return qp, extras['w_static']
+
+
+@pytest.fixture(scope='module')
+def gw_rows(water):
+    """The serial pieces of the in-core route on water at ROW_NTAU and
+    ROW_TILE_GB (`grid_row_axes`); its two reduced sums serially with their
+    addends, per tau point -- proj(tau) and one addend per grid-row tile,
+    the branch sums of Sigma on the serial Wt and one per block pair; and
+    the largest relative move of chi0, W(0), Wt, Sigma_pp and the
+    quasiparticle energies over ROW_PERMUTATIONS random orders of the grid
+    points."""
+    w = water
+    g = grid_row_axes(w['eps'], w['nocc'])
+    eps, nocc, mu = w['eps'], w['nocc'], g['mu']
+    X_mo, D, X_ao = w['factors'][:3]
+    ref = _serial_gw(w, g, X_mo, D, X_ao)
+    ref_qp = _gw_window(w, w['factors'])
+    moved = np.zeros(6)
+    for seed in range(ROW_PERMUTATIONS):
+        perm = np.random.default_rng(seed).permutation(X_mo.shape[0])
+        F = (X_mo[perm], D[perm], X_ao[perm], w['factors'][3][perm])
+        got = _serial_gw(w, g, *F[:3]) + _gw_window(w, F)
+        moved = np.maximum(moved, [_rel(a, b) for a, b in
+                                   zip(got, ref + ref_qp)])
+    X_o, X_v, e_o, e_v = split_branches(X_mo, eps, nocc, mu)[:4]
+    proj = [proj_tile_addends(X_o, X_v, e_o, e_v, D, t)
+            for t in g['grid'].tau_points]
+    pairs = SigmaPairs(X_ao, D, w['mf'].mo_coeff, eps, nocc,
+                       np.arange(len(eps)), mu, block_memory_gb=ROW_TILE_GB)
+    sig = [branch_pair_addends(pairs, ref[2][k], t)
+           for k, t in enumerate(g['tau'])]
+    return dict(g=g, ref=ref, ref_qp=ref_qp, moved=moved,
+                tiles=len(proj[0][1]), pairs=len(pairs.pairs), proj=proj,
+                sig=sig)
+
+
+def _verdicts(per_point, size, rank, partials, received, rows=None):
+    """This rank's `reduced_sum_verdict` at every tau point of a sweep over
+    `size` ranks: `per_point` the serial (sum, addends) of each point,
+    `partials` and `received` what the rank handed the reduction and got
+    back for it, `rows` the rows of the sum it receives."""
+    ntau = len(per_point)
+    return [reduced_sum_verdict(whole, adds,
+                                sweep_owners(k, ntau, len(adds), size), rank,
+                                partials[k], received[k], rows=rows)
+            for k, (whole, adds) in enumerate(per_point)]
+
+
+def _assert_bounded(verdicts, rank):
+    """Every tau point's three parts pass on this rank."""
+    bad = [(k, v) for k, v in enumerate(verdicts)
+           if not (v.serial and v.partial and v.ratio <= 1)]
+    assert not bad, (rank, bad)
+
+
+def test_grid_rows_share_tiles(water, gw_rows):
+    """The fixture splits points: 3 and 8 ranks share a point's tiles and
+    block pairs in the sweep's last window, and the items per rank differ by
+    at most one within a window."""
+    assert gw_rows['tiles'] > 8 and gw_rows['pairs'] > 8
+    for size in (3, 8):
+        ntau = len(gw_rows['g']['tau'])
+        k0 = ntau - ntau % size
+        spans = [len({k for k, _ in wave_items(k0, ntau, gw_rows['tiles'],
+                                               r, size)})
+                 for r in range(size)]
+        assert ntau % size and max(spans) == 2
+
+
+@pytest.mark.parametrize('size', ROW_SIZES)
+def test_grid_rows_proj_is_bounded(water, gw_rows, size):
+    """proj(tau), a sum over the ranks' grid-row tiles, on its rounding
+    bound: the serial tile addends in tile order are the serial proj(tau),
+    bitwise; every rank's partial of each tau point is its own tiles'
+    addends in tile order, bitwise, zeros where it owns none; each rank's
+    reduced rows lie within `join_bound` of the exact sum of the ranks'
+    partials at every element, floored at one ulp of |proj(tau)|max
+    (tests/reduction_bounds.py); and the sweep yields the rows it
+    received."""
+    w, g = water, gw_rows['g']
+    X_o, X_v, e_o, e_v = split_branches(w['X'], w['eps'], w['nocc'],
+                                        g['mu'])[:4]
+    naux, ntau = w['D'].shape[1], len(gw_rows['proj'])
+
+    def one_rank(comm):
+        rec = RecordedSimulatedComm(comm, [])
+        rows = [r.copy() for _, r in polarizability_rows_sweep(
+            X_o, X_v, e_o, e_v, w['D'], g['grid'].tau_points, rec,
+            ROW_TILE_GB)]
+        return rows, rec.sums
+
+    for r, (rows, sums) in enumerate(run_simulated(one_rank, size)):
+        assert [s[0] for s in sums] == ['reduce_scatter'] * ntau, r
+        assert all(np.array_equal(s[2].reshape(y.shape), y)
+                   for s, y in zip(sums, rows)), r
+        _assert_bounded(_verdicts(
+            gw_rows['proj'], size, r,
+            [s[1].reshape(naux, naux) for s in sums], rows,
+            rows=contiguous_block(naux, r, size)), r)
+
+
+@pytest.mark.parametrize('size', ROW_SIZES)
+def test_grid_rows_partitions_are_bitwise(water, gw_rows, size):
+    """chi0's rows are the serial update of the gathered proj rows, each
+    owner's W - I the serial inversion of its gathered chi0 and W(0) that of
+    chi0(0) on every rank, and Wt's rows on the serial W - I those of one
+    rank, bitwise."""
+    w, g = water, gw_rows['g']
+    grid, naux = g['grid'], w['D'].shape[1]
+    X_o, X_v, e_o, e_v = split_branches(w['X'], w['eps'], w['nocc'],
+                                        g['mu'])[:4]
+    W_serial = _dyson_in_place(gw_rows['ref'][0].copy(), range(grid.nfreq),
+                               grid.nfreq - 1)
+    W_minus_I = {k: W_serial[k] - np.eye(naux) for k in range(grid.nfreq - 1)}
+
+    def wt_rows(comm):
+        size_, rank = (1, 0) if comm is None else (comm.Get_size(),
+                                                   comm.Get_rank())
+        mine = {k: np.ascontiguousarray(W_minus_I[k]) for k in
+                partition(grid.nfreq - 1, rank, size_)}
+        return screened_interaction_rows(mine, g['Ctw'], naux, comm).rows
+
+    def one_rank(comm):
+        proj = [rows.copy() for _, rows in polarizability_rows_sweep(
+            X_o, X_v, e_o, e_v, w['D'], grid.tau_points, comm, ROW_TILE_GB)]
+        chi0 = chi0_frequency_rows(w['X'], w['D'], w['eps'], w['nocc'], grid,
+                                   mu=g['mu'], comm=comm,
+                                   tile_memory_gb=ROW_TILE_GB)
+        whole = np.empty(chi0.shape)
+        for k, c in chi0.gather_slices(range(grid.nfreq)):
+            whole[k] = c
+        owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
+        return proj, chi0.rows, whole, owned, w0, wt_rows(comm)
+
+    out = run_simulated(one_rank, size)
+    proj = np.concatenate([o[0] for o in out], axis=1)     # (ntau, naux, naux)
+    chi0 = np.zeros((grid.nfreq, naux, naux))
+    for k in range(grid.ntau):
+        chi0 += grid.cosft_wt[:, k, None, None] * proj[k]
+    wt_one = wt_rows(None)
+    eye = np.eye(naux)
+    for r, (_, rows, whole, owned, w0, wt) in enumerate(out):
+        r0, r1 = contiguous_block(naux, r, size)
+        assert np.array_equal(rows, chi0[:, r0:r1]), r
+        assert np.array_equal(whole, chi0), r
+        assert sorted(owned) == [k for k in partition(grid.nfreq, r, size)
+                                 if k != grid.nfreq - 1]
+        for k, Wm in owned.items():
+            assert np.array_equal(Wm, _minus_eye(np.linalg.inv(
+                eye - chi0[k]))), (r, k)
+        assert np.array_equal(w0, np.linalg.inv(eye - chi0[-1])), r
+        assert np.array_equal(wt, wt_one[:, r0:r1]), r
+
+
+def _minus_eye(W):
+    """W - I on the diagonal in place, the Dyson step's own update."""
+    W[np.diag_indices(W.shape[0])] -= 1.0
+    return W
+
+
+@pytest.mark.parametrize('size', ROW_SIZES)
+def test_grid_rows_self_energy_is_bounded(water, gw_rows, size):
+    """The branch sums of Sigma, a sum over the ranks' block pairs, on their
+    rounding bound, on the serial Wt and on the Wt the distributed chain
+    screens itself: the serial pair addends in pair order are the serial
+    branch sums, bitwise; every rank's partial of each tau point is its own
+    pairs' addends in pair order, bitwise; the reduced sums lie within
+    `join_bound` of the exact sum of the ranks' partials. The chain's
+    pair-built Sigma is the tau -> omega transform of its reduced branch
+    sums, bitwise; the driver's W(0) the chain's; the quasiparticle
+    energies within COMPOSED_GRAD_K times what relabelling the grid points
+    moves them, floored at the root finder's `QP_BISECTION_TOL`; every
+    rank's Sigma, W(0) and energies rank 0's."""
+    w, g = water, gw_rows['g']
+    grid, naux = g['grid'], w['D'].shape[1]
+    X_mo, D, X_ao = w['factors'][:3]
+    eps, nocc, states = w['eps'], w['nocc'], np.arange(len(w['eps']))
+    ntau = len(g['tau'])
+
+    def sigma_pairs():
+        return SigmaPairs(X_ao, D, w['mf'].mo_coeff, eps, nocc, states,
+                          g['mu'], block_memory_gb=ROW_TILE_GB)
+
+    def one_rank(comm):
+        r0, r1 = contiguous_block(naux, comm.Get_rank(), comm.Get_size())
+        pairs = sigma_pairs()
+        on_serial = RecordedSimulatedComm(comm, [])
+        imaginary_time.self_energy_branch_sums(
+            pairs, ProjRows(np.ascontiguousarray(gw_rows['ref'][2][:, r0:r1]),
+                            naux, on_serial), g['tau'])
+        chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=g['mu'],
+                                   comm=comm, tile_memory_gb=ROW_TILE_GB)
+        owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
+        Wt = screened_interaction_rows(owned, g['Ctw'], naux, comm)
+        slabs = [slab.copy() for _, slab in Wt.gather_slices(range(ntau))]
+        chain = RecordedSimulatedComm(comm, [])
+        sigma = self_energy_diagonal_rows(pairs, ProjRows(Wt.rows, naux,
+                                                          chain),
+                                          eps, nocc, g['tau'], g['pade'],
+                                          mu=g['mu'])
+        return (on_serial.sums, chain.sums, slabs, sigma, w0,
+                _gw_window(w, w['factors'], comm))
+
+    out = run_simulated(one_rank, size)
+    pairs, slabs = sigma_pairs(), out[0][2]
+    chain_sums = [branch_pair_addends(pairs, slab, t)
+                  for slab, t in zip(slabs, g['tau'])]
+    rS = self_energy_fit_ranges(eps, nocc, mu=g['mu'])[1]
+    C = minimax_transform_weights(COSINE_TW, g['tau'], g['pade'], *rS)[0]
+    S = minimax_transform_weights(SINE_TW, g['tau'], g['pade'], *rS)[0]
+    shape, ref_qp = (2, ntau, len(eps)), gw_rows['ref_qp'][0]
+    qp_bar = COMPOSED_GRAD_K * max(gw_rows['moved'][4] * np.abs(ref_qp).max(),
+                                   QP_BISECTION_TOL)
+    for r, (on_serial, chain, slabs_r, sigma, w0, (qp, w0_driver)) in \
+            enumerate(out):
+        for sums, per_point in ((on_serial, gw_rows['sig']),
+                                (chain, chain_sums)):
+            assert [s[0] for s in sums] == ['allreduce'], r
+            sent, got = (a.reshape(shape) for a in sums[0][1:])
+            _assert_bounded(_verdicts(per_point, size, r,
+                                      [sent[:, k] for k in range(ntau)],
+                                      [got[:, k] for k in range(ntau)]), r)
+        assert all(np.array_equal(a, b) for a, b in zip(slabs_r, slabs)), r
+        sig_l, sig_g = chain[0][2].reshape(shape)
+        assert np.array_equal(sigma, -0.5 * ((sig_g + sig_l).T @ C.T + 1j * (
+            (sig_g - sig_l).T @ S.T))), r
+        assert np.array_equal(w0, w0_driver), r
+        assert np.abs(qp - ref_qp).max() <= qp_bar, r
+        for a, b in zip((sigma, w0, qp), (out[0][3], out[0][4], out[0][5][0])):
+            assert np.array_equal(a, b), r
+
+
+def test_pair_built_sigma_is_anchored_serially(water, gw_rows):
+    """One rank's pair-built Sigma_pp, the states' diagonal straight from the
+    block pairs, against the AO-built one: a relabelling of the same sums,
+    within COMPOSED_GRAD_K times what relabelling the grid moves the AO
+    build."""
+    w, g = water, gw_rows['g']
+    X_mo, D, X_ao = w['factors'][:3]
+    eps, nocc = w['eps'], w['nocc']
+    naux = D.shape[1]
+    pairs = SigmaPairs(X_ao, D, w['mf'].mo_coeff, eps, nocc,
+                       np.arange(len(eps)), g['mu'],
+                       block_memory_gb=ROW_TILE_GB)
+    Wt = ProjRows(gw_rows['ref'][2], naux)
+    sigma = self_energy_diagonal_rows(pairs, Wt, eps, nocc, g['tau'],
+                                      g['pade'], mu=g['mu'])
+    assert _rel(sigma, gw_rows['ref'][3]) <= (COMPOSED_GRAD_K
+                                               * gw_rows['moved'][3])
 
 
 # ------------------------------------------------------- the whole surface

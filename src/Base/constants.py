@@ -839,3 +839,11 @@ DAVIDSON_SPACE_GB = 16
 # This tolerance absorbs decimal round-tripping and nothing else; it is not a
 # statement that two grids this close are interchangeable.
 ISDF_RADII_MATCH_TOL = 1e-10
+
+# Bytes of W(i.omega) - I per chunk of the omega -> tau transform of the
+# space-time self-energy (`GW.imaginary_time`): the frequencies are folded into
+# Wt(i.tau) a chunk at a time, two at the chlorophyllide dimer/cc-pVTZ (0.87 GB
+# a frequency). The chunk is also the association of that sum -- one GEMM per
+# chunk, added in chunk order -- which the row-distributed transform keeps, so
+# it is fixed by naux alone and never by the rank count.
+SCREENED_CHUNK_BYTES = 2 << 30

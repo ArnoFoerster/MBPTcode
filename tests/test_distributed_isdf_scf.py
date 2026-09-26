@@ -10,14 +10,15 @@ rank count owns a different set of them (water 7 tiles, ethylene 14):
     energy and the same on every rank, the orbitals one set of bits across
     the ranks, the mean field's own ISDFJK back on it afterwards;
   * J, K and the long-range K of one fixed density at 2, 3 and 8 ranks
-    against the one-rank handle (the same tiles, no collective) on
-    COMPOSED_GRAD_K times the measured reassociation response: for K and
-    K_lr, sums over row tiles, the largest move of the one-rank K when its
-    own tile addends are re-associated as 2, 3 and 8 ranks would
-    (`reassociation_response`: reversed, and 32 random orders cut into as
-    many runs as ranks, per rank count) or the ranks' partials are added in
-    reverse; for J the ranks' partials reversed, floored at one ulp of its
-    largest element;
+    against the one-rank handle (the same tiles, no collective): K and K_lr,
+    sums over row tiles, with every rank's partial its tiles' one-rank
+    addends added in tile order, bitwise, and the reduced K within the
+    rounding bound of the addends' exact sum at every element
+    (`rounding_bound`: half an ulp of each partial sum a rank forms and of
+    each join of two ranks' partials, the most any order of the reduction
+    can move it, floored at one ulp of |K|max); J within COMPOSED_GRAD_K
+    times the ranks' partials reversed, floored at one ulp of its largest
+    element;
   * tests/test_distributed_isdf_scf_mpi.py's own checks at 8 ranks, where
     rank 7 owns none of water's 7 tiles: a pass on every rank;
   * the bytes every rank holds, read off the handle (`memory_faults` of
@@ -33,12 +34,13 @@ rank count owns a different set of them (water 7 tiles, ethylene 14):
     limiting each simulated rank's own pool of `NODE_THREADS` threads
     (`on_the_node_pool`), so `blas_single_threaded` drops it to one and
     `blas_full_pool` gives it back as on a rank of a real node): every
-    rank's tiles of Z (and of G, factored) bitwise the one-rank tiles, and
-    J and K on the anchored bar; each rank's K partials built inside the
-    SCF's wrap bitwise the ones outside it; after a distributed SCF whose
-    handle was built inside it (`build=False`), every rank's
-    tiles bitwise the one-rank tiles and its record at NODE_THREADS for the
-    fit, the interaction and K -- while a GEMM over a rank's concatenated
+    rank's tiles of Z (and of G, factored) bitwise the one-rank tiles, J on
+    its anchored bar and K on its rounding bound; each rank's K partials
+    built inside the SCF's wrap bitwise the ones outside it; after a
+    distributed SCF whose handle was built inside it (`build=False`), every
+    rank's tiles bitwise the one-rank tiles and its record at NODE_THREADS
+    for the fit, the interaction and K -- while a GEMM over a rank's
+    concatenated
     rows, a GEMM inside the wrap and a one-rank reference fitted at one
     pool thread, all three shown moved, would not be;
   * under the same emulated node in this process, the pool every stage of
@@ -55,8 +57,9 @@ SHOWN TO FAIL, the pooled gate: with `distributed_isdf_jk` building the
 handle inside `blas_single_threaded` (the factory before this gate), every
 rank fitted its tiles at one pool thread and the one-rank handle at the
 process's own count, and at 2, 3 and 8 ranks every tile of both operators' Z
-differed from the one-rank tile, K at 5.8e3 and K_lr at 5.1e4 times
-the anchor -- what 16-thread OpenBLAS nodes showed, and what no laptop
+differed from the one-rank tile, K at 7.1e3 and K_lr at 5.2e4 to 6.1e4
+times its rounding bound (0.2-0.7 without the defect) -- what 16-thread
+OpenBLAS nodes showed, and what no laptop
 gate could: the real `blas_single_threaded` is a no-op below
 BLAS_WRAP_MIN_THREADS (two threads here) and off the main thread (every
 simulated rank). On the shape stand-in alone, the pool left out, the same
@@ -98,10 +101,9 @@ from src.Base.isdf_jk import ISDFJK, isdf_jk
 from src.Base.utils import threads
 from src.Base.utils.mpi_grid import run_simulated
 from tests import test_force_serial_shaped as shape_blas
+from tests.reduction_bounds import exact_offset, regrouped, rounding_bound
 from tests.test_distributed_isdf_scf_mpi import main as mpi_main
-from tests.test_distributed_isdf_scf_mpi import (memory_faults,
-                                                  reassociation_response,
-                                                  tile_addends)
+from tests.test_distributed_isdf_scf_mpi import memory_faults, tile_addends
 from tests.test_force_serial_shaped import racing_dgemm
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -373,8 +375,8 @@ def ranked_partials(mf, size, factored=False):
     """Over `size` ranks on `mf`'s density: every rank's reduced (J, K, K_lr),
     its own partials of the three before the reduction, its interaction
     tiles, (a rank with two tiles or more) the first tile's rows of one
-    GEMM over all its M^T rows beside that tile's own GEMM, and its K and
-    K_lr partials again inside the SCF's `blas_single_threaded`."""
+    GEMM over all its M^T rows beside that tile's own GEMM, its K and K_lr
+    partials again inside the SCF's `blas_single_threaded`, and its tiles."""
     mfs = [fresh(WATER, 'lrc-wpbeh') for _ in range(size)]
 
     def one(comm):
@@ -402,39 +404,43 @@ def ranked_partials(mf, size, factored=False):
             rows = np.vstack([handle.MT[t] for t in handle.mine])
             joined = (mm(rows, first.T)[:len(first)], mm(first, first.T))
         tiles = interaction_tiles(handle)
+        mine = list(handle.mine)
         handle.release()
-        return (vj, vk, klr), (pj, pk, plr), tiles, joined, wrapped
+        return (vj, vk, klr), (pj, pk, plr), tiles, joined, wrapped, mine
     return run_simulated(one, size)
 
 
 def anchored_faults(mf, factored=False, one=None):
-    """J, K and K_lr at every size of SIZES against the one-rank handle, on
-    COMPOSED_GRAD_K times the largest reassociation response measured on the
-    run -- K and K_lr: the one-rank K's tile addends re-associated as every
-    size would, J: one ulp of its largest element; and for all three every
-    size's partials added in reverse rank order; the interaction tiles
-    bitwise the one-rank tiles; every rank's results one set of bits; every
-    rank's K and K_lr partials inside the SCF's wrap bitwise the ones
-    outside it. Returns (faults, ratios, live), `live` whether a joined
-    GEMM's rows differed from the tile's own.
+    """J, K and K_lr at every size of SIZES against the one-rank handle. J
+    on COMPOSED_GRAD_K times the largest reassociation response measured on
+    the run: one ulp of its largest element, and every size's partials added
+    in reverse rank order. K and K_lr on their rounding bound: every rank's
+    partial its tiles' one-rank addends added in tile order, bitwise, and
+    the reduced K within `rounding_bound` of the addends' exact sum at every
+    element, floored at one ulp of |K|max. The interaction tiles bitwise the
+    one-rank tiles; every rank's results one set of bits; every rank's K and
+    K_lr partials inside the SCF's wrap bitwise the ones outside it. Returns
+    (faults, ratios, live): each result's distance over its bar, and whether
+    a joined GEMM's rows differed from the tile's own.
 
     one: `one_rank_jk(mf, factored)`, made here when None."""
     ref, ref_tiles, addends = (one_rank_jk(mf, factored=factored)
                                if one is None else one)
     runs = {size: ranked_partials(mf, size, factored) for size in SIZES}
-    anchor = [ULP * np.abs(ref[0]).max()] + [
-        reassociation_response(a, whole, SIZES)
-        for a, whole in zip(addends, ref[1:])]
+    anchor = ULP * np.abs(ref[0]).max()
     for res in runs.values():
-        for n in range(3):
-            parts = [r[1][n] for r in res]
-            forward, backward = parts[0].copy(), parts[-1].copy()
-            for p in parts[1:]:
-                forward = forward + p
-            for p in parts[-2::-1]:
-                backward = backward + p
-            anchor[n] = max(anchor[n], np.abs(forward - backward).max())
+        parts = [r[1][0] for r in res]
+        forward, backward = parts[0].copy(), parts[-1].copy()
+        for p in parts[1:]:
+            forward = forward + p
+        for p in parts[-2::-1]:
+            backward = backward + p
+        anchor = max(anchor, np.abs(forward - backward).max())
     faults, ratios, live = [], {}, False
+    faults += [f'the tile addends do not sum to the one-rank {name}'
+               for name, adds, whole in zip(('K', 'K_lr'), addends, ref[1:])
+               if not np.array_equal(regrouped(adds, [range(len(adds))]),
+                                     whole)]
     for size, res in runs.items():
         tiles = {}
         for rank, r in enumerate(res):
@@ -451,20 +457,36 @@ def anchored_faults(mf, factored=False, one=None):
         faults += [f'{size} ranks: tile {key} is not the one-rank tile'
                    for key, rows in tiles.items()
                    if not np.array_equal(rows, ref_tiles.get(key))]
+        owners = [r[5] for r in res]
         for n, name in enumerate(('J', 'K', 'K_lr')):
             got = [r[0][n] for r in res]
             if len({digest(g) for g in got}) != 1:
                 faults.append(f'{size} ranks: {name} differs between ranks')
-            ratios[size, name] = np.abs(got[0] - ref[n]).max() / anchor[n]
-            if ratios[size, name] > COMPOSED_GRAD_K:
+            if n == 0:
+                ratios[size, name] = (np.abs(got[0] - ref[n]).max()
+                                      / (COMPOSED_GRAD_K * anchor))
+            else:
+                adds = addends[n - 1]
+                faults += [f'{size} ranks: rank {rank} {name} partial is not '
+                           "its tiles' one-rank addends"
+                           for rank, r in enumerate(res)
+                           if not np.array_equal(r[1][n],
+                                                 regrouped(adds, [r[5]]))]
+                bound = np.maximum(rounding_bound(adds, owners),
+                                   np.spacing(np.abs(ref[n]).max()))
+                ratios[size, name] = float(
+                    (np.abs(exact_offset(got[0], adds)) / bound).max())
+            if ratios[size, name] > 1:
                 faults.append(f'{size} ranks: {name} at '
-                              f'{ratios[size, name]:.2f} of the anchor')
+                              f'{ratios[size, name]:.2f} of its bar')
     return faults, ratios, live
 
 
 def test_jk_reduction_is_anchored(serial):
-    """J, K and K_lr at 2, 3 and 8 ranks on the anchored bar, the tiles of
-    both operators' Z bitwise the one-rank tiles, every rank the same."""
+    """J at 2, 3 and 8 ranks on its anchored bar and K and K_lr on their
+    rounding bound, every rank's K partials its tiles' one-rank addends, the
+    tiles of both operators' Z bitwise the one-rank tiles, every rank the
+    same."""
     faults, ratios, _ = anchored_faults(serial['water', 'lrc-wpbeh'])
     assert not faults, (faults, ratios)
 
@@ -500,8 +522,9 @@ def test_rows_are_serial_shaped(factored):
     """On the shape- and pool-sensitive BLAS, every GEMM under src on it and
     every rank on its own node pool: every rank's tiles of Z (of G,
     factored) are the one-rank tiles bitwise at 2, 3 and 8 ranks, built
-    before the SCF or inside it, and J, K, K_lr sit on the anchored bar
-    measured on the same BLAS; K built inside the SCF's wrap is K outside
+    before the SCF or inside it, J sits on its anchored bar measured on the
+    same BLAS and K, K_lr on their rounding bound; K built inside the SCF's
+    wrap is K outside
     it, bitwise; a GEMM over a rank's joined rows, one inside the wrap and a
     reference fitted at one pool thread are moved by it, so a tile formed
     any of those ways would not pass."""

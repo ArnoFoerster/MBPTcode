@@ -17,10 +17,10 @@ import os
 
 import numpy as np
 
-from src.Base.constants import ISDF_TILE_GB
+from src.Base.constants import ISDF_TILE_GB, SCREENED_CHUNK_BYTES
 from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (agreement, current_comm, partition,
-                                     reduce_sum)
+from src.Base.utils.mpi_grid import (agreement, contiguous_block,
+                                     current_comm, partition, reduce_sum)
 from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
                                           minimax_transform_weights,
                                           minimax_points_for_accuracy,
@@ -28,8 +28,71 @@ from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
                                           SELF_ENERGY_PAD)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.LinearResponse.space_time import (
-    owned_frequency_blocks, polarizability_projected_sweep,
-    polarizability_projected_tau, split_branches, three_index_slice)
+    FrequencyBlock, ProjRows, owned_frequency_blocks,
+    polarizability_projected_sweep, polarizability_projected_tau,
+    split_branches, sweep_waves, three_index_slice, wave_items)
+
+
+class SigmaPairs:
+    """The (P block, Q block) pairs of the self-energy sweep over the
+    interpolation points and what they contract: X_o, X_v and the states'
+    columns X_s of the MO collocation X_ao C, and D. The blocks are the AO
+    build's (`sigma_blocks`) and the far-field screen (coords, screen_r_cut)
+    drops the same pairs, the points Morton-ordered first. X_ao is read once
+    here and not kept.
+    """
+
+    def __init__(self, X_ao, D, mo_coeff, eps, nocc, states, mu,
+                 block_memory_gb=ISDF_TILE_GB, coords=None, screen_r_cut=None):
+        occ, virt = get_occ_virt_indices(eps, nocc)
+        blocks = sigma_blocks(X_ao.shape[0], D.shape[1], block_memory_gb)
+        far = None
+        if coords is not None and screen_r_cut:
+            idx = _morton_order(np.asarray(coords))
+            X_ao = np.ascontiguousarray(X_ao[idx])
+            D = np.ascontiguousarray(D[idx])
+            far = _far_block_pairs(np.asarray(coords)[idx], blocks,
+                                   screen_r_cut)
+        X_mo = X_ao @ mo_coeff
+        del X_ao
+        # the branches, and the whole diagonal's states, are column ranges of
+        # the one MO collocation: views, so a rank holds it once
+        self.X_o, self.X_v = X_mo[:, :len(occ)], X_mo[:, len(occ):]
+        states = np.atleast_1d(states)
+        self.X_s = (X_mo if np.array_equal(states, np.arange(X_mo.shape[1]))
+                    else np.ascontiguousarray(X_mo[:, states]))
+        self.D, self.blocks = D, blocks
+        self.e_o, self.e_v = eps[occ] - mu, eps[virt] - mu
+        self.pairs = [(ip, iq) for ip in range(len(blocks))
+                      for iq in range(len(blocks))
+                      if far is None or not far[ip, iq]]
+
+    def add(self, out, Wk, tau, js):
+        """out[0] += Sigma^<_pp(tau) and out[1] += Sigma^>_pp(tau) of the
+        pairs `js`, one after another in that order:
+
+            Sigma^{<,>}_pp += sum_{P in p, Q in q} X_s[P,p] (Zt*G)_PQ X_s[Q,p]
+
+        with Zt = D_p Wk D_q^T; D_p Wk is formed once per run of one P block.
+        """
+        eo_t, ev_t = np.exp(self.e_o * tau), np.exp(-self.e_v * tau)
+        X_o, X_v, X_s, D = self.X_o, self.X_v, self.X_s, self.D
+        last = None
+        for j in js:
+            ip, iq = self.pairs[j]
+            (p0, p1), (q0, q1) = self.blocks[ip], self.blocks[iq]
+            if ip != last:
+                DW = D[p0:p1] @ Wk
+                Xo_p, Xv_p = X_o[p0:p1] * eo_t, X_v[p0:p1] * ev_t
+                last = ip
+            Zt = DW @ D[q0:q1].T
+            G = Xo_p @ X_o[q0:q1].T
+            G *= Zt                                  # in place; Zt reused
+            out[0] += np.einsum('Pp,Pp->p', X_s[p0:p1], G @ X_s[q0:q1])
+            G = Xv_p @ X_v[q0:q1].T
+            G *= Zt
+            out[1] -= np.einsum('Pp,Pp->p', X_s[p0:p1], G @ X_s[q0:q1])
+            del Zt, G
 
 
 def greens_function_imaginary_time(X, eps, nocc, tau, mu=None):
@@ -137,12 +200,17 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
     return npoints, worst
 
 
-def _transform_screened(Ctw, W_omega, chunk_bytes=2 << 30):
+def screened_chunk(nfreq, naux, chunk_bytes=SCREENED_CHUNK_BYTES):
+    """Frequencies per chunk of the omega -> tau transform of W - I."""
+    return max(1, min(nfreq, int(chunk_bytes // max(naux * naux * 8, 1))))
+
+
+def _transform_screened(Ctw, W_omega, chunk_bytes=SCREENED_CHUNK_BYTES):
     """
     sum_omega Ctw[.,omega] (W(i.omega) - I), without ever copying all of W.
     """
     nfreq, naux = W_omega.shape[0], W_omega.shape[-1]
-    step = max(1, min(nfreq, int(chunk_bytes // max(naux * naux * 8, 1))))
+    step = screened_chunk(nfreq, naux, chunk_bytes)
     dg = np.diag_indices(naux)
     out = np.zeros(Ctw.shape[:1] + (naux, naux))
     for k0 in range(0, nfreq, step):
@@ -152,6 +220,39 @@ def _transform_screened(Ctw, W_omega, chunk_bytes=2 << 30):
         out += np.tensordot(Ctw[:, k0:k1], blk, axes=(1, 0))
         del blk
     return out
+
+
+def screened_interaction_rows(W_minus_I, Ctw, naux, comm,
+                              chunk_bytes=SCREENED_CHUNK_BYTES):
+    """Wt(i.tau) = sum_w Ctw[t, w] (W(i.omega_w) - I) held by auxiliary rows,
+    `ProjRows` (ntau, r1 - r0, naux), from each frequency's W - I whole on
+    its round-robin owner (`partition`): `W_minus_I` maps this rank's
+    frequencies to them.
+
+    The frequencies are folded in the chunks of `_transform_screened`
+    (`screened_chunk`, fixed by naux), the owners handing every rank its rows
+    of the chunk and each rank adding the chunk into its rows one auxiliary
+    row per call (`ProjRows.fold`): a call shape no rank count changes, so a
+    rank's rows are the same bits at every rank count on any BLAS. No rank
+    holds a whole (ntau, naux, naux) array or the product of a chunk.
+    """
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    nfreq = Ctw.shape[1]
+    r0, r1 = contiguous_block(naux, rank, size)
+    Wt = ProjRows(np.zeros((Ctw.shape[0], r1 - r0, naux)), naux, comm)
+    weights = np.ascontiguousarray(Ctw.T)                 # (nfreq, ntau)
+    step = screened_chunk(nfreq, naux, chunk_bytes)
+    for k0 in range(0, nfreq, step):
+        block = list(range(k0, min(k0 + step, nfreq)))
+        owners = [k % size for k in block]
+        ks = [k for k, o in zip(block, owners) if o == rank]
+        whole = [W_minus_I[k] for k in ks]
+        if size == 1:
+            whole = np.stack(whole)
+        Wt.fold(weights, FrequencyBlock(block, owners, ks, whole))
+    return Wt
+
 
 def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                                      freq_block=None, scratch_dir=None,
@@ -311,10 +412,31 @@ def _morton_order(coords):
     return np.argsort(key)
 
 
+def sigma_blocks(M, naux, block_memory_gb=ISDF_TILE_GB):
+    """[(p0, p1)] interpolation-point blocks of the self-energy sweep, b rows
+    each so that one (b, naux) and two (b, b) blocks fit the budget: set by
+    M, naux and the budget alone."""
+    b = int((-naux + np.sqrt(naux**2 + 8 * block_memory_gb * 1e9 / 8)) / 4)
+    b = max(1, min(M, b))
+    edges = list(range(0, M, b)) + [M]
+    return list(zip(edges[:-1], edges[1:]))
+
+
+def _far_block_pairs(points, blocks, screen_r_cut):
+    """far[ip, iq]: blocks whose bounding spheres are further apart than
+    screen_r_cut (Bohr), on Morton-ordered points."""
+    cen = np.array([points[p0:p1].mean(axis=0) for p0, p1 in blocks])
+    rad = np.array([np.linalg.norm(points[p0:p1] - c, axis=1).max()
+                    for (p0, p1), c in zip(blocks, cen)])
+    sep = np.linalg.norm(cen[:, None, :] - cen[None, :, :], axis=2)
+    return sep - rad[:, None] - rad[None, :] > screen_r_cut
+
+
 def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
                                       tau_points, omega_in, omega_out,
                                       mu=None, ranges=None, tau_indices=None,
-                                      Wt_tau=None, block_memory_gb=4.0,
+                                      Wt_tau=None,
+                                      block_memory_gb=ISDF_TILE_GB,
                                       coords=None, screen_r_cut=None):
     """Full Sigma^c_{mu nu}(i.omega) in the AO basis, shape (nfreq, nao, nao).
 
@@ -404,11 +526,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     # accumulates into a (nao, M) buffer and multiplies by X_ao once at the end.
     # Flop counts are identical term by term; only the working set changes.
     M, naux = X_ao.shape[0], D.shape[1]
-    # b from the per-block working set: one (b, naux) and two (b, b).
-    b = int((-naux + np.sqrt(naux**2 + 8 * block_memory_gb * 1e9 / 8)) / 4)
-    b = max(1, min(M, b))
-    edges = list(range(0, M, b)) + [M]
-    pairs = list(zip(edges[:-1], edges[1:]))
+    pairs = sigma_blocks(M, naux, block_memory_gb)
     # Spatial order first, then block: the screen is geometric, so the blocks
     # have to be. Permuting P is a relabelling of a summation index and leaves
     # Sigma unchanged.
@@ -419,12 +537,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
         D = np.ascontiguousarray(D[idx])
         X_mo = X_ao @ mo_coeff
         X_o, X_v = X_mo[:, occ], X_mo[:, virt]
-        P = np.asarray(coords)[idx]
-        cen = np.array([P[p0:p1].mean(axis=0) for p0, p1 in pairs])
-        rad = np.array([np.linalg.norm(P[p0:p1] - c, axis=1).max()
-                        for (p0, p1), c in zip(pairs, cen)])
-        sep = np.linalg.norm(cen[:, None, :] - cen[None, :, :], axis=2)
-        far = sep - rad[:, None] - rad[None, :] > screen_r_cut
+        far = _far_block_pairs(np.asarray(coords)[idx], pairs, screen_r_cut)
 
     which = range(ntau) if tau_indices is None else np.atleast_1d(tau_indices)
     for k in which:
@@ -468,6 +581,51 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
             out.imag[w] += S[w, k] * odd_k
     out *= -0.5
     return out
+
+
+def self_energy_diagonal_rows(pairs, Wt, eps, nocc, tau_points, omega_out,
+                              mu=None, ranges=None):
+    """Sigma^c_pp(i.omega_out) for the states of `pairs` (`SigmaPairs`),
+    (nstates, nfreq), whole on every rank, from Wt(i.tau) held by auxiliary
+    rows (`ProjRows` over the ranks).
+
+    `self_energy_matrix_imaginary_time`'s sweep with the (tau point, block
+    pair) items split over the ranks in `sweep_waves` windows instead of the
+    tau points alone, so it divides past ntau ranks: a rank gathers the at
+    most two Wt(tau) slices its items read and adds each pair's branch sums
+    straight to the diagonal (`SigmaPairs.add`), so neither the (nao, M)
+    accumulators of the AO build nor the (nfreq, nao, nao) AO matrix is
+    formed. The branch sums, (2, ntau, nstates), are the one reduction -- a
+    sum re-associated over the ranks' items -- and the tau -> omega transform
+    follows on every rank.
+    """
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    if mu is None:
+        mu = 0.5 * (eps[occ].max() + eps[virt].min())
+    _, rS = ranges or self_energy_fit_ranges(eps, nocc, mu=mu)
+    C, _ = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS,
+                                     warn=False)
+    S, _ = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS,
+                                     warn=False)
+    sig_l, sig_g = self_energy_branch_sums(pairs, Wt, tau_points)
+    return -0.5 * ((sig_g + sig_l).T @ C.T + 1j * ((sig_g - sig_l).T @ S.T))
+
+
+def self_energy_branch_sums(pairs, Wt, tau_points):
+    """(Sigma^<_pp(tau), Sigma^>_pp(tau)), (2, ntau, nstates), whole on every
+    rank: the (tau point, block pair) items in `sweep_waves` windows, each
+    rank's items added in their order and the ranks' partials reduced."""
+    size, rank = Wt._size_rank()
+    ntau = len(tau_points)
+    sig = np.zeros((2, ntau, pairs.X_s.shape[1]))    # lesser, greater branch
+    for k0, k1 in sweep_waves(ntau, size):
+        mine = wave_items(k0, k1, len(pairs.pairs), rank, size)
+        need = sorted({k for k, _ in mine})
+        slabs = {k: slab.copy() for k, slab in Wt.gather_slices(need)}
+        for k in need:
+            pairs.add(sig[:, k], slabs.pop(k), tau_points[k],
+                      [j for kk, j in mine if kk == k])
+    return reduce_sum(sig, Wt.comm)
 
 
 def sigma_ao_to_mo(sigma_ao, mo_coeff):

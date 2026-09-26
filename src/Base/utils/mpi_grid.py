@@ -199,6 +199,70 @@ def reduce_sum(a, comm):
     return a
 
 
+def reduce_scatter_rows(a, comm, out=None):
+    """This rank's `contiguous_block` of rows of the sum over ranks of `a`.
+
+    The part of `reduce_sum` a rank that reads only its own rows of the sum
+    needs: every rank hands in its whole partial `a` (left unchanged) and
+    receives the summed rows [start, stop) it owns, into `out` (allocated when
+    None) and nothing else, so each rank sends and receives one partial's worth
+    of data where a bandwidth-optimal all-reduce moves two. Serially the one
+    block is the whole array: `a` itself, or copied into `out`.
+
+    A SUM, RE-ASSOCIATED like any: MPI's Reduce_scatter may add the partials
+    in another order than its Allreduce, so the rows agree with `reduce_sum`'s
+    to the summation order; the simulated communicator adds in rank order for
+    both, bitwise. The sum is elementwise, so a caller may lay its own data out
+    in any order inside each rank's rows. float64; past `MPI_COUNT_MAX`
+    doubles it runs in rounds, each rank's next window of rows per call, the
+    counts in doubles.
+    """
+    if comm is None or comm.Get_size() == 1:
+        if out is None:
+            return a
+        out[...] = a
+        return out
+    size, rank = comm.Get_size(), comm.Get_rank()
+    buf = np.ascontiguousarray(a)
+    if buf.dtype != np.float64:
+        raise TypeError(f'reduce_scatter_rows sums float64, not {buf.dtype}')
+    row = _row_length(buf)
+    _check_row(row)
+    blocks = [contiguous_block(buf.shape[0], r, size) for r in range(size)]
+    r0, r1 = blocks[rank]
+    shape = (r1 - r0,) + buf.shape[1:]
+    if out is None:
+        out = np.empty(shape)
+    elif (out.shape != shape or out.dtype != np.float64
+          or not out.flags.c_contiguous):
+        raise ValueError(f'reduce_scatter_rows writes a C-contiguous float64 '
+                         f'{shape} block, not a {out.dtype} {out.shape} one')
+    if buf.size <= MPI_COUNT_MAX:
+        _reduce_scatter_once(buf.reshape(-1), out.reshape(-1),
+                             [(s1 - s0) * row for s0, s1 in blocks], comm)
+        return out
+    per = max(1, MPI_COUNT_MAX // max(size * row, 1))
+    longest = max(s1 - s0 for s0, s1 in blocks)
+    for t0 in range(0, longest, per):
+        windows = [(s0 + min(t0, s1 - s0), s0 + min(t0 + per, s1 - s0))
+                   for s0, s1 in blocks]
+        send = np.concatenate([buf[w0:w1].reshape(-1) for w0, w1 in windows])
+        w0, w1 = windows[rank]
+        _reduce_scatter_once(send, out[w0 - r0:w1 - r0].reshape(-1),
+                             [(v1 - v0) * row for v0, v1 in windows], comm)
+    return out
+
+
+def _reduce_scatter_once(send, recv, counts, comm):
+    """recv <- the sum over ranks of their segment `rank` of the flat send,
+    cut into consecutive segments of counts[r] doubles: one Reduce_scatter."""
+    if isinstance(comm, SimulatedComm):
+        comm.reduce_scatter_sum(send, recv, counts)
+    else:
+        comm.Reduce_scatter([send, MPI.DOUBLE], [recv, MPI.DOUBLE],
+                            recvcounts=counts, op=MPI.SUM)
+
+
 def allgather_blocks(a, comm):
     """In-place all-gather of the `contiguous_block` row blocks of an array.
 
@@ -1153,7 +1217,8 @@ class _SimulatedWorld:
 
 class SimulatedComm:
     """One rank of `simulated_world`: the communicator surface the routes use
-    (Get_rank, Get_size, the reductions through `reduce_sum`/`reduce_max`,
+    (Get_rank, Get_size, the reductions through `reduce_sum`/`reduce_max`/
+    `reduce_scatter_rows`,
     the broadcasts through `broadcast`/`replicate`/`broadcast_rows`, the
     gathers and the transposing exchange through `allgather_blocks`/
     `allgather_ranges`/`exchange_blocks`), backed by threads instead
@@ -1277,6 +1342,33 @@ class SimulatedComm:
         if self._rank == 0:
             w.parts = [None] * w.size
             w.total = None
+        w.barrier.wait()                       # ...before it is cleared
+
+    def reduce_scatter_sum(self, send, recv, counts):
+        """recv <- the sum over ranks, in RANK ORDER, of segment `rank` of
+        their flat send buffers, cut into consecutive segments of counts[r]
+        elements: `allreduce_sum`'s additions on those elements, so its bits.
+
+        The send buffers are read in place, never written: each rank's stays
+        untouched until the barrier after every rank has summed its segment.
+        """
+        w = self._world
+        if send.size != sum(counts) or recv.size != counts[self._rank]:
+            raise ValueError(
+                f'rank {self._rank} offered {send.size} doubles and room for '
+                f'{recv.size} to a reduce-scatter of counts {list(counts)}; '
+                'under MPI this is MPI_ERR_TRUNCATE')
+        w.parts[self._rank] = send
+        w.barrier.wait()                       # every partial deposited
+        s0 = int(sum(counts[:self._rank]))
+        s1 = s0 + int(counts[self._rank])
+        total = w.parts[0][s0:s1].copy()
+        for part in w.parts[1:]:
+            total = total + part[s0:s1]
+        recv[...] = total
+        w.barrier.wait()                       # every segment summed
+        if self._rank == 0:
+            w.parts = [None] * w.size
         w.barrier.wait()                       # ...before it is cleared
 
     def allreduce_max(self, buf):

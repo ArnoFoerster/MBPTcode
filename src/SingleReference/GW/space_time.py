@@ -37,7 +37,7 @@ import warnings
 import numpy as np
 from pyscf import df as pyscf_df
 
-from src.Base.constants import ISDF_RADII_MATCH_TOL
+from src.Base.constants import ISDF_RADII_MATCH_TOL, ISDF_TILE_GB
 from src.Base.environment import environment_of
 from src.Base.pyscf_interface import get_orbital_energies
 from src.Base.separable_ri import (DEFAULT_PAIR_TOL, atomic_grid,
@@ -50,16 +50,19 @@ from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.grids import (gauss_legendre_grid, minimax_time_grid,
                                   minimax_frequency_grid,
                                   minimax_supported_sizes)
-from src.Base.utils.mpi_grid import (agreement, allgather_blocks,
-                                     contiguous_block, current_comm, grid_comm,
-                                     lockstep, lockstep_mean_field, partition,
+from src.Base.utils.mpi_grid import (agreement, broadcast_rows,
+                                     current_comm, grid_comm, lockstep,
+                                     lockstep_mean_field, partition,
                                      reduce_sum)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid, COSINE_WT,
                                            minimax_transform_weights)
 from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.GW.imaginary_time import (self_energy_matrix_imaginary_time,
+from src.SingleReference.GW.imaginary_time import (SigmaPairs,
+                                                   self_energy_matrix_imaginary_time,
+                                                   self_energy_diagonal_rows,
                                                    sigma_ao_to_mo_diagonal,
                                                    self_energy_fit_ranges,
+                                                   screened_interaction_rows,
                                                    screened_interaction_tau_blocked,
                                                    minimax_points_for_gw,
                                                    DEFAULT_TAU_TARGET)
@@ -68,7 +71,8 @@ from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              imaginary_axis_sample_points)
 from src.SingleReference.GW.reaction_field import (
     separable_gauge_transform, separable_quasiparticle_shift)
-from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_frequency_rows, chi0_imaginary_frequency)
 
 DEFAULT_NTAU = 'auto'
 DEFAULT_NFREQ = 'auto'
@@ -420,10 +424,117 @@ def _dyson_in_place(chi0, rows, static_index=None, transform=None):
     return chi0
 
 
+def _dyson_owned(chi0, static_index=None, transform=None):
+    """({frequency: W - I}, W(omega = 0)) from chi0 held by auxiliary rows
+    (`ProjRows` over the frequencies): W - I whole for this rank's round-robin
+    frequencies alone, W(0) whole on every rank (None without a passenger).
+
+    Each frequency's chi0 is gathered whole to its owner and inverted there as
+    `_dyson_in_place` inverts it -- the passenger dressed, every other
+    frequency in the bare gauge when `transform` is set -- so each W is the
+    serial inversion of its chi0, bitwise. The passenger is broadcast from
+    its owner; it is no part of the Sigma quadrature.
+    """
+    size, rank = chi0._size_rank()
+    naux = chi0.naux
+    eye, dg = np.eye(naux), np.diag_indices(naux)
+    W_minus_I, w_static = {}, None
+    for k, c in chi0.gather_slices(partition(chi0.shape[0], rank, size)):
+        if k == static_index:
+            w_static = np.linalg.inv(eye - c)        # dressed: the kernel's
+            continue
+        if transform is not None:
+            c = transform.T @ c @ transform
+        W = np.linalg.inv(eye - c)
+        W[dg] -= 1.0                                  # the correlation part
+        W_minus_I[k] = W
+    c = W = eye = None                          # before the broadcast lands
+    if static_index is not None:
+        if w_static is None:
+            w_static = np.empty((naux, naux))
+        broadcast_rows(w_static, static_index % size, chi0.comm)
+    return W_minus_I, w_static
+
+
+def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
+                  tau_points, freq_points, pade_freq, p_state, want_static,
+                  extras, ntau, comm, transform, solver_mode, dm_correction,
+                  greedy, timings, screen_r_cut, sigma_x, eps_anchor,
+                  sigma_x_matrix, tile_gb):
+    """The in-core route over more than one rank, split over grid rows as
+    well as tau points, so that it divides past ntau ranks and no rank holds a
+    whole (M, M) block, a whole stack of (naux, naux) slices or the AO
+    self-energy:
+
+        chi0(i.nu)   this rank's auxiliary rows    `chi0_frequency_rows`
+        W(i.nu)      whole on its owner alone      `_dyson_owned`
+        Wt(i.tau)    this rank's auxiliary rows    `screened_interaction_rows`
+        Sigma_pp     whole on every rank           `self_energy_diagonal_rows`
+
+    Two sums are reduced and re-associate over the ranks: proj(tau) over the
+    grid-row tiles and the self-energy's branch sums over its block pairs.
+    Every other step is an output partition: chi0's rows the serial update of
+    their proj rows, each W the serial inversion of its chi0, Wt's rows one
+    call shape at every rank count, each root the serial solve of its Sigma.
+    """
+    _t = _time.time()
+    chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=mu, comm=comm,
+                               tile_memory_gb=tile_gb)
+    if timings is not None:
+        timings['t_chi0'] = _time.time() - _t
+        timings['nranks'] = comm.Get_size()
+
+    _t = _time.time()
+    W_minus_I, w_static = _dyson_owned(
+        chi0, grid.nfreq - 1 if want_static else None, transform)
+    del chi0
+    if want_static:
+        if extras is not None:
+            extras['w_static'] = w_static
+            extras['w_static_ntau'] = ntau
+        freq_points = freq_points[:-1]
+    rW, _ = self_energy_fit_ranges(eps, nocc, mu=mu)
+    Ctw, _ = minimax_transform_weights(COSINE_WT, tau_points, freq_points,
+                                       *rW, warn=False)
+    Wt = screened_interaction_rows(W_minus_I, Ctw, D.shape[1], comm)
+    if timings is not None:
+        timings['dyson_frequencies'] = len(W_minus_I)
+    del W_minus_I
+    reaction_field = None
+    if transform is not None:
+        reaction_field = separable_quasiparticle_shift(X_mo, D, w_static,
+                                                       transform, nocc)
+        D = D @ transform
+    if timings is not None:
+        timings['t_dyson'] = _time.time() - _t
+
+    _t = _time.time()
+    if isinstance(X_ao, SlicedFactors):
+        X_ao = X_ao.gather('X_ao')
+    elif X_ao is None:
+        X_ao = _ao_collocation(X_mo, mf)
+    pairs = SigmaPairs(X_ao, D, mf.mo_coeff, eps, nocc,
+                       np.atleast_1d(p_state), mu, block_memory_gb=tile_gb,
+                       coords=coords, screen_r_cut=screen_r_cut)
+    del X_ao
+    sigma = self_energy_diagonal_rows(pairs, Wt, eps, nocc, tau_points,
+                                      pade_freq, mu=mu)
+    del pairs, Wt
+    if timings is not None:
+        timings['t_sigma'] = _time.time() - _t
+
+    return _finish_qp(sigma[0] if np.ndim(p_state) == 0 else sigma,
+                      eps if eps_anchor is None else eps_anchor,
+                      nocc, p_state, mu, pade_freq, mf, mol,
+                      solver_mode, dm_correction, greedy, timings, sigma_x,
+                      reaction_field=reaction_field, comm=comm,
+                      sigma_x_matrix=sigma_x_matrix)
+
+
 def _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points, freq_points,
                        pade_freq, mu, p_state, Wt_tau=None, tau_indices=None,
                        reduce_over=None, X_ao=None, coords=None,
-                       screen_r_cut=None):
+                       screen_r_cut=None, block_memory_gb=ISDF_TILE_GB):
     """Sigma_c(i.omega) built in the AO basis, projected onto the p_state diagonal.
 
     X_ao may be `SlicedFactors`: the sweep reads it whole, so it is gathered
@@ -438,7 +549,8 @@ def _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points, freq_points,
     sigma_ao = self_energy_matrix_imaginary_time(
         X_ao, D, W_omega, mf.mo_coeff, eps, nocc,
         tau_points, freq_points, pade_freq, mu=mu, Wt_tau=Wt_tau,
-        tau_indices=tau_indices, coords=coords, screen_r_cut=screen_r_cut)
+        tau_indices=tau_indices, coords=coords, screen_r_cut=screen_r_cut,
+        block_memory_gb=block_memory_gb)
     if reduce_over is not None:
         reduce_sum(sigma_ao, reduce_over)
     sigma = sigma_ao_to_mo_diagonal(sigma_ao, mf.mo_coeff,
@@ -557,7 +669,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                                freq_block=None, scratch_dir=None,
                                tau_target=DEFAULT_TAU_TARGET, extras=None,
                                screen_r_cut=None, sigma_x='mf',
-                               eps_anchor=None, sigma_x_matrix=None):
+                               eps_anchor=None, sigma_x_matrix=None,
+                               tile_gb=ISDF_TILE_GB):
     """GW@RPA quasiparticle energy by the space-time route; restricted, DF only.
 
     Same quantity as `calc_qp_energy(selfenergy='GW', polarizability='RPA')`.
@@ -579,18 +692,25 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                  bitwise those of the replicated factors.
     freq_block:  build W blockwise in frequency, so chi0 is never formed.
     scratch_dir: additionally cache the tau projection on disk.
-    distribute:  split the tau sums over MPI ranks and all-reduce; exact, no
-                 halo. The Dyson inversions split over the FREQUENCIES, a
-                 contiguous block per rank, and the inverted rows are
-                 all-gathered verbatim -- nfreq x naux^2 moved once, no sum
-                 re-associated, so W(i.omega) is the same bits on every rank
-                 and those of the replicated inversion. The quasiparticle
-                 window's per-state Pade and Newton split over the STATES
-                 (`_finish_qp`), which needs no reduction at all and is
-                 bitwise. With freq_block or scratch_dir the partition moves
-                 inside each frequency block and Wt is held rows-per-rank
-                 (`_qp_blocked`), so the low-memory path divides its sweep and
-                 its memory; every rank there still inverts every frequency.
+    tile_gb:     the working-set budget of the chi0 sweep's grid-row tiles
+                 and of the self-energy's block pairs, GB; memory and the
+                 summation order only.
+    distribute:  over more than one rank the in-core route is split over
+                 grid rows as well as tau points (`_qp_grid_rows`): the
+                 (tau, tile) and (tau, block pair) items of both M^2 sweeps
+                 go over the ranks, so the stage divides past ntau ranks,
+                 and chi0 and Wt(tau) are held by auxiliary rows, each
+                 frequency's W whole on its owner alone, Sigma as the
+                 states' diagonal -- no whole (M, M) block, stack of
+                 (naux, naux) slices or AO self-energy on any rank. proj(tau)
+                 and the self-energy's branch sums are reduced and
+                 re-associate; every other step is an output partition. The
+                 quasiparticle window's per-state Pade and Newton split over
+                 the STATES (`_finish_qp`), which needs no reduction at all
+                 and is bitwise. With freq_block or scratch_dir the tau
+                 partition moves inside each frequency block and Wt is held
+                 rows-per-rank (`_qp_blocked`); that path still splits tau
+                 points alone and every rank there inverts every frequency.
                  None (the default) distributes over `comm`, or over
                  `current_comm()` when no comm is given, and runs serially
                  without either; True with neither probes MPI's world; False
@@ -708,7 +828,6 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
 
     grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
                                            freq_points, freq_weights)
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
 
     _, rS = self_energy_fit_ranges(eps, nocc, mu=mu)
     tau_points = 0.5 * minimax_time_grid(ntau, *rS)[0]
@@ -720,26 +839,31 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                         ntau, (mpi_comm, rank, nranks), freq_block,
                         scratch_dir, solver_mode, dm_correction, greedy,
                         timings, X_ao, coords, screen_r_cut, sigma_x,
-                        eps_anchor, transform, sigma_x_matrix),
+                        eps_anchor, transform, sigma_x_matrix, tile_gb),
             mpi_comm if nranks > 1 else None, extras)
+    if nranks > 1:
+        return _root_quasiparticles(
+            _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
+                          tau_points, freq_points, pade_freq, p_state,
+                          want_static, extras, ntau, mpi_comm, transform,
+                          solver_mode, dm_correction, greedy, timings,
+                          screen_r_cut, sigma_x, eps_anchor, sigma_x_matrix,
+                          tile_gb),
+            mpi_comm, extras)
 
     _t = _time.time()
     chi0 = chi0_imaginary_frequency(X_mo, D, eps, nocc, grid, mu=mu,
-                                    tau_indices=tau_mine)
-    if nranks > 1:
-        reduce_sum(chi0, mpi_comm)
+                                    tile_memory_gb=tile_gb)
     if timings is not None:
         timings['t_chi0'] = _time.time() - _t
         timings['nranks'] = nranks
 
     # Dyson, in place one frequency at a time: a list comprehension would hold
-    # both the list and the stacked copy on top of chi0. Each rank inverts its
-    # own contiguous block and the rows travel verbatim: no sum re-associates.
+    # both the list and the stacked copy on top of chi0.
     _t = _time.time()
-    rows = range(*contiguous_block(chi0.shape[0], rank, nranks))
+    rows = range(chi0.shape[0])
     _dyson_in_place(chi0, rows, chi0.shape[0] - 1 if want_static else None,
                     transform)
-    allgather_blocks(chi0, mpi_comm)
     W_omega = chi0
     w_static = None
     if want_static:
@@ -761,30 +885,26 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
         timings['dyson_frequencies'] = len(rows)
 
     _t = _time.time()
-    tau_mine_sig = partition(len(tau_points), rank, nranks) if nranks > 1 else None
     sigma = _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points,
-                               freq_points, pade_freq, mu, p_state,
-                               tau_indices=tau_mine_sig, X_ao=X_ao,
+                               freq_points, pade_freq, mu, p_state, X_ao=X_ao,
                                coords=coords, screen_r_cut=screen_r_cut,
-                               reduce_over=mpi_comm if nranks > 1 else None)
+                               block_memory_gb=tile_gb)
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    return _root_quasiparticles(
-        _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
-                   nocc, p_state, mu, pade_freq, mf, mol,
-                   solver_mode, dm_correction, greedy, timings, sigma_x,
-                   reaction_field=reaction_field,
-                   comm=mpi_comm if nranks > 1 else None,
-                   sigma_x_matrix=sigma_x_matrix),
-        mpi_comm if nranks > 1 else None, extras)
+    return _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
+                      nocc, p_state, mu, pade_freq, mf, mol,
+                      solver_mode, dm_correction, greedy, timings, sigma_x,
+                      reaction_field=reaction_field,
+                      sigma_x_matrix=sigma_x_matrix)
 
 
 def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                 pade_freq, p_state, want_static, extras, ntau, mpi,
                 freq_block, scratch_dir, solver_mode, dm_correction, greedy,
                 timings, X_ao, coords, screen_r_cut, sigma_x='mf',
-                eps_anchor=None, transform=None, sigma_x_matrix=None):
+                eps_anchor=None, transform=None, sigma_x_matrix=None,
+                tile_gb=ISDF_TILE_GB):
     """Low-memory branch: chi0 is never formed.
 
     Frequencies are built, inverted and folded into Wt(i.tau) a block at a time,
@@ -828,7 +948,7 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
         scratch_dir=scratch_dir, wt_scratch=wt_path,
         static_index=static_idx, static_out=static_out, transform=transform,
         tau_indices=tau_mine, tau_out_indices=tau_mine_out,
-        comm=mpi_comm if nranks > 1 else None)
+        comm=mpi_comm if nranks > 1 else None, tile_memory_gb=tile_gb)
     if want_static:
         static_out['w_static_ntau'] = ntau
     if timings is not None:
@@ -848,7 +968,8 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                                Wt_tau=Wt_tau, tau_indices=tau_mine_out,
                                reduce_over=mpi_comm if nranks > 1 else None,
                                X_ao=X_ao, coords=coords,
-                               screen_r_cut=screen_r_cut)
+                               screen_r_cut=screen_r_cut,
+                               block_memory_gb=tile_gb)
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 

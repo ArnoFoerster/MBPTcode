@@ -14,6 +14,12 @@ Gated here, on water/cc-pVDZ BSE@HF at 2, 3 and 8 simulated ranks:
     lockstep volume, all of it proven equal by the checked locksteps' digests
     and none of it broadcast. Against the SERIAL roots they sit within
     ROOT_TOL, not on them: the row split re-associates the sums it reduces;
+  * within what the Davidson resolves of the one-rank roots
+    (`roots_resolution`, 1.1e-11 of |roots| here; measured 1.0e-13, 9.1e-14
+    and 8.2e-14 at 2, 3 and 8 ranks) after the one-rank iteration, trial
+    vector for trial vector; and the grid reduce-scatter
+    (`reduce_scatter_rows`) handing every rank the rows one off its block
+    breaks the action so far that the Davidson refuses the solve;
   * a trial vector perturbed by one ulp on the last rank changes nothing
     anywhere, bitwise, and `lockstep_stats` under `audit=True` counts exactly
     that one repair on exactly that rank -- the block action handed the
@@ -55,6 +61,7 @@ from src.SingleReference.LinearResponse.davidson import (
     _lanczos_lowest, isdf_bse_factors, isdf_block_action, lowest_amb_eigenvalue,
     solve_bse_df, solve_bse_isdf, static_screening_matrix)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.test_distributed_fit_mpi import relative, roots_resolution
 
 SIZES = [2, 3, 8]
 NROOTS = 5
@@ -161,6 +168,35 @@ def test_every_rank_returns_rank_zeros_solve(serial, ranks, size):
             assert info['stats'][key] == info0['stats'][key], key
         for key in ('davidson_lockstep_mb', 'davidson_lockstep_skipped_mb'):
             assert info['timings'][key] == info0['timings'][key], key
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_the_roots_are_one_ranks_to_the_davidsons_resolution(water, serial,
+                                                             ranks, size):
+    """The re-associated grid reduce-scatter and output reduction leave the
+    roots within what the Davidson resolves of the one-rank solve, after the
+    one-rank iteration."""
+    om_s, _, _, info_s = serial
+    om0, _, _, info0 = ranks[size][0]
+    bar = roots_resolution(info_s['eps'], water['nocc'], om_s)
+    assert relative(om0, om_s) <= bar
+    for key in ('davidson_vind_calls', 'davidson_block_actions'):
+        assert info0['stats'][key] == info_s['stats'][key], key
+    assert (info0['timings']['davidson_vectors_applied']
+            == info_s['timings']['davidson_vectors_applied'])
+
+
+def test_a_wrong_row_block_breaks_the_solve(water, monkeypatch):
+    """Every rank handed the grid reduction's rows one off its block: the
+    action is no longer the symmetric Casida one and the Davidson refuses."""
+    real = davidson.reduce_scatter_rows
+
+    def one_row_off(a, comm, out=None):
+        return real(np.roll(a, 1, axis=0), comm, out=out)
+
+    monkeypatch.setattr(davidson, 'reduce_scatter_rows', one_row_off)
+    with pytest.raises(RuntimeError, match='Davidson failed'):
+        run_simulated(lambda comm: solve(water, comm, probe=False), 3)
 
 
 @pytest.mark.parametrize('size', SIZES)
