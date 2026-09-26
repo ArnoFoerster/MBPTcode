@@ -87,7 +87,7 @@ def build_spinorbital_integrals_from_mf(mf):
         mo_energy = mf.mo_energy
 
     else:
-        # call-time import: optional (README, Install) and slow to load
+        # call-time import: optional (docs/installation.md) and slow to load
         try:
             from openfermion.chem.molecular_data import spinorb_from_spatial
             from openfermionpyscf._run_pyscf import compute_integrals

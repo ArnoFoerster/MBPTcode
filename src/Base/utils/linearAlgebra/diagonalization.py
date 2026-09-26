@@ -150,8 +150,8 @@ def _warn_elpa_unavailable(global_N):
         f'ELPA is unavailable (mpi4py and/or pyelpa did not import), {where}. '
         f'The N={global_N} eigensolve cleared the distribution threshold and '
         f'would otherwise have been spread over the ranks. Install pyelpa (see '
-        f'the README\'s "Distributed eigensolve"), or set MBPT_USE_ELPA=0 to '
-        f'silence this.', RuntimeWarning, stacklevel=3)
+        f'"Distributed eigensolve" in docs/parallel.md), or set '
+        f'MBPT_USE_ELPA=0 to silence this.', RuntimeWarning, stacklevel=3)
 
 
 def diagonalize_matrix(M, threshold=5000):
