@@ -65,7 +65,13 @@ class SB:
             return NotImplemented
         out = dict(self.blocks)
         for k, v in other.blocks.items():
-            out[k] = out[k] + sign * v if k in out else sign * v
+            # one pass over the block: sign * v would be a second full temporary
+            if k not in out:
+                out[k] = sign * v
+            elif sign > 0:
+                out[k] = out[k] + v
+            else:
+                out[k] = out[k] - v
         return SB(out)
 
     def __add__(self, other):
