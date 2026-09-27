@@ -116,10 +116,12 @@ Checks (path; standard):
     quasiparticle force (anchored, at least `ISDF_GRADIENT_FLOOR`)
   * the chain with a build-only factory (context: the chain converges its SCF
     through `distributed_mean_field` on the region's ranks): orbitals across
-    ranks (bitwise), mf0 against the self-converged one (reduced), its force
-    (anchored); at one rank, where that is `mf.kernel()`, ONE plain run of it
-    on the mean field the factory built, no distributed handles left on it,
-    and the chain holding that run's energy and orbitals (bitwise)
+    ranks (bitwise), mf0 against the self-converged one (reduced) and a
+    stationary point of the serial SCF to its own conv_tol_grad, its force
+    against the serial force off that same mean field (anchored); at one
+    rank, where that is `mf.kernel()`, ONE plain run of it on the mean field
+    the factory built, no distributed handles left on it, and the chain
+    holding that run's energy and orbitals (bitwise)
   * the state-pair surface on sliced factors, `RPABSESurface(sliced=True)`
     (context), both layouts handed ONE reference and ONE displaced mean
     field: its composed force, energy and root at a displaced geometry
@@ -596,6 +598,18 @@ def chain_scf_unrun(m):
     """
     out = scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri')
     out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    return out
+
+
+def serial_copy(mf, m):
+    """A plain serial mean field holding `mf`'s solution bitwise: the object
+    `chain_scf_unrun` builds, with `mf`'s orbitals, occupations, orbital
+    energies and energy, and no distributed handle of its own."""
+    out = chain_scf_unrun(m)
+    out.mo_coeff = np.array(mf.mo_coeff, copy=True)
+    out.mo_occ = np.array(mf.mo_occ, copy=True)
+    out.mo_energy = np.array(mf.mo_energy, copy=True)
+    out.e_tot, out.converged = mf.e_tot, True
     return out
 
 
@@ -1416,27 +1430,48 @@ def build_only_factory(gate, mol, mf_grad, g_ex, gate_bar):
     # above compares against.
     runs = []
     chain_unrun = ExcitedStateChain(mol, recorded(chain_scf_unrun, runs))
-    d_scf = abs(chain_unrun.mf0.e_tot - mf_grad.e_tot)
-    n_mo = gate.distinct(chain_unrun.mf0.mo_coeff)
+    mf0 = chain_unrun.mf0
+    d_scf = abs(mf0.e_tot - mf_grad.e_tot)
+    n_mo = gate.distinct(mf0.mo_coeff)
     g_unrun = chain_unrun.excitation_gradient()[0]
-    d_ex_unrun = np.abs(g_unrun - g_ex).max()
-    gate.info(f'build-only factory: dE = {d_scf:.2e} Ha, excitation_gradient '
-              f'|d| = {d_ex_unrun:.2e} Ha/Bohr')
+    # THE FORCE IS COMPARED OFF ITS OWN MEAN FIELD. Two SCF runs of the same
+    # equations, each to conv_tol_grad, land a round-off apart, and the fit
+    # adjoint amplifies that into the force: from other initial guesses the
+    # serial force on this water moves by 0.9-1.4e-8 Ha/Bohr, the size of the
+    # anchored gate, so against `g_ex`, off `mf_grad`, the gate would sample
+    # that floor rather than the chain. The reference is the serial force off
+    # mf0 itself, rank 0's on every rank as above, and the SCF is gated on
+    # its own terms: mf0 a stationary point of the serial equations to the
+    # object's conv_tol_grad. The move between the two SCF solutions' forces
+    # is reported, not gated.
+    with distributed(None):
+        plain = serial_copy(mf0, mol)
+        g_orb = float(np.linalg.norm(plain.get_grad(plain.mo_coeff,
+                                                    plain.mo_occ)))
+        g_ref = ExcitedStateChain(mol, chain_scf,
+                                  mf=plain).excitation_gradient()[0]
+    if gate.size > 1:
+        g_ref = broadcast(g_ref, gate.comm)
+    d_ex_unrun = np.abs(g_unrun - g_ref).max()
+    gate.info(f'build-only factory: dE = {d_scf:.2e} Ha, serial |g_orb| = '
+              f'{g_orb:.1e}, excitation_gradient |d| = {d_ex_unrun:.2e} '
+              f'Ha/Bohr off its own mean field, '
+              f'{np.abs(g_ref - g_ex).max():.2e} between the two SCF '
+              'solutions')
     gate.check(n_mo == 1, 'build-only factory [context] mo_coeff bitwise '
                f'identical across ranks, {gate.size} rank(s)',
                f'{n_mo} distinct of {gate.size}')
+    gate.check(g_orb < plain.conv_tol_grad,
+               'build-only factory mf0 a stationary point of the serial SCF, '
+               f'{gate.size} rank(s)',
+               f'|g_orb| = {g_orb:.1e} vs conv_tol_grad '
+               f'{plain.conv_tol_grad:.0e}')
     if gate.size > 1:
-        # The reductions re-associate the sums over the auxiliary index and
-        # over the grid points, so the SCF lands on the same fixed point to
-        # its convergence tolerance and no closer; the force it carries is then
-        # compared at the SAME anchored gate the excitation force above uses,
-        # since it is the same quantity off a mean field that moved by that
-        # much.
         gate.check(d_scf < 1e-10, 'build-only factory mf0 == the self-converged '
                    f'one, {gate.size} rank(s)', f'|dE| = {d_scf:.2e} Ha')
         gate.check(d_ex_unrun < gate_bar,
                    f'build-only factory excitation_gradient over {gate.size} '
-                   'ranks == serial',
+                   'ranks == serial off its mean field',
                    f'|d| = {d_ex_unrun:.2e} vs gate {gate_bar:.2e} Ha/Bohr')
         return
     # Without a communicator `distributed_mean_field` IS `mf.kernel()`, the
@@ -1445,9 +1480,8 @@ def build_only_factory(gate, mol, mf_grad, g_ex, gate_bar):
     # handles left behind, and the chain holding that run's bits -- not close
     # to them. The run is compared with itself, not with `mf_grad`, because
     # two SCF runs of a threaded pyscf do not repeat their bits.
-    # The FORCE is compared with the one off `mf_grad`, a SECOND SCF run, so
-    # it is gated at the anchored bar the block above measured, not bitwise.
-    mf0 = chain_unrun.mf0
+    # The FORCE is compared with the serial one off mf0, at the anchored bar
+    # the block above measured.
     run = runs[0] if len(runs) == 1 else None
     plain = (run is not None and run['mf'] is mf0 and not run['args']
              and set(run['kwargs']) <= {'dm0'}
@@ -1464,7 +1498,8 @@ def build_only_factory(gate, mol, mf_grad, g_ex, gate_bar):
                and np.array_equal(np.asarray(mf0.mo_coeff), run['mo_coeff']),
                "build-only factory orbitals are bitwise that run's")
     gate.check(d_ex_unrun < gate_bar,
-               'build-only factory excitation_gradient == serial',
+               'build-only factory excitation_gradient == serial off its '
+               'mean field',
                f'|d| = {d_ex_unrun:.2e} vs gate {gate_bar:.2e} Ha/Bohr')
 
 
