@@ -131,11 +131,10 @@ class ProjRows:
     needs a whole matrix gets one frequency or one tau point at a time: the
     rank that factorizes a frequency gathers that chi0, the rank that sweeps a
     tau point gathers that slice. The adjoints come back the same way, so
-    projbar lives in the same rows (`zeros_like`, `fold`). At the
-    chlorophyllide hexamer the whole array is 153 GB and a rank's rows 19.1 at
-    eight ranks. The grid-row split of the GW stage holds chi0(i.nu) and
-    Wt(i.tau) the same way, the first axis a frequency or a tau point
-    (`gather_slices` hands a rank any slices it names).
+    projbar lives in the same rows (`zeros_like`, `fold`). The grid-row split
+    of the GW stage holds chi0(i.nu) and Wt(i.tau) the same way, the first
+    axis a frequency or a tau point (`gather_slices` hands a rank any slices
+    it names).
 
     THE ROWS ARE THE SAME BITS AT EVERY RANK COUNT. A GEMM's rows depend on
     the call's shape (`owned_frequency_blocks`), and a rank's row block is a
@@ -701,6 +700,36 @@ def fold_frequency_rows(out, c, blk):
         out[:, i, :] += np.tensordot(c, blk[:, i, :], axes=(0, 0))
 
 
+def spin_summed(kernel, X_mos, D, spectra, noccs, *args, **kwargs):
+    """`kernel`'s chi0 -- or proj(tau) -- of an unrestricted reference,
+    chi0_alpha + chi0_beta, from the kernel's restricted form.
+
+    Every kernel here carries the closed-shell spin factor 2 of
+    `polarizability_projected_tau`, so one spin's own contribution is HALF the
+    kernel called on that spin's collocation, spectrum and occupation. Each
+    spin sits at its own mid-gap, which cancels from the pair product
+    e^{(eps_i - mu) tau} e^{-(eps_a - mu) tau} and only keeps the two factors
+    bounded. `kernel` is `chi0_imaginary_frequency`, `chi0_frequency_rows`
+    (the sum then in this rank's rows) or `polarizability_projected_sweep`;
+    args and kwargs follow its `nocc`.
+    """
+    out = None
+    for X, eps, nocc in zip(X_mos, spectra, noccs):
+        part = kernel(X, D, eps, nocc, *args,
+                      mu=0.5 * (eps[nocc - 1] + eps[nocc]), **kwargs)
+        if out is None:
+            out = part
+        else:
+            _held(out)[...] += _held(part)
+    _held(out)[...] *= 0.5
+    return out
+
+
+def _held(a):
+    """What this rank holds of `a`: a `ProjRows`' rows, an array itself."""
+    return a.rows if isinstance(a, ProjRows) else a
+
+
 def three_index_slice(X, D, p, tile_gb=ISDF_TILE_GB):
     """B_p[P, q] = sum_k D[k,P] X[k,p] X[k,q]: one bra state's pair density in
     the auxiliary basis, (naux, norb), in O(M naux norb). Tiled over grid rows
@@ -767,14 +796,14 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
     EVERY ROW IS THE SERIAL ROW, on any BLAS. A GEMM row is not a function of
     that row alone: OpenBLAS picks its tail kernel and its threading from the
     call's shape, so rows a rank transforms on their own differ from the
-    serial block's in the last bits. At 8 ranks on water/cc-pVDZ, 3 of 24
-    frequencies a rank, OpenBLAS 0.3.18 moves 30% of the contour-deformation
-    wc by 1 to 224 ulp where MKL 2021.4 moves none, and that broke the bitwise
-    quasiparticle roots over 8 ranks. So every serial block holding one of the
-    caller's frequencies is transformed with the serial call and the owned
-    rows are compacted to its front, in place; one rank is that call alone.
-    An output partition over frequencies therefore gathers to the serial
-    result bitwise, while a sum over frequencies still re-associates.
+    serial block's in the last bits: on water/cc-pVDZ at 3 of 24 frequencies a
+    rank, OpenBLAS moves 30% of the contour-deformation wc by 1 to 224 ulp
+    where MKL moves none, enough to break bitwise quasiparticle roots. So every
+    serial block holding one of the caller's frequencies is transformed with
+    the serial call and the owned rows are compacted to its front, in place;
+    one rank is that call alone. An output partition over frequencies therefore
+    gathers to the serial result bitwise, while a sum over frequencies still
+    re-associates.
 
     Each row a rank transforms and does not own costs 2 ntau naux^2 flops
     against the (2/3) naux^3 factorization it pays per frequency it owns, a
@@ -808,18 +837,25 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
         yield ks, blk
 
 
-def laplace_representation_error(grid, eps, nocc, freq):
+def laplace_representation_error(grid, eps, nocc, freq, pair_energies=None):
     """max over y = d +- freq of |y sum_k w_k e^{-y tau_k} - 1|: how well the
     grid's bare quadrature carries this real frequency, on the pair energies
     that actually occur. inf when freq reaches the gap (a real pole).
+
+    pair_energies: d itself, in place of the pairs (eps, nocc) spans -- both
+    spins of an unrestricted reference.
 
     The gate on the imaginary-time form of W at a REAL frequency, which is what
     a contour-deformation residue below the particle-hole gap asks for:
     -2d/(d^2 - w^2) = -int 2 cosh(w tau) e^{-d tau} dtau holds only where the
     grid still represents e^{-y tau} on every y = d -/+ w.
     """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    d = (np.asarray(eps)[virt][None, :] - np.asarray(eps)[occ][:, None]).ravel()
+    if pair_energies is None:
+        occ, virt = get_occ_virt_indices(eps, nocc)
+        d = (np.asarray(eps)[virt][None, :]
+             - np.asarray(eps)[occ][:, None]).ravel()
+    else:
+        d = np.asarray(pair_energies, float)
     y = np.concatenate([d - freq, d + freq])
     if y.min() <= 0.0:
         return np.inf

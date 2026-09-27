@@ -37,7 +37,7 @@ class LinearResponseSolver:
         coeff_ov: the (naux, nocc*nvirt) occupied-virtual block on its own, for
         callers that never need the full (naux, norb, norb) coeff_df -- see
         `get_df_coefficients_ov`. When given, the RPA screening uses it directly
-        and coeff_df may be left None.
+        and coeff_df may be left None. Unrestricted: the (alpha, beta) pair.
         """
         self.spin_mode = spin_mode.lower()
         self.eta = eta
@@ -60,6 +60,8 @@ class LinearResponseSolver:
             self.norb_b = len(self.eps_b)
             if self.coeff_a is not None:
                 self.naux = self.coeff_a.shape[0]
+            elif self.coeff_ov is not None:
+                self.naux = self.coeff_ov[0].shape[0]
         else:
             self.eps = eps
             self.norb = len(self.eps)

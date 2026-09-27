@@ -13,7 +13,9 @@ than re-converging it, which is what lets a caller pass a solvated reference
 straight through. A PCM at some OTHER dielectric constant is a different ground
 state, though: keeping it would put the optical response at eps on top of a
 reaction field built at the wrong constant, and nothing downstream can see that
-it happened.
+it happened. So is a PCM at the right constant on ANOTHER cavity (method,
+Lebedev order, sphere scale, radii): the optical response must sit on the
+solute boundary the ground state relaxed in.
 
 The cavity is PCM_LEBEDEV_ORDER = 11 (50 points per sphere) where pyscf's
 default is 29 (302): the re-converged water in water moved from -76.03784008
@@ -39,17 +41,25 @@ def check(ok, label, detail=''):
     return bool(ok)
 
 
-def pcm_at(mf, eps):
-    """`mf` carrying a PCM at `eps`, unconverged: the check runs before the SCF."""
+def pcm_at(mf, eps, env=None):
+    """`mf` carrying a PCM at `eps`, unconverged: the check runs before the SCF.
+
+    On `env`'s cavity when one is given -- the ground state and the optical
+    response must share one solute boundary -- else on pyscf's defaults.
+    """
     wrapped = pyscf_solvent.PCM(mf)
     wrapped.with_solvent.eps = eps
+    if env is not None:
+        wrapped.with_solvent.method = env.method
+        for name, value in env._cavity.items():
+            setattr(wrapped.with_solvent, name, value)
     return wrapped
 
 
 def test_a_pcm_at_another_constant_is_refused(mol, base_mf, water):
     """The wrong ground state must be named, not adopted."""
     try:
-        water.mean_field(mol, lambda _mol: pcm_at(base_mf, 20.0))
+        water.mean_field(mol, lambda _mol: pcm_at(base_mf, 20.0, water))
         return check(False, 'a PCM at another constant is refused')
     except ValueError as exc:
         return check('20.0' in str(exc) and '78.39' in str(exc),
@@ -59,9 +69,21 @@ def test_a_pcm_at_another_constant_is_refused(mol, base_mf, water):
 
 def test_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water):
     """One reaction field, applied once."""
-    solvated = pcm_at(base_mf, water.eps_static)
+    solvated = pcm_at(base_mf, water.eps_static, water)
     return check(water.mean_field(mol, lambda _mol: solvated) is solvated,
                  'a PCM already at eps_static is passed straight through')
+
+
+def test_a_pcm_on_another_cavity_is_refused(mol, base_mf, water):
+    """The right constant on the wrong cavity is still another ground state:
+    pyscf's default Lebedev order (29) against this environment's."""
+    try:
+        water.mean_field(mol, lambda _mol: pcm_at(base_mf, water.eps_static))
+        return check(False, 'a PCM on another cavity is refused')
+    except ValueError as exc:
+        return check('lebedev_order' in str(exc) or 'method' in str(exc),
+                     'a PCM at eps_static on another cavity is refused, and the '
+                     'setting named', str(exc)[:90] + '...')
 
 
 def test_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water):
@@ -109,5 +131,6 @@ if __name__ == '__main__':
     all_ok &= test_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water)
     all_ok &= test_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water)
     all_ok &= test_a_pcm_at_another_constant_is_refused(mol, base_mf, water)
+    all_ok &= test_a_pcm_on_another_cavity_is_refused(mol, base_mf, water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

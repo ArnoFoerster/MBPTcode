@@ -146,14 +146,43 @@ def attach_isdf_gradient(mf):
 
     Subclassing the gradient pyscf would have built keeps `as_scanner` and
     everything the geometry optimizers need, and replaces only the number.
+
+    A CONTINUUM WRAPPED AROUND IT LATER needs this called again on the wrapped
+    object. The method is bound to the mean field it was attached to, and
+    pyscf's `solvent.PCM` copies the instance dictionary, so the wrapped object
+    would inherit a gradient of the UNWRAPPED, never-converged one. A stale
+    binding found here is dropped before the new one is made, `kernel` refuses
+    one it is handed, and the force itself is `mean_field_skeleton_force`, which
+    adds the reaction field's fixed-density term that pyscf's PCM mixin would
+    otherwise have supplied.
     """
-    base_cls = mf.nuc_grad_method().__class__
+    # cycle: isdf_jk imports this module for attach_isdf_gradient
+    from src.Base.isdf_jk import mean_field_skeleton_force
+
+    for stale in ('nuc_grad_method', 'Gradients'):
+        mf.__dict__.pop(stale, None)
+    # A PCM mean field's own gradient class is pyscf's solvent MIXIN, which
+    # wraps another gradient object rather than a mean field; subclass the
+    # plain gradient of the SCF underneath, and keep the wrapped mean field as
+    # the base, whose force `mean_field_skeleton_force` completes with the
+    # reaction field.
+    plain = mf.undo_solvent() if getattr(mf, 'with_solvent', None) is not None \
+        else mf
+    for stale in ('nuc_grad_method', 'Gradients'):
+        plain.__dict__.pop(stale, None)
+    base_cls = plain.nuc_grad_method().__class__
 
     class _ISDFGradients(base_cls):
         """pyscf's gradient with the ISDF force in place of the fitted one."""
 
         def kernel(self, *args, **kwargs):
-            self.de = isdf_mean_field_gradient(self.base)
+            if getattr(self.base, 'mo_occ', None) is None:
+                raise RuntimeError(
+                    'this ISDF gradient belongs to a mean field that was never '
+                    'converged -- typically the object a continuum was wrapped '
+                    'around afterwards. Call attach_isdf_gradient on the '
+                    'wrapped mean field.')
+            self.de = mean_field_skeleton_force(self.base)
             return self.de
 
     mf.nuc_grad_method = types.MethodType(lambda m: _ISDFGradients(m), mf)

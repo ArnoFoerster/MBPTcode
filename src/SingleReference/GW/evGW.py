@@ -117,8 +117,8 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
 
     An unrestricted reference is driven channel by channel: the spectrum is
     (2, nmo), the anchor and the convergence test are per channel, DIIS runs
-    on both at once. The Casida route serves it; the imaginary-axis routes
-    refuse an unrestricted reference themselves.
+    on both at once. Every mode serves it; on the imaginary-axis modes each
+    channel's step rebuilds the one W from both spins of the iterate.
     """
     mol = mf.mol if mol is None else mol
     if mode not in MODES:

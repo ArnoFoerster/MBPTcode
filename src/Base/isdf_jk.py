@@ -3,15 +3,14 @@
 WHY THIS EXISTS
 ---------------
 pyscf's DF builds `cderi`, naux x nao(nao+1)/2, and streams it once per SCF
-iteration. For the chlorophyllide-a dimer (178 atoms) at cc-pVTZ that is
-nao = 4068, naux = 10420 -> 690 GB; and a range-separated hybrid such as
-LRC-wPBEh builds a SECOND one for the erf-attenuated operator (see
-`pyscf/df/df.py::range_coulomb`, which caches an entire parallel DF object per
-omega), so 1.38 TB of node-local scratch, read every iteration.
+iteration; a range-separated hybrid such as LRC-wPBEh builds a SECOND one for
+the erf-attenuated operator (see `pyscf/df/df.py::range_coulomb`, which caches
+an entire parallel DF object per omega), and both are read every iteration.
 
 The GW/BSE half of this pipeline already runs on the separable RI of Duchemin
-and Blase (`src/Base/separable_ri.py`), where the same system costs 1.4 GB for
-X and 3.6 GB for D. The SCF was the only consumer of the dense cderi left.
+and Blase (`src/Base/separable_ri.py`), whose factors X (M, nao) and D
+(naux, M) are far smaller. The SCF was the only consumer of the dense cderi
+left.
 
 THE SAME FACTORIZATION, CONTRACTED FOR J AND K
 ----------------------------------------------
@@ -26,9 +25,8 @@ Coulomb matrices follow by contraction, with no three-index tensor anywhere:
 
 K is the expensive one and its cost is 4 M^2 nao, or 3 with the hermitian
 shortcut -- the M^2-nao contraction appears twice, once forming the Hadamard
-argument and once contracting it back. At the dimer/cc-pVTZ, M = 43076, that is
-25.5 Tflop against DF-K's 112, and the largest object ever formed is a block of
-rows of an (M, M) matrix.
+argument and once contracting it back. The largest object ever formed is a
+block of rows of an (M, M) matrix.
 
 AND ONLY K IS USABLE, WHICH IS THE POINT OF THIS MODULE
 -------------------------------------------------------
@@ -52,12 +50,11 @@ basis, the size of the RI error it sits on top of.
 
 WHAT IS STORED
 --------------
-Z itself is (M, M): 14.9 GB at the dimer. That fits in a node, unlike 690 GB,
-so `z_mode='dense'` holds it. `z_mode='factored'` instead keeps L = V^{1/2} M,
-shape (naux, M) = 3.6 GB, and rebuilds Z's rows per block. Measured on
-benzene and naphthalene at cc-pVTZ, that is 1.6x the time for 2.4x less
-resident memory -- and the ratio moves with naux/nao, so it widens as the
-auxiliary basis does. `z_mode='auto'` picks from max_memory.
+Z itself is (M, M), far smaller than the cderi it replaces, so
+`z_mode='dense'` holds it. `z_mode='factored'` instead keeps L = V^{1/2} M,
+shape (naux, M), and rebuilds Z's rows per block: at cc-pVTZ about 1.6x the
+time for 2.4x less resident memory -- and the ratio moves with naux/nao, so it
+widens as the auxiliary basis does. `z_mode='auto'` picks from max_memory.
 
 RANGE SEPARATION
 ----------------
@@ -106,7 +103,7 @@ from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    fit_M_stable, fit_M_streaming,
                                    molecular_points_covariant,
                                    optimize_atomic_radii, resolve_isdf_grid,
-                                   shipped_radii_lookup)
+                                   shipped_radii_lookup, default_auxbasis)
 
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
 #: one factorization when the caller wants that. 148 points per atom.
@@ -162,7 +159,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
       counts alone          tabulated -> the row; not tabulated -> a warning
                             and a run-time re-optimization onto another local
                             minimum of a multi-modal surface, which is a grid
-                            no campaign scored.
+                            nothing validated.
       radii alone           the radii ARE the grid; no row is consulted.
       radii+counts          where a row exists for those counts the two must
                             agree to `ISDF_RADII_MATCH_TOL` or the call is
@@ -188,7 +185,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
         points were placed from. A nuclear derivative needs them, because a
         bare point cloud does not say which atom owns which row.
     """
-    auxbasis = auxbasis or (str(mol.basis) + '-ri')
+    auxbasis = auxbasis or default_auxbasis(mol.basis)
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     if grid_accuracy is not None:
         level_counts, n_start = resolve_isdf_grid(grid_accuracy, mol.basis,
@@ -211,9 +208,9 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
         for el in elements:
             # One table, one lookup, at the counts asked for -- the published
             # cc-pVTZ grids are rows in it at their own counts rather than a
-            # substitution for a caller who named no size. That branch made a
+            # substitution for a caller who named no size, which would make a
             # grid-convergence study at cc-pVTZ return the same number for
-            # every count, which reads as convergence.
+            # every count and read as convergence.
             try:
                 radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
                                                      counts)
@@ -221,9 +218,9 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                 warnings.warn(
                     f'ISDF grid re-optimized at run time: {no_row.args[0]} '
                     f'Re-optimizing lands on another local minimum of a '
-                    f'multi-modal surface, so this grid is not one any '
-                    f'campaign scored and is not reproducible from a clean '
-                    f'checkout.', RuntimeWarning, stacklevel=2)
+                    f'multi-modal surface, so this grid is not a validated '
+                    f'one and is not reproducible from a clean checkout.',
+                    RuntimeWarning, stacklevel=2)
                 radii[el] = optimize_atomic_radii(el, mol.basis, auxbasis,
                                                   counts=counts,
                                                   n_start=n_start)[0]
@@ -236,7 +233,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
         origins = {el: False for el in radii}
         against_table = sorted(set(elements) & set(radii)) if named_counts else []
         for el in against_table:
-            hit = shipped_radii_lookup(el, str(mol.basis), str(auxbasis), counts)
+            hit = shipped_radii_lookup(el, mol.basis, auxbasis, counts)
             if hit is None:
                 continue                 # no row at these counts: nothing to contradict
             table_radii, _, origins[el] = hit
@@ -362,8 +359,7 @@ def isdf_j(X, zrows, dms, block):
     """J for a stack of density matrices.
 
     Only the DIAGONAL of X Dm X^T is needed, so J never touches an (M, M)
-    object at all -- it is O(M nao^2) and would run happily on a laptop at the
-    dimer. The whole memory question is K's.
+    object at all -- it is O(M nao^2), and the whole memory question is K's.
     """
     nk, nao = X.shape
     nset = len(dms)
@@ -386,8 +382,7 @@ def isdf_k(X, zrows, dms, block):
 
     The Hadamard product is why K cannot be reassociated into something
     cheaper: Z's ELEMENTS are needed, not its action. What blocking buys is
-    that only `block` rows of it exist at a time -- 177 MB at the dimer with
-    block = 512, against 14.9 GB for the whole thing.
+    that only `block` rows of it exist at a time, (block, M) against (M, M).
 
     General in Dm: no hermiticity is assumed, so this is also the hermi=0 path.
     """
@@ -445,7 +440,7 @@ class ISDFJK(df.df.DF):
     Subclasses pyscf's DF purely for the plumbing `_DFHF` expects (auxbasis,
     auxmol, mol, max_memory, reset). Everything that would touch a three-index
     tensor is overridden: `build` factorizes instead, and `loop`/`_cderi` raise
-    rather than let a caller silently fall back onto the 690 GB path.
+    rather than let a caller silently fall back onto the dense cderi.
     """
 
     def __init__(self, mol, auxbasis=None, counts=None, radii=None,
@@ -453,17 +448,17 @@ class ISDFJK(df.df.DF):
                  use_symmetry=True, j_route='df-direct', check_tol=1e-3,
                  l_max_second=2, regularization=DEFAULT_REGULARIZATION,
                  block_memory_gb=4.0, progress=None, n_start=1):
-        super().__init__(mol, auxbasis=auxbasis or (str(mol.basis) + '-ri'))
+        super().__init__(mol, auxbasis=auxbasis or default_auxbasis(mol.basis))
         # Caps the working set of the fit's blocked loops. It reaches here
-        # because the fit is where the peak is: the Gram matrix is n_k^2, 14.9
-        # GB at the dimer/cc-pVTZ, and everything else in the build is small
-        # beside it. It does not change the answer, but it IS a speed knob:
-        # one aux_e2 call per block, each rebuilding a shell-pair list over
-        # nbas x auxnbas -- see `separable_ri.build_D_F` for the measurement.
+        # because the fit is where the peak is: the Gram matrix is n_k^2, and
+        # everything else in the build is small beside it. It does not change
+        # the answer, but it IS a speed knob: one aux_e2 call per block, each
+        # rebuilding a shell-pair list over nbas x auxnbas -- see
+        # `separable_ri.build_D_F`.
         self.block_memory_gb = block_memory_gb
         # None follows mol.verbose, so the knob that turns on the mean field's
-        # output turns on the factorization's too. It is minutes to hours here
-        # and was previously silent throughout.
+        # output turns on the factorization's too, which can run for minutes
+        # to hours.
         self.progress = (mol.verbose > 0) if progress is None else progress
         self.counts = counts or DEFAULT_COUNTS
         # Whether the CALLER named counts. `isdf_grid` refuses explicit radii
@@ -799,7 +794,7 @@ class ISDFJK(df.df.DF):
         raise NotImplementedError(
             'ISDFJK stores no three-index tensor -- that is the point. '
             'A caller reaching loop()/_cderi wants pyscf DF; give it a '
-            'pyscf.df.DF instead of silently materializing 690 GB.')
+            'pyscf.df.DF instead of silently materializing the tensor.')
 
     @property
     def _cderi(self):
@@ -818,14 +813,12 @@ def separable_factors_from_jk(mf):
     factorization -- `isdf_grid` and the grid block in `separable_factors` are
     the same published tables, the same `optimize_atomic_radii` fallback and the
     same covariant frames, and `metric_sqrt`'s tolerance is `separable_factors`'
-    1e-12 -- so a BSE run on top of an ISDF SCF was building it twice. At the
-    chlorophyllide dimer/cc-pVTZ the second build cost 7772 s, on top of the
-    6166 s the SCF had already spent.
+    1e-12 -- so a BSE run on top of an ISDF SCF takes the SCF's rather than
+    building it twice.
 
     Returns the same pair `separable_factors` would, in the same auxiliary
     gauge, which is the part that must not drift: pairing factors from one fit
-    with a W from another is the silent gauge error this project has paid for
-    before.
+    with a W from another is a silent gauge error.
     """
     with_df = getattr(mf, 'with_df', None)
     if not isinstance(with_df, ISDFJK):
@@ -857,7 +850,7 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
     geometry optimizer that asks the mean field for its gradient would
     otherwise walk downhill on a different surface.
     """
-    out = mf.density_fit(auxbasis=auxbasis or (str(mf.mol.basis) + '-ri'))
+    out = mf.density_fit(auxbasis=auxbasis or default_auxbasis(mf.mol.basis))
     out.with_df = ISDFJK(mf.mol, auxbasis=auxbasis, counts=counts, radii=radii,
                          z_mode=z_mode, block=block, refit_omega=refit_omega,
                          use_symmetry=use_symmetry, j_route=j_route,
@@ -970,7 +963,19 @@ def mean_field_skeleton_force(mf):
     from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 
     if isinstance(getattr(mf, 'with_df', None), ISDFJK):
-        return np.asarray(isdf_mean_field_gradient(mf))
+        force = np.asarray(isdf_mean_field_gradient(mf))
+        # The ISDF force is assembled here, not by pyscf's gradient class, so
+        # pyscf's PCM mixin never adds the reaction field's Hellmann-Feynman
+        # part: the energy-weighted density already carries V_PCM through the
+        # orbital energies, but dE_PCM/dR at fixed density does not come for
+        # free. Without it the force is off by 1.0e-2 Ha/Bohr on water/cc-pVDZ
+        # in water.
+        with_solvent = getattr(mf, 'with_solvent', None)
+        if with_solvent is not None:
+            from src.Base.pcm_derivatives import solvation_gradient
+            force = force + np.asarray(solvation_gradient(with_solvent,
+                                                          mf.make_rdm1()))
+        return force
     g0 = mf.Gradients()
     if hasattr(mf, 'xc'):
         g0.grid_response = True

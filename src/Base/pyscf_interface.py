@@ -3,8 +3,9 @@ import weakref
 
 import numpy as np
 from pyscf import gto, scf, ao2mo, lib
+from pyscf.scf import stability as scf_stability
 
-from src.Base.constants import AUX_METRIC_LINDEP
+from src.Base.constants import AUX_METRIC_LINDEP, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.environment import environment_of
 
 #: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
@@ -158,6 +159,80 @@ def get_dipole_integrals(mol, mf, representation='spatial'):
         else:
             return dip_mo
 
+def unrestricted_reference_diagnostics(mf, who):
+    """{'s2', 's2_exact', 'stable'} of an unrestricted reference, warned, cached.
+
+    A quasiparticle calculation on a UHF/UKS determinant is only as meaningful
+    as the determinant: spin contamination mixes spin states into every
+    orbital energy, and an internally unstable solution is not the ground state
+    the calculation claims to start from. Both are reported rather than
+    silently carried, and computed once per converged mean field (a
+    self-consistent GW loop calls back in every cycle). None for a restricted
+    reference.
+    """
+    if not isinstance(mf, scf.uhf.UHF):
+        return None
+    key = np.asarray(mf.mo_energy, float).tobytes()
+    cached = getattr(mf, '_reference_diagnostics', None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    s2, _ = mf.spin_square()
+    s = 0.5 * mf.mol.spin
+    exact = s * (s + 1.0)
+    _, stable = scf_stability.uhf_internal(mf, return_status=True, verbose=0)
+    out = {'s2': float(s2), 's2_exact': float(exact), 'stable': bool(stable)}
+    if s2 - exact > UHF_SPIN_CONTAMINATION_WARN:
+        warnings.warn(
+            f'{who}: the unrestricted reference is spin-contaminated, <S^2> = '
+            f'{s2:.4f} against S(S+1) = {exact:.4f}; its quasiparticle energies '
+            f'describe a mixture of spin states.', RuntimeWarning, stacklevel=3)
+    if not stable:
+        warnings.warn(
+            f'{who}: the unrestricted reference is internally UNSTABLE -- a '
+            f'lower UHF solution exists (pyscf.scf.stability.uhf_internal); '
+            f'the quasiparticle energies start from a saddle point.',
+            RuntimeWarning, stacklevel=3)
+    mf._reference_diagnostics = (key, out)
+    return out
+
+
+def spin_index(spin_channel):
+    """0 for 'alpha', 1 for 'beta': the row of an unrestricted (2, ...) array."""
+    if spin_channel not in ('alpha', 'beta'):
+        raise ValueError(f"spin_channel must be 'alpha' or 'beta', got "
+                         f"{spin_channel!r}")
+    return 0 if spin_channel == 'alpha' else 1
+
+
+def require_closed_shell_or_unrestricted(mf, who, mol=None):
+    """Refuse a reference that a restricted code path would misread.
+
+    Every restricted route splits the orbitals at `nelectron // 2`. An ROHF or
+    ROKS object is not an unrestricted one, so a UHF test lets it through, and
+    the split then counts the singly occupied orbital as virtual -- a number
+    comes back, for a different system. The same goes for fractional (smeared)
+    occupations. An unrestricted reference carries per-spin occupations and
+    passes; a restricted one must be closed shell and aufbau: the lowest
+    `nelectron // 2` orbitals doubly occupied and the rest empty.
+    """
+    if isinstance(mf, scf.uhf.UHF):
+        return
+    mol = mf.mol if mol is None else mol
+    nocc = mol.nelectron // 2
+    mo_occ = getattr(mf, 'mo_occ', None)
+    off = 0
+    if mo_occ is not None:
+        mo_occ = np.asarray(mo_occ, float)
+        expected = np.where(np.arange(mo_occ.size) < nocc, 2.0, 0.0)
+        off = int(np.count_nonzero(np.abs(mo_occ - expected) > 1e-8))
+    if mol.spin != 0 or off:
+        raise NotImplementedError(
+            f'{who} needs a closed-shell aufbau reference -- the lowest {nocc} '
+            f'orbitals doubly occupied and the rest empty -- or an unrestricted '
+            f'one; this one has spin {mol.spin} and {off} occupations off that '
+            f'pattern. Run an open shell as UHF/UKS.')
+
+
 def get_orbital_energies(mf, representation='spatial'):
     mo_energy = mf.mo_energy
     is_uhf = isinstance(mf, scf.uhf.UHF)
@@ -292,27 +367,26 @@ def _warn_df_fallback(exc):
         RuntimeWarning, stacklevel=3)
 
 
-def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200):
+def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
+                           mo_coeff=None):
     """The occupied-virtual block of B_Q,pq, and optionally whole rows B_Q,p:.
 
     `get_density_fitting_coefficients` returns the full (naux, norb, norb)
-    tensor: 140 GB at dodecacene/cc-pVTZ
-
-    The imaginary-frequency GW route never uses more than two slices of it: 
-    B[:, occ, virt] for chi0
-    B[:, p, :] for the self-energy--> 11 GB for dodecacene/cc-pVTZ
-
-    So we build only those
+    tensor, and the imaginary-frequency GW route never uses more than two
+    slices of it -- B[:, occ, virt] for chi0 and B[:, p, :] for the
+    self-energy -- so only those are built.
 
     Returns (C_ov, C_rows): C_ov is (naux, nocc*nvirt), already flattened the
     way the RPA kernel wants it and index-compatible with
     `coeff[:, occ[:, None], virt].reshape(naux, -1)`; C_rows is
     (naux, len(rows), norb), or None when rows is None.
 
-    Restricted and DF only -- without `with_df` there is no three-index object
-    to slice, and the caller should fall back to the full builder.
+    DF only -- without `with_df` there is no three-index object to slice, and
+    the caller should fall back to the full builder. `mo_coeff` names the
+    orbitals, by default the mean field's: one spin's coefficients of an
+    unrestricted reference, whose occupied and virtual indices are that spin's.
     """
-    mo = mf.mo_coeff
+    mo = mf.mo_coeff if mo_coeff is None else mo_coeff
     norb = mo.shape[1]
     mo_o = np.ascontiguousarray(mo[:, occ])
     mo_v = np.ascontiguousarray(mo[:, virt])
@@ -396,14 +470,13 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             # Fallback: decompose the AO-basis (spin-independent) ERI ONCE,
             # then transform by mo_a/mo_b separately -- mirrors the has_df
             # branch's own ao_3c-then-per-spin-transform structure exactly.
-            # Decomposing eri_aa and eri_bb independently (as an earlier
-            # version of this fallback did) gives alpha and beta unrelated
-            # auxiliary bases: the aa/bb diagonal blocks come back exact
-            # either way, but the abab cross block is then unreproducible by
-            # construction (no shared Q to contract alpha against beta) --
-            # caught by DFIntegrals.reconstruct_g's cross-check against
-            # get_antisymmetrized_spin_block_eri (~0.08 max abs error on a
-            # UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
+            # Decomposing eri_aa and eri_bb independently would give alpha
+            # and beta unrelated auxiliary bases: the aa/bb diagonal blocks
+            # come back exact either way, but the abab cross block is then
+            # unreproducible by construction (no shared Q to contract alpha
+            # against beta) -- caught by DFIntegrals.reconstruct_g's
+            # cross-check against get_antisymmetrized_spin_block_eri (~0.08 max
+            # abs error on a UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
             eri_ao = mol.intor('int2e')
             kernel = environment.kernel_ao(mol)
             if kernel is not None:
@@ -565,14 +638,12 @@ def get_antisymmetrized_spin_block_eri(mol, mf, eri_chemist=None):
 
     g_aaaa = get_antisymmetrized_integrals(phys_aa)
     # For RHF, alias g_bbbb = g_aaaa (same object) instead of building an
-    # independent, numerically identical norb^4 copy (~1.2GB at cc-pVQZ CO).
+    # independent, numerically identical norb^4 copy.
     # This makes `self.g_aaaa is self.g_bbbb` true, activating
     # MP3DensityMatrixSolverUnrestricted._is_restricted()'s symmetry-reduced
-    # fast-path in compute_t3_2/compute_t1_3/compute_gamma3_blocks; that fast
-    # path's abb-from-aab relabeling had a sign/transpose bug (fixed in
-    # density_matrix.py, see compute_t3_2's abb branch) and is now verified
-    # to reproduce the full (non-fast-path) UHF branch to ~1e-18 -- see
-    # tests/test_mp3_density_matrix.py.
+    # fast-path in compute_t3_2/compute_t1_3/compute_gamma3_blocks, which
+    # reproduces the full (non-fast-path) UHF branch to ~1e-18
+    # (tests/test_mp3_density_matrix.py).
     g_bbbb = g_aaaa if not is_uhf else get_antisymmetrized_integrals(phys_bb)
     g_abab = phys_ab
     return g_aaaa, g_bbbb, g_abab

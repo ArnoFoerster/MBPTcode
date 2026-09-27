@@ -415,11 +415,13 @@ def test_the_refusals(mf):
     umf = dft.UKS(mol)
     umf.xc = 'pbe0'
     umf.kernel()
-    try:
-        qsgw_eigenvalues(umf, max_cycle=1)
-        ok &= check(False, 'an unrestricted reference is refused')
-    except NotImplementedError as e:
-        ok &= check('restricted' in str(e), 'an unrestricted reference is refused')
+    # an unrestricted reference runs the loop per spin (one capped cycle here;
+    # its fixed point is gated in tests/test_qsgw_continuum.py)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        u_eps, u_mo, _ = qsgw_eigenvalues(umf, max_cycle=1)
+    ok &= check(u_eps.shape == (2, mol.nao) and u_mo.shape == (2, mol.nao, mol.nao),
+                'an unrestricted reference runs per spin')
     romf = dft.ROKS(mol)
     romf.xc = 'pbe0'
     romf.kernel()
@@ -440,13 +442,17 @@ def test_the_refusals(mf):
         ok &= check('AO space' in str(e) and lmf.mo_coeff.shape[1] < mf.mol.nao,
                     'a mean field with fewer MOs than AOs is refused',
                     f'{lmf.mo_coeff.shape[1]} of {mf.mol.nao} orbitals kept')
+    # an environment that screens without dressing the interaction has no
+    # Delta W for the continuum operator; a real continuum runs the loop
     solvated = mf.copy()
-    solvated.with_screening = types.SimpleNamespace(screens=True)
+    solvated.with_screening = types.SimpleNamespace(
+        screens=True, aux_kernel=lambda auxmol: None)
     for label, call, exc, text in (
             ('no density fitting', lambda: qsgw_eigenvalues(mf, df=False),
              NotImplementedError, 'DF'),
-            ('an attached environment', lambda: qsgw_eigenvalues(solvated),
-             NotImplementedError, 'gas phase'),
+            ('an environment with no dressed interaction',
+             lambda: qsgw_eigenvalues(solvated), NotImplementedError,
+             'without dressing'),
             ('a negative flow', lambda: qsgw_eigenvalues(mf, flow=-1.0, max_cycle=1),
              ValueError, 'flow')):
         try:

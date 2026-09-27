@@ -39,14 +39,11 @@ same way: one unit vector per requested root returns `nroots` roots that all
 report converged and are not the lowest ones whenever the smallest
 orbital-energy differences are degenerate. See GUESS_FACTOR.
 
-Where this reaches. At a chlorophyllide-a hexamer / cc-pVTZ -- 474 atoms,
-nao 10980, naux 28236, and M 117762 on the published grids -- the DF route
-would need a 21 TB (naux, nvirt, nvirt) array and 5.5 Pflop per trial vector,
-and its static W a 2 TB (naux, n_occ, n_vir) one. The separable route holds Zt
-at 103 GB, costs 29 Tflop per trial vector, and takes its W from imaginary time
-instead. Zt spread across ranks is the row split of `isdf_block_action`; what
-is still missing at that size is the ISDF fit's own M x M Gram inversion, which
-lives in `separable_ri.fit_M`, not here.
+Where this reaches. On a large molecule the DF route needs an
+(naux, nvirt, nvirt) array per trial vector and an (naux, n_occ, n_vir) one
+for its static W; the separable route holds the (M, M) Zt instead and takes
+its W from imaginary time. Zt spread across ranks is the row split of
+`isdf_block_action`.
 
 Over ranks the Davidson and the (A-B) probe run on every rank alike. MPI lives
 inside the block action alone: it locksteps its trial vectors at entry and
@@ -71,7 +68,8 @@ from src.Base.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
                                 DAVIDSON_SPACE_GB, HARTREE_TO_EV,
                                 ISDF_TILE_GB, KAPPA)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
+                                      get_orbital_energies,
+                                      require_closed_shell_or_unrestricted)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
                                      current_comm, grid_comm, lockstep,
@@ -80,7 +78,7 @@ from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
                                      replicate)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
 from src.SingleReference.GW.qp_energy import calc_qp_energy
@@ -93,7 +91,8 @@ from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
-from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_imaginary_frequency, spin_summed)
 
 
 #: Unit-vector guesses per requested root. One each is what a diagonal-dominant
@@ -302,7 +301,7 @@ def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
     Matrix-free -- a symmetric Lanczos on z -> (A-B)z through the same block
     action the solver uses -- so it runs at any size the action runs at. That
     makes it the instability CONTROL at production sizes, where nothing dense
-    fits (at a11/cc-pVTZ the DF vv slice alone is 91.5 GB): min eig < 0 there
+    fits: min eig < 0 there
     confirms the regime `solve_casida_davidson` refuses; and comparing the DF
     and ISDF actions' values at a size where both fit tests whether the
     factorization, not the physics, pushed a near-zero mode negative.
@@ -638,12 +637,12 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     spin: 'singlet' (kappa = 2) or 'triplet' (kappa = 0); the screened term is
     spin-independent, so both read the same W.
     probe: measure min eig(A-B) first and refuse the solve while it is
-    negative -- the instability regime, diagnosed before the node-hours are
-    spent rather than inside the eigensolver. True converges the eigenvalue;
+    negative -- the instability regime, diagnosed before the run is spent
+    rather than inside the eigensolver. True converges the eigenvalue;
     'sign' stops as soon as the sign is PROVEN by the Ritz residual bound,
-    which is all the refusal above actually reads. At the chlorophyllide
-    dimer/cc-pVDZ the converged probe was 24.3% of the whole run -- second only
-    to the solve it guards -- to establish that a number was +0.060 Ha.
+    which is all the refusal above actually reads; a converged probe can cost
+    a large share of the run, second only to the solve it guards, to establish
+    a sign.
     False skips it, which is reasonable only on a reference already probed:
     the quantity is a property of the SCF SOLUTION, not the molecule.
     gw_kwargs: forwarded to `solve_qp_diagonal_space_time` (the shared factors
@@ -689,7 +688,7 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     together, and aborts on anything the radii table has not got.
 
     progress: stamp each stage to stdout as it begins and ends, so a job that
-    is going to take node-hours says which stage it is in WHILE it is in it.
+    is going to take hours says which stage it is in WHILE it is in it.
     The returned timings only arrive if the run finishes, which is exactly the
     case that does not need them. None follows `mol.verbose`, so the one knob
     that already turns on the mean field's output turns on this too rather
@@ -708,6 +707,7 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     (`_QPStageTimings`, summed over evGW's cycles, whose count is
     `qp_cycles`).
     """
+    require_closed_shell_or_unrestricted(mf, 'solve_bse_isdf', mol=mol)
     t = {}
     stats = {}
     if W_aux is not None and (isinstance(qp, str) or screen_at == 'qp' or
@@ -842,8 +842,8 @@ def solve_bse_isdf(mf, mol, nocc, nroots=5, qp='G0W0', factors=None,
     # The GW route already inverted [1 - chi0] at every frequency it needed; if
     # it carried omega = 0 along, the static screening this kernel wants is one
     # of those slots and a second imaginary-time sweep buys nothing. The sweep
-    # is the cost -- `polarizability_projected_tau` per tau -- and it was 1320 s
-    # at the chlorophyllide dimer/cc-pVTZ for a single frequency.
+    # is the cost -- `polarizability_projected_tau` per tau -- even for a
+    # single frequency.
     w_shared = gw_extras.get('w_static')
     if W_aux is not None:
         naux = (factors.naux if isinstance(factors, SlicedFactors)
@@ -957,6 +957,7 @@ def solve_bse_df(mf, mol, nocc, nroots=5, qp='G0W0', probe=True, conv_tol=1e-5,
     transition_dipole and exciton_descriptors per root, per-stage timings (the
     Davidson's breakdown among them), and the evGW record.
     """
+    require_closed_shell_or_unrestricted(mf, 'solve_bse_df', mol=mol)
     t = {}
     stats = {}
     if progress is None:
@@ -1142,6 +1143,22 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
     return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
 
 
+def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,
+                                         tau_target=DEFAULT_TAU_TARGET):
+    """`static_screening_matrix` of an unrestricted reference: ONE W from
+    chi0_alpha + chi0_beta (`space_time.spin_summed`), each spin in its own
+    collocation X_mos[s] = X_ao C_s, on a grid spanning the transitions of
+    both spins and as many time points as the harder of the two needs."""
+    e_min, e_max = transition_range(spectra, noccs)
+    ntau = max(minimax_points_for_bse(e, n, tau_target=tau_target)[0]
+               for e, n in zip(spectra, noccs))
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                           with_sine=False, with_inverse=False)
+    chi0 = spin_summed(chi0_imaginary_frequency, X_mos, D, spectra, noccs,
+                       grid)[0]
+    return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
+
+
 def isdf_bse_factors(mf, mol, nocc, eps=None,
                      auxbasis=None, radii=None, counts=None, factors=None,
                      screening='imaginary-time', ntau=DEFAULT_NTAU,
@@ -1183,8 +1200,7 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
             given factors, and the reference the imaginary-time route was
             checked against -- 1e-8 relative on the W entries at ntau=18 on
             water and ethene / cc-pVDZ -- but it forms B and then a
-            (naux, n_occ, n_vir) array, which at a chlorophyllide-a hexamer /
-            cc-pVTZ are 25 TB and 2 TB. Small systems only.
+            (naux, n_occ, n_vir) array. Small systems only.
 
     ntau: imaginary-time points; 'auto' (the default) sizes the grid from the
     Kaltak-Klimes-Kresse test integral over the chi0 transition range at
@@ -1200,9 +1216,8 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
     replicate the mean field, the factors and `eps` from rank 0 before the
     grid is sized from them, and all-reduce ONE (naux, naux) matrix. This is
     the best compute-per-byte sweep in the code: every tau point is an M^2
-    sweep and the whole result is a single naux^2 block, 0.19 GB at
-    dodecacene/cc-pVTZ, against 1320 s of serial sweep at the chlorophyllide
-    dimer. Exact up to summation order.
+    sweep and the whole result is a single naux^2 block. Exact up to
+    summation order.
     """
     comm = current_comm() if comm is None else comm
     mpi_comm = grid_comm(comm)[0] if _takes_comm(distribute, comm) else None
@@ -1283,10 +1298,10 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     `isdf_block_action` or driven by an eigensolver other than Davidson's.
     The exchange contractions go through an (nvec, naux, nvirt, nvirt)-shaped
     intermediate, so they are CHUNKED over trial vectors to `tile_memory_gb`;
-    Davidson batches ~2-3x the requested roots, which at naphthalene/cc-pVTZ
-    is a 24 GB temporary unchunked -- enough to take out the process, not just
-    slow it. The naux*nvirt^2 inside one chunk is what cannot be chunked away,
-    and is what `isdf_block_action` exists to remove.
+    Davidson batches ~2-3x the requested roots, which unchunked is a temporary
+    large enough to take out the process, not just slow it. The naux*nvirt^2
+    inside one chunk is what cannot be chunked away, and is what
+    `isdf_block_action` exists to remove.
 
     comm: by default the current `distributed` region's. Nothing here is
     divided over ranks: every rank applies the whole serial action, so the
@@ -1379,12 +1394,10 @@ def _screened_rows(D_mine, D, W_aux, comm=None):
 
     UNDER A RANK COUNT THE PRODUCT IS REASSOCIATED. `D_mine (W D^T)` forms the
     (naux, M) inner product whole on every rank -- naux^2 M multiply-adds and
-    naux M doubles that no rank count divides, 9.4e13 and 26.6 GB at a
-    chlorophyllide-a hexamer / cc-pVTZ (M 117762, naux 28236), the same order as
-    the rows they are for. `(D_mine W) D^T` is the same matrix from
-    nmine naux^2 + nmine naux M multiply-adds through an (nmine, naux)
-    intermediate, both of which fall with the rank count: 7.0e13 fewer
-    multiply-adds and 20 GB less per rank at four ranks on those shapes.
+    naux M doubles that no rank count divides, the same order as the rows they
+    are for. `(D_mine W) D^T` is the same matrix from nmine naux^2 +
+    nmine naux M multiply-adds through an (nmine, naux) intermediate, both of
+    which fall with the rank count.
 
     The two associations are not bitwise equal, so the serial expression is
     left exactly as it was and the reassociation is taken only where there is a
@@ -1423,10 +1436,9 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
 
     so a row block contributes X_o[blk]^T (Zt[blk] * P[blk]) X_v and the M x M
     Hadamard product is never formed. The tiling is free -- same flop count,
-    same GEMM shapes -- and at a chlorophyllide-a hexamer / cc-pVTZ (nao 10980,
-    M 117762) it is the difference between holding 103 GB and 310 GB. Zt itself
-    is the wall past that, and the same row decomposition is what distributes
-    it across ranks.
+    same GEMM shapes -- and holds one (M, M) array where the whole product
+    would hold three. Zt itself is the wall past that, and the same row
+    decomposition is what distributes it across ranks.
 
     comm: with an MPI communicator, by default the current `distributed`
     region's, this rank builds and holds ONLY ITS
@@ -1437,15 +1449,12 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
     Both exchange terms are sums over the row index -- X_o[blk]^T (...) for A
     and, through U, for B -- so each rank produces a partial (n_occ, n_vir) per
     trial vector and ONE all-reduce of the batch, nvec x n_occ x n_vir doubles
-    per term, completes them: 1 MB per vector and term at dodecacene against
-    the M^2 n_occ flops it stands for.
+    per term, completes them, against the M^2 n_occ flops it stands for.
 
     THE HARTREE TERM RIDES THE SAME REDUCTION. Its last contraction,
-    X_o^T (u X_v), is a sum over the same grid rows, and at anthracene/cc-pVTZ
-    (M 3552, n_occ 47, n_vir 513) the whole term measures 7.7% of a serial
-    action and 19% of a four-rank one, because it was the only piece a rank
-    count did not divide. Split over the rows it costs one more (n_occ, n_vir)
-    slab in the batch and no extra collective.
+    X_o^T (u X_v), is a sum over the same grid rows; whole, it would be the
+    only piece a rank count did not divide. Split over the rows it costs one
+    more (n_occ, n_vir) slab in the batch and no extra collective.
 
     NOTHING ELSE RUNS AT FULL GRID LENGTH EITHER, which is what a rank count
     has to divide for the action to keep scaling. Three pieces read or write
@@ -1459,8 +1468,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         enters.
       p and p D are a REDUCTION -- p is a per-grid-point quantity, so a rank
         forms its own rows of it and contracts them with its own rows of D;
-        only the naux-long p D crosses, 11 kB at anthracene against the
-        M naux flops it removes.
+        only the naux-long p D crosses, against the M naux flops it removes.
       X_o^T (Zt * P) X_v is a partial over the rows in its FIRST index and
         whole in its second, and a rank contracts only its own columns of it
         with its own rows of X_v. So the (n_occ, M) partial is REDUCE-
@@ -1470,11 +1478,11 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         of the sum. The partial is accumulated straight into owner order,
         rank s's columns filling rows [s0, s1) of an (M, n_occ) buffer, so
         the GEMMs are the ones an all-reduce read and nothing is copied. The
-        partial is 1.3 MB per trial vector at anthracene against the
-        n_occ M n_vir flops it stands for.
+        partial is n_occ M doubles per trial vector against the n_occ M n_vir
+        flops it stands for.
         Contracting X_v first instead would need no reduce at all and costs
-        M n_vir per row in place of n_occ M -- ten times more here, since the
-        virtual space is the wide one.
+        M n_vir per row in place of n_occ M -- more, since the virtual space
+        is the wide one.
 
     The partials sum in rank order rather than in one GEMM, so a distributed
     run agrees with the serial one to the last bits, not in them.
@@ -1495,11 +1503,10 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
     `SlicedFactors` in `isdf_factors`: this rank's rows are all the action
     reads of X_v and D once Zt is built, so it holds only those; D is gathered
     whole once for the Zt product and dropped with it, and X_o, which
-    (Zt * P) X_o reads whole, is gathered once. At the chlorophyllide hexamer
-    over 8 ranks the Davidson then holds 8.0 GB of factor arrays per rank
-    instead of 57.6 (X_mo, X_ao and D whole plus the X_o and X_v copies), and
-    the gathered arrays are the replicated ones, so the output is bitwise the
-    replicated-factor action's.
+    (Zt * P) X_o reads whole, is gathered once. The Davidson then holds its
+    rows of the factor arrays instead of X_mo, X_ao and D whole plus the X_o
+    and X_v copies, and the gathered arrays are the replicated ones, so the
+    output is bitwise the replicated-factor action's.
 
     The returned action carries `comm_clock`, a `_CommClock` credited with the
     wall seconds of the lockstep, the gather and the reductions of every
@@ -1744,28 +1751,26 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
 
     A DAVIDSON IS A CHAIN OF DECISIONS -- how many trial vectors the next batch
     carries, which roots have converged, when the space restarts -- each read
-    off residuals in dense arithmetic, and on two nodes at
-    water/cc-pVDZ an iteration replicated over unequal action outputs fell
-    apart: the ranks called the batch reduction with buffers of different
-    sizes (MPI_ERR_TRUNCATE), or one iterated on alone. The distributed action
-    closes that at its source: it locksteps its trial vectors at entry and
-    gathers or all-reduces every term it returns (`isdf_block_action`), so
-    every rank's iteration reads the same numbers and takes the same decisions,
-    with no protocol between them. The roots, vectors, flags, cycle count and
-    pair-space record are lockstepped once at the end, so every rank returns
-    rank 0's even had its own subspace eigensolve, or the dense completion of
-    a solve whose pair space ran out, differed in a last bit; ranks whose
-    iterations had fallen apart meet that lockstep against another rank's
-    block-action lockstep and raise ValueError together instead of
-    deadlocking.
+    off residuals in dense arithmetic, and an iteration replicated over unequal
+    action outputs falls apart: the ranks call the batch reduction with buffers
+    of different sizes (MPI_ERR_TRUNCATE), or one iterates on alone. The
+    distributed action closes that at its source: it locksteps its trial
+    vectors at entry and gathers or all-reduces every term it returns
+    (`isdf_block_action`), so every rank's iteration reads the same numbers and
+    takes the same decisions, with no protocol between them. The roots,
+    vectors, flags, cycle count and pair-space record are lockstepped once at
+    the end, so every rank returns rank 0's even had its own subspace
+    eigensolve, or the dense completion of a solve whose pair space ran out,
+    differed in a last bit; ranks whose iterations had fallen apart meet that
+    lockstep against another rank's block-action lockstep and raise ValueError
+    together instead of deadlocking.
 
     stats: optional dict, filled with where the time went. The Davidson is the
-    largest stage of a production BSE (37.6% at the chlorophyllide dimer/
-    cc-pVDZ) and the total alone does not say whether that is the block action
-    doing necessary work or the solver taking too many iterations to get there.
-    Counting the action separately from everything around it distinguishes
-    "make the action faster" from "give it a better guess", which are different
-    pieces of work.
+    largest stage of a production BSE, and the total alone does not say whether
+    that is the block action doing necessary work or the solver taking too many
+    iterations to get there. Counting the action separately from everything
+    around it distinguishes "make the action faster" from "give it a better
+    guess", which are different pieces of work.
 
     timings: optional dict, filled with the same `davidson_*` keys serially and
     under a comm, so a rank count's scaling can be read term by term rather
@@ -1773,8 +1778,7 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     divides, `davidson_comm` the part of it and of the final lockstep spent in
     collectives, `davidson_lockstep_mb` what the locksteps moved and
     `davidson_lockstep_skipped_mb` what their digests proved every rank held
-    already (the trial vectors and the result are checked locksteps, 357 MB a
-    solve at pentacene/cc-pVTZ),
+    already (the trial vectors and the result are checked locksteps),
     `davidson_subspace` what every rank runs whole, and `davidson_iterations`
     with `davidson_vectors_applied` the work the guess asked for.
     `davidson_subspace_max` is the largest trial subspace in pairs,

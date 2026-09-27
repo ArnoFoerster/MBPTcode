@@ -11,17 +11,20 @@ region 1 (their Eqs. (11)-(13)):
     chi_22  = P_0,22 + P_0,22 v_22 chi_22                          (Eq. 13)
 
 chi_22 is the *reducible* (interacting) polarizability of the solvent alone.
-So the whole embedding is one substitution: build every self-energy exactly as
-in the gas phase, but with
+So the embedding is one substitution in the interaction,
 
     v  ->  v + vtilde ,     vtilde = v chi v ,
 
-the second term being the reaction potential (Eq. 15) felt inside the cavity.
-Nothing in the diagrammatics changes, which is why attaching a screening
-object to an mf covers *every* self-energy in this code at once -- both
-chokepoints that hand out two-electron integrals (dense
-get_two_electron_integrals_chemist and DF get_density_fitting_coefficients)
-consult it.
+the second term being the reaction potential (Eq. 15) felt inside the cavity,
+and attaching a screening object to an mf makes both chokepoints that hand out
+two-electron integrals (dense get_two_electron_integrals_chemist and DF
+get_density_fitting_coefficients) return the dressed interaction. How a
+method consumes it is the method's: a response kernel (RPA, BSE) screens with
+it directly; a GW self-energy is built with the BARE interaction and carries
+the continuum as Duchemin et al.'s Eq. (18) shift, since screening Sigma with
+v + vtilde as well would count the same polarization twice
+(`GW.reaction_field`); a route that never forms W (ADC) takes the static
+COHSEX operator of `cohsex_correction` instead.
 
 Optical, not static
 -------------------
@@ -58,7 +61,38 @@ pyscf itself uses,
 
 which is negative semi-definite (screening lowers the interaction) and only
 needs the one-electron grid potentials v_k, never a four-index object.
+
+Limitations
+-----------
+Stated so a number is quoted with them, not discovered later:
+
+  * One-way coupling. The continuum responds to the solute; the solute's own
+    electrons do not respond back to the INDUCED solvent density beyond linear
+    response in the dressed W. Explicit-solvent GW (Weng and Vlcek, J. Chem.
+    Phys. 155, 054104 (2021)) finds the indirect solvent-to-solute back-action
+    carries up to 68 % of the quasiparticle shift of small molecules in water;
+    a continuum reaction field has no representation of it.
+  * Post-SCF. The optical response is added after the SCF: the orbitals and
+    orbital energies are those of the ground state in PCM(eps_static) and are
+    not relaxed in the optical field.
+  * Vertical, non-equilibrium charged states by default. The slow
+    (orientational) polarization belongs to the N-electron ground state; the
+    ion's equilibrium relaxation is the opt-in `equilibrium=True`
+    (`reaction_field.equilibrium_level_shift`, on `static_partner`), a
+    classical correction after the quasiparticle equation.
+  * No solvent number density or molecular size: two solvents with the same
+    eps and cavity are one solvent here.
+  * Outlying charge. A diffuse basis or an anion puts density outside the
+    cavity, which the apparent-surface-charge model treats only approximately
+    (SS(V)PE and IEF-PCM correct for it; C-PCM does not).
+  * Unrestricted references take Eq. (18) on every GW route -- Casida,
+    imaginary frequency, space-time and its contour continuations, and qsGW
+    through its continuum operator -- one W from both spins and each spin
+    orbital's own shift. Their nuclear gradients and the BSE remain
+    restricted-only.
 """
+import warnings
+
 import numpy as np
 import scipy.linalg
 
@@ -68,11 +102,12 @@ from pyscf import solvent as pyscf_solvent
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
-from src.Base.constants import (HARTREE_TO_EV, ISDF_TILE_GB,
+from src.Base.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
                                 PCM_LEBEDEV_ORDER, SOLVENT_PLASMON_EV)
 from src.Base.environment import attach_environment, environment_of
 from src.Base.pcm_derivatives import by_atom, solver_bilinear_gradient
 from src.Base.pcm_factorization import factorize_once
+from src.Base.pyscf_interface import require_closed_shell_or_unrestricted
 from src.Base.separable_ri import auxmol_key
 from src.Base.utils.threads import blas_single_threaded
 
@@ -162,6 +197,88 @@ def solvent_plasmon_energy(solvent, rule='f_sum'):
     return value / HARTREE_TO_EV
 
 
+def normalize_cavity_atoms(cavity_atoms, unit='Angstrom'):
+    """((symbol, (3,) Bohr), ...) of the spheres a cavity adds, or None."""
+    if cavity_atoms is None:
+        return None
+    scale = 1.0 if str(unit).lower() == 'bohr' else 1.0 / BOHR_TO_ANGSTROM
+    out = tuple((str(symbol), np.asarray(xyz, float).reshape(3) * scale)
+                for symbol, xyz in cavity_atoms)
+    return out or None
+
+
+class CavitySpheres:
+    """The sphere set of a cavity: the solute's atoms, then the shell's.
+
+    What pyscf's `gen_surface` and `PCM.build` read of a molecule -- the
+    centres, the element of each for its radius, and the integral suffix --
+    and nothing else: no basis functions, no electrons.
+    """
+
+    def __init__(self, mol, cavity_atoms):
+        self._symbols = ([mol.atom_symbol(i) for i in range(mol.natm)]
+                         + [symbol for symbol, _ in cavity_atoms])
+        self._coords = np.vstack([mol.atom_coords(unit='B')]
+                                 + [np.reshape(xyz, (1, 3))
+                                    for _, xyz in cavity_atoms])
+        self.natm = len(self._symbols)
+        self.cart = mol.cart
+
+    def atom_symbol(self, ia):
+        return self._symbols[ia]
+
+    def atom_coords(self, unit='Bohr'):
+        if str(unit).upper() not in ('B', 'BOHR', 'AU'):
+            return self._coords * BOHR_TO_ANGSTROM
+        return self._coords.copy()
+
+    def atom_charges(self):
+        return np.array([gto.charge(s) for s in self._symbols], dtype=int)
+
+    def _add_suffix(self, intor):
+        return intor + ('_cart' if self.cart else '_sph')
+
+
+class EnclosingPCM(pyscf_pcm.PCM):
+    """pyscf's PCM on a cavity that encloses the solute AND a fixed explicit shell.
+
+    The surface is generated from the spheres of both (`CavitySpheres`);
+    everything the solute contributes -- its nuclear potential on the surface,
+    its electronic potential, the potential matrix -- still comes from `mol`,
+    the solute alone. The shell is cavity and nothing else: it carries no
+    nuclear charge and no basis functions here, and its own response is the
+    business of whatever polarizable sites stand at its atoms
+    (`composite_environment.ContinuumWithSites`).
+
+    The shell does not ride the solute's atoms, and pyscf's surface gradient
+    assigns every grid point to a solute atom, so a force on this cavity is not
+    built (`SolventScreening.differentiable` is False with a shell).
+    """
+
+    _keys = pyscf_pcm.PCM._keys.union({'cavity_atoms'})
+
+    def __init__(self, mol, cavity_atoms):
+        super().__init__(mol)
+        self.cavity_atoms = cavity_atoms
+
+    def build(self, ng=None):
+        solute = self.mol
+        self.mol = CavitySpheres(solute, self.cavity_atoms)
+        try:
+            super().build(ng)
+        finally:
+            self.mol = solute
+        # the nuclear potential on the surface is the solute's alone
+        grid = self.surface['grid_coords']
+        fakemol = gto.fakemol_for_charges(grid,
+                                          expnt=self.surface['charge_exp'] ** 2)
+        nuclei = gto.fakemol_for_charges(solute.atom_coords(unit='B'))
+        v_ng = gto.mole.intor_cross(solute._add_suffix('int2c2e'), nuclei,
+                                    fakemol)
+        self.v_grids_n = np.dot(solute.atom_charges(), v_ng)
+        return self
+
+
 class SolventScreening:
     """The reaction-field kernel vtilde = v chi v of a PCM continuum.
 
@@ -185,7 +302,7 @@ class SolventScreening:
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
                  lebedev_order=PCM_LEBEDEV_ORDER, vdw_scale=1.2, r_probe=0.0,
                  radii_table=None, allow_static_eps=False, eps_static=None,
-                 omega_p=None):
+                 omega_p=None, cavity_atoms=None, cavity_unit='Angstrom'):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
         pyscf's SMD table, whose refractive index sets eps = n^2), not both.
         method/lebedev_order/vdw_scale/r_probe/radii_table are handed straight
@@ -207,6 +324,14 @@ class SolventScreening:
         take one from and stays adiabatic (g == 1) unless given one. It is a
         property of the SOLVENT, so it travels with eps and eps_static rather
         than being set per calculation.
+
+        cavity_atoms: ((symbol, xyz), ...) of an explicit shell the cavity
+        encloses together with the solute, in `cavity_unit`; fixed in space,
+        so every geometry's cavity is rebuilt around the solute's atoms and
+        these. The ground state's PCM (`mean_field`) and the optical response
+        share that one cavity. The shell adds no charge -- pair it with
+        polarizable sites at its atoms (`ContinuumWithSites`) for it to
+        respond.
 
         THE STATIC ONE-BODY TERM IS NOT OPTIONAL. A continuum acts through two
         channels -- the reaction field of the transition density, which reaches
@@ -236,10 +361,15 @@ class SolventScreening:
         if omega_p is None and solvent is not None:
             omega_p = solvent_plasmon_energy(solvent)
         self.omega_p = None if omega_p is None else float(omega_p)
+        self.cavity_atoms = normalize_cavity_atoms(cavity_atoms, cavity_unit)
+        # a shell's spheres do not ride the atoms; see EnclosingPCM
+        self.differentiable = self.cavity_atoms is None
         self._cavity = dict(lebedev_order=lebedev_order, vdw_scale=vdw_scale,
-                            r_probe=r_probe, radii_table=radii_table)
+                            r_probe=r_probe, radii_table=radii_table,
+                            cavity_atoms=self.cavity_atoms,
+                            cavity_unit='Bohr')
 
-        self._pcm = pyscf_pcm.PCM(mol)
+        self._pcm = self._new_pcm(mol)
         self._pcm.eps = eps
         self._pcm.method = method
         self._pcm.lebedev_order = lebedev_order
@@ -254,6 +384,26 @@ class SolventScreening:
         self._v_ao = None
         self._aux_cache = {}
         self._transform_cache = {}
+
+    def _new_pcm(self, mol):
+        """pyscf's PCM around `mol`, enclosing the shell when there is one."""
+        if self.cavity_atoms is None:
+            return pyscf_pcm.PCM(mol)
+        return EnclosingPCM(mol, self.cavity_atoms)
+
+    def cavity_spheres(self):
+        """(centres (n, 3) Bohr, radii (n,) Bohr) of every sphere of the cavity:
+        the solute's atoms, then the shell's, on this object's radius rule."""
+        centres = [self.mol.atom_coord(i) for i in range(self.mol.natm)]
+        charges = list(self.mol.atom_charges())
+        for symbol, xyz in (self.cavity_atoms or ()):
+            centres.append(xyz)
+            charges.append(gto.charge(symbol))
+        table = self._cavity['radii_table']
+        if table is None:
+            table = (self._cavity['vdw_scale'] * pyscf_pcm.modified_Bondi
+                     + self._cavity['r_probe'] / BOHR_TO_ANGSTROM)
+        return np.array(centres), np.asarray(table, float)[charges]
 
     # ---- surface response -------------------------------------------------
 
@@ -553,22 +703,27 @@ class SolventScreening:
         as it is, so the reaction field is applied once; one at any other
         constant relaxed a DIFFERENT ground state and raises. Otherwise the mean
         field is wrapped and re-converged from its own density.
+
+        THE OPTICAL RESPONSE IS NOT ATTACHED to the returned mean field: a
+        gradient chain or surface carries this object itself. A caller handing
+        the mean field to `calc_qp_energy` attaches it
+        (`environment.attach_environment(mf, self)`); without it the
+        quasiparticles are gas-phase GW on a solvated SCF.
         """
         mf = scf_factory(mol)
         if hasattr(mf, 'with_solvent'):
-            if (self.eps_static is not None
-                    and abs(mf.with_solvent.eps - self.eps_static) > 1e-8):
-                raise ValueError(
-                    f'the factory converged its SCF inside PCM(eps = '
-                    f'{mf.with_solvent.eps}) but this environment relaxes the '
-                    f'ground state at eps_static = {self.eps_static}: those '
-                    f'are two different ground states, and keeping the '
-                    f'factory one would put the optical response at eps = '
-                    f'{self.eps} on top of the wrong reaction field.')
+            self.check_ground_state_continuum(mf.with_solvent)
             return mf
         if self.eps_static is None:
+            warnings.warn(
+                'no eps_static: the ground state is left in the gas phase and '
+                'only the optical response is modelled -- the frozen-'
+                'polarization limit, not non-equilibrium solvation. Pass '
+                'eps_static to relax the SCF in the continuum.',
+                RuntimeWarning, stacklevel=2)
             return mf
-        wrapped = pyscf_solvent.PCM(mf)
+        wrapped = (pyscf_solvent.PCM(mf) if self.cavity_atoms is None
+                   else pyscf_solvent.PCM(mf, self._new_pcm(mf.mol)))
         wrapped.with_solvent.method = self.method
         wrapped.with_solvent.eps = self.eps_static
         factorize_once(wrapped.with_solvent)
@@ -576,6 +731,10 @@ class SolventScreening:
         wrapped.with_solvent.vdw_scale = self._cavity['vdw_scale']
         wrapped.with_solvent.r_probe = self._cavity['r_probe']
         wrapped.with_solvent.radii_table = self._cavity['radii_table']
+        if 'nuc_grad_method' in mf.__dict__:
+            # an ISDF mean field's gradient is bound to the unwrapped object
+            from src.gradients.isdf_mean_field import attach_isdf_gradient
+            attach_isdf_gradient(wrapped)
         with blas_single_threaded():
             wrapped.kernel(dm0=mf.make_rdm1())
         if not wrapped.converged:
@@ -583,6 +742,77 @@ class SolventScreening:
                 f'the SCF did not re-converge inside PCM(eps = '
                 f'{self.eps_static}); no ground state follows from it')
         return wrapped
+
+    def static_partner(self):
+        """This continuum answering at eps_static: the same cavity, the slow response.
+
+        Non-equilibrium solvation has two dielectric constants on ONE solute
+        boundary. The optical response (this object) is what follows a fast
+        excitation; the static one is what the ground state relaxes in and what
+        an ion reaches once the solvent nuclei have reoriented around it. A
+        quantity that needs both -- the equilibrium correction of a charged
+        state, the outer-sphere reorganization energy -- takes the partner from
+        here so the two share every cavity setting by construction. Adiabatic
+        (no omega_p): a static response has no frequency to die off at. Built
+        once per object; `for_geometry` builds a new object, and a new partner
+        with it.
+        """
+        if self.eps_static is None:
+            raise ValueError(
+                'no eps_static on this environment, so there is no static '
+                'response to pair with the optical one; pass eps_static (a '
+                'named solvent supplies it).')
+        partner = getattr(self, '_static_partner', None)
+        if partner is None:
+            partner = SolventScreening(self.mol, eps=self.eps_static,
+                                       method=self.method,
+                                       allow_static_eps=True,
+                                       eps_static=self.eps_static,
+                                       **self._cavity)
+            self._static_partner = partner
+        return partner
+
+    def check_ground_state_continuum(self, with_solvent):
+        """Refuse a mean field whose PCM is not this environment's ground state.
+
+        The ground state relaxes at eps_static and the response is optical, but
+        both must sit on ONE cavity: a reaction field converged with another
+        method, Lebedev order, sphere scale or radius table describes a
+        different solute boundary, and the optical response would then be added
+        on top of a ground state it does not belong to. eps is compared only
+        against eps_static, and only when one is set.
+        """
+        mismatched = []
+        if (self.eps_static is not None
+                and abs(with_solvent.eps - self.eps_static) > 1e-8):
+            mismatched.append(f'eps {with_solvent.eps} vs eps_static '
+                              f'{self.eps_static}')
+        if str(with_solvent.method).upper() != str(self.method).upper():
+            mismatched.append(f'method {with_solvent.method} vs {self.method}')
+        for name in ('lebedev_order', 'vdw_scale', 'r_probe'):
+            theirs, ours = getattr(with_solvent, name, None), self._cavity[name]
+            if theirs is not None and ours is not None and \
+                    abs(float(theirs) - float(ours)) > 1e-12:
+                mismatched.append(f'{name} {theirs} vs {ours}')
+        theirs = getattr(with_solvent, 'radii_table', None)
+        ours = self._cavity['radii_table']
+        if theirs is not None and ours is not None and \
+                not np.allclose(np.asarray(theirs, float), np.asarray(ours, float)):
+            mismatched.append('radii_table differs')
+        theirs = getattr(with_solvent, 'cavity_atoms', None)
+        if (theirs is None) != (self.cavity_atoms is None) or (
+                theirs is not None and (
+                    [s for s, _ in theirs] != [s for s, _ in self.cavity_atoms]
+                    or not np.allclose([x for _, x in theirs],
+                                       [x for _, x in self.cavity_atoms]))):
+            mismatched.append('the enclosed shell differs')
+        if mismatched:
+            raise ValueError(
+                'the mean field converged its SCF inside a different continuum '
+                'than this environment describes (' + '; '.join(mismatched) +
+                '): the optical response would be added on top of a ground '
+                'state that belongs to another cavity. Build both from one '
+                'SolventScreening (its mean_field method), or match them.')
 
     def static_self_energy(self, mf, mol=None):
         """Sigma^solv of `cohsex_correction` in the MO basis of `mf`.
@@ -598,6 +828,8 @@ class SolventScreening:
             nocc_a, nocc_b = mf.nelec
             return (self.cohsex_correction(mol, mo_a, nocc_a),
                     self.cohsex_correction(mol, mo_b, nocc_b))
+        require_closed_shell_or_unrestricted(mf, 'the static solvent self-energy',
+                                             mol=mol)
         return self.cohsex_correction(mol, mo_coeff, mol.nelectron // 2)
 
     def aux_kernel_adjoint(self, auxmol, v_bar):
@@ -832,8 +1064,10 @@ class SolventScreening:
 
     def __repr__(self):
         label = f"solvent={self.solvent!r}, " if self.solvent else ""
+        shell = (f", shell={len(self.cavity_atoms)} atoms"
+                 if self.cavity_atoms is not None else "")
         return (f"SolventScreening({label}eps={self.eps:.4f} (optical), "
-                f"method={self.method!r}, ngrids={self.ngrids})")
+                f"method={self.method!r}, ngrids={self.ngrids}{shell})")
 
 
 def auxmol_of(mf, mol=None):
@@ -910,6 +1144,8 @@ def attach_solvent_screening(mf, eps=None, solvent=None, method='IEF-PCM',
     screening = SolventScreening(mol if mol is not None else mf.mol,
                                  eps=eps, solvent=solvent, method=method,
                                  **kwargs)
+    if hasattr(mf, 'with_solvent'):
+        screening.check_ground_state_continuum(mf.with_solvent)
     return attach_environment(mf, screening)
 
 

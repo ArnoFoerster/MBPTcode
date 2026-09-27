@@ -152,7 +152,7 @@ def pole_clearance(omega, poles, eps, nocc):
                  / np.min(poles))
 
 
-def compressible(omega, eps, nocc):
+def compressible(omega, eps, nocc, pair_energies=None):
     """(ok, reach) for the compression condition: is every pole the contour
     sweeps closer to omega than the particle-hole gap?
 
@@ -177,8 +177,14 @@ def compressible(omega, eps, nocc):
     and a deeper one has neither.
 
     reach: the worst swept pole in units of E_g. ok is reach < 1.
+
+    pair_energies: the screening's particle-hole energies when they are not
+    the ones (eps, nocc) spans -- both spins of an unrestricted reference,
+    whose E_g is the smaller of the two channels' while the swept poles are
+    the channel's own.
     """
-    limit = float(ov_energies(eps, nocc).min())
+    limit = float((ov_energies(eps, nocc) if pair_energies is None
+                   else np.asarray(pair_energies, float)).min())
     swept = residue_set(eps, nocc, omega)
     reach = max((abs(eps[q] - omega) for q, _ in swept), default=0.0) / limit
     return bool(reach < 1.0), float(reach)
@@ -255,13 +261,16 @@ def qp_energy_sop(p, amplitudes, poles, eps, nocc, xc_correction=0.0,
 
 
 def sop_from_wc(wc, nu_points, eps, nocc, n_poles=SOP_N_POLES, relocate=True,
-                stride=SOP_FIT_STRIDE, e_max=None):
+                stride=SOP_FIT_STRIDE, e_max=None, pair_energies=None):
     """(poles, amplitudes) for one state, from its imaginary-axis data.
 
     The one entry point a caller needs: the poles are fitted here and are then
-    the frozen object a gradient differentiates through.
+    the frozen object a gradient differentiates through. pair_energies: the
+    screening's particle-hole energies, which bound the poles, when they are
+    not the ones (eps, nocc) spans -- see `compressible`.
     """
-    d = ov_energies(eps, nocc)
+    d = (ov_energies(eps, nocc) if pair_energies is None
+         else np.asarray(pair_energies, float))
     gap, top = float(d.min()), float(e_max if e_max is not None else d.max())
     poles = initial_poles(n_poles, gap, top)
     if relocate:

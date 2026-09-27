@@ -25,7 +25,7 @@ value itself.
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.constants import HARTREE_TO_EV, QP_ORDER_SEARCH
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
 from src.Base.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
@@ -48,9 +48,8 @@ from src.gradients.targets import (add_z_contribution, rpa_partials,
                                    qp_partials_with_shift, solve_Z)
 
 #: How many virtual orbitals above the Fermi level are searched for the
-#: quasiparticle LUMO. G0W0 reorders states relative to the mean field, so the
-#: lowest attachment is not always the first virtual, but it is never far.
-ATTACHMENT_SEARCH = 4
+#: quasiparticle LUMO; see `constants.QP_ORDER_SEARCH`.
+ATTACHMENT_SEARCH = QP_ORDER_SEARCH
 
 # Paper Table I: how the four variants are named and what each one means.
 # (screening of BOTH the G0W0 step and the BSE kernel, BSE eigenproblem)

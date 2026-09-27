@@ -17,7 +17,9 @@ through `FiniteDifferenceGradient` instead of being excluded.
     conformers  the torsional minima a soft emitter has, their Boltzmann
                 populations, and a property averaged over them
     characters  the whole BSE spectrum at one geometry and its charge-transfer
-                weights, for labelling roots
+                weights, for labelling roots; the fragment character of a
+                quasiparticle orbital (Pipek-Mezey), following it across
+                geometries, and whether it is the lowest-energy process
     rates       Marcus-Levich-Jortner and Marcus golden-rule rates, with the
                 electronic coupling as an argument
     spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors -- the coupling
@@ -53,6 +55,7 @@ from src.properties.vibronic import (adiabatic_gap, align_to, energy_at,
                                      huang_rhys_from_displacement,
                                      huang_rhys_from_gradient, normal_modes,
                                      relax_state, reorganization,
+                                     reorganization_four_point,
                                      reorganization_from_huang_rhys,
                                      vibronic_analysis)
 from src.properties.conformers import (Conformer, Torsion, boltzmann_weights,
@@ -60,7 +63,10 @@ from src.properties.conformers import (Conformer, Torsion, boltzmann_weights,
                                        deduplicate, rotatable_bonds,
                                        search_conformers, torsion_starts,
                                        torsion_values)
-from src.properties.characters import ct_character, roots
+from src.properties.characters import (ct_character, orbital_fingerprint,
+                                       quasiparticle_character,
+                                       quasiparticle_order, roots,
+                                       surface_order, track_orbital)
 from src.properties.rates import marcus_levich_jortner_rate, marcus_rate
 from src.properties.spin_orbit import (chain_manifolds, isdf_manifolds,
                                        qdpt_hamiltonian, qdpt_spectrum,

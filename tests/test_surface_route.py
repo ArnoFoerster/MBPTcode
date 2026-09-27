@@ -1,7 +1,7 @@
 """The ONE entry point: every dispatch row, every refusal, and the numbers unchanged.
 
-`potential_energy_surface` exists because a surface used to be a constructor
-call with its physics implicit in it. Two relaxations of one molecule were 0.9
+`potential_energy_surface` exists because a constructor call leaves a
+surface's physics implicit in it. Two relaxations of one molecule were 0.9
 eV apart on an adiabatic energy because one E_0 was `mf.e_tot` and the other
 `mf.e_tot + (E_x^HF - E_xc) + E_c^dRPA`; two incompatible quasiparticle windows
 ran under one name; `solver` had three defaults; and an ISDF grid nobody
@@ -50,7 +50,8 @@ from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                           QuasiparticleSurface)
 from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.rpa_bse_surface import (MeanFieldQPSurface, RPABSESurface,
+                                           RPAQPSurface)
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import MeanFieldSurface
 from src.properties.surfaces import (compare_surfaces, potential_energy_surface,
@@ -111,6 +112,8 @@ ROWS = [
     ('dft/none', MeanFieldSurface, pbe0, dict(ground_state=DFT_PBE0)),
     ('dft/Excitation/space-time/isdf', ExcitedStateChain, pbe0,
      dict(ground_state=DFT_PBE0, excitation=Excitation('singlet'))),
+    ('dft/ChargedExcitation/space-time/isdf', MeanFieldQPSurface, pbe0,
+     dict(ground_state=DFT_PBE0, excitation=ChargedExcitation(4, -1))),
 ]
 
 
@@ -133,10 +136,15 @@ def test_every_dispatch_row_builds_its_class(mol, name, expected, factory, kw):
 
 
 def test_a_combination_with_no_class_lists_the_ones_that_have_one(mol):
-    """A refusal that does not say what IS available sends the caller guessing."""
+    """A refusal that does not say what IS available sends the caller guessing.
+
+    A charged state on the mean field's own energy is realized on the cubic
+    route only (`MeanFieldQPSurface`); the dense quasi-boson route has none.
+    """
     with pytest.raises(ValueError) as exc:
         potential_energy_surface(mol, rhf, ground_state=DFT_HF,
-                                 excitation=ChargedExcitation(4, -1))
+                                 excitation=ChargedExcitation(4, -1),
+                                 chi0='dense-qb', factorization='four-index')
     assert 'RPAQPSurface' in str(exc.value)
     assert 'MeanFieldSurface' in str(exc.value)
 

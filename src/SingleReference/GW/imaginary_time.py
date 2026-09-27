@@ -26,7 +26,7 @@ from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
                                           minimax_points_for_accuracy,
                                           COSINE_TW, COSINE_WT, SINE_TW,
                                           SELF_ENERGY_PAD)
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.LinearResponse.space_time import (
     FrequencyBlock, ProjRows, owned_frequency_blocks,
     polarizability_projected_sweep, polarizability_projected_tau,
@@ -189,7 +189,39 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
               / (eps[virt].min() - eps[occ].max()),
               rW[1] / rW[0],
               rS[1] / rS[0])
+    return _points_for_ratios(ratios, target, npoints_max)
 
+
+def unrestricted_fit_ranges(spectra, noccs):
+    """`self_energy_fit_ranges` of an unrestricted reference: the same rule on
+    the union of both spin channels, each at its own mid-gap.
+
+    W is built from both spins' transitions, so its range is theirs together;
+    Sigma_s = -G_s W decays at |eps_m,s - mu_s| + Omega_S, and ONE pair of
+    ranges covering both channels lets either channel's sweep read the same
+    transforms. A closed shell run unrestricted gets the restricted ranges.
+    """
+    w_lo, w_hi = transition_range(spectra, noccs)
+    dG = np.concatenate([np.abs(e - 0.5 * (e[n - 1] + e[n]))
+                         for e, n in zip(spectra, noccs)])
+    lo, hi = SELF_ENERGY_PAD
+    return ((lo * w_lo, hi * w_hi),
+            (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
+
+
+def minimax_points_for_gw_unrestricted(spectra, noccs,
+                                       target=DEFAULT_TAU_TARGET,
+                                       npoints_max=34):
+    """`minimax_points_for_gw` over both spin channels' ranges together."""
+    w_lo, w_hi = transition_range(spectra, noccs)
+    rW, rS = unrestricted_fit_ranges(spectra, noccs)
+    return _points_for_ratios((w_hi / w_lo, rW[1] / rW[0], rS[1] / rS[0]),
+                              target, npoints_max)
+
+
+def _points_for_ratios(ratios, target, npoints_max):
+    """(npoints, worst error): the smallest tabulated grid that fits every
+    range ratio in `ratios` to `target`, or the largest and inf if none does."""
     npoints, worst = 0, 0.0
     for R in ratios:
         n, err = minimax_points_for_accuracy(1.0, R, target=target,
@@ -285,18 +317,17 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     reduces, no more), every rank inverts the block, and this rank folds it
     into ONLY ITS OWN output rows `tau_out_indices`. So the M^2 sweep is
     divided, Wt is held rows-per-rank -- ntau/nranks x naux^2 instead of
-    ntau x naux^2, which is what makes 55 GB at the 476-atom hexamer/cc-pVDZ
-    fit beside anything -- and the proj(tau) cache holds this rank's points
-    alone. The self-energy sweep downstream reads Wt[k] only for the tau
-    points it owns, so the two partitions must coincide: hand it the same
+    ntau x naux^2 -- and the proj(tau) cache holds this rank's points alone.
+    The self-energy sweep downstream reads Wt[k] only for the tau points it
+    owns, so the two partitions must coincide: hand it the same
     `tau_out_indices`. Serial (all None) is bitwise unchanged. With all three
     None the comm is `current_comm()`, and a context of several ranks splits
     the INPUT points here (`partition`) while every rank folds every output
     row, so the return is the whole Wt, identical on every rank; a partition
     handed in without a comm stays the caller's own partial, never reduced
-    here. An audited run compares the inputs' digests, and on the way out
-    those of W(omega = 0) and of a whole Wt -- rows held per rank differ by
-    design and are not compared.
+    here. An audited run compares the inputs' digests, and on the way out those
+    of W(omega = 0) and of a whole Wt -- rows held per rank differ by design
+    and are not compared.
 
     X is the MO collocation, or `SlicedFactors` over `comm`, whose occupied
     and virtual columns `split_branches` gathers whole once for the sweep.
@@ -338,7 +369,7 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     cache, path = None, None
     if scratch_dir is not None:
         os.makedirs(scratch_dir, exist_ok=True)
-        # per rank: two ranks on one node must not share a cache file
+        # per rank: two ranks on one machine must not share a cache file
         path = os.path.join(scratch_dir, f'proj_{ntau}_{naux}_r{rank}.npy')
         cache = np.lib.format.open_memmap(path, mode='w+', dtype=np.float64,
                                           shape=(ntau, naux, naux))
@@ -519,9 +550,8 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     # and the rest must add nothing, since the caller reduces over subsets.
     out = np.zeros((len(omega_out), nao, nao), dtype=complex)
     # BLOCKED OVER THE INTERPOLATION INDEX. Zt, G_l and G_g are each (M, M),
-    # and the unblocked form holds three of them plus the Hadamard temporary --
-    # 159 GB at M = 70448 (the 476-atom hexamer/cc-pVDZ), which the OOM killer
-    # ended. Every term is a sum over P, so cutting that index costs nothing:
+    # and the unblocked form holds three of them plus the Hadamard temporary.
+    # Every term is a sum over P, so cutting that index costs nothing:
     # the three GEMMs become (b, M) row slabs, the outer contraction
     # accumulates into a (nao, M) buffer and multiplies by X_ao once at the end.
     # Flop counts are identical term by term; only the working set changes.

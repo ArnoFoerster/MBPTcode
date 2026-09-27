@@ -105,7 +105,7 @@ from src.gradients.factor_chain import check_scf_quality  # noqa: F401
 from src.gradients.reaction_field_adjoint import (reaction_field_backward,
                                                    reaction_field_shift,
                                                    static_screening)
-from src.gradients.isdf_derivatives import (qp_xc_correction,
+from src.gradients.isdf_derivatives import (GaugeAdjoint, qp_xc_correction,
                                             qp_xc_correction_Y,
                                             qp_xc_correction_skeleton,
                                             xc_hybrid_coeff)
@@ -1100,6 +1100,75 @@ class ExcitedStateChain(FactorChain):
         # Z in the record nothing says so.
         return grad, dict(diags, qp_energy=float(w_star), qp_z=float(z_fac),
                           qp_route=qp_out.get('residue_route'))
+
+    def _equilibrium_pieces(self, mol, mf):
+        """The factors and the three static screenings Delta eps^eq reads.
+
+        The optical (dressed) and the static partner's gauge each screen the
+        one chi0 in their own metric; the bare screening is shared by both
+        Eq. (18) terms, so three chi0(0) sweeps serve the difference.
+        """
+        x_mo, d, eps, _, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
+        if d_bare is None:
+            raise ValueError(
+                'equilibrium solvation needs a continuum that dresses the '
+                'interaction; this chain screens in the gas phase')
+        partner, d_static = self.static_factor(mol, auxmol, crd)
+        with self.phase('t_screening'):
+            bare = static_screening(x_mo, d_bare, eps, self.nocc, self.w_grid)
+            optical = (static_screening(x_mo, d, eps, self.nocc, self.w_grid),
+                       bare)
+            relaxed = (static_screening(x_mo, d_static, eps, self.nocc,
+                                        self.w_grid), bare)
+        return (x_mo, d, d_static, d_bare, eps, auxmol, crd, partner, optical,
+                relaxed)
+
+    def equilibrium_shift(self, offset=0, mol=None, mf=None):
+        """Delta eps^eq = Eq18_p(eps_s) - Eq18_p(eps_inf) on this chain's factors.
+
+        The orbital `offset` from the HOMO, in Hartree: how much further the
+        level moves once the solvent has relaxed around the charged state.
+        The ion's energy E_0 -/+ eps^QP moves by -/+ this, <= 0. On the SAME
+        factors and grid as the chain's own Eq. (18), so its gradient
+        (`equilibrium_shift_gradient`) is of this number and not of the
+        density-fitted one `calc_qp_energy(equilibrium=True)` adds.
+        """
+        mol, mf = self.mean_field(mol, mf)
+        (x_mo, d, d_static, d_bare, eps, _, _, _, optical,
+         relaxed) = self._equilibrium_pieces(mol, mf)
+        orb = self.nocc - 1 + offset
+        return float(
+            reaction_field_shift(x_mo, d_static, d_bare, eps, self.nocc,
+                                 grid=self.w_grid, screening=relaxed)[orb]
+            - reaction_field_shift(x_mo, d, d_bare, eps, self.nocc,
+                                   grid=self.w_grid, screening=optical)[orb])
+
+    def equilibrium_shift_gradient(self, offset=0, mol=None, mf=None):
+        """(d Delta eps^eq / dR, diagnostics) for the orbital `offset`.
+
+        Two passes of the Eq. (18) adjoint, at the static partner and at the
+        optical response, and their difference: the static one lands its D
+        adjoint on the partner's metric, which carries the cavity's motion in
+        the static response, the optical one on the chain's own dressed
+        gauge, and both on the one bare factor they share.
+        """
+        self.require_differentiable_environment()
+        mol, mf = self.mean_field(mol, mf)
+        (x_mo, d, d_static, d_bare, eps, auxmol, crd, partner, optical,
+         relaxed) = self._equilibrium_pieces(mol, mf)
+        weights = np.zeros(len(eps))
+        weights[self.nocc - 1 + offset] = 1.0
+        with self.phase('t_reaction_field_backward'):
+            e_s, x_s, d_s, b_s = reaction_field_backward(
+                weights, x_mo, d_static, d_bare, eps, self.nocc,
+                grid=self.w_grid, screening=relaxed)
+            e_o, x_o, d_o, b_o = reaction_field_backward(
+                weights, x_mo, d, d_bare, eps, self.nocc, grid=self.w_grid,
+                screening=optical)
+        return self.nuclear_gradient(
+            mol, mf, auxmol, crd, x_mo, e_s - e_o, x_s - x_o, -d_o,
+            d_bar_bare=b_s - b_o,
+            extra_gauges=[GaugeAdjoint(d_s, partner)])
 
     def total_gradient(self, mol=None, mf=None):
         """(dE_ex/dR, E_ex, diagnostics) -- the quantity an optimizer steps on.

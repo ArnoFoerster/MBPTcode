@@ -11,9 +11,11 @@ from src.Base.utils.matsubara import (beta_from_mf, ir_continuation_order,
                                       self_energy_range, thermal_e_min)
 from src.Base.pyscf_interface import (get_orbital_energies,
                                      get_density_fitting_coefficients,
-                                     get_df_coefficients_ov)
+                                     get_df_coefficients_ov,
+                                     require_closed_shell_or_unrestricted,
+                                     spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.Solvers.qp_equation import solve_qp_equation
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift)
@@ -62,10 +64,41 @@ def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_w
     return sigma
 
 
+def _unrestricted_screening(mol, mf, nocc, states, spin):
+    """(alpha and beta spectra, the solver of the spin-summed W, the rows
+    B[:, states, :] of channel `spin`).
+
+    chi0 = chi0_alpha + chi0_beta, each spin's particle-hole block in its own
+    orbitals, and no spin factor: that is `LinearResponseSolver`'s unrestricted
+    screening, handed the two occupied-virtual blocks alone.
+    """
+    spectra = tuple(np.asarray(e, float)
+                    for e in get_orbital_energies(mf, representation='spatial'))
+    if getattr(mf, 'with_df', None) is None:
+        coeff = get_density_fitting_coefficients(mol, mf,
+                                                 representation='spatial')[:2]
+        lr = LinearResponseSolver(spectra, coeff_df=coeff,
+                                  spin_mode='unrestricted',
+                                  eta=DEFAULT_BROADENING_ETA)
+        return spectra, lr, coeff[spin][:, states, :]
+    blocks, rows = [], None
+    for s, (e, c) in enumerate(zip(spectra, mf.mo_coeff)):
+        occ, virt = get_occ_virt_indices(e, nocc[s])
+        C_ov, C_row = get_df_coefficients_ov(
+            mol, mf, occ, virt, rows=list(states) if s == spin else None,
+            mo_coeff=c)
+        blocks.append(C_ov)
+        rows = C_row if s == spin else rows
+    lr = LinearResponseSolver(spectra, coeff_ov=tuple(blocks),
+                              spin_mode='unrestricted',
+                              eta=DEFAULT_BROADENING_ETA)
+    return spectra, lr, rows
+
+
 def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
                                     solver_mode='pole_strength', greedy=True,
                                     dm_correction=None, timings=None, beta=None,
-                                    eps_anchor=None):
+                                    eps_anchor=None, spin_channel='alpha'):
     """
     GW@RPA quasiparticle energy via the imaginary-frequency-axis route:
     RPA W(i*omega) -> convolution -> Pade continuation.
@@ -87,10 +120,22 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         many sample points happen to exist.
     `beta=None` reads it off the mean field when that carries Fermi-Dirac
     smearing (`beta_from_mf`), and otherwise leaves everything at T = 0.
+
+    UNRESTRICTED (nocc = (nalpha, nbeta)): ONE W from chi0_alpha + chi0_beta,
+    and the self-energy, the static exchange and the Eq. (18) shift of the
+    channel `spin_channel`, Sigma_s = -G_s W, sampled on the line through that
+    channel's own mid-gap. The frequency grid spans the transitions of both
+    spins, since both build the W it integrates. An `eps_anchor` of shape
+    (2, nmo) is read at the channel's row.
     """
 
+    require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_imaginary_axis',
+                                         mol=mol)
+    unrestricted = isinstance(mf, scf.uhf.UHF)
+    spin = spin_index(spin_channel) if unrestricted else None
     eps = get_orbital_energies(mf, representation='spatial')
-    occ_idx, virt_idx = get_occ_virt_indices(eps, nocc)
+    if not unrestricted:
+        occ_idx, virt_idx = get_occ_virt_indices(eps, nocc)
 
     # A WINDOW SHARES ONE SCREENING BUILD: the rows of the three-index object
     # are sliced for every requested state at once, and W below is built once.
@@ -103,7 +148,10 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
 
     # Use B only as B[:, occ, virt] (for chi0) and B[:, states, :] (for Sigma)
     with bare_self_energy(mf, reaction_field):
-        if hasattr(mf, 'with_df') and mf.with_df is not None:
+        if unrestricted:
+            spectra, lr, C_row = _unrestricted_screening(mol, mf, nocc, states,
+                                                         spin)
+        elif hasattr(mf, 'with_df') and mf.with_df is not None:
             C_ov, C_row = get_df_coefficients_ov(mol, mf, occ_idx, virt_idx,
                                                  rows=list(states))
             lr = LinearResponseSolver(eps, coeff_ov=C_ov,
@@ -124,9 +172,14 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         beta = beta_from_mf(mf)
 
     # occ-virt ranges
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    e_min = eps[virt].min() - eps[occ].max()
-    e_max = eps[virt].max() - eps[occ].min()
+    screening_nocc = nocc
+    if unrestricted:
+        e_min, e_max = transition_range(spectra, nocc)
+        eps, nocc = spectra[spin], nocc[spin]
+    else:
+        occ, virt = get_occ_virt_indices(eps, nocc)
+        e_min = eps[virt].min() - eps[occ].max()
+        e_max = eps[virt].max() - eps[occ].min()
     if beta is not None:
         e_min = thermal_e_min(beta, e_min)
 
@@ -135,14 +188,15 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
     elif grid == 'gauss_legendre':
         if w0 is None:
-            w0 = 0.5 * e_min if beta is not None else gap_scaled_w0(eps, nocc)
+            w0 = (0.5 * e_min if beta is not None or unrestricted
+                  else gap_scaled_w0(eps, nocc))
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     else:
         raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
 
     # calculate W on imaginary axis - This is the integration gird  
     _t = _time.time()
-    W_grid = solve_screening_imaginary_axis(lr, nocc, freq_points)
+    W_grid = solve_screening_imaginary_axis(lr, screening_nocc, freq_points)
     if timings is not None:
         timings['t_W'] = _time.time() - _t
 
@@ -158,11 +212,14 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     # The equation is anchored on eps_p; evGW hands the mean-field spectrum
     # here while the screening above follows the corrected one.
     anchor = eps if eps_anchor is None else np.asarray(eps_anchor, float)
+    if unrestricted and anchor.ndim == 2:
+        anchor = anchor[spin]
 
     _t = _time.time()
     xc_diag = static_exchange_diagonal(mf, mol, states,
                                        dm_correction=dm_correction,
-                                       reaction_field=reaction_field)
+                                       reaction_field=reaction_field,
+                                       spin=spin)
     out = []
     for i, p in enumerate(states):
         z_fit, iw_query = imaginary_axis_sample_points(freq_points, nocc,
