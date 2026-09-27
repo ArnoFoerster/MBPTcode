@@ -81,6 +81,8 @@ import sys
 import threading
 import warnings
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import numpy as np
 import pytest
 import scipy.linalg
@@ -765,6 +767,9 @@ def test_anthracene_once():
 
 
 if __name__ == '__main__':
-    print('RESULT ' + json.dumps(pooled_main(
-        sys.argv[1] == 'factored', pool=sys.argv[2:] != ['nopool'])),
-        flush=True)
+    if len(sys.argv) > 1:              # the child of `on_the_pooled_blas`
+        print('RESULT ' + json.dumps(pooled_main(
+            sys.argv[1] == 'factored', pool=sys.argv[2:] != ['nopool'])),
+            flush=True)
+    else:
+        sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))

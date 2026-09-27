@@ -556,5 +556,8 @@ def shape_main(mode, size):
 
 
 if __name__ == '__main__':
-    print('RESULT ' + json.dumps(shape_main(sys.argv[1], int(sys.argv[2]))),
-          flush=True)
+    if len(sys.argv) > 1:              # the child of `run_in_subprocess`
+        print('RESULT ' + json.dumps(shape_main(sys.argv[1],
+                                                int(sys.argv[2]))), flush=True)
+    else:
+        sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))
