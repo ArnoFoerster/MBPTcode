@@ -272,17 +272,20 @@ def sigma_s_from_d(be, gb, amps, zint, Y, order):
 
 def sigma_d_from_s(be, gb, amps, zint, y1, order):
     """W^ab_ij(S) -- A54 (first order) and A55 (second)."""
-    W = (-0.5 * _p_ab(be.ein('ijka,kb->ijab', gb['ooov'], y1))
-         - 0.5 * _p_ij(_ovvv_ijab(be, gb, y1)))
+    # the factors -1/2 and 1/2 scale y1 (o*v) rather than the doubles (o^2 v^2)
+    yh = 0.5 * y1
+    ym = -yh
+    W = (_p_ab(be.ein('ijka,kb->ijab', gb['ooov'], ym))
+         + _p_ij(_ovvv_ijab(be, gb, ym)))
     if order < 2:
         return W
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
-    u_vv = be.ein('kacd,kd->ac', gb['ovvv'], y1)
-    w_oo = be.ein('klic,lc->ki', gb['ooov'], y1)
-    W = W + 0.5 * _p_ab(be.ein('ijka,kb->ijab', ZA, y1)
-                        + be.ein('ijbc,ac->ijab', t1, u_vv))
-    return W + 0.5 * _p_ij(be.ein('jcab,ic->ijab', ZB, y1)
-                           + be.ein('jkab,ki->ijab', t1, w_oo))
+    u_vv = be.ein('kacd,kd->ac', gb['ovvv'], yh)
+    w_oo = be.ein('klic,lc->ki', gb['ooov'], yh)
+    W = W + _p_ab(be.ein('ijka,kb->ijab', ZA, yh)
+                  + be.ein('ijbc,ac->ijab', t1, u_vv))
+    return W + _p_ij(be.ein('jcab,ic->ijab', ZB, yh)
+                     + be.ein('jkab,ki->ijab', t1, w_oo))
 
 
 def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None):
