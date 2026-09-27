@@ -102,6 +102,10 @@ def to_blocks(v, no, nv, level='adc3'):
     return y1, Y
 
 
+# the doubles blocks from_blocks reads, the only ones sigma forms
+W_KEYS = ('aaaa', 'bbbb', 'abab')
+
+
 def from_blocks(w1, W, no, nv, level='adc3'):
     d = dimensions(no, nv, level)
     z = np.zeros((no, nv))
@@ -208,8 +212,8 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
         if o_sd is None:
             return from_blocks(w1, SB(), no, nv, level)
         w1 = w1 + _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
-        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd)
-             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd))
+        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=W_KEYS)
+             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, keys=W_KEYS))
         return from_blocks(w1, W, no, nv, level)
 
     return aop, diag, d

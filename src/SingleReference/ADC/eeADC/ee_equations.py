@@ -270,32 +270,35 @@ def sigma_s_from_d(be, gb, amps, zint, Y, order):
                 + be.ein('ikja,kj->ia', gb['ooov'], x_oo))
 
 
-def sigma_d_from_s(be, gb, amps, zint, y1, order):
-    """W^ab_ij(S) -- A54 (first order) and A55 (second)."""
+def sigma_d_from_s(be, gb, amps, zint, y1, order, keys=None):
+    """W^ab_ij(S) -- A54 (first order) and A55 (second). `keys`, a tuple of
+    spin strings, limits W to those blocks on the SPIN_BLOCKED backend."""
     # the factors -1/2 and 1/2 scale y1 (o*v) rather than the doubles (o^2 v^2)
     yh = 0.5 * y1
     ym = -yh
-    W = (_p_ab(be.ein('ijka,kb->ijab', gb['ooov'], ym))
-         + _p_ij(_ovvv_ijab(be, gb, ym)))
+    W = (_p_ab(be.ein('ijka,kb->ijab', gb['ooov'], ym), keys)
+         + _p_ij(_ovvv_ijab(be, gb, ym), keys))
     if order < 2:
         return W
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
     u_vv = be.ein('kacd,kd->ac', gb['ovvv'], yh)
     w_oo = be.ein('klic,lc->ki', gb['ooov'], yh)
     W = W + _p_ab(be.ein('ijka,kb->ijab', ZA, yh)
-                  + be.ein('ijbc,ac->ijab', t1, u_vv))
+                  + be.ein('ijbc,ac->ijab', t1, u_vv), keys)
     return W + _p_ij(be.ein('jcab,ic->ijab', ZB, yh)
-                     + be.ein('jkab,ki->ijab', t1, w_oo))
+                     + be.ein('jkab,ki->ijab', t1, w_oo), keys)
 
 
-def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None):
-    """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order)."""
+def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None, keys=None):
+    """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order); `keys` as in
+    sigma_d_from_s."""
     vk = vk if vk is not None else VvvvKernels(be, gb.get('vvvv'))
-    W = be.scale(Y, d_ijab)
+    W = be.scale(_only(Y, keys), d_ijab)
     if order < 1:
         return W
-    W = W + 0.5 * (vk.ladder(Y) + be.ein('ijkl,klab->ijab', gb['oooo'], Y))
-    return W - _p_ij(_p_ab(be.ein('kaic,jkbc->ijab', gb['ovov'], Y)))
+    W = W + 0.5 * (_only(vk.ladder(Y), keys)
+                   + _only(be.ein('ijkl,klab->ijab', gb['oooo'], Y), keys))
+    return W - _p_ij(_p_ab(be.ein('kaic,jkbc->ijab', gb['ovov'], Y)), keys)
 
 
 def _ovvv_ia(be, gb, X):
@@ -314,9 +317,17 @@ def _ovvv_ijab(be, gb, x):
     return be.ein('icab,jc->ijab', gb['ovvv'], x)
 
 
-def _p_ab(X):
-    return X - X.transpose(0, 1, 3, 2)
+def _p_ab(X, keys=None):
+    return _only(X, keys) - _only(X.transpose(0, 1, 3, 2), keys)
 
 
-def _p_ij(X):
-    return X - X.transpose(1, 0, 2, 3)
+def _p_ij(X, keys=None):
+    return _only(X, keys) - _only(X.transpose(1, 0, 2, 3), keys)
+
+
+def _only(X, keys):
+    """X's spin blocks named in `keys`, or X itself when keys is None. An SB's
+    transpose holds views, so the blocks left out are never computed."""
+    if keys is None:
+        return X
+    return _sb.SB({k: X.get(k) for k in keys})

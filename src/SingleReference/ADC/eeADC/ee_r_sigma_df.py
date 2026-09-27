@@ -248,8 +248,9 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         if o_sd is None:
             return _r.from_blocks(w1, SB(), no, nv, level)
         w1 = w1 + _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
-        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd)
-             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk))
+        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=_r.W_KEYS)
+             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk,
+                                  keys=_r.W_KEYS))
         return _r.from_blocks(w1, W, no, nv, level)
 
     return aop, diag, d
