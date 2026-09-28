@@ -21,6 +21,7 @@ level in ('adc1', 'adc2', 'adc2x', 'adc3').
 import warnings
 
 import numpy as np
+from pyscf import lib
 from pyscf import scf as _scf
 
 from src.Base.pyscf_interface import (
@@ -169,7 +170,8 @@ def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
         e, Z, _ = eigh_symmetric(0.5 * (H + H.T), threshold=threshold)
         return e[:nroots], None if Z is None else Z[:, :nroots]
     e, Z, _ = solve_symmetric(aop, diag, nroots=nroots, tol_residual=conv_tol,
-                              label='ee-ADC (unrestricted)')
+                              label='ee-ADC (unrestricted)',
+                              max_memory=_subspace_memory(mf))
     return np.asarray(e), np.asarray(Z)
 
 
@@ -250,7 +252,8 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                                   x0=_open_seeds(diag, nroots, max_subspace),
                                   tol_residual=conv_tol,
                                   max_subspace=max_subspace,
-                                  label='ee-ADC (spin-free)')
+                                  label='ee-ADC (spin-free)',
+                                  max_memory=_subspace_memory(mf))
         e, Z = np.asarray(e), np.asarray(Z)
     if Z is None:
         # a distributed dense solve: the eigenvectors are rank 0's alone
@@ -281,6 +284,13 @@ def _open_seeds(diag, nroots, max_subspace):
                                                  max(nroots, cap))))
     R = np.random.default_rng(0).standard_normal(X.shape)
     return X + 1e-2 * R / np.linalg.norm(R, axis=0)
+
+
+def _subspace_memory(mf):
+    """MB left for the Davidson subspace: mf.max_memory is the budget of the
+    whole process (pyscf's convention), less what it holds after the operator
+    build. Zero sends the subspace to disk."""
+    return max(0, mf.max_memory - lib.current_memory()[0])
 
 
 def _channel_basis(n, no, nv, level, sgn):
@@ -381,7 +391,8 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
 
         e, Z_sub, _ = solve_symmetric(aop_sub, diag[keep], nroots=nroots,
                                       tol_residual=conv_tol,
-                                      label='ee-ADC (spin-orbital, Ms sector)')
+                                      label='ee-ADC (spin-orbital, Ms sector)',
+                                      max_memory=_subspace_memory(mf))
         Z_sub = np.asarray(Z_sub)
         if Z_sub.ndim == 1:
             Z_sub = Z_sub[:, None]
@@ -389,5 +400,6 @@ def _solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
         Z[keep, :] = Z_sub          # back to the full configuration basis
         return np.asarray(e), Z
     e, Z, _ = solve_symmetric(aop, diag, nroots=nroots, tol_residual=conv_tol,
-                              label='ee-ADC (spin-orbital)')
+                              label='ee-ADC (spin-orbital)',
+                              max_memory=_subspace_memory(mf))
     return np.asarray(e), np.asarray(Z)
