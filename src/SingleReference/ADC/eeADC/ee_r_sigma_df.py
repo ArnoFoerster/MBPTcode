@@ -201,11 +201,12 @@ class DFVvvvKernels(_eq.VvvvKernels):
 # ----------------------------------------------------------------------
 
 def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
-                   cache=None):
+                   cache=None, parity=None):
     """(aop, diag, dims) from spatial orbital energies and the DF factor
     B (naux, norb, norb) with (pq|rs) = sum_Q B[Q,p,q] B[Q,r,s].
 
-    Same vector layout and spin-channel handling as ee_r_sigma."""
+    Same vector layout, spin-channel handling and `parity` as ee_r_sigma; the
+    particle ladder runs on every spin block whatever the parity."""
     if level not in LEVELS:
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
@@ -240,18 +241,21 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
                                             order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph, no, nv, vk=vk)
     diag = _diagonal_df(eps, B, no, nv, M, o_dd)
+    keys = _r.W_KEYS
+    if parity is not None:
+        gb, amps, zint, M = (_r.flip_symmetric(x) for x in (gb, amps, zint, M))
+        keys = _r.W_KEYS_CHANNEL
 
     def aop(vec):
         vec = np.asarray(vec).ravel()
-        y1, Y = _r.to_blocks(vec, no, nv, level)
+        y1, Y = _r.to_blocks(vec, no, nv, level, parity)
         w1 = be.ein('iajb,jb->ia', M, y1)
         if o_sd is None:
             return _r.from_blocks(w1, SB(), no, nv, level)
         w1 = w1 + _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
-        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=_r.W_KEYS)
-             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk,
-                                  keys=_r.W_KEYS))
-        return _r.from_blocks(w1, W, no, nv, level)
+        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=keys)
+             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk, keys=keys))
+        return _r.from_blocks(w1, W, no, nv, level, parity)
 
     return aop, diag, d
 

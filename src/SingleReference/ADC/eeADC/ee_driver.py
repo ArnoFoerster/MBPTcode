@@ -211,14 +211,17 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
             src = mf if (auxbasis is None and getattr(mf, 'with_df', None)) \
                 else mf.density_fit(auxbasis=auxbasis)
             B = DFIntegrals.from_scf(mol, src).B_aa[:, act, act]
+        # a channel solve hands aop flip eigenvectors only (embed below)
         aop, diag, dims = ee_r_sigma_df.build_operator(
-            eps, B, no, level=level, en_dress=en_dress)
+            eps, B, no, level=level, en_dress=en_dress,
+            parity=_CHANNEL.get(spin))
     else:
         V = get_two_electron_integrals_chemist(
             mol, mf, representation='spatial')[act, act, act, act
                                                ].transpose(0, 2, 1, 3)
         aop, diag, dims = ee_r_sigma.build_operator(
-            eps, V, no, level=level, en_dress=en_dress)
+            eps, V, no, level=level, en_dress=en_dress,
+            parity=_CHANNEL.get(spin))
 
     n = dims['nH']
     embed = None

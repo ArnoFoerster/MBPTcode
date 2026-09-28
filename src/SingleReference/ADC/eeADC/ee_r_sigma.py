@@ -78,15 +78,21 @@ def _restrict_same(T, no, nv):
     return T[iu[:, None], ju[:, None], au[None, :], bu[None, :]].ravel()
 
 
-def to_blocks(v, no, nv, level='adc3'):
-    """flat vector -> (singles SB, doubles SB) in the paper's tensor scaling."""
+def to_blocks(v, no, nv, level='adc3', parity=None):
+    """flat vector -> (singles SB, doubles SB) in the paper's tensor scaling.
+    parity: +1 or -1 when v is a flip eigenvector (spin_flip_vector) of that
+    sign; both SBs then carry it, and D_bbbb is taken from D_aaaa."""
     d = dimensions(no, nv, level)
     sa, sb_, da, db, dm = _slices(d)
-    y1 = SB({'aa': v[sa].reshape(no, nv), 'bb': v[sb_].reshape(no, nv)})
+    y1 = SB({'aa': v[sa].reshape(no, nv), 'bb': v[sb_].reshape(no, nv)},
+            parity=parity)
     if not d['doubles']:
         return y1, SB()
     Yaa = _expand_same(v[da], no, nv) / SCALE
-    Ybb = _expand_same(v[db], no, nv) / SCALE
+    if parity is None:
+        Ybb = _expand_same(v[db], no, nv) / SCALE
+    else:
+        Ybb = Yaa if parity > 0 else -Yaa
     Yab = v[dm].reshape(no, no, nv, nv) / SCALE
     # one negated array, then VIEWS of it: writing -Yab.transpose(...) twice
     # allocates two copies and, more importantly, hides from the DF ladder
@@ -98,15 +104,18 @@ def to_blocks(v, no, nv, level='adc3'):
             'baab': Yneg.transpose(1, 0, 2, 3)},
            derived={'baba': ('abab', (1, 0, 3, 2), +1.0),
                     'abba': ('abab', (0, 1, 3, 2), -1.0),
-                    'baab': ('abab', (1, 0, 2, 3), -1.0)})
+                    'baab': ('abab', (1, 0, 2, 3), -1.0)},
+           parity=parity)
     return y1, Y
 
 
 # the doubles blocks from_blocks reads, the only ones sigma forms
 W_KEYS = ('aaaa', 'bbbb', 'abab')
+# of which a flip eigenvector needs two: its D_bbbb is parity * D_aaaa
+W_KEYS_CHANNEL = ('aaaa', 'abab')
 
 
-def from_blocks(w1, W, no, nv, level='adc3'):
+def from_blocks(w1, W, no, nv, level='adc3', parity=None):
     d = dimensions(no, nv, level)
     z = np.zeros((no, nv))
     zz = np.zeros((no, no, nv, nv))
@@ -116,6 +125,9 @@ def from_blocks(w1, W, no, nv, level='adc3'):
     if not d['doubles']:
         return np.concatenate(out)
     for key in ('aaaa', 'bbbb'):
+        if key == 'bbbb' and parity is not None:
+            out.append(parity * out[-1])
+            continue
         T = W.get(key)
         out.append(SCALE * _restrict_same(T if T is not None else zz, no, nv))
     T = W.get('abab')
@@ -155,6 +167,17 @@ def new_cache():
     return {}
 
 
+def flip_symmetric(x):
+    """x with flip parity +1 declared: an SB, or a dict of them; anything else
+    as it is. Every closed-shell ingredient (integrals, amplitudes, Z, M) has
+    it. Shallow: the arrays are shared, and x itself is left unmarked."""
+    if isinstance(x, SB):
+        return SB(x.blocks, x.derived, parity=1.0)
+    if isinstance(x, dict):
+        return {k: flip_symmetric(v) for k, v in x.items()}
+    return x
+
+
 def _ingredients(cache, make_gb, make_vk):
     cache = new_cache() if cache is None else cache
     if 'gb' not in cache:
@@ -163,12 +186,17 @@ def _ingredients(cache, make_gb, make_vk):
     return cache['gb'], cache['vk'], cache
 
 def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
-                   cache=None):
+                   cache=None, parity=None):
     """(aop, diag, dims) from SPATIAL orbital energies `eps` and the spatial
     physicist tensor V[p,q,r,s] = <pq|rs> (= eri_chemist.transpose(0,2,1,3)).
 
     en_dress: optional Epstein-Nesbet channel dict (ee_en) dressing the
-    AMPLITUDE denominators only; the supermatrix keeps its MP zeroth order."""
+    AMPLITUDE denominators only; the supermatrix keeps its MP zeroth order.
+
+    parity: +1 or -1 when every vector aop receives is a flip eigenvector of
+    that sign (a singlet or triplet channel). aop then forms the alpha-first
+    half of every spin-blocked term and takes the rest by the flip; given any
+    other vector it is wrong. None, the default, assumes nothing."""
     if level not in LEVELS:
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
@@ -204,17 +232,21 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
     # M_aaaa - M_aabb, already at ADC(1)/CIS). Contract through sb_einsum so
     # every spin block is picked up.
     diag = _diagonal(eps, V, no, nv, M, o_dd)
+    keys = W_KEYS
+    if parity is not None:
+        gb, amps, zint, M = (flip_symmetric(x) for x in (gb, amps, zint, M))
+        keys = W_KEYS_CHANNEL
 
     def aop(vec):
         vec = np.asarray(vec).ravel()
-        y1, Y = to_blocks(vec, no, nv, level)
+        y1, Y = to_blocks(vec, no, nv, level, parity)
         w1 = be.ein('iajb,jb->ia', M, y1)
         if o_sd is None:
             return from_blocks(w1, SB(), no, nv, level)
         w1 = w1 + _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
-        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=W_KEYS)
-             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, keys=W_KEYS))
-        return from_blocks(w1, W, no, nv, level)
+        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=keys)
+             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, keys=keys))
+        return from_blocks(w1, W, no, nv, level, parity)
 
     return aop, diag, d
 
