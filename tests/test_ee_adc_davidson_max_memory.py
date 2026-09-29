@@ -38,11 +38,12 @@ def check(ok, label, detail=''):
 
 def spy_davidson1(seen):
     """Wrap pyscf's davidson1 so each call records the max_memory it received
-    (None when the caller passed none); returns the undo."""
+    ('absent' when the caller passed none, apart from an explicit None, which
+    davidson1 cannot take); returns the undo."""
     davidson1 = dav.pyscf_lib.davidson1
 
     def spy(*args, **kw):
-        seen.append(kw.get('max_memory'))
+        seen.append(kw.get('max_memory', 'absent'))
         return davidson1(*args, **kw)
     dav.pyscf_lib.davidson1 = spy
     return lambda: setattr(dav.pyscf_lib, 'davidson1', davidson1)
@@ -73,7 +74,7 @@ def test_ee_adc_budget():
     e_large, seen_large = solve(mf, LARGE_MB, ncore)
     ok = check(seen_small == [0], 'mf.max_memory = 1 MB reaches davidson1 as 0',
                f'received {seen_small}')
-    held = [LARGE_MB - m for m in seen_large if m is not None]
+    held = [LARGE_MB - m for m in seen_large if isinstance(m, (int, float))]
     ok &= check(len(held) == 1 and 0 < held[0] < 10**4,
                 f'mf.max_memory = {LARGE_MB} MB reaches davidson1 less the '
                 "process's use", f'received {seen_large}')
@@ -89,15 +90,17 @@ def test_default_untouched():
     n = 300
     a = rng.standard_normal((n, n))
     a = 0.01 * (a + a.T) + np.diag(np.arange(1.0, n + 1.0))
-    seen = []
+    seen, e, err = [], None, ''
     undo = spy_davidson1(seen)
     try:
         e, _, _ = dav.solve_symmetric(lambda x: a @ x, np.diag(a), nroots=2)
+    except Exception as exc:
+        err = f'; {type(exc).__name__}: {exc}'
     finally:
         undo()
-    ok = check(seen == [None], 'solve_symmetric without max_memory passes none',
-               f'received {seen}')
-    d = np.abs(np.asarray(e) - np.linalg.eigvalsh(a)[:2]).max()
+    ok = check(seen == ['absent'], 'solve_symmetric without max_memory passes none',
+               f'received {seen}{err}')
+    d = np.inf if e is None else np.abs(np.asarray(e) - np.linalg.eigvalsh(a)[:2]).max()
     ok &= check(d < 1e-6, 'and still finds the two lowest eigenvalues',
                 f'max |d| = {d:.1e}')
     return ok
