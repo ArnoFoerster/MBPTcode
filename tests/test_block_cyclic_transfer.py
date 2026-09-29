@@ -46,12 +46,15 @@ class ThreadComm:
         self.limit, self.sizes = limit, sizes
 
     def Get_rank(self):
+        """This thread's rank."""
         return self.rank
 
     def Get_size(self):
+        """The number of thread ranks."""
         return self.size
 
     def bcast(self, obj, root=0):
+        """Hand `obj` from root to every other rank, as mpi4py's bcast."""
         if self.rank == root:
             for dest in range(self.size):
                 if dest != root:
@@ -65,12 +68,14 @@ class ThreadComm:
                                f'limit {self.limit}')
 
     def Send(self, buf, dest, tag):
+        """Post a copy of `buf` to `dest`; refused over the limit."""
         buf = np.asarray(buf)
         self._refuse(buf)
         self.sizes.append(buf.size)
         self.boxes[self.rank, dest].put((tag, buf.copy()))
 
     def Recv(self, buf, source, tag):
+        """Fill `buf` from the next message of `source`, which must match."""
         self._refuse(buf)
         got_tag, data = self.boxes[source, self.rank].get(timeout=5)
         if got_tag != tag or data.shape != buf.shape:
@@ -118,12 +123,14 @@ def round_trip(n, nb, pr, pc, limit):
 
 
 def check(ok, label, detail=''):
+    """Print one verdict line and return `ok` as a bool."""
     tail = f'   ({detail})' if detail else ''
     print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
     return bool(ok)
 
 
 def main():
+    """Run every section; 0 when all pass, else 1."""
     ok = True
 
     print('\n=== 1. the default cap fits an MPI count ===')
@@ -132,7 +139,7 @@ def main():
                 '_MAX_MESSAGE <= 2**31 - 1', f'_MAX_MESSAGE = {cap}')
 
     print('\n=== 2. round trip under a message limit, 8 ranks on 4 x 2 ===')
-    # 203 = 25 blocks of 8 and a remainder of 3, so every chunk shape differs
+    # 203 = 25 blocks of 8 and a remainder of 3, so the chunks differ in shape
     limit = 97
     saved = cap
     dg._MAX_MESSAGE = limit
