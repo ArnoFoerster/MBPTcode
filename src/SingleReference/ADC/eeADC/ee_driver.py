@@ -279,7 +279,7 @@ def _open_seeds(diag, nroots, max_subspace):
     solve_symmetric's own seed count, so the seeds never crowd a small
     subspace."""
     n = len(diag)
-    cap = max_subspace // 2 if max_subspace else n
+    cap = n if max_subspace is None else max_subspace // 2
     X = np.column_stack(diagonal_seeds(diag, min(n, 2 * nroots + 4,
                                                  max(nroots, cap))))
     R = np.random.default_rng(0).standard_normal(X.shape)

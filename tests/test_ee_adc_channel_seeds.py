@@ -13,6 +13,9 @@ RADC's three lowest singlets to 1e-3 eV, each with parity +1, and warns of nothi
 Reference: pyscf RADC, nroots=5, same reference and fitting set: 5.4443, 6.8020,
 7.6729, 7.6729, 8.1812 eV (run 2026-09-28_benzene-radc-pyscf-5roots).
 
+Before it, without an SCF: at max_subspace=0 and one root the seeds number one,
+as solve_symmetric keeps room for, and the solve runs.
+
 Run: python tests/test_ee_adc_channel_seeds.py
 """
 import math
@@ -25,7 +28,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.ee_driver import _open_seeds, solve_ee_adc
+from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988
 REFERENCE_EV = np.array([5.4443, 6.8020, 7.6729])
@@ -47,6 +51,29 @@ def benzene():
         atoms.append(f'C {1.39 * math.cos(a):.6f} {1.39 * math.sin(a):.6f} 0')
         atoms.append(f'H {2.48 * math.cos(a):.6f} {2.48 * math.sin(a):.6f} 0')
     return '; '.join(atoms)
+
+
+def test_zero_subspace():
+    """max_subspace=0 at one root: solve_symmetric keeps room for one vector, so
+    the seeds must number one too; more made davidson1 raise IndexError."""
+    rng = np.random.default_rng(0)
+    n = 20
+    A = rng.standard_normal((n, n))
+    A = 0.05 * (A + A.T) + np.diag(np.arange(1.0, n + 1.0))
+    diag = np.diag(A).copy()
+    x0 = _open_seeds(diag, 1, 0)
+    ok = check(x0.shape == (n, 1), 'max_subspace=0: one seed for one root',
+               f'shape {x0.shape}')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            solve_symmetric(lambda x: A @ x, diag, nroots=1, x0=x0,
+                            max_subspace=0)
+        ok &= check(True, 'max_subspace=0: the solve runs')
+    except Exception as exc:
+        ok &= check(False, 'max_subspace=0: the solve runs',
+                    f'{type(exc).__name__}: {exc}')
+    return ok
 
 
 def test_benzene_singlets():
@@ -73,7 +100,9 @@ def test_benzene_singlets():
 
 
 if __name__ == '__main__':
-    print('=== benzene / cc-pVDZ, ADC(2) singlet channel, nroots=3 ===')
-    all_ok = test_benzene_singlets()
+    print('=== the seed count at max_subspace=0, nroots=1 ===')
+    all_ok = test_zero_subspace()
+    print('\n=== benzene / cc-pVDZ, ADC(2) singlet channel, nroots=3 ===')
+    all_ok &= test_benzene_singlets()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
