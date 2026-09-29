@@ -116,6 +116,10 @@ W_KEYS_CHANNEL = ('aaaa', 'abab')
 
 
 def from_blocks(w1, W, no, nv, level='adc3', parity=None):
+    """(singles blocks, doubles blocks) -> flat vector, the inverse of to_blocks;
+    a missing block is zero. parity: +1 or -1 when the blocks are those of a
+    flip eigenvector; D_bbbb is then parity * D_aaaa, and W needs only
+    W_KEYS_CHANNEL."""
     d = dimensions(no, nv, level)
     z = np.zeros((no, nv))
     zz = np.zeros((no, no, nv, nv))

@@ -13,12 +13,14 @@ from src.SingleReference.ADC.eeADC.ee_spin_blocks import anti4  # noqa: E402
 
 
 def check(ok, label, detail=''):
+    """Print one verdict line and return `ok` as a bool."""
     tail = f'   ({detail})' if detail else ''
     print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
     return bool(ok)
 
 
 def main():
+    """Run every level; 0 when all pass, else 1."""
     rng = np.random.default_rng(7)
     no, nv, naux = 4, 9, 30
     n = no + nv
