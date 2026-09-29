@@ -7,6 +7,8 @@ import warnings
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.constants import MPI_COUNT_MAX
+
 # mpi4py/ELPA are imported ON DEMAND, never at module import time.
 #
 # WHY (this is not a style preference): `from mpi4py import MPI` runs MPI_Init at
@@ -69,20 +71,20 @@ def _chunk_indices(solver, rank):
 # the pickled collectives cap one message at 2 GB and hold every chunk a second
 # time on rank 0, so neither reaches a Casida matrix of 10^5 pair states.
 # An MPI count is a C int, so a chunk past 2**31 - 1 elements makes Recv raise
-# MPI_ERR_ARG (8 ranks, N > 131071); every chunk goes in pieces below that.
-_MAX_MESSAGE = 2**30
+# MPI_ERR_ARG (8 ranks, N > 131071); every chunk goes in pieces of at most
+# MPI_COUNT_MAX elements, the bound mpi_grid's collectives keep.
 
 def _send_pieces(comm, chunk, dest, tag):
-    """Send a chunk, flattened in C order, in pieces of at most _MAX_MESSAGE."""
+    """Send a chunk, flattened in C order, in pieces of at most MPI_COUNT_MAX."""
     flat = chunk.reshape(-1)
-    for k in range(0, flat.size, _MAX_MESSAGE):
-        comm.Send(flat[k:k + _MAX_MESSAGE], dest=dest, tag=tag)
+    for k in range(0, flat.size, MPI_COUNT_MAX):
+        comm.Send(flat[k:k + MPI_COUNT_MAX], dest=dest, tag=tag)
 
 def _recv_pieces(comm, chunk, source, tag):
     """Receive _send_pieces' pieces, in send order, into a C-contiguous chunk."""
     flat = chunk.reshape(-1)          # a view, so the pieces land in chunk
-    for k in range(0, flat.size, _MAX_MESSAGE):
-        comm.Recv(flat[k:k + _MAX_MESSAGE], source=source, tag=tag)
+    for k in range(0, flat.size, MPI_COUNT_MAX):
+        comm.Recv(flat[k:k + MPI_COUNT_MAX], source=source, tag=tag)
 
 def gather_block_cyclic(Z_local, global_N, solver, comm):
     """Gathers distributed block-cyclic matrix Z_local to Rank 0; None elsewhere."""
