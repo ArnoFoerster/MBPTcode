@@ -614,13 +614,14 @@ def static_screened_coulomb_aux(eps, coeff_df, nocc):
     return np.asarray(lr.static_screening_aux(nocc))
 
 
-def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8):
+def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8,
+                                  channel='singlet'):
     """Static second-order GW kernel Θ^GW (BSE2@GW) as Casida A and B blocks.
 
     The two blocks to add to the BSE@GW Casida matrices of
-    `LinearResponseSolver.build_casida_matrices(lBSE=True, W_aux=W_aux)`. Both
-    spin manifolds get the same blocks; the reference adds them to the singlet
-    only. Restricted/RHF, DF factors only, never a norb^4 tensor.
+    `LinearResponseSolver.build_casida_matrices(lBSE=True, W_aux=W_aux)` for one
+    spin manifold, chosen by `channel`; the reference adds the singlet blocks to
+    the singlet only. Restricted/RHF, DF factors only, never a norb^4 tensor.
 
     Parameters
     ----------
@@ -639,6 +640,9 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     blksize : int
         Virtual orbitals c per block of the particle-particle ladder, whose
         (a, c, b, d) intermediate is held for one block only.
+    channel : {'singlet', 'triplet'}
+        Spin adaptation of the M_S = 0 block: the six terms of the Notes for the
+        singlet, their particle-hole terms alone for the triplet.
 
     Returns
     -------
@@ -664,10 +668,24 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     of the BSE with the metric Π_PQ = sum_kc D_P,kc D_Q,kc / d_kc in place of
     W_aux, and the ladders are DF contractions blocked over c.
 
+    In spin orbitals the particle-hole terms tie the spin of pair ia to that of
+    pair jb (W_ij,kc needs spin(i) = spin(j)) and the ladders do not (W_ak,jl
+    fixes spin(k) = spin(a) = spin(i) and spin(l) = spin(j) = spin(b)). In the
+    M_S = 0 block, S = Θ_αα,αα + Θ_αα,ββ and T = Θ_αα,αα − Θ_αα,ββ, so the ladders
+    enter the singlet twice and the triplet not at all, and the particle-hole
+    terms, with their internal spin loop, enter both alike:
+
+        Θ^S = the six terms above,    Θ^T = their particle-hole terms alone.
+
+    The reference's text calls the triplet unaffected (its Sec. III D); its
+    eq 72 in spin orbitals gives the triplet the particle-hole terms.
+
     References
     ----------
     E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 71-73.
     """
+    if channel not in ('singlet', 'triplet'):
+        raise ValueError(f"channel must be 'singlet' or 'triplet', got {channel!r}")
     occ, virt = get_occ_virt_indices(eps, nocc)
     no, nv = len(occ), len(virt)
     n_pair = no * nv
@@ -703,6 +721,8 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     theta_B = 4.0 * (D_ov.T @ Pi @ D_ov).reshape(no, nv, no, nv) \
         .transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
     del Pi
+    if channel == 'triplet':
+        return theta_A, theta_B
 
     # Hole-hole ladder, s_kl = ε_k + ε_l
     s_kl = reg(eps[occ][:, None] + eps[occ][None, :])
