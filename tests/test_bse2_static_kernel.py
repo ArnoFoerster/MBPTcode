@@ -57,21 +57,27 @@ def check(ok, label, detail=''):
     return bool(ok)
 
 
-def dense_theta(eps, coeff, W_aux, nocc):
+def dense_theta(eps, coeff, W_aux, nocc, ladders=True):
     """The six terms of the Notes of static_second_order_kernel_df on the dense
-    W_pq,rs = sum_PQ B_P,pq W_PQ B_Q,rs, as (n_pair, n_pair) blocks in (ia, jb)."""
+    W_pq,rs = sum_PQ B_P,pq W_PQ B_Q,rs, as (n_pair, n_pair) blocks in (ia, jb);
+    the particle-hole terms alone (the triplet channel) with ladders=False."""
     W = np.einsum('Ppq,PQ,Qrs->pqrs', coeff, W_aux, coeff)
     o, v = slice(0, nocc), slice(nocc, None)
     e = eps
     d_kc = 1.0 / (e[v][None, :] - e[o][:, None])
     s_kl = 1.0 / (e[o][:, None] + e[o][None, :])
     s_cd = 1.0 / (e[v][:, None] + e[v][None, :])
-    A = (4.0 * np.einsum('ijkc,kc,abkc->iajb', W[o, o, o, v], d_kc, W[v, v, o, v])
-         + 2.0 * np.einsum('akjl,kl,kilb->iajb', W[v, o, o, o], s_kl, W[o, o, o, v])
-         - 2.0 * np.einsum('acjd,cd,cidb->iajb', W[v, v, o, v], s_cd, W[v, o, v, v]))
-    B = (4.0 * np.einsum('ibkc,kc,ajkc->iajb', W[o, v, o, v], d_kc, W[v, o, o, v])
-         + 2.0 * np.einsum('akbl,kl,kilj->iajb', W[v, o, v, o], s_kl, W[o, o, o, o])
-         - 2.0 * np.einsum('acbd,cd,cidj->iajb', W[v, v, v, v], s_cd, W[v, o, v, o]))
+    A = 4.0 * np.einsum('ijkc,kc,abkc->iajb', W[o, o, o, v], d_kc, W[v, v, o, v])
+    B = 4.0 * np.einsum('ibkc,kc,ajkc->iajb', W[o, v, o, v], d_kc, W[v, o, o, v])
+    if ladders:
+        A = A + 2.0 * np.einsum('akjl,kl,kilb->iajb',
+                                W[v, o, o, o], s_kl, W[o, o, o, v])
+        A = A - 2.0 * np.einsum('acjd,cd,cidb->iajb',
+                                W[v, v, o, v], s_cd, W[v, o, v, v])
+        B = B + 2.0 * np.einsum('akbl,kl,kilj->iajb',
+                                W[v, o, v, o], s_kl, W[o, o, o, o])
+        B = B - 2.0 * np.einsum('acbd,cd,cidj->iajb',
+                                W[v, v, v, v], s_cd, W[v, o, v, o])
     n_pair = A.shape[0] * A.shape[1]
     return A.reshape(n_pair, n_pair), B.reshape(n_pair, n_pair)
 
@@ -97,6 +103,18 @@ if __name__ == '__main__':
         dev = max(np.abs(A_df - A_ref).max(), np.abs(B_df - B_ref).max()) / scale
         all_ok &= check(dev < 1e-10, f'DF Theta^A/Theta^B vs dense, blksize={blksize}',
                         f'max rel dev {dev:.1e}')
+    # 1b. the triplet channel is the particle-hole part of the dense transcription
+    A_ph, B_ph = dense_theta(eps_hf, coeff, w_aux, nocc, ladders=False)
+    A_t, B_t = static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
+                                             channel='triplet')
+    dev = max(np.abs(A_t - A_ph).max(), np.abs(B_t - B_ph).max()) / scale
+    all_ok &= check(dev < 1e-10, "channel='triplet' vs dense particle-hole terms",
+                    f'max rel dev {dev:.1e}')
+    try:
+        static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, channel='doublet')
+        all_ok &= check(False, 'unknown channel raises ValueError')
+    except ValueError:
+        all_ok &= check(True, 'unknown channel raises ValueError')
 
     # 2. BSE@GW and BSE2@GW energies on QuAcK's QP energies vs QuAcK
     eps_qp = QUACK_QP_EV / HARTREE_TO_EV
