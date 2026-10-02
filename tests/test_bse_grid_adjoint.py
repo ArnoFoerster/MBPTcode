@@ -4,18 +4,32 @@ on the three-index blocks of `bse_cache`), on RHF/cc-pVDZ at 148 points per
 atom:
 
   * THE KERNEL, per adjoint on the chain's own roots and vectors: eps_bar
-    exact, X_bar, D_bar and the symmetric part of W_bar within ANCHOR_K times
-    the explicit route's own reassociation response (the explicit route
-    re-run with the occupied and virtual orbitals each reversed, so every
-    bra loop runs backwards, its virtual-virtual tiles one grid row wide and
-    W symmetrized), for dOmega and the interstate element, singlet and triplet,
-    full and Tamm-Dancoff, HF and PBE0 references, water and ethylene;
-  * THE FORCE: the composed excitation gradient and the interstate element
-    with 'grid' against the default route within the routes test's anchored
-    bar (`COMPOSED_GRAD_K` times the one-thread repeat of the serial force,
-    floored at `COMPOSED_GRAD_FLOOR`), and the total gradient against a
-    five-point finite difference of E_0 + Omega on water beside the default
-    route's own miss;
+    exact, X_bar, D_bar and the symmetric part of W_bar within a DERIVED
+    rounding bound of the explicit route's. Both routes evaluate one
+    polynomial of the factors, W and the Casida vectors by products and sums
+    alone, so each lies within gamma_K of the sum of its own terms' absolute
+    values (Higham, Accuracy and Stability of Numerical Algorithms, 2002,
+    Sec. 3.1), K the most roundings any term passes through on either route
+    (`roundings`); that sum is each route's own code run on the inputs'
+    absolute values with every term made positive (`magnitudes`), and the
+    explicit route's reading of W unsymmetrized adds the terms of W's
+    antisymmetric part. No measured response enters. For dOmega and the
+    interstate element, singlet and triplet, full and Tamm-Dancoff, HF and
+    PBE0 references, water and ethylene, and benzene; shown to fail with the
+    grid route's swap term dropped and with D_bar's largest element moved
+    1e-10 relative (`test_the_bound_fails_a_wrong_kernel`);
+  * THE FORCE, the composed excitation gradient and the interstate element
+    on water, the default and the Davidson solver, both routes on one mean
+    field with pyscf's OpenMP on one thread: the roots bitwise (one forward
+    pass), the default chain's own fold of the grid route's seeds the grid
+    force bitwise (one fold), so the routes differ in their seeds alone, and
+    those seeds within the kernel's derived bound at that very reverse call.
+    The two forces are printed, not compared: the fold's exact image of the
+    seed difference is ~1e-16 Ha/Bohr, but the fold's own rounding, through
+    a fit adjoint of Gram condition 2e8, moves its result by ~1e-8 Ha/Bohr
+    when the last bits of its input change -- a bar on the forces would gate
+    that draw. And the total gradient against a five-point finite difference
+    of E_0 + Omega on water beside the default route's own miss;
   * THE CACHE: on the explicit route built once, at the first reverse call
     off a forward pass (an energy builds none, two roots off one pinned
     forward pass one); on the grid route never;
@@ -30,15 +44,18 @@ atom:
   * benzene: the kernel's agreement and its time against the explicit
     route's, cache included.
 
-Measured on the laptop at 2 threads, the kernel in its fixed (tile, tile)
-blocks: within 4.5e-16 to 3.3e-15 of the explicit route, at most 6.8
-anchors (water's singlet interstate X_bar); the grid force 0.34 of the
-anchored bar (5.3e-8 Ha/Bohr) from the default, the interstate element
-0.17, the Davidson route's 0.21; the five-point misses 8.5e-8 (grid) and
-8.8e-8 (default) relative; benzene's adjoint 4.0 s with its cache against
-0.31 s. The kernel over ranks -- the same bits at every rank count, no
-whole-grid array on any rank -- is gated in
-tests/test_bse_grid_adjoint_ranks.py.
+Measured on a two-thread workstation: the kernel at most 0.006 of its
+derived bound on every case and benzene's 0.001 (on water the bound is
+4e-13 of D_bar's largest element, so moving that element 1e-10 relative is
+238 bounds, dropping the swap term 1.9e11); at the chains' reverse calls the
+seeds at most 0.006 of it, the forces 6.8e-9 to 1.8e-8 Ha/Bohr apart while
+the fold's image of their seed difference is 2.9e-16 to 9.5e-16; the
+five-point misses 8.5e-8 (grid) and 8.8e-8 (default) relative; benzene's
+adjoint 3.6 s with its cache against 0.29 s. The one-fold gate fails with the
+grid chain's W_bar moved 1e-12 relative inside its fold, the forces then
+still 9.9e-9 apart, which no bar on them could tell from the clean run. The
+kernel over ranks -- the same bits at every rank count, no whole-grid array
+on any rank -- is gated in tests/test_bse_grid_adjoint_ranks.py.
 
 The residue backend of the scanned force is 'sop': the quasiparticle set
 solve's 'explicit' residues build C_ov, the same (naux, nocc*nvir) block, in
@@ -50,17 +67,21 @@ once did. The scan failed on water, 24 block-shaped arrays seen in the
 `b_block`, `_casida_args` and `_casida_seeds` frames, and so did the cache
 count, an energy having built it.
 """
+import math
 import os
 import sys
 import time
+import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-from pyscf import dft, gto, scf
+from pyscf import dft, gto, lib, scf
 
+from src.Base.constants import BSE_ADJOINT_TILE_ROWS, KAPPA
 from src.Base.declaration import Excitation, GroundState
+from src.SingleReference.LinearResponse import isdf_bse_adjoint
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.gradients import excited_state
@@ -71,8 +92,6 @@ from src.gradients.state_manifold import StateManifold
 from src.properties.surfaces import potential_energy_surface
 from tests.test_chain_sliced_factors import (BASIS, H2O, chain_scf,
                                              reachable_arrays)
-from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, COMPOSED_GRAD_K,
-                                   one_thread_scatter)
 
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
@@ -81,10 +100,6 @@ BENZENE = ('C 0 1.3915 0; C 1.2051 0.6958 0; C 1.2051 -0.6958 0; '
            'H 0 2.4715 0; H 2.1404 1.2358 0; H 2.1404 -1.2358 0; '
            'H 0 -2.4715 0; H -2.1404 -1.2358 0; H -2.1404 1.2358 0')
 MOLECULES = {'water': H2O, 'ethylene': ETHYLENE, 'benzene': BENZENE}
-#: How many times the explicit route's own reassociation response the grid
-#: route may sit from it: the two share no summation order at all, where the
-#: anchor reorders two of the explicit route's sums.
-ANCHOR_K = 10
 #: The five-point stencil's step (Bohr) and the relative miss the excited-state
 #: surface's own gate allows (tests/test_excited_state.py).
 FD_STEP = 1e-4
@@ -106,11 +121,6 @@ def molecule(name):
     return gto.M(atom=MOLECULES[name], basis=BASIS, verbose=0)
 
 
-def rel(a, b):
-    """max |a - b| relative to max |a|."""
-    return float(np.abs(a - b).max() / max(np.abs(a).max(), 1e-300))
-
-
 def symmetric(w):
     return 0.5 * (w + w.T)
 
@@ -124,12 +134,6 @@ def casida_inputs(chain):
         cache = bse_cache(x, d, eq, w, no, spin=chain.spin,
                           bse_tda=chain.bse_tda)
     return x, d, eq, w, no, cache, xn, yn
-
-
-def distances(ref, got):
-    """(eps_bar, X_bar, D_bar, sym W_bar) relative distances."""
-    return (rel(ref[0], got[0]), rel(ref[1], got[1]), rel(ref[2], got[2]),
-            rel(symmetric(ref[3]), symmetric(got[3])))
 
 
 class BlockScan:
@@ -179,28 +183,154 @@ class BlockScan:
             sys.settrace(held)
 
 
-def reassociated_explicit(n, x, d, eq, w, no, cache, xn, yn, bra=None):
-    """The explicit adjoint with the occupied and the virtual orbitals each in
-    reverse order -- every bra loop and every orbital sum run backwards --
-    its virtual-virtual term tiled one grid row at a time and W symmetrized:
-    one reordering of its own sums, handed back in the original order."""
-    nmo = x.shape[1]
-    order = np.r_[np.arange(no)[::-1], np.arange(no, nmo)[::-1]]
-    nv = nmo - no
+def roundings(npts, naux, nmo, nocc, tile_rows=BSE_ADJOINT_TILE_ROWS):
+    """The most roundings one term of a seed passes through on either route.
 
-    def flipped(v):
-        return v.reshape(no, nv, -1)[::-1, ::-1].reshape(no * nv, -1)
+    A product adds one to its factors' counts, a sum over n terms at most
+    n - 1 in any order or blocking. The grid route contracts the grid index
+    twice (Zt's columns and the column pass, or D^T (S D)), the auxiliary
+    index twice (D W D^T, S D W) and the orbitals inside P_T and against T,
+    and adds the column tiles' partials; the explicit route contracts the
+    grid twice through its B blocks, the auxiliary index twice and the pairs,
+    n_ov in the bare kernel and nocc^2 in the direct W_bar term. The last 64
+    cover every elementwise product and every accumulation into an output, a
+    dozen on either route.
+    """
+    nvir = nmo - nocc
+    return (2 * npts + 2 * naux + 2 * nmo + nocc * nvir + nocc * nocc
+            + 2 * math.ceil(npts / tile_rows) + 64)
 
-    xr, eqr = np.ascontiguousarray(x[:, order]), np.asarray(eq)[order]
-    spin = 'singlet' if cache['kappa'] else 'triplet'
-    cr = bse_cache(xr, d, eqr, w, no, spin=spin,
-                   bse_tda=cache['B_vo'] is None)
-    one_row = 3 * x.shape[0] * 8 / 1e9
-    e, xb, db, wb = bse_backward(n, xr, d, eqr, symmetric(w), no, cr,
-                                 flipped(xn), flipped(yn), tile_gb=one_row,
-                                 bra=bra)
-    back = np.argsort(order)
-    return e[back], xb[:, back], db, wb
+
+def gamma(k):
+    """gamma_k = k u / (1 - k u), u the unit roundoff: the relative error of
+    k compounded roundings (Higham 2002, Lemma 3.1)."""
+    ku = k * np.finfo(float).eps / 2
+    return ku / (1 - ku)
+
+
+def magnitudes(route, n, x, d, eq, w, no, xn, yn, spin, tda, bra=None,
+               symmetrized=False, tile_rows=BSE_ADJOINT_TILE_ROWS):
+    """(X_bar, D_bar, W_bar) of `route` ('grid' or 'explicit') run on the
+    absolute values of its inputs with every term made positive: the sum of
+    the absolute values of the terms that route adds.
+
+    Every screened term carries -omega_bar and the triplet's zero kappa drops
+    the bare kernel, so omega_bar = -1 turns them all positive; the bare
+    kernel carries +kappa omega_bar, and W = 0 (with no B_oo and B_vo on the
+    explicit route) leaves it alone. W_bar has no bare term. `symmetrized`:
+    the explicit route's interstate element, both orderings averaged;
+    `tile_rows`: the grid route's tile edge.
+    """
+    ax, ad, aw, axn, ayn = (np.abs(a) for a in (x, d, w, xn, yn))
+    if route == 'grid':
+        def run(kind, w_abs, omega_bar):
+            return isdf_bse_backward(n, ax, ad, eq, w_abs, no, axn, ayn,
+                                     spin=kind, bse_tda=tda,
+                                     omega_bar=omega_bar, bra=bra,
+                                     tile_rows=tile_rows)
+    else:
+        screened = bse_cache(ax, ad, eq, aw, no, spin='triplet', bse_tda=tda)
+        bare = dict(screened, kappa=KAPPA[spin], B_vo=None,
+                    B_oo=np.zeros_like(screened['B_oo']))
+
+        def run(kind, w_abs, omega_bar):
+            cache = screened if kind == 'triplet' else bare
+            if symmetrized:
+                return interstate_backward(bra, n, ax, ad, eq, w_abs, no,
+                                           cache, axn, ayn,
+                                           omega_bar=omega_bar)
+            return bse_backward(n, ax, ad, eq, w_abs, no, cache, axn, ayn,
+                                omega_bar=omega_bar, bra=bra)
+    _, x_abs, d_abs, w_bar_abs = run('triplet', aw, -1.0)
+    if KAPPA[spin]:
+        _, x_bare, d_bare, _ = run(spin, np.zeros_like(aw), 1.0)
+        x_abs, d_abs = x_abs + x_bare, d_abs + d_bare
+    return x_abs, d_abs, w_bar_abs
+
+
+def bound_ratios(ref, got, inputs, spin, tda, n, bra=None, symmetrized=False):
+    """(X_bar, D_bar, sym W_bar): the worst |grid - explicit| over the derived
+    bound, element by element; `ref` the explicit route's seeds of root `n`
+    (and `bra`), `got` the grid route's, `inputs` (X_mo, D, eps_qp, W_aux,
+    nocc, Xn, Yn) the arrays both read.
+
+    Each route lies within gamma_K of its own magnitudes from the one exact
+    value, K = `roundings` and two more for the symmetric parts formed; the
+    magnitudes' own roundings are the 1 / (1 - gamma_K). The explicit route
+    reads W as it is and the grid route its symmetric part, so the terms of
+    the antisymmetric part, linear in it, are added in full.
+    """
+    x, d, eq, w, no, xn, yn = inputs
+    g = gamma(roundings(x.shape[0], d.shape[1], x.shape[1], no) + 2)
+    g = g / (1 - g)
+    kw = dict(spin=spin, tda=tda, bra=bra)
+    mag_g = magnitudes('grid', n, x, d, eq, symmetric(w), no, xn, yn, **kw)
+    mag_e = magnitudes('explicit', n, x, d, eq, w, no, xn, yn,
+                       symmetrized=symmetrized, **kw)
+    anti = magnitudes('explicit', n, x, d, eq, 0.5 * (w - w.T), no, xn, yn,
+                      spin='triplet', tda=tda, bra=bra,
+                      symmetrized=symmetrized)
+    pairs = ((ref[1], got[1], mag_e[0] + mag_g[0], anti[0]),
+             (ref[2], got[2], mag_e[1] + mag_g[1], anti[1]),
+             (symmetric(ref[3]), got[3], symmetric(mag_e[2]) + mag_g[2], 0.0))
+    return [worst_ratio(a, b, g * mag + (1 + g) * asym)
+            for a, b, mag, asym in pairs]
+
+
+def grid_bound_ratios(ref, got, inputs, spin, tda, n, bra=None,
+                      tiles=(BSE_ADJOINT_TILE_ROWS, BSE_ADJOINT_TILE_ROWS)):
+    """(X_bar, D_bar, W_bar): the worst |got - ref| over the derived bound of
+    two blockings of the grid route, `ref` in tiles[0] and `got` in
+    tiles[1]: one polynomial, each within gamma_K of its own magnitudes, K
+    counted at the smaller tile."""
+    x, d, eq, w, no, xn, yn = inputs
+    g = gamma(roundings(x.shape[0], d.shape[1], x.shape[1], no, min(tiles))
+              + 2)
+    g = g / (1 - g)
+    mag_a, mag_b = (magnitudes('grid', n, x, d, eq, w, no, xn, yn, spin, tda,
+                               bra=bra, tile_rows=t) for t in tiles)
+    return [worst_ratio(a, b, g * (ma + mb))
+            for a, b, ma, mb in zip(ref[1:], got[1:], mag_a, mag_b)]
+
+
+def worst_ratio(a, b, bound):
+    """max |a - b| / bound element by element; infinite where a zero bound
+    meets a nonzero difference."""
+    off = np.abs(a - b)
+    if np.any(off[bound == 0] > 0):
+        return np.inf
+    return float((off / np.maximum(bound, np.finfo(float).tiny)).max())
+
+
+@pytest.fixture
+def pyscf_one_thread():
+    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
+    order, so two chains on one mean field repeat each other's forward pass
+    and fold bit for bit."""
+    threads = lib.num_threads()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(1)
+    yield
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(threads)
+
+
+def captured(chain):
+    """Every call of the chain's Casida-level adjoint: its forward pieces,
+    root, bra and copies of its seeds, which the fold consumes."""
+    calls = []
+    seeds_of = chain._casida_seeds
+
+    def probed(pieces, n, m=None):
+        out = seeds_of(pieces, n, m)
+        calls.append(dict(pieces=pieces, n=n, m=m,
+                          seeds=tuple(np.array(a, copy=True) for a in out)))
+        return out
+
+    chain._casida_seeds = probed
+    return calls
 
 
 # ------------------------------------------------------------- the setting
@@ -267,41 +397,66 @@ KERNEL_CASES = [
 @pytest.mark.parametrize('name,reference,spin,tda,solver', KERNEL_CASES)
 def test_the_grid_adjoint_is_the_explicit_one(name, reference, spin, tda,
                                               solver):
-    """eps_bar exact; X_bar, D_bar and sym(W_bar) within ANCHOR_K times the
-    explicit route's own reassociation response, for dOmega_0 and for the
-    one-sided and symmetrized interstate elements between roots 0 and 1."""
+    """eps_bar exact; X_bar, D_bar and sym(W_bar) within the derived rounding
+    bound of the explicit route's, for dOmega_0 and for the one-sided and
+    symmetrized interstate elements between roots 0 and 1."""
     mol = molecule(name)
     factory = chain_scf if reference == 'hf' else pbe0_scf
     chain = ExcitedStateChain(mol, factory, mf=factory(mol), spin=spin,
                               bse_tda=tda, solver=solver)
-    args = casida_inputs(chain)
-    x, d, eq, w, no, cache, xn, yn = args
+    x, d, eq, w, no, cache, xn, yn = casida_inputs(chain)
+    inputs = (x, d, eq, w, no, xn, yn)
     kw = dict(spin=spin, bse_tda=tda)
-    for label, bra in (('dOmega', None), ('<1|dH|0>', 1)):
-        ref = bse_backward(0, *args, bra=bra)
-        anchor = distances(ref, reassociated_explicit(0, *args, bra=bra))
-        got = distances(ref, isdf_bse_backward(0, x, d, eq, w, no, xn, yn,
-                                               bra=bra, **kw))
-        print(f'[info] {name}/{reference} {spin} tda={tda} {label}: '
-              f'X {got[1]:.1e} D {got[2]:.1e} Wsym {got[3]:.1e} '
-              f'(anchor {anchor[1]:.1e} {anchor[2]:.1e} {anchor[3]:.1e})')
-        assert got[0] == 0.0, got
-        for g, a in zip(got[1:], anchor[1:]):
-            assert g < ANCHOR_K * a, (label, got, anchor)
-    ref = interstate_backward(0, 1, *args)
-    anchor = distances(ref, reassociated_explicit(0, *args, bra=1))
-    got = distances(ref, isdf_interstate_backward(0, 1, x, d, eq, w, no, xn,
-                                                  yn, **kw))
-    print(f'[info] {name}/{reference} {spin} tda={tda} symmetrized '
-          f'interstate: X {got[1]:.1e} D {got[2]:.1e} Wsym {got[3]:.1e}')
-    assert got[0] == 0.0
-    for g, a in zip(got[1:], anchor[1:]):
-        assert g < ANCHOR_K * a, ('interstate', got, anchor)
+    cases = [(label, 0, bra, False,
+              bse_backward(0, x, d, eq, w, no, cache, xn, yn, bra=bra),
+              isdf_bse_backward(0, x, d, eq, w, no, xn, yn, bra=bra, **kw))
+             for label, bra in (('dOmega', None), ('<1|dH|0>', 1))]
+    cases.append(('symmetrized interstate', 1, 0, True,
+                  interstate_backward(0, 1, x, d, eq, w, no, cache, xn, yn),
+                  isdf_interstate_backward(0, 1, x, d, eq, w, no, xn, yn,
+                                           **kw)))
+    for label, n, bra, sym, ref, got in cases:
+        ratios = bound_ratios(ref, got, inputs, spin, tda, n, bra=bra,
+                              symmetrized=sym)
+        print(f'[info] {name}/{reference} {spin} tda={tda} {label}: X '
+              f'{ratios[0]:.3f} D {ratios[1]:.3f} Wsym {ratios[2]:.3f} of '
+              'the derived bound')
+        assert np.array_equal(ref[0], got[0]), label
+        assert max(ratios) <= 1, (label, ratios)
+
+
+def test_the_bound_fails_a_wrong_kernel(monkeypatch):
+    """The derived bound passes no wrong kernel on water: D_bar's largest
+    element moved 1e-10 relative, and the grid route with its swap term
+    dropped from S, each fail it."""
+    mol = molecule('water')
+    chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol),
+                              solver='davidson')
+    x, d, eq, w, no, cache, xn, yn = casida_inputs(chain)
+    inputs = (x, d, eq, w, no, xn, yn)
+    ref = bse_backward(0, x, d, eq, w, no, cache, xn, yn)
+    got = list(isdf_bse_backward(0, x, d, eq, w, no, xn, yn))
+    clean = bound_ratios(ref, got, inputs, 'singlet', False, 0)
+    d_bar = got[2].copy()
+    d_bar[np.unravel_index(np.abs(d_bar).argmax(), d_bar.shape)] *= 1 + 1e-10
+    moved = bound_ratios(ref, [got[0], got[1], d_bar, got[3]], inputs,
+                         'singlet', False, 0)
+    direct = tuple(t for t in isdf_bse_adjoint.S_TERMS[False]
+                   if t[0] == t[2])
+    monkeypatch.setitem(isdf_bse_adjoint.S_TERMS, False, direct)
+    dropped = bound_ratios(ref, isdf_bse_backward(0, x, d, eq, w, no, xn, yn),
+                           inputs, 'singlet', False, 0)
+    print(f'[info] water dOmega, X / D / Wsym of the derived bound: clean '
+          f'{clean[0]:.3f} / {clean[1]:.3f} / {clean[2]:.3f}; D_bar moved '
+          f'1e-10: {moved[1]:.2f}; swap term dropped: {dropped[0]:.1e} / '
+          f'{dropped[1]:.1e} / {dropped[2]:.1e}')
+    assert max(clean) <= 1 and moved[1] > 1 and min(dropped[1:]) > 1
 
 
 def test_benzene_agreement_and_timing():
-    """The kernel on benzene against the explicit route, and both timed: the
-    explicit one with the cache it needs, the grid one alone."""
+    """The kernel on benzene against the explicit route within the derived
+    bound, and both timed: the explicit one with the cache it needs, the
+    grid one alone."""
     mol = molecule('benzene')
     chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol),
                               solver='davidson')
@@ -313,16 +468,14 @@ def test_benzene_agreement_and_timing():
     t1 = time.perf_counter()
     got = isdf_bse_backward(0, x, d, eq, w, no, xn, yn)
     t2 = time.perf_counter()
-    dist = distances(ref, got)
-    anchor = distances(ref, reassociated_explicit(0, x, d, eq, w, no, cache,
-                                                  xn, yn))
+    ratios = bound_ratios(ref, got, (x, d, eq, w, no, xn, yn), 'singlet',
+                          False, 0)
     print(f'[info] benzene M {x.shape[0]} naux {d.shape[1]} nocc {no}: '
-          f'X {dist[1]:.1e} D {dist[2]:.1e} Wsym {dist[3]:.1e} (anchor '
-          f'{anchor[1]:.1e} {anchor[2]:.1e} {anchor[3]:.1e}); explicit '
-          f'{t1 - t0:.2f} s with its cache, grid {t2 - t1:.2f} s')
-    assert dist[0] == 0.0
-    for g, a in zip(dist[1:], anchor[1:]):
-        assert g < ANCHOR_K * a
+          f'X {ratios[0]:.3f} D {ratios[1]:.3f} Wsym {ratios[2]:.3f} of the '
+          f'derived bound; explicit {t1 - t0:.2f} s with its cache, grid '
+          f'{t2 - t1:.2f} s')
+    assert np.array_equal(ref[0], got[0])
+    assert max(ratios) <= 1, ratios
 
 
 # --------------------------------------------------------------- the force
@@ -343,28 +496,57 @@ def five_point_gradient(chain, mol):
     return fd
 
 
-def test_the_grid_force_is_the_default_force():
-    """Water, the default Casida solver: the excitation gradient and the
-    interstate element within the routes test's anchored bar of the default
-    route's, the total gradient against a five-point finite difference of
-    E_0 + Omega beside the default route's miss; the Davidson route's forces
-    beside it."""
+def test_the_grid_force_is_the_default_force(pyscf_one_thread):
+    """Water, the default and the Davidson solver, the excitation gradient
+    and the interstate element on one mean field: the two routes' roots
+    bitwise, the default chain's fold of the grid seeds the grid force
+    bitwise, and the two routes' seeds at that reverse call within the
+    kernel's derived bound -- the forces differ by the fold's own rounding
+    of those seeds alone, printed beside the fold's exact image of their
+    difference; the total gradient against a five-point finite difference
+    of E_0 + Omega beside the default route's miss."""
     mol = molecule('water')
     mf = chain_scf(mol)
-    default = ExcitedStateChain(mol, chain_scf, mf=mf)
-    grid = ExcitedStateChain(mol, chain_scf, mf=mf, bse_adjoint='grid')
-    g_def = default.excitation_gradient()[0]
-    g_grid = grid.excitation_gradient()[0]
-    bar = max(COMPOSED_GRAD_FLOOR,
-              COMPOSED_GRAD_K * one_thread_scatter(mol, mf, g_def))
-    d_ex = np.abs(g_grid - g_def).max()
-    c_def = default.interstate_gradient(0, 1)[0]
-    c_grid = grid.interstate_gradient(0, 1)[0]
-    d_in = np.abs(c_grid - c_def).max()
-    print(f'[info] water excitation gradient |d| {d_ex:.2e} = '
-          f'{d_ex / bar:.3f} of the anchored bar {bar:.2e} Ha/Bohr; '
-          f'interstate element |d| {d_in:.2e} = {d_in / bar:.3f} of it')
-    assert d_ex < bar and d_in < bar
+    chains = {}
+    for solver in (None, 'davidson'):
+        kw = {} if solver is None else {'solver': solver}
+        default = ExcitedStateChain(mol, chain_scf, mf=mf, **kw)
+        grid = ExcitedStateChain(mol, chain_scf, mf=mf, bse_adjoint='grid',
+                                 **kw)
+        chains[solver] = (default, grid)
+        calls = (captured(default), captured(grid))
+        for element in ('excitation', 'interstate'):
+            out = []
+            for chain, log in zip((default, grid), calls):
+                if element == 'excitation':
+                    g, info = chain.excitation_gradient()
+                    roots = (info['omega'],)
+                else:
+                    g, info = chain.interstate_gradient(0, 1)
+                    roots = (info['omega_m'], info['omega_n'])
+                out.append((np.asarray(g), roots, log[-1]))
+            (g_d, om_d, c_d), (g_g, om_g, c_g) = out
+            label = f"{solver or 'default'} solver, {element}"
+            assert om_d == om_g, (label, om_d, om_g)
+            fold = default._fold_to_nuclei
+            g_x = np.asarray(fold(c_d['pieces'], *[np.array(a, copy=True)
+                                                   for a in c_g['seeds']])[0])
+            image = np.abs(fold(c_d['pieces'], *[
+                a - b for a, b in zip(c_g['seeds'], c_d['seeds'])])[0]).max()
+            x, d, eq, w, no, _, xn, yn = default._casida_args(c_d['pieces'])
+            ratios = bound_ratios(c_d['seeds'], c_g['seeds'],
+                                  (x, d, eq, w, no, xn, yn), default.spin,
+                                  default.bse_tda, c_d['n'], bra=c_d['m'],
+                                  symmetrized=c_d['m'] is not None)
+            print(f'[info] water {label}: forces apart '
+                  f'{np.abs(g_g - g_d).max():.2e} Ha/Bohr, the fold\'s image '
+                  f'of the seed difference {image:.1e}; seeds X / D / Wsym '
+                  f'at {ratios[0]:.3f} / {ratios[1]:.3f} / {ratios[2]:.3f} '
+                  'of the derived bound')
+            assert np.array_equal(g_x, g_g), label
+            assert np.array_equal(c_d['seeds'][0], c_g['seeds'][0]), label
+            assert max(ratios) <= 1, (label, ratios)
+    default, grid = chains[None]
     fd = five_point_gradient(default, mol)
     scale = np.abs(fd).max()
     miss_def = np.abs(default.total_gradient()[0] - fd).max() / scale
@@ -372,17 +554,6 @@ def test_the_grid_force_is_the_default_force():
     print(f'[info] water five-point miss (relative): grid {miss_grid:.2e}, '
           f'default {miss_def:.2e}')
     assert miss_grid < FD_REL
-    davidson = {adjoint: ExcitedStateChain(mol, chain_scf, mf=mf,
-                                           solver='davidson',
-                                           bse_adjoint=adjoint)
-                for adjoint in ('explicit', 'grid')}
-    d_dav = np.abs(davidson['grid'].excitation_gradient()[0]
-                   - davidson['explicit'].excitation_gradient()[0]).max()
-    i_dav = np.abs(davidson['grid'].interstate_gradient(0, 1)[0]
-                   - davidson['explicit'].interstate_gradient(0, 1)[0]).max()
-    print(f'[info] water Davidson route: excitation |d| {d_dav:.2e}, '
-          f'interstate |d| {i_dav:.2e} Ha/Bohr')
-    assert d_dav < bar and i_dav < bar
 
 
 # ---------------------------------------------------------- the memory scan

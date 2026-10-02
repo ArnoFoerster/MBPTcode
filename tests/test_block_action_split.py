@@ -217,12 +217,16 @@ def cases():
 
 @pytest.fixture(scope='module')
 def serial_roots(cases):
-    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank."""
+    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank.
+
+    Divided by the bare d, asked for: the archive's Davidson knew no other
+    preconditioner, and the default is now the screened diagonal."""
     out = {}
     for name, c in cases.items():
         omega, X, Y, _ = solve_bse_isdf(c['mf'], c['mol'], c['nocc'],
                                         nroots=NROOTS, probe=False,
-                                        progress=False, factors=c['factors'])
+                                        progress=False, factors=c['factors'],
+                                        preconditioner='bare')
         out[name] = (omega, X, Y)
     return out
 
@@ -298,6 +302,14 @@ def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
     must be -- every one of them runs the same iteration on the same
     lockstepped action output, as its identical cycle count shows, and the
     result is lockstepped from rank 0 at the end.
+
+    Both solves divide by the bare d, asked for: the gate isolates the row
+    split's re-association. The default preconditioner is now the screened
+    diagonal, itself one reduction over the ranks' grid rows whose last bits
+    move with the rank count, and with it ethylene's roots sat 2.4e-11 and
+    1.5e-10 Ha from the serial ones at 2 and 3 ranks -- a moved iteration
+    path at the Davidson's resolution, gated where the screened diagonal is
+    (test_davidson_preconditioner, test_probe_after_davidson).
     """
     c = cases[name]
     omega0 = serial_roots[name][0]
@@ -307,7 +319,7 @@ def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
         om, X, Y, info = solve_bse_isdf(mf, c['mol'], c['nocc'], nroots=NROOTS,
                                         probe=False, progress=False,
                                         factors=factors, distribute=True,
-                                        comm=comm)
+                                        comm=comm, preconditioner='bare')
         return om, X, Y, info
 
     out = run_simulated(one_rank, size)

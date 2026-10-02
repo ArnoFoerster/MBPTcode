@@ -137,7 +137,7 @@ def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None):
     _check_denominator(d_ijab)
     t2_1 = be.divide(gb['oovv'], d_ijab)
     out = {'t2_1': t2_1}
-    num = (be.ein('ijbc,jabc->ia', t2_1, gb['ovvv'])
+    num = (_ovvv_ia(be, gb, t2_1)
            + be.ein('jkab,jkib->ia', t2_1, gb['ooov']))
     out['t1_2'] = be.divide(num, d_ia)
     if order < 3:
@@ -257,7 +257,7 @@ def _dij(be, X_vv, eye_o):
 
 def sigma_s_from_d(be, gb, amps, zint, Y, order):
     """W^a_i(D) -- A41 (first order) and A42 (second)."""
-    w = (be.ein('jabc,ijbc->ia', gb['ovvv'], Y)
+    w = (_ovvv_ia(be, gb, Y)
          + be.ein('jkib,jkab->ia', gb['ooov'], Y))
     if order < 2:
         return w
@@ -270,34 +270,64 @@ def sigma_s_from_d(be, gb, amps, zint, Y, order):
                 + be.ein('ikja,kj->ia', gb['ooov'], x_oo))
 
 
-def sigma_d_from_s(be, gb, amps, zint, y1, order):
-    """W^ab_ij(S) -- A54 (first order) and A55 (second)."""
-    W = (-0.5 * _p_ab(be.ein('ijka,kb->ijab', gb['ooov'], y1))
-         - 0.5 * _p_ij(be.ein('icab,jc->ijab', gb['ovvv'], y1)))
+def sigma_d_from_s(be, gb, amps, zint, y1, order, keys=None):
+    """W^ab_ij(S) -- A54 (first order) and A55 (second). `keys`, a tuple of
+    spin strings, limits W to those blocks on the SPIN_BLOCKED backend."""
+    # the factors -1/2 and 1/2 scale y1 (o*v) rather than the doubles (o^2 v^2)
+    yh = 0.5 * y1
+    ym = -yh
+    W = (_p_ab(be.ein('ijka,kb->ijab', gb['ooov'], ym), keys)
+         + _p_ij(_ovvv_ijab(be, gb, ym), keys))
     if order < 2:
         return W
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
-    u_vv = be.ein('kacd,kd->ac', gb['ovvv'], y1)
-    w_oo = be.ein('klic,lc->ki', gb['ooov'], y1)
-    W = W + 0.5 * _p_ab(be.ein('ijka,kb->ijab', ZA, y1)
-                        + be.ein('ijbc,ac->ijab', t1, u_vv))
-    return W + 0.5 * _p_ij(be.ein('jcab,ic->ijab', ZB, y1)
-                           + be.ein('jkab,ki->ijab', t1, w_oo))
+    u_vv = be.ein('kacd,kd->ac', gb['ovvv'], yh)
+    w_oo = be.ein('klic,lc->ki', gb['ooov'], yh)
+    W = W + _p_ab(be.ein('ijka,kb->ijab', ZA, yh)
+                  + be.ein('ijbc,ac->ijab', t1, u_vv), keys)
+    return W + _p_ij(be.ein('jcab,ic->ijab', ZB, yh)
+                     + be.ein('jkab,ki->ijab', t1, w_oo), keys)
 
 
-def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None):
-    """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order)."""
+def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None, keys=None):
+    """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order); `keys` as in
+    sigma_d_from_s."""
     vk = vk if vk is not None else VvvvKernels(be, gb.get('vvvv'))
-    W = be.scale(Y, d_ijab)
+    W = be.scale(_only(Y, keys), d_ijab)
     if order < 1:
         return W
-    W = W + 0.5 * (vk.ladder(Y) + be.ein('ijkl,klab->ijab', gb['oooo'], Y))
-    return W - _p_ij(_p_ab(be.ein('kaic,jkbc->ijab', gb['ovov'], Y)))
+    W = W + 0.5 * (_only(vk.ladder(Y), keys)
+                   + _only(be.ein('ijkl,klab->ijab', gb['oooo'], Y), keys))
+    return W - _p_ij(_p_ab(be.ein('kaic,jkbc->ijab', gb['ovov'], Y)), keys)
 
 
-def _p_ab(X):
-    return X - X.transpose(0, 1, 3, 2)
+def _ovvv_ia(be, gb, X):
+    """sum_jbc <ja||bc> X_ijbc -> (i, a). A closed-shell DF gb carries <ja|bc>
+    as 'ovvv_ajbc' and takes ee_spin_blocks.ovvv_ia; any other gb contracts
+    its 'ovvv' block."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ovvv_ia(gb['ovvv_ajbc'], X)
+    return be.ein('jabc,ijbc->ia', gb['ovvv'], X)
 
 
-def _p_ij(X):
-    return X - X.transpose(1, 0, 2, 3)
+def _ovvv_ijab(be, gb, x):
+    """sum_c <ic||ab> x_jc -> (i, j, a, b), routed as _ovvv_ia."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ovvv_ijab(gb['ovvv_ajbc'], x)
+    return be.ein('icab,jc->ijab', gb['ovvv'], x)
+
+
+def _p_ab(X, keys=None):
+    return _only(X, keys) - _only(X.transpose(0, 1, 3, 2), keys)
+
+
+def _p_ij(X, keys=None):
+    return _only(X, keys) - _only(X.transpose(1, 0, 2, 3), keys)
+
+
+def _only(X, keys):
+    """X's spin blocks named in `keys`, or X itself when keys is None. An SB's
+    transpose holds views, so the blocks left out are never computed."""
+    if keys is None:
+        return X
+    return _sb.SB({k: X.get(k) for k in keys})

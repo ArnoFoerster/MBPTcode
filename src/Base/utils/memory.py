@@ -35,8 +35,8 @@ def allocation_max_memory_mb(fraction=ALLOCATION_MEMORY_FRACTION, default=None):
     died in the DF build on a node with hundreds of GB free; inside a SLURM
     job (`SLURM_JOB_ID` set), that case reads the node's own physical memory
     instead. Off SLURM (no `SLURM_JOB_ID`), neither variable set still returns
-    `default` unchanged, so a laptop run keeps whatever pyscf's own default or
-    a caller's own value was. The per-node figure and a whole node's physical
+    `default` unchanged, so a run outside SLURM keeps whatever pyscf's own
+    default or a caller's own value was. The per-node figure and a whole node's physical
     memory are the NODE's, shared by every rank SLURM places on it
     (`tasks_per_node`), so with eight ranks per node each process targets an
     eighth; the per-CPU form is already per task.

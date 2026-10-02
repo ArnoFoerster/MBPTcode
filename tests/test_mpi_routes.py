@@ -149,21 +149,28 @@ Checks (path; standard):
     width beyond the X_bar and D_bar handed in, and the adjoint's ledger at
     this rank's tiles, the metric root on rank 0 alone (exact)
   * the state-pair surface on sliced factors with the grid BSE adjoint,
-    `bse_adjoint='grid'` (context), both adjoints handed ONE reference and ONE
-    displaced mean field: its composed force and energy against the default
-    adjoint's on the same ranks (anchored: `COMPOSED_GRAD_K` times what a
-    repeat of the sliced surface moves them in the section above, the force
-    at the excitation force's gate and the energy at one ulp at the least,
-    since each surface's chains run pyscf's K builds for themselves), every
-    rank rank 0's (bitwise), and no
-    three-index block reachable from the chain or its forward pass at the
-    reverse call, where the default route's cache is found (exact); at that
-    call the grid adjoint's four Casida-level seeds, computed over the ranks,
-    the bits of the same kernel run serially on the gathered factors and
-    every rank's rank 0's (bitwise), and the kernel traced line by line in
+    `bse_adjoint='grid'`, and with the default one (context), both handed ONE
+    reference and ONE displaced mean field with pyscf's OpenMP on one thread,
+    each route gated over the ranks against its own serial kernel and never
+    against the other: the two surfaces' energy and root (bitwise: one
+    forward pass, the adjoint is all that differs); at the reverse call the
+    grid adjoint's four Casida-level seeds, computed over the ranks, the bits
+    of the same kernel run serially on the gathered factors, and the composed
+    force the bits of the same fold of those serial seeds on the same pieces,
+    every rank's rank 0's (bitwise); the default adjoint's seeds the bits of
+    `bse_cache` and `bse_backward` run serially on the gathered factors, its
+    force every rank's rank 0's (bitwise); no three-index block reachable
+    from the chain or its forward pass at the reverse call, where the default
+    route's cache is found (exact); the grid kernel traced line by line in
     every frame it enters: no array with the whole grid on an axis outside
     the one named boundary gather of X_bar and D_bar
-    (`adjoints_at_the_boundary`), no whole-factor gather (exact)
+    (`adjoints_at_the_boundary`), no whole-factor gather (exact). The two
+    routes' forces are printed beside each other, not gated: their seeds
+    agree to a few ulp, the fold's exact image of the difference is 1e-16
+    Ha/Bohr, and what the computed forces differ by is the fold's own
+    rounding, a fit adjoint of Gram condition 2e8 carrying last-bit input
+    changes to 1e-8 Ha/Bohr; the routes' identity is gated serially, on the
+    seeds, at a derived rounding bound (tests/test_bse_grid_adjoint.py)
   * the lockstep counters of the whole run: calls and bytes identical on every
     rank (exact; `lockstep` is a collective)
   * ONE audited chain forward, `distributed(comm, audit=True)`, on a mean field
@@ -185,7 +192,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import scipy.linalg
-from pyscf import dft, gto, scf
+from pyscf import dft, gto, lib, scf
 try:
     from threadpoolctl import threadpool_limits
 except ImportError:  # without it the excitation gate keeps its bare floor
@@ -223,6 +230,7 @@ from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_frequency_rows, polarizability_projected_tau,
     polarizability_tiles, split_branches, wave_items)
 from src.gradients import factor_chain, isdf_derivatives
+from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
@@ -248,9 +256,9 @@ warnings.simplefilter('ignore')
 #: itself is `COMPOSED_GRAD_K` times the re-association scatter measured on
 #: the machine at hand (`one_thread_scatter`) wherever that is larger, because
 #: the composed force scatters by more than this on a machine with more
-#: threads than the laptop this number was read on: 6.0e-9 over two ranks
+#: threads than the workstation this number was read on: 6.0e-9 over two ranks
 #: there, 1.57e-8 over one rank per node on two cluster nodes at 16 threads,
-#: against a 1.8e-8 one-thread repeat of the SERIAL force on the laptop
+#: against a 1.8e-8 one-thread repeat of the SERIAL force on the workstation
 #: (water/cc-pVDZ). Held alone, a number read on one machine gates the other
 #: machine's BLAS rather than its distribution.
 COMPOSED_GRAD_FLOOR = 1.5e-8
@@ -266,7 +274,7 @@ SIGMA_REL = 1e-10
 #: read sop adjoints 5.0e-12, 2.1e-10 and 4.8e-9 from serial, each run on a
 #: freshly converged mean field. So the bar is measured, not fixed: the root,
 #: Z and adjoints of the serial sop gradient with X moved one ulp per element
-#: (`sop_anchor`). On the laptop fixture that anchor is 2.1e-13 Ha, 5.0e-12
+#: (`sop_anchor`). On the workstation fixture that anchor is 2.1e-13 Ha, 5.0e-12
 #: and 5.8e-11, and the last-bit wc change a shape-dependent GEMM made before
 #: the rows were cut from the serial block moved the answer by 0.63 of it at
 #: the median and 2.5 at most over 41 draws; five covers that twice and fails
@@ -379,6 +387,17 @@ class Gate:
         return 0 if not failures else 1
 
 
+#: `SimulatedComm`'s own methods: under real MPI a reduction or a broadcast is
+#: one opaque C call with no Python frame to trace at all. Only the simulated
+#: stand-in runs them as Python, and while one is on the stack its locals can
+#: alias ANOTHER rank's buffer through the shared `_SimulatedWorld` state (the
+#: loop variable a reduce-scatter sums another rank's deposited partial into,
+#: e.g.) -- memory that rank never held, made visible only by the threads
+#: sharing one process. The census must not count what it sees through them.
+SIMULATED_COMM_CODES = frozenset(
+    fn.__code__ for fn in vars(SimulatedComm).values() if inspect.isfunction(fn))
+
+
 class HeldCensus:
     """This thread's census of the arrays bound to a name in every frame
     between a call of `root` and the running line: the shapes found whole
@@ -427,6 +446,8 @@ class HeldCensus:
             return
         found = {}
         for f in chain + [frame]:
+            if f.f_code in SIMULATED_COMM_CODES:
+                continue                       # the stand-in, not the rank
             for v in list(f.f_locals.values()):
                 self.visit(v, found)
         for a in found.values():
@@ -842,6 +863,25 @@ def bse_routes(gate, mf, mol, F):
     gate.check(d_eps < 1e-9, 'GW diagonal agrees', f'|d| = {d_eps:.2e} eV')
     same_davidson(gate, 'BSE [context]', om_d, info_d)
 
+    # The probe runs after the Davidson, on its action: 'sign' is proven by
+    # Rayleigh-Ritz on the roots' span, one block action per root, whose
+    # decision is rank 0's on every rank, and no probe mode touches a root.
+    om_g, _, _, info_g = solve_bse_isdf(mf, mol, nocc, nroots=3, probe='sign',
+                                        progress=False, factors=F)
+    _, _, _, info_gs = serial(solve_bse_isdf, mf, mol, nocc, nroots=3,
+                              probe='sign', progress=False, factors=F)
+    st = info_g['stats']
+    seen = gate.everyone((info_g['min_eig_amb'], st.get('probe_source'),
+                          st.get('probe_matvecs')))
+    d_sign = abs(info_g['min_eig_amb'] - info_gs['min_eig_amb'])
+    gate.check(len(set(seen)) == 1 and seen[0][1:] == ('roots', len(om_g))
+               and d_sign < 1e-9 and np.array_equal(om_g, om_d),
+               "min eig(A-B) 'sign' [context] from the roots' span, one block "
+               "action per root, rank 0's on every rank, the roots "
+               "probe=True's",
+               f'{seen[0][1]}, {seen[0][2]} action(s), |d| vs serial '
+               f'{d_sign:.2e}')
+
     # THE RANKS NEED NOT ARRIVE WITH THE SAME NUMBERS. Across nodes a rank's
     # own SCF and fit do not repeat bit for bit; here rank != 0 is handed a
     # spectrum shifted by 1e-3 Ha and factors scaled by 1 + 1e-6 -- far more
@@ -960,7 +1000,9 @@ def sliced_factors_routes(gate, mf, mol, F):
                f'max|d| {np.abs(om_s - om_w).max() * HARTREE_TO_EV:.2e} eV')
     same_davidson(gate, 'BSE [context] on sliced factors', om_s, info_s)
     gathers = gate.everyone(dict(Fs.gathers))
-    once = {'D': 4, 'X_o': 4, 'X_v': 2, 'X_ao': 2}
+    # the window; the BSE's GW diagonal; its Davidson's action, which the
+    # probe after it reuses
+    once = {'D': 3, 'X_o': 3, 'X_v': 2, 'X_ao': 2}
     gate.check(all(g == once for g in gathers),
                'each whole-array gather once per solve or sweep, every rank',
                f'{gathers[0]} on rank 0')
@@ -1517,8 +1559,7 @@ def sliced_chain_routes(gate, mol, gate_bar):
     `SLICED_SAMPLES` times on the same mean fields, the largest difference
     between two evaluations of one layout, and the force, the energy and the
     root are gated at `COMPOSED_GRAD_K` times it (the force at `gate_bar` at
-    the least); every rank's force is rank 0's bitwise. Returns that spread of
-    the force and the energy, None on one rank.
+    the least); every rank's force is rank 0's bitwise.
     """
     gate.section('the state-pair surface on sliced factors')
     if gate.size == 1:
@@ -1589,7 +1630,6 @@ def sliced_chain_routes(gate, mol, gate_bar):
     gate.check(all(g == SLICED_CHAIN_GATHERS for g in gathers),
                'each whole-array gather of the composed force once per sweep '
                'or solve, every rank', f'{gathers[0]} on rank 0')
-    return {'force': rep_g, 'energy': rep_e}
 
 
 def reassociated_fit(mol, layout):
@@ -1925,11 +1965,20 @@ def row_fit_chain_routes(gate, mol):
                f'{adjoint_faults}')
 
 
-def grid_adjoint_routes(gate, mol, gate_bar, repeat):
-    """The state-pair surface on sliced factors with the grid BSE adjoint
-    against the same surface with the default one, on the same ranks and on
-    ONE reference and ONE displaced mean field; `repeat` is what a repeat of
-    the sliced surface moved its force and energy (`sliced_chain_routes`)."""
+def grid_adjoint_routes(gate, mol):
+    """The state-pair surface on sliced factors with the grid BSE adjoint and
+    with the default one, each over the ranks against its own serial kernel,
+    on ONE reference and ONE displaced mean field.
+
+    The two routes are never compared with each other here. Their seeds agree
+    to a few ulp, but the fold carries the last bits of its input to 1e-8
+    Ha/Bohr through the fit adjoint (Gram condition 2e8), so a force-level
+    bar between them is a draw of that rounding; their identity is gated
+    serially on the seeds (tests/test_bse_grid_adjoint.py). Over the ranks
+    each route is exact: the seeds are the serial kernel's bits on the
+    gathered factors, and the grid route's force is the fold of exactly
+    those serial seeds.
+    """
     gate.section('the grid BSE adjoint on sliced factors')
     if gate.size == 1:
         gate.info('one rank: sliced=True lays nothing out')
@@ -1939,6 +1988,13 @@ def grid_adjoint_routes(gate, mol, gate_bar, repeat):
     mf_ref = chain_scf(mol)
     here = gto.M(atom=WATER_DISPLACED, basis='cc-pvdz', verbose=0)
     mf_here = chain_scf(here)
+    # pyscf's OpenMP K builds add their partials in thread-arrival order; on
+    # one thread two surfaces' forward passes and two folds repeat their bits.
+    # Every rank reads the setting before any sets it (simulated ranks share
+    # it) and restores it after every rank is done.
+    threads = lib.num_threads()
+    gate.everyone(None)
+    lib.num_threads(1)
     out = {}
     for adjoint in ('explicit', 'grid'):
         surface = RPABSESurface(mol, chain_scf, spin='singlet', mf=mf_ref,
@@ -1949,58 +2005,132 @@ def grid_adjoint_routes(gate, mol, gate_bar, repeat):
         three = {tuple(sorted((ex.naux, nocc, nmo - nocc))),
                  tuple(sorted((ex.naux, nocc, nocc)))}
         found = set()
+        seeds = []
         fold = ex._fold_to_nuclei
 
-        def probed(pieces, *seeds, fold=fold, ex=ex, three=three,
-                   found=found):
+        def probed(pieces, *seeds_in, fold=fold, ex=ex, three=three,
+                   found=found, seeds=seeds):
             # what the reverse pass holds beside the seeds: chain and forward
             found.update(a.shape for a in reachable((ex, pieces))[0]
                          if tuple(sorted(a.shape)) in three
                          or (a.ndim == 2 and tuple(sorted(a.shape)) ==
                              tuple(sorted((ex.naux, nocc * (nmo - nocc))))))
-            return fold(pieces, *seeds)
+            result = fold(pieces, *seeds_in)
+            if seeds and 'ref' in seeds[-1]:
+                # the same fold of the serial kernel's seeds, handed in whole
+                again = fold(pieces, *[np.array(a, copy=True)
+                                       for a in seeds[-1]['ref']])
+                seeds[-1]['refold'] = (np.asarray(result[0]),
+                                       np.asarray(again[0]))
+            return result
 
         ex._fold_to_nuclei = probed
-        seeds = []
         if adjoint == 'grid':
             probe_grid_seeds(ex, seeds)
-        g, e, _ = surface.total_gradient(here, mf_here)               # context
-        out[adjoint] = (np.asarray(g), e, sorted(found), seeds)
-    g_d, e_d, found_d, _ = out['explicit']
-    g_g, e_g, found_g, seeds = out['grid']
-    # the forward pass is one code for both adjoints, so what moves the energy
-    # between them is the chains' own pyscf work, which the repeat measures
-    bar_g = max(gate_bar, COMPOSED_GRAD_K * repeat['force'])
-    bar_e = COMPOSED_GRAD_K * max(repeat['energy'], np.spacing(abs(e_d)))
-    d = np.abs(g_g - g_d).max()
-    d_e = abs(e_g - e_d)
-    n = gate.distinct(g_g, np.atleast_1d(e_g))
-    gate.check(d <= bar_g and d_e <= bar_e and n == 1,
-               f'state-pair force [context] with the grid BSE adjoint on '
-               f'sliced factors over {gate.size} ranks == the default '
-               'adjoint on one mean field within the anchored bar, every '
+        else:
+            probe_explicit_seeds(ex, seeds)
+        g, e, diags = surface.total_gradient(here, mf_here)           # context
+        out[adjoint] = (np.asarray(g), e, diags['omega'], sorted(found),
+                        seeds)
+    gate.everyone(None)
+    lib.num_threads(threads)
+    g_d, e_d, om_d, found_d, seeds_d = out['explicit']
+    g_g, e_g, om_g, found_g, seeds_g = out['grid']
+    gate.check(e_g == e_d and om_g == om_d,
+               'grid and default BSE adjoints [context] share the forward '
+               'pass on one mean field: energy and root bitwise',
+               f'dE {abs(e_g - e_d):.2e} ({ulps(e_g, e_d):.0f} ulp), dOmega '
+               f'{abs(om_g - om_d):.2e} Ha ({ulps(om_g, om_d):.0f} ulp)')
+    n = gate.distinct(*[a for call in seeds_g for a in call['seeds']])
+    gate.check(seeds_g and all(call['same'] for call in seeds_g) and n == 1,
+               f'grid BSE adjoint seeds [context] over {gate.size} ranks == '
+               'the serial kernel on the gathered factors (bitwise), every '
                "rank rank 0's",
-               f'|d| {d:.2e} = {d / bar_g:.2f} of {bar_g:.2e} Ha/Bohr, dE '
-               f'{d_e:.2e} of {bar_e:.2e} Ha (bitwise {e_g == e_d}), '
-               f'{n} distinct')
+               f'{len(seeds_g)} reverse call(s), worst '
+               f"{max((c['ulp'] for c in seeds_g), default=0):.3g} ulp of "
+               f'the largest element, {n} distinct')
+    folds = [c['refold'] for c in seeds_g if 'refold' in c]
+    n = gate.distinct(g_g, np.atleast_1d(e_g))
+    gate.check(folds and all(np.array_equal(*f) for f in folds) and n == 1,
+               f'state-pair force [context] with the grid BSE adjoint over '
+               f'{gate.size} ranks == the same fold of the serial kernel\'s '
+               "seeds (bitwise), every rank rank 0's",
+               f'{len(folds)} fold(s), |d| '
+               f'{max((np.abs(a - b).max() for a, b in folds), default=0):.2e}'
+               f' Ha/Bohr, {n} distinct')
+    n = gate.distinct(*[a for call in seeds_d for a in call['seeds']])
+    n_g = gate.distinct(g_d, np.atleast_1d(e_d))
+    gate.check(seeds_d and all(call['same'] for call in seeds_d)
+               and n == 1 and n_g == 1,
+               f'default BSE adjoint seeds [context] over {gate.size} ranks '
+               '== bse_cache and bse_backward run serially on the gathered '
+               "factors (bitwise), its force every rank rank 0's",
+               f'{len(seeds_d)} reverse call(s), worst '
+               f"{max((c['ulp'] for c in seeds_d), default=0):.3g} ulp of "
+               f'the largest element, {n} distinct seeds, {n_g} distinct '
+               'forces')
+    gate.info(f'the two adjoints\' forces differ by '
+              f'{np.abs(g_g - g_d).max():.2e} Ha/Bohr, their seeds by '
+              f'{seed_ulps(seeds_g, seeds_d)}: the fold\'s own rounding, '
+              'gated serially on the seeds (tests/test_bse_grid_adjoint.py)')
     gate.check(found_g == [] and found_d != [],
                'no three-index block reachable from the grid-adjoint chain '
                "at its reverse call, where the default route's cache is",
                f'grid {found_g}, default {found_d}')
-    n = gate.distinct(*[a for call in seeds for a in call['seeds']])
-    gate.check(seeds and all(call['same'] for call in seeds) and n == 1,
-               f'grid BSE adjoint seeds [context] over {gate.size} ranks == '
-               'the serial kernel on the gathered factors (bitwise), every '
-               "rank rank 0's",
-               f'{len(seeds)} reverse call(s), {n} distinct')
-    gate.check(seeds and all(call['whole'] == [] and call['boundary'] == 1
-                             and call['gathers'] == {} for call in seeds),
+    gate.check(seeds_g and all(call['whole'] == [] and call['boundary'] == 1
+                               and call['gathers'] == {}
+                               for call in seeds_g),
                'no whole-grid array at any line of the grid adjoint on this '
                'rank outside its one named boundary gather of X_bar and '
                'D_bar, no whole-factor gather inside it',
                '; '.join(f"whole {call['whole']}, boundary "
                          f"{call['boundary']}, gathers {call['gathers']}"
-                         for call in seeds))
+                         for call in seeds_g))
+
+
+def ulps(a, b):
+    """max |a - b| in ulp of max |b|."""
+    b = np.asarray(b)
+    return float(np.abs(np.asarray(a) - b).max()
+                 / np.spacing(max(np.abs(b).max(), np.finfo(float).tiny)))
+
+
+def seed_ulps(grid, default):
+    """The two routes' first eps_bar, X_bar, D_bar and symmetric W_bar apart,
+    in ulp of the default's."""
+    if not grid or not default:
+        return 'no reverse call'
+    (e, x, d, w), (e0, x0, d0, w0) = grid[0]['seeds'], default[0]['seeds']
+    return (f'{ulps(e, e0):.0f} / {ulps(x, x0):.0f} / {ulps(d, d0):.0f} / '
+            f'{ulps(w, 0.5 * (w0 + w0.T)):.0f} ulp')
+
+
+def probe_explicit_seeds(ex, log):
+    """Wrap the default chain's Casida-level adjoint: compare its seeds with
+    `bse_cache` and `bse_backward` run serially on the gathered factors; one
+    record per call into `log`."""
+    seeds_of = ex._casida_seeds
+
+    def probed(pieces, n, m=None):
+        out = seeds_of(pieces, n, m)
+        x, d, eq, w, no, _, xn, yn = ex._casida_args(pieces)
+        X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
+        kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
+        with distributed(None):
+            cache = bse_cache(X, D, eq, w, no, **kw)
+            ref = (bse_backward(n, X, D, eq, w, no, cache, xn, yn,
+                                **ex._tile_kw()) if m is None else
+                   interstate_backward(m, n, X, D, eq, w, no, cache, xn, yn,
+                                       **ex._tile_kw()))
+        # copies: the fold adds into X_bar and D_bar in place
+        seeds = tuple(np.array(a, copy=True) for a in out)
+        log.append(dict(seeds=seeds,
+                        same=all(np.array_equal(a, b)
+                                 for a, b in zip(seeds, ref)),
+                        ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
+        return out
+
+    ex._casida_seeds = probed
 
 
 def probe_grid_seeds(ex, log):
@@ -2008,7 +2138,8 @@ def probe_grid_seeds(ex, log):
     line by line for arrays with the whole grid on an axis, outside the
     boundary gather `adjoints_at_the_boundary`, count the factor gathers it
     makes, and compare its seeds with the same kernel run serially on the
-    gathered factors; one record per call into `log`."""
+    gathered factors, which the record keeps for the fold; one record per
+    call into `log`."""
     seeds_of = ex._casida_seeds
     kernel = os.path.join(SRC, 'SingleReference', 'LinearResponse',
                           'isdf_bse_adjoint.py')
@@ -2057,10 +2188,13 @@ def probe_grid_seeds(ex, log):
                    if m is None else
                    isdf_interstate_backward(m, n, X, D, eq, w, no, xn, yn,
                                             **kw))
+        # copies, as the default route's probe takes them
+        seeds = tuple(np.array(a, copy=True) for a in out)
         log.append(dict(whole=sorted(whole), boundary=len(entered),
-                        gathers=grew, seeds=out,
+                        gathers=grew, seeds=seeds, ref=ref,
                         same=all(np.array_equal(a, b)
-                                 for a, b in zip(out, ref))))
+                                 for a, b in zip(seeds, ref)),
+                        ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
     ex._casida_seeds = probed
@@ -2164,9 +2298,9 @@ def main(comm):
 
         mf_grad, g_ex, gate_bar = chain_end_to_end(gate, mol)
         build_only_factory(gate, mol, mf_grad, g_ex, gate_bar)
-        repeat = sliced_chain_routes(gate, mol, gate_bar)
+        sliced_chain_routes(gate, mol, gate_bar)
         row_fit_chain_routes(gate, mol)
-        grid_adjoint_routes(gate, mol, gate_bar, repeat)
+        grid_adjoint_routes(gate, mol)
 
         lockstep_counters(gate, lockstep_stats(reset=True))
         audited_forward(gate, mol)

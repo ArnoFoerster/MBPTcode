@@ -22,7 +22,10 @@ Gated here:
     3-root solves by the dense completion and the 2-root ones without it;
     `solve_bse_df` itself at 3 roots does the same;
   * at 2 and 3 simulated ranks every rank returns rank 0's roots and vectors
-    bitwise, and rank 0 the serial ones, since the DF action is not divided;
+    bitwise, from one iteration, the DF action not being divided, and rank 0
+    the serial roots to the Davidson's resolution, its trial space being cut
+    by pair rows over the ranks, which re-associates the degenerate partner
+    test at the exhausted pair space and can change the path there;
   * the other pair-space failure, real_eig's projected (A-B) block breaking
     down after the partner test kept 3 pairs for the last one left (water/
     6-31G BSE@HF, 4 roots, conv_tol 1e-5), is completed densely too;
@@ -36,6 +39,12 @@ Gated here:
     corrections, which moves the model's bits by design (measured 6.0e-14 Ha
     on the roots and one eigenvector's sign) and leaves water's alone. The
     completion acts on failed solves only, which is what keeps them;
+  * the reproductions above, the breakdown and the baseline's solves divide
+    by the bare d they were found with, asked for: the default
+    preconditioner is now the screened diagonal, on which the reproduction
+    and `solve_bse_df` converge to the dense roots without exhausting the
+    pair space, and the breakdown reaches its dense roots too -- gated as
+    well;
   * with the completion unavailable (a pair space above BSE_DENSE_MAX_NOV)
     the warning names the pair space and advises fewer roots, a larger guess
     or the dense solver, and never a looser tolerance.
@@ -65,17 +74,21 @@ from src.Base.constants import BSE_DAVIDSON_CONV_TOL
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.LinearResponse import davidson
+from src.SingleReference.LinearResponse import davidson, trial_space
 from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
                                                          solve_casida_davidson)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
+from tests.test_distributed_fit_mpi import relative, roots_resolution
 
 WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
 #: The geometry of the breakdown case and of the bitwise one.
 WATER_C2V = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 CASES = [(nroots, guess_factor) for nroots in (2, 3) for guess_factor in (1, 2)]
 SIZES = [2, 3]
+#: Pair rows per tile of the Davidson's distributed trial space in the rank
+#: gate: the reproduction's 40 pairs fall into 10 tiles.
+SPLIT_TILE = 4
 #: Hartree. The Davidson's own default residual, the breakdown case's.
 DEFAULT_CONV_TOL = inspect.signature(
     solve_casida_davidson).parameters['conv_tol'].default
@@ -116,6 +129,10 @@ out = {{}}
 # and only the values are compared.
 TIMED = 'timings' in inspect.signature(solve_casida_davidson).parameters
 
+# The parent's Davidson divided by d; this tree's default is the screened
+# diagonal, so it is asked for d where it takes the keyword.
+BARE = ({{'preconditioner': 'bare'}} if 'preconditioner' in
+        inspect.signature(davidson._run_davidson).parameters else {{}})
 
 def timed(t):
     return dict(timings=t) if TIMED else {{}}
@@ -142,8 +159,8 @@ for name, tol in (('water_default', {{}}),
     t, stats = {{}}, {{}}
     record(name, *solve_casida_davidson(lr, nocc, nroots=5,
                                         polarizability='BSE', W_aux=w_aux,
-                                        stats=stats, **timed(t), **tol), t,
-           stats)
+                                        stats=stats, **timed(t), **tol,
+                                        **BARE), t, stats)
 
 # test_davidson_residual_floor's model: A = D + 2 V^T V, B = 2 V^T V.
 rng = np.random.default_rng(7)
@@ -161,7 +178,8 @@ def apply_AB(z):
 t, stats = {{}}, {{}}
 record('model', *davidson._run_davidson(apply_AB, diag, 5,
                                         BSE_DAVIDSON_CONV_TOL, 100, None,
-                                        stats=stats, **timed(t)), t, stats)
+                                        stats=stats, **timed(t), **BARE), t,
+                                        stats)
 np.savez({out!r}, **out)
 '''
 
@@ -246,7 +264,11 @@ def dense_roots(lr, nocc, w_aux):
 
 
 def solve(small, nroots, guess_factor, comm=None, **kw):
-    """(omega, X, Y, stats) of the reproduction on this rank's own copies."""
+    """(omega, X, Y, stats) of the reproduction on this rank's own copies,
+    divided by the bare d unless `kw` asks otherwise: the default
+    preconditioner is now the screened diagonal, on which the reproduction
+    converges without exhausting its pair space."""
+    kw.setdefault('preconditioner', 'bare')
     lr = LinearResponseSolver(np.array(small['eps']),
                               coeff_df=np.array(small['coeff']),
                               spin_mode='restricted')
@@ -294,13 +316,15 @@ def test_the_small_pair_space_converges_to_the_dense_roots(small, serial,
 
 def test_solve_bse_df_completes_the_reproduction(small):
     """The entry point the stall was found through: no warning, the dense
-    roots, and the record of how they were reached."""
+    roots, and the record of how they were reached -- on the bare d it was
+    found with, the default preconditioner now being the screened diagonal."""
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('always')
         omega, _, _, info = solve_bse_df(small['mf'], small['mol'],
                                          small['nocc'], nroots=3,
                                          conv_tol=BSE_DAVIDSON_CONV_TOL,
-                                         progress=False)
+                                         progress=False,
+                                         preconditioner='bare')
     assert not [w for w in record if 'Davidson' in str(w.message)]
     assert np.abs(omega - small['dense'][:3]).max() <= DENSE_TOL
     assert info['stats']['davidson_dense_completion']
@@ -310,10 +334,22 @@ def test_solve_bse_df_completes_the_reproduction(small):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('nroots,guess_factor', CASES)
 def test_every_rank_returns_rank_zeros_roots(small, serial, size, nroots,
-                                             guess_factor):
-    """Rank 0's roots and vectors on every rank, bitwise, and the serial ones
-    on rank 0: the DF action runs whole on every rank on lockstepped inputs,
-    and the dense completion builds its A and B through it."""
+                                             guess_factor, monkeypatch):
+    """Rank 0's roots and vectors on every rank, bitwise, from rank 0's
+    iteration: the DF action runs whole on every rank on lockstepped inputs,
+    and the dense completion builds its A and B through it.
+
+    Rank 0's roots are held to the Davidson's resolution of the serial ones,
+    not to their bits, and its path is not the serial one: over ranks the
+    trial space is cut by pair rows (`trial_space.real_eig_rows`), here on
+    SPLIT_TILE tiles that give every rank rows of its own, and its sums over
+    the pair index re-associate with the rank count. Where the pair space is
+    exhausted the partner test is degenerate -- the last corrections are
+    their own partners, |w| = 1 to rounding -- so a re-associated overlap
+    may keep one direction the serial solve drops: at 2 ranks, 3 roots, the
+    solve then fills the last 6 pairs one a cycle and converges on the
+    complete space instead of completing densely, on the same roots."""
+    monkeypatch.setattr(trial_space, 'DAVIDSON_PAIR_TILE', SPLIT_TILE)
     out = run_simulated(lambda comm: solve(small, nroots, guess_factor, comm),
                         size)
     om0, X0, Y0, st0 = out[0]
@@ -321,24 +357,58 @@ def test_every_rank_returns_rank_zeros_roots(small, serial, size, nroots,
     assert r.max() <= BSE_DAVIDSON_CONV_TOL, r
     assert np.abs(om0 - small['dense'][:nroots]).max() <= DENSE_TOL
     om_s, X_s, Y_s, st_s = serial[(nroots, guess_factor)]
-    assert bitwise(om0, om_s) and bitwise(X0, X_s) and bitwise(Y0, Y_s)
+    assert relative(om0, om_s) <= roots_resolution(small['eps'],
+                                                   small['nocc'], om_s)
     for omega, X, Y, stats in out:
         assert bitwise(omega, om0) and bitwise(X, X0) and bitwise(Y, Y0)
         for key in ('davidson_vind_calls', 'davidson_block_actions',
                     'davidson_dense_completion'):
-            assert stats[key] == st0[key] == st_s[key], key
+            assert stats[key] == st0[key], key
 
 
 def test_a_breakdown_at_the_pair_space_limit_is_completed_densely(breakdown):
     """real_eig's projected (A-B) block lost definiteness after the partner
     test kept 3 pairs for the 1 left; (A-B) itself is positive definite, so
-    the dense completion, not the instability error, is the answer."""
+    the dense completion, not the instability error, is the answer. On the
+    bare d the breakdown was found with, asked for: the default
+    preconditioner is now the screened diagonal."""
     b = breakdown
     stats = {}
     omega, X, Y = solve_casida_davidson(b['lr'], b['nocc'], nroots=4,
                                         polarizability='BSE', W_aux=b['w_aux'],
-                                        guess_factor=1, stats=stats)
+                                        guess_factor=1, stats=stats,
+                                        preconditioner='bare')
     assert stats['davidson_dense_completion']
+    assert np.abs(omega - b['dense'][:4]).max() <= DENSE_TOL
+    r = residual(b['lr'], b['nocc'], b['w_aux'], omega, X, Y)
+    assert r.max() <= DEFAULT_CONV_TOL
+
+
+@pytest.mark.parametrize('nroots,guess_factor', CASES)
+def test_the_screened_default_converges_to_the_dense_roots(small, breakdown,
+                                                           nroots,
+                                                           guess_factor):
+    """By default -- the screened diagonal -- the reproduction and the
+    breakdown converge to the dense roots, the reproduction without the
+    dense completion, and `solve_bse_df` likewise."""
+    omega, X, Y, stats = solve(small, nroots, guess_factor,
+                               preconditioner=davidson.DAVIDSON_PRECONDITIONER)
+    assert davidson.DAVIDSON_PRECONDITIONER == 'screened'
+    r = residual(small['lr'], small['nocc'], small['w_aux'], omega, X, Y)
+    assert r.max() <= BSE_DAVIDSON_CONV_TOL, r
+    assert np.abs(omega - small['dense'][:nroots]).max() <= DENSE_TOL
+    assert not stats['davidson_dense_completion']
+    if (nroots, guess_factor) != CASES[-1]:
+        return
+    omega, _, _, info = solve_bse_df(small['mf'], small['mol'], small['nocc'],
+                                     nroots=3, conv_tol=BSE_DAVIDSON_CONV_TOL,
+                                     progress=False)
+    assert np.abs(omega - small['dense'][:3]).max() <= DENSE_TOL
+    assert not info['stats']['davidson_dense_completion']
+    b = breakdown
+    omega, X, Y = solve_casida_davidson(b['lr'], b['nocc'], nroots=4,
+                                        polarizability='BSE', W_aux=b['w_aux'],
+                                        guess_factor=1)
     assert np.abs(omega - b['dense'][:4]).max() <= DENSE_TOL
     r = residual(b['lr'], b['nocc'], b['w_aux'], omega, X, Y)
     assert r.max() <= DEFAULT_CONV_TOL
@@ -349,7 +419,9 @@ def test_converging_solves_are_bitwise_the_baseline_commits(converging, case):
     """The completion acts on failed solves only. water/cc-pVDZ fills its 95
     pairs and converges on them, so a rule that acted whenever the space ran
     out would have moved it, and it is bitwise the baseline's; the 500-pair
-    model stays under half its space and never reaches the completion."""
+    model stays under half its space and never reaches the completion. Both
+    trees divide by the bare d, this one asked for it: the default
+    preconditioner is now the screened diagonal."""
     base, cur = converging['baseline'], converging['current']
     assert not bool(cur[f'{case}_dense'])
     space = int(cur[f'{case}_space'])
