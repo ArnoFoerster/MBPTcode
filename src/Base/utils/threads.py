@@ -27,7 +27,7 @@ nothing and costs its entry, 1-2 ms of rescanning the loaded pools. So the
 threshold is IN the context manager rather than at each call site, and every
 caller is free to wrap unconditionally.
 
-What that gate protects is bitwise reproducibility on a laptop. Two threads
+What that gate protects is bitwise reproducibility on a workstation. Two threads
 dropped to one re-associates the sums BLAS itself makes, which is invisible in
 an energy and not invisible to a record compared with `==`: wrapping the SCF of
 a quasiparticle route audit at two threads moved its `xc_correction_eV` by

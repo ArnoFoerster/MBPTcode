@@ -42,7 +42,7 @@ code returns. What the gates here pin:
                      `BLAS_WRAP_MIN_THREADS` there are too few cores for the
                      two pools to contend over, the wrap is its entry cost
                      alone (1-2 ms of rescanning the loaded pools), and it
-                     stays a no-op. That is what keeps a laptop's records
+                     stays a no-op. That is what keeps a workstation's records
                      bitwise -- an SCF wrapped at two threads moved a recorded
                      `xc_correction_eV` by 1e-16 and failed six of the
                      thirteen checks of the frozen record it is compared with.
@@ -176,7 +176,7 @@ def test_the_wrap_sets_one_thread_and_puts_back_what_it_found():
     """One thread inside, the original count outside, raise or no raise.
 
     `min_threads=1` because the mechanics are what is under test here and the
-    ambient count on a laptop is below the threshold that arms the wrap.
+    ambient count on a workstation is below the threshold that arms the wrap.
     """
     before = blas_threads()
     assert before is not None
@@ -240,7 +240,7 @@ def test_a_worker_thread_leaves_the_count_alone():
 def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch):
     """The wrap and the same limit set from outside are the same arithmetic.
 
-    The thread count is faked past the threshold so the wrap arms on a laptop;
+    The thread count is faked past the threshold so the wrap arms on a workstation;
     the reference is the same build under the same limit, set from OUTSIDE.
     """
     monkeypatch.setattr(threads, 'blas_threads', lambda: 16)
@@ -257,7 +257,7 @@ def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch
                     reason='this machine runs enough cores to arm the wrap')
 def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
                                                                     monkeypatch):
-    """The laptop case, bitwise: nothing is limited, so nothing re-associates.
+    """The workstation case, bitwise: nothing is limited, so nothing re-associates.
 
     A route audit compares `xc_correction_eV` with `==` against a frozen
     record, and a two-thread build dropped to one moves it at 1e-16. Below the

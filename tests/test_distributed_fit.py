@@ -53,7 +53,7 @@ SHOWN TO FAIL: a tile edge that follows the rank's share (nk / 2 size points
 in place of the fixed edge) fails the cross-rank gate at all six multi-rank
 points, the one-rank points passing as they must; restored and
 byte-compared. A rank's rows batched into one GEMM (the trailing update, the
-three-centre contraction) passed here: this laptop's MKL gives those rows
+three-centre contraction) passed here: the workstation's MKL gives those rows
 the same bits at every call shape, which OpenBLAS does not, so that class of
 defect shows under tests/test_distributed_fit_mpi.py on the cluster.
 """

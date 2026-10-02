@@ -29,7 +29,7 @@ and vectors, the factors cut by `SlicedFactors.from_whole`:
       other rank's tiles once per pass, three halo and two hand-back row
       exchanges.
 
-Measured on the laptop at 2 threads: every bitwise gate exact; under the
+Measured on a two-thread workstation: every bitwise gate exact; under the
 stand-in the adjoints move 3.9e-6 to 4.2e-6 off the real BLAS and a
 128-point tile moves them 1.7e-6 to 1.8e-6 more, every rank still the
 one-rank run's bits; the replicated adjoint in 128-point tiles moves the

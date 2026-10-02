@@ -59,7 +59,7 @@ rank fitted its tiles at one pool thread and the one-rank handle at the
 process's own count, and at 2, 3 and 8 ranks every tile of both operators' Z
 differed from the one-rank tile, K at 7.1e3 and K_lr at 5.2e4 to 6.1e4
 times its rounding bound (0.2-0.7 without the defect) -- what 16-thread
-OpenBLAS nodes showed, and what no laptop
+OpenBLAS nodes showed, and what no workstation
 gate could: the real `blas_single_threaded` is a no-op below
 BLAS_WRAP_MIN_THREADS (two threads here) and off the main thread (every
 simulated rank). On the shape stand-in alone, the pool left out, the same
@@ -226,7 +226,7 @@ def on_the_node_pool(set_attr):
     place of the process's, every simulated rank the main thread of its own
     process on a node of NODE_THREADS: the real wraps are no-ops below
     BLAS_WRAP_MIN_THREADS (two on a two-thread machine) and off the main thread (every
-    simulated rank), so no laptop run moves a pool without this.
+    simulated rank), so no workstation run moves a pool without this.
 
     set_attr: `monkeypatch.setattr`, or `setattr` in a subprocess."""
     set_attr(threads, 'threadpool_limits', NodePoolLimit)

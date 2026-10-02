@@ -248,9 +248,9 @@ warnings.simplefilter('ignore')
 #: itself is `COMPOSED_GRAD_K` times the re-association scatter measured on
 #: the machine at hand (`one_thread_scatter`) wherever that is larger, because
 #: the composed force scatters by more than this on a machine with more
-#: threads than the laptop this number was read on: 6.0e-9 over two ranks
+#: threads than the workstation this number was read on: 6.0e-9 over two ranks
 #: there, 1.57e-8 over one rank per node on two cluster nodes at 16 threads,
-#: against a 1.8e-8 one-thread repeat of the SERIAL force on the laptop
+#: against a 1.8e-8 one-thread repeat of the SERIAL force on the workstation
 #: (water/cc-pVDZ). Held alone, a number read on one machine gates the other
 #: machine's BLAS rather than its distribution.
 COMPOSED_GRAD_FLOOR = 1.5e-8
@@ -266,7 +266,7 @@ SIGMA_REL = 1e-10
 #: read sop adjoints 5.0e-12, 2.1e-10 and 4.8e-9 from serial, each run on a
 #: freshly converged mean field. So the bar is measured, not fixed: the root,
 #: Z and adjoints of the serial sop gradient with X moved one ulp per element
-#: (`sop_anchor`). On the laptop fixture that anchor is 2.1e-13 Ha, 5.0e-12
+#: (`sop_anchor`). On the workstation fixture that anchor is 2.1e-13 Ha, 5.0e-12
 #: and 5.8e-11, and the last-bit wc change a shape-dependent GEMM made before
 #: the rows were cut from the serial block moved the answer by 0.63 of it at
 #: the median and 2.5 at most over 41 draws; five covers that twice and fails
@@ -379,6 +379,17 @@ class Gate:
         return 0 if not failures else 1
 
 
+#: `SimulatedComm`'s own methods: under real MPI a reduction or a broadcast is
+#: one opaque C call with no Python frame to trace at all. Only the simulated
+#: stand-in runs them as Python, and while one is on the stack its locals can
+#: alias ANOTHER rank's buffer through the shared `_SimulatedWorld` state (the
+#: loop variable a reduce-scatter sums another rank's deposited partial into,
+#: e.g.) -- memory that rank never held, made visible only by the threads
+#: sharing one process. The census must not count what it sees through them.
+SIMULATED_COMM_CODES = frozenset(
+    fn.__code__ for fn in vars(SimulatedComm).values() if inspect.isfunction(fn))
+
+
 class HeldCensus:
     """This thread's census of the arrays bound to a name in every frame
     between a call of `root` and the running line: the shapes found whole
@@ -427,6 +438,8 @@ class HeldCensus:
             return
         found = {}
         for f in chain + [frame]:
+            if f.f_code in SIMULATED_COMM_CODES:
+                continue                       # the stand-in, not the rank
             for v in list(f.f_locals.values()):
                 self.visit(v, found)
         for a in found.values():
