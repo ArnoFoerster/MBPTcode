@@ -7,6 +7,8 @@ import warnings
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.constants import MPI_COUNT_MAX
+
 # mpi4py/ELPA are imported ON DEMAND, never at module import time.
 #
 # WHY (this is not a style preference): `from mpi4py import MPI` runs MPI_Init at
@@ -68,12 +70,27 @@ def _chunk_indices(solver, rank):
 # Both transfers are buffered point-to-point rather than comm.gather/scatter:
 # the pickled collectives cap one message at 2 GB and hold every chunk a second
 # time on rank 0, so neither reaches a Casida matrix of 10^5 pair states.
+# An MPI count is a C int, so a chunk past 2**31 - 1 elements makes Recv raise
+# MPI_ERR_ARG (8 ranks, N > 131071); every chunk goes in pieces of at most
+# MPI_COUNT_MAX elements, the bound mpi_grid's collectives keep.
+
+def _send_pieces(comm, chunk, dest, tag):
+    """Send a chunk, flattened in C order, in pieces of at most MPI_COUNT_MAX."""
+    flat = chunk.reshape(-1)
+    for k in range(0, flat.size, MPI_COUNT_MAX):
+        comm.Send(flat[k:k + MPI_COUNT_MAX], dest=dest, tag=tag)
+
+def _recv_pieces(comm, chunk, source, tag):
+    """Receive _send_pieces' pieces, in send order, into a C-contiguous chunk."""
+    flat = chunk.reshape(-1)          # a view, so the pieces land in chunk
+    for k in range(0, flat.size, MPI_COUNT_MAX):
+        comm.Recv(flat[k:k + MPI_COUNT_MAX], source=source, tag=tag)
 
 def gather_block_cyclic(Z_local, global_N, solver, comm):
     """Gathers distributed block-cyclic matrix Z_local to Rank 0; None elsewhere."""
     rank = comm.Get_rank()
     if rank != 0:
-        comm.Send(np.ascontiguousarray(Z_local), dest=0, tag=1)
+        _send_pieces(comm, np.ascontiguousarray(Z_local), 0, 1)
         return None
     Z_full = np.empty((global_N, global_N), dtype=Z_local.dtype)
     for src in range(comm.Get_size()):
@@ -82,7 +99,7 @@ def gather_block_cyclic(Z_local, global_N, solver, comm):
             chunk = Z_local
         else:
             chunk = np.empty((len(idx_i), len(idx_j)), dtype=Z_local.dtype)
-            comm.Recv(chunk, source=src, tag=1)
+            _recv_pieces(comm, chunk, src, 1)
         Z_full[np.ix_(idx_i, idx_j)] = chunk
     return Z_full
 
@@ -93,7 +110,7 @@ def scatter_block_cyclic(matrix_full, solver, comm):
     if rank != 0:
         idx_i, idx_j = _chunk_indices(solver, rank)
         chunk = np.empty((len(idx_i), len(idx_j)), dtype=dtype)
-        comm.Recv(chunk, source=0, tag=2)
+        _recv_pieces(comm, chunk, 0, 2)
         return chunk
     own = None
     for dest in range(comm.Get_size()):
@@ -102,7 +119,7 @@ def scatter_block_cyclic(matrix_full, solver, comm):
         if dest == 0:
             own = chunk
         else:
-            comm.Send(chunk, dest=dest, tag=2)
+            _send_pieces(comm, chunk, dest, 2)
     return own
 
 _FALLBACK_WARNED = False
