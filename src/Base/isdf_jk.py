@@ -104,6 +104,7 @@ from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    molecular_points_covariant,
                                    optimize_atomic_radii, resolve_isdf_grid,
                                    shipped_radii_lookup, default_auxbasis)
+from src.Base.utils import memory
 
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
 #: one factorization when the caller wants that. 148 points per atom.
@@ -561,7 +562,7 @@ class ISDFJK(df.df.DF):
         if self.z_mode != 'auto':
             return self.z_mode
         nk = self.nk
-        free = (self.max_memory - lib.current_memory()[0]) * 1e6
+        free = (self.max_memory - memory.current_memory_mb()) * 1e6
         # Dense Z plus one row block plus the (nk, nao) buffers; a third of the
         # remaining memory is the budget, so an SCF still has room to breathe.
         return 'dense' if nk * nk * 8 < 0.33 * free else 'factored'
@@ -586,7 +587,7 @@ class ISDFJK(df.df.DF):
         with range_coulomb(self.mol, self.auxmol, om):
             V = self.auxmol.intor('int2c2e', aosym='s1')
 
-        # Resolved ONCE: it reads current_memory(), which the dense branch
+        # Resolved ONCE: it reads the process's memory, which the dense branch
         # then changes, so asking twice can report a mode that was not used.
         mode = self._resolve_z_mode()
         if mode == 'dense':
@@ -602,7 +603,7 @@ class ISDFJK(df.df.DF):
         if self.block:
             return self.block
         nk, nao = self.X.shape
-        free = max((self.max_memory - lib.current_memory()[0]) * 1e6, 2e8)
+        free = max((self.max_memory - memory.current_memory_mb()) * 1e6, 2e8)
         # A row block costs b*nk (the Hadamard argument) and, in factored mode,
         # b*nk again for the rebuilt Z rows.
         b = int(0.25 * free / (2 * nk * 8))

@@ -14,10 +14,30 @@ leaves it unset) size themselves against, so raising it is the whole fix.
 """
 import os
 import re
+import sys
 
 import numpy as np
+from pyscf import lib
 
 from src.Base.constants import ALLOCATION_MEMORY_FRACTION
+
+try:                    # optional: the resident size off Linux
+    import psutil
+except ImportError:
+    psutil = None
+
+
+def current_memory_mb():
+    """MB this process holds (resident), the amount a budget of the whole
+    process (pyscf's `max_memory` convention) has already spent.
+
+    On Linux this is pyscf's `lib.current_memory()` reading of
+    /proc/<pid>/statm. pyscf reports 0 on every other platform, which would
+    leave such a budget untouched there; psutil's resident size is used
+    instead when it is installed, and without it the result is 0 as before."""
+    if sys.platform.startswith('linux') or psutil is None:
+        return lib.current_memory()[0]
+    return psutil.Process().memory_info().rss / 1e6
 
 
 def allocation_max_memory_mb(fraction=ALLOCATION_MEMORY_FRACTION, default=None):

@@ -45,6 +45,15 @@ first works; so `block2` must be imported before `numpy` in any process that
 uses both. `KMP_DUPLICATE_LIB_OK=TRUE` suppresses the abort but can deadlock
 the DMRG sweep.
 
+`psutil` is optional: off Linux, where pyscf cannot read a process's resident
+size, the memory budgets of the ISDF and DF builds and of the EE-ADC Davidson
+(`Base.utils.memory.current_memory_mb`) subtract what the process already holds
+only when it is installed.
+
+```bash
+pip install psutil
+```
+
 `PolarizableSites`' own hand-rolled coupled-dipole response and PCM solvation
 need nothing beyond pyscf.
 

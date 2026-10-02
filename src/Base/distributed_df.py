@@ -187,6 +187,7 @@ from pyscf.lib import logger
 
 from src.Base.constants import DF_EXCHANGE_TRANSIENT_FRACTION
 from src.Base.isdf_jk import ISDFJK, range_coulomb
+from src.Base.utils import memory
 from src.Base.utils.mpi_grid import (broadcast, contiguous_block,
                                      current_comm, exchange_blocks, lockstep,
                                      lockstep_stats, partition, reduce_sum,
@@ -618,7 +619,7 @@ class DistributedDF(df.df.DF):
         self.row_slice = (start, stop)
         nao = mol.nao_nr()
         nao_pair = nao * (nao + 1) // 2
-        left = self.max_memory - lib.current_memory()[0]
+        left = self.max_memory - memory.current_memory_mb()
         need = (stop - start) * nao_pair * 8 / 1e6
         peak = need * (1 + DF_EXCHANGE_TRANSIENT_FRACTION)
         whole = naux * nao_pair * 8 / 1e6

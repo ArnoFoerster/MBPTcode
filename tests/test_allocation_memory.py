@@ -16,12 +16,15 @@ import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import numpy as np
 import pytest
 from pyscf import gto, scf
+from pyscf import lib as pyscf_lib
 
 from src.Base.constants import ALLOCATION_MEMORY_FRACTION
-from src.Base.utils.memory import (allocation_max_memory_mb, describe_df_storage,
-                                   tasks_per_node)
+from src.Base.utils import memory
+from src.Base.utils.memory import (allocation_max_memory_mb, current_memory_mb,
+                                   describe_df_storage, tasks_per_node)
 
 #: SLURM_* variables the parser reads; cleared before every case so a test
 #: run under an actual allocation does not leak into these, and cleared after
@@ -205,6 +208,25 @@ def test_describe_df_storage_without_with_df_is_none():
     assert info['cderi_gb'] is None
     assert info['cderi_in_core'] is None
     assert info['max_memory_mb'] == mf.max_memory
+
+
+
+def test_current_memory_sees_what_the_process_holds():
+    """A budget of the whole process subtracts what it already holds: with a
+    50 MB array resident, current_memory_mb reports at least that (pyscf's
+    /proc reading on Linux, psutil elsewhere)."""
+    if not (sys.platform.startswith('linux') or memory.psutil is not None):
+        pytest.skip('no resident-size source here: neither /proc nor psutil')
+    held = np.ones(50 * 10**6 // 8)
+    held[:] = 2.0
+    assert current_memory_mb() >= 50
+
+
+def test_without_psutil_it_is_pyscfs_reading(monkeypatch):
+    """Without psutil the helper is pyscf's lib.current_memory, exactly what
+    every budget read before, so Linux and a plain install are unchanged."""
+    monkeypatch.setattr(memory, 'psutil', None)
+    assert current_memory_mb() == pyscf_lib.current_memory()[0]
 
 
 if __name__ == '__main__':

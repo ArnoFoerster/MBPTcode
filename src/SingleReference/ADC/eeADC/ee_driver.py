@@ -21,7 +21,6 @@ level in ('adc1', 'adc2', 'adc2x', 'adc3').
 import warnings
 
 import numpy as np
-from pyscf import lib
 from pyscf import scf as _scf
 
 from src.Base.pyscf_interface import (
@@ -30,6 +29,7 @@ from src.Base.pyscf_interface import (
     DFIntegrals)
 from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_r_sigma, ee_r_sigma_df, ee_utils)
+from src.Base.utils import memory
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
 from src.Solvers.davidson import diagonal_seeds, solve_symmetric
 
@@ -290,7 +290,7 @@ def _subspace_memory(mf):
     """MB left for the Davidson subspace: mf.max_memory is the budget of the
     whole process (pyscf's convention), less what it holds after the operator
     build. Zero sends the subspace to disk."""
-    return max(0, mf.max_memory - lib.current_memory()[0])
+    return max(0, mf.max_memory - memory.current_memory_mb())
 
 
 def _channel_basis(n, no, nv, level, sgn):

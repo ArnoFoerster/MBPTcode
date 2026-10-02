@@ -20,14 +20,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import gto, scf
-from pyscf import lib as pyscf_lib
 
+from src.Base.utils import memory
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers import davidson as dav
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 LARGE_MB = 10**6
-HELD_MB = 200       # the process's use, as pyscf.lib.current_memory reports it
+HELD_MB = 200       # the process's use, as memory.current_memory_mb reports it
 TOL_EH = 1e-10      # the two solves differ only in where the subspace is stored
 
 
@@ -53,19 +53,19 @@ def spy_davidson1(seen):
 
 def solve(mf, budget_mb, ncore):
     """Singlet channel, three roots, at mf.max_memory = budget_mb, with the
-    process's use pinned at HELD_MB as pyscf measures it (it reads
-    /proc/<pid>/statm, so on any other platform it reports 0); returns the
-    energies and the max_memory davidson1 received."""
+    process's use pinned at HELD_MB (memory.current_memory_mb), so the budget
+    davidson1 receives is exact on every platform; returns the energies and
+    the max_memory davidson1 received."""
     mf.max_memory = budget_mb
     seen = []
     undo = spy_davidson1(seen)
-    current_memory = pyscf_lib.current_memory
-    pyscf_lib.current_memory = lambda: (HELD_MB, 0)
+    current_memory_mb = memory.current_memory_mb
+    memory.current_memory_mb = lambda: HELD_MB
     try:
         e, _ = solve_ee_adc(mf, level='adc2', nroots=3, spin='singlet',
                             frozen=ncore, df=True)
     finally:
-        pyscf_lib.current_memory = current_memory
+        memory.current_memory_mb = current_memory_mb
         undo()
     return np.sort(np.asarray(e)), seen
 
