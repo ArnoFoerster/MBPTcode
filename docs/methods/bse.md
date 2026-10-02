@@ -1,62 +1,63 @@
 # BSE
 
-**BSE** — the iterative (Davidson) Bethe-Salpeter equation, singlet or
-triplet, in two interchangeable flavours that share every convention:
-`solve_bse_isdf` on ISDF factors (one factorization for the GW that feeds it
-and the kernel) and `solve_bse_df` on pyscf's own Coulomb fit. Both take
-`self_consistency='evGW'`.
+The Bethe-Salpeter equation (BSE) gives neutral excitation energies, the
+optical spectrum of a molecule, on top of a GW calculation. GW supplies the
+quasiparticle energies, which set the energy of each electron-hole pair; the
+BSE then lets the electron and the hole attract each other through the
+screened Coulomb interaction W, which binds them into an exciton.
 
-Which eigenvalues build the static W is set by the LEVEL OF THEORY: G0W0
-screens W₀ at the mean-field eigenvalues, which is the standard split, and evGW
-at its converged ones. An explicit `qp=` array therefore follows the G0W0
-convention unless `screen_at='qp'` says the array is itself a self-consistent
-spectrum.
+## Running it
 
-## The Davidson
+```python
+from pyscf import gto, dft
+from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
 
-**Preconditioner.** The Davidson divides its residuals by a diagonal,
-`preconditioner='screened'` by default: the pair energies d = eps_a - eps_i
-less the diagonal of the screened direct term, (ii|W|aa), formed in the fit's
-own gauge from the block action's factors (on the ISDF route each rank adds
-its grid rows' tiles and one reduction completes them; on the DF route from
-the factor's own diagonals). It is closer to diag(A) where the screening binds
-the pairs, so a BSE solve takes fewer cycles and block actions to the same
-roots. `preconditioner='bare'` divides by d alone; it moves the iteration path
-only, never the operator or the convergence test, and is what a solve that
-must reproduce a bare-preconditioned iteration bit for bit asks for. RPA's
-diagonal is d either way.
+mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+            basis='cc-pvdz')
+mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
+mf.kernel()
 
-**The (A-B) probe.** `probe=` measures min eig(A-B) and refuses the roots
-while it is negative, the singlet/triplet instability where the omega^2
-reduction is invalid. It runs AFTER the Davidson, on the Davidson's own block
-action, so the action is built once. An unstable reference is usually refused
-sooner, by the Davidson itself: its projected (A-B) block stops being
-positive definite, and the probe that breakdown runs names the reference.
-`probe='sign'` stops as soon as the sign is proven: first by Rayleigh-Ritz of
-(A - B) on the span of the converged roots' X - Y, one block action per root
-(the lowest Ritz value theta and its residual r prove an eigenvalue within r
-of theta), then by a Lanczos from the lowest root with `PROBE_START_MIX` of
-the cold start 1/d, then by the Lanczos from 1/d at escalating tolerances.
-The roots' certificate proves an eigenvalue in their span, not the minimum over
-pair irreps no root reaches; `probe=True` converges the general probe, the
-Lanczos from 1/d. `info['stats']['probe_source']` says which tier decided
-('roots', 'lanczos-warm', 'lanczos-cold').
+omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2, nroots=5)
+```
 
-**The trial space.** pyscf's `real_eig` collapses its trial space to the Ritz
-vectors when it fills, and a solve that collapses takes more cycles. The space
-is raised to `DAVIDSON_SPACE_CYCLES` increments, within what this rank's
-memory holds beside the block action's working set: inside a SLURM allocation
-`DAVIDSON_SPACE_FRACTION` of `mf.max_memory` (which a job sets to its share of
-the allocation), elsewhere `DAVIDSON_SPACE_GB` of the whole holders. Over more
-than one rank the four pair-space-long holders are cut into fixed tiles of
-`DAVIDSON_PAIR_TILE` pair rows (`LinearResponse.trial_space`): each rank holds
-its run of tiles, the projected blocks, norms and Gram-Schmidt overlaps are
-reduced once each, and only the new batch is gathered for the block action,
-so the Rayleigh-Ritz work divides by the rank count. Serially `real_eig` runs
-unchanged. Every decision is read off reduced or lockstepped small matrices,
-so every rank returns rank 0's roots bitwise; the reduced sums re-associate
-with the rank count, so distributed roots agree with the serial ones within
-the Davidson's resolution rather than bit for bit. `info['timings']` splits
-the stage into the block action's pieces (`davidson_action_<piece>`), the
-pair-row loop's (`davidson_subspace_<piece>`), the collectives, the trial
-space's bytes and its budget.
+`omega` holds the excitation energies in Hartree, `X` and `Y` the excitation
+and de-excitation amplitudes of each root.
+
+Two functions solve the same equations and differ only in how the Coulomb
+interaction is represented:
+
+| function | interaction | use it for |
+|---|---|---|
+| `solve_bse_isdf` | interpolative separable density fitting (ISDF) | large molecules; the GW step then scales cubically |
+| `solve_bse_df` | pyscf's own density fitting | smaller molecules, or as a reference |
+
+`spin='triplet'` gives triplet excitations instead of singlets.
+
+## Which GW
+
+By default the quasiparticle energies come from G0W0 on the mean-field
+orbitals. `self_consistency='evGW'` iterates the GW eigenvalues to self
+consistency first and uses them both for the pair energies and for W. If you
+pass your own quasiparticle energies with `qp=`, `screen_at` says whether W is
+built from them (`'qp'`) or from the mean field (the G0W0 convention, the
+default).
+
+## How the equations are solved
+
+The BSE matrix is never built. A Davidson iteration only ever needs the
+matrix applied to a few trial vectors, and the factorized interaction makes
+that product cheap. A few points the user may want to know:
+
+- **Convergence.** The Davidson divides each correction by an estimate of the
+  matrix diagonal. By default this estimate includes the electron-hole
+  attraction, which usually needs noticeably fewer iterations;
+  `preconditioner='bare'` uses the plain pair energies. Both give the same
+  roots.
+- **Stability check.** The BSE as solved here assumes that the ground state is
+  stable. With `probe=True` (the default) the code checks this after the
+  solve and refuses the roots if the reference is unstable, the usual
+  situation for some triplets on top of Hartree-Fock.
+- **Memory and parallel runs.** The Davidson keeps as many trial vectors as
+  the available memory allows. Under MPI the trial vectors are split over the
+  ranks; the roots agree with a serial run to within the convergence
+  tolerance.
