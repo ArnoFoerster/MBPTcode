@@ -16,7 +16,7 @@ Routes:
                    An RHF reference yields singlets AND triplets interleaved;
                    `spin` there goes through the numerical CSF isometry.
 
-level in ('adc1', 'adc2', 'adc2x', 'adc3').
+level in ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2').
 """
 import warnings
 
@@ -98,8 +98,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                          "where the alpha<->beta flip acts on the vector layout")
     from src.SingleReference.ADC.eeADC.ee_en import validate_dress
     en_dress = validate_dress(en_dress)
-    if en_dress is not None and level == 'adc1':
-        raise ValueError('ADC(1) carries no amplitudes, so en_dress has '
+    if en_dress is not None and level in ('adc1', 'gf2'):
+        raise ValueError(f'level={level!r} carries no amplitudes, so en_dress has '
                          'nothing to dress')
     if route == 'unrestricted':
         return _solve_unrestricted(mf, mol, level, nroots, matrix_free,
