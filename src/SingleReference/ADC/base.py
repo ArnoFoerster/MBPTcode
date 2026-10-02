@@ -447,9 +447,10 @@ class ADCSolverUnrestricted:
 
     def solve(self, static_correction=None, nroots=1, homo_index=None,
               ref_vec=None, conv_tol=1e-6, threshold=5000, verbose=0,
-              method='davidson', omega_range=None):
+              method='davidson', omega_range=None, max_cycle=200):
         """(e, Z) for the configured route; details on self.last_result.
-        static_correction is spin-orbital sized ((nso, nso)).
+        static_correction is spin-orbital sized ((nso, nso)). max_cycle caps
+        the Davidson iterations (davidson route).
 
         method='lanczos': matrix-free Lanczos/continued-fraction spectral
         solve instead of Davidson root-following -- needs matrix_free=True
@@ -469,7 +470,8 @@ class ADCSolverUnrestricted:
         if method != 'davidson':
             raise ValueError(f"method={method!r}; expected 'davidson' or 'lanczos'")
         return adc_u_driver.solve(self, static_correction, nroots, homo_index,
-                                  ref_vec, conv_tol, threshold, verbose)
+                                  ref_vec, conv_tol, threshold, verbose,
+                                  max_cycle)
 
     def _solve_lanczos(self, sc, homo_index, ref_vec, omega_range):
         if not self.matrix_free:
@@ -722,10 +724,11 @@ class ADCSolverRestricted:
 
     def solve(self, static_correction=None, nroots=1, homo_index=None,
               ref_vec=None, conv_tol=1e-6, threshold=5000, verbose=0,
-              method='davidson', omega_range=None):
+              method='davidson', omega_range=None, max_cycle=200):
         """(e, Z) for the configured route; eigenvectors on self.last_result.
         Dense routes return all poles; matrix-free routes the nroots
-        root-followed ones (Koopmans guess at homo_index, default the HOMO).
+        root-followed ones (Koopmans guess at homo_index, default the HOMO),
+        at most max_cycle Davidson iterations each.
 
         method='lanczos': matrix-free Lanczos/continued-fraction spectral
         solve instead of Davidson root-following -- needs matrix_free=True and
@@ -745,7 +748,8 @@ class ADCSolverRestricted:
         if method != 'davidson':
             raise ValueError(f"method={method!r}; expected 'davidson' or 'lanczos'")
         return adc_r_driver.solve(self, static_correction, nroots, homo_index,
-                                  ref_vec, conv_tol, threshold, verbose)
+                                  ref_vec, conv_tol, threshold, verbose,
+                                  max_cycle)
 
     def _solve_lanczos(self, sc, homo_index, ref_vec, omega_range):
         if not self.matrix_free:
