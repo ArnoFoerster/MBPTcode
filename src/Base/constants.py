@@ -64,6 +64,23 @@ ISDF_GRID_N_START = 8
 # CasidaSolver-only: TDA-shortcut threshold and omega^2 clipping before sqrt().
 CASIDA_NUMERICAL_EPS = 1e-6
 
+# Newton solve of the pair-channel Riccati equation B^+ + D T + T A + T B T = 0
+# (ring-CCD / ladder-CCD amplitudes, LinearResponse/riccati.py): converged when
+# max|residual| falls below the tolerance. Newton is quadratic from T = 0 for a
+# stable channel, so the cap is a safeguard, not a budget.
+RICCATI_CONV_TOL = 1e-10
+RICCATI_MAX_ITER = 50
+# The DF-streamed ladder amplitudes iterate Jacobi steps with DIIS instead of
+# Newton (no pair-space Sylvester solve at scale): linear, not quadratic.
+RICCATI_MAX_ITER_JACOBI = 200
+
+# N^{-1/2} v by Lanczos (ADC/solve.py apply_inverse_sqrt), the Faddeev-ADC(3)
+# metric turned into a plain symmetric eigenproblem vector by vector: stop when
+# two successive Krylov approximations agree to tol*|v|. The metric is 1 + dN
+# with dN small, so a handful of steps settle it; the cap is a safeguard.
+INV_SQRT_LANCZOS_TOL = 1e-12
+INV_SQRT_LANCZOS_MAX_STEPS = 100
+
 # Chunk size for blocked exciton contractions (memory/speed tradeoff only).
 DEFAULT_BLOCK_SIZE = 512
 

@@ -3,18 +3,8 @@ B-factor einsum plumbing. Used by both the restricted (adc_r_*) and
 spin-orbital (adc_u_*) route modules."""
 import numpy as np
 
+from src.Base.eri_blocks import g_slice_df as _g_slice_df
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-
-
-def _g_slice_df(B, p_idx, q_idx, r_idx, s_idx):
-    """
-    DF/RI build of one block g[p_idx,q_idx,r_idx,s_idx] of the bare
-    (non-antisymmetrized) physicist Coulomb integral g[p,q,r,s] = <pq|rs> =
-    sum_Q B[Q,p,r]*B[Q,q,s]
-    """
-    Bpr = B[:, p_idx][:, :, r_idx]   # (naux, |p|, |r|)
-    Bqs = B[:, q_idx][:, :, s_idx]   # (naux, |q|, |s|)
-    return np.einsum('Qpr,Qqs->pqrs', Bpr, Bqs, optimize=True)
 
 
 def _g_diag_df(B, diag_idx, r_idx, s_idx):

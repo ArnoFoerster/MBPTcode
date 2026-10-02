@@ -8,11 +8,13 @@ import numpy as np
 
 from src.SingleReference.EpsteinNesbet import (EpsteinNesbetDenominators,
                                                restricted_channel_shifts)
-from src.SingleReference.ADC.adc_r_utils import _build_u_blocks_unstreamed
+from src.SingleReference.ADC.adc_r_utils import (_build_u_blocks_unstreamed,
+                                                 _no_u_blocks)
 
 
-def build_operator(s, nocc, static_correction=None):
-    """(aop, diag, dims) for the dense-integral route."""
+def build_operator(s, nocc, static_correction=None, couplings=True):
+    """(aop, diag, dims) for the dense-integral route. couplings=False: U = 0,
+    i.e. F and the satellite block K + C only."""
     eps, eri_chemist = s.eps, s.eri
     norb = s.norb
     O, V = nocc, norb - nocc
@@ -131,12 +133,16 @@ def build_operator(s, nocc, static_correction=None):
         g_vopo=g_vopo, g_voho=g_voho, g_ovpv=g_ovpv, g_ovvp=g_ovvp,
         g_vv_pv=g_vv_pv, g_vv_vp=g_vv_vp,
         g_oo_pp_U=g_oo_pp_U, g_vv_pp_U=g_vv_pp_U)
-    (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
-     apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_unstreamed(
-        None, O, V, norb, eps_o, eps_v, dens,
-        None, None, None, None, None, None,
-        iu_o, ju_o, iu_v, ju_v, _u_ints,
-        is_adc2x=s._is_adc2x, use_materialized=True, w_chemist=s.W_chemist)
+    if couplings:
+        (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_unstreamed(
+            None, O, V, norb, eps_o, eps_v, dens,
+            None, None, None, None, None, None,
+            iu_o, ju_o, iu_v, ju_v, _u_ints,
+            is_adc2x=s._is_adc2x, use_materialized=True, w_chemist=s.W_chemist)
+    else:
+        (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _no_u_blocks(norb, O, V, nP_o, nP_v)
     # ===================== K diagonals =====================
     e_I = (2 * eps_o[:, None] - eps_v[None, :]).ravel()
     e_II = (eps_o[iu_o, None] + eps_o[ju_o, None] - eps_v[None, :]).ravel()

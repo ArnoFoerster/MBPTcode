@@ -27,6 +27,7 @@ from src.SingleReference.ADC import adc_u_utils
 from src.SingleReference.ADC import adc_u_dense_full, adc_u_dense_df
 from src.SingleReference.ADC import adc_u_sigma_full, adc_u_sigma_df
 from src.SingleReference.ADC import adc_r_driver, adc_u_driver
+from src.SingleReference.ADC import adc_r_faddeev, adc_u_faddeev
 from src.SingleReference.ADC import spin_adapt  # module import: it imports this file
 from src.SingleReference.ADC.solve import (diag_dense, lanczos_spectral,
                                            downfolded_seed_vectors,
@@ -73,16 +74,34 @@ class ADCSolverUnrestricted:
     the t2_ijcd hook (u1 shift threaded automatically); the u2_denom_dress
     ATTRIBUTE stays refused (see its setter)."""
 
-    LEVELS = ('adc3',)
+    LEVELS = ('adc3', 'faddeev_adc3')
 
     def __init__(self, mf=None, mol=None, level='adc3', df=False,
-                 matrix_free=True, en_dress=None, screening=None, nocc=None):
-        """mf=None is internal -- from_arrays supplies the arrays instead."""
+                 matrix_free=True, en_dress=None, screening=None, nocc=None,
+                 pair_route=None):
+        """mf=None is internal -- from_arrays supplies the arrays instead.
+
+        level='faddeev_adc3' is the dense spin-orbital Faddeev-ADC(3)
+        (adc_u_faddeev, the reference the restricted route is checked
+        against): matrix_free=False and dense integrals only; pair_route
+        'phonon' (default) or 'riccati'."""
+        if level == 'faddeev_adc3':
+            pair_route = 'phonon' if pair_route is None else pair_route
+            if pair_route not in adc_u_faddeev.PAIR_ROUTES:
+                raise ValueError(f"pair_route={pair_route!r}; expected one of "
+                                 f"{adc_u_faddeev.PAIR_ROUTES}")
+            if matrix_free or df or en_dress is not None or screening is not None:
+                raise ValueError("faddeev_adc3 on the spin-orbital branch is the "
+                                 "dense reference: matrix_free=False, df=False, "
+                                 "no en_dress or screening")
+        elif pair_route is not None:
+            raise ValueError("pair_route is a faddeev_adc3 option")
+        self.pair_route = pair_route
         # ---- flat guard block: every inapplicable option RAISES, never ignored
         if level not in self.LEVELS:
-            raise ValueError(f"level={level!r}; the spin-orbital solver is "
-                             f"ADC(3) only (expected one of {self.LEVELS}). "
-                             "ADC(2)-X is restricted-branch only.")
+            raise ValueError(f"level={level!r}; expected one of {self.LEVELS} "
+                             "on the spin-orbital solver. ADC(2)-X is "
+                             "restricted-branch only.")
         if screening is not None:
             raise ValueError("screening is restricted-branch only")
         en_dress = validate_en_dress(en_dress)
@@ -327,6 +346,9 @@ class ADCSolverUnrestricted:
     def build_supermatrix(self, nocc, static_correction=None):
         """(nH, nH) supermatrix; dense g route, or B_spin reconstruction
         when the solver is g-free."""
+        if self.level == 'faddeev_adc3':
+            return adc_u_faddeev.build_supermatrix(self, nocc, static_correction,
+                                                   route=self.pair_route)
         if self.g is None:
             return adc_u_dense_df.build_supermatrix(self, nocc, static_correction)
         return adc_u_dense_full.build_supermatrix(self, nocc, static_correction)
@@ -480,14 +502,37 @@ class ADCSolverRestricted:
     returns (e, Z), details on last_result.
     """
 
-    LEVELS = ('adc2x', 'adc3')
+    LEVELS = ('adc2x', 'adc3', 'faddeev_adc3')
 
     def __init__(self, mf=None, mol=None, level='adc3', df=False,
-                 matrix_free=True, en_dress=None, screening=None, nocc=None):
-        """mf=None is internal -- from_arrays supplies the arrays instead."""
+                 matrix_free=True, en_dress=None, screening=None, nocc=None,
+                 pair_route=None, eh_triplet=None):
+        """mf=None is internal -- from_arrays supplies the arrays instead.
+
+        level='faddeev_adc3' is the own-channel, no-overlap Faddeev-ADC(3)
+        (adc_r_faddeev); pair_route selects how its pair channels are built,
+        'phonon' (default, from the RPA eigenvectors) or 'riccati' (from the
+        ring/ladder amplitudes alone); eh_triplet the treatment of the
+        particle-hole triplet channel, 'rpa' (default, full
+        TDHF), 'first_order' (ADC(3) level) or 'off' (singlet eh pairs only,
+        as in the PSD self-energies)."""
         # ---- flat guard block: every inapplicable option RAISES, never ignored
         if level not in self.LEVELS:
             raise ValueError(f"level={level!r}; expected one of {self.LEVELS}")
+        if level == 'faddeev_adc3':
+            pair_route = 'phonon' if pair_route is None else pair_route
+            if pair_route not in adc_r_faddeev.PAIR_ROUTES:
+                raise ValueError(f"pair_route={pair_route!r}; expected one of "
+                                 f"{adc_r_faddeev.PAIR_ROUTES}")
+            eh_triplet = 'rpa' if eh_triplet is None else eh_triplet
+            if eh_triplet not in adc_r_faddeev.EH_TRIPLET:
+                raise ValueError(f"eh_triplet={eh_triplet!r}; expected one of "
+                                 f"{adc_r_faddeev.EH_TRIPLET}")
+            if en_dress is not None or screening is not None:
+                raise ValueError("faddeev_adc3 takes no en_dress or screening: "
+                                 "its pair channels replace both")
+        elif pair_route is not None or eh_triplet is not None:
+            raise ValueError("pair_route and eh_triplet are faddeev_adc3 options")
         en_dress = validate_en_dress(en_dress)
         W_chemist = W_aux = None
         screen_coupling = False
@@ -524,6 +569,8 @@ class ADCSolverRestricted:
         self.W_aux = W_aux
         self.screen_coupling = screen_coupling
         self._is_adc2x = (level == 'adc2x')
+        self.pair_route = pair_route
+        self.eh_triplet = eh_triplet
         self.last_result = {}
 
         if mf is None:
@@ -636,13 +683,35 @@ class ADCSolverRestricted:
 
     def build_supermatrix(self, nocc, static_correction=None):
         """(nH, nH) supermatrix at self.level; DF route iff B_aa is set."""
+        if self.level == 'faddeev_adc3':
+            return adc_r_faddeev.build_supermatrix(
+                self, nocc, static_correction,
+                channels=self.faddeev_pair_channels(nocc))
         mod = adc_r_dense_df if self.B_aa is not None else adc_r_dense_full
         return mod.build_supermatrix(self, nocc, static_correction)
 
     def build_matrix_free_operator(self, nocc, static_correction=None):
         """(aop, diag, dims) sigma-vector operator; DF route iff B_aa is set."""
+        if self.level == 'faddeev_adc3':
+            return adc_r_faddeev.build_operator(
+                self, nocc, static_correction,
+                channels=self.faddeev_pair_channels(nocc))
         mod = adc_r_sigma_df if self.B_aa is not None else adc_r_sigma_full
         return mod.build_operator(self, nocc, static_correction)
+
+    def faddeev_pair_channels(self, nocc):
+        """The Faddeev-ADC(3) pair channels at this nocc, built once per
+        solver (they do not depend on the static correction or the root):
+        see adc_r_faddeev.pair_channels."""
+        if self.level != 'faddeev_adc3':
+            raise ValueError("faddeev_pair_channels() needs level='faddeev_adc3'")
+        cache = self.__dict__.setdefault('_faddeev_channels', {})
+        if nocc not in cache:
+            eri = self.eri if self.B_aa is None else None
+            cache[nocc] = adc_r_faddeev.pair_channels(
+                self.eps, nocc, self.B_aa, eri, route=self.pair_route,
+                eh_triplet=self.eh_triplet)
+        return cache[nocc]
 
     def solve_dense(self, nocc, static_correction=None, threshold=5000):
         """Dense diagonalization (mid-level); (eGF, Z, Reigv) sorted ascending."""

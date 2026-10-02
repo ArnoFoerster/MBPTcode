@@ -9,8 +9,13 @@ from src.SingleReference.ADC.adc_u_utils import (
     u1_shift_terms_2h1p, u1_shift_terms_2p1h)
 
 
-def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
-    """(dy_2h1p_full, dy_p): both matvec directions of the U_2h1p block."""
+def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None,
+                 t2_ring=None):
+    """(dy_2h1p_full, dy_p): both matvec directions of the U_2h1p block.
+
+    t2_ring: separate amplitudes for the ring (KC) terms, t2_ijcd then only
+    serving the ladder (CD) term -- Faddeev-ADC(3)'s particle-hole and
+    particle-particle channels; default t2_ijcd for both."""
     norb = s.norb
     occ, virt = slice(0, nocc), slice(nocc, norb)
     dy_shift, dy_p_shift = u1_shift_terms_2h1p(norb, nocc, z_p, Vfull, u1_shift)
@@ -19,6 +24,8 @@ def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     if t2_ijcd is None:
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
         t2_ijcd = g[occ, occ, virt, virt] / denom_ij_cd
+
+    t2r = t2_ijcd if t2_ring is None else t2_ring
 
     g_ij_p_a = g[occ, occ, :, virt]        # (O,O,norb,V): g[i,j,p,a]
     g_v_p_v = g[virt, virt, :, virt]        # (V,V,norb,V): g[c,d,p,a]
@@ -29,26 +36,27 @@ def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     W1 = _cached_einsum('cdpa,p->cda', g_v_p_v, z_p, optimize=True)
     CD = 0.5 * _cached_einsum('ijcd,cda->ija', t2_ijcd, W1, optimize=True)
     W2 = _cached_einsum('cmpk,p->cmk', g_v_o_o, z_p, optimize=True)   # (V,O,O)
-    KC1 = -_cached_einsum('ikca,cjk->ija', t2_ijcd, W2, optimize=True)
-    KC2 = _cached_einsum('jkca,cik->ija', t2_ijcd, W2, optimize=True)
+    KC1 = -_cached_einsum('ikca,cjk->ija', t2r, W2, optimize=True)
+    KC2 = _cached_einsum('jkca,cik->ija', t2r, W2, optimize=True)
     dy_2h1p_full = T0 + CD + KC1 + KC2
 
     # ---- adjoint: Vfull -> dy_p ----
     T0_adj = 0.5 * _cached_einsum('ijpa,ija->p', g_ij_p_a, Vfull, optimize=True)
     X1 = _cached_einsum('ijcd,ija->cda', t2_ijcd, Vfull, optimize=True)
     CD_adj = 0.25 * _cached_einsum('cda,cdpa->p', X1, g_v_p_v, optimize=True)
-    Y2 = _cached_einsum('ikca,ija->kcj', t2_ijcd, Vfull, optimize=True)
+    Y2 = _cached_einsum('ikca,ija->kcj', t2r, Vfull, optimize=True)
     KC1_adj = -0.5 * _cached_einsum('kcj,cjpk->p', Y2, g_v_o_o, optimize=True)
-    Y3 = _cached_einsum('jkca,ija->kci', t2_ijcd, Vfull, optimize=True)
+    Y3 = _cached_einsum('jkca,ija->kci', t2r, Vfull, optimize=True)
     KC2_adj = 0.5 * _cached_einsum('kci,cipk->p', Y3, g_v_o_o, optimize=True)
     dy_p = T0_adj + CD_adj + KC1_adj + KC2_adj
 
     return dy_2h1p_full + dy_shift, dy_p + dy_p_shift
 
 
-def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
+def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None,
+                 t2_ring=None):
     """2p1h mirror of apply_U_2h1p; one shared t2 array serves both
-    sectors (transposed view, signs absorbed)."""
+    sectors (transposed view, signs absorbed). t2_ring as in apply_U_2h1p."""
     norb = s.norb
     occ, virt = slice(0, nocc), slice(nocc, norb)
     dy_shift, dy_p_shift = u1_shift_terms_2p1h(norb, nocc, z_p, Vfull, u1_shift)
@@ -58,6 +66,7 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
         t2_ijcd = g[occ, occ, virt, virt] / denom_ij_cd
     t2m = t2_ijcd.transpose(2, 3, 0, 1)      # == -t2_abkl, VIEW (see docstring)
+    t2mr = t2m if t2_ring is None else t2_ring.transpose(2, 3, 0, 1)
 
     g_ab_p_i = g[virt, virt, :, occ]        # (V,V,norb,O): g[a,b,p,i]
     g_o_o_p = g[occ, occ, :, occ]           # (O,O,norb,O): g[k,l,p,i]
@@ -68,17 +77,17 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     W1 = _cached_einsum('klpi,p->kli', g_o_o_p, z_p, optimize=True)
     CD = 0.5 * _cached_einsum('abkl,kli->iab', t2m, W1, optimize=True)
     W2 = _cached_einsum('kmpc,p->kmc', g_o_v_v, z_p, optimize=True)   # (O,V,V)
-    KC1 = -_cached_einsum('acki,kbc->iab', t2m, W2, optimize=True)
-    KC2 = _cached_einsum('bcki,kac->iab', t2m, W2, optimize=True)
+    KC1 = -_cached_einsum('acki,kbc->iab', t2mr, W2, optimize=True)
+    KC2 = _cached_einsum('bcki,kac->iab', t2mr, W2, optimize=True)
     dy_2p1h_full = T0 + CD + KC1 + KC2
 
     # ---- adjoint: Vfull -> dy_p ----
     T0_adj = 0.5 * _cached_einsum('abpi,iab->p', g_ab_p_i, Vfull, optimize=True)
     X1 = -_cached_einsum('abkl,iab->kli', t2m, Vfull, optimize=True)
     CD_adj = -0.25 * _cached_einsum('kli,klpi->p', X1, g_o_o_p, optimize=True)
-    Y2 = -_cached_einsum('acki,iab->kcb', t2m, Vfull, optimize=True)
+    Y2 = -_cached_einsum('acki,iab->kcb', t2mr, Vfull, optimize=True)
     KC1_adj = 0.5 * _cached_einsum('kcb,kbpc->p', Y2, g_o_v_v, optimize=True)
-    Y3 = -_cached_einsum('bcki,iab->kca', t2m, Vfull, optimize=True)
+    Y3 = -_cached_einsum('bcki,iab->kca', t2mr, Vfull, optimize=True)
     KC2_adj = -0.5 * _cached_einsum('kca,kapc->p', Y3, g_o_v_v, optimize=True)
     dy_p = T0_adj + CD_adj + KC1_adj + KC2_adj
 

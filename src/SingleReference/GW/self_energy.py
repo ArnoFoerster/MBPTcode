@@ -167,6 +167,20 @@ class SigmaEvaluator:
         val = self._combine(sums)
         return float(val[0]) if scalar else val
 
+    def poles(self):
+        """(residues, poles), flat: Sigma_pp(w) = sum_k r_k / (w - P_k) at
+        eta = 0, with P = eps_q - sign_q Omega_S. Every vertex mode is a
+        linear combination of the pole sums, so its coefficients are combine
+        applied to unit sums."""
+        if self._calc_imag:
+            raise ValueError("poles() is the real part's pole representation")
+        coef = self._combine(np.eye(self.n_terms))
+        sign = np.where(np.arange(len(self._eps)) < self._nocc_spin, 1.0, -1.0)
+        res = [c * wt for c, wt in zip(coef, self._weights)]
+        pol = [self._eps[None, :] - sign[None, :] * om[:, None] for om in self._omegas]
+        return (np.concatenate([r.ravel() for r in res]),
+                np.concatenate([q.ravel() for q in pol]))
+
 
 class SelfEnergySolver(AmplitudeGenerator):
     """Diagonal GW and vertex-corrected self-energies (Sigma_pp): restricted/unrestricted spin, bare/screened, DF or full ERIs."""

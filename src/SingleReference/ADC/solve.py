@@ -3,7 +3,9 @@ dense diagonalization, the downfolded/satellite seed builders, and the
 Lanczos/continued-fraction spectral solver."""
 import numpy as np
 
+from src.Base.constants import INV_SQRT_LANCZOS_MAX_STEPS, INV_SQRT_LANCZOS_TOL
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.SingleReference.GW.quasi_boson import eigh_sym, invsqrtm_sym
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 
 
@@ -166,14 +168,16 @@ def diag_dense(H, norb, threshold=5000):
 class _LanczosState:
     """Incremental Lanczos state so lanczos_spectral can extend the
     tridiagonalization in blocks instead of restarting from scratch each
-    time it checks convergence."""
+    time it checks convergence. keep_vectors=False stores no Krylov basis
+    (V is None): only the tridiagonal, for runs that never reorthogonalize
+    or form a Ritz vector."""
     __slots__ = ('V', 'a', 'b', 'v_prev', 'v_curr', 'beta', 'breakdown')
 
-    def __init__(self, v0):
+    def __init__(self, v0, keep_vectors=True):
         nrm0 = np.linalg.norm(v0)
         if nrm0 < 1e-300:
             raise ValueError("lanczos_spectral: zero starting vector")
-        self.V = []
+        self.V = [] if keep_vectors else None
         self.a = []
         self.b = []          # b[k-1] = beta_k, the k-1<->k off-diagonal
         self.v_prev = np.zeros_like(v0)
@@ -190,10 +194,14 @@ class _LanczosState:
 def _lanczos_extend(matvec, state, nsteps, reorth=True):
     """Run up to `nsteps` more Lanczos iterations on `state` in place (fewer
     if an invariant subspace is hit -- state.breakdown is then set True)."""
+    if reorth and state.V is None:
+        raise ValueError("_lanczos_extend: reorth needs a state that keeps "
+                         "its vectors")
     for _ in range(nsteps):
         if state.breakdown:
             break
-        state.V.append(state.v_curr)
+        if state.V is not None:
+            state.V.append(state.v_curr)
         w = matvec(state.v_curr)
         alpha = float(np.dot(state.v_curr, w))
         state.a.append(alpha)
@@ -210,6 +218,51 @@ def _lanczos_extend(matvec, state, nsteps, reorth=True):
         state.b.append(beta)
         state.beta = beta
     return state
+
+
+def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
+                       max_steps=INV_SQRT_LANCZOS_MAX_STEPS):
+    """N^{-1/2} v for a symmetric positive-definite N given only as a
+    matvec: Lanczos on N from v (_lanczos_extend, reorthogonalized),
+    N^{-1/2} v ~ |v| V_k f(T_k) e_1 with f(x) = x^{-1/2}, extended until two
+    successive approximations differ by less than tol*|v|. For the Faddeev
+    metric N = 1 + dN, dN small, a handful of steps suffice.
+
+    Raises when a Ritz value of N is not positive (N indefinite) or the
+    approximation has not settled in max_steps."""
+    v = np.asarray(v, dtype=float)
+    vnorm = np.linalg.norm(v)
+    if vnorm == 0.0:
+        return np.zeros_like(v)
+    state = _LanczosState(v)
+    prev = None
+    for _ in range(max_steps):
+        _lanczos_extend(matvec, state, 1)
+        a = np.asarray(state.a)
+        b = np.asarray(state.b[:len(a) - 1])
+        th, S = np.linalg.eigh(np.diag(a) + np.diag(b, 1) + np.diag(b, -1))
+        if th.min() <= 0.0:
+            raise np.linalg.LinAlgError(
+                f"apply_inverse_sqrt: N is not positive definite (Ritz value "
+                f"{th.min():.3e})")
+        cur = np.asarray(state.V).T @ (vnorm * (S @ (S[0, :] / np.sqrt(th))))
+        if state.breakdown or (prev is not None
+                               and np.linalg.norm(cur - prev) < tol * vnorm):
+            return cur
+        prev = cur
+    raise RuntimeError(f"apply_inverse_sqrt: not converged in {max_steps} "
+                       "Lanczos steps")
+
+
+def inverse_sqrt_psd(N, what):
+    """N^{-1/2} of a dense symmetric positive-definite N
+    (GW.quasi_boson.invsqrtm_sym); raises LinAlgError for an indefinite N,
+    naming it by `what`."""
+    w, V = eigh_sym(N)
+    if w.min() <= 0.0:
+        raise np.linalg.LinAlgError(f"{what} is not positive definite (min "
+                                    f"eigenvalue {w.min():.3e})")
+    return invsqrtm_sym(N, eig=(w, V))
 
 
 def _continued_fraction(omega, a, b, eta):

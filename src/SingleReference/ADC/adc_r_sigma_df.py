@@ -17,7 +17,7 @@ from src.SingleReference.ADC.adc_r_utils import (
     _u_2h1p_unfold, _u_2p1h_unfold, _u_2p1h_zparts_df,
     _u_I_ring_contract_df, _u_pv_vp_contract_df, _u_Ip_pv_vp_contract_df,
     _u2_2h1p_amplitude_chunks, _u2_2p1h_amplitude_chunks,
-    _build_u_blocks_unstreamed)
+    _build_u_blocks_unstreamed, _no_u_blocks)
 
 
 # ===================== S4 followup: C-block occupied-index streaming =====================
@@ -452,8 +452,9 @@ def _pp_ladder_matvec_df(Bv, Vmat, iu_v, ju_v, V, antisymmetric, q_chunk=32):
     return X[:, iu_v, ju_v]
 
 
-def build_operator(s, nocc, static_correction=None):
-    """(aop, diag, dims) for the DF route."""
+def build_operator(s, nocc, static_correction=None, couplings=True):
+    """(aop, diag, dims) for the DF route. couplings=False: U = 0, i.e. F
+    and the satellite block K + C only, nothing of U built or applied."""
     if s.W_chemist is not None:
         raise ValueError(
             'dense W_chemist screening is a dense-integral route; with DF '
@@ -597,7 +598,10 @@ def build_operator(s, nocc, static_correction=None):
     # ============ U blocks: streamed, or DF-applier fallback ============
     _u_ints = dict(
         g_ii_U=g_ii_U, g_ii=g_ii, g_aa_U=g_aa_U, g_aa=g_aa)
-    if _u_streamable:
+    if not couplings:
+        (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _no_u_blocks(norb, O, V, nP_o, nP_v)
+    elif _u_streamable:
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
          apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_streamed(
             s.B_aa, O, V, norb, eps_o, eps_v, _dh_c, _dp_c, dens,

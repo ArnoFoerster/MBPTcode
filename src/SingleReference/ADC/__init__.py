@@ -17,6 +17,11 @@
     adc_u_dense_df.py      spin-orbital dense supermatrix, B_spin
     adc_u_sigma_full.py    spin-orbital matrix-free operator, dense g
     adc_u_sigma_df.py      spin-orbital matrix-free operator, g-free B_spin
+    adc_u_faddeev.py       spin-orbital dense Faddeev-ADC(3), the reference
+    adc_r_faddeev.py       restricted matrix-free Faddeev-ADC(3), DF (production)
+    adc_r_flex.py          restricted one-shot FLEX (diagonal QP), for comparison
+    second_order.py        Sigma(2) (= ADC(2), GF2), direct and SOX parts as
+                           pole lists, for methods that add or remove it
     spin_adapt.py          CSF isometry and adapter
     static_correction.py   Sigma(infinity) builders + build_static_correction
     solve.py               Davidson/dense solvers, seeds, Lanczos spectral
@@ -30,8 +35,10 @@ Usage:  solver = ADCSolver(mf, level=..., df=..., ...)
         sc = build_static_correction(mf, mol, kind=..., en_dress=...)
         e, Z = solver.solve(static_correction=sc)
 
-Levels: ADC(2)-X and ADC(3) on the restricted branch, ADC(3) on the
-spin-orbital branch.
+Levels: ADC(2)-X, ADC(3) and Faddeev-ADC(3) (level='faddeev_adc3', the
+own-channel, no-overlap Faddeev kernel with RPA phonons; pair_route='phonon'
+or 'riccati') on the restricted branch; ADC(3) and the dense Faddeev-ADC(3)
+reference on the spin-orbital branch.
 This file is re-exports only -- no definitions live here.
 """
 from src.SingleReference.ADC.base import (ADCSolver, ADCSolverRestricted,

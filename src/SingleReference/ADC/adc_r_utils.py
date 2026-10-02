@@ -26,6 +26,18 @@ def dimensions(norb, nocc):
             'nH': norb + n2h1p + n2p1h}
 
 
+def _no_u_blocks(norb, O, V, nP_o, nP_v):
+    """The six U-block pieces of _build_u_blocks_* identically zero: the
+    operator then carries F and the satellite block K + C alone, with no
+    coupling work per matvec (Faddeev-ADC(3) applies its own U)."""
+    zero_p = np.zeros(norb)
+    return (np.zeros((norb, O * V)), np.zeros((norb, O * V)),
+            lambda z_II, z_III: zero_p,
+            lambda z_p: (np.zeros((nP_o, V)), np.zeros((nP_o, V))),
+            lambda z_IIp, z_IIIp: zero_p,
+            lambda z_p: (np.zeros((O, nP_v)), np.zeros((O, nP_v))))
+
+
 def _u2_spin_amplitudes(g_num, g_num_T, dens, layout):
     """(t_same, t_opp): the same-spin (aaaa) and opposite-spin (abab) T2^(1)
     amplitudes for one denominator layout, each with its OWN EN-dressed

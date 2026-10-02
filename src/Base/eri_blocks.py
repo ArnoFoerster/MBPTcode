@@ -35,6 +35,9 @@ The density-fitted interaction, (pq|rs) = sum_PQ J_pq,P [V^-1]_PQ J_rs,Q, is
 here as well: a route that differentiates a FITTED energy has to evaluate that
 same fitted energy, so the forward assembly and the three-index gradient
 skeleton (`gradients.df_assembly`) read one pair of integral builders.
+
+`g_slice_df` / `g_slice` give one physicist block <pq|rs> from a DF factor
+(or a dense chemist tensor), for routes that slice rather than hold blocks.
 """
 import numpy as np
 from pyscf import ao2mo
@@ -125,6 +128,25 @@ class MOEriBlocks:
                 f'nao^4 array. Energies are fine; for gradients build the '
                 f'integrals densely.')
         return self.dense
+
+
+def g_slice_df(B, p_idx, q_idx, r_idx, s_idx):
+    """
+    DF/RI build of one block g[p_idx,q_idx,r_idx,s_idx] of the bare
+    (non-antisymmetrized) physicist Coulomb integral g[p,q,r,s] = <pq|rs> =
+    sum_Q B[Q,p,r]*B[Q,q,s]
+    """
+    Bpr = B[:, p_idx][:, :, r_idx]   # (naux, |p|, |r|)
+    Bqs = B[:, q_idx][:, :, s_idx]   # (naux, |q|, |s|)
+    return np.einsum('Qpr,Qqs->pqrs', Bpr, Bqs, optimize=True)
+
+
+def g_slice(B, eri_chemist, p_idx, q_idx, r_idx, s_idx):
+    """<pq|rs> over index ranges (slices or arrays) from the DF factor B, or
+    from the dense chemist tensor (pq|rs) when B is None."""
+    if B is not None:
+        return g_slice_df(B, p_idx, q_idx, r_idx, s_idx)
+    return eri_chemist[p_idx][:, r_idx][:, :, q_idx][:, :, :, s_idx].transpose(0, 2, 1, 3)
 
 
 def as_blocks(eri_mo, nocc):
