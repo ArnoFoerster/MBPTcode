@@ -82,7 +82,9 @@ def _srg_laplace_quadrature(mu_max, tol, nodes_per_panel=12, width=4.0):
     x_lo / 2 of weight x_lo for [0, x_lo]. The rule is checked against the
     closed form on 4000 log-spaced μ and μ = 0; a miss narrows the panels by
     3/4, at most five times, then raises ValueError. The panel count grows as
-    ln(mu_max): 49 nodes at mu_max = 2.5e4, 61 at 2.5e5, for tol = 1e-7.
+    ln(mu_max): 49 nodes at mu_max = 2.5e4, 61 at 2.5e5, for tol = 1e-7. A
+    narrowed rule has one to three panels more, so the count is not monotone
+    in mu_max: 73 nodes at 4e4.
 
     Parameters
     ----------
@@ -524,9 +526,13 @@ class SelfEnergySolver(AmplitudeGenerator):
             (1 - exp(-s λ)) / λ = ∫_0^s exp(-t λ) dt ≈ sum_n w_n exp(-t_n λ),
 
         λ = a² + b², separates them, K(a, b) ≈ (a + b) sum_n w_n exp(-t_n a²)
-        exp(-t_n b²), so each quadrature node is one more GEMM per chunk, 50 to
-        60 nodes (_srg_laplace_quadrature), and each term of Σ~ carries a
-        relative error below quad_tol. Per node the elementwise build of U and
+        exp(-t_n b²), so each quadrature node is one more GEMM per chunk. The
+        node count grows with ln(2 s a_max²), a_max = ε_max - ε_min + Ω_max: 61
+        on water/cc-pVDZ at s = 100 (_srg_laplace_quadrature). Each term of Σ~
+        carries a relative error below quad_tol, so an element misses by at most
+        quad_tol times 2 sum_Sr |χ_Srp χ_Srq K(Δ_Srp, Δ_Srq)|, the sum of its
+        terms' magnitudes; where they cancel, that exceeds quad_tol times the
+        element itself. Per node the elementwise build of U and
         V costs about as much as the GEMM once nmo nears 10³, and numpy runs it
         on one thread, so n_workers > 1 hands each worker a fixed, interleaved
         share of the chunks, its own accumulator and BLAS pinned to one thread.

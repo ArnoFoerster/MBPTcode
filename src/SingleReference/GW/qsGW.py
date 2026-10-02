@@ -16,9 +16,11 @@ doi 10.1021/acs.jctc.3c00281). Its diagonal is that of Kotani, van Schilfgaarde
 and Faleev's mode A, 1/2 [Sigma_pq(eps_p) + Sigma_pq(eps_q)] (Phys. Rev. B 76,
 165106, 2007), with every term whose energy denominator lies within about
 1/sqrt(2 s) of zero damped; off the diagonal the two differ at every s
-(SelfEnergySolver.static_self_energy_matrix). Plain mode A on the pole sum puts
-high virtuals on poles of Sigma, and its loop does not settle; `flow=None`
-still selects it, with eta as the broadening. qsGW0 keeps the mean field's RPA
+(SelfEnergySolver.static_self_energy_matrix). Plain mode A carries each high
+virtual's crossing of a pole of Sigma into the occupied-virtual block at size
+1/eta, so its loop converges at some eta and not at others; the SRG kernel
+bounds each coupling by the larger of its two denominators. `flow=None` still
+selects mode A, with eta as the broadening. qsGW0 keeps the mean field's RPA
 Casida solution, `screening='fixed'`: W stays, the amplitudes and the poles
 follow the rotated orbitals. Restricted spin, Casida route only.
 

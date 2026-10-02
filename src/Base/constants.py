@@ -98,12 +98,15 @@ QSGW_BLOCK_ELEMS = 2**24
 # SRG flow parameter s of the qsGW static self-energy, in Hartree^-2 (Marie and
 # Loos, JCTC 2023, doi 10.1021/acs.jctc.3c00281, eq. 44). A diagonal term with
 # energy denominator a enters with weight 1 - exp(-2 a^2 s), above 0.99 for
-# |a| > 4.1 eV at s = 100, so the near-pole terms that stall mode A are damped
-# and the rest kept. Marie and Loos find their accuracy plateau from s = 50 and
-# recommend 500 or 1000, judged on convergence from a HF start. On water
-# cc-pVDZ from s = 200 up the high virtuals carry two self-consistent branches
-# and PBE and PBE0 starts end 0.9 to 1.6 meV apart at the frontier; at s = 100
-# they agree to 1e-4 meV, with HOMO and LUMO about 1 meV from s = 1000.
+# |a| > 4.1 eV at s = 100. Off the diagonal the kernel K(a, b) is at most
+# (1 + sqrt 2) / (2 max(|a|, |b|)) at every s, so a virtual's near-pole terms
+# stay out of its couplings to the occupied orbitals, the block that rotates the
+# density; mode A carries them there at size 1/eta. Marie and Loos find their
+# accuracy plateau from s = 50 and recommend 500 or 1000, judged on convergence
+# from a HF start. On water cc-pVDZ from s = 200 up the high virtuals carry two
+# self-consistent branches and PBE and PBE0 starts end 0.9 to 1.6 meV apart at
+# the frontier; at s = 100 they agree to 1e-4 meV, with HOMO and LUMO about
+# 1 meV from s = 1000.
 QSGW_SRG_FLOW = 100.0
 # Relative error bound of the quadrature behind the SRG kernel,
 # (1 - exp(-s lam)) / lam = int_0^s exp(-t lam) dt ~ sum_n w_n exp(-t_n lam):
