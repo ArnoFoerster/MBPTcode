@@ -810,4 +810,68 @@ class GProxy:
             return g_elem_df(self._B_spin, p, q, r, s)
         return self._g_dense[key]
 
-# For backwards compatibility with other files
+def get_antisymmetrized_spin_integrals(h1_mo, eri_chemist):
+    """(h1_spin, <pq||rs>) in interleaved spin orbitals from spatial h1 and (pq|rs)."""
+    norb = h1_mo.shape[0]
+    n_spin = 2 * norb
+    h1_spin = np.zeros((n_spin, n_spin))
+    h1_spin[0::2, 0::2] = h1_mo
+    h1_spin[1::2, 1::2] = h1_mo
+    g_anti_spin = get_antisymmetrized_spin_eri(eri_chemist)
+    return h1_spin, g_anti_spin
+
+
+def _active_window_mean_field(mol, mf, n_occ_spatial, n_act_spatial,
+                              active_space, who):
+    """(mf_window, h1_mo, eri_chemist, n_occ_spatial, n_act_spatial) of a bare,
+    closed-shell restricted reference, its MOs permuted when an ActiveSpace is
+    given. h1 is the reference's own hcore (ECPs and overrides included), read
+    before any permutation; an attached environment is refused, since the
+    downfolding assumes the bare interaction."""
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError(f'{who} needs a restricted closed-shell reference')
+    require_closed_shell_or_unrestricted(mf, who, mol=mol)
+    if getattr(mf, 'with_screening', None) is not None or getattr(mf, 'with_solvent', None) is not None:
+        raise NotImplementedError(f'{who} downfolds the bare interaction; this mean '
+                                  f'field carries an environment')
+    hcore_ao = mf.get_hcore()
+    if active_space is not None:
+        mf = active_space.permuted_mf(mf)
+        n_occ_spatial, n_act_spatial = active_space.contiguous_counts()
+    h1_mo = mf.mo_coeff.T @ hcore_ao @ mf.mo_coeff
+    eri_chemist = get_two_electron_integrals_chemist(mol, mf)
+    return mf, h1_mo, eri_chemist, n_occ_spatial, n_act_spatial
+
+
+def get_system_data(mol=None, mf=None, n_occ_spatial=0, n_act_spatial=2,
+                    active_space=None):
+    """Antisymmetrized spin-orbital ERI, h1, eps and the (core | active | external) spin-orbital index arrays.
+
+    The window is the contiguous one [0, n_occ_spatial) | next n_act_spatial |
+    rest. An ActiveSpace supplies it instead when given: its MOs are permuted so
+    a character-selected window is contiguous again (src/Base/active_space.py).
+    """
+    mf, h1_mo, eri_chemist, n_occ_spatial, n_act_spatial = _active_window_mean_field(
+        mol, mf, n_occ_spatial, n_act_spatial, active_space, 'get_system_data')
+    norb = len(mf.mo_energy)
+    n_occ_spin = 2 * n_occ_spatial
+    n_act_spin = 2 * n_act_spatial
+    occ_idx  = np.arange(0, n_occ_spin, dtype=int)
+    act_idx  = np.arange(n_occ_spin, n_occ_spin + n_act_spin, dtype=int)
+    virt_idx = np.arange(n_occ_spin + n_act_spin, 2 * norb, dtype=int)
+    h1_spin, g_anti_spin = get_antisymmetrized_spin_integrals(h1_mo, eri_chemist)
+    eps_spin = get_orbital_energies(mf, representation='spin')
+    return g_anti_spin, h1_spin, eps_spin, occ_idx, act_idx, virt_idx
+
+def get_system_data_spatial(mol=None, mf=None, n_occ_spatial=0, n_act_spatial=2,
+                            active_space=None):
+    """Spatial twin of get_system_data: physicist-ordered ERI <pq|rs>, h1, eps and the spatial index arrays."""
+    mf, h1_mo, eri_chemist, n_occ_spatial, n_act_spatial = _active_window_mean_field(
+        mol, mf, n_occ_spatial, n_act_spatial, active_space, 'get_system_data_spatial')
+    eps    = mf.mo_energy
+    norb   = len(eps)
+    occ_idx  = np.arange(0, n_occ_spatial, dtype=int)
+    act_idx  = np.arange(n_occ_spatial, n_occ_spatial + n_act_spatial, dtype=int)
+    virt_idx = np.arange(n_occ_spatial + n_act_spatial, norb, dtype=int)
+    eri_spatial_phys = eri_chemist.transpose(0, 2, 1, 3)
+    return eri_spatial_phys, h1_mo, eps, occ_idx, act_idx, virt_idx

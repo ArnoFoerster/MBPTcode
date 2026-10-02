@@ -14,7 +14,10 @@ settings are under [Threads](parallel.md#threads).
 the tree pulls in, so it is not optional.
 
 The coupled-cluster integral path additionally needs `openfermion` and
-`openfermionpyscf`, imported only when they are reached:
+`openfermionpyscf`, and the determinant-basis active-space solver
+(`Solvers.active_space_solver.ExactDiagonalizationSolver`, the default
+backend of `Solvers.active_space.solve`) needs `openfermion`; both are
+imported only when they are reached:
 
 ```bash
 pip install openfermion openfermionpyscf
@@ -28,6 +31,19 @@ pip install geometric        # geomeTRIC relaxation, in properties.optimize
 pip install cppe             # polarizable embedding from a real potential file
 pip install pyscf-dispersion # D3/D4 empirical dispersion
 ```
+
+`Solvers.active_space_solver.Block2DMRGSolver` additionally needs `block2`:
+
+```bash
+pip install block2
+```
+
+block2's wheel links its own OpenMP runtime. With an MKL build of NumPy
+(Intel's runtime), importing block2 after NumPy aborts the process (`OMP:
+Error #15`) instead of raising a catchable error, while importing block2
+first works; so `block2` must be imported before `numpy` in any process that
+uses both. `KMP_DUPLICATE_LIB_OK=TRUE` suppresses the abort but can deadlock
+the DMRG sweep.
 
 `PolarizableSites`' own hand-rolled coupled-dipole response and PCM solvation
 need nothing beyond pyscf.

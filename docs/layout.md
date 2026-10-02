@@ -18,6 +18,8 @@ src/Base/               PySCF interface, constants, linear algebra
     utils/grids.py      minimax and Gauss-Legendre imaginary-axis grids
     utils/time_frequency.py  one grid object carrying both axes
     utils/matsubara.py  finite-temperature (IR) grids
+    active_space.py     ActiveSpace: an active window of canonical orbitals,
+                        by energy, counts, irrep or Loewdin population
 src/SingleReference/
     ADC/                the ADC solvers (see ADC/__init__.py for the map)
     CC/                 CCSD/CCSDT amplitudes, lambda, EOM
@@ -33,7 +35,17 @@ src/SingleReference/
     BSE/                the upfolded (non-perturbative) BSE
 src/Solvers/            quasiparticle root finders, including the
                         pole-guarded Newton solve contour deformation uses,
-                        and a matrix-free Davidson eigensolver
+                        a matrix-free Davidson eigensolver, and the
+                        ActiveSpaceSolver protocol (FCI, determinant-basis
+                        and DMRG adapters) over an active-space Hamiltonian;
+                        active_space.py dispatches a DOWNFOLDED effective
+                        Hamiltonian over those same adapters by name
+src/MultiReference/
+    QDPT/               active-space downfolding: generated_evaluators(_spinfree).py
+                        (machine-derived MP2/MP3 diagram evaluators, no
+                        generator in this repo) and perturbative.py, which
+                        builds an active space's g_eff from them for
+                        src/Solvers/active_space.py to solve
 src/gradients/          analytic nuclear gradients: one adjoint module per
                         forward one, differentiating production's own objects
 src/properties/         the ONE surface dispatcher, geometry optimization,
