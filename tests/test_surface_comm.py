@@ -10,7 +10,7 @@ energy, force and diagnostics on the way out. Six gates:
       `tests/baseline_3f09ac0.json`, recorded before these classes ever took
       a communicator, bitwise -- `==` on the energy, `np.array_equal` on the
       gradient taken through `evaluate` -- and none of them carries a `comm`.
-      A laptop gate by design: the numbers were recorded by a pyscf without
+      A single-machine gate by design: the numbers were recorded by a pyscf without
       OpenMP, which repeats its bits, and a threaded pyscf adds its K-split
       partials in thread-arrival order and cannot meet them.
   (b) Under `run_simulated` (sizes 2 and 3; `run_simulated` enters the
@@ -222,7 +222,8 @@ def test_serially_every_surface_is_the_baseline(baseline, baseline_water,
     recorded = _r0(baseline, label)
     surface = build(baseline_water, baseline_scf)
     assert not hasattr(surface, 'comm')
-    # bitwise against the laptop's recording: a laptop gate by design (a)
+    # bitwise against the workstation's recording: a single-machine gate by
+    # design (a)
     assert surface.total_energy() == recorded['total_energy']
     grad, e_g, _ = evaluate(surface, baseline_water)
     assert e_g == recorded['gradient_energy']

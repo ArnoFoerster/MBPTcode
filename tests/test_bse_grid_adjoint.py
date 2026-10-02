@@ -30,7 +30,7 @@ atom:
   * benzene: the kernel's agreement and its time against the explicit
     route's, cache included.
 
-Measured on the laptop at 2 threads, the kernel in its fixed (tile, tile)
+Measured on a two-thread workstation, the kernel in its fixed (tile, tile)
 blocks: within 4.5e-16 to 3.3e-15 of the explicit route, at most 6.8
 anchors (water's singlet interstate X_bar); the grid force 0.34 of the
 anchored bar (5.3e-8 Ha/Bohr) from the default, the interstate element

@@ -1,19 +1,19 @@
 """Every rank holds ONE calculation's force and energy on the two things a
-cluster node has and this laptop has not: a pyscf whose threaded GEMM does
+cluster node has and this workstation has not: a pyscf whose threaded GEMM does
 not repeat its bits, and a BLAS whose GEMM bits follow the call shape.
 
 THE PYSCF RACE. `pyscf.lib.ddot`, behind `lib.dot` and `lib.einsum`, calls
 NPdgemm (pyscf/lib/np_helper/npdot.c), which, where k/m > 3 and k/n > 3,
 splits the K index over the OpenMP threads and adds the partial products into
 C under `omp critical` in thread-ARRIVAL order: at 16 threads no pyscf result
-repeats bit for bit, within one process or across nodes. This laptop's pyscf
+repeats bit for bit, within one process or across nodes. This workstation's pyscf
 is built without OpenMP (`lib.num_threads()` is 1), so no simulated-rank gate
 here could see it. `racing_dgemm` replaces `numpy_helper._dgemm`, the ctypes
 caller of NPdgemm, by what NPdgemm computes at `OMP_THREADS` threads, the
 partials added in a fresh random order per call.
 
 THE SHAPE-SENSITIVE BLAS. On OpenBLAS a GEMM row depends on the call's shape
-(tests/test_frequency_rows_serial_shaped.py), which the laptop's BLAS hides.
+(tests/test_frequency_rows_serial_shaped.py), which an MKL workstation's BLAS hides.
 Here the same stand-in covers the whole package: every `a @ b`,
 `np.dot/matmul/tensordot/inner/vdot`, contracting `np.einsum` and `x.dot(y)`
 under src/ is rewritten at import (`ShapeRewriter`) to scale its result by

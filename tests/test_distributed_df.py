@@ -43,8 +43,8 @@ orbital energies, one ulp at the least, floored at `E_TOL`, `DM_TOL` and
 `MO_TOL`; where two distributed runs of one layout are compared, within
 `COMPOSED_GRAD_K` times the repeat alone, which is bitwise here, where pyscf
 repeats its bits. The checks that the serial path IS pyscf's own SCF, and the
-subprocess probe against the archived tree, are `==` on two runs: laptop
-gates by design, met where pyscf repeats its bits.
+subprocess probe against the archived tree, are `==` on two runs:
+single-machine gates by design, met where pyscf repeats its bits.
 
 EVERY GATE HERE WAS SHOWN TO FAIL:
 

@@ -59,7 +59,7 @@ def test_per_cpu_without_cpus_per_task_assumes_one_cpu():
 
 
 def test_neither_variable_returns_the_default_unscaled():
-    """No allocation in the environment (a laptop): `default` comes back
+    """No allocation in the environment (a single machine): `default` comes back
     exactly, never scaled by `fraction`."""
     assert allocation_max_memory_mb() is None
     assert allocation_max_memory_mb(default=8000) == 8000
@@ -161,7 +161,7 @@ def test_per_cpu_form_is_already_per_task():
 
 
 def test_outside_slurm_both_unset_still_returns_the_default():
-    """No `SLURM_JOB_ID` at all (a laptop): the whole-node fallback must not
+    """No `SLURM_JOB_ID` at all (a single machine): the whole-node fallback must not
     fire, so `default` still comes back unscaled, same as
     `test_neither_variable_returns_the_default_unscaled`."""
     assert 'SLURM_JOB_ID' not in os.environ

@@ -194,7 +194,7 @@ def roots_resolution(eps, nocc, roots):
     roots move by 2.4e-13 of |roots| when conv_tol alone goes from 1e-5 to
     1e-9, and one reassociation of the replicated fit moved them by 5.2e-14
     and 9.7e-14 in two 8-node jobs and by 3.2e-13 to 7.9e-13 over five
-    reorderings on a laptop: below the floor the anchor is the solves' noise.
+    reorderings on a workstation: below the floor the anchor is the solves' noise.
     """
     floor = _residual_floor(bse_pair_diagonal(eps, nocc))
     return float(np.sqrt(len(roots)) * floor / np.linalg.norm(roots))

@@ -61,7 +61,7 @@ estimator (not its bits), and the reductions re-associate J and K, so the
 distributed SCF lands on the serial ISDF-K SCF within the SCF's own
 convergence threshold, the same on every rank.
 
-MEASURED, anthracene/cc-pVDZ/LRC-wPBEh on two laptop threads (M 3552 in 7
+MEASURED, anthracene/cc-pVDZ/LRC-wPBEh on two workstation threads (M 3552 in 7
 tiles, nao 246, naux 924, nocc 47), the one-rank handle: the row fit 12.8
 s; one operator's Z rows 0.75 s (31 GF/s); a K build 0.23 s, 34 GF/s on
 2 M^2 (nocc + nao) + 2 M nao^2, against 0.32 s for the serial ISDFJK's K on

@@ -68,7 +68,7 @@ Set MBPT_USE_MPI=0 to force the serial path.
 
 `simulated_world(size)` gives `size` communicators that reduce through shared
 memory across THREADS of one process. It exists so every distributed path can
-be exercised where MPI cannot start -- the sandboxed test runner, a laptop
+be exercised where MPI cannot start -- the sandboxed test runner, a machine
 without mpirun -- with the real reduction, not a no-op: each rank runs in its
 own thread and `reduce_sum` blocks until every rank has contributed, then
 hands all of them the rank-ordered sum. tests/test_mpi_routes.py and
@@ -990,7 +990,7 @@ def agreement(x, comm=None, label=None, audit_only=False):
     the sum, because an odd weight is invertible mod 2^64; changes in several
     words cancel only where their differences stand in the ratio of two
     pseudo-random weights, ~2^-64, which also catches swapped elements. It
-    measured 10 to 18 GB/s on the laptop, 26 GB in 1.4 to 2.6 s, where
+    measured 10 to 18 GB/s on a workstation, 26 GB in 1.4 to 2.6 s, where
     blake2b runs at 0.29 GB/s (90 s), sha1 at 0.49 and a 32-bit crc32 at 3.5;
     a sum over a strided sample would miss the one-ulp drift in an unsampled
     element, and that drift is what this looks for. The shapes, dtypes and
