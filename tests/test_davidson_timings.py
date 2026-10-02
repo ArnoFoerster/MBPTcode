@@ -13,6 +13,15 @@ already, `davidson_lockstep_skipped_mb`; and the counts -- iterations, vectors
 applied, largest subspace -- that say whether the cost is the action or the
 number of times the guess made the solver call it.
 
+The block action is split further, into its local pieces
+(`davidson_action_<piece>`: the GEMMs, the Hadamard product, the Hartree
+term, the owner-order write, the batch's element-wise terms), which with the
+collectives inside it (`davidson_comm_gather`, `_reduce_grid`,
+`_reduce_pairs`) say what of a vector's time a rank count divides. The
+subspace work is split likewise where the trial space is cut by pair rows
+(`davidson_subspace_<piece>`, zero serially), beside the bytes this rank's
+holders take (`davidson_trial_space_mb`).
+
 Gated here: the keys exist on every rank; the parts do not exceed the whole;
 the counts are consistent with the `stats` the same run reports, so the two
 cannot drift into two spellings of one number; every rank runs the same
@@ -64,9 +73,11 @@ from pyscf import gto, scf
 
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import (COMM_KINDS,
+from src.SingleReference.LinearResponse.davidson import (ACTION_PIECES,
+                                                         COMM_KINDS,
                                                          _QPStageTimings,
                                                          solve_bse_isdf)
+from src.SingleReference.LinearResponse.trial_space import SUBSPACE_PIECES
 
 SIZES = [2, 3]
 NROOTS = 3
@@ -81,7 +92,13 @@ TIMING_KEYS = ('davidson_block_action', 'davidson_subspace', 'davidson_comm',
                'davidson_subspace_max', 'davidson_vectors_applied',
                'davidson_lockstep_mb', 'davidson_lockstep_skipped_mb',
                'davidson_max_space', 'davidson_collapses',
-               *(f'davidson_comm_{kind}' for kind in COMM_KINDS))
+               *(f'davidson_comm_{kind}' for kind in COMM_KINDS),
+               *(f'davidson_action_{piece}' for piece in ACTION_PIECES),
+               *(f'davidson_subspace_{piece}' for piece in SUBSPACE_PIECES),
+               'davidson_trial_space_mb')
+#: The collectives inside the block action; the lockstep kind also holds the
+#: result's, which is outside it.
+ACTION_COMM_KINDS = ('gather', 'reduce_grid', 'reduce_pairs')
 #: Every rank fills these too: chi0/sigma/the exchange build/the root search
 #: of the space-time QP solve all run -- and time -- on every rank.
 QP_TIMING_KEYS = ('qp_chi0', 'qp_dyson', 'qp_sigma', 'qp_static', 'qp_states')
@@ -171,6 +188,19 @@ def _check_iterating_rank(t, stats):
     # A vind call applies an X block and a Y block, so the subspace is never
     # more than half the vectors the action saw.
     assert 2 * t['davidson_subspace_max'] <= t['davidson_vectors_applied']
+    # The action's local pieces all ran -- a singlet BSE has every one -- and
+    # with its own collectives they stay inside it.
+    pieces = [t[f'davidson_action_{piece}'] for piece in ACTION_PIECES]
+    assert min(pieces) > 0.0
+    inside = sum(pieces) + sum(t[f'davidson_comm_{kind}']
+                               for kind in ACTION_COMM_KINDS)
+    assert inside <= t['davidson_block_action'] + TIMER_SLACK
+    # The pair-row loop's pieces stay inside the subspace work, and zero
+    # where real_eig runs whole; the holders take their 32 bytes per pair.
+    sub = [t[f'davidson_subspace_{piece}'] for piece in SUBSPACE_PIECES]
+    assert min(sub) >= 0.0
+    assert sum(sub) <= t['davidson_subspace'] + TIMER_SLACK
+    assert t['davidson_trial_space_mb'] >= 0.0
     json.dumps(t)                     # a caller may record it as JSON
 
 
@@ -351,12 +381,17 @@ def test_qp_timings_move_no_bits(water, tmp_path_factory, archive):
     roots and vectors, run as a subprocess on the extracted tree, against
     this tree's, BITWISE -- nothing between the two trees touches the
     arithmetic of a one-rank solve.
+
+    Both trees divide by the bare d, this one asked for it: the default
+    preconditioner is now the screened diagonal, which the pre-instrumentation
+    tree does not have, and which moves the serial roots' last bits.
     """
     tmp = tmp_path_factory.mktemp('qp_timings_bitwise')
     omega_old, X_old, Y_old = _archived_bse_roots(archive, tmp)
     omega_new, X_new, Y_new, _ = solve_bse_isdf(
         water['mf'], water['mol'], water['nocc'], nroots=NROOTS,
-        probe=True, progress=False, factors=water['factors'])
+        probe=True, progress=False, factors=water['factors'],
+        preconditioner='bare')
     assert _bitwise(omega_old, omega_new)
     assert _bitwise(X_old, X_new)
     assert _bitwise(Y_old, Y_new)

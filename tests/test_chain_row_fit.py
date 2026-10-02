@@ -53,6 +53,7 @@ D = M^T V^(1/2) formed whole and the rows cut from it
 (rows without the fit's ledger), while (a), (b) and (d) stayed green: the
 same rows and the same numbers, only formed whole.
 """
+import functools
 import inspect
 import os
 import sys
@@ -74,7 +75,7 @@ from src.Base.sliced_factors import SlicedFactors, whole_factor
 from src.Base.solvent_screening import SolventScreening
 from src.Base.utils.mpi_grid import (contiguous_block, distributed, lockstep,
                                      partition, run_simulated)
-from src.gradients import factor_chain
+from src.gradients import excited_state, factor_chain
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
@@ -85,6 +86,7 @@ from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
 from src.properties.surface import evaluate
 from src.properties.surfaces import potential_energy_surface
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from tests.test_chain_sliced_factors import (COMPOSED_GATHERS, H2O,
                                              H2O_DISPLACED, chain_scf,
                                              own_water, reachable_arrays,
@@ -590,7 +592,18 @@ def product_fit_factors(fit):
 def test_ethylene_row_fit_is_its_own_estimator(monkeypatch):
     """Where the pair screen drops pairs, the row-fit chain sits within the
     anchored bar of its own estimator formed whole, and `_fit`'s estimator,
-    which it does not realize, outside that bar in every quantity."""
+    which it does not realize, outside that bar in every quantity.
+
+    On the default preconditioner, the screened diagonal, the BSE roots are
+    held within the Davidson's own certificate instead of the bar: that
+    diagonal is formed from the factors themselves, so the fit's last bits
+    reach the Davidson's path as well as its operator, and the roots of the
+    row fit and of its estimator formed whole part by more than the
+    reassociation bar. Every root lies within GATE_BSE_CONV_TOL of the whole
+    fit's, sqrt(nroots) GATE_BSE_CONV_TOL / |roots| relative; the anchored
+    bar on the BSE roots is held on the bare d, asked for, and every other
+    quantity on the bar as before.
+    """
     mol = molecule(ETHYLENE)
 
     def run(**kw):
@@ -608,23 +621,42 @@ def test_ethylene_row_fit_is_its_own_estimator(monkeypatch):
         return run_simulated(rank, 2)[0]
 
     keys = ('force', 'energy', 'root', 'bse_roots', 'drpa_force')
-    rows, replicated = run(**row_kw()), run(sliced=True)
-    with monkeypatch.context() as patch:
+    on_bar = ('force', 'energy', 'root', 'drpa_force')
+
+    def three(patch):
+        """rows, whole and bar, on whatever `patch` holds."""
+        rows = run(**row_kw())
         patch.setattr(FactorChain, 'row_fit_factors',
                       product_fit_factors(fit_M_stable))
         whole = run(**row_kw())
         patch.setattr(FactorChain, 'row_fit_factors', product_fit_factors(
             reassociated_fit(mol, product_pairs(mol))))
         bar = run(**row_kw())
-    own, near = anchored(whole, bar, rows, keys)
+        return rows, whole, bar
+
+    replicated = run(sliced=True)
+    with monkeypatch.context() as patch:
+        rows, whole, bar = three(patch)
+    with monkeypatch.context() as patch:
+        patch.setattr(excited_state, 'solve_casida_davidson',
+                      functools.partial(solve_casida_davidson,
+                                        preconditioner='bare'))
+        bare = three(patch)
+    bare_own, bare_near = anchored(bare[1], bare[2], bare[0], ('bse_roots',))
+    certificate = (np.sqrt(len(whole['bse_roots'])) * GATE_BSE_CONV_TOL
+                   / np.linalg.norm(whole['bse_roots']))
+    assert relative(rows['bse_roots'], whole['bse_roots']) <= certificate
+    own, near = anchored(whole, bar, rows, on_bar)
     other, apart = anchored(whole, bar, replicated, keys)
     print('\nethylene, 2 ranks, against its own estimator: ' + '; '.join(own)
           + '\n  the replicated fit against the same: ' + '; '.join(other)
+          + '\n  on the bare d, the row fit: ' + '; '.join(bare_own)
           + f"\n  max |d force| row fit - replicated "
             f"{np.abs(rows['force'] - replicated['force']).max():.2e} "
             f"Ha/Bohr, |d root| "
             f"{abs(rows['root'] - replicated['root']) * HARTREE_TO_EV:.2e} eV")
     assert max(near.values()) <= FIT_REASSOCIATION_K, own
+    assert max(bare_near.values()) <= FIT_REASSOCIATION_K, bare_own
     assert min(apart.values()) > FIT_REASSOCIATION_K, other
 
 

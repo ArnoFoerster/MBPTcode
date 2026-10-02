@@ -33,9 +33,13 @@ Measured on a two-thread workstation: every bitwise gate exact; under the
 stand-in the adjoints move 3.9e-6 to 4.2e-6 off the real BLAS and a
 128-point tile moves them 1.7e-6 to 1.8e-6 more, every rank still the
 one-rank run's bits; the replicated adjoint in 128-point tiles moves the
-composed force 1.10e-8 Ha/Bohr at 2 ranks, 0.35 of its anchored bar (three
-times the 1.04e-8 the same distributed run moves on one BLAS thread); 1.92e-8
-and 0.43 at 3 ranks, 8.6e-9 and 0.13 at 8, run outside the suite.
+composed force 9.0e-9 Ha/Bohr at 2 ranks by its seeds alone: they sit at
+most 0.003 of the derived bound, and the fold of the default-tile seeds on
+the reblocked run's pieces is the distributed force bitwise. A 1e-10
+relative move of D_bar's largest element in the reblocked kernel puts its
+seeds at 236 bounds while the force moves 6.8e-9, less than the clean
+reblocking did; a dropped W_bar is 1.3e12 bounds; a 1e-12 change of W_bar in
+the reblocked run's fold breaks the one-fold gate.
 
 SHOWN TO FAIL, then restored and byte-compared (`cmp`): the kernel reading
 its column tiles of D out of D gathered whole (`whole_factor(D, 'D')` before
@@ -54,7 +58,7 @@ import numpy as np
 import pytest
 from pyscf import gto, lib
 
-from src.Base.constants import COMPOSED_GRAD_K
+from src.Base.constants import BSE_ADJOINT_TILE_ROWS
 from src.Base.sliced_factors import SlicedFactors, whole_factor
 from src.Base.utils.mpi_grid import (contiguous_block, distributed,
                                      run_simulated)
@@ -63,10 +67,9 @@ from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.gradients import excited_state
 from src.gradients.excited_state import ExcitedStateChain
-from tests.test_bse_grid_adjoint import ETHYLENE
+from tests.test_bse_grid_adjoint import ETHYLENE, grid_bound_ratios
 from tests.test_chain_sliced_factors import (BASIS, H2O, H2O_DISPLACED,
                                              bitwise, chain_scf)
-from tests.test_mpi_routes import COMPOSED_GRAD_FLOOR, one_thread
 
 SIZES = [2, 3, 8]
 #: The default tile and one that cuts water's 444 points into 7 tiles.
@@ -308,34 +311,88 @@ def test_the_composed_force_is_the_replicated_adjoints(size, monkeypatch,
           f'|g| {np.abs(dist[0][0]).max():.6e}')
 
 
+def traced_grid_forces(comm, factory_of):
+    """`grid_forces`, and at every reverse call this chain's seeds recorded
+    beside the default-tile kernel's run serially on the gathered factors,
+    which the same fold then carries on the same pieces: (the forces, the
+    records)."""
+    factory = factory_of(comm.Get_rank())
+    mol = own_molecule('water')
+    chain = ExcitedStateChain(mol, factory, mf=factory(mol),
+                              solver='davidson', sliced=True,
+                              bse_adjoint='grid')
+    calls = []
+    seeds_of, fold = chain._casida_seeds, chain._fold_to_nuclei
+
+    def seeds(pieces, n, m=None):
+        out = seeds_of(pieces, n, m)
+        x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+        X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
+        kw = dict(spin=chain.spin, bse_tda=chain.bse_tda)
+        with distributed(None):
+            ref = (isdf_bse_backward(n, X, D, eq, w, no, xn, yn, **kw)
+                   if m is None else
+                   isdf_interstate_backward(m, n, X, D, eq, w, no, xn, yn,
+                                            **kw))
+        calls.append(dict(n=n, m=m, ref=ref, inputs=(X, D, eq, w, no, xn, yn),
+                          spin=chain.spin, tda=chain.bse_tda,
+                          seeds=tuple(np.array(a, copy=True) for a in out)))
+        return out
+
+    def folded(pieces, *own):
+        result = fold(pieces, *own)
+        calls[-1]['refold'] = np.asarray(fold(pieces, *[
+            np.array(a, copy=True) for a in calls[-1]['ref']])[0])
+        return result
+
+    chain._casida_seeds, chain._fold_to_nuclei = seeds, folded
+    here = gto.M(atom=H2O_DISPLACED, basis=BASIS, verbose=0)
+    g_ex, d_ex = chain.excitation_gradient(here)
+    g_st, _ = chain.interstate_gradient(0, 1)
+    return (g_ex, d_ex['omega'], g_st), calls
+
+
 def test_the_force_carries_the_adjoints_bits(monkeypatch, pyscf_one_thread):
     """At 2 ranks the replicated adjoint in 128-point tiles, a reblocking of
     the same sums, moves the composed force off the distributed one's bits
-    -- so the bitwise gate above can fail -- by no more than the anchored
-    bar: `COMPOSED_GRAD_K` times what the same distributed run moves on one
-    BLAS thread, a re-association of its sums, `COMPOSED_GRAD_FLOOR` at the
-    least. The linear solves after the adjoint carry a last-bit change of
-    their right-hand side up to their tolerance."""
+    -- so the bitwise gate above can fail -- and by its seeds alone: on
+    every rank the root is the distributed run's, the same fold of the
+    default-tile kernel's seeds on the reblocked run's own pieces is the
+    distributed force bitwise, and the reblocked seeds lie within the derived
+    rounding bound of the default-tile ones (`grid_bound_ratios`). The force
+    difference itself is the fold's own rounding of those seeds, printed:
+    the fit adjoint carries last-bit changes of its input to ~1e-8 Ha/Bohr,
+    so a bar on it would gate a draw."""
     factory_of = mean_fields(2)
     dist = run_simulated(grid_forces, 2, factory_of)
-    again = one_thread(lambda: run_simulated(grid_forces, 2, factory_of))
-    response = 0.0 if again is None else max(
-        float(np.abs(np.asarray(a) - np.asarray(b)).max())
-        for a, b in zip(again[0], dist[0]))
     monkeypatch.setattr(excited_state, 'isdf_bse_backward',
                         serial_replicated(isdf_bse_backward, 1,
                                           tile_rows=128))
     monkeypatch.setattr(excited_state, 'isdf_interstate_backward',
                         serial_replicated(isdf_interstate_backward, 2,
                                           tile_rows=128))
-    moved = run_simulated(grid_forces, 2, factory_of)
-    d = max(float(np.abs(np.asarray(a) - np.asarray(b)).max())
-            for a, b in zip(moved[0], dist[0]))
-    bar = max(COMPOSED_GRAD_FLOOR, COMPOSED_GRAD_K * response)
-    print(f'[info] 128-point tiles move the composed force by {d:.2e} '
-          f'Ha/Bohr, {d / bar:.2f} of the anchored bar {bar:.2e} = max('
-          f'{COMPOSED_GRAD_FLOOR:.1e}, {COMPOSED_GRAD_K} x {response:.2e})')
-    assert not bitwise(moved[0], dist[0]) and d < bar, d
+    moved = run_simulated(traced_grid_forces, 2, factory_of)
+    for r, (forces, calls) in enumerate(moved):
+        d = max(float(np.abs(np.asarray(a) - np.asarray(b)).max())
+                for a, b in zip(forces, dist[r]))
+        assert not bitwise(forces, dist[r]), f'rank {r}: nothing moved'
+        assert forces[1] == dist[r][1], f'rank {r}: the root moved'
+        assert len(calls) == 2, len(calls)
+        for label, call, g in zip(('excitation', 'interstate'), calls,
+                                  (dist[r][0], dist[r][2])):
+            ratios = grid_bound_ratios(call['ref'], call['seeds'],
+                                       call['inputs'], call['spin'],
+                                       call['tda'], call['n'], bra=call['m'],
+                                       tiles=(BSE_ADJOINT_TILE_ROWS, 128))
+            same = np.array_equal(call['refold'], g)
+            print(f'[info] rank {r} {label}: 128-point tiles move the force '
+                  f'{d:.2e} Ha/Bohr, the seeds X / D / W at {ratios[0]:.3f} / '
+                  f'{ratios[1]:.3f} / {ratios[2]:.3f} of the derived bound; '
+                  f'the fold of the default-tile seeds bitwise the '
+                  f'distributed force: {same}')
+            assert same, (r, label)
+            assert np.array_equal(call['seeds'][0], call['ref'][0]), label
+            assert max(ratios) <= 1, (r, label, ratios)
 
 
 # ------------------------------------------------ (b) the memory scan

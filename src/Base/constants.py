@@ -1,4 +1,5 @@
 """Numeric defaults and self-energy method registry shared across src/SingleReference/."""
+import math
 
 # Physical constants, CODATA 2018. Defined here and nowhere else: import them,
 # never re-spell the digits, so every route reports the same number.
@@ -478,6 +479,17 @@ ATOMIC_TIME_SECONDS = 2.4188843265857e-17
 # a 0.1% error in every radiative lifetime.
 SPEED_OF_LIGHT_AU = 137.035999177
 
+# hc in Hartree nm: a photon of E Hartree has the vacuum wavelength
+# HARTREE_WAVELENGTH_NM / E nm (lambda = 2 pi c / E in Bohr).
+HARTREE_WAVELENGTH_NM = 2.0 * math.pi * SPEED_OF_LIGHT_AU * BOHR_TO_ANGSTROM / 10.0
+# FWHM of a Gaussian per standard deviation, 2 sqrt(2 ln 2).
+GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
+# Exponent F below which a Franck-Condon density e^F times its bell integral is
+# zero in double precision: ln of the smallest normal float (-708) less a
+# margin of e^40 for a bell prefactor 1/sqrt(2 pi F''), which only a band
+# narrower than 1e-17 Hartree could exceed.
+FC_UNDERFLOW_EXPONENT = -748.0
+
 # Largest |H_ixjy - H_jyix| a finite-difference Hessian (src/properties/
 # hessian.py) may carry before it is refused, relative to its own largest
 # element. A central difference of an analytic force makes the two halves
@@ -752,6 +764,15 @@ AGREEMENT_DIGEST_BLOCK = 4096
 # AMB_LANCZOS_MAXITER_PER_DIM operator applications per pair.
 AMB_LANCZOS_NCV = 20
 AMB_LANCZOS_MAXITER_PER_DIM = 10
+# Weight of the normalized cold start 1/d added to the lowest converged Casida
+# root's normalized X - Y when the (A - B) Lanczos starts after the Davidson
+# (`LinearResponse.davidson`). (A - B) is block diagonal over the pair irreps
+# and the root lies in one of them, so the root alone would confine the
+# Krylov space there; 1/d has weight in every irrep. At 0.1 a tenth of the
+# start reaches the other irreps while the root still carries most of it, so
+# the warm start reaches the sign certificate in fewer block actions than 1/d
+# alone.
+PROBE_START_MIX = 0.1
 
 # How the Hellmann-Feynman adjoint of a BSE root is realized. 'explicit'
 # contracts the Casida vectors against the three-index blocks B[P, i, a] of
@@ -834,12 +855,58 @@ FIT_TRANSPOSE_TILE = 256
 # applies the action to them again: a solve that collapses takes more cycles
 # and block actions than one that never does, its top roots converging last.
 # The space is raised to DAVIDSON_SPACE_CYCLES of real_eig's per-cycle
-# increment, never past DAVIDSON_SPACE_GB of its four pair-space-long holders
-# per trial pair and never below real_eig's own bound, so every solve pyscf
-# already held whole runs exactly as it did.
+# increment, never past what this rank's memory holds of its four
+# pair-space-long holders per trial pair and never below real_eig's own bound,
+# so every solve pyscf already held whole runs exactly as it did. Where no
+# allocation says what this rank's memory is -- a single machine outside
+# SLURM, whose max_memory is pyscf's process default -- the whole holders are
+# held within DAVIDSON_SPACE_GB instead.
 DAVIDSON_SPACE_CYCLES = 50
 DAVIDSON_SPACE_GB = 16
 
+# Fraction of this rank's max_memory (the allocation's share a job hands pyscf,
+# `Base.utils.memory.allocation_max_memory_mb`) that the Davidson's trial space
+# (`LinearResponse.davidson`) may take together with the block action's own
+# working set -- its kernel rows and tiles and one batch's buffers -- counted
+# on the pair rows this rank holds. One half is real_eig's own rule, which
+# gives its holders half of max_memory; the action's arrays come off that half
+# rather than out of the other, which the factors, W, the mean field and the
+# setup's gathered D hold. On a large system the half left beside the action
+# holds more trial pairs than DAVIDSON_SPACE_CYCLES asks for, so the cycle
+# bound binds and the iteration path does not depend on the rank count.
+DAVIDSON_SPACE_FRACTION = 0.5
+
+# Pair rows per tile of the Casida/BSE Davidson's trial space distributed over
+# ranks (`LinearResponse.trial_space`): a rank holds the rows of its
+# contiguous run of tiles of V, W, U1 and U2. FIXED, never derived from a rank
+# count: a GEMM's bits depend on its call shape, so one tile sequence is what
+# makes the row products the same bits at every rank count. A cost knob
+# otherwise: a tile of this height costs about what the untiled rows do, a
+# smaller one more per row, and the tile count bounds how unevenly the ranks'
+# runs of tiles can split the pair space.
+DAVIDSON_PAIR_TILE = 1024
+
+# The diagonal the Casida/BSE Davidson (`LinearResponse.davidson`) divides its
+# residuals by: 'bare', the pair energies d = eps_a - eps_i, or 'screened',
+# d - (ii|W|aa), the diagonal of the screened direct term in the fit's own
+# gauge (the bare Coulomb's for TDHF, nothing for RPA). The singlet's Hartree
+# diagonal 2(ia|ia) is left out: added, it converged slower. The screened
+# diagonal is the default: it is closer to the diagonal of A where the
+# screened attraction binds the pairs, so a BSE solve takes fewer cycles and
+# block actions to the same roots, and holds whole a trial space the bare one
+# collapses. RPA's diagonal is d either way; 'bare' stays selectable, and it is
+# what a solve that must reproduce a bare-preconditioned iteration asks for.
+DAVIDSON_PRECONDITIONER = 'screened'
+DAVIDSON_PRECONDITIONERS = ('bare', 'screened')
+
+# Grid rows per tile of the screened preconditioner's fitted densities
+# D^T (X_o o X_o) and D^T (X_v o X_v) (`LinearResponse.davidson`): tile t is
+# rows [4096 t, 4096 (t + 1)) of the grid, cut only where a rank's rows begin
+# or end, and a rank adds its tiles' (naux, n_occ + n_vir) addends in tile
+# order before ONE reduction. FIXED by the grid, never by the rank count; a
+# tile's squares are 4096 (n_occ + n_vir) doubles beside the
+# (naux, n_occ + n_vir) sum.
+DAVIDSON_DIAGONAL_TILE = 4096
 
 # Bohr within which an explicit set of ISDF shell radii counts as THE shipped
 # table row for the same (element, basis, auxbasis, counts). Both sides are
