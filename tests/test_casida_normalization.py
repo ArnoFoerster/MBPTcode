@@ -44,7 +44,7 @@ def build():
     return mol, mf, td
 
 
-def test_oscillator_strengths_refuse_a_pyscf_vector(mol, mf, td):
+def check_oscillator_strengths_refuse_a_pyscf_vector(mol, mf, td):
     """The mistake this catches is silent: f comes back a factor of two small
     and every root sits at the right energy."""
     nocc = mol.nelectron // 2
@@ -58,7 +58,7 @@ def test_oscillator_strengths_refuse_a_pyscf_vector(mol, mf, td):
                      'a pySCF vector is refused by name', str(exc).split('--')[0].strip())
 
 
-def test_the_converted_vector_reproduces_pyscf_oscillator_strengths(mol, mf, td):
+def check_the_converted_vector_reproduces_pyscf_oscillator_strengths(mol, mf, td):
     """THE ABSOLUTE GATE ON THE PAIR. An independent implementation with the
     other convention and its own factors agrees only if this repo's sqrt(2)
     goes with this repo's normalization; either one alone is unfalsifiable."""
@@ -69,7 +69,7 @@ def test_the_converted_vector_reproduces_pyscf_oscillator_strengths(mol, mf, td)
     return check(d < 1e-10, 'converted, f matches pySCF exactly', f'max |df| {d:.1e}')
 
 
-def test_the_tolerance_admits_a_loose_root_and_never_one_half():
+def check_the_tolerance_admits_a_loose_root_and_never_one_half():
     """It has to straddle a real gap: a Davidson root at conv_tol 1e-5 carries
     a norm error far above machine precision, and 1/2 must never pass."""
     x = np.ones((6, 1)) / np.sqrt(6.0)
@@ -86,14 +86,22 @@ def test_the_tolerance_admits_a_loose_root_and_never_one_half():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mol, mf, td = build()
     all_ok = True
     print('\n-- the boundary refuses the other convention')
-    all_ok &= test_oscillator_strengths_refuse_a_pyscf_vector(mol, mf, td)
-    all_ok &= test_the_tolerance_admits_a_loose_root_and_never_one_half()
+    all_ok &= check_oscillator_strengths_refuse_a_pyscf_vector(mol, mf, td)
+    all_ok &= check_the_tolerance_admits_a_loose_root_and_never_one_half()
     print('\n-- converted, the two implementations agree')
-    all_ok &= test_the_converted_vector_reproduces_pyscf_oscillator_strengths(mol, mf, td)
+    all_ok &= check_the_converted_vector_reproduces_pyscf_oscillator_strengths(mol, mf, td)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_casida_normalization_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

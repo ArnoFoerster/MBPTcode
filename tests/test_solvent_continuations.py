@@ -73,7 +73,7 @@ def solvent_shifts(mf, radii):
     return out
 
 
-def test_every_continuation_carries_eq18(mf, radii):
+def check_every_continuation_carries_eq18(mf, radii):
     ips = solvent_shifts(mf, radii)
     shift = {c: sol - gas for c, (gas, sol) in ips.items()}
     ok = check(all(s < -0.1 for s in shift.values()),
@@ -86,11 +86,19 @@ def test_every_continuation_carries_eq18(mf, radii):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     import warnings
     warnings.simplefilter('ignore')
     mol, mf, radii = build()
     print('\n-- the solvent shift of the HOMO on every space-time continuation')
-    all_ok = test_every_continuation_carries_eq18(mf, radii)
+    all_ok = check_every_continuation_carries_eq18(mf, radii)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_solvent_continuations_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

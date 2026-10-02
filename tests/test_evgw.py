@@ -61,7 +61,7 @@ def build_reference():
     return m
 
 
-def test_the_first_cycle_is_g0w0(mf):
+def check_the_first_cycle_is_g0w0(mf):
     """Cycle one screens with the mean field's own spectrum, so it must
     reproduce the single-shot route: the same grid, the same anchor, the same
     call, to the round-off of the one unit conversion the dispatcher makes."""
@@ -77,7 +77,7 @@ def test_the_first_cycle_is_g0w0(mf):
                  'the first evGW cycle IS G0W0', f'max |d eps| {d:.1e} Ha')
 
 
-def test_it_converges_and_opens_the_gap_beyond_g0w0(mf):
+def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
     """evGW screens with the OPENED gap, so P0 is less polarizable, W less
     screening, and the gap ends above the G0W0 one. A loop that came back below
     it would have the feedback backwards."""
@@ -100,7 +100,7 @@ def test_it_converges_and_opens_the_gap_beyond_g0w0(mf):
     return ok
 
 
-def test_the_high_virtuals_do_not_decide_convergence(mf):
+def check_the_high_virtuals_do_not_decide_convergence(mf):
     """They are discretised continuum, not quasiparticles: the solver picks a
     different root for them from one cycle to the next, so a criterion over the
     whole spectrum never converges even though the gap is stationary. The
@@ -125,7 +125,7 @@ def test_the_high_virtuals_do_not_decide_convergence(mf):
     return ok
 
 
-def test_the_anchor_is_what_makes_it_converge(mf):
+def check_the_anchor_is_what_makes_it_converge(mf):
     """THE DISCRIMINATING TEST. Drive the same loop by hand with the equation
     anchored on the ITERATE and it must diverge, opening the gap by a
     near-constant amount every cycle. Without this, dropping `eps_anchor`
@@ -158,7 +158,7 @@ def test_the_anchor_is_what_makes_it_converge(mf):
     return ok
 
 
-def test_the_quadrature_is_frozen_on_the_anchor(mf):
+def check_the_quadrature_is_frozen_on_the_anchor(mf):
     """A grid re-derived per cycle shrinks as the gap opens, so the fixed point
     would depend on the schedule that reached it. The space-time route sizes
     its grid from the anchor when one is given: on a spectrum whose gap is
@@ -182,7 +182,7 @@ def test_the_quadrature_is_frozen_on_the_anchor(mf):
                  f"{t_anchored['ntau_auto']}, free {t_free['ntau_auto']}")
 
 
-def test_every_orbital_is_updated(mf):
+def check_every_orbital_is_updated(mf):
     """G and P0 are built from the whole spectrum, so a partial update leaves
     the rest screening at mean-field values and the result is not evGW."""
     _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=2, tol=0.0)
@@ -193,7 +193,7 @@ def test_every_orbital_is_updated(mf):
                  f"smallest |shift| {np.abs(info['shift']).min() * HARTREE_TO_EV:.3f} eV")
 
 
-def test_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
+def check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
     """A fixed point reached faster must be the SAME fixed point; an
     accelerator that moved the answer would be extrapolating a different map.
     The comparison is against the damped linear mixing DIIS replaces, since on
@@ -212,7 +212,7 @@ def test_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
     return ok
 
 
-def test_the_shift_view_does_not_move_the_original(mf):
+def check_the_shift_view_does_not_move_the_original(mf):
     """The loop builds one of these per cycle; mutating the caller's mean field
     would leave it holding a spectrum from an abandoned iterate."""
     before = np.asarray(mf.mo_energy, float).copy()
@@ -223,7 +223,7 @@ def test_the_shift_view_does_not_move_the_original(mf):
                  'the shifted view shares everything but the spectrum')
 
 
-def test_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
+def check_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
     """A molecule too large for in-core J/K takes PySCF's direct branch, which
     reads the optimizer the mean field caches; a view made through the pickle
     hooks arrives without it and the static correction of every cycle raises.
@@ -246,7 +246,7 @@ def test_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
                  detail)
 
 
-def test_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
+def check_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
     """`eps_anchor=None` must leave the single-shot route BITWISE as it was, or
     threading the keyword moved every existing G0W0 number."""
     nocc = mf.mol.nelectron // 2
@@ -260,7 +260,7 @@ def test_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
                  'eps_anchor=None leaves G0W0 bitwise unchanged')
 
 
-def test_the_anchor_reaches_every_route_through_the_dispatcher(mf):
+def check_the_anchor_reaches_every_route_through_the_dispatcher(mf):
     """The loop hands `eps_anchor` to `calc_qp_energy`, so on a spectrum that
     is not the mean field's the anchored root must differ from the unanchored
     one by about the shift -- on every route, or that route would compound."""
@@ -280,7 +280,7 @@ def test_the_anchor_reaches_every_route_through_the_dispatcher(mf):
     return ok
 
 
-def test_calc_qp_energy_drives_every_route(mf):
+def check_calc_qp_energy_drives_every_route(mf):
     """`self_consistency='evGW'` must work on all three GW routes, and all
     three must reach the same fixed point: they differ only in how chi0 is
     built, so a disagreement beyond the quadratures would be a bug in one."""
@@ -299,7 +299,7 @@ def test_calc_qp_energy_drives_every_route(mf):
     return ok
 
 
-def test_the_refusals(mf):
+def check_the_refusals(mf):
     """A vertex or a non-RPA screening would need its own fixed point rather
     than riding on this one; an unknown mode or switch is a typo, not a
     fallback."""
@@ -350,7 +350,7 @@ def test_the_refusals(mf):
     return ok
 
 
-def test_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
+def check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
     """The point of the loop. chi0 must be evaluated once per cycle on the
     CURRENT eigenvalues, and W is its Dyson inverse -- a screening cached on
     the geometry instead of the spectrum would leave every cycle re-solving
@@ -387,7 +387,7 @@ def test_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
     return ok
 
 
-def test_screen_at_selects_which_spectrum_builds_w(mf):
+def check_screen_at_selects_which_spectrum_builds_w(mf):
     """The convention is the LEVEL OF THEORY: G0W0 screens W0 at the mean
     field, evGW at its fixed point. An explicit `qp` array therefore defaults
     to the standard G0W0 split, and `screen_at='qp'` is the opt-in for an array
@@ -424,7 +424,7 @@ def test_screen_at_selects_which_spectrum_builds_w(mf):
     return ok
 
 
-def test_an_unrestricted_reference_is_driven_channel_by_channel():
+def check_an_unrestricted_reference_is_driven_channel_by_channel():
     """Both spin channels are updated and converged together, on the Casida
     route and on the space-time route alike, and the dispatcher's evGW answer
     for one channel is that channel's fixed point. The alpha HOMO of a radical
@@ -475,7 +475,7 @@ def test_an_unrestricted_reference_is_driven_channel_by_channel():
     return ok
 
 
-def test_evgw0_keeps_w_and_moves_the_poles():
+def check_evgw0_keeps_w_and_moves_the_poles():
     """evGW0 reinjects the eigenvalues into G alone: the RPA Casida problem is
     solved once for the whole loop, and only the poles of Sigma_c follow the
     iterate. Its gap lands between G0W0 and evGW on water: the moved poles open
@@ -543,7 +543,7 @@ def test_evgw0_keeps_w_and_moves_the_poles():
     return ok
 
 
-def test_the_reaction_field_follows_the_iterate():
+def check_the_reaction_field_follows_the_iterate():
     """In a continuum the reaction field's Delta W screens with the eigenvalues
     it is built at, so the evGW step on the Casida route rebuilds its term
     every cycle at the iterate, as the imaginary-axis routes do by calling
@@ -607,7 +607,7 @@ def build_water():
     return m
 
 
-def test_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
+def check_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
     """`update` holds every other orbital at its Kohn-Sham energy, so a deep
     core state screens but never carries its own Pade-continued correction back
     into W. The frontier pair still moves."""
@@ -627,7 +627,7 @@ def test_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
     return ok
 
 
-def test_the_full_update_is_the_default_and_moves_the_core(water):
+def check_the_full_update_is_the_default_and_moves_the_core(water):
     """Default evGW moves every orbital, which is what the windowed run is
     contrasted against; the oxygen 1s moves by electronvolts."""
     eps, info = evgw_eigenvalues(water, water.mol, mode='space-time')
@@ -637,7 +637,7 @@ def test_the_full_update_is_the_default_and_moves_the_core(water):
                  'electronvolts', f'1s {shift:+.2f} eV')
 
 
-def test_an_empty_update_window_is_refused(water):
+def check_an_empty_update_window_is_refused(water):
     try:
         evgw_eigenvalues(water, water.mol, mode='space-time', update=[])
     except ValueError as exc:
@@ -646,40 +646,48 @@ def test_an_empty_update_window_is_refused(water):
     return check(False, 'an empty update window is refused')
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mf = build_reference()
     all_ok = True
     print('\n-- 1. the loop starts at G0W0 and ends past it')
-    all_ok &= test_the_first_cycle_is_g0w0(mf)
-    all_ok &= test_it_converges_and_opens_the_gap_beyond_g0w0(mf)
-    all_ok &= test_every_orbital_is_updated(mf)
+    all_ok &= check_the_first_cycle_is_g0w0(mf)
+    all_ok &= check_it_converges_and_opens_the_gap_beyond_g0w0(mf)
+    all_ok &= check_every_orbital_is_updated(mf)
     print('\n-- 2. the anchor, which is what makes it converge')
-    all_ok &= test_the_anchor_is_what_makes_it_converge(mf)
-    all_ok &= test_the_quadrature_is_frozen_on_the_anchor(mf)
-    all_ok &= test_g0w0_is_unchanged_when_the_anchor_is_not_given(mf)
-    all_ok &= test_the_anchor_reaches_every_route_through_the_dispatcher(mf)
+    all_ok &= check_the_anchor_is_what_makes_it_converge(mf)
+    all_ok &= check_the_quadrature_is_frozen_on_the_anchor(mf)
+    all_ok &= check_g0w0_is_unchanged_when_the_anchor_is_not_given(mf)
+    all_ok &= check_the_anchor_reaches_every_route_through_the_dispatcher(mf)
     print('\n-- 3. the screening really follows the iterate')
-    all_ok &= test_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf)
-    all_ok &= test_screen_at_selects_which_spectrum_builds_w(mf)
+    all_ok &= check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf)
+    all_ok &= check_screen_at_selects_which_spectrum_builds_w(mf)
     print('\n-- 4. convergence machinery')
-    all_ok &= test_the_high_virtuals_do_not_decide_convergence(mf)
-    all_ok &= test_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf)
-    all_ok &= test_the_shift_view_does_not_move_the_original(mf)
-    all_ok &= test_the_shift_view_builds_j_and_k_on_the_direct_path(mf)
+    all_ok &= check_the_high_virtuals_do_not_decide_convergence(mf)
+    all_ok &= check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf)
+    all_ok &= check_the_shift_view_does_not_move_the_original(mf)
+    all_ok &= check_the_shift_view_builds_j_and_k_on_the_direct_path(mf)
     print('\n-- 5. the front door, on every route')
-    all_ok &= test_calc_qp_energy_drives_every_route(mf)
-    all_ok &= test_the_refusals(mf)
+    all_ok &= check_calc_qp_energy_drives_every_route(mf)
+    all_ok &= check_the_refusals(mf)
     print('\n-- 6. an unrestricted reference')
-    all_ok &= test_an_unrestricted_reference_is_driven_channel_by_channel()
+    all_ok &= check_an_unrestricted_reference_is_driven_channel_by_channel()
     print('\n-- 7. evGW0: W of the mean field, poles of the iterate')
-    all_ok &= test_evgw0_keeps_w_and_moves_the_poles()
+    all_ok &= check_evgw0_keeps_w_and_moves_the_poles()
     print('\n-- 8. in a continuum: the reaction field follows the iterate')
-    all_ok &= test_the_reaction_field_follows_the_iterate()
+    all_ok &= check_the_reaction_field_follows_the_iterate()
     print('\n-- 9. the update window')
     water = build_water()
-    all_ok &= test_orbitals_outside_the_update_window_stay_at_the_mean_field(water)
-    all_ok &= test_the_full_update_is_the_default_and_moves_the_core(water)
-    all_ok &= test_an_empty_update_window_is_refused(water)
+    all_ok &= check_orbitals_outside_the_update_window_stay_at_the_mean_field(water)
+    all_ok &= check_the_full_update_is_the_default_and_moves_the_core(water)
+    all_ok &= check_an_empty_update_window_is_refused(water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_evgw_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

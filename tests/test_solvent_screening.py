@@ -76,7 +76,7 @@ def check(ok, label, detail=''):
     return ok
 
 
-def test_analytic_sphere():
+def check_analytic_sphere():
     """Unit point charge at the centre of a sphere of radius a: the reaction
     potential it feels is -(1 - 1/eps)/a, the Born/conductor result, which is
     the exact solution of Poisson's equation for this geometry."""
@@ -102,7 +102,7 @@ def test_analytic_sphere():
     return all_ok
 
 
-def test_vacuum_invariant(mol, mf):
+def check_vacuum_invariant(mol, mf):
     """eps = 1: no dielectric, so not one bit of any integral may move."""
     eri_gas = get_two_electron_integrals_chemist(mol, mf)
     B_gas = get_density_fitting_coefficients(mol, mf)
@@ -114,7 +114,7 @@ def test_vacuum_invariant(mol, mf):
             & check(d_B == 0.0, 'eps=1 leaves the DF factor bit-identical', f'{d_B:.1e}'))
 
 
-def test_kernel_is_negative_semidefinite(mol, mf, eri_gas):
+def check_kernel_is_negative_semidefinite(mol, mf, eri_gas):
     attach_solvent_screening(mf, solvent='water')
     v_tilde = get_two_electron_integrals_chemist(mol, mf) - eri_gas
     detach_solvent_screening(mf)
@@ -128,7 +128,7 @@ def test_kernel_is_negative_semidefinite(mol, mf, eri_gas):
                     f'largest eigenvalue {w_max:.1e}, |vtilde|max {scale:.3f}'))
 
 
-def test_df_matches_dense(mol, mf, eri_gas, B_gas):
+def check_df_matches_dense(mol, mf, eri_gas, B_gas):
     """B -> T B must carry the same vtilde the dense route adds, to within the
     RI error the same B already has on the bare interaction."""
     ri_error_bare = np.abs(np.einsum('Qpq,Qrs->pqrs', B_gas, B_gas) - eri_gas).max()
@@ -158,7 +158,7 @@ def test_df_matches_dense(mol, mf, eri_gas, B_gas):
     return ok & check(d < 1e-12, 'T = I at eps = 1', f'{d:.1e}')
 
 
-def test_uhf():
+def check_uhf():
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='sto-3g', spin=1, verbose=0)
     mf = scf.UHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
     _, g_gas, _ = get_uhf_spin_orbital_arrays_blockstacked(mol, mf)
@@ -182,7 +182,7 @@ def test_uhf():
                     f'{err_scr:.1e} vs bare {err_gas:.1e}'))
 
 
-def test_static_cohsex(mol, mf):
+def check_static_cohsex(mol, mf):
     """The first-order reaction field: image-charge sign structure."""
     attach_solvent_screening(mf, solvent='water')
     sigma = solvent_static_selfenergy(mf, mol)
@@ -199,7 +199,7 @@ def test_static_cohsex(mol, mf):
     return ok
 
 
-def test_the_grid_potential_streams(mol, mf):
+def check_the_grid_potential_streams(mol, mf):
     """The COHSEX term over grid blocks is the answer it is in one block.
 
     The AO grid potential is (nao, nao, ngrids) -- ~10 GB at 100 atoms in a
@@ -245,7 +245,7 @@ def test_the_grid_potential_streams(mol, mf):
     return ok
 
 
-def test_end_to_end(mol):
+def check_end_to_end(mol):
     """ADC(3) and GW must both report a lower IP in solvent, by the same amount
     through the DF and the dense route."""
     def ips(mf, df):
@@ -276,7 +276,7 @@ def test_end_to_end(mol):
                       f'GW {d_gw * 1000:.1f} meV, ADC(3) {d_adc * 1000:.1f} meV')
 
 
-def test_all_gw_routes(mol):
+def check_all_gw_routes(mol):
     """Every GW route carries the solvent the same way: Sigma_c screened by the
     bare interaction plus Duchemin et al.'s Eq. (18) shift, formed from the
     dressed static screening of each route's own factors (DF for casida and
@@ -326,7 +326,7 @@ def test_all_gw_routes(mol):
                       f'space-time {d_st * 1000:.1f} meV vs casida')
 
 
-def test_optical_eps_guard(mol):
+def check_optical_eps_guard(mol):
     eps_opt, eps_static = solvent_dielectrics('water')
     ok = check(abs(eps_opt - 1.3328 ** 2) < 1e-9 and abs(eps_static - 78.355) < 1e-9,
                'water dielectrics from pyscf SMD table',
@@ -346,7 +346,7 @@ def test_optical_eps_guard(mol):
     return ok
 
 
-def test_cavity_order(mol, mf):
+def check_cavity_order(mol, mf):
     """The continuum's cost is the surface potential, n_ao^2 x n_surf, and
     order 11 against 29 moves formaldehyde's solvation energy in toluene by
     0.4 meV at a quarter of the cost -- so the order is the shipped constant,
@@ -371,7 +371,7 @@ def test_cavity_order(mol, mf):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
     eri_gas = get_two_electron_integrals_chemist(mol, mf)
@@ -379,27 +379,35 @@ if __name__ == '__main__':
 
     all_ok = True
     print('\n-- 1. analytic spherical-cavity limit')
-    all_ok &= test_analytic_sphere()
+    all_ok &= check_analytic_sphere()
     print('\n-- 2. vacuum invariant')
-    all_ok &= test_vacuum_invariant(mol, mf)
+    all_ok &= check_vacuum_invariant(mol, mf)
     print('\n-- 3. vtilde structure')
-    all_ok &= test_kernel_is_negative_semidefinite(mol, mf, eri_gas)
+    all_ok &= check_kernel_is_negative_semidefinite(mol, mf, eri_gas)
     print('\n-- 4. DF route == dense route')
-    all_ok &= test_df_matches_dense(mol, mf, eri_gas, B_gas)
+    all_ok &= check_df_matches_dense(mol, mf, eri_gas, B_gas)
     print('\n-- 5. UHF')
-    all_ok &= test_uhf()
+    all_ok &= check_uhf()
     print('\n-- 6. static COHSEX reaction field')
-    all_ok &= test_static_cohsex(mol, mf)
+    all_ok &= check_static_cohsex(mol, mf)
     print('\n-- 6b. the COHSEX grid potential streams')
-    all_ok &= test_the_grid_potential_streams(mol, mf)
+    all_ok &= check_the_grid_potential_streams(mol, mf)
     print('\n-- 7. end to end (ADC(3), GW)')
-    all_ok &= test_end_to_end(mol)
+    all_ok &= check_end_to_end(mol)
     print('\n-- 8. optical-eps guards')
-    all_ok &= test_optical_eps_guard(mol)
+    all_ok &= check_optical_eps_guard(mol)
     print('\n-- 9. all GW routes carry the solvent')
-    all_ok &= test_all_gw_routes(mol)
+    all_ok &= check_all_gw_routes(mol)
     print('\n-- 10. the cavity order')
-    all_ok &= test_cavity_order(mol, mf)
+    all_ok &= check_cavity_order(mol, mf)
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_solvent_screening_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

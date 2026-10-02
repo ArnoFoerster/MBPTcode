@@ -73,7 +73,7 @@ def mean_field_spectrum(mf):
     return eps, coeff, nocc, omega, X, Y
 
 
-def test_the_blocked_static_self_energy_is_the_dense_one(mf):
+def check_the_blocked_static_self_energy_is_the_dense_one(mf):
     """The blocked builder, forced to one excitation per chunk,
     reproduces calculate_self_energy_matrix at round-off, and its diagonal is
     calculate_self_energy(p, eps_p) per state: the matrix routine's
@@ -101,7 +101,7 @@ def test_the_blocked_static_self_energy_is_the_dense_one(mf):
     return ok
 
 
-def test_the_laplace_quadrature():
+def check_the_laplace_quadrature():
     """The rule behind the SRG kernel: sum_n w_n exp(-mu x_n) against
     int_0^1 exp(-mu x) dx = (1 - exp(-mu)) / mu, on a grid five times denser
     than the rule's own check. Relative error below QSGW_SRG_QUAD_TOL for every
@@ -125,7 +125,7 @@ def test_the_laplace_quadrature():
     return ok
 
 
-def test_the_srg_static_self_energy(mf):
+def check_the_srg_static_self_energy(mf):
     """The regularized form. Marie and Loos's SRG-qsGW self-energy
     (arXiv:2303.05984, eq. 44; JCTC 2023, doi 10.1021/acs.jctc.3c00281),
 
@@ -185,7 +185,7 @@ def test_the_srg_static_self_energy(mf):
     return ok
 
 
-def test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf):
+def check_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf):
     """The view hands the rotated orbitals to get_density_fitting_coefficients,
     so B' = U^T B U with U the rotation, and leaves the original untouched."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
@@ -207,7 +207,7 @@ def test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf):
     return ok
 
 
-def test_a_preset_transition_density_feeds_the_amplitudes(mf):
+def check_a_preset_transition_density_feeds_the_amplitudes(mf):
     """A solver built on rotated DF factors contracts an injected rho, the mean
     field's, instead of forming its own: the qsGW0 amplitudes chi' = rho^T B'."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
@@ -235,7 +235,7 @@ def gap_ev(eps, nocc):
     return (eps[nocc] - eps[nocc - 1]) * HARTREE_TO_EV
 
 
-def test_both_flavors_converge_and_open_the_gap(mf):
+def check_both_flavors_converge_and_open_the_gap(mf):
     """qsGW and qsGW0 converge on water within EVGW_TOL on HOMO and LUMO and
     QSGW_DM_TOL on the density; both gaps lie above the Casida G0W0 gap of the
     same mean field, as every self-consistent flavor's does on water (Kaplan
@@ -299,7 +299,7 @@ def test_both_flavors_converge_and_open_the_gap(mf):
     return ok
 
 
-def test_the_two_mixings_land_on_one_fixed_point(mf):
+def check_the_two_mixings_land_on_one_fixed_point(mf):
     """CDIIS on the AO Hamiltonian and Kaplan's linear mixing are two paths to
     the same fixed point: HOMO and LUMO agree within 10 EVGW_TOL, each run
     being converged to EVGW_TOL on its own. The linear step is Kaplan et al.'s
@@ -339,7 +339,7 @@ def test_the_two_mixings_land_on_one_fixed_point(mf):
     return ok
 
 
-def test_a_mean_field_without_density_fitting(mf):
+def check_a_mean_field_without_density_fitting(mf):
     """Without with_df the DF factors are an eigendecomposition of the MO-basis
     ERI, whose auxiliary index follows the orbitals. The loop rotates the mean
     field's factors, B'_P,pq = sum_mn U_mp B_P,mn U_nq with U = C0^T S C, so the
@@ -385,7 +385,7 @@ def test_a_mean_field_without_density_fitting(mf):
     return ok
 
 
-def test_the_refusals(mf):
+def check_the_refusals(mf):
     """Bad input and unsupported branches are named, not silently served."""
     ok = True
     for kw, text in (({'screening': 'never'}, 'screening'),
@@ -469,7 +469,7 @@ def test_the_refusals(mf):
     return ok
 
 
-def test_calc_qp_energy_drives_the_loop(mf):
+def check_calc_qp_energy_drives_the_loop(mf):
     """The front door: self_consistency='qsGW' returns the loop's HOMO, a list
     of states the dict with the loop's info and orbitals; qsGW0 likewise; any
     other route, a vertex, a density correction and an anchor are refused."""
@@ -516,7 +516,7 @@ def kohn_sham_fock_diagonal(mf, mo_coeff):
     return np.einsum('mp, mn, np -> p', mo_coeff, fock, mo_coeff)
 
 
-def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
+def check_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
     """One application of the Casida eigenvalue map at the converged
     (eps', C'), anchored on the Kohn-Sham Fock diagonal of the rotated density,
     returns eps' on HOMO and LUMO within EVGW_TOL, and the evGW0 loop started
@@ -573,7 +573,7 @@ def test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
     return ok
 
 
-def test_the_step_keywords_leave_evgw_unchanged(mf):
+def check_the_step_keywords_leave_evgw_unchanged(mf):
     """Without the three keywords the step is the one evGW0 has always used;
     a spectrum without its transition density, or the reverse, is refused."""
     eps_fixed, fixed = evgw_eigenvalues(mf, mf.mol, mode='casida', screening='fixed')
@@ -600,7 +600,7 @@ def test_the_step_keywords_leave_evgw_unchanged(mf):
     return ok
 
 
-def test_qsgw_forgets_its_starting_point():
+def check_qsgw_forgets_its_starting_point():
     """qsGW from PBE and from PBE0 lands on one fixed point. Both runs converge
     two orders tighter than the default, tol = 1e-7 Ha and dm_tol = 1e-8, so
     the comparison reads the fixed points and not the loops' last steps: HOMO
@@ -638,7 +638,7 @@ def test_qsgw_forgets_its_starting_point():
     return ok
 
 
-def test_the_boundaries(mf):
+def check_the_boundaries(mf):
     """Shapes and switches the other checks never visit. TDA screening
     converges to its own fixed point, its gap more than 0.1 eV from full RPA's,
     so the switch reaches the Casida solver. A Mole with point-group symmetry
@@ -686,30 +686,38 @@ def test_the_boundaries(mf):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mf = build_reference()
     all_ok = True
     print('\n-- 1. the static self-energy')
-    all_ok &= test_the_blocked_static_self_energy_is_the_dense_one(mf)
-    all_ok &= test_the_laplace_quadrature()
-    all_ok &= test_the_srg_static_self_energy(mf)
+    all_ok &= check_the_blocked_static_self_energy_is_the_dense_one(mf)
+    all_ok &= check_the_laplace_quadrature()
+    all_ok &= check_the_srg_static_self_energy(mf)
     print('\n-- 2. the rotated view and the injected transition density')
-    all_ok &= test_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf)
-    all_ok &= test_a_preset_transition_density_feeds_the_amplitudes(mf)
+    all_ok &= check_the_rotated_view_carries_the_orbitals_into_the_df_factors(mf)
+    all_ok &= check_a_preset_transition_density_feeds_the_amplitudes(mf)
     print('\n-- 3. the loop')
-    all_ok &= test_both_flavors_converge_and_open_the_gap(mf)
-    all_ok &= test_the_two_mixings_land_on_one_fixed_point(mf)
-    all_ok &= test_a_mean_field_without_density_fitting(mf)
-    all_ok &= test_the_refusals(mf)
+    all_ok &= check_both_flavors_converge_and_open_the_gap(mf)
+    all_ok &= check_the_two_mixings_land_on_one_fixed_point(mf)
+    all_ok &= check_a_mean_field_without_density_fitting(mf)
+    all_ok &= check_the_refusals(mf)
     print('\n-- 4. the front door')
-    all_ok &= test_calc_qp_energy_drives_the_loop(mf)
+    all_ok &= check_calc_qp_energy_drives_the_loop(mf)
     print('\n-- 5. the converged point is a fixed point of the evGW0 map')
-    all_ok &= test_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf)
-    all_ok &= test_the_step_keywords_leave_evgw_unchanged(mf)
+    all_ok &= check_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf)
+    all_ok &= check_the_step_keywords_leave_evgw_unchanged(mf)
     print('\n-- 6. starting-point independence')
-    all_ok &= test_qsgw_forgets_its_starting_point()
+    all_ok &= check_qsgw_forgets_its_starting_point()
     print('\n-- 7. the boundaries')
-    all_ok &= test_the_boundaries(mf)
+    all_ok &= check_the_boundaries(mf)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_qsgw_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

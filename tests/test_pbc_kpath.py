@@ -56,7 +56,7 @@ def _al(dim=3, vac=20.0):
     return cell
 
 
-def test_exact_at_mesh_points():
+def check_exact_at_mesh_points():
     cell = _al()
     ok = True
     for km in ([2, 2, 2], [3, 3, 3], [4, 4, 4]):
@@ -71,7 +71,7 @@ def test_exact_at_mesh_points():
     return ok
 
 
-def test_exact_for_band_limited():
+def check_exact_for_band_limited():
     """A trigonometric polynomial on the BvK lattice is reproduced EVERYWHERE."""
     cell = _al()
     km = [4, 4, 4]
@@ -103,7 +103,7 @@ def test_exact_for_band_limited():
     return ok
 
 
-def test_real_input_gives_real_output():
+def check_real_input_gives_real_output():
     """Real data in, real array out -- on EVEN meshes especially.
 
     The centred BvK index set is lopsided for an even mesh: it holds the
@@ -143,7 +143,7 @@ def test_real_input_gives_real_output():
     return ok
 
 
-def test_two_dimensional_mesh():
+def check_two_dimensional_mesh():
     cell = _al(dim=2)
     km = [4, 4, 1]
     kpts = cell.make_kpts(km)
@@ -158,7 +158,7 @@ def test_two_dimensional_mesh():
     return ok
 
 
-def test_damping_trades_exactness():
+def check_damping_trades_exactness():
     cell = _al()
     km = [3, 3, 3]
     kpts = cell.make_kpts(km)
@@ -172,7 +172,7 @@ def test_damping_trades_exactness():
                   f'{e0:.1e} undamped vs {e1:.1e} damped'))
 
 
-def test_path_geometry():
+def check_path_geometry():
     cell = _al()
     kpts, x, tick_x, labels = band_path(cell, 'fcc', 'G X W K G', npoints=120)
     ok = check(len(kpts) == len(x), 'one distance per k-point',
@@ -205,19 +205,27 @@ def test_path_geometry():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1. exactness at the mesh')
-    all_ok &= test_exact_at_mesh_points()
+    all_ok &= check_exact_at_mesh_points()
     print('\n-- 2. exactness for a band-limited function')
-    all_ok &= test_exact_for_band_limited()
+    all_ok &= check_exact_for_band_limited()
     print('\n-- 2b. real input, real output')
-    all_ok &= test_real_input_gives_real_output()
+    all_ok &= check_real_input_gives_real_output()
     print('\n-- 3. a 2D (slab) mesh')
-    all_ok &= test_two_dimensional_mesh()
+    all_ok &= check_two_dimensional_mesh()
     print('\n-- 4. damping')
-    all_ok &= test_damping_trades_exactness()
+    all_ok &= check_damping_trades_exactness()
     print('\n-- 5. path geometry')
-    all_ok &= test_path_geometry()
+    all_ok &= check_path_geometry()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_pbc_kpath_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

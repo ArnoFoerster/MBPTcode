@@ -56,7 +56,7 @@ def pcm_at(mf, eps, env=None):
     return wrapped
 
 
-def test_a_pcm_at_another_constant_is_refused(mol, base_mf, water):
+def check_a_pcm_at_another_constant_is_refused(mol, base_mf, water):
     """The wrong ground state must be named, not adopted."""
     try:
         water.mean_field(mol, lambda _mol: pcm_at(base_mf, 20.0, water))
@@ -67,14 +67,14 @@ def test_a_pcm_at_another_constant_is_refused(mol, base_mf, water):
                      str(exc)[:90] + '...')
 
 
-def test_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water):
+def check_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water):
     """One reaction field, applied once."""
     solvated = pcm_at(base_mf, water.eps_static, water)
     return check(water.mean_field(mol, lambda _mol: solvated) is solvated,
                  'a PCM already at eps_static is passed straight through')
 
 
-def test_a_pcm_on_another_cavity_is_refused(mol, base_mf, water):
+def check_a_pcm_on_another_cavity_is_refused(mol, base_mf, water):
     """The right constant on the wrong cavity is still another ground state:
     pyscf's default Lebedev order (29) against this environment's."""
     try:
@@ -86,7 +86,7 @@ def test_a_pcm_on_another_cavity_is_refused(mol, base_mf, water):
                      'setting named', str(exc)[:90] + '...')
 
 
-def test_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water):
+def check_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water):
     """Nothing attached yet: the SCF is put inside PCM(eps_static) here."""
     wrapped = water.mean_field(mol, lambda _mol: base_mf)
     return check(wrapped is not base_mf and wrapped.converged
@@ -96,7 +96,7 @@ def test_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water):
                  f'{base_mf.e_tot:.8f} Ha')
 
 
-def test_a_solvent_name_carries_both_constants(mol):
+def check_a_solvent_name_carries_both_constants(mol):
     """A caller cannot take one without the other: the name supplies the
     optical constant the response uses and the static one the ground state
     relaxes in."""
@@ -116,7 +116,7 @@ def test_a_solvent_name_carries_both_constants(mol):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
@@ -126,11 +126,19 @@ if __name__ == '__main__':
 
     all_ok = True
     print('\n-- the two constants travel together')
-    all_ok &= test_a_solvent_name_carries_both_constants(mol)
+    all_ok &= check_a_solvent_name_carries_both_constants(mol)
     print('\n-- and the ground state is relaxed in the static one, exactly once')
-    all_ok &= test_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water)
-    all_ok &= test_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water)
-    all_ok &= test_a_pcm_at_another_constant_is_refused(mol, base_mf, water)
-    all_ok &= test_a_pcm_on_another_cavity_is_refused(mol, base_mf, water)
+    all_ok &= check_a_bare_factory_is_wrapped_at_eps_static(mol, base_mf, water)
+    all_ok &= check_a_pcm_at_eps_static_is_returned_untouched(mol, base_mf, water)
+    all_ok &= check_a_pcm_at_another_constant_is_refused(mol, base_mf, water)
+    all_ok &= check_a_pcm_on_another_cavity_is_refused(mol, base_mf, water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_solvent_mean_field_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

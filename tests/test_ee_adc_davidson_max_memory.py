@@ -20,12 +20,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import gto, scf
+from pyscf import lib as pyscf_lib
 
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers import davidson as dav
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 LARGE_MB = 10**6
+HELD_MB = 200       # the process's use, as pyscf.lib.current_memory reports it
 TOL_EH = 1e-10      # the two solves differ only in where the subspace is stored
 
 
@@ -50,20 +52,25 @@ def spy_davidson1(seen):
 
 
 def solve(mf, budget_mb, ncore):
-    """Singlet channel, three roots, at mf.max_memory = budget_mb; returns the
+    """Singlet channel, three roots, at mf.max_memory = budget_mb, with the
+    process's use pinned at HELD_MB as pyscf measures it (it reads
+    /proc/<pid>/statm, so on any other platform it reports 0); returns the
     energies and the max_memory davidson1 received."""
     mf.max_memory = budget_mb
     seen = []
     undo = spy_davidson1(seen)
+    current_memory = pyscf_lib.current_memory
+    pyscf_lib.current_memory = lambda: (HELD_MB, 0)
     try:
         e, _ = solve_ee_adc(mf, level='adc2', nroots=3, spin='singlet',
                             frozen=ncore, df=True)
     finally:
+        pyscf_lib.current_memory = current_memory
         undo()
     return np.sort(np.asarray(e)), seen
 
 
-def test_ee_adc_budget():
+def check_ee_adc_budget():
     """The budget reaches davidson1, and the roots do not depend on it."""
     mol = gto.M(atom=WATER, basis='cc-pvdz', unit='Angstrom', verbose=0)
     mf = scf.RHF(mol).density_fit()
@@ -75,7 +82,7 @@ def test_ee_adc_budget():
     ok = check(seen_small == [0], 'mf.max_memory = 1 MB reaches davidson1 as 0',
                f'received {seen_small}')
     held = [LARGE_MB - m for m in seen_large if isinstance(m, (int, float))]
-    ok &= check(len(held) == 1 and 0 < held[0] < 10**4,
+    ok &= check(held == [HELD_MB],
                 f'mf.max_memory = {LARGE_MB} MB reaches davidson1 less the '
                 "process's use", f'received {seen_large}')
     d = np.abs(e_small - e_large).max()
@@ -84,7 +91,7 @@ def test_ee_adc_budget():
     return ok
 
 
-def test_default_untouched():
+def check_default_untouched():
     """solve_symmetric without max_memory leaves davidson1's default alone."""
     rng = np.random.default_rng(0)
     n = 300
@@ -106,10 +113,18 @@ def test_default_untouched():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     print('=== water / cc-pVDZ, ADC(2) singlet channel: the subspace budget ===')
-    all_ok = test_ee_adc_budget()
+    all_ok = check_ee_adc_budget()
     print('=== solve_symmetric without max_memory ===')
-    all_ok &= test_default_untouched()
+    all_ok &= check_default_untouched()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_ee_adc_davidson_max_memory_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

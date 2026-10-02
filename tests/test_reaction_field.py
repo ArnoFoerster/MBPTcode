@@ -70,7 +70,7 @@ def build():
                 x_bare=x_bare)
 
 
-def test_one_chi0_reproduces_two_screenings(s):
+def check_one_chi0_reproduces_two_screenings(s):
     """The congruence must be EXACT, not merely close: it is what makes the
     reaction-field shift cost one Dyson inversion instead of a second chi0."""
     ok = check(np.abs(s['x'] - s['x_bare']).max() < 1e-12,
@@ -88,7 +88,7 @@ def test_one_chi0_reproduces_two_screenings(s):
     return ok
 
 
-def test_delta_w_is_a_reduced_interaction(s):
+def check_delta_w_is_a_reduced_interaction(s):
     """vtilde screens, so W with the reaction field is weaker than without and
     every orbital's self-polarization is negative -- both gap edges move toward
     each other, which is the Born stabilization of cation and anion alike."""
@@ -111,7 +111,7 @@ def test_delta_w_is_a_reduced_interaction(s):
     return ok
 
 
-def test_the_gas_phase_is_a_no_op(s):
+def check_the_gas_phase_is_a_no_op(s):
     """No environment, no shift -- so callers add it unconditionally."""
     shift = quasiparticle_shift(s['x'], None, s['nocc'])
     return check(bare_gauge_transform(s['auxmol'], None) is None
@@ -121,7 +121,7 @@ def test_the_gas_phase_is_a_no_op(s):
                  'the gas phase returns None, and a zero shift of the right shape')
 
 
-def test_the_transform_follows_the_one_decision(s):
+def check_the_transform_follows_the_one_decision(s):
     """The gauge map exists exactly when the environment dresses v.
 
     `bare_gauge_transform` maps a dressed auxiliary gauge onto the bare one, so
@@ -135,7 +135,7 @@ def test_the_transform_follows_the_one_decision(s):
                  'the gauge map exists exactly when the environment dresses v')
 
 
-def test_it_is_not_the_cohsex_sum(s):
+def check_it_is_not_the_cohsex_sum(s):
     """The shipped `cohsex_correction` sums over every orbital and uses the
     BARE vtilde; Eq. (18) is a self-element of the SCREENED one. The two differ
     by hundreds of meV on the gap, which is the whole reason for this module."""
@@ -152,7 +152,7 @@ def test_it_is_not_the_cohsex_sum(s):
                  f'gap closure {gap_eq18:.3f} vs {gap_cohsex:.3f} eV')
 
 
-def test_the_compact_form_matches_the_explicit_delta_w(s):
+def check_the_compact_form_matches_the_explicit_delta_w(s):
     """`separable_quasiparticle_shift` never builds Delta W -- (M, M) in a rank
     that grows with the system -- and must land on the same numbers as the
     reference form that does."""
@@ -170,7 +170,7 @@ def test_the_compact_form_matches_the_explicit_delta_w(s):
 
 
 # ------------------------------------------------------------ the cache
-def test_a_second_environment_gets_its_own_reaction_field():
+def check_a_second_environment_gets_its_own_reaction_field():
     """A stronger continuum must not be served the weaker one's Delta W."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
@@ -208,19 +208,27 @@ def test_a_second_environment_gets_its_own_reaction_field():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     s = build()
     all_ok = True
     print('\n-- 1. one chi0, two gauges')
-    all_ok &= test_one_chi0_reproduces_two_screenings(s)
-    all_ok &= test_the_transform_follows_the_one_decision(s)
-    all_ok &= test_the_gas_phase_is_a_no_op(s)
+    all_ok &= check_one_chi0_reproduces_two_screenings(s)
+    all_ok &= check_the_transform_follows_the_one_decision(s)
+    all_ok &= check_the_gas_phase_is_a_no_op(s)
     print('\n-- 2. the shift itself')
-    all_ok &= test_delta_w_is_a_reduced_interaction(s)
-    all_ok &= test_the_compact_form_matches_the_explicit_delta_w(s)
-    all_ok &= test_it_is_not_the_cohsex_sum(s)
+    all_ok &= check_delta_w_is_a_reduced_interaction(s)
+    all_ok &= check_the_compact_form_matches_the_explicit_delta_w(s)
+    all_ok &= check_it_is_not_the_cohsex_sum(s)
     print('\n-- 3. the cache keys on the spectrum AND the cavity')
-    all_ok &= test_a_second_environment_gets_its_own_reaction_field()
+    all_ok &= check_a_second_environment_gets_its_own_reaction_field()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_reaction_field_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

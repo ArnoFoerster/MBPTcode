@@ -67,7 +67,7 @@ def green(n, beta, poles, weights):
     return sum(w / (iw - p) for p, w in zip(poles, weights))
 
 
-def test_t0_grids_refuse_a_metal():
+def check_t0_grids_refuse_a_metal():
     # a degenerate Fermi level, which is what a metal looks like to these
     # helpers: eps[nocc] - eps[nocc-1] is ~0 and can come out negative
     eps = np.array([-1.0, -0.5, -0.2, -0.2000001, 0.3, 0.9])
@@ -86,7 +86,7 @@ def test_t0_grids_refuse_a_metal():
     return ok
 
 
-def test_thermal_e_min_restores_them():
+def check_thermal_e_min_restores_them():
     beta = 316.0                                  # ~1000 K
     e_min = thermal_e_min(beta, gap=0.0)
     ok = check(abs(e_min - np.pi / beta) < 1e-12,
@@ -101,7 +101,7 @@ def test_thermal_e_min_restores_them():
     return ok
 
 
-def test_basis_is_a_basis():
+def check_basis_is_a_basis():
     b = IRBasis(1000.0, eps=1e-10)
     gu = (b.u * b.wx) @ b.u.T
     gv = (b.v * b.wy) @ b.v.T
@@ -119,7 +119,7 @@ def test_basis_is_a_basis():
     return ok
 
 
-def test_size_converges_and_scales():
+def check_size_converges_and_scales():
     sizes = {}
     for lam in (100.0, 1000.0, 10000.0, 100000.0):
         per_quad = [IRBasis(lam, eps=1e-8, order=o, n_extra=e).size
@@ -136,7 +136,7 @@ def test_size_converges_and_scales():
     return ok
 
 
-def test_uhat_parity():
+def check_uhat_parity():
     b = IRBasis(1000.0, eps=1e-10)
     uh = b.uhat(np.arange(0, 40))
     ok = True
@@ -150,7 +150,7 @@ def test_uhat_parity():
     return ok
 
 
-def test_fit_and_predict():
+def check_fit_and_predict():
     """The gapped and the metallic spectra must reconstruct equally well."""
     rng = np.random.default_rng(0)
     spectra = [('gapped, single pole at 3.0', [3.0], [1.0]),
@@ -180,7 +180,7 @@ def test_fit_and_predict():
     return ok
 
 
-def test_tau_transport_jacobian():
+def check_tau_transport_jacobian():
     """fit_matsubara's coefficients are dimensionless: u_at needs (2/beta).
 
     `uhat` integrates over x in [-1, 1] rather than tau in [0, beta], so a
@@ -226,7 +226,7 @@ def test_tau_transport_jacobian():
     return ok
 
 
-def test_sampling_is_sparse_and_conditioned():
+def check_sampling_is_sparse_and_conditioned():
     ok = True
     for beta in (10.0, 100.0, 1000.0):
         b = IRBasis(beta * WMAX, eps=1e-10)
@@ -252,7 +252,7 @@ SAMPLING_SWEEP = [(lam, eps) for lam in (100, 200, 400, 800, 1600)
                   for eps in (1e-6, 1e-8, 1e-10, 1e-12)]
 
 
-def test_sampling_determines_the_fit():
+def check_sampling_determines_the_fit():
     """Every (Lambda, eps) must give a sampling set that PINS the coefficients.
 
     This is the gate on the defect the module was shipped with. The paper's
@@ -289,7 +289,7 @@ def test_sampling_determines_the_fit():
     return ok
 
 
-def test_sampling_stays_sparse():
+def check_sampling_stays_sparse():
     """The augmentation must not buy determinacy with points.
 
     Each Matsubara point is a self-energy evaluation, so a fix that doubled the
@@ -308,7 +308,7 @@ def test_sampling_stays_sparse():
     return ok
 
 
-def test_sampling_reads_the_carrying_part_of_uhat():
+def check_sampling_reads_the_carrying_part_of_uhat():
     """uhat_l's parity ALTERNATES with l, so the part to read is not fixed.
 
     The shipped code took `top.imag` for every fermionic basis, while its own
@@ -334,7 +334,7 @@ def test_sampling_reads_the_carrying_part_of_uhat():
     return ok
 
 
-def test_fit_refuses_an_underdetermined_set():
+def check_fit_refuses_an_underdetermined_set():
     """A starved set must raise, not return the minimum-norm vector.
 
     `default_matsubara_sampling` now guarantees its own output, so this guards
@@ -359,7 +359,7 @@ def test_fit_refuses_an_underdetermined_set():
     return ok
 
 
-def test_mirroring_does_not_repair_a_real_fit():
+def check_mirroring_does_not_repair_a_real_fit():
     """The negative half is redundant, so positive_only=False is not the cure.
 
     uhat_l(-n-1) = conj(uhat_l(n)) makes the mirrored rows duplicates up to a
@@ -386,7 +386,7 @@ def test_mirroring_does_not_repair_a_real_fit():
     return ok
 
 
-def test_symmetric_set_determines_the_complex_fit():
+def check_symmetric_set_determines_the_complex_fit():
     """The positive_only=False path is marginal in the same way, and is used.
 
     A complex fit (real=False, e.g. of a periodic Wt^q, which is complex
@@ -411,7 +411,7 @@ def test_symmetric_set_determines_the_complex_fit():
     return ok
 
 
-def test_symmetric_set_is_closed_under_reflection():
+def check_symmetric_set_is_closed_under_reflection():
     """positive_only=False must be two-sided, which a complex fit asks for by name.
 
     Its complex fit of Wt^q wants "a sampling set symmetric under n -> -n-1",
@@ -433,39 +433,47 @@ def test_symmetric_set_is_closed_under_reflection():
     return ok
 
 
-def test_continuation_order():
+def check_continuation_order():
     orders = [ir_continuation_order(100.0, WMAX, eps=e) for e in (1e-4, 1e-8, 1e-12)]
     return check(orders == sorted(orders) and len(set(orders)) == 3,
                  'ir_continuation_order grows as the tolerance tightens',
                  f'{orders} for eps = 1e-4, 1e-8, 1e-12')
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1. the T=0 grids refuse a metal')
-    all_ok &= test_t0_grids_refuse_a_metal()
+    all_ok &= check_t0_grids_refuse_a_metal()
     print('\n-- 2. thermal_e_min restores them')
-    all_ok &= test_thermal_e_min_restores_them()
+    all_ok &= check_thermal_e_min_restores_them()
     print('\n-- 3. the IR basis is a basis')
-    all_ok &= test_basis_is_a_basis()
+    all_ok &= check_basis_is_a_basis()
     print('\n-- 4. size converges and scales as log(Lambda)')
-    all_ok &= test_size_converges_and_scales()
+    all_ok &= check_size_converges_and_scales()
     print('\n-- 5. uhat parity (Li et al. Sec. II C)')
-    all_ok &= test_uhat_parity()
+    all_ok &= check_uhat_parity()
     print('\n-- 6. fit and predict, gapped vs metallic')
-    all_ok &= test_fit_and_predict()
+    all_ok &= check_fit_and_predict()
     print('\n-- 7. sparse sampling and conditioning')
-    all_ok &= test_tau_transport_jacobian()
-    all_ok &= test_sampling_is_sparse_and_conditioned()
+    all_ok &= check_tau_transport_jacobian()
+    all_ok &= check_sampling_is_sparse_and_conditioned()
     print('\n-- 7b. the sampling set determines the fit')
-    all_ok &= test_sampling_determines_the_fit()
-    all_ok &= test_sampling_stays_sparse()
-    all_ok &= test_sampling_reads_the_carrying_part_of_uhat()
-    all_ok &= test_fit_refuses_an_underdetermined_set()
-    all_ok &= test_mirroring_does_not_repair_a_real_fit()
-    all_ok &= test_symmetric_set_determines_the_complex_fit()
-    all_ok &= test_symmetric_set_is_closed_under_reflection()
+    all_ok &= check_sampling_determines_the_fit()
+    all_ok &= check_sampling_stays_sparse()
+    all_ok &= check_sampling_reads_the_carrying_part_of_uhat()
+    all_ok &= check_fit_refuses_an_underdetermined_set()
+    all_ok &= check_mirroring_does_not_repair_a_real_fit()
+    all_ok &= check_symmetric_set_determines_the_complex_fit()
+    all_ok &= check_symmetric_set_is_closed_under_reflection()
     print('\n-- 8. continuation order')
-    all_ok &= test_continuation_order()
+    all_ok &= check_continuation_order()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_matsubara_ir_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

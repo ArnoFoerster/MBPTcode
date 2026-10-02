@@ -151,7 +151,7 @@ def random_guess(mol, mf, level):
     return np.sort(e), [w for w in caught if issubclass(w.category, RuntimeWarning)]
 
 
-def test_level(mol, mf, level, method):
+def check_level(mol, mf, level, method):
     """Both channels at one ADC level against spin=None and pyscf."""
     ok, singlets, parity, e_all = channels(mol, mf, level)
     e_rand, warned = random_guess(mol, mf, level)
@@ -181,7 +181,7 @@ def test_level(mol, mf, level, method):
     return ok
 
 
-def test_variants(mol, mf):
+def check_variants(mol, mf):
     """The channel basis at ADC(1), with a frozen core, DF and EN dressing."""
     ok = True
     for label, level, kw in (('adc1, singles only', 'adc1', {}),
@@ -210,7 +210,7 @@ def test_variants(mol, mf):
                       'ValueError', raised)
 
 
-def test_dense():
+def check_dense():
     """The triplet channel on the dense path, against a dense spin=None solve
     split by the parity computed here, which uses neither the Davidson nor the
     channel basis; water / STO-3G keeps both solves cheap."""
@@ -242,7 +242,7 @@ def test_dense():
     return ok
 
 
-def test_channel_basis():
+def check_channel_basis():
     """Both channel bases, molecule-free: each orthonormal and inside its flip
     eigenspace, restrict the adjoint of embed, together a basis of the space."""
     try:
@@ -273,7 +273,7 @@ def test_channel_basis():
     return ok
 
 
-def test_davidson_warns():
+def check_davidson_warns():
     """A root left unconverged is named in a RuntimeWarning; a converged run is
     silent."""
     # a Hartree-scale diagonal, as an excitation spectrum
@@ -293,19 +293,27 @@ def test_davidson_warns():
     return ok & check(not runs[200], 'max_cycle=200 converges without one')
 
 
-if __name__ == '__main__':
+def run():
     mol, mf = build()
     all_ok = True
     for level, method in LEVELS:
         print(f'\n=== water / cc-pVDZ, {level} ===')
-        all_ok &= test_level(mol, mf, level, method)
+        all_ok &= check_level(mol, mf, level, method)
     print('\n=== water / cc-pVDZ, variants ===')
-    all_ok &= test_variants(mol, mf)
+    all_ok &= check_variants(mol, mf)
     print('\n=== water / STO-3G, dense path ===')
-    all_ok &= test_dense()
+    all_ok &= check_dense()
     print('\n=== channel bases ===')
-    all_ok &= test_channel_basis()
+    all_ok &= check_channel_basis()
     print('\n=== davidson ===')
-    all_ok &= test_davidson_warns()
+    all_ok &= check_davidson_warns()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_ee_adc_spin_channels_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

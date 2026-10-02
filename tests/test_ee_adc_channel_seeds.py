@@ -53,7 +53,7 @@ def benzene():
     return '; '.join(atoms)
 
 
-def test_zero_subspace():
+def check_zero_subspace():
     """max_subspace=0 at one root: solve_symmetric keeps room for one vector, so
     the seeds must number one too; more made davidson1 raise IndexError."""
     rng = np.random.default_rng(0)
@@ -76,7 +76,7 @@ def test_zero_subspace():
     return ok
 
 
-def test_benzene_singlets():
+def check_benzene_singlets():
     """The singlet channel's three roots against pyscf's three lowest singlets."""
     mol = gto.M(atom=benzene(), basis='cc-pvdz', unit='Angstrom', verbose=0)
     mf = scf.RHF(mol).density_fit()
@@ -99,10 +99,18 @@ def test_benzene_singlets():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     print('=== the seed count at max_subspace=0, nroots=1 ===')
-    all_ok = test_zero_subspace()
+    all_ok = check_zero_subspace()
     print('\n=== benzene / cc-pVDZ, ADC(2) singlet channel, nroots=3 ===')
-    all_ok &= test_benzene_singlets()
+    all_ok &= check_benzene_singlets()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_ee_adc_channel_seeds_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

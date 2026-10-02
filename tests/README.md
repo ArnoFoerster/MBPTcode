@@ -1,17 +1,20 @@
 # Tests
 
-Standalone scripts, not a pytest suite. Each one runs a calculation, prints a
-verdict per check and exits non-zero if any of them failed:
+Every file runs both as a script and under pytest. As a script it runs its
+calculations, prints a verdict per check and exits non-zero if any of them
+failed:
 
 ```bash
 python tests/test_adc3.py
 ```
 
-Almost nothing here is collected by `pytest`: the checks live under
-`if __name__ == '__main__'`, so `pytest tests/` reports a directory of empty
-files as passing. Run them as scripts, and **read the exit code** — a script
-that prints `FAILURES DETECTED` is telling you something a green summary line
-would not.
+Read the exit code: a script that prints `FAILURES DETECTED` is telling you
+something a green summary line would not. Under pytest, a file whose checks
+take the molecule or mean field its `__main__` builds names them `check_*`,
+moves the `__main__` body into `run()`, and has one argument-free `test_*`
+that asserts `run()`; a `test_*` function never takes an argument no fixture
+supplies and never returns its verdict. `test_conventions.py` fails on either,
+and `conftest.py` makes pytest's warning about a returned value an error.
 
 `test_imports.py` is the cheap one to run first: it imports every module under
 `src/` in about a second and separates a missing `src.` module from a missing

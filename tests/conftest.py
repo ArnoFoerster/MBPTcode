@@ -13,3 +13,11 @@ os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '2')
 # test_mpi_routes.py is an mpirun script too, whose verdict is its exit status.
 collect_ignore = ['test_mpi_grid_distribution.py',
                   'test_mpi_routes.py']
+
+
+def pytest_configure(config):
+    """A test that returns its verdict instead of asserting it passes whatever
+    the verdict is; make pytest's warning about that a failure
+    (tests/test_conventions.py checks the same by parsing)."""
+    config.addinivalue_line('filterwarnings',
+                            'error::pytest.PytestReturnNotNoneWarning')

@@ -108,7 +108,7 @@ def make_slab(nrep, kmesh, mesh, scf=True):
 
 # ------------------------------------------------------------ 1/2. quadrature
 
-def test_quadrature():
+def check_quadrature():
     cell, _ = make_slab(1, None, [13, 13, 72], scf=False)
     poly = minibz_polygon(cell, [2, 2, 1])
 
@@ -162,7 +162,7 @@ def test_quadrature():
 
 # --------------------------------------------- 3/4. what the averaging does
 
-def test_correction_profile():
+def check_correction_profile():
     cell, _ = make_slab(1, None, [13, 13, 72], scf=False)
     ok = True
     print(f"       {'kmesh':>6} {'v(0)':>11} {'W-av':>11} {'ratio':>9} "
@@ -252,7 +252,7 @@ def test_correction_profile():
 
 # --------------------------------------------------------- 5/6. structural
 
-def test_guards_and_tags():
+def check_guards_and_tags():
     cell, _ = make_slab(1, None, [13, 13, 72], scf=False)
     kmesh = [2, 2, 1]
     r0, beta, _ = nyquist_params(cell, kmesh)
@@ -282,7 +282,7 @@ def test_guards_and_tags():
 
 # ------------------------------------- 6b. the singular kernel, once given f
 
-def test_singular_kernel_with_law():
+def check_singular_kernel_with_law():
     """A singular kernel becomes averageable once its small-k form is supplied.
 
     This is the auxiliary-function half applied to the kernel wrapper. Only ONE
@@ -386,7 +386,7 @@ def _bz_integral(cell, law):
                                   nang=96, nrad=96)[0]
 
 
-def test_interpolant():
+def check_interpolant():
     cell, _ = make_slab(1, None, [13, 13, 72], scf=False)
     area_bz = (2 * np.pi) ** 2 / inplane_cell_area(cell)
     ok = True
@@ -465,7 +465,7 @@ def test_interpolant():
     return ok
 
 
-def test_interpolant_on_real_data():
+def check_interpolant_on_real_data():
     """Round trip through actual per-q RPA correlation energies."""
     kmesh = [2, 2, 1]
     cell, mf = make_slab(1, kmesh, [13, 13, 72])
@@ -510,7 +510,7 @@ def test_interpolant_on_real_data():
 
 # ------------------------------------------------------------- 7. folding
 
-def test_inplane_folding():
+def check_inplane_folding():
     """A 2x2 primitive mini-BZ and a 1x1 supercell mini-BZ are the same region
     of absolute k-space, so the averaged kernel must fold exactly."""
     prim, mf_p = make_slab(1, [2, 2, 1], [13, 13, 72])
@@ -547,21 +547,29 @@ def test_inplane_folding():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1/2. the mini-BZ quadrature')
-    all_ok &= test_quadrature()
+    all_ok &= check_quadrature()
     print('\n-- 3/4. what the averaging does, and how it compares to CA')
-    all_ok &= test_correction_profile()
+    all_ok &= check_correction_profile()
     print('\n-- 5/6. guards and tags')
-    all_ok &= test_guards_and_tags()
+    all_ok &= check_guards_and_tags()
     print('\n-- 6b. a singular kernel, once given its law')
-    all_ok &= test_singular_kernel_with_law()
+    all_ok &= check_singular_kernel_with_law()
     print('\n-- 8. the interpolant half')
-    all_ok &= test_interpolant()
+    all_ok &= check_interpolant()
     print('\n-- 8b. the interpolant on real per-q RPA data')
-    all_ok &= test_interpolant_on_real_data()
+    all_ok &= check_interpolant_on_real_data()
     print('\n-- 7. in-plane supercell folding')
-    all_ok &= test_inplane_folding()
+    all_ok &= check_inplane_folding()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_pbc_wav_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

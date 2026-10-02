@@ -61,7 +61,7 @@ def check(ok, label, detail=''):
     return bool(ok)
 
 
-def test_minimax_transforms_the_model_pair():
+def check_minimax_transforms_the_model_pair():
     g = TimeFrequencyGrid.minimax(14, E_MIN, E_MAX)
     ok = True
     worst = 0.0
@@ -78,7 +78,7 @@ def test_minimax_transforms_the_model_pair():
     return ok
 
 
-def test_transform_matrices_are_not_inverses():
+def check_transform_matrices_are_not_inverses():
     """Why four matrices -- and why |A B - I| is the wrong acceptance test."""
     ok = True
     duality = {n: TimeFrequencyGrid.minimax(n, E_MIN, E_MAX).duality_error()
@@ -99,7 +99,7 @@ def test_transform_matrices_are_not_inverses():
     return ok
 
 
-def test_minimax_more_points_never_hurt():
+def check_minimax_more_points_never_hurt():
     """A transform that misses is UNDER-resolved: more points, never fewer.
 
     Below the narrowest tabulated Remez column GreenX slides that column onto
@@ -148,7 +148,7 @@ def test_minimax_more_points_never_hurt():
     return ok
 
 
-def test_ir_does_round_trip():
+def check_ir_does_round_trip():
     g = TimeFrequencyGrid.ir(beta=50.0, omega_max=5.0, eps=1e-10, statistics='boson')
     ok = check(g.roundtrip_error() < 1e-6,
                'IR round-trips through basis coefficients',
@@ -167,7 +167,7 @@ IR_SWEEP = [(beta, wmax, eps) for beta in (100.0, 200.0, 800.0)
             for wmax in (2.0, 4.0) for eps in (1e-8, 1e-10)]
 
 
-def test_ir_duality_is_the_basis_round_trip():
+def check_ir_duality_is_the_basis_round_trip():
     """`duality_error` must be SMALL on an IR grid, for both parities.
 
     Its docstring always said so; the code returned max|A B - I| instead, which
@@ -199,7 +199,7 @@ def test_ir_duality_is_the_basis_round_trip():
     return ok
 
 
-def test_ir_sector_split_is_a_clean_partition():
+def check_ir_sector_split_is_a_clean_partition():
     """Each sector must have no more functions than there are sampling points.
 
     The split was `|Re uhat_l| > 1e-8 max|uhat|`, which measures one function
@@ -230,7 +230,7 @@ def test_ir_sector_split_is_a_clean_partition():
     return ok
 
 
-def test_minimax_duality_is_still_the_raw_product():
+def check_minimax_duality_is_still_the_raw_product():
     """The IR branch must not have changed what minimax reports.
 
     `duality_error` on a minimax grid is GreenX's own `cosft_duality_error` and
@@ -248,7 +248,7 @@ def test_minimax_duality_is_still_the_raw_product():
     return ok
 
 
-def test_gauss_legendre_refuses_to_transform():
+def check_gauss_legendre_refuses_to_transform():
     g = TimeFrequencyGrid.gauss_legendre(20, w0=0.5)
     ok = check(g.nfreq == 20 and g.ntau == 0,
                'gauss_legendre is frequency-only', f'{g!r}')
@@ -262,7 +262,7 @@ def test_gauss_legendre_refuses_to_transform():
     return ok
 
 
-def test_identical_interface():
+def check_identical_interface():
     grids = [TimeFrequencyGrid.minimax(14, E_MIN, E_MAX),
              TimeFrequencyGrid.ir(beta=50.0, omega_max=5.0, statistics='boson')]
     fields = ('tau_points', 'tau_weights', 'omega_points', 'omega_weights',
@@ -296,7 +296,7 @@ def _weights(kind, grid, e_min, e_max, rcond=None):
         time_frequency.TRANSFORM_FIT_RCOND = saved
 
 
-def test_transform_pseudo_inverse():
+def check_transform_pseudo_inverse():
     """A zero singular value contributes zero; everything else is untouched.
 
     The fit is a per-point least squares through an SVD, and below 20 points
@@ -398,7 +398,7 @@ def test_transform_pseudo_inverse():
     return ok
 
 
-def test_grid_size_resolution():
+def check_grid_size_resolution():
     """'auto' or None resolves over EVERY ratio, the widest binding; an
     explicit count passes through with nothing measured."""
     ratios = (40.0, 486.0, 3000.0)
@@ -428,27 +428,35 @@ def test_grid_size_resolution():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1. minimax reproduces its model pair')
-    all_ok &= test_minimax_transforms_the_model_pair()
+    all_ok &= check_minimax_transforms_the_model_pair()
     print('\n-- 2. matrices are not inverses, but the round trip works')
-    all_ok &= test_transform_matrices_are_not_inverses()
+    all_ok &= check_transform_matrices_are_not_inverses()
     print('\n-- 2b. more points never hurt the transform fit')
-    all_ok &= test_minimax_more_points_never_hurt()
+    all_ok &= check_minimax_more_points_never_hurt()
     print('\n-- 3. IR does round-trip')
-    all_ok &= test_ir_does_round_trip()
+    all_ok &= check_ir_does_round_trip()
     print('\n-- 3b. the IR duality diagnostic is the basis round trip')
-    all_ok &= test_ir_duality_is_the_basis_round_trip()
-    all_ok &= test_ir_sector_split_is_a_clean_partition()
-    all_ok &= test_minimax_duality_is_still_the_raw_product()
+    all_ok &= check_ir_duality_is_the_basis_round_trip()
+    all_ok &= check_ir_sector_split_is_a_clean_partition()
+    all_ok &= check_minimax_duality_is_still_the_raw_product()
     print('\n-- 4. gauss_legendre is frequency-only')
-    all_ok &= test_gauss_legendre_refuses_to_transform()
+    all_ok &= check_gauss_legendre_refuses_to_transform()
     print('\n-- 5. one interface, both backends')
-    all_ok &= test_identical_interface()
+    all_ok &= check_identical_interface()
     print('\n-- 6. the transform fit is a pseudo-inverse')
-    all_ok &= test_transform_pseudo_inverse()
+    all_ok &= check_transform_pseudo_inverse()
     print('\n-- 7. a grid size is a count or a resolved sentinel')
-    all_ok &= test_grid_size_resolution()
+    all_ok &= check_grid_size_resolution()
     print('\n' + ('All TimeFrequencyGrid checks passed.' if all_ok else 'FAILURES above.'))
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_time_frequency_grid_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

@@ -121,7 +121,7 @@ def mf_metal(_li):
     return _li[1]
 
 
-def test_beta_from_mf(mf_metal):
+def check_beta_from_mf(mf_metal):
     ok = check(abs(beta_from_mf(mf_metal) - 1.0 / mf_metal.sigma) < 1e-12,
                'beta_from_mf reads 1/sigma off a Fermi-smeared mean field',
                f'sigma {mf_metal.sigma} -> beta {beta_from_mf(mf_metal):.1f}')
@@ -150,7 +150,7 @@ def test_beta_from_mf(mf_metal):
 
 # ------------------------------------------------- 2. both failure modes
 
-def test_both_failure_modes():
+def check_both_failure_modes():
     """The integer window fails loudly on one basis and silently on another."""
     from src.SingleReference.Periodic.pbc_rpa import _transition_window
     ok = True
@@ -208,7 +208,7 @@ def test_both_failure_modes():
 
 # --------------------------------------------------- 3. T = 0 stays untouched
 
-def test_gapped_is_untouched():
+def check_gapped_is_untouched():
     cell, mf = h2_slab()
     e = np.asarray(mf.mo_energy)
     f = np.asarray(mf.mo_occ, dtype=float)
@@ -244,7 +244,7 @@ def test_gapped_is_untouched():
 
 # ------------------------------------------------------- 4. the Pade order cap
 
-def test_pade_order_cap():
+def check_pade_order_cap():
     # A synthetic Sigma_c with two poles, sampled on a vertical line.
     z = 0.0 + 1j * np.linspace(0.05, 4.0, 24)
     sigma = 1.0 / (z - (-0.4 + 0.05j)) + 0.5 / (z - (0.9 + 0.05j))
@@ -283,7 +283,7 @@ def test_pade_order_cap():
 
 # --------------------------------------------- 4b. what the cap is sized FROM
 
-def test_pade_cap_is_sized_from_sigma_not_from_w():
+def check_pade_cap_is_sized_from_sigma_not_from_w():
     """The continuation acts on Sigma_c, so its range -- not W's -- sets the cap.
 
     e_max is the largest particle-hole TRANSITION energy: the range of W, and
@@ -356,7 +356,7 @@ def test_pade_cap_is_sized_from_sigma_not_from_w():
 
 # ------------------------------------------------------------- 5. end to end
 
-def test_metallic_rpa_runs(cell, mf):
+def check_metallic_rpa_runs(cell, mf):
     """The run the package exists to make possible."""
     kmesh = [3, 3, 1]
     r0, beta_d, _ = nyquist_params(cell, kmesh)
@@ -399,24 +399,32 @@ def test_metallic_rpa_runs(cell, mf):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 3. the T=0 path is untouched')
-    all_ok &= test_gapped_is_untouched()
+    all_ok &= check_gapped_is_untouched()
 
     print('\n-- 4. the Pade order cap')
-    all_ok &= test_pade_order_cap()
-    all_ok &= test_pade_cap_is_sized_from_sigma_not_from_w()
+    all_ok &= check_pade_order_cap()
+    all_ok &= check_pade_cap_is_sized_from_sigma_not_from_w()
 
     cell_m, mf_m = li_layer()
     print('\n-- 1. beta_from_mf')
-    all_ok &= test_beta_from_mf(mf_m)
+    all_ok &= check_beta_from_mf(mf_m)
 
     print('\n-- 2. both failure modes of the integer window')
-    all_ok &= test_both_failure_modes()
+    all_ok &= check_both_failure_modes()
 
     print('\n-- 5. a metallic RPA correlation energy, end to end')
-    all_ok &= test_metallic_rpa_runs(cell_m, mf_m)
+    all_ok &= check_metallic_rpa_runs(cell_m, mf_m)
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_metallic_grid_wiring_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

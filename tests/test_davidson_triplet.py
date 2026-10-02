@@ -56,7 +56,7 @@ def build():
     return mol, mf, nocc, lr
 
 
-def test_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr):
+def check_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr):
     ok = True
     for mode in ('RPA', 'TDHF'):
         for spin in ('singlet', 'triplet'):
@@ -72,7 +72,7 @@ def test_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr):
     return ok
 
 
-def test_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr):
+def check_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr):
     """What a kappa silently left at 2 would fail.
 
     Dropping the 2(ia|jb) bare exchange can only lower a root, so the triplet
@@ -92,7 +92,7 @@ def test_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr):
                  + ' Ha')
 
 
-def test_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr):
+def check_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr):
     """kappa = 0 must remove the Hartree term from A AND B, not just from A."""
     nvirt = len(mf.mo_energy) - nocc
     X_mo, D, W_aux = isdf_bse_factors(mf, mol, nocc)[:3]
@@ -124,7 +124,7 @@ def _chain_factory(m):
     return x
 
 
-def test_chain_lets_a_triplet_reach_davidson(mol):
+def check_chain_lets_a_triplet_reach_davidson(mol):
     """'auto' used to send every triplet to the dense solver; at production
     sizes that is a dense (n_ov)^2 matrix instead of a matrix-free solve.
 
@@ -160,7 +160,7 @@ def test_chain_lets_a_triplet_reach_davidson(mol):
     return ok
 
 
-def test_chain_gives_the_same_excitation_either_solver(mol):
+def check_chain_gives_the_same_excitation_either_solver(mol):
     """End to end: the BSE@G0W0 excitation must not depend on how it was solved.
 
     The Davidson returns `nroots` lowest roots and the dense one returns all of
@@ -181,16 +181,24 @@ def test_chain_gives_the_same_excitation_either_solver(mol):
     return ok
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mol, mf, nocc, lr = build()
     print(f'\n=== water / cc-pVDZ, nocc={nocc} ===')
     all_ok = True
-    all_ok &= test_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr)
-    all_ok &= test_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr)
-    all_ok &= test_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr)
+    all_ok &= check_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr)
+    all_ok &= check_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr)
+    all_ok &= check_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr)
     print('\n-- the excited-state chain')
-    all_ok &= test_chain_lets_a_triplet_reach_davidson(mol)
-    all_ok &= test_chain_gives_the_same_excitation_either_solver(mol)
+    all_ok &= check_chain_lets_a_triplet_reach_davidson(mol)
+    all_ok &= check_chain_gives_the_same_excitation_either_solver(mol)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_davidson_triplet_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

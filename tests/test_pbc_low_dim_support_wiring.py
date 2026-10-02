@@ -66,7 +66,7 @@ def make_cell(lz, mesh):
     return cell
 
 
-def test_kmesh_inverse():
+def check_kmesh_inverse():
     cell = make_cell(14.0, [13, 13, 42])
     ok = True
     for km in ([1, 1, 1], [2, 2, 1], [3, 3, 1], [4, 4, 1], [2, 3, 1]):
@@ -81,14 +81,14 @@ def test_kmesh_inverse():
     return ok
 
 
-def test_undamped_is_noop():
+def check_undamped_is_noop():
     cell = make_cell(6.0, [13, 13, 20])          # deliberately tiny vacuum
     plain = lambda c, q, Gv: np.zeros(len(Gv))
     return check(assert_damping_fits(cell, cell.make_kpts([4, 4, 1]), plain) is None,
                  'no-op for a kernel with no damping envelope')
 
 
-def test_refining_the_mesh_trips_it():
+def check_refining_the_mesh_trips_it():
     """Fixed vacuum, finer k-mesh: r0 grows, and at some point the kernel wraps."""
     cell = make_cell(14.0, [13, 13, 42])
     verdicts = []
@@ -107,7 +107,7 @@ def test_refining_the_mesh_trips_it():
                  'a fixed vacuum passes on coarse meshes and trips on a fine one')
 
 
-def test_periodic_axis_is_not_flagged():
+def check_periodic_axis_is_not_flagged():
     """Identical geometry and k-mesh; only cell.dimension differs."""
     verdicts = {}
     for dimension in (3, 2):
@@ -133,7 +133,7 @@ def test_periodic_axis_is_not_flagged():
                       'the same cell as a slab IS flagged (a3 is now vacuum)')
 
 
-def test_every_builder_runs_it():
+def check_every_builder_runs_it():
     """The check must live in the builders, not only in a helper nobody calls."""
     cell = make_cell(8.0, [13, 13, 25])
     kmesh = [4, 4, 1]
@@ -167,17 +167,25 @@ def test_every_builder_runs_it():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1. kmesh_from_kpts')
-    all_ok &= test_kmesh_inverse()
+    all_ok &= check_kmesh_inverse()
     print('\n-- 2. no-op without damping')
-    all_ok &= test_undamped_is_noop()
+    all_ok &= check_undamped_is_noop()
     print('\n-- 3. refining the mesh trips a fixed vacuum')
-    all_ok &= test_refining_the_mesh_trips_it()
+    all_ok &= check_refining_the_mesh_trips_it()
     print('\n-- 5. periodic vs non-periodic single-k axis')
-    all_ok &= test_periodic_axis_is_not_flagged()
+    all_ok &= check_periodic_axis_is_not_flagged()
     print('\n-- 4. every coulG_fn builder runs the check')
-    all_ok &= test_every_builder_runs_it()
+    all_ok &= check_every_builder_runs_it()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_pbc_low_dim_support_wiring_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

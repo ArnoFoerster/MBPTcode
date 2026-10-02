@@ -47,7 +47,7 @@ def direct_veff_matches(view, mf):
         return False, f'direct get_veff raised: {err}'
 
 
-def test_the_restricted_view():
+def check_the_restricted_view():
     """Water, RKS PBE0: _ks_semicanonical_setup's view on the direct path."""
     mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
                 basis='cc-pvdz', verbose=0)
@@ -60,7 +60,7 @@ def test_the_restricted_view():
                  detail)
 
 
-def test_the_unrestricted_view():
+def check_the_unrestricted_view():
     """OH, UKS PBE0: _ks_semicanonical_setup_uhf's view on the direct path."""
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, verbose=0)
     mf = dft.UKS(mol)
@@ -72,10 +72,18 @@ def test_the_unrestricted_view():
                  detail)
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     all_ok = True
-    all_ok &= test_the_restricted_view()
-    all_ok &= test_the_unrestricted_view()
+    all_ok &= check_the_restricted_view()
+    all_ok &= check_the_unrestricted_view()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_static_correction_semicanonical_view_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

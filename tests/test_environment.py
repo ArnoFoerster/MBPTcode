@@ -67,7 +67,7 @@ def factory(mol):
     return mf
 
 
-def test_every_environment_satisfies_the_protocol(mol):
+def check_every_environment_satisfies_the_protocol(mol):
     """Structural, not by inheritance: `SolventScreening` never names it.
 
     The check is worth its line because the failure is quiet: a class that
@@ -87,7 +87,7 @@ def test_every_environment_satisfies_the_protocol(mol):
     return ok
 
 
-def test_none_means_not_screening_and_nothing_else(mol):
+def check_none_means_not_screening_and_nothing_else(mol):
     """The rule the chokepoints rest on. A form that is absent because the
     environment does not respond returns None and the route carries on with the
     bare interaction, which is correct. A form absent because a SCREENING
@@ -112,7 +112,7 @@ def test_none_means_not_screening_and_nothing_else(mol):
                       ', '.join(forms))
 
 
-def test_only_a_responding_environment_dresses_the_interaction(mol):
+def check_only_a_responding_environment_dresses_the_interaction(mol):
     """A fixed charge does not respond, so it screens nothing: it changes the
     mean field and nothing after it."""
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
@@ -128,7 +128,7 @@ def test_only_a_responding_environment_dresses_the_interaction(mol):
     return ok
 
 
-def test_the_dressed_metric_is_the_whole_substitution(mol):
+def check_the_dressed_metric_is_the_whole_substitution(mol):
     """The interaction reaches a separable factorization only through the
     auxiliary metric, so dressing V^(1/2) IS v -> v + vtilde. It stays positive
     -- a negative eigenvalue means the discretized field over-screens the bare
@@ -149,7 +149,7 @@ def test_the_dressed_metric_is_the_whole_substitution(mol):
     return ok
 
 
-def test_attaching_is_reversible_and_scoped(mol):
+def check_attaching_is_reversible_and_scoped(mol):
     """A route evaluates part of its chain on a mean field the caller may use
     elsewhere; leaving a cavity attached would silently move their numbers."""
     mf = factory(mol)
@@ -166,7 +166,7 @@ def test_attaching_is_reversible_and_scoped(mol):
     return ok
 
 
-def test_the_eq18_shift_follows_the_one_decision(mol):
+def check_the_eq18_shift_follows_the_one_decision(mol):
     """An environment that dresses the interaction carries the shift; one that
     does not carries none. Not a separate switch: the same question."""
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
@@ -187,7 +187,7 @@ def test_the_eq18_shift_follows_the_one_decision(mol):
     return ok
 
 
-def test_point_charges_move_the_mean_field_and_nothing_after_it(mol):
+def check_point_charges_move_the_mean_field_and_nothing_after_it(mol):
     """Everything the charges do enters through h_core, so the post-SCF routes
     see a different reference and the same interaction."""
     charges, coords = np.array([-0.4, 0.4]), np.array([[0, 0, 4.0], [0, 0, 5.0]])
@@ -234,7 +234,7 @@ def small_system():
     return mol, mf, auxmol
 
 
-def test_a_screening_environment_without_a_form_refuses_rather_than_returns_none(small):
+def check_a_screening_environment_without_a_form_refuses_rather_than_returns_none(small):
     """PolarizableSites screens through the auxiliary metric alone. Its
     density-fitted and four-index forms raise by name and point at the
     separable route; None there would silently drop the sites."""
@@ -256,7 +256,7 @@ def test_a_screening_environment_without_a_form_refuses_rather_than_returns_none
     return ok
 
 
-def test_the_static_term_production_adds_is_the_environment_own(small):
+def check_the_static_term_production_adds_is_the_environment_own(small):
     """`solvent_static_selfenergy` reads the attached environment; nothing else."""
     mol, mf, _ = small
     ok = check(solvent_static_selfenergy(mf, mol) is None,
@@ -277,7 +277,7 @@ def test_the_static_term_production_adds_is_the_environment_own(small):
     return ok
 
 
-def test_polarizable_sites_dress_and_carry_no_static_term(mol):
+def check_polarizable_sites_dress_and_carry_no_static_term(mol):
     """COHSEX and the dressed interaction are independent: `PolarizableSites`
     dresses and offers no static operator, `SolventScreening` does both, and
     the Eq. (18) shift exists exactly for the environments that dress."""
@@ -299,7 +299,7 @@ def test_polarizable_sites_dress_and_carry_no_static_term(mol):
     return ok
 
 
-def test_a_cavity_follows_the_atoms(small):
+def check_a_cavity_follows_the_atoms(small):
     """`for_geometry` rebuilds the surface for a displaced molecule and keeps
     the reference object for the reference molecule."""
     mol, _, _ = small
@@ -321,7 +321,7 @@ def test_a_cavity_follows_the_atoms(small):
     return ok
 
 
-def test_the_continuum_carries_both_halves_of_its_derivative(small):
+def check_the_continuum_carries_both_halves_of_its_derivative(small):
     """The dressed metric AND the static reaction field, so a chain in a
     continuum reports forces rather than refusing them."""
     mol, mf, auxmol = small
@@ -342,7 +342,7 @@ def test_the_continuum_carries_both_halves_of_its_derivative(small):
     return ok
 
 
-def test_rpa_gradient_with_point_charges_vs_finite_difference():
+def check_rpa_gradient_with_point_charges_vs_finite_difference():
     """dE/dR of E_HF + E_c^dRPA in a fixed-charge field against a five-point
     stencil of the chain's own energy, the charges held where they are.
 
@@ -384,7 +384,7 @@ def test_rpa_gradient_with_point_charges_vs_finite_difference():
     return ok
 
 
-def test_the_gas_phase_is_the_default_everywhere(mol):
+def check_the_gas_phase_is_the_default_everywhere(mol):
     """So a caller holding no environment never special-cases one."""
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     env = NoEnvironment()
@@ -396,29 +396,37 @@ def test_the_gas_phase_is_the_default_everywhere(mol):
                  'NoEnvironment answers every channel with nothing')
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mol = gto.M(atom=ATOM, basis=BASIS, verbose=0)
     all_ok = True
     print('\n-- 1. the contract')
-    all_ok &= test_every_environment_satisfies_the_protocol(mol)
-    all_ok &= test_none_means_not_screening_and_nothing_else(mol)
-    all_ok &= test_the_gas_phase_is_the_default_everywhere(mol)
-    all_ok &= test_attaching_is_reversible_and_scoped(mol)
+    all_ok &= check_every_environment_satisfies_the_protocol(mol)
+    all_ok &= check_none_means_not_screening_and_nothing_else(mol)
+    all_ok &= check_the_gas_phase_is_the_default_everywhere(mol)
+    all_ok &= check_attaching_is_reversible_and_scoped(mol)
     print('\n-- 2. one decision: does it dress the interaction?')
-    all_ok &= test_only_a_responding_environment_dresses_the_interaction(mol)
-    all_ok &= test_the_dressed_metric_is_the_whole_substitution(mol)
-    all_ok &= test_the_eq18_shift_follows_the_one_decision(mol)
+    all_ok &= check_only_a_responding_environment_dresses_the_interaction(mol)
+    all_ok &= check_the_dressed_metric_is_the_whole_substitution(mol)
+    all_ok &= check_the_eq18_shift_follows_the_one_decision(mol)
     print('\n-- 3. permanent charges act through the mean field alone')
-    all_ok &= test_point_charges_move_the_mean_field_and_nothing_after_it(mol)
+    all_ok &= check_point_charges_move_the_mean_field_and_nothing_after_it(mol)
     print('\n-- 4. the gradient side of the contract')
     small = small_system()
-    all_ok &= test_a_screening_environment_without_a_form_refuses_rather_than_returns_none(small)
-    all_ok &= test_the_static_term_production_adds_is_the_environment_own(small)
-    all_ok &= test_polarizable_sites_dress_and_carry_no_static_term(mol)
-    all_ok &= test_a_cavity_follows_the_atoms(small)
-    all_ok &= test_the_continuum_carries_both_halves_of_its_derivative(small)
+    all_ok &= check_a_screening_environment_without_a_form_refuses_rather_than_returns_none(small)
+    all_ok &= check_the_static_term_production_adds_is_the_environment_own(small)
+    all_ok &= check_polarizable_sites_dress_and_carry_no_static_term(mol)
+    all_ok &= check_a_cavity_follows_the_atoms(small)
+    all_ok &= check_the_continuum_carries_both_halves_of_its_derivative(small)
     print('\n-- 5. the dRPA force in a fixed-charge field')
-    all_ok &= test_rpa_gradient_with_point_charges_vs_finite_difference()
+    all_ok &= check_rpa_gradient_with_point_charges_vs_finite_difference()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_environment_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

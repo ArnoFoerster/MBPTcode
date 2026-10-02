@@ -58,7 +58,7 @@ def factory(mol):
     return mf
 
 
-def test_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc):
+def check_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc):
     """Same factor, same static W: Davidson and the dense [[A,B],[B,A]] agree
     to round-off, which fixes the kernel's gauge and normalization at once."""
     omega, _, _, info = solve_bse_df(mf, mol, nocc, nroots=NROOTS, qp=False,
@@ -75,7 +75,7 @@ def test_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc):
                  f'max |dw| {d:.1e} Ha')
 
 
-def test_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc):
+def check_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc):
     """Every orbital's quasiparticle energy on the diagonal is the one
     `calc_qp_energy(mode='casida')` returns, and GW opens the Kohn-Sham gap."""
     _, _, _, info = solve_bse_df(mol=mol, mf=mf, nocc=nocc, nroots=NROOTS,
@@ -93,7 +93,7 @@ def test_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc):
                       f'{gap_qp * HARTREE_TO_EV:.2f} eV')
 
 
-def test_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc):
+def check_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc):
     """DF and ISDF are two fits of one interaction on one mean field; the
     BSE@G0W0 roots agree to the interpolative fit's error and no more."""
     om_df = np.sort(solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False)[0])
@@ -104,7 +104,7 @@ def test_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc):
                  f'{d * 1e3:.1f} meV against a {FIT_TOL * 1e3:.0f} meV bar')
 
 
-def test_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
+def check_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
     """The loop runs on the Casida route; its fixed point opens the gap past
     G0W0 from a PBE0 start, sits on the diagonal, and rebuilds W."""
     _, _, _, g0w0 = solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False)
@@ -136,7 +136,7 @@ def test_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
     return ok
 
 
-def test_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):
+def check_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):
     """Both halves of the reaction field, on both routes: the ground state at
     eps_static opens the roots (the frozen-polarization half), the response at
     eps_inf then moves them by the same amount through the two factorizations."""
@@ -179,7 +179,7 @@ def test_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):
                       + ' eV, max |d| ' + f'{d * 1e3:.2f} meV')
 
 
-if __name__ == '__main__':
+def run():
     warnings.simplefilter('ignore')
     mol = gto.M(atom=ATOM, basis=BASIS, verbose=0)
     mf = factory(mol)
@@ -187,12 +187,20 @@ if __name__ == '__main__':
     print(f'\n=== water / {BASIS} @ {XC}, nocc={nocc}, {NROOTS} roots ===')
     all_ok = True
     print('\n-- 1. the solve, and its diagonal')
-    all_ok &= test_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc)
-    all_ok &= test_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc)
-    all_ok &= test_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc)
+    all_ok &= check_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc)
+    all_ok &= check_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc)
+    all_ok &= check_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc)
     print('\n-- 2. evGW-BSE')
-    all_ok &= test_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc)
+    all_ok &= check_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc)
     print('\n-- 3. a continuum, both halves')
-    all_ok &= test_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf, nocc)
+    all_ok &= check_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf, nocc)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_bse_df_driver_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)

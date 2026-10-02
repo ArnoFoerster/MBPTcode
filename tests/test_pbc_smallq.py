@@ -101,7 +101,7 @@ def make_slab(kmesh, mesh):
 
 # ---------------------------------------------------------------- 1. Stern
 
-def test_stern_reference_limits():
+def check_stern_reference_limits():
     kf = 0.7
     dos = 1.0 / np.pi                       # 2D free-electron DOS, a.u.
 
@@ -157,7 +157,7 @@ def test_stern_reference_limits():
 
 # ------------------------------------------------------- 2/3. the BZ measure
 
-def test_minibz_measure():
+def check_minibz_measure():
     R = 0.234486
 
     ok = check(abs(head_average_2d(R, 0.0) - 4.0 * np.pi / R) < 1e-13,
@@ -224,7 +224,7 @@ def _bare_cell():
 
 # ------------------------------------------------------------- 4. plasmon
 
-def test_plasmon_dispersion():
+def check_plasmon_dispersion():
     n = density_2deg(0.7)
     q = np.array([0.01, 0.04, 0.16, 0.64])
     w = plasmon_frequency_2d(q, n)
@@ -254,7 +254,7 @@ def _cell_with_lattice(a1, a2):
     return cell
 
 
-def test_minibz_polygon():
+def check_minibz_polygon():
     lattices = {'square': ((4.0, 0.0), (0.0, 4.0)),
                 'hexagonal': ((2.46, 0.0), (-1.23, 2.13042)),
                 'rect 2:1': ((4.0, 0.0), (0.0, 8.0))}
@@ -388,7 +388,7 @@ def _quadrature_over_polygon(poly, kappa, n=1200):
 
 # ------------------------------------------ 5. the constant-approximation kernel
 
-def test_constant_head_kernel():
+def check_constant_head_kernel():
     cell, _ = _bare_cell()
     Gv, _, _ = cell.get_Gv_weights(cell.mesh)
     ok = True
@@ -503,7 +503,7 @@ class _GammaHead:
         return lo
 
 
-def test_head_admissibility():
+def check_head_admissibility():
     kmesh = [2, 2, 1]
     cell, mf = make_slab(kmesh, [13, 13, 72])
     r0, beta, _ = nyquist_params(cell, kmesh)
@@ -576,19 +576,27 @@ def test_head_admissibility():
     return ok
 
 
-if __name__ == '__main__':
+def run():
     all_ok = True
     print('\n-- 1. Stern 2DEG reference limits')
-    all_ok &= test_stern_reference_limits()
+    all_ok &= check_stern_reference_limits()
     print('\n-- 2/3. the mini-BZ measure, and the 3D average it is not')
-    all_ok &= test_minibz_measure()
+    all_ok &= check_minibz_measure()
     print('\n-- 4. the sqrt(q) plasmon')
-    all_ok &= test_plasmon_dispersion()
+    all_ok &= check_plasmon_dispersion()
     print('\n-- 4b. the exact mini-BZ cell and the anisotropy hook')
-    all_ok &= test_minibz_polygon()
+    all_ok &= check_minibz_polygon()
     print('\n-- 5. the constant-approximation kernel')
-    all_ok &= test_constant_head_kernel()
+    all_ok &= check_constant_head_kernel()
     print('\n-- 6. head admissibility on a slab')
-    all_ok &= test_head_admissibility()
+    all_ok &= check_head_admissibility()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
-    sys.exit(0 if all_ok else 1)
+    return all_ok
+
+
+def test_pbc_smallq_checks():
+    assert run()
+
+
+if __name__ == '__main__':
+    sys.exit(0 if run() else 1)
