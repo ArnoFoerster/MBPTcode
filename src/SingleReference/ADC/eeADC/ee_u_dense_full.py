@@ -35,7 +35,7 @@ from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_en as _en
 
-LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3')
+LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2')
 
 # (ph/ph order, ph/2p2h order, 2p2h/2p2h order); None = block absent
 _BLOCK_ORDERS = {
@@ -43,6 +43,9 @@ _BLOCK_ORDERS = {
     'adc2':  (2, 1, 0),
     'adc2x': (2, 1, 1),
     'adc3':  (3, 2, 1),
+    # GF2 of Monino and Loos, J. Chem. Phys. 159, 034105 (2023), eq 53: A^HF
+    # singles, ADC(2)'s first-order coupling, the bare doubles diagonal
+    'gf2':   (1, 1, 0),
 }
 
 
@@ -77,7 +80,7 @@ def build_supermatrix(eps, g, nocc, level='adc3', amps=None, zint=None,
 
 def _ingredients(eps, g, nocc, norb, level, amps, zint, rho, en_dress=None):
     """MP amplitudes / Z intermediates / density, computed on demand."""
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
     if order == 1:
         return None, None, None
     if amps is None:

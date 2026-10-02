@@ -25,6 +25,7 @@ periodic H2 slab).
 | `18_periodic_slab_gw.py` | the continuum of `13` for a periodic **slab** — electrolyte above, metal electrode below |
 | `19_ee_adc.py` | electronic-excitation ADC(2)/ADC(3): spin-free, matrix-free, DF, and the singlet and triplet channels |
 | `20_vibronic_band_shape.py` | formaldehyde S1: both minima, Huang-Rhys factors by the gradient and the displacement route, and the absorption and emission bands at 300 K with their FWHM (eV, cm^-1, nm) and Stokes shift (`band_shape`) |
+| `21_ee_fold.py` | the folded EE solver: ADC(2), GF2 and the one-doubles-set BSE@GW of Monino and Loos (2023) solved root by root on the singles space, the folded ADC(2) roots beside the full solve |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE
