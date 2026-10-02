@@ -12,7 +12,10 @@ Gated here, on water/cc-pVDZ BSE@HF at 2, 3 and 8 simulated ranks:
   * every rank returns rank 0's roots, vectors and probe value bitwise, and ran
     the same iteration: the same cycle and probe matvec counts and the same
     lockstep volume, all of it proven equal by the checked locksteps' digests
-    and none of it broadcast. Against the SERIAL roots they sit within
+    and none of it broadcast. Every distributed solve here holds its trial
+    space on SPLIT_TILE tiles of pair rows (`trial_space.real_eig_rows`),
+    whose reduced sums re-associate with the rank count, so no distributed
+    root is pinned bitwise. Against the SERIAL roots they sit within
     ROOT_TOL, not on them: the row split re-associates the sums it reduces;
   * within what the Davidson resolves of the one-rank roots
     (`roots_resolution`, 1.1e-11 of |roots| here; measured 1.0e-13, 9.1e-14
@@ -32,10 +35,11 @@ Gated here, on water/cc-pVDZ BSE@HF at 2, 3 and 8 simulated ranks:
     certificate on the BSE;
   * kernels called with no comm inside a `distributed` region follow it, and
     the DF route, whose action is not divided, runs whole on every rank:
-    `solve_bse_df` in a region at 2 and 3 ranks returns the SERIAL roots and
-    vectors bitwise on every rank (its action locksteps its inputs and
-    re-associates nothing), and a one-ulp perturbation of rank 1's batch is
-    repaired at the action's entry.
+    `solve_bse_df` in a region at 2 and 3 ranks returns rank 0's roots and
+    vectors bitwise on every rank, within the Davidson's resolution of the
+    serial ones (its action re-associates nothing, its trial space does),
+    and a one-ulp perturbation of rank 1's batch is repaired at the action's
+    entry.
 
 Removing the entry lockstep of `isdf_block_action` fails both ISDF
 perturbation gates (the action's output then differs on the perturbed rank,
@@ -56,7 +60,7 @@ from pyscf import gto, scf
 
 from src.Base.utils.mpi_grid import distributed, lockstep_stats, run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse import davidson
+from src.SingleReference.LinearResponse import davidson, trial_space
 from src.SingleReference.LinearResponse.davidson import (
     _lanczos_lowest, isdf_bse_factors, isdf_block_action, lowest_amb_eigenvalue,
     solve_bse_df, solve_bse_isdf, static_screening_matrix)
@@ -65,6 +69,10 @@ from tests.test_distributed_fit_mpi import relative, roots_resolution
 
 SIZES = [2, 3, 8]
 NROOTS = 5
+#: Pair rows per tile of the Davidson's distributed trial space in this file:
+#: water's 95 pairs fall into 12 tiles, so every rank of every size holds
+#: some and the trial space's reduced sums re-associate with the rank count.
+SPLIT_TILE = 8
 #: Ha. The row split sums the ranks' partials in rank order instead of inside
 #: one GEMM; measured 9.7e-14 at 2 ranks, 9.5e-14 at 3, 7.6e-14 at 8.
 ROOT_TOL = 1e-11
@@ -79,6 +87,14 @@ DENSE_REL = 1e-13
 #: second iteration's X block, past the guess.
 PLANT_AT = 3
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+
+
+@pytest.fixture(scope='module', autouse=True)
+def split_pair_space():
+    """Every distributed solve here on SPLIT_TILE tiles of pair rows."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(trial_space, 'DAVIDSON_PAIR_TILE', SPLIT_TILE)
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -257,6 +273,9 @@ def test_one_ulp_planted_in_one_iteration_moves_no_bit(water, ranks,
                     and calls[0] == PLANT_AT):
                 fired.append(one_ulp_up(z))        # the driver's own buffer
             return act(z)
+        # the default preconditioner is now the screened diagonal, which
+        # the wrapped action forms
+        action.screened_diagonal = act.screened_diagonal
         return action, diag
 
     def one_rank(comm):
@@ -347,14 +366,21 @@ def df_serial(water):
 
 @pytest.mark.parametrize('size', [2, 3])
 def test_the_df_route_runs_whole_on_every_rank(water, df_serial, size):
-    """`solve_bse_df` inside a region: every rank returns the serial roots and
-    vectors bitwise, from the serial number of cycles, and one probe value."""
+    """`solve_bse_df` inside a region: its action runs whole on every rank
+    and its Davidson's trial space is cut by pair rows, so every rank returns
+    rank 0's roots and vectors bitwise, from the serial number of cycles,
+    within the Davidson's resolution of the serial roots -- not on them, the
+    trial space's reduced sums re-associating with the rank count -- and one
+    probe value."""
     om_s, X_s, Y_s, info_s = df_serial
     out = run_simulated(lambda comm: solve_df(water), size)
-    amb0 = out[0][3]['min_eig_amb']
+    om0, X0, Y0, info0 = out[0]
+    amb0 = info0['min_eig_amb']
     assert abs(amb0 - info_s['min_eig_amb']) <= PROBE_TOL
+    assert relative(om0, om_s) <= roots_resolution(info_s['eps'],
+                                                   water['nocc'], om_s)
     for om, X, Y, info in out:
-        assert bitwise(om, om_s) and bitwise(X, X_s) and bitwise(Y, Y_s)
+        assert bitwise(om, om0) and bitwise(X, X0) and bitwise(Y, Y0)
         assert (info['stats']['davidson_vind_calls']
                 == info_s['stats']['davidson_vind_calls'])
         assert info['min_eig_amb'] == amb0
@@ -363,17 +389,17 @@ def test_the_df_route_runs_whole_on_every_rank(water, df_serial, size):
 
 
 @pytest.mark.parametrize('size', [2, 3])
-def test_the_df_action_repairs_one_ulp_on_rank_one(water, df_serial,
-                                                   monkeypatch, size):
+def test_the_df_action_repairs_one_ulp_on_rank_one(water, monkeypatch, size):
     """Rank 1's Davidson buffer moved one ulp before the DF action of one
-    iteration sees it: every rank still returns the serial solve bitwise, and
-    the audit counts that one repair, of one ulp, on rank 1 alone.
+    iteration sees it: every rank still returns the unperturbed distributed
+    solve bitwise, and the audit counts that one repair, of one ulp, on rank
+    1 alone.
 
-    The ulp is the detector here. The DF ranks share no partials, so without
-    the entry lockstep rank 0 never sees rank 1's drift and the final
-    lockstep hands rank 1 rank 0's roots anyway; what gives it away is that
-    rank 1 then iterated on its own, and the final lockstep repaired 1.99
-    where the entry one repairs 1.1e-16."""
+    The ulp is the detector here. The DF action shares no partials, but the
+    trial space does: without the entry lockstep rank 1's pair rows of the
+    action's output, and every reduced sum they enter, would carry its
+    drift to every rank."""
+    clean = run_simulated(lambda comm: solve_df(water, probe=False), size)
     fired = []
     real = davidson.df_block_action
 
@@ -388,6 +414,9 @@ def test_the_df_action_repairs_one_ulp_on_rank_one(water, df_serial,
                     and calls[0] == PLANT_AT):
                 fired.append(one_ulp_up(z))        # the driver's own buffer
             return act(z)
+        # the default preconditioner is now the screened diagonal, which
+        # the wrapped action forms
+        action.screened_diagonal = act.screened_diagonal
         return action, diag
 
     def one_rank(comm):
@@ -399,9 +428,9 @@ def test_the_df_action_repairs_one_ulp_on_rank_one(water, df_serial,
     monkeypatch.setattr(davidson, 'df_block_action', planting)
     moved = run_simulated(one_rank, size)
     assert fired and fired[0] > 0.0, 'the perturbation was never planted'
-    om_s, X_s, Y_s, _ = df_serial
+    om_c, X_c, Y_c, _ = clean[0]
     for r, ((om, X, Y, _), stats) in enumerate(moved):
-        assert bitwise(om, om_s) and bitwise(X, X_s) and bitwise(Y, Y_s)
+        assert bitwise(om, om_c) and bitwise(X, X_c) and bitwise(Y, Y_c)
         assert stats['mismatched_calls'] == (1 if r == 1 else 0)
         assert stats['max_abs_diff'] == (fired[0] if r == 1 else 0.0)
 

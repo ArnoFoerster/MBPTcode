@@ -54,6 +54,11 @@ def model(monkeypatch):
         v = (2 * (f @ V.T) @ V).reshape(z.shape)
         return diag[None] * z + v, v
 
+    # RPA's screened diagonal is d itself, as the production actions return
+    # it; the default preconditioner is now the screened diagonal, which a
+    # block action without one refuses.
+    apply_AB.screened_diagonal = lambda: diag
+
     def block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
                      spin='singlet', comm=None):
         calls.append(nocc)

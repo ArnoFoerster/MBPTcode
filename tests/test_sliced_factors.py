@@ -24,8 +24,8 @@ region:
     energies bitwise, every rank rank 0's, and one gather each of D, X_o,
     X_v and X_ao per solve;
   * the whole ISDF BSE on slices (GW diagonal, W carried from the GW axis,
-    probe, Davidson) and the static W rebuilt on its own: bitwise, with the
-    gathers counted per stage;
+    Davidson, and the probe on the Davidson's own action) and the static W
+    rebuilt on its own: bitwise, with the gathers counted per stage;
   * what cannot be served from slices is refused on every rank before any
     collective: unpacking them as a tuple, a serial consumer, a reaction
     field;
@@ -304,8 +304,9 @@ def test_bse_on_slices(water, size):
     for r, out in enumerate(res):
         assert bitwise(out['sliced'], out['whole']), f'rank {r}: not bitwise'
         assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
-        # the GW diagonal once each; the probe and the Davidson D and X_o each
-        assert out['by_name'] == {'D': 3, 'X_o': 3, 'X_v': 1, 'X_ao': 1}
+        # the GW diagonal once each; D and X_o once more for the Davidson's
+        # action, which the probe after it reuses rather than rebuilds
+        assert out['by_name'] == {'D': 2, 'X_o': 2, 'X_v': 1, 'X_ao': 1}
 
 
 @pytest.mark.parametrize('size', [3])

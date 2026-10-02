@@ -10,7 +10,8 @@ Covers what landed with `solve_bse_isdf`:
   3. The instability machinery on 90-degree twisted ethene, the textbook
      singlet-unstable reference: the matrix-free min eig(A-B) probe against
      the dense value, the solver's RuntimeError diagnosis (never pyscf's bare
-     LinAlgError), and the driver refusing BEFORE the solve.
+     LinAlgError), and the driver refusing the solve before it returns a
+     root -- after its Davidson, whose own breakdown names the reference.
      NOTE mf.stability() calls this system internally stable -- it is a
      different Hessian and no substitute for the probe.
   4. The DF block action is invariant to the trial-vector chunking that keeps
@@ -149,7 +150,7 @@ def main():
                 'TDHF and BSE differ in sign on the SAME reference -- probe the kernel in use',
                 f'BSE {amb_bse:+.4f}, TDHF {amb_dense:+.4f} Ha')
 
-    print('\n=== driver refuses an unstable diagonal before the solve ===')
+    print('\n=== driver refuses an unstable diagonal before returning roots ===')
     mol_w = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mf_w = dft.RKS(mol_w, xc='LRC-WPBEh').density_fit(auxbasis='cc-pvdz-ri')
     mf_w.kernel()
@@ -159,10 +160,10 @@ def main():
     try:
         solve_bse_isdf(mf_w, mol_w, nocc_w, nroots=3, qp=eps_inv,
                        auxbasis='cc-pvdz-ri')
-        ok &= check(False, 'driver refuses before the solve')
+        ok &= check(False, 'driver refuses the unstable diagonal')
     except RuntimeError as exc:
-        ok &= check('refused before the solve' in str(exc),
-                    'driver refuses before the solve, naming min eig(A-B)')
+        ok &= check('refused before the solve returned' in str(exc),
+                    'driver refuses before returning roots, naming min eig(A-B)')
 
     print('\n=== DF block action invariant to trial-vector chunking ===')
     W_df = lr.static_screening_aux(nocc)

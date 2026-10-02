@@ -110,9 +110,9 @@ density-fitted SCF divide their work over MPI ranks. Every rank runs the whole
 script -- the SCF loop, the Davidson, the gradient chains, the geometry walk --
 and MPI lives only inside the kernels that realize the physics: the tau and
 frequency sweeps of the GW self-energy and its adjoints, the three-centre pass
-of the ISDF fit, the rows of the screened kernel in the BSE block action, and
-the auxiliary rows and grid points of the SCF's J, K and exchange-correlation
-potential. A driver never takes a communicator; the kernels read it from the
+of the ISDF fit, the rows of the screened kernel in the BSE block action, the
+pair rows of the BSE Davidson's trial space, and the auxiliary rows and grid
+points of the SCF's J, K and exchange-correlation potential. A driver never takes a communicator; the kernels read it from the
 region the script opens once:
 
 ```python

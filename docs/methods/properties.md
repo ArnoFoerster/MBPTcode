@@ -27,3 +27,19 @@ minima `calc_adiabatic_gap` already relaxes (El-Sayed's rule, computed rather
 than assumed) plus the Herzberg-Teller dV/dq scan over `vibronic`'s
 ground-state modes that `rates.spin_vibronic_rate` needs for an
 El-Sayed-forbidden pair, where the Condon term alone is not the whole story.
+
+**Vibronic band shapes** — `band_shape(s_k, omega_k, e00, temperature,
+energies, *, gaussian_fwhm, lorentzian_fwhm)` gives the normalized absorption
+(E x FC) and emission (E^3 x FC) spectra of the displaced-oscillator model
+from `vibronic`'s Huang-Rhys factors, the 0-0 energy and the temperature, with
+their peaks, FWHMs, the Stokes shift, and the emission per unit wavelength with
+its FWHM in nm. Both broadenings are required arguments: a computed width is
+only comparable with a measured one when the broadening added to it is stated.
+The Franck-Condon density is `rates.fc_weighted_dos`, the generating function
+the golden-rule rates use, which takes a homogeneous Lorentzian (integrated on
+the real time axis, with an Euler-Maclaurin correction at the kink of
+e^{-gamma |t|}) and returns an exact zero where the saddle-point exponent has
+underflowed, the far side of a cold band. `band_grid` builds an energy grid
+that covers and resolves both bands, and `gaussian_limit_fwhm` the width of
+the second cumulant alone. See `examples/20_vibronic_band_shape.py` for
+formaldehyde S1 end to end, both Huang-Rhys routes.
