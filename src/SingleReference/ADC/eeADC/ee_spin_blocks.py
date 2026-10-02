@@ -35,9 +35,9 @@ import numpy as np
 class SB:
     """Spin-blocked spatial tensor: {spin string -> ndarray}."""
 
-    __slots__ = ('blocks', 'derived')
+    __slots__ = ('blocks', 'derived', 'parity')
 
-    def __init__(self, blocks=None, derived=None):
+    def __init__(self, blocks=None, derived=None, parity=None):
         self.blocks = {k: v for k, v in (blocks or {}).items() if v is not None}
         # Optional provenance: {key: (base_key, axis_permutation, sign)} when
         # a block is a signed transpose of another. A kernel that commutes
@@ -46,6 +46,11 @@ class SB:
         # it halves the dominant cost. Every arithmetic operation below drops
         # it, so a stale map can never be used.
         self.derived = derived
+        # Optional flip parity p = +1 or -1: X[flip(key)] == p * X[key] for
+        # every key, flip being alpha <-> beta. An operation on such tensors
+        # then forms the alpha-first blocks alone and takes the rest from
+        # them (_with_flip). None promises nothing.
+        self.parity = parity
 
     def get(self, key):
         return self.blocks.get(key)
@@ -60,12 +65,38 @@ class SB:
         return f'SB({sorted(self.blocks)})'
 
     # ---- arithmetic (mirrors what the equations do to plain ndarrays) ----
+    def _map(self, fn):
+        """fn, a linear map of one block, on every block; on the alpha-first
+        half alone when the parity gives the rest."""
+        if self.parity is None:
+            return SB({k: fn(v) for k, v in self.blocks.items()})
+        return SB(_with_flip({k: fn(v) for k, v in self.blocks.items()
+                              if k[0] == 'a'}, self.parity), parity=self.parity)
+
     def _combine(self, other, sign):
         if not isinstance(other, SB):
             return NotImplemented
+        if self.parity is not None and self.parity == other.parity:
+            half = {k: v for k, v in self.blocks.items() if k[0] == 'a'}
+            for k, v in other.blocks.items():
+                if k[0] != 'a':
+                    continue
+                if k not in half:
+                    half[k] = sign * v
+                elif sign > 0:
+                    half[k] = half[k] + v
+                else:
+                    half[k] = half[k] - v
+            return SB(_with_flip(half, self.parity), parity=self.parity)
         out = dict(self.blocks)
         for k, v in other.blocks.items():
-            out[k] = out[k] + sign * v if k in out else sign * v
+            # one pass over the block: sign * v would be a second full temporary
+            if k not in out:
+                out[k] = sign * v
+            elif sign > 0:
+                out[k] = out[k] + v
+            else:
+                out[k] = out[k] - v
         return SB(out)
 
     def __add__(self, other):
@@ -75,10 +106,10 @@ class SB:
         return self._combine(other, -1.0)
 
     def __neg__(self):
-        return SB({k: -v for k, v in self.blocks.items()})
+        return self._map(lambda v: -v)
 
     def __mul__(self, c):
-        return SB({k: c * v for k, v in self.blocks.items()})
+        return self._map(lambda v: c * v)
 
     __rmul__ = __mul__
 
@@ -87,7 +118,7 @@ class SB:
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
         return SB({''.join(k[a] for a in axes): v.transpose(axes)
-                   for k, v in self.blocks.items()})
+                   for k, v in self.blocks.items()}, parity=self.parity)
 
     def scale(self, arr):
         """Multiply elementwise by a weight. A plain array is applied to every
@@ -98,19 +129,32 @@ class SB:
         if isinstance(arr, SB):
             return SB({k: v * arr.get(k) for k, v in self.blocks.items()
                        if arr.get(k) is not None})
-        return SB({k: v * arr for k, v in self.blocks.items()})
+        return self._map(lambda v: v * arr)
 
     def divide(self, arr):
         """scale() by the reciprocal, without forming 1/arr for the whole SB."""
         if isinstance(arr, SB):
             return SB({k: v / arr.get(k) for k, v in self.blocks.items()
                        if arr.get(k) is not None})
-        return SB({k: v / arr for k, v in self.blocks.items()})
+        return self._map(lambda v: v / arr)
 
     def spin_flip(self):
         """The closed-shell involution alpha <-> beta."""
         tr = str.maketrans('ab', 'ba')
-        return SB({k.translate(tr): v for k, v in self.blocks.items()})
+        return SB({k.translate(tr): v for k, v in self.blocks.items()},
+                  parity=self.parity)
+
+
+_FLIP = str.maketrans('ab', 'ba')
+
+
+def _with_flip(half, parity):
+    """The alpha-first blocks `half` completed by their alpha <-> beta
+    partners, X[flip(key)] = parity * X[key]: the same array for +1."""
+    out = dict(half)
+    for k, v in half.items():
+        out[k.translate(_FLIP)] = v if parity > 0 else -v
+    return out
 
 
 def sb_einsum(subs, *ops, optimize=True):
@@ -120,9 +164,14 @@ def sb_einsum(subs, *ops, optimize=True):
     if len(terms) != len(ops):
         raise ValueError(f'{subs!r} expects {len(terms)} operands, got {len(ops)}')
     idx = sorted(set(''.join(terms)))
+    parities = [getattr(op, 'parity', None) for op in ops]
+    # flip eigenvectors in, a flip eigenvector out: its alpha-first half only
+    half = bool(rhs) and None not in parities
     out = {}
     for assign in itertools.product('ab', repeat=len(idx)):
         smap = dict(zip(idx, assign))
+        if half and smap[rhs[0]] == 'b':
+            continue
         arrays = []
         for t, op in zip(terms, ops):
             arr = op.get(''.join(smap[c] for c in t))
@@ -133,6 +182,9 @@ def sb_einsum(subs, *ops, optimize=True):
             key = ''.join(smap[c] for c in rhs)
             val = np.einsum(subs, *arrays, optimize=optimize)
             out[key] = out[key] + val if key in out else val
+    if half:
+        parity = float(np.prod(parities))
+        return SB(_with_flip(out, parity), parity=parity)
     return SB(out)
 
 
@@ -162,6 +214,70 @@ def anti4(V, Vx=None):
 
 _G_BLOCKS = {'oooo': 'oooo', 'ooov': 'oovo', 'oovv': 'oovv',
              'ovov': 'ovvo', 'ovvv': 'ovvv', 'vvvv': 'vvvv'}
+
+
+def ovvv_ia(S, X):
+    """sum_jbc <ja||bc> X_ijbc for a closed-shell reference, per output spin.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c)
+        The spatial V[j, a, b, c] = <ja|bc>, stored so (j, b, c) is contiguous.
+    X : SB of the six doubles blocks, index order (i, j, b, c)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order
+    (i, a). anti4's blocks of <ja||bc> are V, V - Vx and -Vx with
+    Vx[j,a,b,c] = V[j,a,c,b]; moving every Vx onto X as a (b, c) transpose
+    leaves one V contraction per output spin,
+
+        sigma^a_ia = sum_jbc V_jabc (X^aaaa_ijbc - X^aaaa_ijcb
+                                     + X^abba_ijbc - X^abab_ijcb),
+
+    and alpha <-> beta for 'bb': one matmul on a reshape view of S, where the
+    block-wise einsum reorders (copies) the o v^3 block once per spin block.
+    An X with a flip parity needs the 'aa' matmul alone."""
+    Sm = S.reshape(S.shape[0], -1)
+    out = {}
+    spins = (('aa', ('aaaa', 'abba', 'abab')), ('bb', ('bbbb', 'baab', 'baba')))
+    for s, (same, with_v, with_neg) in (spins if X.parity is None else spins[:1]):
+        Z = (X.get(same) - X.get(same).transpose(0, 1, 3, 2) + X.get(with_v)
+             - X.get(with_neg).transpose(0, 1, 3, 2))
+        out[s] = Z.reshape(Z.shape[0], -1) @ Sm.T
+    if X.parity is not None:
+        return SB(_with_flip(out, X.parity), parity=X.parity)
+    return SB(out)
+
+
+def ovvv_ijab(S, x):
+    """sum_c <ic||ab> x_jc for a closed-shell reference, per output spin block.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c), as in ovvv_ia
+    x : SB with blocks 'aa' and 'bb', shape (no, nv), index order (j, c)
+
+    Returns an SB of the six doubles blocks, index order (i, j, a, b). With
+    T^s_ijab = sum_c V_icab x^s_jc, one matmul per spin, every block follows
+    by an (a, b) transpose:
+
+        aaaa = T^a - T^a_ijba,   baba = T^a,   baab = -T^a_ijba,
+
+    and alpha <-> beta for bbbb, abab, abba. An x with a flip parity p has
+    T^b = p T^a, so one matmul gives every block."""
+    nv, no = S.shape[0], S.shape[1]
+    Sm = S.reshape(nv, -1)
+
+    def t(xs):
+        # [j, (i, a, b)], so every (i, j) slab stays contiguous in (a, b)
+        return (xs @ Sm).reshape(no, no, nv, nv).transpose(1, 0, 2, 3)
+
+    swap = (0, 1, 3, 2)
+    if x.parity is not None:
+        Ta = t(x.get('aa'))
+        Tb = Ta if x.parity > 0 else -Ta
+        return SB(_with_flip({'aaaa': Ta - Ta.transpose(swap), 'abab': Tb,
+                              'abba': -Tb.transpose(swap)}, x.parity),
+                  parity=x.parity)
+    Ta, Tb = t(x.get('aa')), t(x.get('bb'))
+    return SB({'aaaa': Ta - Ta.transpose(swap), 'bbbb': Tb - Tb.transpose(swap),
+               'baba': Ta, 'abab': Tb,
+               'baab': -Ta.transpose(swap), 'abba': -Tb.transpose(swap)})
 
 
 def g_blocks_sb(V, nocc_spatial, norb_spatial):

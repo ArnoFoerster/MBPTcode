@@ -155,7 +155,7 @@ def _lindep_for(tol_residual, floor=1e-22, ceiling=1e-14):
 def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
                     tol_residual=1e-6, tol_eig=None, max_cycle=200,
                     max_subspace=None, precond=None, lindep=None, verbose=0,
-                    warn_unconverged=True, label='Davidson'):
+                    warn_unconverged=True, label='Davidson', max_memory=None):
     """The `nroots` lowest eigenpairs of a real symmetric matrix-free
     operator -- or, with `pick`, the `nroots` it selects.
 
@@ -178,6 +178,11 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         DEFAULT is sized for convergence, not for memory; this argument is the
         memory answer, and setting it low is paid for in matrix-vector
         products (see _default_subspace).
+    max_memory: MB davidson1 may hold its subspace in. Above it the subspace
+        goes to HDF5 files under PYSCF_TMPDIR, and the disk traffic can cost
+        more than the matrix-vector products. It bounds the subspace only, so
+        a caller holding other arrays passes what they leave free. None keeps
+        davidson1's own default, pyscf's 4000 MB.
     max_cycle: davidson1 restarts by collapsing the subspace onto the nroots
         Ritz vectors alone, so it re-climbs out of a restart slowly and wants
         a generous budget.
@@ -228,7 +233,8 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         conv, e, c = pyscf_lib.davidson1(
             aop, guess, precond, nroots=nroots, pick=pick,
             tol=tol_eig, tol_residual=tol_residual, lindep=lindep,
-            max_cycle=max_cycle, max_space=max_space, verbose=verbose)
+            max_cycle=max_cycle, max_space=max_space, verbose=verbose,
+            **({} if max_memory is None else {'max_memory': max_memory}))
     except LinearDependenceError as exc:
         # The trial subspace has spanned everything reachable, which at these
         # dimensions means the operator is small enough that iterating on it

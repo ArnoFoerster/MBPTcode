@@ -45,8 +45,10 @@ def _phys(Bl, Br):
 
 
 def g_blocks_df(B, no, norb):
-    """The five blocks with at most two virtual indices, spin-blocked.
-    <ab||cd> is deliberately absent -- it goes through the kernels below."""
+    """The five blocks with at most three virtual indices: ovvv as the spatial
+    <ja|bc> stored [a, j, b, c] (ee_spin_blocks.ovvv_ia), the others
+    spin-blocked. <ab||cd> is deliberately absent -- it goes through the
+    kernels below."""
     o, v = slice(0, no), slice(no, norb)
     Boo, Bov, Bvo, Bvv = B[:, o, o], B[:, o, v], B[:, v, o], B[:, v, v]
     return {
@@ -54,7 +56,7 @@ def g_blocks_df(B, no, norb):
         'ooov': anti4(_phys(Boo, Bov), _phys(Bov, Boo).transpose(0, 1, 3, 2)),
         'oovv': anti4(_phys(Bov, Bov)),
         'ovov': anti4(_phys(Boo, Bvv), _phys(Bov, Bvo).transpose(0, 1, 3, 2)),
-        'ovvv': anti4(_phys(Bov, Bvv)),
+        'ovvv_ajbc': np.ascontiguousarray(_phys(Bov, Bvv).transpose(1, 0, 2, 3)),
     }
 
 
@@ -199,11 +201,12 @@ class DFVvvvKernels(_eq.VvvvKernels):
 # ----------------------------------------------------------------------
 
 def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
-                   cache=None):
+                   cache=None, parity=None):
     """(aop, diag, dims) from spatial orbital energies and the DF factor
     B (naux, norb, norb) with (pq|rs) = sum_Q B[Q,p,q] B[Q,r,s].
 
-    Same vector layout and spin-channel handling as ee_r_sigma."""
+    Same vector layout, spin-channel handling and `parity` as ee_r_sigma; the
+    particle ladder runs on every spin block whatever the parity."""
     if level not in LEVELS:
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
@@ -222,6 +225,9 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
 
     be = _eq.SPIN_BLOCKED
     order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    if order == 3 and 'ovvv' not in gb:
+        # the third-order ovvv terms still contract anti4's six spin blocks
+        gb['ovvv'] = anti4(gb['ovvv_ajbc'].transpose(1, 0, 2, 3))
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
@@ -235,17 +241,21 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
                                             order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph, no, nv, vk=vk)
     diag = _diagonal_df(eps, B, no, nv, M, o_dd)
+    keys = _r.W_KEYS
+    if parity is not None:
+        gb, amps, zint, M = (_r.flip_symmetric(x) for x in (gb, amps, zint, M))
+        keys = _r.W_KEYS_CHANNEL
 
     def aop(vec):
         vec = np.asarray(vec).ravel()
-        y1, Y = _r.to_blocks(vec, no, nv, level)
+        y1, Y = _r.to_blocks(vec, no, nv, level, parity)
         w1 = be.ein('iajb,jb->ia', M, y1)
         if o_sd is None:
             return _r.from_blocks(w1, SB(), no, nv, level)
         w1 = w1 + _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
-        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd)
-             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk))
-        return _r.from_blocks(w1, W, no, nv, level)
+        W = (_eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd, keys=keys)
+             + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk, keys=keys))
+        return _r.from_blocks(w1, W, no, nv, level, parity)
 
     return aop, diag, d
 
