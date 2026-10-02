@@ -418,7 +418,7 @@ def build_operator(eps_a, eps_b, Ba, Bb, no_a, no_b, level='adc3',
         en_shift = _en.shift_from_denominators(d_amp, d_ijab)
 
     be = _backend()
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
     amps, zint, rho = _r._amplitudes_cached(cache, be, gb, d_amp, d_ia_amp,
                                             order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph,

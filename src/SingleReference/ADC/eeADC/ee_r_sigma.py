@@ -29,9 +29,13 @@ from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_en as _en
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 
-LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3')
+LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2')
+# gf2: the symmetrised one-doubles-set GF2 supermatrix of Monino and Loos,
+# J. Chem. Phys. 159, 034105 (2023), eq 53: ADC(2)'s coupling and bare doubles
+# diagonal under the first-order singles block A^HF (eq 54a), i.e. ADC(2)
+# without the three static second-order singles terms of eq 57; HF energies.
 _BLOCK_ORDERS = {'adc1': (1, None, None), 'adc2': (2, 1, 0),
-                 'adc2x': (2, 1, 1), 'adc3': (3, 2, 1)}
+                 'adc2x': (2, 1, 1), 'adc3': (3, 2, 1), 'gf2': (1, 1, 0)}
 SCALE = 2.0                                    # ee_utils.PAPER_DOUBLES_SCALE
 
 
@@ -218,7 +222,7 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
                            (no, nv, no, nv))
 
     be = _eq.SPIN_BLOCKED
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:

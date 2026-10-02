@@ -201,18 +201,38 @@ class DFVvvvKernels(_eq.VvvvKernels):
 # ----------------------------------------------------------------------
 
 def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
-                   cache=None, parity=None):
+                   cache=None, parity=None, pieces=False):
     """(aop, diag, dims) from spatial orbital energies and the DF factor
     B (naux, norb, norb) with (pq|rs) = sum_Q B[Q,p,q] B[Q,r,s].
 
     Same vector layout, spin-channel handling and `parity` as ee_r_sigma; the
-    particle ladder runs on every spin block whatever the parity."""
+    particle ladder runs on every spin block whatever the parity.
+
+    pieces: True also returns the blocks the doubles fold of ee_fold needs,
+    (aop, diag, dims, pieces) with pieces = {'M', 'V', 'Vt', 'D', 'level',
+    'no', 'nv', 'be'}: M the singles block M_ia,jb (SB, blocks of shape
+    (no, nv, no, nv), index order (i, a, j, b)), V the coupling W^ab_ij(S) as
+    a callable from an SB singles vector (blocks (no, nv), index order (i, a))
+    to an SB doubles vector (blocks (no, no, nv, nv), index order
+    (i, j, a, b)), Vt its transpose W^a_i(D) the other way (no 'dense_limit'
+    key: solve_folded runs Davidson on them at every size), D = d_ijab the
+    doubles diagonal, shape (no, no, nv, nv), index order (i, j, a, b). Only a
+    level whose doubles block is that bare diagonal (o_dd = 0: adc2, gf2) is
+    accepted, and only without `parity`: the fold takes its spin channel on the
+    singles alone."""
     if level not in LEVELS:
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
     nv = norb - no
     o_ss, o_sd, o_dd = _r._BLOCK_ORDERS[level]
     d = _r.dimensions(no, nv, level)
+    if pieces and (o_sd is None or o_dd != 0):
+        raise ValueError(f'pieces=True needs a level whose doubles block is the bare '
+                         f'diagonal (o_dd = 0 with a coupling); level={level!r} has '
+                         f'(o_ss, o_sd, o_dd) = {(o_ss, o_sd, o_dd)}')
+    if pieces and parity is not None:
+        raise ValueError('pieces=True takes parity=None; ee_fold forms the spin '
+                         'channel on the singles space itself')
 
     gb, vk, cache = _r._ingredients(cache, lambda: g_blocks_df(B, no, norb),
                                     lambda: DFVvvvKernels(B, no, norb))
@@ -224,7 +244,7 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
                            (no, nv, no, nv))
 
     be = _eq.SPIN_BLOCKED
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3}[level]
+    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
     if order == 3 and 'ovvv' not in gb:
         # the third-order ovvv terms still contract anti4's six spin blocks
         gb['ovvv'] = anti4(gb['ovvv_ajbc'].transpose(1, 0, 2, 3))
@@ -257,7 +277,20 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
              + _eq.sigma_d_from_d(be, gb, Y, d_ijab, o_dd, vk=vk, keys=keys))
         return _r.from_blocks(w1, W, no, nv, level, parity)
 
-    return aop, diag, d
+    if not pieces:
+        return aop, diag, d
+
+    def coupling_v(y1):
+        # W^ab_ij(S): the doubles image of a singles vector, eqs A54/A55
+        return _eq.sigma_d_from_s(be, gb, amps, zint, y1, o_sd)
+
+    def coupling_vt(Y):
+        # W^a_i(D): the singles image of a doubles vector, eqs A41/A42
+        return _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
+
+    parts = {'M': M, 'V': coupling_v, 'Vt': coupling_vt, 'D': d_ijab,
+             'level': level, 'no': no, 'nv': nv, 'be': be}
+    return aop, diag, d, parts
 
 
 def _diagonal_df(eps, B, no, nv, M, o_dd):
