@@ -147,6 +147,13 @@ Check the tier for your own system the same way before a production run: one
 calculation against the exact tensor, or against the tightest tier where the
 exact tensor does not fit, on the quantity you report.
 
+One tier is loaded without its highest shell. ISDF interpolation grids represent
+auxiliary functions only up to l = 5, and B's tightest `aug-DZVP-MOLOPT-ae` tier
+carries one l = 6 shell, so `load_ri_basis` and `<name>-ri` serve it without that
+shell (102 of its 115 functions; `RI_LMAX` in `cp2k_basis.py`). Measured on
+aminoborane with density-fitted G0W0@HF BSE, dropping it moves the lowest three
+roots of either spin by at most 0.10 meV and the HF energy by 3 microhartree.
+
 ## License
 
 The basis data remain CP2K's, distributed under GPL-2.0-or-later; MBPTcode

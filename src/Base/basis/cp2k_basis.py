@@ -36,7 +36,9 @@ functions up to twice the orbital l_max. Measured on formaldehyde against the
 exact four-center tensor, the Delta-I 1e-4 tiers (no d on H, no g on O) leave 27 meV
 on the lowest BSE singlets and 6 meV on HOMO and LUMO; the tightest tiers, with g on
 C and O, leave 1.6 meV and under 1 meV. `min_lmax` in `pick_ri_tier` asks for
-that completeness explicitly.
+that completeness explicitly. `RI_LMAX` caps a tier's angular momentum where an
+ISDF interpolation grid could not represent it; the loaded set then has fewer
+functions than its name counts.
 
 Command line: `python -m src.Base.basis.cp2k_basis scout [ELEMENT ...]` lists,
 per element, the orbital sets with their function counts and the RI tiers with
@@ -72,6 +74,15 @@ BASIS_NAMES = ('aug-SZV-MOLOPT-ae', 'aug-SZV-MOLOPT-ae-mini', 'aug-SZV-MOLOPT-ae
 CITATION = ('R. Pasquier, M. Graml, J. Wilhelm, J. Chem. Theory Comput. 22, 540 '
             '(2026), doi:10.1021/acs.jctc.5c01386')
 SPDF = 'spdfghi'
+
+# Highest auxiliary angular momentum loaded, per (orbital set, element), below what
+# the tier carries. An ISDF interpolation grid's Lebedev direction sets span
+# spherical harmonics only to l = 5, and B's tightest aug-DZVP-MOLOPT-ae tier is the
+# one tier of that set reaching l = 6 (one i shell, 13 of 115 functions). Dropping
+# it moves the density-fitted G0W0@HF BSE roots of aminoborane by at most 0.10 meV
+# on the lowest three of either spin (0.32 meV over the lowest ten) and the HF
+# energy by 3 microhartree.
+RI_LMAX = {('aug-DZVP-MOLOPT-ae', 'B'): 5}
 
 # Data lines start with a digit; only a header starts with an element symbol.
 _HEADER = re.compile(r'^(?P<el>[A-Z][a-z]?)\s+(?P<names>\S.*)$')
@@ -324,11 +335,18 @@ def pick_ri_tier(basis_name, element, max_error=None, min_lmax=None, path=None):
 
 
 def load_ri_basis(basis_name, elements, max_error=None, min_lmax=None, path=None):
-    """{element: PySCF internal basis}, one RI tier per element; see `pick_ri_tier`."""
+    """{element: PySCF internal basis}, one RI tier per element; see `pick_ri_tier`.
+
+    Shells above `RI_LMAX` are dropped where it names the set and element.
+    """
     path = path or data_file('ri')
-    return {el: parse('\n'.join(basis_block(
-                pick_ri_tier(basis_name, el, max_error, min_lmax, path)[0], el, path)))
-            for el in elements}
+    out = {}
+    for el in elements:
+        tier = pick_ri_tier(basis_name, el, max_error, min_lmax, path)[0]
+        shells = parse('\n'.join(basis_block(tier, el, path)))
+        lmax = RI_LMAX.get((basis_name, el))
+        out[el] = shells if lmax is None else [s for s in shells if s[0] <= lmax]
+    return out
 
 
 def _write_nwchem(fh, table):

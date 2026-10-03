@@ -10,7 +10,8 @@ Checks, in order:
              tier builds with the count its header implies (per set and l,
              contractions times 2l + 1; C aug-SZV-MOLOPT-ae is STO-6G + 1s + 1p
              + 1d = 3s2p1d = 14)
-  tier rule  threshold, tightest by default, min_lmax, a tier's own Delta-I
+  tier rule  threshold, tightest by default, min_lmax, a tier's own Delta-I;
+             RI_LMAX drops B's aug-DZVP i shell and nothing else
   guards     unknown element, non-numeric data line, offline, failed download
   register   names build the dicts bit for bit; one RI name per set of tiers; a
              threshold call leaves `-ri` alone; elements outside a set and bad
@@ -164,6 +165,23 @@ if __name__ == '__main__':
                     and 'l_max >= 4' in msg and 'Delta-I' not in msg,
                     'min_lmax without max_error: tightest with g, else a warning for N',
                     f'O {o_tier[1]}, N {n_tier[1]}; {msg}')
+
+    # RI_LMAX: B's tightest aug-DZVP tier loads without its i shell, and no other
+    # set of any element differs from its tier's block.
+    differ = []
+    for basis_name in cb.BASIS_NAMES:
+        for el in sorted({e for e, _, _ in cb._blocks(ri)}):
+            if not cb.ri_tiers(basis_name, el, ri):
+                continue
+            block = cb.parse('\n'.join(cb.basis_block(
+                cb.pick_ri_tier(basis_name, el, path=ri)[0], el, ri)))
+            if cb.load_ri_basis(basis_name, [el], path=ri)[el] != block:
+                differ.append((basis_name, el))
+    b_dzvp = cb.load_ri_basis('aug-DZVP-MOLOPT-ae', ['B'], path=ri)['B']
+    all_ok &= check(differ == [('aug-DZVP-MOLOPT-ae', 'B')]
+                    and max(s[0] for s in b_dzvp) == 5 and nao('B', b_dzvp) == 102,
+                    'B aug-DZVP loads its tightest tier up to l = 5 (102 of 115), '
+                    'every other set as its block', f'{differ}, {nao("B", b_dzvp)}')
 
     # Data guards: missing element, non-numeric line (pyscf would eval() it),
     # offline mode, failed fetch.
