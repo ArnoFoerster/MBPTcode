@@ -1,4 +1,5 @@
-"""Finite-difference nuclear derivatives of the fragment-diabatic BSE matrix.
+"""Finite-difference nuclear derivatives of the fragment-diabatic BSE matrix,
+Tamm-Dancoff or full (the chain's kernel).
 
 The reference the analytic diabatic gradient (`src.gradients.fragment_diabatic`)
 has to reproduce, in the role `nonadiabatic.derivative_couplings` plays for the
@@ -36,7 +37,7 @@ from src.properties.nonadiabatic import mo_overlap, state_overlap
 
 def diabatic_matrix(chain, fragments, sites, ct=None, omega0=None, mol=None,
                     mf=None, scheme='lowdin', reference=None, route='auto'):
-    """FragmentPartition of `chain`'s TDA-BSE at one geometry.
+    """FragmentPartition of `chain`'s BSE at one geometry.
 
     `reference`, a FragmentPartition at another geometry, fixes the local
     orbitals' identity, the diabats' signs and Omega_0 (see module docstring).
@@ -66,9 +67,9 @@ def _align(part, reference):
     """
     ref_o, o = reference.orbitals, part.orbitals
     t = mo_overlap(ref_o.mol, ref_o.mo_coeff, o.mol, o.mo_coeff)
-    pr, pc = reference.p_canonical(), part.p_canonical()
-    ov = np.diag(state_overlap(t, o.nocc, pr, np.zeros_like(pr), pc,
-                               np.zeros_like(pc))[1:, 1:])
+    xr, yr = reference.xy(reference.p_canonical())
+    xc, yc = part.xy(part.p_canonical())
+    ov = np.diag(state_overlap(t, o.nocc, xr, yr, xc, yc)[1:, 1:])
     if np.abs(ov).min() < DIABAT_OVERLAP_FLOOR:
         k = int(np.abs(ov).argmin())
         raise ValueError(

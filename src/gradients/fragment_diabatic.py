@@ -4,28 +4,44 @@ The diabats, the effective matrix and the resolvent vectors are
 `src.properties.fragment_bse`; the finite-difference reference this module
 reproduces is `src.properties.diabatic`. Omega_0 is held fixed.
 
+TAMM-DANCOFF OR FULL. Everything is written for the symmetric pencil
+K v = Omega S v of `fragment_bse` -- K = A, S = 1 in the Tamm-Dancoff
+approximation; v = (X, Y), K = [[A, B], [B, A]], S = diag(1, -1) for the full
+BSE -- so one code serves both, and the chain's `bse_tda` picks the kernel.
+
 WHAT MOVES. An element E_ab = [A_eff(Omega_0)]_ab depends on the geometry
-through the canonical TDA-BSE matrix A, through the fragment-localized
-orbitals that A is rotated into (A_loc = T^T A T), and through the diabats,
-which are eigenvectors of blocks of A_loc. Four terms, none optional:
+through the canonical BSE matrix K, through the fragment-localized orbitals
+that K is rotated into (K_loc = T^T K T, the same T on the X and the Y half),
+and through the diabats, which are eigenvectors of blocks of K_loc. Four
+terms, none optional:
 
 1. AMPLITUDES (the chain). At fixed diabats and fixed local orbitals,
-   dE_ab = u_a^T dA_loc u_b with u = p + y (module docstring of
-   `fragment_bse`). Every first derivative is a contraction of dA_loc with a
+   dE_ab = u_a^T dK_loc u_b with u = p + y (module docstring of
+   `fragment_bse`). Every first derivative is a contraction of dK_loc with a
    few vector pairs (s, t), each mapped to the canonical basis by T and fed to
    the excited-state reverse chain as an interstate seed: `bse_backward` and
-   `interstate_backward` only read columns of the amplitude arrays, so the
-   diabat vectors take the place of roots, and `_fold_to_nuclei` carries the
-   quasiparticle, screening and integral adjoints unchanged.
+   `interstate_backward` contract dA with x_s x_t^T + y_s y_t^T and dB with
+   x_s y_t^T + y_s x_t^T, which is s^T dK t, and they only read columns of the
+   amplitude arrays, so the diabat vectors take the place of roots, and
+   `_fold_to_nuclei` carries the quasiparticle, screening and integral
+   adjoints unchanged.
 
 2. DIABAT RESPONSE. A diabat p_c is the lowest eigenvector of its block B_c of
-   A_loc, so it turns as B_c does: dp_c = -(B_c - E_c)^+ dB_c p_c. Rotating
-   the P basis is the same as transforming A, so its effect on E_ab is
-   u_a^T [A, K] u_b with K the rotation, which collapses to p_c^T dA_loc z_c
-   with z_c from ONE linear solve in the block per diabat. Another vector
-   pair for the chain.
+   the pencil, so it turns as B_c does: dp_c = -(B_c - E_c S)^+ dB_c p_c,
+   normalized in the metric. Moving P (and with it Q, the complement
+   orthogonal in the metric) is the same as transforming K by a transformation
+   that preserves S; carried through the Schur complement, sum_ab W_ab dE_ab
+   gains sum_c g_c^T dp_c with
 
-3. CANONICAL GAUGE. A_loc is A rotated by T, and T = U_o (x) U_v moves: with
+       g_c = K u V e_c - S y V E e_c ,   V = W + W^T ,
+
+   E the matrix differentiated (y = 0 and E = K_PP undressed). Rotations of
+   diabats among themselves -- two states of one block -- are included
+   exactly. The block solve turns g_c into z_c, and the term is
+   p_c^T dK_loc z_c: ONE linear solve in the block per diabat and another
+   vector pair for the chain.
+
+3. CANONICAL GAUGE. K_loc is K rotated by T, and T = U_o (x) U_v moves: with
    G = U^T dU the generator of the canonical-to-local rotation, every pair
    (s, t) adds sum G (.) D, D built from s, t, A s and A t. G is the local
    orbitals' derivative overlap less the canonical one. The canonical part is
@@ -48,15 +64,15 @@ which are eigenvectors of blocks of A_loc. Four terms, none optional:
 Only Loewdin populations are differentiated here (`scheme='lowdin'`); the IAO
 populations are a finite-difference cross-check (`fragment_localization`).
 
-GATED (tests/test_fragment_diabatic.py, offset ethylene dimer, cc-pVDZ): a
-root's gradient through the partition equals the supermolecular TDA root
-gradient to 5e-10 Ha/Bohr, with the orbital-rotation terms vanishing for it as
-they must; each element's gradient along a random direction equals the
-relocalized finite difference within its noise (about 1e-5 relative), with
-the canonical-gauge and localization terms several percent of the total.
+GATED (tests/test_fragment_diabatic.py, offset ethylene dimer, cc-pVDZ), in
+both kernels: a root's gradient through the partition equals the
+supermolecular root gradient (Tamm-Dancoff or full) to 1e-8 relative, with the
+orbital-rotation terms vanishing for it as they must; each element's gradient
+along a random direction equals the relocalized finite difference, with the
+canonical-gauge and localization terms several percent of the total.
 
-SIZE. Nothing is dense beyond FRAGMENT_DENSE_MAX pairs: the BSE action is the
-ISDF block action, the diabats come from the shared symmetric Davidson, the
+SIZE. Nothing is dense beyond FRAGMENT_DENSE_MAX rows: the BSE action is the
+ISDF block action, the diabats come from a Davidson (`fragment_bse`), the
 resolvent from conjugate gradients, the diabat response from a projected
 MINRES in its block, and the localization response from MINRES over the
 rotations BETWEEN fragments -- where the diabatic quantities live; inside one
@@ -83,7 +99,8 @@ from src.gradients.derivative_coupling import (_sigma_contraction,
                                                configuration_coupling,
                                                ov_coupling)
 from src.properties.fragment_bse import (BSEOperator, FragmentPartition,
-                                         local_pair_diagonal)
+                                         local_pair_diagonal, to_canonical,
+                                         to_local)
 
 
 # ---------------------------------------------------------------- helpers
@@ -99,12 +116,18 @@ def _overlap_derivative(mol, w_s):
     return _ket_derivative(mol, w_s + w_s.T)
 
 
-def _rotation_density(s, t, a_s, a_t, nocc):
-    """(D_o, D_v): d(s^T A_loc t) = sum G_o (.) D_o + G_v (.) D_v under a
-    rotation x -> G_o X + X G_v^T of the local amplitudes."""
-    S, T = s.reshape(nocc, -1), t.reshape(nocc, -1)
-    As, At = a_s.reshape(nocc, -1), a_t.reshape(nocc, -1)
-    return At @ S.T + As @ T.T, At.T @ S + As.T @ T
+def _rotation_density(s, t, k_s, k_t, nocc, nvir):
+    """(D_o, D_v): d(s^T K_loc t) = sum G_o (.) D_o + G_v (.) D_v under a
+    rotation x -> G_o X + X G_v^T of the local amplitudes -- of both halves
+    of a full-BSE vector, which rotate alike."""
+    d_o, d_v = 0.0, 0.0
+    for h in range(len(s) // (nocc * nvir)):
+        sl = slice(h * nocc * nvir, (h + 1) * nocc * nvir)
+        S, T = s[sl].reshape(nocc, nvir), t[sl].reshape(nocc, nvir)
+        Ks, Kt = k_s[sl].reshape(nocc, nvir), k_t[sl].reshape(nocc, nvir)
+        d_o = d_o + Kt @ S.T + Ks @ T.T
+        d_v = d_v + Kt.T @ S + Ks.T @ T
+    return d_o, d_v
 
 
 # ------------------------------------------------- localization response
@@ -289,30 +312,20 @@ class DiabaticGradient:
             self.operator, self.orbitals, sites, ct, omega0=omega0)
         self._cache = {}
 
-    # -- local-basis A action
+    # -- local-basis K action
     def _a(self, x):
         o = self.orbitals
-        return o.to_local(self.operator.apply(o.to_canonical(x)))
+        return to_local(o, self.operator.apply(to_canonical(o, x)))
 
-    def _block_index(self, c):
-        hole, elec = self.orbitals.pair_labels()
-        label = self.partition.labels[c]
-        kind, rest = label.split(' ')
-        pair = rest.split('.')[0]
-        if kind == 'site':
-            k = l = int(pair)
-        else:
-            k, l = map(int, pair.split('->'))
-        return np.flatnonzero((hole == k) & (elec == l))
+    def _eigvec_response(self, c, g):
+        """z_c with p_c^T dK z_c = g^T dp_c, the diabat-response term.
 
-    def _eigvec_response(self, c, w):
-        """z_c with p_c^T dA z_c the diabat-response term for weight w.
-
-        Solves (B_c - E_c) z = -Pi w in diabat c's block, z orthogonal to p_c,
-        with Pi the projector off p_c: densely below FRAGMENT_DENSE_MAX pairs,
-        by MINRES above (the projected operator is symmetric and, for the
-        lowest state of a block, positive semidefinite with p_c as its only
-        null direction).
+        With L = B_c - E_c S on diabat c's block, null direction p_c, and the
+        projector Pi_c = 1 - p_c (S p_c)^T off p_c along the metric:
+        z = -Pi_c L^+ Pi_c^T g. Solved densely below FRAGMENT_DENSE_MAX rows,
+        by MINRES above (L is symmetric; for the lowest state of a block it is
+        positive semidefinite with p_c as its only null direction, and higher
+        states of a block are indefinite, which MINRES takes as well).
         """
         part = self.partition
         if part.gaps[c] < DIABAT_GAP_MIN:
@@ -320,68 +333,76 @@ class DiabaticGradient:
                              f'{part.gaps[c]:.2e} Ha of another state of its '
                              f'block; its response is not defined')
         p = part.p_local[:, c]
-        idx = self._block_index(c)
-        pc = p[idx]
+        rows = part.block_rows[c]
+        pc = p[rows]
+        sig = part.metric[rows]
+        spc = sig * pc
         e_c = float(part.a_pp[c, c])
-        wb = w[idx] - pc * (pc @ w[idx])
-        dim = idx.size
+        gb = g[rows] - spc * (pc @ g[rows])             # Pi_c^T g
+        dim = rows.size
         b = np.zeros(len(p))
 
-        def project(x):
-            return x - np.outer(pc, pc @ x)
+        def project(x):                                 # Pi_c
+            return x - np.outer(pc, spc @ x)
+
+        def project_t(x):                               # Pi_c^T
+            return x - np.outer(spc, pc @ x)
 
         def block(x):
             full = np.zeros((len(p), x.shape[1]))
-            full[idx] = x
-            return self._a(full)[idx]
+            full[rows] = x
+            return self._a(full)[rows]
         if dim <= FRAGMENT_DENSE_MAX:
             m = block(np.eye(dim))
-            m = 0.5 * (m + m.T)
-            proj = np.eye(dim) - np.outer(pc, pc)
-            lhs = proj @ (m - e_c * np.eye(dim)) @ proj + np.outer(pc, pc)
-            b[idx] = proj @ -np.linalg.solve(lhs, proj @ wb)
+            m = 0.5 * (m + m.T) - e_c * np.diag(sig)
+            lhs = project_t(project_t(m.T).T) + np.outer(pc, pc)
+            b[rows] = project(-np.linalg.solve(0.5 * (lhs + lhs.T),
+                                               gb)[:, None])[:, 0]
             return b
 
         def mv(x):
             x = project(np.reshape(x, (dim, 1)))
-            return project(block(x) - e_c * x)[:, 0]
-        diag = local_pair_diagonal(self.orbitals, self.operator.eps_qp)[idx] - e_c
+            return project_t(block(x) - e_c * sig[:, None] * x)[:, 0]
+        d_ov = local_pair_diagonal(self.orbitals, self.operator.eps_qp)
+        diag = np.tile(d_ov, len(p) // len(d_ov))[rows] - e_c * sig
         prec = 1.0 / np.maximum(np.abs(diag), 1e-2)
         op = LinearOperator((dim, dim), matvec=mv, dtype=float)
         pre = LinearOperator((dim, dim), dtype=float,
                              matvec=lambda x: project(
-                                 (np.ravel(x) * prec)[:, None])[:, 0])
-        sol, info = minres(op, -wb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
+                                 project_t(np.reshape(x, (dim, 1)))
+                                 * prec[:, None])[:, 0])
+        sol, info = minres(op, -gb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
                            maxiter=5000)
-        resid = np.abs(mv(sol) + wb).max()
-        if resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(wb).max(), 1e-300):
+        resid = np.abs(mv(sol) + gb).max()
+        if resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(), 1e-300):
             raise RuntimeError(f'diabat response for {part.labels[c]} did not '
                                f'converge (info={info}, residual {resid:.2e})')
-        b[idx] = project(sol[:, None])[:, 0]
+        b[rows] = project(sol[:, None])[:, 0]
         return b
 
     def _pairs(self, w):
-        """[(s, t, weight)] with sum_ab W_ab dE_ab = sum weight * s^T dA_loc t.
+        """[(s, t, weight)] with sum_ab W_ab dE_ab = sum weight * s^T dK_loc t.
 
-        The amplitude part sum_ab W_ab u_a^T dA u_b is n_p pairs (u_a, U W_a);
+        The amplitude part sum_ab W_ab u_a^T dK u_b is n_p pairs (u_a, U W_a);
         each diabat adds one more, (p_c, z_c), from its eigenvector response
-        with the weight w_c the module docstring derives.
+        with the weight g_c the module docstring derives.
         """
         part = self.partition
         w = np.asarray(w, float)
         u = part.u_local if self.dressed else part.p_local
-        au = self._a(u)
-        m = part.p_local.T @ au                     # M_ca = p_c . A u_a
+        sy = part.metric[:, None] * (part.y_local if self.dressed
+                                     else np.zeros_like(u))
+        ku = self._a(u)
+        v = w + w.T
+        g = ku @ v - sy @ (v @ self.matrix())          # column c is g_c
         pairs = []
         for a in range(u.shape[1]):
             if np.any(w[a]):
                 pairs.append((u[:, a], u @ w[a], 1.0))
         for c in range(u.shape[1]):
-            wc = (au @ (w[:, c] + w[c, :]) - u @ (w.T @ m[c])
-                  - u @ (w @ m[c]))
-            if not np.any(wc):
+            if not np.any(g[:, c]):
                 continue
-            z = self._eigvec_response(c, wc)
+            z = self._eigvec_response(c, g[:, c])
             if np.any(z):
                 pairs.append((part.p_local[:, c], z, 1.0))
         return pairs
@@ -393,11 +414,10 @@ class DiabaticGradient:
         cache = self._cache
         if not cache:
             cache.update(bse_cache(x_mo, d, eps_qp, w_aux, chain.nocc,
-                                   spin=chain.spin, bse_tda=True))
+                                   spin=chain.spin, bse_tda=self.operator.tda))
         total = None
         for s, t, wgt in pairs:
-            xs = o.to_canonical(np.column_stack([s, t]))
-            ys = np.zeros_like(xs)
+            xs, ys = self.partition.xy(to_canonical(o, np.column_stack([s, t])))
             if np.allclose(s, t):
                 part = bse_backward(0, x_mo, d, eps_qp, w_aux, chain.nocc,
                                     cache, xs, ys, omega_bar=wgt)
@@ -415,8 +435,8 @@ class DiabaticGradient:
         d_o = np.zeros((nocc, nocc))
         d_v = np.zeros((o.nvir, o.nvir))
         for s, t, wgt in pairs:
-            a_s, a_t = self._a(s[:, None])[:, 0], self._a(t[:, None])[:, 0]
-            do, dv = _rotation_density(s, t, a_s, a_t, nocc)
+            k_s, k_t = self._a(s[:, None])[:, 0], self._a(t[:, None])[:, 0]
+            do, dv = _rotation_density(s, t, k_s, k_t, nocc, o.nvir)
             d_o += wgt * do
             d_v += wgt * dv
         d_o, d_v = 0.5 * (d_o - d_o.T), 0.5 * (d_v - d_v.T)
@@ -465,7 +485,7 @@ class DiabaticGradient:
 
         dOmega = Z c^T dA_eff(Omega) c at the root, so the partition has to be
         built AT the root (omega0 = Omega). With a complete Q this is the
-        supermolecular TDA root's gradient -- the identity the tests check,
+        supermolecular root's gradient -- the identity the tests check,
         and one the localization terms cannot change, because a root does not
         depend on how the orbitals are localized.
         """

@@ -41,7 +41,7 @@ optional third-party one.
 | BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space` |
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field` |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
-| fragment-diabatic BSE and its analytic gradient | `test_fragment_diabatic` (about 25 minutes) |
+| fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
 | an environment from a charged structure file, and the diabatic gradient in it | `test_protein_environment` (unit tests in seconds; the gradient gate about 10 minutes) |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
 | MPI: the context, `lockstep` and the collectives | `test_mpi_context`, `test_mpi_grid_primitives`, `test_mpi_map`, `test_layering` |

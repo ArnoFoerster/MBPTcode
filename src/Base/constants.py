@@ -563,6 +563,12 @@ DIABAT_OVERLAP_FLOOR = 0.9
 # block holds another state closer than this (Hartree) has no well-defined
 # eigenvector response, which divides by the gap.
 DIABAT_GAP_MIN = 1e-4
+# Roots carried beyond those asked for, and the smallest subspace before a
+# restart, in the full-BSE block Davidson of the fragment partition: with
+# only the quasiparticle diagonal as preconditioner, a root just above the
+# last one asked for otherwise leaves the subspace at each restart.
+FRAGMENT_DAVIDSON_EXTRA_ROOTS = 4
+FRAGMENT_DAVIDSON_MIN_SPACE = 80
 
 # How many orbitals past the frontier are solved to find the lowest-energy
 # attachment or removal: G0W0 reorders states relative to the mean field, so
