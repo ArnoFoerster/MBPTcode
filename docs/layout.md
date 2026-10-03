@@ -10,6 +10,10 @@ src/Base/               PySCF interface, constants, linear algebra
     solvent_screening.py  PCM reaction field, with its analytic adjoint
     dispersion.py        the empirical D3/D4 correction
     composite_environment.py, polarizable_sites.py, cppe_interface.py
+    fragment_localization.py  fragment Pipek-Mezey orbitals (pyscf), the
+                        basis of the fragment-partitioned BSE
+    protein_environment.py  a QM region, its fragments and a charges +
+                        polarizable-sites environment from a PQR file
                         QM/MMPol: permanent charges plus induced dipoles
     pcm_factorization.py, pcm_derivatives.py
                         the PCM cavity's cached solve and its nuclear
@@ -50,5 +54,8 @@ src/gradients/          analytic nuclear gradients: one adjoint module per
                         forward one, differentiating production's own objects
 src/properties/         the ONE surface dispatcher, geometry optimization,
                         vibronic analysis, conformers, rates and the
-                        couplings they need
+                        couplings they need; the fragment-diabatic BSE
+                        (fragment_bse.py) and its finite differences
+                        (diabatic.py), whose analytic gradient is
+                        src/gradients/fragment_diabatic.py
 ```

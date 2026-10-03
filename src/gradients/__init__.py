@@ -122,6 +122,7 @@ from src.gradients.sum_over_poles_adjoint import sigma_sop_backward, sop_partial
 from src.gradients.targets import (add_z_contribution, chain_AB, qp_partials,
                                    qp_partials_with_shift, rpa_partials, solve_Z)
 
-# `derivative_coupling` and `state_manifold` depend on `src.properties`, not
-# present in this package, so those two modules are reached by importing them
-# directly rather than through this namespace.
+# `derivative_coupling`, `state_manifold` and `fragment_diabatic` (the gradient
+# of the fragment-diabatic BSE matrix of `src.properties.fragment_bse`) depend
+# on `src.properties`, not present in this package, so those modules are
+# reached by importing them directly rather than through this namespace.

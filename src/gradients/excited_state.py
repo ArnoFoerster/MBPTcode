@@ -770,6 +770,22 @@ class ExcitedStateChain(FactorChain):
         return om[order], xn[:, order], yn[:, order], {}
 
     def _forward(self, mol, mf):
+        pieces = self.kernel_pieces(mol, mf)
+        x_mo, d, eps_qp, w_aux = pieces[4], pieces[5], pieces[7], pieces[8]
+        with self.phase('t_casida'):
+            om, xn, yn, cache = self._casida(x_mo, d, eps_qp, w_aux)
+        return om, pieces[:9] + (cache, xn, yn) + pieces[12:]
+
+    def kernel_pieces(self, mol, mf):
+        """Everything `_forward` builds BEFORE the Casida solve, in its layout.
+
+        The same sixteen-long tuple `_forward` returns, with an empty cache
+        and no roots (`xn`, `yn` are None): the quasiparticle energies, the
+        static screening and the factors the BSE matrix is made of. A quantity
+        that needs the kernel but not the supermolecular roots -- the diabatic
+        elements of `src.properties.fragment_bse` -- starts here, and so does
+        its gradient: `_fold_to_nuclei` reads nothing from the roots.
+        """
         x_mo, d, eps, mu, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
         # ONE STATIC SCREENING. The BSE kernel's W and the dressed half of
         # Eq. (18) are the same [1 - chi0(0)]^-1 on the same axis; the orbital
@@ -810,10 +826,8 @@ class ExcitedStateChain(FactorChain):
         env_outside = self._env_static_outside(shift, len(eps))
         if env_outside is not None:
             eps_qp = eps_qp + env_outside
-        with self.phase('t_casida'):
-            om, xn, yn, cache = self._casida(x_mo, d, eps_qp, w_aux)
-        return om, (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, cache,
-                    xn, yn, mu, d_bare, shift, screening)
+        return (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, {},
+                None, None, mu, d_bare, shift, screening)
 
     def spectrum(self, mol=None, mf=None):
         """Every excitation energy the Casida step returned, ascending, in Hartree."""

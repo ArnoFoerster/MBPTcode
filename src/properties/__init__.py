@@ -37,6 +37,13 @@ through `FiniteDifferenceGradient` instead of being excluded.
                 under the ground state cannot be two functionals
     hessian     the nuclear Hessian by central differences of the analytic
                 gradient, for a route pyscf's own analytic Hessian cannot serve
+    fragment_bse
+                the fragment-partitioned Tamm-Dancoff BSE: site and
+                charge-transfer diabats, A_eff(Omega_0) = A_PP + Sigma(Omega_0)
+                with the rest eliminated exactly, and its resolvent vectors
+    diabatic    finite differences of that diabatic matrix, relocalized at
+                every displaced geometry: the reference the analytic gradient
+                (`src.gradients.fragment_diabatic`) is gated against
 
 `src.Embedding` and its cRPA-embedded surfaces are out of scope for this
 repository, so no row here dispatches to one; a spec that names such a surface

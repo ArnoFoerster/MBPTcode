@@ -71,11 +71,18 @@ THOLE_FACTOR = 2.5874
 MIN_SITE_SEPARATION = 1e-6
 
 
-def dipole_interaction_matrix(coords, alphas, thole=THOLE_FACTOR):
+def dipole_interaction_matrix(coords, alphas, thole=THOLE_FACTOR, groups=None):
     """T, the (3N, 3N) damped dipole-dipole coupling; zero on the diagonal blocks.
 
     thole=None removes the damping, which is correct only for sites far enough
     apart that it does nothing and is otherwise the catastrophe above.
+
+    groups: one label per site; sites that share a label do not couple. This
+    is the exclusion convention of polarizable embedding with atom-centred
+    sites (each residue or molecule one group): two bonded atoms sit 1-2 Bohr
+    apart, inside the catastrophe radius of any realistic pair of atomic
+    polarizabilities, and their mutual polarization is already in the
+    polarizabilities a force field assigns them. None couples every pair.
 
     Built as one (n, n, 3, 3) broadcast rather than a double loop: the loop is
     fine for the handful of sites a test uses and hopeless for the hundreds a
@@ -111,7 +118,13 @@ def dipole_interaction_matrix(coords, alphas, thole=THOLE_FACTOR):
     d3, d5 = (d ** 3)[..., None, None], (d ** 5)[..., None, None]
     T = (l5 * 3.0 * r[:, :, :, None] * r[:, :, None, :] / d5
          - l3 * np.eye(3) / d3)                            # (n, n, 3, 3)
-    T *= off[:, :, None, None]
+    mask = off
+    if groups is not None:
+        groups = np.asarray(groups)
+        if len(groups) != n:
+            raise ValueError(f'{n} sites but {len(groups)} group labels')
+        mask = mask & (groups[:, None] != groups[None, :])
+    T *= mask[:, :, None, None]
     return np.transpose(T, (0, 2, 1, 3)).reshape(3 * n, 3 * n)
 
 
@@ -126,7 +139,7 @@ def closest_pair(coords):
     return int(k), int(kp), float(d[k, kp])
 
 
-def response_matrix(coords, alphas, thole=THOLE_FACTOR):
+def response_matrix(coords, alphas, thole=THOLE_FACTOR, groups=None):
     """B = (alpha^-1 - T)^-1, the (3N, 3N) classical response.
 
     Symmetric because T is, and positive definite only where the sites are far
@@ -139,7 +152,7 @@ def response_matrix(coords, alphas, thole=THOLE_FACTOR):
     """
     coords = np.asarray(coords, float).reshape(-1, 3)
     alphas = np.asarray(alphas, float).reshape(-1)
-    T = dipole_interaction_matrix(coords, alphas, thole=thole)
+    T = dipole_interaction_matrix(coords, alphas, thole=thole, groups=groups)
     inv_alpha = np.repeat(1.0 / alphas, 3)
     M = np.diag(inv_alpha) - T
     M = 0.5 * (M + M.T)
@@ -406,7 +419,7 @@ class PolarizableSites:
     screens = True
 
     def __init__(self, coords, alphas, thole=THOLE_FACTOR, unit='Angstrom',
-                 mol=None):
+                 mol=None, groups=None):
         scale = 1.0 / BOHR_TO_ANGSTROM if str(unit).lower() != 'bohr' else 1.0
         self.coords = np.asarray(coords, float).reshape(-1, 3) * scale
         self.alphas = np.asarray(alphas, float).reshape(-1)
@@ -416,8 +429,10 @@ class PolarizableSites:
         if mol is not None:
             check_site_clearance(self.coords, mol.atom_coords())
         self.thole = thole
+        self.groups = None if groups is None else np.asarray(groups)
         # B is a property of the environment alone, so it is built once
-        self.B = response_matrix(self.coords, self.alphas, thole=thole)
+        self.B = response_matrix(self.coords, self.alphas, thole=thole,
+                                 groups=self.groups)
         self._aux_cache = {}
 
     @classmethod

@@ -265,9 +265,21 @@ def ground_state_coupling(mol, mf, nocc, xn, yn):
     """
     x = np.asarray(xn, float).reshape(nocc, -1)
     y = np.asarray(yn, float).reshape(nocc, -1)
+    return ov_coupling(mol, mf, nocc, GROUND_SPIN_FACTOR * (x - y))
+
+
+def ov_coupling(mol, mf, nocc, w):
+    """(natm, 3) sum_ia W_ia A_ia, A_ia = <phi_i | d phi_a / dR>, canonical.
+
+    The occupied-virtual block of the derivative overlap, which is the
+    coupled-perturbed rotation: `ground_state_coupling` is this with
+    W = sqrt(2) (X - Y), and the localization response of
+    `fragment_diabatic` reaches it with the occupied-virtual weight of the
+    local orbitals' motion. One Z-vector for any W.
+    """
+    w = np.asarray(w, float).reshape(nocc, -1)
     eps = np.asarray(mf.mo_energy, float)
     norb = len(eps)
-    w = GROUND_SPIN_FACTOR * (x - y)
     u = w / (eps[None, nocc:] - eps[:nocc, None])
     # dF and dS are SYMMETRIC, so a sum over occupied-virtual pairs is half of
     # the full matrix contraction. Sigma is NOT, so its weight carries the

@@ -537,6 +537,33 @@ CHARACTER_WINDOW = 6
 LOCALIZED_ASSIGNMENT_FLOOR = 0.8
 TRACKING_MARGIN = 0.1
 
+# Fragment localization (`Base.fragment_localization`): the Pipek-Mezey
+# functional tolerance. Tighter than pyscf's 1e-6 default because the local
+# orbitals are differentiated -- a finite difference of a diabatic element
+# over h = 1e-3 Bohr needs the localization converged well past h^2.
+FRAGMENT_PM_CONV_TOL = 1e-12
+FRAGMENT_PM_CONV_TOL_GRAD = 1e-9
+FRAGMENT_PM_POLISH_MAX = 2000
+
+# Fragment-partitioned BSE (`properties.fragment_bse`). Below FRAGMENT_DENSE_MAX
+# pairs every block is diagonalized and every resolvent solved densely; above
+# it, LOBPCG and conjugate gradients at FRAGMENT_SOLVE_TOL. The pole guard asks
+# Omega_0 to sit FRAGMENT_POLE_MARGIN Hartree (0.27 eV) below the lowest
+# eigenvalue of A_QQ, so Sigma(Omega) is smooth over the diabats' range.
+FRAGMENT_DENSE_MAX = 3000
+FRAGMENT_SOLVE_TOL = 1e-10
+FRAGMENT_POLE_MARGIN = 0.01
+
+# Finite-difference diabats (`properties.diabatic`): a displaced diabat that
+# overlaps its reference by less than this has mixed within its block, and its
+# difference would follow a different state.
+DIABAT_OVERLAP_FLOOR = 0.9
+
+# Analytic diabatic gradients (`gradients.fragment_diabatic`): a diabat whose
+# block holds another state closer than this (Hartree) has no well-defined
+# eigenvector response, which divides by the gap.
+DIABAT_GAP_MIN = 1e-4
+
 # How many orbitals past the frontier are solved to find the lowest-energy
 # attachment or removal: G0W0 reorders states relative to the mean field, so
 # the quasiparticle LUMO is not always the first virtual, but it is never far.
