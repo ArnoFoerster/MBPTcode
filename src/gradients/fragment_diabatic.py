@@ -545,8 +545,14 @@ class DiabaticGradient:
         with self._timed('chain'):
             chain = self._chain_term(pairs)
         canon, loc = self._rotation_terms(pairs)
-        return chain + canon + loc, dict(chain=chain, canonical=canon,
-                                         localization=loc)
+        # The three terms are each rank's own threaded arithmetic after the
+        # last lockstep, so their bits can differ between ranks; every rank
+        # returns rank 0's.
+        total, chain, canon, loc = lockstep(
+            tuple(np.ascontiguousarray(a, dtype=float)
+                  for a in (chain + canon + loc, chain, canon, loc)),
+            check=True)
+        return total, dict(chain=chain, canonical=canon, localization=loc)
 
     def matrix(self):
         """The matrix being differentiated: A_eff(Omega_0), or A_PP undressed."""
