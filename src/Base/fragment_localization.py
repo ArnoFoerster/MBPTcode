@@ -13,8 +13,7 @@ population on a fragment is the sum of its populations on that fragment's
 atoms, and the localization maximizes sum_i sum_K q_Ki^2 (exponent 2) within
 the occupied and within the virtual space (Pipek and Mezey, J. Chem. Phys.
 90, 4916 (1989)), run through pyscf's `lo.pipek.PipekMezey` with the
-population tensor replaced. Two population
-schemes are offered:
+fragment population tensor. Two population schemes are offered:
 
 * 'lowdin' (default): q_Ki = sum_{mu in K} [S^1/2 C]_{mu i}^2. Defined for
   both spaces, and its nuclear derivative is closed form through that of
@@ -24,15 +23,13 @@ schemes are offered:
   basis. Defined for the occupied space only; a cross-check of how much the
   diabats depend on the population scheme, not a route with a gradient.
 
-WHAT IS LEFT OUT ON PURPOSE. The populations are referred to the
-supersystem's own basis (Loewdin) or to a free-atom minimal basis (IAO), never
-to orbitals of the isolated fragments: that would tie every diabatic quantity
-to separate fragment SCFs and make their response part of every gradient. Nor
-are the local orbitals recanonicalized inside each fragment, because nothing
-downstream needs it: every diabatic quantity depends on the fragment
-SUBSPACES only (the span of the orbitals assigned to each fragment), not on
-how the orbitals are rotated inside one fragment. That is also the invariance
-the tests check.
+WHAT IS LEFT OUT ON PURPOSE. The populations refer to the supersystem's own
+basis (Loewdin) or to a free-atom minimal basis (IAO), never to orbitals of
+the isolated fragments, which would tie every diabatic quantity to separate
+fragment SCFs and their response. Nor are the local orbitals recanonicalized
+inside each fragment: every diabatic quantity depends on the fragment
+SUBSPACES only, not on rotations inside one fragment, and the tests check
+that invariance.
 
 THE ROTATION IS KEPT. `u_occ` and `u_vir` are the canonical-to-local
 rotations, C_loc = C_can U, because the BSE is assembled and differentiated
@@ -44,11 +41,13 @@ import numpy as np
 from pyscf import gto, lo
 from pyscf.lo import iao as pyscf_iao
 from pyscf.lo import orth
+from scipy.optimize import linear_sum_assignment
 from scipy.sparse.linalg import LinearOperator, minres
 
 from src.Base.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_TOL_GRAD,
                                 FRAGMENT_PM_POLISH_MAX,
                                 LOCALIZED_ASSIGNMENT_FLOOR)
+from src.Base.utils.krylov import root_driven_solve
 
 POPULATION_SCHEMES = ('lowdin', 'iao')
 
@@ -147,13 +146,12 @@ def _localize(mol, orbitals, pops, start=None, conv_tol=FRAGMENT_PM_CONV_TOL):
 def _newton_polish(pm, c_loc, tol=FRAGMENT_PM_CONV_TOL_GRAD, maxiter=8):
     """Newton steps on the PM functional from a converged `c_loc`.
 
-    pyscf's second-order solver stops on a joint criterion and in practice
-    leaves a gradient of 1e-8..1e-7 on this functional; the orbitals are
-    differentiated afterwards, so a few full Newton steps with its own analytic
-    gradient and Hessian-vector product (`gen_g_hop`) finish the job. The
-    Hessian is symmetric and nearly singular inside each fragment, so each
-    step is a MINRES solve (densely by least squares below
-    FRAGMENT_PM_POLISH_MAX rotation parameters).
+    pyscf's second-order solver stops on a joint criterion and leaves a
+    gradient of 1e-8..1e-7 on this functional; the orbitals are
+    differentiated, so a few Newton steps with its analytic gradient and
+    Hessian-vector product (`gen_g_hop`) follow. The Hessian is symmetric and
+    nearly singular inside each fragment, so each step is a MINRES solve
+    (dense least squares up to FRAGMENT_PM_POLISH_MAX rotation parameters).
     """
     n = c_loc.shape[1]
     npar = n * (n - 1) // 2
@@ -297,51 +295,68 @@ class FragmentOrbitals:
         else:
             pops_o = population_tensor(mol, fragments, scheme, s=s)
             pops_v = pops_o
+        # built before anything can refuse: a distributed mean field builds
+        # the Fock matrix collectively, on every rank
+        fock = mf.get_fock() if reference is None else None
 
-        out = {}
-        for tag, c, pops in (('occ', c_o, pops_o), ('vir', c_v, pops_v)):
-            start = None
-            if reference is not None:
-                ref_c = reference.c_occ if tag == 'occ' else reference.c_vir
-                start = _transport(mol, c, reference.mol, ref_c)
-            u, _ = _localize(mol, c, pops, start=start, conv_tol=conv_tol)
-            proj = pops(mol, c @ u)
-            q = np.einsum('kii->ik', proj)
-            labels, weights = q.argmax(axis=1), q.max(axis=1)
-            grad = _stationarity(proj, labels)
-            if weights.size and weights.min() < floor:
-                worst = int(weights.argmin())
-                raise ValueError(
-                    f'{tag} local orbital {worst} has at most '
-                    f'{weights[worst]:.3f} of its population on one fragment '
-                    f'(floor {floor}); it belongs to no fragment, so the '
-                    f'local / charge-transfer split is not defined. Use '
-                    f'larger fragments or a smaller basis.')
-            cl = c @ u
-            if reference is not None:
-                # local orbital k means the reference's local orbital k
-                ref_c = reference.c_occ if tag == 'occ' else reference.c_vir
-                ref_l = (reference.occ_labels if tag == 'occ'
-                         else reference.vir_labels)
-                order, signs = _match(mol, cl, reference.mol, ref_c)
-                if not np.array_equal(labels[order], ref_l):
-                    raise ValueError(f'{tag} local orbitals changed fragment '
-                                     f'relative to the reference geometry')
-            else:
-                # fragment-contiguous, by orbital energy inside a fragment;
-                # sign: the largest AO coefficient is positive
-                energies = np.einsum('pi,pq,qi->i', cl, mf.get_fock(), cl)
-                order = np.lexsort((energies, labels))
-                big = cl[np.abs(cl).argmax(axis=0), np.arange(cl.shape[1])]
-                signs = np.where(big < 0, -1.0, 1.0)[order]
-            u = u[:, order] * signs[None, :]
-            out[tag] = (u, labels[order], weights[order], grad)
-
+        def localize(_):
+            spaces = {tag: _localize_space(mol, tag, c, pops, reference,
+                                           conv_tol, floor, fock)
+                      for tag, c, pops in (('occ', c_o, pops_o),
+                                           ('vir', c_v, pops_v))}
+            return mo, spaces
+        # runs on rank 0 alone (`root_driven_solve`): its iterations and
+        # refusals, its orbitals and the mean-field orbitals they rotate are
+        # rank 0's on every rank
+        mo, out = root_driven_solve(localize)
         return cls(mol=mol, fragments=fragments, scheme=scheme, mo_coeff=mo,
                    nocc=nocc, u_occ=out['occ'][0], u_vir=out['vir'][0],
                    occ_labels=out['occ'][1], vir_labels=out['vir'][1],
                    occ_weights=out['occ'][2], vir_weights=out['vir'][2],
                    pm_gradient={'occ': out['occ'][3], 'vir': out['vir'][3]})
+
+
+def _localize_space(mol, tag, c, pops, reference, conv_tol, floor, fock):
+    """(u, labels, weights, stationarity gradient) of one space, `tag` 'occ'
+    or 'vir': localized, refused below `floor`, ordered and signed as
+    `FragmentOrbitals.from_mf` documents; `fock` (AO) orders it when there is
+    no reference."""
+    start = None
+    if reference is not None:
+        ref_c = reference.c_occ if tag == 'occ' else reference.c_vir
+        start = _transport(mol, c, reference.mol, ref_c)
+    u, _ = _localize(mol, c, pops, start=start, conv_tol=conv_tol)
+    proj = pops(mol, c @ u)
+    q = np.einsum('kii->ik', proj)
+    labels, weights = q.argmax(axis=1), q.max(axis=1)
+    grad = _stationarity(proj, labels)
+    if weights.size and weights.min() < floor:
+        worst = int(weights.argmin())
+        raise ValueError(
+            f'{tag} local orbital {worst} has at most '
+            f'{weights[worst]:.3f} of its population on one fragment '
+            f'(floor {floor}); it belongs to no fragment, so the '
+            f'local / charge-transfer split is not defined. Use '
+            f'larger fragments or a smaller basis.')
+    cl = c @ u
+    if reference is not None:
+        # local orbital k means the reference's local orbital k
+        ref_c = reference.c_occ if tag == 'occ' else reference.c_vir
+        ref_l = (reference.occ_labels if tag == 'occ'
+                 else reference.vir_labels)
+        order, signs = _match(mol, cl, reference.mol, ref_c)
+        if not np.array_equal(labels[order], ref_l):
+            raise ValueError(f'{tag} local orbitals changed fragment '
+                             f'relative to the reference geometry')
+    else:
+        # fragment-contiguous, by orbital energy inside a fragment;
+        # sign: the largest AO coefficient is positive
+        energies = np.einsum('pi,pq,qi->i', cl, fock, cl)
+        order = np.lexsort((energies, labels))
+        big = cl[np.abs(cl).argmax(axis=0), np.arange(cl.shape[1])]
+        signs = np.where(big < 0, -1.0, 1.0)[order]
+    u = u[:, order] * signs[None, :]
+    return u, labels[order], weights[order], grad
 
 
 def _match(mol, c, ref_mol, ref_c):
@@ -356,7 +371,6 @@ def _match(mol, c, ref_mol, ref_c):
     so the assignment needs only to be one-to-one and keep each orbital on
     its fragment, which the caller checks.
     """
-    from scipy.optimize import linear_sum_assignment
     t = c.T @ gto.mole.intor_cross('int1e_ovlp', mol, ref_mol) @ ref_c
     rows, cols = linear_sum_assignment(-np.abs(t))
     order = np.empty(t.shape[1], int)

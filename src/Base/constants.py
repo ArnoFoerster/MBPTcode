@@ -602,12 +602,17 @@ FRAGMENT_PM_CONV_TOL = 1e-12
 FRAGMENT_PM_CONV_TOL_GRAD = 1e-9
 FRAGMENT_PM_POLISH_MAX = 2000
 
-# Fragment-partitioned BSE (`properties.fragment_bse`). Below FRAGMENT_DENSE_MAX
-# pairs every block is diagonalized and every resolvent solved densely; above
-# it, LOBPCG and conjugate gradients at FRAGMENT_SOLVE_TOL. The pole guard asks
-# Omega_0 to sit FRAGMENT_POLE_MARGIN Hartree (0.27 eV) below the lowest
-# eigenvalue of A_QQ, so Sigma(Omega) is smooth over the diabats' range.
+# Fragment-partitioned BSE (`properties.fragment_bse`). Up to
+# FRAGMENT_DENSE_MAX rows every block is diagonalized and every resolvent
+# solved densely; above it, by Davidson and conjugate gradients to
+# FRAGMENT_SOLVE_TOL. The pole guard asks Omega_0 to sit FRAGMENT_POLE_MARGIN
+# Hartree (0.27 eV) below the lowest eigenvalue of A_QQ, so Sigma(Omega) is
+# smooth over the diabats' range.
 FRAGMENT_DENSE_MAX = 3000
+# The same limit for a matrix-free (ISDF) operator: forming a block there
+# costs one whole-system action per row, against the few hundred an
+# iterative solve takes.
+FRAGMENT_MATRIX_FREE_DENSE_MAX = 256
 FRAGMENT_SOLVE_TOL = 1e-10
 FRAGMENT_POLE_MARGIN = 0.01
 
@@ -626,6 +631,10 @@ DIABAT_GAP_MIN = 1e-4
 # last one asked for otherwise leaves the subspace at each restart.
 FRAGMENT_DAVIDSON_EXTRA_ROOTS = 4
 FRAGMENT_DAVIDSON_MIN_SPACE = 80
+# Newton step (Hartree) at which the pole guard stops locating the lowest
+# positive eigenvalue on Q. It sharpens the reported value only, not the
+# guard's verdict.
+FRAGMENT_GUARD_NEWTON_TOL = 1e-6
 
 # How many orbitals past the frontier are solved to find the lowest-energy
 # attachment or removal: G0W0 reorders states relative to the mean field, so

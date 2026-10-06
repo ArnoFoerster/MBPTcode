@@ -71,36 +71,60 @@ orbital-rotation terms vanishing for it as they must; each element's gradient
 along a random direction equals the relocalized finite difference, with the
 canonical-gauge and localization terms several percent of the total.
 
-SIZE. Nothing is dense beyond FRAGMENT_DENSE_MAX rows: the BSE action is the
-ISDF block action, the diabats come from a Davidson (`fragment_bse`), the
-resolvent from conjugate gradients, the diabat response from a projected
-MINRES in its block, and the localization response from MINRES over the
-rotations BETWEEN fragments -- where the diabatic quantities live; inside one
-fragment the functional is nearly flat, those rotations decouple, and the
-full residual is checked. The iterative path reproduces the dense one to
-1e-8 relative on the test system. Each element still costs one reverse pass
-of the excited-state chain plus a few BSE actions.
+SIZE. Nothing is dense beyond `fragment_bse.dense_limit` rows
+(FRAGMENT_DENSE_MAX with the matrix at hand, FRAGMENT_MATRIX_FREE_DENSE_MAX
+matrix-free, where forming a block costs one whole-system action per row): the
+BSE action is the ISDF block action, the diabats come from a Davidson
+(`fragment_bse`), the resolvent from conjugate gradients, the diabat response
+from a projected MINRES in its block, and the localization response from MINRES
+over the rotations BETWEEN fragments, where the diabatic quantities live;
+inside one fragment the functional is nearly flat, those rotations decouple,
+and the full residual is checked. The iterative path reproduces the dense one
+to 1e-8 relative on the test system. Each element costs one reverse pass of the
+excited-state chain plus a few BSE actions; with the chain's
+`bse_adjoint='grid'` that pass runs over the ISDF grid without any
+(naux, n_occ, n_vir) block.
+
+OVER MPI RANKS the module is a replicated driver like the chain: every rank
+runs it, and the BSE action and the reverse chain are divided over the
+ranks. A serial step whose threaded arithmetic need not agree to the bit
+takes rank 0's result: the localization, its response, the block Davidsons
+and the diabat responses run on rank 0 alone, the other ranks serving its
+BSE actions (`krylov.root_driven_solve`); the guard's Newton and the
+conjugate-gradient resolvent run on every rank on rank 0's slope, step and
+stopping mask (`lockstep`). Every rank thus enters the same collectives
+equally often and fails or succeeds together
+(tests/test_fragment_diabatic_ranks.py).
 
 WHAT IS NOT HERE. A diabat block with several states whose energies come close
 (the eigenvector response divides by their gap and is refused below
-`DIABAT_GAP_MIN`); the grid realization of the adjoint (the explicit one is
-used); a derivative with respect to Omega_0, which is held fixed by
-construction; any environment beyond what the chain itself differentiates.
+`DIABAT_GAP_MIN`); a derivative with respect to Omega_0, which is held fixed
+by construction; any environment beyond what the chain itself
+differentiates.
 """
+import contextlib
+import time
+
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, minres
 
-from src.Base.constants import (DIABAT_GAP_MIN, FRAGMENT_DENSE_MAX,
-                                FRAGMENT_SOLVE_TOL)
+from src.Base.constants import DIABAT_GAP_MIN, FRAGMENT_SOLVE_TOL
 from src.Base.fragment_localization import (FragmentOrbitals,
                                             fragment_ao_indices)
+from src.Base.utils.krylov import root_driven_solve
+from src.Base.utils.mpi_grid import lockstep
 from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
 from src.gradients.derivative_coupling import (_sigma_contraction,
                                                configuration_coupling,
                                                ov_coupling)
-from src.properties.fragment_bse import (BSEOperator, FragmentPartition,
-                                         local_pair_diagonal, to_canonical,
-                                         to_local)
+from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+    isdf_bse_backward, isdf_interstate_backward)
+from src.properties.fragment_bse import (BSEOperator, FragmentCanonical,
+                                         FragmentPartition, dense_limit,
+                                         to_canonical, to_local)
+from src.properties.optimize import relax
+from src.properties.rates import marcus_rate
+from src.properties.vibronic import project_coupling
 
 
 # ---------------------------------------------------------------- helpers
@@ -256,7 +280,9 @@ def _localization_term(mol, mf, orbitals, d_occ, d_vir):
         if not np.any(d_anti):
             continue
         pm = _PMResponse(mol, c_loc, rows)
-        z = pm.solve(d_anti, labels)
+        # MINRES on rank 0 alone, with its stop and refusal
+        # (`root_driven_solve`)
+        z = root_driven_solve(lambda act: pm.solve(d_anti, labels))
         cbar = pm.c_bar(z)
         # (a) occupied-virtual mixing of this space
         if tag == 'occ':
@@ -296,21 +322,41 @@ class DiabaticGradient:
 
     def __init__(self, chain, fragments, sites, ct=None, omega0=None,
                  mol=None, mf=None, route='auto', localization='response',
-                 dressed=True, reference_orbitals=None):
+                 dressed=True, reference_orbitals=None, progress=None):
         if localization not in ('response', 'frozen'):
             raise ValueError(f"localization must be 'response' or 'frozen', "
                              f"got {localization!r}")
         chain.require_differentiable_environment()
         self.chain, self.localization = chain, localization
         self.dressed = bool(dressed)
-        self.mol, self.mf = chain.mean_field(mol, mf)
-        self.operator, self.pieces = BSEOperator.from_chain(
-            chain, self.mol, self.mf, route=route)
-        self.orbitals = FragmentOrbitals.from_mf(self.mf, fragments,
-                                                 reference=reference_orbitals)
-        self.partition = FragmentPartition.build(
-            self.operator, self.orbitals, sites, ct, omega0=omega0)
+        # wall seconds per stage, summed over calls
+        self.timings = {}
+        # `progress`, a callable taking one string, hears each stage begin
+        self.progress = progress
+        with self._timed('mean_field'):
+            self.mol, self.mf = chain.mean_field(mol, mf)
+        with self._timed('kernel'):
+            self.operator, self.pieces = BSEOperator.from_chain(
+                chain, self.mol, self.mf, route=route)
+        with self._timed('localization'):
+            self.orbitals = FragmentOrbitals.from_mf(
+                self.mf, fragments, reference=reference_orbitals)
+        with self._timed('partition'):
+            self.partition = FragmentPartition.build(
+                self.operator, self.orbitals, sites, ct, omega0=omega0,
+                progress=progress)
         self._cache = {}
+
+    @contextlib.contextmanager
+    def _timed(self, key):
+        if getattr(self, 'progress', None) is not None:
+            self.progress(key)
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.timings[key] = (self.timings.get(key, 0.0)
+                                 + time.perf_counter() - t0)
 
     # -- local-basis K action
     def _a(self, x):
@@ -322,7 +368,7 @@ class DiabaticGradient:
 
         With L = B_c - E_c S on diabat c's block, null direction p_c, and the
         projector Pi_c = 1 - p_c (S p_c)^T off p_c along the metric:
-        z = -Pi_c L^+ Pi_c^T g. Solved densely below FRAGMENT_DENSE_MAX rows,
+        z = -Pi_c L^+ Pi_c^T g. Solved densely below `dense_limit` rows,
         by MINRES above (L is symmetric; for the lowest state of a block it is
         positive semidefinite with p_c as its only null direction, and higher
         states of a block are indefinite, which MINRES takes as well).
@@ -352,7 +398,7 @@ class DiabaticGradient:
             full = np.zeros((len(p), x.shape[1]))
             full[rows] = x
             return self._a(full)[rows]
-        if dim <= FRAGMENT_DENSE_MAX:
+        if dim <= dense_limit(self.operator):
             m = block(np.eye(dim))
             m = 0.5 * (m + m.T) - e_c * np.diag(sig)
             lhs = project_t(project_t(m.T).T) + np.outer(pc, pc)
@@ -360,25 +406,45 @@ class DiabaticGradient:
                                                gb)[:, None])[:, 0]
             return b
 
-        def mv(x):
-            x = project(np.reshape(x, (dim, 1)))
-            return project_t(block(x) - e_c * sig[:, None] * x)[:, 0]
-        d_ov = local_pair_diagonal(self.orbitals, self.operator.eps_qp)
+        # Preconditioner: the exact quasiparticle diagonal of the
+        # fragment-canonical basis (`FragmentCanonical`), rotated back; the
+        # block maps onto itself, and R D^-1 R^T stays positive definite, as
+        # MINRES needs.
+        work = FragmentCanonical(self.orbitals, self.operator.eps_qp)
+        d_ov = work.diagonal()
         diag = np.tile(d_ov, len(p) // len(d_ov))[rows] - e_c * sig
         prec = 1.0 / np.maximum(np.abs(diag), 1e-2)
-        op = LinearOperator((dim, dim), matvec=mv, dtype=float)
-        pre = LinearOperator((dim, dim), dtype=float,
-                             matvec=lambda x: project(
-                                 project_t(np.reshape(x, (dim, 1)))
-                                 * prec[:, None])[:, 0])
-        sol, info = minres(op, -gb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
-                           maxiter=5000)
-        resid = np.abs(mv(sol) + gb).max()
-        if resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(), 1e-300):
-            raise RuntimeError(f'diabat response for {part.labels[c]} did not '
-                               f'converge (info={info}, residual {resid:.2e})')
+
+        def rotate(x, to):
+            full = np.zeros((len(p), x.shape[1]))
+            full[rows] = x
+            return to(full)[rows]
+
+        def apply_prec(x):
+            x = project_t(np.reshape(x, (dim, 1)))
+            x = rotate(rotate(x, work.from_local) * prec[:, None],
+                       work.to_local)
+            return project(x)[:, 0]
+
+        def solve(act):
+            # rank 0 alone iterates (`root_driven_solve`): MINRES stops on
+            # its own arithmetic, and the block action is collective
+            def mv(x):
+                x = project(np.reshape(x, (dim, 1)))
+                return project_t(act(x) - e_c * sig[:, None] * x)[:, 0]
+            op = LinearOperator((dim, dim), matvec=mv, dtype=float)
+            pre = LinearOperator((dim, dim), dtype=float, matvec=apply_prec)
+            sol, info = minres(op, -gb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
+                               maxiter=5000)
+            resid = np.abs(mv(sol) + gb).max()
+            if resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(), 1e-300):
+                raise RuntimeError(f'diabat response for {part.labels[c]} did '
+                                   f'not converge (info={info}, residual '
+                                   f'{resid:.2e})')
+            return sol
+        sol = root_driven_solve(solve, block, dim)
         b[rows] = project(sol[:, None])[:, 0]
-        return b
+        return lockstep(b, check=True)
 
     def _pairs(self, w):
         """[(s, t, weight)] with sum_ab W_ab dE_ab = sum weight * s^T dK_loc t.
@@ -408,17 +474,31 @@ class DiabaticGradient:
         return pairs
 
     def _chain_term(self, pairs):
+        """The reverse chain for every pair, in the chain's `bse_adjoint`
+        realization: 'explicit' through the three-index blocks, 'grid' over
+        the ISDF grid, divided over the ranks, with no (naux, n_occ, n_vir)
+        block."""
         chain, o = self.chain, self.orbitals
         x_mo, d, eps_qp, w_aux = (self.pieces[4], self.pieces[5],
                                   self.pieces[7], self.pieces[8])
+        grid = getattr(chain, 'bse_adjoint', 'explicit') == 'grid'
+        kw = dict(spin=chain.spin, bse_tda=self.operator.tda)
         cache = self._cache
-        if not cache:
-            cache.update(bse_cache(x_mo, d, eps_qp, w_aux, chain.nocc,
-                                   spin=chain.spin, bse_tda=self.operator.tda))
+        if not grid and not cache:
+            cache.update(bse_cache(x_mo, d, eps_qp, w_aux, chain.nocc, **kw))
         total = None
         for s, t, wgt in pairs:
             xs, ys = self.partition.xy(to_canonical(o, np.column_stack([s, t])))
-            if np.allclose(s, t):
+            same = np.allclose(s, t)
+            if grid and same:
+                part = isdf_bse_backward(0, x_mo, d, eps_qp, w_aux, chain.nocc,
+                                         xs, ys, omega_bar=wgt, **kw)
+            elif grid:
+                # one pass: the grid element is symmetric in its two vectors
+                part = isdf_interstate_backward(0, 1, x_mo, d, eps_qp, w_aux,
+                                                chain.nocc, xs, ys,
+                                                omega_bar=wgt, **kw)
+            elif same:
                 part = bse_backward(0, x_mo, d, eps_qp, w_aux, chain.nocc,
                                     cache, xs, ys, omega_bar=wgt)
             else:
@@ -434,25 +514,36 @@ class DiabaticGradient:
         nocc = o.nocc
         d_o = np.zeros((nocc, nocc))
         d_v = np.zeros((o.nvir, o.nvir))
-        for s, t, wgt in pairs:
-            k_s, k_t = self._a(s[:, None])[:, 0], self._a(t[:, None])[:, 0]
-            do, dv = _rotation_density(s, t, k_s, k_t, nocc, o.nvir)
+        # one block action for every vector of every pair
+        with self._timed('rotation_actions'):
+            ks = self._a(np.column_stack([v for s, t, _ in pairs
+                                          for v in (s, t)]))
+        for k, (s, t, wgt) in enumerate(pairs):
+            do, dv = _rotation_density(s, t, ks[:, 2 * k], ks[:, 2 * k + 1],
+                                       nocc, o.nvir)
             d_o += wgt * do
             d_v += wgt * dv
-        d_o, d_v = 0.5 * (d_o - d_o.T), 0.5 * (d_v - d_v.T)
+        d_o, d_v = lockstep((np.ascontiguousarray(0.5 * (d_o - d_o.T)),
+                             np.ascontiguousarray(0.5 * (d_v - d_v.T))),
+                            check=True)
         # canonical part: - sum (U D U^T) (.) A^can
         dc_o = o.u_occ @ d_o @ o.u_occ.T
         dc_v = o.u_vir @ d_v @ o.u_vir.T
-        canon = configuration_coupling(self.mol, self.mf, nocc, dc_o.T, -dc_v)
+        with self._timed('canonical'):
+            canon = configuration_coupling(self.mol, self.mf, nocc, dc_o.T,
+                                           -dc_v)
         if self.localization == 'frozen':
             return canon, np.zeros_like(canon)
-        loc = _localization_term(self.mol, self.mf, o, d_o, d_v)
+        with self._timed('localization_response'):
+            loc = _localization_term(self.mol, self.mf, o, d_o, d_v)
         return canon, loc
 
     def gradient(self, w):
         """(sum_ab W_ab dE_ab/dR (natm, 3), diagnostics) in Hartree/Bohr."""
-        pairs = self._pairs(w)
-        chain = self._chain_term(pairs)
+        with self._timed('pairs'):
+            pairs = self._pairs(w)
+        with self._timed('chain'):
+            chain = self._chain_term(pairs)
         canon, loc = self._rotation_terms(pairs)
         return chain + canon + loc, dict(chain=chain, canonical=canon,
                                          localization=loc)
@@ -578,8 +669,6 @@ def diabatic_marcus(chain, fragments, sites, donor, acceptor, ct=None,
     minimum; everything is returned so a quantum (Marcus-Levich-Jortner) rate
     can be built from the same numbers with `rates`.
     """
-    from src.properties.optimize import relax
-    from src.properties.rates import marcus_rate
     relax_kw = {} if relax_kw is None else dict(relax_kw)
     surf_d = DiabaticSurface(chain, fragments, sites, donor, ct, omega0, dressed)
     omega0 = surf_d.omega0
@@ -618,7 +707,6 @@ def linear_vibronic_coupling(gradient, modes, masses):
     coupling slopes (Koeppel, Domcke and Cederbaum, Adv. Chem. Phys. 57, 59
     (1984)). One reverse pass per element, n(n+1)/2 of them.
     """
-    from src.properties.vibronic import project_coupling
     m = gradient.matrix()
     n = m.shape[0]
     kappa = np.zeros((n, n, modes.shape[1]))

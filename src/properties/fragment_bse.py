@@ -30,7 +30,7 @@ problem, and its P weight is Z = [1 - c^T Sigma'(Omega) c]^-1; that is the
 identity the tests check. For the full BSE, Q contains the diabats'
 de-excitation partners (Y, X) as well, so A_eff stays one (n_p, n_p) matrix of
 excitations, with the partners folded into Sigma at Omega_0; in the
-Tamm-Dancoff limit the partners decouple and A_eff is the familiar
+Tamm-Dancoff limit the partners decouple and A_eff is
 A_PP + A_PQ (Omega - A_QQ)^-1 A_QP. The diabatic quantities a vibronic model
 needs are A_eff(Omega_0) (site and charge-transfer energies on the diagonal,
 effective couplings off it), its Coulomb-only part K_PP, and dA_eff/dOmega,
@@ -54,10 +54,10 @@ P as an explicit diabat, never in Q; the partition refuses otherwise.
 DENSE AND MATRIX-FREE ARE ONE CODE PATH. `BSEOperator` applies K to a block of
 vectors, densely from `bse_blocks` for small systems and through the ISDF
 block action of the Davidson solver otherwise; everything here works through
-`apply`, rotating into and out of the local basis on the way. Iteratively,
-Tamm-Dancoff block eigenpairs come from the shared symmetric Davidson, full-BSE
-ones from a Davidson on the (A + B, A - B) pair, and the resolvent from
-conjugate gradients.
+`apply`, rotating into and out of the local basis on the way. Above
+`dense_limit` rows, Tamm-Dancoff block eigenpairs come from the shared
+symmetric Davidson, full-BSE ones from a Davidson on the (A + B, A - B) pair,
+and the resolvent from conjugate gradients.
 
 WHICH KERNEL is the chain's: `ExcitedStateChain(bse_tda=...)`.
 
@@ -69,13 +69,16 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.linalg import eigh, null_space
-from scipy.sparse.linalg import LinearOperator, cg
 
 from src.Base.constants import (FRAGMENT_DAVIDSON_EXTRA_ROOTS,
                                 FRAGMENT_DAVIDSON_MIN_SPACE,
+                                FRAGMENT_GUARD_NEWTON_TOL,
                                 FRAGMENT_POLE_MARGIN, FRAGMENT_SOLVE_TOL,
-                                FRAGMENT_DENSE_MAX)
+                                FRAGMENT_DENSE_MAX,
+                                FRAGMENT_MATRIX_FREE_DENSE_MAX)
 from src.Base.sliced_factors import SlicedFactors
+from src.Base.utils.krylov import root_driven_solve
+from src.Base.utils.mpi_grid import lockstep
 from src.gradients.bse_isdf import bse_blocks, bse_solve
 from src.SingleReference.LinearResponse.davidson import isdf_block_action
 from src.Solvers.davidson import solve_symmetric
@@ -118,7 +121,8 @@ class BSEOperator:
     def apply(self, x):
         x = np.asarray(x, float)
         vec = x.ndim == 1
-        x = x.reshape(self.dim, -1)
+        # the ISDF action is collective: every rank hands it rank 0's vectors
+        x = lockstep(np.ascontiguousarray(x.reshape(self.dim, -1)), check=True)
         y = self._apply(x)
         return y[:, 0] if vec else y
 
@@ -165,6 +169,14 @@ class BSEOperator:
         return cls(nocc, eps_qp, apply, tda=tda), pieces
 
 
+def dense_limit(operator):
+    """Rows up to which a block of `operator` is solved densely:
+    FRAGMENT_DENSE_MAX with the matrix at hand, FRAGMENT_MATRIX_FREE_DENSE_MAX
+    matrix-free, where forming a block costs one action per row."""
+    return (FRAGMENT_DENSE_MAX if operator.dense is not None
+            else FRAGMENT_MATRIX_FREE_DENSE_MAX)
+
+
 def _halves(rotate, orbitals, v):
     v = np.asarray(v, float)
     n_ov = orbitals.nocc * orbitals.nvir
@@ -195,44 +207,126 @@ def split_xy(v, n_ov):
     return v[:n_ov], v[n_ov:]
 
 
-def local_pair_diagonal(orbitals, eps_qp):
-    """(n_ov,) the quasiparticle part of A_loc's diagonal, F_aa - F_ii in the
-    local basis: the preconditioner and the Davidson seeds of every iterative
-    solve on the partition."""
-    eps_qp = np.asarray(eps_qp, float)
-    n = orbitals.nocc
-    f_oo = np.einsum('pi,p,pi->i', orbitals.u_occ, eps_qp[:n], orbitals.u_occ)
-    f_vv = np.einsum('pa,p,pa->a', orbitals.u_vir, eps_qp[n:], orbitals.u_vir)
-    return (f_vv[None, :] - f_oo[:, None]).ravel()
+class FragmentCanonical:
+    """The partition's working basis: each fragment's local occupied and
+    virtual orbitals rotated among themselves to diagonalize the
+    quasiparticle Fock block.
+
+    The Fock matrix of Pipek-Mezey orbitals is far from diagonal inside a
+    fragment, so F_aa - F_ii there is a poor Davidson seed and
+    preconditioner. Rotations inside one fragment change no diabatic quantity
+    and map every pair block onto itself, so the partition is solved here, on
+    the exact quasiparticle diagonal e_a - e_i, and its vectors are returned
+    in the local basis.
+    """
+
+    def __init__(self, orbitals, eps_qp):
+        eps_qp = np.asarray(eps_qp, float)
+        n = orbitals.nocc
+        self.nocc, self.nvir = n, orbitals.nvir
+        self.r_occ, self.e_occ = self._rotate(orbitals.u_occ, eps_qp[:n],
+                                              orbitals.occ_labels)
+        self.r_vir, self.e_vir = self._rotate(orbitals.u_vir, eps_qp[n:],
+                                              orbitals.vir_labels)
+
+    @staticmethod
+    def _rotate(u, eps, labels):
+        f = u.T @ (eps[:, None] * u)
+        r = np.zeros_like(f)
+        e = np.zeros(len(f))
+        for k in np.unique(labels):
+            idx = np.flatnonzero(labels == k)
+            w, v = np.linalg.eigh(f[np.ix_(idx, idx)])
+            r[np.ix_(idx, idx)] = v
+            e[idx] = w
+        return r, e
+
+    def diagonal(self):
+        """(n_ov,) e_a - e_i: the quasiparticle part of A, exactly."""
+        return (self.e_vir[None, :] - self.e_occ[:, None]).ravel()
+
+    def _pairs(self, x, a, b):
+        n_ov = self.nocc * self.nvir
+        out = []
+        for h in range(x.shape[0] // n_ov):
+            z = x[h * n_ov:(h + 1) * n_ov].reshape(self.nocc, self.nvir, -1)
+            out.append(np.einsum('ij,jbk,ab->iak', a, z, b,
+                                 optimize=True).reshape(n_ov, -1))
+        return np.vstack(out)
+
+    def to_local(self, x):
+        """(dim, k) working -> local, a full-BSE vector's halves alike."""
+        return self._pairs(np.asarray(x, float), self.r_occ, self.r_vir)
+
+    def from_local(self, x):
+        """(dim, k) local -> working; the transpose of `to_local`."""
+        return self._pairs(np.asarray(x, float), self.r_occ.T, self.r_vir.T)
 
 
-def _lowest(apply, diag, n, dim, tol):
+def _lowest(apply, diag, n, dim, tol, x0=None, dense_max=FRAGMENT_DENSE_MAX):
     """(values, vectors) of the n lowest eigenpairs of a symmetric operator:
-    dense below FRAGMENT_DENSE_MAX, the shared symmetric Davidson above."""
-    if dim <= FRAGMENT_DENSE_MAX:
+    dense up to `dense_max` rows (`dense_limit`), above it the shared
+    symmetric Davidson, started from `x0` when given and root-driven over
+    ranks (`root_driven_solve`)."""
+    if dim <= dense_max:
         m = apply(np.eye(dim))
         w, v = np.linalg.eigh(0.5 * (m + m.T))
         return w[:n], v[:, :n]
-    e, x, conv = solve_symmetric(
-        lambda v: apply(np.reshape(v, (dim, 1)))[:, 0], np.asarray(diag, float),
-        nroots=n, tol_residual=tol, max_cycle=500,
-        label='fragment diabats')
-    if not np.all(conv):
-        raise RuntimeError(f'block eigenpairs did not converge to {tol}')
-    return e, x
+
+    def solve(act):
+        e, x, conv = solve_symmetric(
+            lambda v: act(np.reshape(v, (dim, 1)))[:, 0],
+            np.asarray(diag, float), nroots=n, x0=x0, tol_residual=tol,
+            max_cycle=500, label='fragment diabats')
+        if not np.all(conv):
+            raise RuntimeError(f'block eigenpairs did not converge to {tol}')
+        return np.asarray(e, float), np.ascontiguousarray(x)
+    return root_driven_solve(solve, apply, dim)
 
 
-def _lowest_pencil(apply, diag, n, m, tol):
+def _lowest_pencil(apply, diag, n, m, tol, dense_max=FRAGMENT_DENSE_MAX):
     """(values, vectors) of the n lowest positive roots of a full BSE on m
     pairs; `apply` acts on stacked (2m, k) blocks, `diag` (m,) estimates A's
     diagonal, and the vectors come stacked (X, Y) with X^T X - Y^T Y = 1.
-    Dense below FRAGMENT_DENSE_MAX, `_casida_davidson` above."""
-    if 2 * m <= FRAGMENT_DENSE_MAX:
+    Dense up to `dense_max` rows (`dense_limit`), `_casida_davidson` above,
+    root-driven over ranks (`root_driven_solve`)."""
+    if 2 * m <= dense_max:
         k = apply(np.eye(2 * m))
         k = 0.5 * (k + k.T)
         w, x, y = bse_solve(k[:m, :m], k[:m, m:])
         return w[:n], np.vstack([x[:, :n], y[:, :n]])
-    return _casida_davidson(apply, diag, n, m, tol)
+    return root_driven_solve(
+        lambda act: _casida_davidson(act, diag, n, m, tol), apply, 2 * m)
+
+
+def _batched_cg(apply, rhs, prec, tol, maxiter=2000):
+    """Conjugate gradients on every column of `rhs` at once, one block action
+    per iteration. A column stops once its residual is below tol |rhs|; the
+    stopping mask is rank 0's (`lockstep`), so every rank applies the
+    operator to the same columns."""
+    x = np.zeros_like(rhs)
+    r = rhs.copy()
+    z = prec(r)
+    p = z.copy()
+    rz = np.einsum('ij,ij->j', r, z)
+    bnorm = np.linalg.norm(rhs, axis=0)
+    bnorm[bnorm == 0.0] = 1.0
+    active = lockstep(np.linalg.norm(r, axis=0) > tol * bnorm, check=True)
+    for _ in range(maxiter):
+        if not active.any():
+            return x
+        idx = np.flatnonzero(active)
+        ap = apply(p[:, idx])
+        alpha = rz[idx] / np.einsum('ij,ij->j', p[:, idx], ap)
+        x[:, idx] += p[:, idx] * alpha
+        r[:, idx] -= ap * alpha
+        znew = prec(r[:, idx])
+        rz_new = np.einsum('ij,ij->j', r[:, idx], znew)
+        p[:, idx] = znew + p[:, idx] * (rz_new / rz[idx])
+        rz[idx] = rz_new
+        active = lockstep(np.linalg.norm(r, axis=0) > tol * bnorm, check=True)
+    raise RuntimeError(f'resolvent solve did not converge in {maxiter} '
+                       f'iterations ({int(active.sum())} columns left)')
 
 
 def _casida_davidson(apply, diag, n, m, tol, max_cycle=500):
@@ -246,8 +340,8 @@ def _casida_davidson(apply, diag, n, m, tol, max_cycle=500):
     A few roots beyond the n asked for are carried and kept through every
     restart: the diagonal is the quasiparticle one only (the kernel's diagonal
     is not at hand matrix-free), and a root just above the last one asked
-    for -- 0.8 mHa above it in a site block of the test dimer -- otherwise
-    keeps leaving the subspace at each restart and the iteration stalls.
+    for otherwise leaves the subspace at each restart and the iteration
+    stalls.
     """
     diag = np.asarray(diag, float)
     nwork = min(m, n + FRAGMENT_DAVIDSON_EXTRA_ROOTS)
@@ -352,7 +446,10 @@ class FragmentPartition:
 
     @classmethod
     def build(cls, operator, orbitals, sites, ct=None, omega0=None,
-              tol=FRAGMENT_SOLVE_TOL, margin=FRAGMENT_POLE_MARGIN):
+              tol=FRAGMENT_SOLVE_TOL, margin=FRAGMENT_POLE_MARGIN,
+              progress=None):
+        """`progress`, a callable taking one string, hears each stage."""
+        say = progress if progress is not None else (lambda msg: None)
         ct = {} if ct is None else dict(ct)
         if orbitals.nocc != operator.nocc:
             raise ValueError('orbitals and operator disagree on nocc')
@@ -360,10 +457,16 @@ class FragmentPartition:
         tda, n_ov, dim = operator.tda, operator.n_ov, operator.dim
         sig = operator.metric
 
-        def k_loc(x):
-            return to_local(orbitals, operator.apply(to_canonical(orbitals, x)))
+        # every solve below runs in the fragment-canonical working basis
+        # (`FragmentCanonical`); p and y return to the local basis at the end
+        work = FragmentCanonical(orbitals, operator.eps_qp)
 
-        d_ov = local_pair_diagonal(orbitals, operator.eps_qp)
+        def k_loc(x):
+            x = to_canonical(orbitals, work.to_local(x))
+            return work.from_local(to_local(orbitals, operator.apply(x)))
+
+        d_ov = work.diagonal()
+        dense_max = dense_limit(operator)
         diag = d_ov if tda else np.concatenate([d_ov, d_ov])
 
         blocks = [((k, k), n, f'site {k}') for k, n in sorted(sites.items())]
@@ -383,27 +486,38 @@ class FragmentPartition:
                 return k_loc(full)[rows]
             n_get = min(n + 1, idx.size)
             if tda:
-                w, v = _lowest(block_apply, d_ov[idx], n_get, idx.size, tol)
+                w, v = _lowest(block_apply, d_ov[idx], n_get, idx.size, tol,
+                               dense_max=dense_max)
             else:
                 w, v = _lowest_pencil(block_apply, d_ov[idx], n_get, idx.size,
-                                      tol)
+                                      tol, dense_max=dense_max)
+            w, v = lockstep((np.asarray(w, float), np.ascontiguousarray(v)),
+                            check=True)
             for s in range(n):
                 others = np.delete(w, s)
                 gaps.append(float(np.abs(others - w[s]).min())
                             if others.size else np.inf)
                 col = np.zeros(dim)
-                lead = np.abs(v[:idx.size, s]).argmax()
-                col[rows] = v[:, s] * np.sign(v[lead, s])
+                col[rows] = v[:, s]
+                # the phase convention is the LOCAL basis's: largest local
+                # X component positive, whatever basis the block was solved in
+                loc = work.to_local(col[:, None])[:n_ov, 0]
+                col *= np.sign(loc[np.abs(loc).argmax()])
                 p_cols.append(col)
                 labels.append(f'{name}.{s}')
                 block_rows.append(rows)
             block_energies.append((name, w[:n]))
+            say(f'{name}: {idx.size} pairs, lowest {np.round(w[:n], 6)} Ha')
         p = np.array(p_cols).T
         kp = k_loc(p)
         a_pp = p.T @ kp
         a_pp = 0.5 * (a_pp + a_pp.T)
         if omega0 is None:
-            omega0 = float(np.diag(a_pp)[:sum(sites.values())].mean())
+            # the mean of each site's lowest state: with two states per site
+            # the mean of all sits between the two bands, next to whichever
+            # stayed in Q
+            omega0 = float(np.mean([e[0] for name, e in block_energies
+                                    if name.startswith('site')]))
 
         # Q is the complement orthogonal in the metric: Pi = 1 - p (S p)^T
         # projects on it along P, and P^T S p = 1 makes Pi idempotent
@@ -420,8 +534,11 @@ class FragmentPartition:
             px = proj(x)
             return proj_t(k_loc(px) - om * sig[:, None] * px)
 
-        q_low = cls._q_lowest(k_loc, shifted, proj, sig, sp, diag, dim, tda,
-                              omega0, margin, tol)
+        say(f'pole guard on Q ({dim} rows), Omega_0 = {omega0:.6f} Ha')
+        q_low = lockstep(float(cls._q_lowest(k_loc, shifted, proj, sig, sp,
+                                             diag, dim, tda, omega0, margin,
+                                             tol, dense_max)))
+        say(f'lowest positive eigenvalue on Q {q_low:.6f} Ha')
         if not omega0 < q_low - margin:
             raise ValueError(
                 f'Omega_0 = {omega0:.6f} Ha is not below the lowest positive '
@@ -430,30 +547,24 @@ class FragmentPartition:
                 f'close an explicit diabat (sites / ct) or lower Omega_0.')
 
         rhs = -proj_t(kp)                   # Pi^T (K - Omega_0 S) y = -Pi^T K p
-        if dim <= FRAGMENT_DENSE_MAX:
+        if dim <= dense_max:
             # + p p^T fills the null space Pi leaves, without touching the
             # solution: the right-hand side is orthogonal to p
             m = shifted(np.eye(dim), omega0) + p @ p.T
             y = proj(np.linalg.solve(0.5 * (m + m.T), rhs))
         else:
             prec_d = np.maximum(diag - omega0 * sig, 1e-3)
-            op = LinearOperator(
-                (dim, dim), dtype=float,
-                matvec=lambda x: shifted(np.reshape(x, (dim, 1)), omega0)[:, 0])
-            prec = LinearOperator(
-                (dim, dim), dtype=float,
-                matvec=lambda x: proj(proj_t(np.reshape(x, (dim, 1)))
-                                      / prec_d[:, None])[:, 0])
-            y = np.zeros_like(rhs)
-            for c in range(rhs.shape[1]):
-                sol, info = cg(op, rhs[:, c], M=prec, rtol=tol, maxiter=2000)
-                if info != 0:
-                    raise RuntimeError(f'resolvent solve for diabat {c} did '
-                                       f'not converge (info={info})')
-                y[:, c] = proj(sol[:, None])[:, 0]
+            say(f'resolvent: {rhs.shape[1]} columns, batched conjugate gradients')
+            # Pi D^-1 Pi^T: symmetric, and positive on the range the
+            # residuals live in
+            y = proj(_batched_cg(lambda x: shifted(x, omega0), rhs,
+                                 lambda x: proj(proj_t(x) / prec_d[:, None]),
+                                 tol))
+        y = lockstep(np.ascontiguousarray(y), check=True)
         sigma = -rhs.T @ y                          # p_a^T K y_b
         sigma = 0.5 * (sigma + sigma.T)
         dsigma = -(y.T @ (sig[:, None] * y))
+        p, y = work.to_local(p), work.to_local(y)
         return cls(operator=operator, orbitals=orbitals, omega0=float(omega0),
                    labels=labels, p_local=p, y_local=y, a_pp=a_pp,
                    sigma=sigma, dsigma=dsigma, q_lowest=q_low,
@@ -462,7 +573,7 @@ class FragmentPartition:
 
     @staticmethod
     def _q_lowest(k_loc, shifted, proj, sig, sp, diag, dim, tda, omega0,
-                  margin, tol):
+                  margin, tol, dense_max=FRAGMENT_DENSE_MAX):
         """The lowest positive eigenvalue of the pencil on Q.
 
         Through H(om) = Pi^T (K - om S) Pi + c (S p)(S p)^T, whose lowest
@@ -475,36 +586,39 @@ class FragmentPartition:
         """
         # a guard, not a result: 1e-7 Ha is ample against the margin
         gtol = max(tol, 1e-7)
-        if not tda and dim <= FRAGMENT_DENSE_MAX:
+        if not tda and dim <= dense_max:
             q = null_space(sp.T)
             kq = q.T @ k_loc(q)
             mq = q.T @ (sig[:, None] * q)
             mu = eigh(0.5 * (mq + mq.T), 0.5 * (kq + kq.T), eigvals_only=True)
             return float(1.0 / mu.max())
 
-        def lowest(om):
+        def lowest(om, x0=None):
             big = float(np.abs(diag).max()) + abs(om)
 
             def h(x):
                 return shifted(x, om) + big * (sp @ (sp.T @ x))
             w, x = _lowest(h, diag - om * sig + big * (sp ** 2).sum(axis=1),
-                           1, dim, gtol)
+                           1, dim, gtol, x0=x0, dense_max=dense_max)
             return float(w[0]), x[:, 0]
         if tda:
             return lowest(0.0)[0]
         om = omega0 + margin
         mu, x = lowest(om)
-        if mu <= 0.0:
-            return om                        # the guard fails; the caller says so
+        # The sign of mu at Omega_0 + margin decides the guard; Newton,
+        # each Davidson warm-started from the last eigenvector, locates the
+        # eigenvalue a refusal names. mu and x are rank 0's
+        # (`root_driven_solve`), and so are the slope and the stop, so every
+        # rank runs the same steps.
         for _ in range(30):
             px = proj(x[:, None])[:, 0]
-            slope = -float(px @ (sig * px))
+            slope = lockstep(-float(px @ (sig * px)))
             if slope >= 0.0:
                 break
             step = -mu / slope
             om += step
-            mu, x = lowest(om)
-            if abs(step) < gtol:
+            mu, x = lowest(om, x)
+            if lockstep(bool(abs(step) < FRAGMENT_GUARD_NEWTON_TOL)):
                 break
         return om
 

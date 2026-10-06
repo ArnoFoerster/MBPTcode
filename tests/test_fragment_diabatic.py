@@ -31,8 +31,8 @@ WHAT EACH GATE IS FOR:
 - the same, in a field of fixed point charges, with both charge-transfer
   diabats explicit, for the dressed A_eff and the bare A_PP. The charges make
   the site-charge-transfer couplings and their localization terms large,
-  which is what exposes an error in the localization response: a metric term
-  counted twice once cost 0.16% of exactly those terms and nothing else.
+  which exposes an error in the localization response (a metric term
+  counted twice shows in exactly those terms and nothing else).
 - a charge-transfer diabat's SURFACE (ground state plus diabat), the object an
   optimizer relaxes, against a central difference of its own energy.
 - the linear vibronic coupling model is the element gradients projected on
@@ -73,7 +73,6 @@ from pyscf import gto, scf
 from src.Base import constants
 from src.Base.environment import PointCharges
 from src.Base.fragment_localization import FragmentOrbitals
-from src.gradients import fragment_diabatic
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.fragment_diabatic import (DiabaticGradient, DiabaticSurface,
                                              linear_vibronic_coupling)
@@ -133,6 +132,13 @@ def charged_full_chain():
 @pytest.fixture(scope='module')
 def gradient(chain):
     return DiabaticGradient(chain, FRAGMENTS, SITES)
+
+
+def force_iterative(monkeypatch):
+    """Every block, guard, resolvent and response iterative: both dense
+    limits (`fragment_bse.dense_limit`) below the smallest block here."""
+    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
+    monkeypatch.setattr(fragment_bse, 'FRAGMENT_MATRIX_FREE_DENSE_MAX', 10)
 
 
 def random_direction(natm, seed):
@@ -211,7 +217,7 @@ def test_isdf_action_and_iterative_path_match_dense(chain, operator, orbitals,
     isdf = BSEOperator.from_chain(chain, route='isdf')[0]
     x = np.random.default_rng(5).normal(size=(operator.n_ov, 3))
     assert np.abs(isdf.apply(x) - operator.dense @ x).max() < 1e-10
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
+    force_iterative(monkeypatch)
     iterative = FragmentPartition.build(isdf, orbitals, SITES,
                                         omega0=partition.omega0)
     assert np.abs(np.diag(iterative.a_eff)
@@ -299,8 +305,7 @@ def test_linear_vibronic_coupling_is_the_projected_gradients(chain, gradient):
 
 def test_iterative_gradient_matches_dense(chain, gradient, monkeypatch):
     dense = {ab: gradient.element(*ab)[0] for ab in ((0, 0), (0, 1))}
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
-    monkeypatch.setattr(fragment_diabatic, 'FRAGMENT_DENSE_MAX', 10)
+    force_iterative(monkeypatch)
     iterative = DiabaticGradient(chain, FRAGMENTS, SITES, route='isdf',
                                  omega0=gradient.partition.omega0)
     for ab, ref in dense.items():
@@ -371,7 +376,7 @@ def test_full_bse_isdf_action_and_iterative_path_match_dense(
     isdf = BSEOperator.from_chain(full_chain, route='isdf')[0]
     x = np.random.default_rng(5).normal(size=(full_operator.dim, 3))
     assert np.abs(isdf.apply(x) - full_operator.dense @ x).max() < 1e-10
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
+    force_iterative(monkeypatch)
     iterative = FragmentPartition.build(isdf, orbitals, SITES,
                                         omega0=full_partition.omega0)
     assert np.abs(np.diag(iterative.a_eff)
@@ -404,8 +409,7 @@ def test_full_bse_elements_in_point_charges_match_finite_differences(
 def test_full_bse_iterative_gradient_matches_dense(full_chain, monkeypatch):
     dense = DiabaticGradient(full_chain, FRAGMENTS, SITES)
     ref = {ab: dense.element(*ab)[0] for ab in ((0, 0), (0, 1))}
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
-    monkeypatch.setattr(fragment_diabatic, 'FRAGMENT_DENSE_MAX', 10)
+    force_iterative(monkeypatch)
     iterative = DiabaticGradient(full_chain, FRAGMENTS, SITES, route='isdf',
                                  omega0=dense.partition.omega0)
     for ab, r in ref.items():
