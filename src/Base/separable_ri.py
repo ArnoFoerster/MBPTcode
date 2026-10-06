@@ -129,6 +129,7 @@ from scipy.optimize import minimize, basinhopping
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
+from src.Base.basis.ri_fallback import element_auxbasis, missing_row_hint
 from src.Base.constants import (AUX_METRIC_INDEFINITE_TOL,
                                 AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
                                 FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
@@ -2617,6 +2618,7 @@ def _tabulated_counts(element, basis, auxbasis):
     tuple nobody ever optimized rather than a corrupt table.
     """
     out = []
+    auxbasis = element_auxbasis(element, basis, auxbasis)
     for key, row in shipped_radii().items():
         el, bas, aux, counts = key.split('|')
         if (el, bas, aux) != (str(element), element_basis_name(basis, element),
@@ -2638,6 +2640,7 @@ def shipped_radii_lookup(element, basis, auxbasis, counts):
     it, and they are the rows most likely to be asked for by someone
     reproducing a published number.
     """
+    auxbasis = element_auxbasis(element, basis, auxbasis)
     row = shipped_radii().get(_shipped_key(element, basis, auxbasis, counts))
     if row is None:
         return None
@@ -2658,7 +2661,8 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
         raise KeyError(
             f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
             f'{sorted((counts or {}).items())}. Held for this element and '
-            f'basis: {_tabulated_counts(element, basis, auxbasis)}.')
+            f'basis: {_tabulated_counts(element, basis, auxbasis)}.'
+            + missing_row_hint(element, basis, auxbasis, counts))
     radii, _, origin = hit
     return radii, origin
 
@@ -2841,7 +2845,8 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
                 f'which returns the row\'s flag alongside its radii.')
         return radii, fit_error
 
-    cache = _radii_cache_path(element, basis, auxbasis, settings)
+    cache = _radii_cache_path(element, basis, element_auxbasis(element, basis, auxbasis),
+                              settings)
     if os.path.exists(cache) and not return_candidates:
         # Tolerate a damaged cache rather than trusting it. A truncated or
         # half-written file is not hypothetical: a job array starts every task
@@ -2857,7 +2862,7 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     # gto.M still insists on a consistent spin for an odd-Z atom.
     atom = gto.M(atom=f'{element} 0 0 0', basis=basis, verbose=0,
                  spin=gto.charge(element) % 2)
-    auxatom = df.addons.make_auxmol(atom, auxbasis=auxbasis)
+    auxatom = df.addons.make_auxmol(atom, auxbasis=element_auxbasis(element, basis, auxbasis))
 
     decode = lambda x: _radii_from_flat(
         np.clip(x, np.log(r_min), np.log(r_max)), counts)

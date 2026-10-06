@@ -62,6 +62,17 @@ ISDF_GRID_ACCURACY = {
 # start are a DIFFERENT grid and not the one that was scored.
 ISDF_GRID_N_START = 8
 
+# Highest auxiliary angular momentum the ISDF interpolation grid represents.
+ISDF_MAX_AUX_L = 5
+
+# Auxiliary set standing in for an element the augmented RI family lacks, keyed
+# (element, orbital basis). Mg has no aug-cc-pV{D,T}Z-ri. Lowest five BSE singlets
+# of MgH2, MgF2, Mg(OH)2 against the autoaux set, Mg set varied, others genuine:
+# cc-pVQZ-ri stays within 1.0 meV (cc-pVDZ-ri up to 3.9, cc-pVTZ-ri 1.7 at aug-DZ),
+# and it reaches l = 5 = ISDF_MAX_AUX_L (src/Base/basis/ri_fallback.py).
+ISDF_AUX_FALLBACK = {('Mg', 'aug-cc-pvdz'): 'cc-pvqz-ri',
+                     ('Mg', 'aug-cc-pvtz'): 'cc-pvqz-ri'}
+
 # CasidaSolver-only: TDA-shortcut threshold and omega^2 clipping before sqrt().
 CASIDA_NUMERICAL_EPS = 1e-6
 
