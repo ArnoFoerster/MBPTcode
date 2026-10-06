@@ -30,8 +30,9 @@ WHAT EACH GATE IS FOR:
   monomers, equals the finite difference with relocalization at every
   displaced geometry. This is the gate for the canonical-gauge and the
   localization terms, which are several percent of the element's gradient
-  here and which a root cannot see. The off-diagonal element is compared up to
-  its sign, which is a convention of the diabats' phases.
+  here and which a root cannot see. Every element is compared signed, the
+  couplings included: the diabats' phase (`fragment_bse.diabat_phase`) is
+  the same in the analytic partition and in the finite difference's own.
 - the same, in a field of fixed point charges, with both charge-transfer
   diabats explicit, for the dressed A_eff and the bare A_PP. The charges make
   the site-charge-transfer couplings and their localization terms large,
@@ -262,10 +263,7 @@ def test_element_gradients_match_finite_differences(chain, gradient):
     for a, b in ((0, 0), (1, 1), (0, 1)):
         g, d = gradient.element(a, b)
         an = float((g * direction).sum())
-        if a == b:
-            assert abs(an - fd[a, b]) < 2e-5 * scale
-        else:
-            assert abs(abs(an) - abs(fd[a, b])) < 2e-5 * scale
+        assert abs(an - fd[a, b]) < 2e-5 * scale, (a, b)
         assert np.abs(d['localization']).max() > 0.0
 
 
@@ -285,7 +283,7 @@ def test_elements_in_point_charges_match_finite_differences(charged_chain,
     for a in range(n):
         for b in range(a, n):
             an = float((grad.element(a, b)[0] * direction).sum())
-            assert abs(abs(an) - abs(fd[a, b])) < 1e-6 * scale, (a, b)
+            assert abs(an - fd[a, b]) < 1e-6 * scale, (a, b)
 
 
 def test_charge_transfer_diabat_surface_gradient(charged_chain):
@@ -347,7 +345,7 @@ def check_elements(chain, sites, ct, omega0, seed, tol, steps=(1e-3, 5e-4)):
     for a in range(n):
         for b in range(a, n):
             an = float((grad.element(a, b)[0] * direction).sum())
-            assert abs(abs(an) - abs(fd[a, b])) < tol * scale, (a, b)
+            assert abs(an - fd[a, b]) < tol * scale, (a, b)
 
 
 @pytest.mark.parametrize('tda', [True, False])

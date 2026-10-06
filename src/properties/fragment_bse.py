@@ -218,6 +218,9 @@ def diabat_phase(orbitals, v):
     a fragment, so the sign survives a local orbital whose own sign symmetry
     leaves to the last bits (ethylene's pi*). a^T T b of generic a and b has
     no zero that symmetry forces, and it changes smoothly with the nuclei.
+    a and b are fixed in the Cartesian frame, so the sign follows the
+    molecule's orientation and can change only through a zero of a^T T b;
+    energies and |couplings| are invariant.
     """
     x, y = split_xy(np.asarray(v, float), orbitals.nocc * orbitals.nvir)
     t = (x + y).reshape(orbitals.nocc, orbitals.nvir)
