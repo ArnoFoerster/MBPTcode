@@ -30,7 +30,8 @@ import warnings
 import numpy as np
 from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
 
-from src.Base.constants import BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_EV
+from src.Base.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV,
+                                GEOMETRIC_START_TOL, HARTREE_TO_EV)
 from src.Base.declaration import SurfacePhysics
 from src.Base.environment import environment_label, resolve_environment
 from src.Base.isdf_jk import mean_field_skeleton_force
@@ -160,7 +161,12 @@ def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
         Passing the ground-state analytic Hessian (`normal_modes` builds one
         anyway for the Huang-Rhys factors) typically halves the cycle count:
         the excited surface has similar curvature to the ground one, which is
-        what a quasi-Newton method needs and cannot guess.
+        what a quasi-Newton method needs and cannot guess. Another walk's
+        final `info['hessian']` -- the singlet's at its minimum, for the
+        triplet started there -- is the same kind of guess.
+
+    `info['hessian']` is the BFGS Hessian the walk ended with, (3N, 3N) in
+    Ha/Bohr^2, the refrozen walk's after a refreeze.
     refreeze: after convergence, rebuild the frozen conventions at the new
         geometry (`surface.refreeze`) and optimize again, up to this many
         times. 0 reports the single-surface minimum with the drift unmeasured
@@ -282,7 +288,8 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
     info = {'converged': converged, 'cycles': len(history), 'history': history,
             'energy': e, 'omega': diags.get('omega'),
             'grad_max': residual, 'opt_grad_max': residual,
-            'rejected': rejected, 'status': status, 'optimizer': 'internal'}
+            'rejected': rejected, 'status': status, 'optimizer': 'internal',
+            'hessian': hess.copy()}
 
     if refreeze and converged:
         mol2, info2 = _trust_region_walk(surface.refreeze(m_cur), m_cur,
@@ -293,7 +300,8 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
         info.update(refreeze_shift=shift,
                     refreeze_denergy=float(info2['energy'] - info['energy']),
                     refreeze_info=info2, energy=info2['energy'],
-                    omega=info2['omega'], refreeze='measured')
+                    omega=info2['omega'], refreeze='measured',
+                    hessian=info2['hessian'])
         if verbose:
             print(f'  [refreeze] geometry moved {shift:.2e} Bohr, energy by '
                   f'{info2["energy"] - e:+.2e} Ha')
@@ -313,7 +321,7 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
 
 def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
                        coordsys='tric', refreeze=0, verbose=True,
-                       workdir=None):
+                       workdir=None, hess_init=None):
     """Relax `surface`'s state through geomeTRIC. Returns (mol, info).
 
     Preferred over `optimize` beyond a handful of atoms: the Cartesian
@@ -350,6 +358,13 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     residual, and not the driving force at R0 that `grad_max` means elsewhere;
     `info['grad_max']` is the same float, kept for callers that read it.
 
+    hess_init: a starting Cartesian Hessian in Ha/Bohr^2 (geomeTRIC's
+        `hess_data`, transformed to its internal coordinates), or None for
+        geomeTRIC's own guess; another walk's `info['hessian']` is one.
+        `info['hessian']` is the approximate Cartesian Hessian geomeTRIC
+        ends with (`write_cart_hess`), the refrozen walk's after a refreeze;
+        a refrozen walk starts from `hess_init` as the first did.
+
     Under ranks every rank runs geomeTRIC on evaluations locked to rank 0's
     (`surface.evaluate`, in the engine's `calc_new` callback), and every rank
     comes back holding rank 0's geometry and record. geomeTRIC's files then go
@@ -362,7 +377,7 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     mol = surface.mol0 if mol is None else mol
     return rank_zero_walk(*_geometric_walk(surface, mol, maxiter, converge,
                                            coordsys, refreeze, verbose,
-                                           workdir))
+                                           workdir, hess_init))
 
 
 def geometric_engine():
@@ -386,7 +401,7 @@ def geometric_engine():
 
 
 def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
-                    verbose, workdir):
+                    verbose, workdir, hess_init=None):
     """The engine `optimize_geometric` documents."""
     Engine, GeoMolecule, run_optimizer = geometric_engine()
 
@@ -397,8 +412,13 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
 
     trace = []
 
+    start = np.asarray(mol.atom_coords(), float).ravel()
+
     class _Surface(Engine):
         def calc_new(self, coords, dirname):
+            coords = np.asarray(coords, float).ravel()
+            if np.abs(coords - start).max() < GEOMETRIC_START_TOL:
+                coords = start
             m = at_geometry(mol, coords)
             g, e, d = evaluate(surface, m)
             omega = d.get('omega')
@@ -417,9 +437,18 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
     # working directory belongs to the process, which the rank threads of
     # `run_simulated` share, and a chdir on one would move the others' files.
     tmp = workdir or tempfile.mkdtemp(prefix='esopt_')
+    # the approximate Cartesian Hessian geomeTRIC ends with, written here
+    hess_out = os.path.join(tmp, 'es_final_hessian.txt')
+    # geomeTRIC tests `hess_data` for truth, which an array refuses; a nested
+    # list in Ha/Bohr^2 is its documented form, and the frequency analysis it
+    # would run on a given Hessian is not wanted
+    given = ({} if hess_init is None else
+             {'hess_data': np.asarray(hess_init, float).tolist(),
+              'frequency': False})
     out = run_optimizer(customengine=engine, coordsys=coordsys,
                         maxiter=maxiter, convergence_set=converge,
-                        input='es', prefix=os.path.join(tmp, 'es'), check=0)
+                        input='es', prefix=os.path.join(tmp, 'es'), check=0,
+                        write_cart_hess=hess_out, **given)
 
     xyz = np.asarray(out.xyzs[-1]) / BOHR_TO_ANGSTROM
     mol_opt = mol.copy()
@@ -430,17 +459,21 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
             'energy': trace[-1]['e'], 'omega': trace[-1]['omega'],
             'grad_max': residual, 'opt_grad_max': residual, 'status': 'ok',
             'engine': 'geometric', 'optimizer': 'geometric',
-            'coordsys': coordsys}
+            'coordsys': coordsys,
+            'hessian': (np.loadtxt(hess_out) if os.path.exists(hess_out)
+                        else None)}
 
     if refreeze:
         mol2, info2 = _geometric_walk(surface.refreeze(mol_opt), mol_opt,
                                       maxiter, converge, coordsys,
-                                      refreeze - 1, verbose, workdir)
+                                      refreeze - 1, verbose, workdir,
+                                      hess_init)
         shift = float(np.abs(mol2.atom_coords() - mol_opt.atom_coords()).max())
         info.update(refreeze_shift=shift,
                     refreeze_denergy=float(info2['energy'] - info['energy']),
                     refreeze_info=info2, energy=info2['energy'],
-                    omega=info2['omega'], refreeze='measured')
+                    omega=info2['omega'], refreeze='measured',
+                    hessian=info2['hessian'])
         if verbose:
             print(f'  [refreeze] geometry moved {shift:.2e} Bohr, energy by '
                   f'{info["refreeze_denergy"]:+.2e} Ha')

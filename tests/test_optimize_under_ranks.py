@@ -219,6 +219,21 @@ def ground_walk(factory, **kw):
     return walked(surface, mol, trust=GROUND_TRUST, **kw)
 
 
+def same_record(a, b):
+    """Two walk records hold the same entries, bit for bit: arrays by
+    `np.array_equal`, containers entry by entry, everything else by `==`."""
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        return (np.shape(a) == np.shape(b)
+                and np.array_equal(np.asarray(a), np.asarray(b)))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(same_record(a[k], b[k])
+                                             for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return (type(a) is type(b) and len(a) == len(b)
+                and all(same_record(x, y) for x, y in zip(a, b)))
+    return a == b
+
+
 def serial_walk(run):
     """`run()` outside the context: the serial reference, and the bar a
     distributed walk's geometries are gated at, `GEOMETRY_FLOOR`."""
@@ -242,7 +257,7 @@ def assert_same_walk(reference, results, bar):
     for rank in results[1:]:
         assert np.array_equal(rank['coords'], results[0]['coords'])
         assert rank['energy'] == results[0]['energy']
-        assert rank['info'] == results[0]['info']
+        assert same_record(rank['info'], results[0]['info'])
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -378,7 +393,7 @@ def test_a_worker_ranks_own_force_decides_nothing():
         assert rank['cycles'] == reference['cycles']
         assert np.array_equal(rank['coords'], reference['coords'])
         assert rank['energy'] == reference['energy']
-        assert rank['info'] == reference['info']
+        assert same_record(rank['info'], reference['info'])
     assert np.array_equal(results[0]['coords'], results[1]['coords'])
 
 

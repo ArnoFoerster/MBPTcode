@@ -81,6 +81,13 @@ EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
                               'dense_max_nov', 'nroots', 'e_min_below_gap',
                               'tile_gb', 'bse_adjoint'})
 
+#: How a BSE state is followed from geometry to geometry: `track` absent (or
+#: None) follows the root INDEX, 'overlap' the state, by the overlap of its
+#: Casida vector with the previous step's in the moving orbital basis
+#: (`ExcitedStateChain.tracked_state`). Read by the two BSE rows alone.
+ROOT_FOLLOWING = ('overlap',)
+TRACK_NUMERICS = frozenset({'track'})
+
 #: Numeric keywords `RPAGroundStateChain` reads. Its imaginary-time count and
 #: its frequency quadrature are named apart from the GW ones: they integrate
 #: different integrands and a single `ntau` would silently tie them together.
@@ -314,7 +321,7 @@ def excited_kwargs(setup, row):
         kw['scissor'] = 'calibrate'
     if row.outside_treatment == 'scissor':
         kw['outside'] = 'scissor'
-    for name in sorted(EXCITED_NUMERICS):
+    for name in sorted(EXCITED_NUMERICS | TRACK_NUMERICS):
         if name in setup.numerics:
             kw[name] = setup.numerics[name]
     return kw
@@ -322,14 +329,26 @@ def excited_kwargs(setup, row):
 
 def excited_numerics(chain):
     """The grids and caps an `ExcitedStateChain` resolved, as numbers, and
-    the realization of its adjoint."""
-    return {'ntau_gw': int(chain.ntau_gw), 'ntau_w': int(chain.ntau_w),
-            'nfreq_cd': int(chain.nfreq_cd), 'n_poles': int(chain.n_poles),
-            'sop_stride': chain.sop_stride, 'nroots': int(chain.nroots),
-            'dense_max_nov': int(chain.dense_max_nov),
-            'bse_conv_tol': float(chain.bse_conv_tol),
-            'degeneracy_tol': float(chain.degeneracy_tol),
-            'bse_adjoint': chain.bse_adjoint}
+    the realization of its adjoint; `track` where the state is followed by
+    overlap."""
+    out = {'ntau_gw': int(chain.ntau_gw), 'ntau_w': int(chain.ntau_w),
+           'nfreq_cd': int(chain.nfreq_cd), 'n_poles': int(chain.n_poles),
+           'sop_stride': chain.sop_stride, 'nroots': int(chain.nroots),
+           'dense_max_nov': int(chain.dense_max_nov),
+           'bse_conv_tol': float(chain.bse_conv_tol),
+           'degeneracy_tol': float(chain.degeneracy_tol),
+           'bse_adjoint': chain.bse_adjoint}
+    if chain.track is not None:
+        out['track'] = chain.track
+    return out
+
+
+def refuse_unknown_track(numerics):
+    """`track` names a way of following a state, or is refused by name."""
+    track = numerics.get('track')
+    if track is not None and track not in ROOT_FOLLOWING:
+        raise ValueError(f'track={track!r} not in {ROOT_FOLLOWING}: a state is '
+                         f'followed by its index (track absent) or by overlap')
 
 
 def build_rpa_ground(row, setup):
@@ -456,7 +475,8 @@ def dispatch_table():
         Row('rpa', NO_EXCITATION, 'dense-qb', 'df',
             cls['DenseRPASurface'], frozenset(), build_dense_rpa),
         Row('rpa', 'Excitation', 'space-time', 'isdf',
-            cls['RPABSESurface'], GRID_NUMERICS | EXCITED_NUMERICS,
+            cls['RPABSESurface'],
+            GRID_NUMERICS | EXCITED_NUMERICS | TRACK_NUMERICS,
             build_rpa_bse, qp_keyword='qp_window', outside_treatment='scissor',
             reads_solver=True, reads_residues=True, isdf_grid=True),
         Row('rpa', 'Excitation', 'dense-qb', 'four-index',
@@ -481,7 +501,8 @@ def dispatch_table():
             cls['MeanFieldSurface'], frozenset(), build_mean_field,
             post_scf=False),
         Row('dft', 'Excitation', 'space-time', 'isdf',
-            cls['ExcitedStateChain'], GRID_NUMERICS | EXCITED_NUMERICS,
+            cls['ExcitedStateChain'],
+            GRID_NUMERICS | EXCITED_NUMERICS | TRACK_NUMERICS,
             build_excited_chain, qp_keyword='qp_window',
             outside_treatment='scissor', reads_solver=True,
             reads_residues=True, isdf_grid=True),
@@ -832,6 +853,7 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     refuse_undeclared_state(excitation, mol)
     row = find_row(ground_state, excitation, chi0, factorization)
     refuse_foreign_numerics(row, numerics)
+    refuse_unknown_track(numerics)
     if mf is None:
         mf = reference_mean_field(mol, scf_factory, environment)
     refuse_undeclared_functional(ground_state, mf)

@@ -221,12 +221,17 @@ class FrozenFactorization:
         # resolves this basis. The default count is sized for double zeta and
         # fails for most elements at larger bases.
         fit_errors = {}
+        # wall seconds of each convention's construction, for the record
+        self.seconds = {}
+        t0 = time.perf_counter()
         if radii is None:
             radii = {}
             for el in elements:
                 radii[el], fit_errors[el], _ = runtime_atomic_radii(
                     el, self.basis, self.auxbasis, self.counts,
                     n_start=n_start)
+        self.seconds['radii'] = time.perf_counter() - t0
+        t0 = time.perf_counter()
         # The radii come from a local descent on a multi-modal objective whose
         # minimum moves with the BLAS reduction order, the frames from an
         # `eigh`: rank 0's on every rank, before anything is placed. Clouds and
@@ -235,6 +240,7 @@ class FrozenFactorization:
          self.frames) = lockstep((radii, fit_errors,
                                   *point_layout(mol, radii),
                                   atomic_frames(mol)[0]))
+        self.seconds['points'] = time.perf_counter() - t0
         if self.radii_tag is None:
             failed = {el: e for el, e in self.fit_errors.items()
                       if e >= ISDF_FIT_ERROR_FAILED}
@@ -254,7 +260,9 @@ class FrozenFactorization:
         # The layout is a screening threshold on collocated products of rank
         # 0's placed points, locked too: a rank whose threshold kept another
         # column set raises on every rank (the shapes disagree).
+        t0 = time.perf_counter()
         self.layout = lockstep(test_set_layout(mol, self.coords(mol)))
+        self.seconds['layout'] = time.perf_counter() - t0
         # Weak on the Mole: the value is arrays and pins nothing, so an entry
         # dies with its geometry. A weak key is wrong wherever the value
         # references the key -- `_environment_cache` holds `env.mol is mol`.
@@ -454,6 +462,9 @@ class FactorChain:
                  factorization=None, radii=None, grid_accuracy=None,
                  sliced=None, fit=None, fit_block=None):
         self.mol0, self.scf_factory = mol, scf_factory
+        # wall seconds of each step of this constructor, for the record
+        self.construction_seconds = {}
+        t0 = time.perf_counter()
         # Resolved before the branch, so that building a factorization and
         # matching a shared one are handed the same counts and recipe.
         if grid_accuracy is not None:
@@ -474,6 +485,7 @@ class FactorChain:
             factorization.require_match(basis, auxbasis, counts, n_start, frames,
                                         radii, sliced=sliced, fit=fit,
                                         fit_block=fit_block)
+        self.construction_seconds['factorization'] = time.perf_counter() - t0
         if factorization.sliced and not self.READS_SLICED_FACTORS:
             raise ValueError(
                 f'{type(self).__name__} reads the factors whole in kernels '
@@ -513,6 +525,7 @@ class FactorChain:
                 "row fit's tiled adjoint carries the bare gauge alone; build "
                 "the factorization with fit='replicated', the same "
                 'estimator, for a solvated run')
+        t0 = time.perf_counter()
         with self.phase('t_scf'):
             self.mf0 = self.environment.mean_field(
                 mol, converged_factory(
@@ -521,7 +534,10 @@ class FactorChain:
         # mf0 directly must be rank 0's, and a given `mf=` may have been
         # converged on each rank alone.
         lockstep_mean_field(self.mf0)
+        self.construction_seconds['mean_field'] = time.perf_counter() - t0
+        t0 = time.perf_counter()
         self.scf_residual = check_scf_quality(self.mf0, self.nocc)
+        self.construction_seconds['scf_quality'] = time.perf_counter() - t0
 
         # the same objects, not copies, so two chains on one factorization
         # have bitwise identical factors

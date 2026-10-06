@@ -53,16 +53,27 @@ at every rank count, and another realization (and, where the pair screen
 drops a pair, another estimator) than the replicated fit
 (`FrozenFactorization`).
 
+One forward, several states. Everything `_forward` computes before the
+Casida step (the factors, the static screening, the reaction field, the
+quasiparticle set and its tape, the outside scissor) reads neither the spin
+nor the root (`_shared_forward`, a `SharedForward`). `spin_view` is a shallow
+copy of a chain whose conventions are frozen, with another spin and root, so
+a singlet and a triplet, or several roots, are solved and differentiated on
+the same objects (`src.gradients.state_manifold.StateManifold.evaluate`).
+
 Everything computed from this surface (geometry optimization, normal modes,
 Huang-Rhys factors, adiabatic gaps, reorganization energies, rates) lives in
 `src/properties/` and knows only the `PotentialEnergySurface` protocol.
 """
+import copy
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 
 from src.Base.sliced_factors import GridTileRows, SlicedFactors
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, ROOT_FOLLOW_MARGIN_MIN,
+from src.Base.constants import (FIT_CHOLESKY_BLOCK, KAPPA,
+                                ROOT_FOLLOW_MARGIN_MIN,
                                 ROOT_FOLLOW_WEIGHT_MIN)
 from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                 BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
@@ -104,6 +115,76 @@ from src.gradients.qp_space_time import (qp_gradient_space_time,
                                          qp_set_gradient, static_term)
 from src.gradients.space_time_adjoint import (chi0_backward,
                                               chi0_backward_rows)
+
+
+class ForwardPieces(tuple):
+    """The seventeen pieces of `ExcitedStateChain._forward`, with the static
+    correction <p|Sigma_x - v_xc + Sigma^env|p> the quasiparticle solve read
+    on the set beside them (`xc_correction`, None at the mean field), so the
+    reverse solve reads the forward's own bits."""
+
+    def __new__(cls, pieces, xc_correction=None):
+        out = super().__new__(cls, pieces)
+        out.xc_correction = xc_correction
+        return out
+
+
+@dataclass(eq=False)
+class SharedForward:
+    """What one geometry's forward pass holds before the Casida step: the
+    factors, eps, eps^QP, the static W_aux, mu, the bare factor, the Eq. (18)
+    shift and its screening pair, the quasiparticle set's tape and the static
+    correction it read. No spin and no root enters any of them."""
+
+    mol: object
+    mf: object
+    auxmol: object
+    crd: object
+    x_mo: object
+    d: object
+    eps: np.ndarray
+    eps_qp: np.ndarray
+    w_aux: np.ndarray
+    mu: float
+    d_bare: object
+    shift: object
+    screening: object
+    qp_tape: object
+    xc_correction: object
+
+    def pieces(self, cache, xn, yn):
+        """The `ForwardPieces` of one Casida solve on this forward."""
+        return ForwardPieces(
+            (self.mol, self.mf, self.auxmol, self.crd, self.x_mo, self.d,
+             self.eps, self.eps_qp, self.w_aux, cache, xn, yn, self.mu,
+             self.d_bare, self.shift, self.screening, self.qp_tape),
+            self.xc_correction)
+
+    def release(self):
+        """Drop the quasiparticle tape's proj(tau) rows and slices."""
+        if self.qp_tape is not None:
+            self.qp_tape.release()
+
+
+@dataclass(eq=False)
+class FirstPoint:
+    """(dE/dR, E, diagnostics) of one state already evaluated at one
+    geometry, handed to the surface that walks from there: its first
+    `total_gradient` at that geometry, for that spin and root, is this one
+    (`replayed_first_point`), so a T1 relaxation started where the S1 force
+    was taken does not evaluate the T1 force there again."""
+
+    coords: np.ndarray
+    charges: np.ndarray
+    spin: str
+    state: int
+    result: tuple
+
+    def answers(self, mol, spin, state):
+        """Whether this is the point asked for: same nuclei, spin and root."""
+        return (spin == self.spin and int(state) == self.state
+                and np.array_equal(mol.atom_charges(), self.charges)
+                and np.array_equal(mol.atom_coords(), self.coords))
 
 
 class ExcitedStateChain(FactorChain):
@@ -209,6 +290,10 @@ class ExcitedStateChain(FactorChain):
         # first forward calibrates it, a {orbital: shift} mapping afterwards,
         # which is what `frozen_scissor` reads.
         self.outside_shift = None
+        # {probe: the shift it lends}, frozen with `outside_shift`.
+        self.outside_lent = None
+        # Whether a forward pass has run and frozen the Newton branch.
+        self.forward_ran = False
         # What the chain this one was refrozen from had calibrated, so the
         # record can say how far the convention moved with the geometry.
         self.outside_shift_before = None
@@ -453,6 +538,14 @@ class ExcitedStateChain(FactorChain):
             if not self._freeze_newton_branch(
                     route_out, eps, xc_correction, states):
                 break
+        # What the last solve took, state by state, for the record: the route
+        # and the pole strength Z, which the route does not keep on the chain.
+        # A solve that reports no Z (a stand-in route) records None for it.
+        z_of = route_out.get('z')
+        self.qp_diagnostics = {
+            'routes': self._routes_taken(route_out),
+            'z': None if z_of is None else
+            {int(p): float(z) for p, z in zip(states, z_of)}}
         return out, route_out
 
     def _tile_kw(self):
@@ -525,9 +618,11 @@ class ExcitedStateChain(FactorChain):
         if self.outside_shift is not None:
             return
         roots = {int(p): float(w) for p, w in zip(self.qp_set, ws)}
+        free = self._env_free(roots, env)
+        # the shift each probe lends, which is how the record names it
+        self.outside_lent = {q: w - float(eps[q]) for q, w in free.items()}
         outside = np.flatnonzero(self._outside_window(len(eps)))
-        self.outside_shift = calibrate_scissor(
-            eps, self.nocc, self._env_free(roots, env), outside)
+        self.outside_shift = calibrate_scissor(eps, self.nocc, free, outside)
 
     @staticmethod
     def _env_free(values, env):
@@ -712,22 +807,34 @@ class ExcitedStateChain(FactorChain):
         return om[order], xn[:, order], yn[:, order], {}
 
     def _forward(self, mol, mf):
-        pieces = self.kernel_pieces(mol, mf)
-        x_mo, d, eps_qp, w_aux = pieces[4], pieces[5], pieces[7], pieces[8]
+        return self._casida_forward(self._shared_forward(mol, mf))
+
+    def _casida_forward(self, shared):
+        """(Omega, `ForwardPieces`): this chain's spin solved on `shared`."""
         with self.phase('t_casida'):
-            om, xn, yn, cache = self._casida(x_mo, d, eps_qp, w_aux)
-        return om, pieces[:9] + (cache, xn, yn) + pieces[12:]
+            om, xn, yn, cache = self._casida(shared.x_mo, shared.d,
+                                             shared.eps_qp, shared.w_aux)
+        # The quasiparticle set's tape rides with the pieces: the reverse
+        # solve reads proj(tau) and the slices from it instead of sweeping
+        # them again, bitwise.
+        return om, shared.pieces(cache, xn, yn)
 
     def kernel_pieces(self, mol, mf):
         """Everything `_forward` builds before the Casida solve, in its layout.
 
-        The same seventeen-long tuple `_forward` returns, with an empty cache
-        and no roots (`xn`, `yn` are None): the quasiparticle energies, the
-        static screening and the factors the BSE matrix is made of. A quantity
-        that needs the kernel but not the supermolecular roots -- the diabatic
-        elements of `src.properties.fragment_bse` -- starts here, and so does
-        its gradient: `_fold_to_nuclei` reads nothing from the roots.
+        The same seventeen-long `ForwardPieces` `_forward` returns, with an
+        empty cache and no roots (`xn`, `yn` are None): the quasiparticle
+        energies, the static screening and the factors the BSE matrix is made
+        of. A quantity that needs the kernel but not the supermolecular roots
+        -- the diabatic elements of `src.properties.fragment_bse` -- starts
+        here, and so does its gradient: `_fold_to_nuclei` reads nothing from
+        the roots.
         """
+        return self._shared_forward(mol, mf).pieces({}, None, None)
+
+    def _shared_forward(self, mol, mf):
+        """The `SharedForward` at one geometry: everything before the Casida
+        step, which reads neither `spin` nor `state`."""
         x_mo, d, eps, mu, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
         # One static screening: the BSE kernel's W and the dressed half of
         # Eq. (18) are the same [1 - chi0(0)]^-1 on the same axis; the orbital
@@ -745,15 +852,14 @@ class ExcitedStateChain(FactorChain):
         shift, screening = self._reaction_field(x_mo, d, d_bare, eps,
                                                 screening=pair)
         d_sigma = d if d_bare is None else d_bare
-        qp_tape = None
+        qp_tape = xc = None
         if self.at_mean_field:
             eps_qp = eps
         else:
             with self.phase('t_qp'):
+                xc = self._xc_correction(mf, self.qp_set, shift)
                 out, route_out = self._qp_set_solve(
-                    x_mo, d_sigma, eps, mu,
-                    self._xc_correction(mf, self.qp_set, shift),
-                    np.zeros(len(self.qp_set)))
+                    x_mo, d_sigma, eps, mu, xc, np.zeros(len(self.qp_set)))
             ws, qp_tape = out[0], route_out.get('tape')
             eps_qp = eps.copy()
             eps_qp[self.qp_set] = ws
@@ -770,11 +876,46 @@ class ExcitedStateChain(FactorChain):
         env_outside = self._env_static_outside(shift, len(eps))
         if env_outside is not None:
             eps_qp = eps_qp + env_outside
-        # The quasiparticle set's tape rides with the pieces: the reverse
-        # solve reads proj(tau) and the slices from it instead of sweeping
-        # them again, bitwise.
-        return (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, {},
-                None, None, mu, d_bare, shift, screening, qp_tape)
+        self.forward_ran = True
+        return SharedForward(mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux,
+                             mu, d_bare, shift, screening, qp_tape, xc)
+
+    @property
+    def conventions_frozen(self):
+        """Whether the first forward has fixed what every later one reads:
+        the Newton branch of the quasiparticle set and, outside the set, the
+        scissor calibrated. At the mean field there is nothing to fix."""
+        if self.at_mean_field:
+            return True
+        return self.forward_ran and (self.outside != 'scissor'
+                                     or self.outside_shift is not None)
+
+    def spin_view(self, spin, state=None, track=None):
+        """This chain with another spin and root, on the same frozen objects.
+
+        A shallow copy, refused until `conventions_frozen`: `outside_shift`
+        is rebound by the first forward, so a copy made earlier would
+        calibrate its own scissor. Made afterwards it shares
+        every convention, the factorization, the environment and its cache by
+        reference, and keeps its own root-following history and its own
+        record of the Davidsons it runs. `state` and `track` default to this
+        chain's; the stage timer is shared.
+        """
+        if spin not in KAPPA:
+            raise ValueError(f'spin={spin!r} not in {tuple(KAPPA)}')
+        if not self.conventions_frozen:
+            raise RuntimeError(
+                'a spin view shares the conventions the first forward pass '
+                'freezes (the Newton branch, the outside scissor); '
+                'evaluate the chain once before taking one')
+        view = copy.copy(self)
+        view.spin = spin
+        view.state = self.state if state is None else int(state)
+        view.track = self.track if track is None else track
+        view._followed = view._anchor = None
+        view.follow_log = []
+        view.davidson_solves = []
+        return view
 
     def spectrum(self, mol=None, mf=None):
         """Every excitation energy the Casida step returned, ascending, in Hartree."""
@@ -919,7 +1060,8 @@ class ExcitedStateChain(FactorChain):
             return a
         return GridTileRows.from_whole(np.asarray(a), block, current_comm())
 
-    def _fold_to_nuclei(self, pieces, eqp_bar, x_bar, d_bar, w_bar):
+    def _fold_to_nuclei(self, pieces, eqp_bar, x_bar, d_bar, w_bar,
+                        release_tape=True):
         """(natm, 3) from the four Casida-level adjoints, and diagnostics.
 
         Everything below the Casida step is linear in the seed, so the same
@@ -934,9 +1076,17 @@ class ExcitedStateChain(FactorChain):
         Over ranks the pair is `GridTileRows` (`_adjoint_rows`): the seeds are
         cut to this rank's tiles, and the quasiparticle and chi0 sweeps return
         their adjoints in the same tiles, tile-major.
+
+        release_tape: drop the forward's quasiparticle tape after reading it.
+        False where more reverse passes follow off the same forward
+        (`StateManifold.evaluate`), which releases it once at the end; each
+        of them then reads proj(tau) and the slices instead of sweeping them.
+        The static correction the forward read is reused where the pieces
+        carry it (`ForwardPieces`).
         """
         (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, cache, xn, yn,
          mu, d_bare, shift, screening, qp_tape) = pieces
+        xc = getattr(pieces, 'xc_correction', None)
         block = self._adjoint_rows(x_mo)
         if block is not None:
             x_bar, d_bar = self._as_rows(x_bar, block), self._as_rows(d_bar,
@@ -952,14 +1102,15 @@ class ExcitedStateChain(FactorChain):
         else:
             # the whole set folds through one proj(tau) sweep
             with self.phase('t_qp_backward'):
+                if xc is None:
+                    xc = self._xc_correction(mf, self.qp_set, shift)
                 (_, e_qp, x_qp, d_qp), qp_out = self._qp_set_solve(
-                    x_mo, d_sigma, eps, mu,
-                    self._xc_correction(mf, self.qp_set, shift),
-                    eqp_bar[self.qp_set], tape=qp_tape, rows_block=block)
+                    x_mo, d_sigma, eps, mu, xc, eqp_bar[self.qp_set],
+                    tape=qp_tape, rows_block=block)
             # read once: its proj(tau) rows and slices are not held through
-            # the rest of the reverse pass (a later reverse off the same
-            # forward sweeps them again)
-            for tape in (qp_tape, qp_out.pop('tape', None)):
+            # the rest of the reverse pass unless another reverse follows
+            held = (qp_tape,) if release_tape else ()
+            for tape in held + (qp_out.pop('tape', None),):
                 if tape is not None:
                     tape.release()
             eps_bar += e_qp
@@ -1025,10 +1176,24 @@ class ExcitedStateChain(FactorChain):
         mol, mf = self.mean_field(mol, mf)
         om, pieces = self._forward(mol, mf)
         root = self.tracked_state(mol, mf, om, pieces)
+        return self._root_gradient(pieces, om, root)
+
+    def _root_gradient(self, pieces, om, root, release_tape=True):
+        """(dOmega_root/dR, diagnostics) off one forward's pieces."""
         with self.phase('t_bse_backward'):
             seeds = self._casida_seeds(pieces, root)
-        grad, diags = self._fold_to_nuclei(pieces, *seeds)
+        grad, diags = self._fold_to_nuclei(pieces, *seeds,
+                                           release_tape=release_tape)
         return grad, dict(diags, omega=float(om[root]), root=int(root))
+
+    def _interstate_gradient(self, pieces, om, m, n, release_tape=True):
+        """(d<m|H|n>/dR, diagnostics) off one forward's pieces."""
+        with self.phase('t_bse_backward'):
+            seeds = self._casida_seeds(pieces, n, m)
+        grad, diags = self._fold_to_nuclei(pieces, *seeds,
+                                           release_tape=release_tape)
+        return grad, dict(diags, omega_m=float(om[m]), omega_n=float(om[n]),
+                          gap=float(om[n] - om[m]))
 
     def interstate_gradient(self, m, n, mol=None, mf=None):
         """(d<m|H|n>/dR, diagnostics) between two BSE roots, m != n.
@@ -1046,11 +1211,7 @@ class ExcitedStateChain(FactorChain):
         self.require_differentiable_environment()
         mol, mf = self.mean_field(mol, mf)
         om, pieces = self._forward(mol, mf)
-        with self.phase('t_bse_backward'):
-            seeds = self._casida_seeds(pieces, n, m)
-        grad, diags = self._fold_to_nuclei(pieces, *seeds)
-        return grad, dict(diags, omega_m=float(om[m]), omega_n=float(om[n]),
-                          gap=float(om[n] - om[m]))
+        return self._interstate_gradient(pieces, om, m, n)
 
     def quasiparticle(self, offset=0, mol=None, mf=None):
         """eps^QP for the orbital `offset` from the HOMO (0 = HOMO, +1 = LUMO)."""
@@ -1205,12 +1366,21 @@ class ExcitedStateChain(FactorChain):
         chain was handed, so a density-fitted reference gets the density-fitted
         gradient including its auxiliary-basis response.
         """
+        replay = replayed_first_point(self, mol)
+        if replay is not None:
+            return replay
         mol, mf = self.mean_field(mol, mf)
         # one fit adjoint for both: the mean field's exchange skeleton rides
         # the excitation's assembly
         with self.one_fit_adjoint(mf, mean_field=True):
             g_om, diags = self.excitation_gradient(mol, mf)
             g_0 = self.mean_field_gradient(mf)
+        return self.composed_total(mf, g_0, g_om, diags)
+
+    @staticmethod
+    def composed_total(mf, g_0, g_om, diags):
+        """(dE_ex/dR, E_ex, diagnostics) from the mean field's force and
+        (dOmega/dR, diagnostics): E_ex = E_0 + Omega, one assembly."""
         diags = dict(diags, e_scf=mf.e_tot, grad_scf_max=float(np.abs(g_0).max()),
                      grad_omega_max=float(np.abs(g_om).max()))
         return g_0 + g_om, mf.e_tot + diags['omega'], diags
@@ -1275,3 +1445,17 @@ class ExcitedStateChain(FactorChain):
             kernel += '(mean-field eps)'
         return (f'{kernel} {self.spin} state {self.state} / {self.basis} / '
                 f'outside {self.outside} / {self.environment!r}')
+
+
+def replayed_first_point(surface, mol):
+    """The result of the `FirstPoint` `surface` holds, if it answers `mol`
+    and the surface's spin and root, else None; taken off the surface at the
+    first call either way, since it is the start of a walk and a later visit
+    to the same geometry is evaluated afresh."""
+    first = surface.__dict__.pop('first_point', None)
+    if first is None:
+        return None
+    mol = surface.mol0 if mol is None else mol
+    if first.answers(mol, surface.spin, surface.state):
+        return first.result
+    return None

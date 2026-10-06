@@ -1819,17 +1819,21 @@ def grid_adjoint_routes(gate, mol):
         fold = ex._fold_to_nuclei
 
         def probed(pieces, *seeds_in, fold=fold, ex=ex, three=three,
-                   found=found, seeds=seeds):
+                   found=found, seeds=seeds, **fold_kw):
             # what the reverse pass holds beside the seeds: chain and forward
             found.update(a.shape for a in reachable((ex, pieces))[0]
                          if tuple(sorted(a.shape)) in three
                          or (a.ndim == 2 and tuple(sorted(a.shape)) ==
                              tuple(sorted((ex.naux, nocc * (nmo - nocc))))))
-            result = fold(pieces, *seeds_in)
+            again = None
             if seeds and 'ref' in seeds[-1]:
-                # the same fold of the serial kernel's seeds, handed in whole
+                # the same fold of the serial kernel's seeds, handed in whole;
+                # first, so that it reads the tape the probed fold may release
                 again = fold(pieces, *[np.array(a, copy=True)
-                                       for a in seeds[-1]['ref']])
+                                       for a in seeds[-1]['ref']],
+                             release_tape=False)
+            result = fold(pieces, *seeds_in, **fold_kw)
+            if again is not None:
                 seeds[-1]['refold'] = (np.asarray(result[0]),
                                        np.asarray(again[0]))
             return result

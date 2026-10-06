@@ -49,6 +49,14 @@ from src.Base.isdf_jk import ISDFJK
 from src.Base.separable_ri import _SHELL_ORDER
 from src.properties.optimize import mean_field_force
 
+#: Why a finite-difference Hessian of an ISDF-K mean field has a grid floor.
+ROUGH_GRID = ('the ISDF energy depends on the orientation of each atom\'s '
+              'interpolation cloud and the atomic frames turn the clouds as '
+              'the atoms move, so on a coarse grid the surface is rough on '
+              'the step\'s scale and its force constants are wrong even though '
+              'the force is exact (formaldehyde/cc-pVDZ/B3LYP: 1362 cm^-1 off '
+              'at 148 points per atom, 405 at G2, 11 at G3)')
+
 
 def displacement_list(natm, step=NUCLEAR_FD_STEP):
     """Every (atom, component, sign) central-difference displacement.
@@ -89,33 +97,37 @@ def require_hessian_grid(mf, level=ISDF_HESSIAN_MIN_GRID):
     with_df = getattr(mf, 'with_df', None)
     if not isinstance(with_df, ISDFJK):
         return
-    basis = str(mf.mol.basis).lower()
-    floor = ISDF_GRID_ACCURACY.get(basis, {}).get(level)
-    why = ('the ISDF energy depends on the orientation of each atom\'s '
-           'interpolation cloud and the atomic frames turn the clouds as the '
-           'atoms move, so on a coarse grid the surface is rough on the '
-           'step\'s scale and its force constants are wrong even though the '
-           'force is exact (formaldehyde/cc-pVDZ/B3LYP: 1362 cm^-1 off at 148 '
-           'points per atom, 405 at G2, 11 at G3)')
-    if floor is None:
-        raise NotImplementedError(
-            f'no ISDF grid is validated at {level} for {mf.mol.basis}, so a '
-            f'finite-difference Hessian of this ISDF-K mean field has no grid '
-            f'it may be built on: {why}.')
     got = isdf_grid_counts(with_df)
     if got is None:
         raise NotImplementedError(
             'this ISDF-K mean field was handed its interpolation points from '
             f'outside, so its grid cannot be checked against the {level} '
-            f'floor a finite-difference Hessian needs: {why}.')
-    short = {el: c for el, c in got.items()
+            f'floor a finite-difference Hessian needs: {ROUGH_GRID}.')
+    require_hessian_counts(mf.mol.basis, got, level)
+
+
+def require_hessian_counts(basis, counts, level=ISDF_HESSIAN_MIN_GRID):
+    """Raise unless every element's (A1, A2, A3, B1) shell counts at `basis`
+    reach the `level` grid a finite-difference ISDF-K Hessian needs.
+
+    The check of `require_hessian_grid` on the counts alone, so a driver can
+    refuse a Hessian grid before it converges the first SCF.
+    counts: {element: (A1, A2, A3, B1)}.
+    """
+    floor = ISDF_GRID_ACCURACY.get(str(basis).lower(), {}).get(level)
+    if floor is None:
+        raise NotImplementedError(
+            f'no ISDF grid is validated at {level} for {basis}, so a '
+            f'finite-difference Hessian of this ISDF-K mean field has no grid '
+            f'it may be built on: {ROUGH_GRID}.')
+    short = {el: tuple(c) for el, c in counts.items()
              if any(n < f for n, f in zip(c, floor))}
     if short:
         listed = ', '.join(f'{el} {c}' for el, c in sorted(short.items()))
         raise NotImplementedError(
             f'a finite-difference Hessian of an ISDF-K mean field needs the '
-            f'{level} grid {tuple(floor)} at {mf.mol.basis} or more on every '
-            f'element, and this one has {listed}: {why}.')
+            f'{level} grid {tuple(floor)} at {basis} or more on every '
+            f'element, and this one has {listed}: {ROUGH_GRID}.')
 
 
 def gradient_at(mol, scf_factory, ia, x, sign, step=NUCLEAR_FD_STEP):

@@ -198,14 +198,18 @@ def relax_state(surface, mol=None, engine='auto', **kw):
     """
     mol_opt, info = relax(surface, mol, engine=engine, **kw)
     mf = surface_mean_field(surface, mol_opt)
-    record = {'mol': mol_opt, 'mf': mf,
-              'e_total': surface.total_energy(mol_opt, mf),
-              'e_scf': float(mf.e_tot), 'info': info}
-    # An excited surface carries its excitation energy alongside the total; a
+    # An excited surface carries its excitation energy alongside the total,
+    # both off ONE forward pass: its `energy` is (E_0 + Omega, ..., Omega). A
     # ground-state one has none, and reporting a zero there would read as a
     # degeneracy.
-    if hasattr(surface, 'excitation'):
-        record['omega'] = surface.excitation(mol_opt, mf)
+    excited = hasattr(surface, 'excitation')
+    energies = surface.energy(mol_opt, mf) if excited else None
+    record = {'mol': mol_opt, 'mf': mf,
+              'e_total': (energies[0] if excited
+                          else surface.total_energy(mol_opt, mf)),
+              'e_scf': float(mf.e_tot), 'info': info}
+    if excited:
+        record['omega'] = energies[-1]
     # WHAT WAS RELAXED, carried with the number. A surface built through
     # `potential_energy_surface` knows which functional its E_0 is and which
     # realization computed it; one built by hand does not, and None is how the

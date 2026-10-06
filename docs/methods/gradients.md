@@ -68,6 +68,12 @@ used. Under MPI the work of a force is split over the ranks in fixed pieces,
 so the result does not depend on the number of ranks beyond the order of one
 final sum (see [Threads and MPI](../parallel.md)).
 
+Several excited states at one geometry, for example a singlet and a triplet,
+can share one evaluation: the mean field, the factors, the screening and the
+quasiparticle energies are computed once, then each spin is solved and each
+force is taken from them. The numbers are the same as evaluating each state
+on its own.
+
 `examples/16_numerical_hessian_from_gradient.py` builds a vibrational analysis
 from the gradient by central differences, and
 `examples/15_excited_state_geometry_optimization.py` relaxes an excited state.

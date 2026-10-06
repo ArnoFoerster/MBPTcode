@@ -546,6 +546,36 @@ SCF_GRAD_TOL = 1e-9
 SCF_ENERGY_CONV_TOL = 1e-10
 SCF_ENERGY_GRAD_TOL = 1e-7
 
+# Orbital-gradient norms |g| = ||2 F_vo||_F at which an SCF's record notes the
+# first cycle below: the energy-only threshold, the force path's, and two
+# decades between.
+SCF_HISTORY_GRAD_MARKS = (1e-7, 1e-9, 1e-11)
+
+# Bohr. Largest atomic displacement over which an SCF along a walk starts
+# from the previous geometry's converged density rather than the atomic
+# guess: optimizer steps and finite-difference displacements are below the
+# optimizer's trust ceiling of 0.5 Bohr; a reoriented copy of the molecule is
+# not, and starts afresh.
+SCF_WARM_START_MAX_SHIFT = 0.5
+
+# The second-order finish of an SCF (`scf_convergence.newton_finished`):
+# pyscf's DIIS loop is run to an orbital gradient of SCF_NEWTON_FINISH_FROM
+# with the energy-only conv_tol, then exact Newton steps on the orbital
+# Hessian take it to the mean field's own conv_tol_grad. Each step solves
+# H x = -g by preconditioned conjugate gradients to a residual of
+# SCF_NEWTON_RESIDUAL_FRACTION x conv_tol_grad (the next gradient is that
+# residual plus O(|x|^2), so one step from 1e-7 reaches a 1e-11 target),
+# with at most SCF_NEWTON_MAX_HOPS Hessian products (one response Fock build
+# each) per step and SCF_NEWTON_MAX_STEPS steps.
+SCF_NEWTON_FINISH_FROM = SCF_ENERGY_GRAD_TOL
+SCF_NEWTON_DIIS_CONV_TOL = SCF_ENERGY_CONV_TOL
+SCF_NEWTON_RESIDUAL_FRACTION = 0.1
+SCF_NEWTON_MAX_HOPS = 40
+SCF_NEWTON_MAX_STEPS = 4
+# Ha. Smallest |2 (F_aa - F_ii)| the Newton solve's diagonal preconditioner
+# divides by: a near-degenerate pair across the gap is not divided by zero.
+SCF_NEWTON_PRECOND_FLOOR = 1e-2
+
 # What a mean field is converged to when it will be differentiated. The
 # Lagrangian assumes the occupied-virtual Fock block vanishes, so a loose SCF
 # biases the force rather than degrading it gracefully: the force moves by
@@ -755,6 +785,13 @@ GEOM_OPT_CONV = {'opt_grad_max': 4.5e-4, 'grad_rms': 3.0e-4,
 # The deprecated spelling of the same threshold. `optimize` accepts either
 # spelling and refuses the two disagreeing.
 GEOM_OPT_CONV['grad_max'] = GEOM_OPT_CONV['opt_grad_max']
+
+# Bohr. geomeTRIC carries a geometry in Angstrom through its own Bohr radius
+# (CODATA 2018, 3.2e-11 relative from BOHR_TO_ANGSTROM), so the start it
+# hands back is the given one displaced by ~1e-10 Bohr. A requested geometry
+# within this of the walk's start is the start, evaluated at its own bits,
+# which is what lets a surface's first point (`FirstPoint`) answer it.
+GEOMETRIC_START_TOL = 1e-8
 
 # Conformer search over the soft torsions of a twisted emitter.
 # A bond is drawn when the internuclear distance is within this factor of the

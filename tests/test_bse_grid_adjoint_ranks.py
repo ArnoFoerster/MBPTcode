@@ -328,10 +328,13 @@ def traced_grid_forces(comm, factory_of):
                                       for a in out)))
         return out
 
-    def folded(pieces, *own):
-        result = fold(pieces, *own)
-        calls[-1]['refold'] = np.asarray(fold(pieces, *[
-            np.array(a, copy=True) for a in calls[-1]['ref']])[0])
+    def folded(pieces, *own, **fold_kw):
+        # the refold first, keeping the tape the probed fold may release
+        refold = np.asarray(fold(pieces, *[
+            np.array(a, copy=True) for a in calls[-1]['ref']],
+            release_tape=False)[0])
+        result = fold(pieces, *own, **fold_kw)
+        calls[-1]['refold'] = refold
         return result
 
     chain._casida_seeds, chain._fold_to_nuclei = seeds, folded
