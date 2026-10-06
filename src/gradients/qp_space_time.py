@@ -100,6 +100,38 @@ def frozen_newton_seed(w0, p, eps, nocc, offset):
     return float(w0)
 
 
+def static_term(xc_correction, si):
+    """The static term <p|Sigma_x - v_xc|p> + Sigma^env_pp the si-th state of
+    a set is solved with: one entry per state, or one scalar for all."""
+    return (float(np.asarray(xc_correction).ravel()[si])
+            if np.ndim(xc_correction) else float(xc_correction))
+
+
+def frozen_on_pole_model(p, w0, sop_poles):
+    """Whether the reference solve put orbital p on the pole model: True with
+    its poles frozen, False with its root frozen and no poles, None before.
+
+    The Newton start is eps_p at the reference solve and the frozen root
+    after it, and the quasiparticle correction can carry a state across the
+    Eq. (27) limit (formaldehyde PBE0 orbitals 4, 5 and 10), so the verdict is
+    frozen with the root and the poles, as the scissor tiers are; only a state
+    with nothing frozen reads `compressible` at its Newton start.
+    """
+    if isinstance(sop_poles, Mapping) and sop_poles.get(int(p)) is not None:
+        return True
+    if isinstance(w0, Mapping) and w0.get(int(p)) is not None:
+        return False
+    return None
+
+
+def pole_model_admitted(p, start, eps, nocc, w0, sop_poles):
+    """Eq. (27)'s verdict on orbital p: the frozen one once the reference
+    solve has decided it (`frozen_on_pole_model`), else `compressible` at the
+    Newton start."""
+    frozen = frozen_on_pole_model(p, w0, sop_poles)
+    return compressible(start, eps, nocc)[0] if frozen is None else frozen
+
+
 def _stride_kw(sop_stride):
     """`stride=` for `sop_from_wc`, or nothing when the default is wanted.
 
@@ -182,7 +214,7 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     serial poles bitwise; `sop_model` then reads them as frozen poles, and
     the amplitudes are the call `sop_from_wc` would have made. The states
     fitted are those pass 1 sends to the pole model (route, scissor tier,
-    compression condition at the Newton start) and has no frozen poles for.
+    Eq. (27)'s verdict, `pole_model_admitted`) and has no frozen poles for.
     """
     if residue_route != 'sop':
         return sop_poles
@@ -194,7 +226,8 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
         offset, _ = frozen_pole_offset(pole_offset, p)
         start = frozen_newton_seed(w0, p, eps, nocc, offset)
         route, _ = scissor_route(scissor, p, eps, nocc, start)
-        if route == 'sop' and compressible(start, eps, nocc)[0]:
+        if route == 'sop' and pole_model_admitted(p, start, eps, nocc, w0,
+                                                  sop_poles):
             need.append(si)
     if not need:
         return sop_poles
@@ -301,8 +334,9 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                    screening is never evaluated off the imaginary axis. A
                    state that Eq. (27) does not admit falls back to 'auto';
                    `route_out['residue_route']` says which ran. The decision
-                   is taken at the Newton start, frozen like every other
-                   branch here.
+                   is taken at the reference solve's Newton start and then
+                   frozen with the root and the poles
+                   (`frozen_on_pole_model`), like every other branch here.
     pole_offset:   the Newton's guard band, frozen by the caller
                    (`frozen_pole_offset`); None relaxes it per geometry.
     w0:            the Newton's start, a scalar or a mapping orbital -> energy
@@ -355,7 +389,8 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     shift = None
     if route == 'sop':
         route, shift = scissor_route(scissor, p, eps, nocc, start)
-        if route == 'sop' and not compressible(start, eps, nocc)[0]:
+        if route == 'sop' and not pole_model_admitted(p, start, eps, nocc, w0,
+                                                      sop_poles):
             route = 'auto'
     if route == 'auto':
         route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
@@ -667,17 +702,19 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         # Per state: <p|Sigma_x - v_xc|p> differs from orbital to orbital. A
         # scalar is accepted, and is right on Hartree-Fock, where every entry
         # is zero.
-        xc_p = (float(np.asarray(xc_correction).ravel()[si])
-                if np.ndim(xc_correction) else float(xc_correction))
+        xc_p = static_term(xc_correction, si)
         offset, relax = frozen_pole_offset(pole_offset, p)
         start = frozen_newton_seed(w0, p, eps, nocc, offset)
         route = residue_route
         # A state Eq. (27) does not admit cannot be carried by the pole model
-        # at any M, so it takes the residue route and the record says so.
+        # at any M, so it takes the residue route and the record says so. The
+        # verdict is the reference solve's once it has frozen the root and the
+        # poles (`frozen_on_pole_model`).
         shift = None
         if route == 'sop':
             route, shift = scissor_route(scissor, p, eps, nocc, start)
-            if route == 'sop' and not compressible(start, eps, nocc)[0]:
+            if route == 'sop' and not pole_model_admitted(
+                    p, start, eps, nocc, w0, sop_poles):
                 route = 'auto'
         if route == 'auto':
             route = residue_route_auto(grid, eps, nocc, start, laplace_tol)

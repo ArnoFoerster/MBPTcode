@@ -104,7 +104,7 @@ from src.gradients.isdf_derivatives import (GaugeAdjoint, qp_xc_correction,
 from src.properties.nonadiabatic import (follow_state, mo_overlap,
                                          state_overlap)
 from src.gradients.qp_space_time import (qp_gradient_space_time,
-                                         qp_set_gradient)
+                                         qp_set_gradient, static_term)
 from src.gradients.space_time_adjoint import (chi0_backward,
                                               chi0_backward_rows)
 
@@ -422,7 +422,7 @@ class ExcitedStateChain(FactorChain):
             kw['tile_gb'] = self.tile_gb
         return kw
 
-    def _freeze_newton_branch(self, route_out):
+    def _freeze_newton_branch(self, route_out, eps, xc_correction, states):
         """Keep the guard band, the root and the pole set each quasiparticle
         solve resolved to, once. True when a calibrated shift was added and
         the solve has to be repeated to read it.
@@ -431,6 +431,16 @@ class ExcitedStateChain(FactorChain):
         displaces it, so `setdefault` freezes that one: a displaced geometry
         reports what it used, starts from the reference root, evaluates the
         pole model on the reference poles and changes none of them.
+
+        eps, xc_correction, states: what the solve read, xc_correction per
+        state of `states` (or one scalar), so the calibrated shift is taken
+        off the same numbers the 'scissor' route adds it back to.
+
+        The calibrated shift is Sigma_c,pp(w_p) alone: the 'scissor' route
+        returns eps_p + xc_p + s_p with the static term
+        xc_p = <p|Sigma_x - v_xc|p> + Sigma^env_pp, and the root solved here is
+        w_p = eps_p + xc_p + Sigma_c,pp(w_p), so s_p = w_p - (eps_p + xc_p)
+        puts the state on its own root at this geometry.
         """
         for p, off in route_out.get('pole_offsets', {}).items():
             self.pole_offsets.setdefault(int(p), float(off))
@@ -444,12 +454,13 @@ class ExcitedStateChain(FactorChain):
         # Tier the states the route sent to the real axis. A second reading of
         # Eq. (27) would test the root where the route tested the start, and
         # disagree on the marginal states.
-        eps0 = np.asarray(self.mf0.mo_energy, float)
+        static = {int(p): static_term(xc_correction, si)
+                  for si, p in enumerate(np.atleast_1d(states))}
         grew = False
         for p, route in self._routes_taken(route_out).items():
             if route in ('sop', 'scissor') or p in self.scissor_map:
                 continue
-            self.scissor_map[p] = float(roots[p]) - float(eps0[p])
+            self.scissor_map[p] = float(roots[p]) - float(eps[p] + static[p])
             grew = True
         return grew
 
@@ -497,7 +508,8 @@ class ExcitedStateChain(FactorChain):
             # matters: freezing on a pass that grew the grid would
             # `setdefault` the roots of an under-resolved quadrature, so this
             # call must stay inside the `or`.
-            if not (grew or self._freeze_newton_branch(route_out)):
+            if not (grew or self._freeze_newton_branch(
+                    route_out, eps, xc_correction, states)):
                 break
         return out, route_out
 
@@ -558,7 +570,7 @@ class ExcitedStateChain(FactorChain):
             mask[self.qp_set] = False
         return mask
 
-    def _freeze_outside_shift(self, eps, ws):
+    def _freeze_outside_shift(self, eps, ws, env=None):
         """Calibrate the scissor the orbitals outside the set carry, once.
 
         `calibrate_scissor` gives every outside orbital the quasiparticle
@@ -574,12 +586,30 @@ class ExcitedStateChain(FactorChain):
         d(shift)/dR into a force that has no term for it. Its constancy is
         what lets `_fold_to_nuclei` send an outside orbital's seed straight to
         the mean-field eigenvalue.
+
+        In a continuum the shift is the probe's GW correction alone: the
+        probe's root solves w = eps_q + <q|Sigma_x - v_xc|q> + Sigma_c,qq(w)
+        + Sigma^env_qq, and every orbital outside the set gets its own
+        Sigma^env_pp on the diagonal (`_env_static_outside`), so the scissor
+        transfers w - eps_q - Sigma^env_qq (Duchemin, Jacquemin and Blase,
+        J. Chem. Phys. 144, 164106 (2016), Eq. (18)). In the gas phase `env`
+        is None and the shift is the root minus eps.
         """
         if self.outside_shift is not None:
             return
         roots = {int(p): float(w) for p, w in zip(self.qp_set, ws)}
         outside = np.flatnonzero(self._outside_window(len(eps)))
-        self.outside_shift = calibrate_scissor(eps, self.nocc, roots, outside)
+        self.outside_shift = calibrate_scissor(
+            eps, self.nocc, self._env_free(roots, env), outside)
+
+    @staticmethod
+    def _env_free(values, env):
+        """{p: v_p - <p|Sigma^env|p>}: a value without its orbital's own
+        Eq. (18) term, which every orbital outside the set gets on its own."""
+        if env is None:
+            return dict(values)
+        return {int(p): float(v) - float(env[int(p)])
+                for p, v in values.items()}
 
     def outside_record(self):
         """What the orbitals outside the quasiparticle set carry, in eV.
@@ -805,7 +835,7 @@ class ExcitedStateChain(FactorChain):
             # environment's static term below is added on top of it, not
             # instead of it.
             if self.outside == 'scissor':
-                self._freeze_outside_shift(eps, ws)
+                self._freeze_outside_shift(eps, ws, shift)
                 for p in np.flatnonzero(self._outside_window(len(eps))):
                     scissor_p = frozen_scissor(self.outside_shift, p)
                     if scissor_p is not None:
@@ -1107,18 +1137,17 @@ class ExcitedStateChain(FactorChain):
         # Hartree-Fock it is zero.
         d_sigma = d if d_bare is None else d_bare
         self._size_cd_grid(x_mo, d_sigma, eps, mu, mf, shift, orb)
+        xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         qp_out = {}
         with self.phase('t_qp'):
             out = qp_gradient_space_time(x_mo, d_sigma,
                                          eps, self.nocc, self.gw_grid,
                                          self.nu, self.wt, orb, mu=mu,
                                          want_grad=False,
-                                         xc_correction=float(
-                                             self._xc_correction(
-                                                 mf, [orb], shift)[0]),
+                                         xc_correction=xc_orb,
                                          route_out=qp_out,
                                          **self._qp_kw())
-        self._freeze_newton_branch(qp_out)
+        self._freeze_newton_branch(qp_out, eps, xc_orb, [orb])
         return float(out[0])
 
     def quasiparticle_gradient(self, offset=0, mol=None, mf=None):
@@ -1135,15 +1164,15 @@ class ExcitedStateChain(FactorChain):
         orb = self.nocc - 1 + offset
         d_sigma = d if d_bare is None else d_bare
         self._size_cd_grid(x_mo, d_sigma, eps, mu, mf, shift, orb)
+        xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         qp_out = {}
         with self.phase('t_qp_backward'):
             w_star, z_fac, eps_bar, x_bar, d_bar = qp_gradient_space_time(
                 x_mo, d_sigma, eps, self.nocc,
                 self.gw_grid, self.nu, self.wt, orb,
-                mu=mu, want_grad=True,
-                xc_correction=float(self._xc_correction(mf, [orb], shift)[0]),
+                mu=mu, want_grad=True, xc_correction=xc_orb,
                 route_out=qp_out, **self._qp_kw())
-        self._freeze_newton_branch(qp_out)
+        self._freeze_newton_branch(qp_out, eps, xc_orb, [orb])
         # The correction carries Z, not 1: the Newton condition is
         # w = eps_p + Delta_p + Sigma_c(w), so every term on the right,
         # Delta_p included, is renormalized by Z = [1 - dSigma_c/dw]^-1 on its
