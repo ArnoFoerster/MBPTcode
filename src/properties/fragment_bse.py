@@ -73,6 +73,7 @@ from scipy.linalg import eigh, null_space
 from src.Base.constants import (FRAGMENT_DAVIDSON_EXTRA_ROOTS,
                                 FRAGMENT_DAVIDSON_MIN_SPACE,
                                 FRAGMENT_GUARD_NEWTON_TOL,
+                                FRAGMENT_PHASE_SEED,
                                 FRAGMENT_POLE_MARGIN, FRAGMENT_SOLVE_TOL,
                                 FRAGMENT_DENSE_MAX,
                                 FRAGMENT_MATRIX_FREE_DENSE_MAX)
@@ -205,6 +206,25 @@ def split_xy(v, n_ov):
     if v.shape[0] == n_ov:
         return v, np.zeros_like(v)
     return v[:n_ov], v[n_ov:]
+
+
+def diabat_phase(orbitals, v):
+    """+1 or -1: the sign that makes a^T T b positive, where T = C_occ (X + Y)
+    C_vir^T is the AO transition density of the local-basis vector `v` (X
+    stacked on Y for the full BSE) and a, b are two fixed generic AO vectors
+    drawn from FRAGMENT_PHASE_SEED.
+
+    T does not depend on the local orbitals' signs, order or rotations inside
+    a fragment, so the sign survives a local orbital whose own sign symmetry
+    leaves to the last bits (ethylene's pi*). a^T T b of generic a and b has
+    no zero that symmetry forces, and it changes smoothly with the nuclei.
+    """
+    x, y = split_xy(np.asarray(v, float), orbitals.nocc * orbitals.nvir)
+    t = (x + y).reshape(orbitals.nocc, orbitals.nvir)
+    a, b = np.random.default_rng(FRAGMENT_PHASE_SEED).standard_normal(
+        (2, orbitals.c_occ.shape[0]))
+    overlap = float((orbitals.c_occ.T @ a) @ t @ (orbitals.c_vir.T @ b))
+    return 1.0 if overlap >= 0.0 else -1.0
 
 
 class FragmentCanonical:
@@ -499,10 +519,9 @@ class FragmentPartition:
                             if others.size else np.inf)
                 col = np.zeros(dim)
                 col[rows] = v[:, s]
-                # the phase convention is the LOCAL basis's: largest local
-                # X component positive, whatever basis the block was solved in
-                loc = work.to_local(col[:, None])[:n_ov, 0]
-                col *= np.sign(loc[np.abs(loc).argmax()])
+                # the phase is the transition density's (`diabat_phase`),
+                # whatever basis the block was solved in
+                col *= diabat_phase(orbitals, work.to_local(col[:, None])[:, 0])
                 p_cols.append(col)
                 labels.append(f'{name}.{s}')
                 block_rows.append(rows)

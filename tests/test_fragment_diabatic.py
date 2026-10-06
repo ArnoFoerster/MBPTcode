@@ -13,6 +13,10 @@ WHAT EACH GATE IS FOR:
   orbitals are rotated INSIDE a fragment: the diabats depend on the fragment
   subspaces only. That invariance is what lets the analytic gradient ignore
   the near-flat intra-fragment directions of the localization functional.
+  It holds SIGNED, couplings included, and under a local orbital's sign
+  flip too: the diabats' phase is their transition density's, which
+  ethylene's pi* (equal and opposite coefficients on its two carbons) cannot
+  flip.
 - the partition is exact: Sigma and dSigma/dOmega equal a dense Feshbach
   oracle, the roots of A_eff(Omega) c = Omega c with complete Q equal the full
   TDA eigenvalues, and Z equals the exact P weight of the full eigenvector.
@@ -187,11 +191,22 @@ def test_diabats_depend_on_the_fragment_subspaces_only(operator, orbitals,
     turned = dataclasses.replace(
         orbitals, u_occ=rotate(orbitals.u_occ, orbitals.occ_labels),
         u_vir=rotate(orbitals.u_vir, orbitals.vir_labels))
-    other = FragmentPartition.build(operator, turned, SITES,
-                                    omega0=partition.omega0)
-    # off-diagonal elements up to the diabats' phase convention
-    assert np.abs(np.abs(other.a_eff) - np.abs(partition.a_eff)).max() < 1e-10
-    assert np.abs(np.diag(other.a_eff) - np.diag(partition.a_eff)).max() < 1e-10
+    # a local orbital's sign is what symmetry leaves to the last bits
+    # (ethylene's pi*): fragment 0's virtuals flipped
+    flipped = dataclasses.replace(
+        orbitals, u_vir=orbitals.u_vir * np.where(orbitals.vir_labels == 0,
+                                                  -1.0, 1.0))
+    for case, orbs in (('rotated', turned), ('flipped', flipped)):
+        other = FragmentPartition.build(operator, orbs, SITES,
+                                        omega0=partition.omega0)
+        # signed: the diabats' phase is their transition density's
+        # (`fragment_bse.diabat_phase`), which no local orbital's sign moves
+        for name, a, b in (('a_eff', other.a_eff, partition.a_eff),
+                           ('sigma', other.sigma, partition.sigma),
+                           ('dsigma', other.dsigma, partition.dsigma),
+                           ('p', other.p_canonical(),
+                            partition.p_canonical())):
+            assert np.abs(a - b).max() < 1e-10, (case, name)
 
 
 def test_partition_is_the_exact_feshbach_elimination(operator, orbitals,

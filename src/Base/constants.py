@@ -635,6 +635,9 @@ FRAGMENT_DAVIDSON_MIN_SPACE = 80
 # positive eigenvalue on Q. It sharpens the reported value only, not the
 # guard's verdict.
 FRAGMENT_GUARD_NEWTON_TOL = 1e-6
+# Seed of the two generic AO vectors a, b that fix each diabat's sign: the
+# sign of a^T T b, T its AO transition density (`fragment_bse.diabat_phase`).
+FRAGMENT_PHASE_SEED = 20261006
 
 # How many orbitals past the frontier are solved to find the lowest-energy
 # attachment or removal: G0W0 reorders states relative to the mean field, so
