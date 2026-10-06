@@ -1,4 +1,4 @@
-"""The contour deformation in production is the code it replaced, BITWISE.
+"""The contour deformation in production equals its reference copy, bitwise.
 
 `SingleReference/GW/contour_deformation.py` holds the forward physics,
 `SingleReference/GW/real_screening.py` the explicit real-frequency screening,
@@ -7,19 +7,16 @@ and `gradients/contour_deformation_adjoint.py` the adjoints. A move is only a
 move if the numbers do not change, so every gate here is `array_equal`, not a
 tolerance.
 
-Every gate below was shown to fail once, by breaking in the source what the
-gate watches and running this file against it:
+Every gate below fails when the source it watches is broken:
 
   * the Newton step, -(w - eps_p - xc - s)/(1 - sp) signed + in
     `Solvers.qp_equation`: both flat-screening guards, the refusal, the
-    capture fallback, the frozen guard and water fail. One step from the
-    oxygen 1s start of water/cc-pVDZ goes to -21.141598284733 Ha correctly
-    and to -19.956969423548 Ha flipped, 1.18 Ha apart, and the iterate lists
-    then share nothing past their first entry.
+    frozen guard and water fail. One step from the oxygen 1s start of
+    water/cc-pVDZ goes to -20.117866411565 Ha correctly and to
+    -20.980701296715 Ha flipped, 0.86 Ha apart, and the iterate lists then
+    share nothing past their first entry.
   * the residue term of Sigma dropped in `sigma_cd`: 2 fail. It is worth
-    8.1e-3 Ha on that oxygen 1s, 0.519747765714 against 0.511673049707 Ha,
-    and without it the capture model is no longer captured at all -- no
-    Newton of it ever reaches the pole of the neighbouring orbital.
+    8.1e-3 Ha on that oxygen 1s, 0.520811747276 against 0.512737031268 Ha.
   * the imaginary-axis d-slope of `frequency_factor`, -2 (w^2 - d^2)/den^2
     signed +: 1 fail. On the pair energies that gate samples, 0.05 to 3 Ha,
     the flip moves the slope by 1.0e+03 at w = 0.017, 3.8e+01 at w = 0.31 and
@@ -68,9 +65,9 @@ from src.gradients import qp_space_time as qst
 from src.gradients import space_time_adjoint as sta
 from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
 
-# --------------------------------------------------------------- the old code
-# Verbatim copies of what was replaced. They are the reference: a gate that
-# recomputed the reference through the new code would gate nothing.
+# --------------------------------------------------------- the reference code
+# Verbatim reference implementations: a gate that recomputed the reference
+# through production would gate nothing.
 
 def _old_f_imaginary(d, nu):
     den = d ** 2 + nu ** 2
@@ -106,8 +103,8 @@ def _reference_newton(p, Bp, eps, nocc, nu_points, nu_weights, wc,
                       C_ov=None, pole_offset=QP_POLE_OFFSET, eta=0.0,
                       real_screening=None, linearize_on_capture=True,
                       relax_offset=True, guard_out=None, trace=None):
-    """The quasiparticle loop of `qp_energy_cd` exactly as it was before the
-    move, with one `trace.append` per self-energy evaluation."""
+    """The reference quasiparticle loop of `qp_energy_cd`, with one
+    `trace.append` per self-energy evaluation."""
     w = float(eps[p] + (pole_offset if p < nocc else -pole_offset)
               if w0 is None else w0)
     common = dict(eta=eta, C_ov=C_ov, real_screening=real_screening)
@@ -195,8 +192,7 @@ def _reference_newton(p, Bp, eps, nocc, nu_points, nu_weights, wc,
         warnings.warn(
             f'the quasiparticle root of orbital {p} lies inside the '
             f'{pole_offset:.0e} Ha pole guard, so the guard was relaxed to '
-            f'{offset:.1e} Ha to reach it. The self-energy quadrature is less '
-            f'accurate that close to the pole; the root is still converged to '
+            f'{offset:.1e} Ha to reach it; the root is converged to '
             f'{tol:.0e}.', RuntimeWarning, stacklevel=2)
     residues = prod.residue_set(eps, nocc, w)
     sp = prod.sigma_cd_slope(p, w, Bp, eps, nocc, nu_points, nu_weights,
@@ -231,14 +227,13 @@ def _reference_newton(p, Bp, eps, nocc, nu_points, nu_weights, wc,
 
 # ------------------------------------------------------------------- the data
 
-#: The synthetic spectra of tests/test_cd_pole_guard.py: a flat screening puts
-#: the root inside the guard (2e-3), outside it (5e-3) or exactly on the pole
-#: (0.0), and the second spectrum drags orbital 4 onto the pole at orbital 3.
+#: The synthetic spectrum of tests/test_cd_pole_guard.py: a flat screening puts
+#: the root inside the guard (-4e-3), outside it (-1e-2) or exactly on the pole
+#: (0.0).
 GUARD_EPS = np.array([-0.9, -0.6, -0.35, 0.15, 0.4, 0.8])
 GUARD_NOCC = 3
 GUARD_NU = np.array([0.05, 0.3, 1.0, 4.0])
 GUARD_WT = np.array([0.1, 0.3, 0.8, 3.0])
-CAPTURE_EPS = np.array([-0.9, -0.6, -0.35, 0.15, 0.20, 0.8])
 
 
 @pytest.fixture(scope='module')
@@ -257,17 +252,6 @@ def water():
     c_ov = b[:, occ, :][:, :, virt].reshape(b.shape[0], -1)
     nu, wt = gauss_legendre_grid(48, gap_scaled_w0(eps, nocc))
     return eps, nocc, b, c_ov, nu, wt
-
-
-def capture_model():
-    """(p, Bp, C_ov, wc) whose Newton is captured by the pole at orbital 3."""
-    rng = np.random.default_rng(7)
-    b = rng.normal(scale=0.15, size=(3, len(CAPTURE_EPS), len(CAPTURE_EPS)))
-    b = 0.5 * (b + b.transpose(0, 2, 1))
-    c_ov = b[:, :GUARD_NOCC, GUARD_NOCC:].reshape(
-        3, GUARD_NOCC * (len(CAPTURE_EPS) - GUARD_NOCC))
-    wc = np.full((len(GUARD_NU), len(CAPTURE_EPS)), 0.16)
-    return 4, b[:, 4, :], c_ov, wc
 
 
 def states(nocc):
@@ -332,7 +316,7 @@ def test_frequency_factor_reproduces_the_old_formulas():
 
 
 def test_the_rpa_frequency_factor_is_untouched():
-    """`_f_rpa` now delegates on the imaginary axis and for eta != 0 on the
+    """`_f_rpa` delegates on the imaginary axis and for eta != 0 on the
     real one. Its two other branches keep their own spelling: w = 0 is the
     static limit, and eta = 0 is a/(a^2+0) - b/(b^2+0), which differs from
     1/a - 1/b in the last bits (5.7e-14 on these pair energies).
@@ -353,10 +337,11 @@ def test_the_rpa_frequency_factor_is_untouched():
     assert np.abs(shared - own).max() < 1e-12
 
 
-@pytest.mark.parametrize('screening', [2e-3, 5e-3])
+@pytest.mark.parametrize('screening', [-4e-3, -1e-2])
 def test_the_guarded_newton_reproduces_the_old_loop_on_the_guard(screening):
-    """Same iterates, same root, same Z, same warnings -- the flat-screening
-    models where the root sits inside and outside the pole guard."""
+    """Same iterates, root, Z and warnings on the flat-screening models whose
+    root sits inside and outside the pole guard (physical sign, W^c(0) < 0;
+    tests/test_cd_pole_guard.py)."""
     Bp = np.zeros((3, len(GUARD_EPS)))
     wc = np.full((len(GUARD_NU), len(GUARD_EPS)), screening)
     ref_trace, new_trace = [], []
@@ -390,35 +375,9 @@ def test_a_root_on_the_pole_is_refused_with_the_same_words():
     assert str(new.value) == str(ref.value)
 
 
-def test_the_capture_fallback_reproduces_the_old_loop():
-    """The branch that ends on a POLE of another orbital, not on a root."""
-    p, Bp, c_ov, wc = capture_model()
-    ref_trace, new_trace = [], []
-    with warnings.catch_warnings(record=True) as ref_caught:
-        warnings.simplefilter('always')
-        w_ref, z_ref, res_ref = _reference_newton(
-            p, Bp, CAPTURE_EPS, GUARD_NOCC, GUARD_NU, GUARD_WT, wc, C_ov=c_ov,
-            trace=ref_trace)
-    with warnings.catch_warnings(record=True) as new_caught:
-        warnings.simplefilter('always')
-        w_new, z_new, res_new = _traced_solve(
-            p, Bp, CAPTURE_EPS, GUARD_NOCC, GUARD_NU, GUARD_WT, wc, new_trace,
-            C_ov=c_ov)
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter('always')
-        assert prod.qp_energy_cd(p, Bp, CAPTURE_EPS, GUARD_NOCC, GUARD_NU,
-                                 GUARD_WT, wc=wc,
-                                 C_ov=c_ov)[:2] == (w_new, z_new)
-    assert new_trace == ref_trace
-    assert w_new == w_ref and z_new == z_ref and res_new == res_ref
-    assert ([str(c.message) for c in new_caught]
-            == [str(c.message) for c in ref_caught])
-    assert any('captured by the pole' in str(c.message) for c in new_caught)
-
-
 def test_the_frozen_guard_warns_exactly_as_it_did():
     Bp = np.zeros((3, len(GUARD_EPS)))
-    wc = np.full((len(GUARD_NU), len(GUARD_EPS)), 2e-3)
+    wc = np.full((len(GUARD_NU), len(GUARD_EPS)), -4e-3)
     ref_guard, new_guard = {}, {}
     with warnings.catch_warnings(record=True) as ref_caught:
         warnings.simplefilter('always')
@@ -481,7 +440,7 @@ def test_the_residue_term_is_what_the_gate_is_worth(water):
 
 def test_a_flipped_newton_step_would_not_survive_the_gate(water):
     """The iterate comparison is sensitive to the step itself, not only to the
-    root: one step from the core start goes 1.18 Ha the other way."""
+    root: one step from the core start goes 0.86 Ha the other way."""
     eps, nocc, b, c_ov, nu, wt = water
     d = ov_energies(eps, nocc)
     bp = b[:, 0, :]
@@ -493,7 +452,7 @@ def test_a_flipped_newton_step_would_not_survive_the_gate(water):
     sp = prod.sigma_cd_slope(0, w, bp, eps, nocc, nu, wt, res, wc, C_ov=c_ov)
     good = w - (w - eps[0] - s) / (1.0 - sp)
     flipped = w + (w - eps[0] - s) / (1.0 - sp)
-    assert abs(good - flipped) > 1.0, abs(good - flipped)
+    assert abs(good - flipped) > 0.5, abs(good - flipped)
 
 
 def test_the_frequency_blocks_are_the_same_generator(monkeypatch):

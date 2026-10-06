@@ -79,7 +79,7 @@ GRID_NUMERICS = frozenset({'basis', 'auxbasis', 'counts', 'radii', 'n_start',
 EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
                               'sop_stride', 'bse_conv_tol', 'degeneracy_tol',
                               'dense_max_nov', 'nroots', 'e_min_below_gap',
-                              'cd_pole_resolution', 'tile_gb', 'bse_adjoint'})
+                              'tile_gb', 'bse_adjoint'})
 
 #: Numeric keywords `RPAGroundStateChain` reads. Its imaginary-time count and
 #: its frequency quadrature are named apart from the GW ones: they integrate
@@ -329,7 +329,6 @@ def excited_numerics(chain):
             'dense_max_nov': int(chain.dense_max_nov),
             'bse_conv_tol': float(chain.bse_conv_tol),
             'degeneracy_tol': float(chain.degeneracy_tol),
-            'cd_pole_resolution': float(chain.cd_pole_resolution),
             'bse_adjoint': chain.bse_adjoint}
 
 

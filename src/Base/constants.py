@@ -278,19 +278,21 @@ PCM_CROSS_TERM_STEP = 1e-2
 # (src/SingleReference/GW/contour_deformation.py). A pole of G at
 # |omega - eps_q| below RESIDUE_ON_CONTOUR_TOL counts as on the contour.
 # QP_POLE_OFFSET is how far off an orbital energy the quasiparticle iteration
-# is kept: at omega = eps_q the imaginary-axis integrand collapses onto nu = 0
-# and no quadrature resolves it (water/cc-pVDZ: exact to 3e-14 at 1e-3, only
-# 5e-6 at 1e-4; a floor, not a tuning knob).
+# is kept. The integral term takes its singular part in closed form
+# (`cd_integral_weights`), so Sigma is continuous through every orbital energy
+# and the offset sets only the Newton's start and the band a frozen path
+# records.
 RESIDUE_ON_CONTOUR_TOL = 1e-10
 QP_POLE_OFFSET = 1e-3
-# The smallest offset the Newton iteration may fall back to when a
-# quasiparticle root lies inside the guard band, where the guard undoes every
-# step and the iteration deadlocks at a fixed point that is not the root.
-QP_POLE_OFFSET_MIN = 1e-6
+# The smallest band the Newton may relax to when a quasiparticle root lies
+# inside the guard, where the guard undoes every step and the iteration
+# deadlocks at a fixed point that is not the root. Ten times the on-contour
+# tolerance: Sigma is exact at that distance, and a dense spectrum can put a
+# real root within 1e-6 Ha of a neighbouring level.
+QP_POLE_OFFSET_MIN = 1e-9
 # Below this pole strength a converged root is a satellite, not the
-# quasiparticle. f(w) = w - eps_p - Sigma(w) diverges at every eps_q, so it has
-# a genuine zero just to either side of each one, with Z = 1/(1 - dSigma/dw)
-# going to zero there because the slope diverges.
+# quasiparticle: Z = 1/(1 - dSigma/dw) collapses beside a pole of Sigma at
+# eps_q -/+ Omega_s.
 QP_POLE_STRENGTH_MIN = 0.1
 # Margin (Hartree) past the residue frequencies of the Newton start that the
 # tau grid must carry for the Laplace residue backend to be chosen: the root
@@ -302,16 +304,6 @@ RPA_ENERGY_NFREQ = 40
 # Gauss-Legendre points on the imaginary-frequency half of a contour
 # deformation.
 CD_NFREQ = 64
-# How far inside the root-to-pole distance the first contour-deformation
-# frequency has to sit. A grid whose smallest node is not well inside the
-# root-to-pole gap loses the Lorentzian spike the pole of G puts on the
-# imaginary-frequency integrand, and the Newton is left on whatever the
-# truncated self-energy has a zero at.
-CD_POLE_RESOLUTION = 40.0
-# Where doubling the contour-deformation grid gives up. A root sitting on a
-# pole of G is resolved by no quadrature, so the growth must stop somewhere
-# and say so rather than run the cost up.
-CD_NFREQ_MAX = 512
 # Imaginary-time points behind the contour-deformation grid. The cosine
 # transform onto the imaginary-frequency quadrature would be converged at 18;
 # a residue asks the same grid for the cosh transform at a real frequency w',
@@ -859,7 +851,7 @@ DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
 # seed serves: it changes every digest, never a verdict between ranks running
 # one tree.
 AGREEMENT_DIGEST_SEED = 1
-# 64-bit words per block of that digest; a throughput knob only (4096 was the
+# 64-bit words per block of that digest; a throughput knob only (4096 is the
 # fastest block length measured for the uint64 matrix-vector product over the
 # blocks, which runs far faster than blake2b over the same bytes).
 AGREEMENT_DIGEST_BLOCK = 4096

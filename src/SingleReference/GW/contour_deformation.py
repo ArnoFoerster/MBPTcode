@@ -31,12 +31,15 @@ C_ov by `wc_explicit` it is O(naux^2 nocc nvirt) per frequency.
 
 WHAT MAKES IT WRONG. A residue frequency landing on a particle-hole transition
 sits on a real pole of chi0, and W and its frequency derivative there are
-arbitrarily large: `residue_pole_distance` reports how close. And omega = eps_q
-puts a pole of G ON the contour, where the integrand of the imaginary-axis term
-collapses onto nu = 0 and no quadrature resolves it -- hence the pole guard of
-the Newton (`Solvers.qp_equation.solve_qp_equation_newton_guarded`), the
-warning when it has to be relaxed, and `root_pole_distance` as the measure of
-the narrowest feature the quadrature was asked to carry.
+arbitrarily large: `residue_pole_distance` reports how close.
+
+OMEGA = EPS_Q IS NOT A POLE. Sigma_c has its poles at eps_q -/+ Omega_s, but
+the split above has a step at eps_q: the integral term jumps by W^c_pq,qp(0)
+and the residue term, gaining or losing q, jumps back by the same amount. The
+integral's jump comes from a Lorentzian of half-width |omega - eps_q| at
+nu = 0, which a fixed quadrature cannot follow once the width falls below its
+smallest node. `cd_integral_weights` integrates that Lorentzian's singular
+part exactly, so the total is continuous through every orbital energy.
 
 The residue SET is a discrete choice, and the total is analytic where it
 changes -- the integral term compensates the jump -- so a gradient freezes the
@@ -46,23 +49,19 @@ in `gradients.contour_deformation_adjoint`.
 
 `solve_qp_energy_contour` is the driver `calc_qp_energy(mode='space-time',
 continuation='cd'|'laplace'|'sop')` enters: one ISDF factorization, one
-proj(tau) sweep, one contour grid sized against the root-to-pole distance, and
-then either this module's Newton or the pole model of `sum_over_poles`. 'cd'
-and 'laplace' solve the SAME equation and differ only in the backend the
-residues read W from: the explicit O(N^4) chi0(w') of
-`real_screening.ExplicitRealScreening`, or the O(N^3) cosh transform of the
-proj(tau) the integral term already built. The cubic one exists only below the
-particle-hole gap and REFUSES above it rather than fall back, because a
-continuation that silently changes route returns a different functional under
-the name asked for.
+proj(tau) sweep, one contour grid, and then either this module's Newton or
+the pole model of `sum_over_poles`. 'cd' and 'laplace' solve the SAME
+equation and differ only in the backend the residues read W from: the
+explicit O(N^4) chi0(w') of `real_screening.ExplicitRealScreening`, or the
+O(N^3) cosh transform of the proj(tau) the integral term already built. The
+cubic one exists only below the particle-hole gap and REFUSES above it rather
+than fall back, because a continuation that silently changes route returns a
+different functional under the name asked for.
 """
-import warnings
-
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (CD_NFREQ, CD_NFREQ_MAX, CD_NTAU,
-                                CD_POLE_RESOLUTION, HARTREE_TO_EV,
+from src.Base.constants import (CD_NFREQ, CD_NTAU, HARTREE_TO_EV,
                                 ISDF_TILE_GB, QP_CD_NEWTON_MAX_ITER,
                                 QP_CD_NEWTON_TOL, QP_POLE_OFFSET,
                                 QP_POLE_OFFSET_MIN, QP_POLE_STRENGTH_MIN,
@@ -135,25 +134,59 @@ def residue_pole_distance(eps, nocc, omega, residues):
     return np.array([np.abs(d - abs(eps[q] - omega)).min() for q, _ in residues])
 
 
-def root_pole_distance(eps, roots, states):
-    """min over p, q != p of |w*_p - eps_q|: the narrowest spike on the contour.
+def cd_integral_weights(de, nu_points, nu_weights):
+    """(c, dc), each (nfreq, norb): Sigma^int = -(1/pi) sum_kq c[k,q] wc[k,q],
+    and dc = dc/d(de), for de = omega - eps.
 
-    Sigma^int weights W(i.nu) by (w - eps_q)/[(w - eps_q)^2 + nu^2], a
-    Lorentzian of half-width d_q = w - eps_q sitting at nu = 0, so this is the
-    smallest feature the imaginary-frequency quadrature has to resolve. The
-    orbital's own pole is excluded: the Newton's guard holds the root away from
-    eps_p by construction, while a root that has walked up to a NEIGHBOURING
-    level is what makes the quadrature the limiting approximation.
-    `residue_pole_distance` is the companion on the real axis, where the poles
-    belong to chi0 rather than to G.
+    The integrand is g_q = de_q / (de_q^2 + nu^2) times wc_q(nu). The exact
+    integral of g_q is (pi/2) sign(de_q) at any width, while a quadrature's
+    goes to zero with de_q once |de_q| drops below its smallest node. So the
+    singular part is integrated in closed form,
+
+        int g wc = c_q int g h  +  int g [wc - c_q h],
+
+    with h = a^2 / (a^2 + nu^2), int g h = (pi/2) sign(de) a / (a + |de|),
+    and c_q = wc_q(0). The remainder vanishes like nu^2 at nu = 0, so the
+    quadrature carries it at any width. wc is even in nu, so wc_q(0) is
+    extrapolated in nu^2 from the two smallest nodes (coefficients about 1.04
+    and -0.04 on Gauss-Legendre), which does not amplify noise in wc. a is
+    four times the median node, about twice the gap. Matching the curvature
+    as well would read it off two nodes 1e-4 Ha apart and multiply the noise
+    of a fitted transform by 1e5.
+
+    In weights: c = W_k g_kq plus, on the two smallest nodes, their
+    extrapolation coefficients times the quadrature's error on g h. Away from
+    every orbital energy that error is negligible; near one it supplies the
+    missing jump. Linear in wc, so every adjoint that pushes W_k g_kq onto
+    wc[k] pushes c[k] instead.
+
+    Residual error at |de| near the smallest node, for
+    wc = Omega^2/(Omega^2 + nu^2) and Omega >= 0.3 Ha: at most 6e-9 of wc(0)
+    on the value and 2e-4 of wc(0) on the slope
+    (`tests/test_cd_singular_part.py`).
     """
-    eps = np.asarray(eps, float)
-    out = np.inf
-    for w, p in zip(np.atleast_1d(roots), np.atleast_1d(states)):
-        d = np.abs(float(w) - eps)
-        d[int(p)] = np.inf
-        out = min(out, float(d.min()))
-    return out
+    de = np.asarray(de, float)
+    nu = np.asarray(nu_points, float)
+    wt = np.asarray(nu_weights, float)
+    den = de[None, :] ** 2 + nu[:, None] ** 2
+    g = de[None, :] / den
+    dg = (nu[:, None] ** 2 - de[None, :] ** 2) / den ** 2
+    c = wt[:, None] * g
+    dc = wt[:, None] * dg
+    k1, k2 = np.argsort(nu)[:2]
+    n1, n2 = nu[k1] ** 2, nu[k2] ** 2
+    a = 4.0 * float(np.median(nu))
+    h = wt * a * a / (a * a + nu ** 2)
+    # inside RESIDUE_ON_CONTOUR_TOL the residue term takes the pole at half
+    # weight, so the closed form takes sign 0 there
+    side = np.where(np.abs(de) < RESIDUE_ON_CONTOUR_TOL, 0.0, np.sign(de))
+    ad = a + np.abs(de)
+    err = 0.5 * np.pi * side * a / ad - h @ g
+    derr = -0.5 * np.pi * a / ad ** 2 - h @ dg
+    for k, coef in ((k1, n2 / (n2 - n1)), (k2, -n1 / (n2 - n1))):
+        c[k] += coef * err
+        dc[k] += coef * derr
+    return c, dc
 
 
 def screening_applied(chi0, Bp):
@@ -272,8 +305,8 @@ def sigma_cd(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues=None,
             wc = wc_explicit(Bp, C_ov, ov_energies(eps, nocc), nu_points)
         else:
             wc = screening_contraction(Bp, wbp)
-    g = de[None, :] / (de[None, :] ** 2 + np.asarray(nu_points)[:, None] ** 2)
-    s_int = -float(np.asarray(nu_weights) @ np.einsum('kq,kq->k', g, wc)) / np.pi
+    c, _ = cd_integral_weights(de, nu_points, nu_weights)
+    s_int = -float(np.einsum('kq,kq->', c, wc)) / np.pi
 
     res = residue_set(eps, nocc, omega) if residues is None else residues
     s_res = 0.0
@@ -290,8 +323,8 @@ def sigma_cd_slope(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues, wc,
                    eta=0.0, C_ov=None, real_screening=None):
     """dSigma^c_pp/domega at fixed (eps, Bp), residue set frozen -- closed form.
 
-    The integral term's only omega dependence is g_q = (omega - eps_q) /
-    [(omega - eps_q)^2 + nu^2], so its slope costs nfreq x norb given wc. A
+    The integral term's only omega dependence is in its weights
+    (`cd_integral_weights`), so its slope costs nfreq x norb given wc. A
     residue evaluates W at |eps_q - omega|, so its slope is the frequency
     derivative of the screening, W [dchi0/dfreq] W, contracted with Bp[:,q] on
     both sides: one W build per residue, as the value itself costs.
@@ -304,10 +337,8 @@ def sigma_cd_slope(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues, wc,
     across three decades -- the signature of a constant factor, not of a
     differencing error.
     """
-    de = omega - eps
-    nu = np.asarray(nu_points)[:, None]
-    dg = (nu ** 2 - de[None, :] ** 2) / (de[None, :] ** 2 + nu ** 2) ** 2
-    slope = -float(np.asarray(nu_weights) @ np.einsum('kq,kq->k', dg, wc)) / np.pi
+    _, dc = cd_integral_weights(omega - eps, nu_points, nu_weights)
+    slope = -float(np.einsum('kq,kq->', dc, wc)) / np.pi
     if residues:
         rs = residue_backend(real_screening, C_ov, eps, nocc, eta)
         for q, weight in residues:
@@ -438,20 +469,6 @@ def cd_frequency_grid(eps, nocc, ntau=CD_NTAU, nfreq_cd=CD_NFREQ, w0_cd=None,
     return nu, nu_weights, grid, w0
 
 
-def cd_grid_resolves(nu, eps, roots, states, resolution=CD_POLE_RESOLUTION):
-    """Whether the quadrature's smallest node resolves the root-to-pole spike.
-
-    A pole of G at a NEIGHBOURING orbital energy puts a Lorentzian of
-    half-width d = |eps^QP_p - eps_q| on the imaginary-frequency integrand at
-    nu = 0 (`root_pole_distance`). A grid whose smallest node sits at a
-    comparable frequency integrates the wrong function there, and the Newton
-    then converges on whatever zero the truncated self-energy has -- a
-    satellite, or nothing at all.
-    """
-    return bool(float(np.min(nu)) * resolution
-                <= root_pole_distance(eps, roots, states))
-
-
 def newton_seeds(eps, nocc, states, pole_offset=None):
     """(seeds, guard band, whether it may still relax) for a fresh solve.
 
@@ -574,9 +591,7 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
     states:      the orbitals to solve; one proj(tau), one contour grid and one
                  exchange build serve all of them.
     ntau:        imaginary-time points behind the grid (`cd_frequency_grid`).
-    nfreq_cd:    contour-deformation quadrature points, DOUBLED up to
-                 `CD_NFREQ_MAX` while the grid does not resolve the
-                 root-to-pole spike (`cd_grid_resolves`).
+    nfreq_cd:    contour-deformation quadrature points.
     pole_offset: the Newton's guard band; None relaxes it per solve.
     sigma_x:     which K builds the static exchange, see
                  `qp_solve.static_exchange_diagonal`.
@@ -707,47 +722,31 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
             three_index_ov(X_mo, D, eps, nocc, tile_gb=tile_gb), eps, nocc)
 
     nfreq = int(nfreq_cd)
-    while True:
-        nu, nu_weights, grid, w0 = cd_frequency_grid(
-            eps, nocc, ntau=ntau, nfreq_cd=nfreq, w0_cd=w0_cd,
-            e_min_below_gap=e_min_below_gap, pair_energies=pairs)
-        if unrestricted:
-            proj_tau = spin_summed(polarizability_projected_sweep, X_mos, D,
-                                   spectra, noccs, grid.tau_points,
-                                   tile_memory_gb=tile_gb)
-        else:
-            proj_tau = polarizability_projected_sweep(X_mo, D, eps, nocc,
-                                                      grid.tau_points, mu=mu,
-                                                      tile_memory_gb=tile_gb)
-        Bps = [three_index_slice(X_mo, D, int(p), tile_gb=tile_gb)
-               for p in states]
-        wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, Bps,
-                                             tile_gb=tile_gb)
-        if continuation == 'laplace':
-            # The residues read the SAME proj(tau) the imaginary-axis term did,
-            # through cosh instead of cos; the backend keeps it alive.
-            real_screening = LaplaceRealScreening(proj_tau, grid, eps, nocc,
-                                                  pair_energies=pairs)
-        del proj_tau
-        roots, pole_strengths, records = _contour_roots(
-            continuation, states, seeds, admission, Bps, wcs, eps, nocc, nu,
-            nu_weights, xc_correction, offset, relax, n_poles, sop_stride,
-            real_screening, pair_energies=pairs)
-        # Sized against the roots it just produced, and doubled at most to the
-        # ceiling: the sizing needs the roots and the roots need a grid.
-        resolved = cd_grid_resolves(nu, eps, roots, states)
-        if resolved or nfreq >= CD_NFREQ_MAX:
-            break
-        nfreq = min(2 * nfreq, CD_NFREQ_MAX)
-    if not resolved:
-        warnings.warn(
-            f'a quasiparticle root of this set lies '
-            f'{root_pole_distance(eps, roots, states):.2e} Ha from a '
-            f'neighbouring orbital energy, which the contour-deformation '
-            f'quadrature does not resolve at its {CD_NFREQ_MAX}-point ceiling '
-            f'(smallest frequency {np.min(nu):.2e} Ha). The self-energy of '
-            f'that orbital is integrated over a spike the grid steps across.',
-            RuntimeWarning, stacklevel=2)
+    nu, nu_weights, grid, w0 = cd_frequency_grid(
+        eps, nocc, ntau=ntau, nfreq_cd=nfreq, w0_cd=w0_cd,
+        e_min_below_gap=e_min_below_gap, pair_energies=pairs)
+    if unrestricted:
+        proj_tau = spin_summed(polarizability_projected_sweep, X_mos, D,
+                               spectra, noccs, grid.tau_points,
+                               tile_memory_gb=tile_gb)
+    else:
+        proj_tau = polarizability_projected_sweep(X_mo, D, eps, nocc,
+                                                  grid.tau_points, mu=mu,
+                                                  tile_memory_gb=tile_gb)
+    Bps = [three_index_slice(X_mo, D, int(p), tile_gb=tile_gb)
+           for p in states]
+    wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, Bps,
+                                         tile_gb=tile_gb)
+    if continuation == 'laplace':
+        # The residues read the SAME proj(tau) the imaginary-axis term did,
+        # through cosh instead of cos; the backend keeps it alive.
+        real_screening = LaplaceRealScreening(proj_tau, grid, eps, nocc,
+                                              pair_energies=pairs)
+    del proj_tau
+    roots, pole_strengths, records = _contour_roots(
+        continuation, states, seeds, admission, Bps, wcs, eps, nocc, nu,
+        nu_weights, xc_correction, offset, relax, n_poles, sop_stride,
+        real_screening, pair_energies=pairs)
 
     diagnostics = {'continuation': continuation, 'ntau': int(ntau),
                    'nfreq_cd': int(nfreq), 'w0_cd': float(w0),
@@ -755,5 +754,5 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                    # explicit backend, the other two are their own
                    'residue_route_taken': ('explicit' if continuation == 'cd'
                                            else continuation),
-                   'cd_grid_resolved': bool(resolved), 'states': records}
+                   'states': records}
     return roots * HARTREE_TO_EV, pole_strengths, diagnostics

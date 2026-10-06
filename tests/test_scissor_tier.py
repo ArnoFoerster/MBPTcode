@@ -141,7 +141,6 @@ def _stub_surface(scissor, excluded=(1,)):
     surface.sop_stride = None
     surface.tile_gb = None
     surface.mf0 = types.SimpleNamespace(mo_energy=EPS)
-    surface._grow_cd_grid = lambda *a, **k: False
     return surface
 
 
@@ -198,32 +197,3 @@ def test_an_uncalibrated_surface_never_repeats_the_solve(monkeypatch):
     surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 1
     assert surface.scissor_map == {}
-
-
-def test_nothing_is_frozen_from_a_pass_that_grew_the_grid(monkeypatch):
-    """The roots and guard bands are frozen by `setdefault`, so freezing on a
-    pass that then doubled the quadrature would lock in the under-resolved
-    ones. Guards the short circuit in `_qp_set_solve`: hoisting the freeze out
-    of the `or` passes every other gate here and seeds the chain from the
-    discarded grid.
-    """
-    surface = _stub_surface(None)
-    roots = iter((-9.9, -1.50))          # coarse grid first, then the real one
-    calls = []
-
-    def fake(*args, **kw):
-        root = next(roots)
-        calls.append(root)
-        kw['route_out'].update(routes={1: 'sop', 3: 'sop'},
-                               roots={1: root, 3: float(EPS[3])},
-                               pole_offsets={1: 0.1 * len(calls)})
-        return (np.zeros(2), np.zeros(2))
-
-    monkeypatch.setattr('src.gradients.excited_state.qp_set_gradient', fake)
-    grows = iter((True, False))
-    surface._grow_cd_grid = lambda *a, **k: next(grows)
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
-    assert len(calls) == 2, 'the grid grew once, so the solve runs twice'
-    assert surface.qp_seeds[1] == pytest.approx(-1.50), \
-        'the seed must come from the settled grid, not the discarded one'
-    assert surface.pole_offsets[1] == pytest.approx(0.2)

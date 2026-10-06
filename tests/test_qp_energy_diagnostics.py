@@ -29,7 +29,7 @@ def test_the_contour_route_fills_the_diagnostics():
     assert diagnostics['continuation'] == 'cd'
     assert isinstance(diagnostics['ntau'], int)
     assert isinstance(diagnostics['nfreq_cd'], int)
-    assert 'w0_cd' in diagnostics and 'cd_grid_resolved' in diagnostics
+    assert 'w0_cd' in diagnostics
     (record,) = diagnostics['states']          # one state asked for
     assert record['state'] == mf.mol.nelectron // 2 - 1
     for key in ('newton_seed', 'pole_offset', 'residues', 'sop_admits',

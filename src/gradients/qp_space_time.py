@@ -62,7 +62,8 @@ from src.SingleReference.GW.contour_deformation import (  # noqa: F401
 # surface reaches the frozen shift through this module.
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               frozen_scissor, scissor_route)
-from src.SingleReference.GW.contour_deformation import qp_energy_cd
+from src.SingleReference.GW.contour_deformation import (cd_integral_weights,
+                                                        qp_energy_cd)
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                    pole_amplitudes,
                                                    qp_energy_sop, sop_from_wc)
@@ -242,29 +243,40 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     return out
 
 
-def integral_term_reverse(state, WtB, k, nu, wt):
+def integral_term_reverse(state, WtB, k):
     """(Bp_bar, chi0_bar, eps_bar) of one contour-deformation frequency for one state.
 
-    Sigma^int_p(w) = -(1/pi) sum_k W_k Re[ sum_q wc[k,q] (w - eps_q) /
-    ((w - eps_q)^2 + nu_k^2) ], so at a fixed frequency the adjoint on the
-    screening is the weight vector `weights_k` on wc[k, :], which
+    Sigma^int_p(w) = -(1/pi) sum_kq c[k,q] wc[k,q] with the weights of
+    `cd_integral_weights`, so at a fixed frequency the adjoint on the
+    screening is the weight vector c[k, :] on wc[k, :], which
     `integral_term_backward` pushes back onto the state's slice and onto
-    chi0(i.nu_k); the explicit eps dependence of the Lorentzian gives the
-    third term. On the pole-model route the omega dependence is analytic
-    and `wc_bar` already holds the whole weight, so that term is zero.
+    chi0(i.nu_k); the explicit eps dependence of the weights gives the third
+    term. On the pole-model route the omega dependence is analytic and
+    `wc_bar` already holds the whole weight, so that term is zero.
 
     state: one entry of the reverse pass's active set: the state's slice
-    `Bp`, its Z-weighted adjoint `zw`, `de` = w* - eps and `wc_bar` or None.
+    `Bp`, its Z-weighted adjoint `zw`, the weights `c` and `dc` at its root
+    (`integral_state`) and `wc_bar` or None.
     """
     Bp = state['Bp']
     if state['wc_bar'] is not None:
         bb, _, cb = integral_term_backward(Bp, WtB, state['wc_bar'][k])
         return bb, cb, 0.0
-    de = state['de']
-    g = de / (de ** 2 + nu ** 2)
-    coeff = -state['zw'] * wt / np.pi
-    bb, wck, cb = integral_term_backward(Bp, WtB, coeff * g)
-    return bb, cb, -coeff * wck * (nu ** 2 - de ** 2) / (de ** 2 + nu ** 2) ** 2
+    coeff = -state['zw'] / np.pi
+    bb, wck, cb = integral_term_backward(Bp, WtB, coeff * state['c'][k])
+    return bb, cb, -coeff * wck * state['dc'][k]
+
+
+def integral_state(Bp, zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
+                   **extra):
+    """One entry of the reverse pass's active set (`integral_term_reverse`),
+    with the integral term's weights at the root over every frequency: the
+    singular part sits on the two smallest nodes, whichever rank owns them."""
+    state = dict(Bp=Bp, zw=zw, wc_bar=wc_bar, **extra)
+    if wc_bar is None:
+        state['c'], state['dc'] = cd_integral_weights(w_star - eps, nu_points,
+                                                      nu_weights)
+    return state
 
 
 def require_explicit_fits(naux, nocc, nvir, p):
@@ -440,7 +452,6 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     # Sigma^int's reverse pass, streamed over the same frequency blocks
     naux = proj_tau.shape[-1]
     eye = np.eye(naux)
-    de = w_star - eps
     eps_bar = np.zeros_like(eps)
     Bp_bar = np.zeros_like(Bp)
     if route == 'scissor':
@@ -454,7 +465,7 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
         eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles, eps, nocc,
                                                 nu_points, sigma_bar=z)
         eps_bar += eps_sop
-    state = dict(Bp=Bp, zw=z, de=de, wc_bar=wc_bar)
+    state = integral_state(Bp, z, w_star, eps, nu_points, nu_weights, wc_bar)
     proj_bar = proj_tau.zeros_like()
     eps_bar_part = np.zeros_like(eps)
     for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
@@ -462,8 +473,7 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
             # one state, so a plain solve; `qp_set_gradient` takes the LU and
             # shares it over the states
             WtB = np.linalg.solve(eye - fb.chi0[m], Bp)
-            bb, fb.chi0[m], e_k = integral_term_reverse(
-                state, WtB, k, nu_points[k], nu_weights[k])
+            bb, fb.chi0[m], e_k = integral_term_reverse(state, WtB, k)
             Bp_bar += bb
             eps_bar_part += e_k
         proj_bar.fold(grid.cosft_wt, fb)
@@ -765,8 +775,9 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                                                     nocc, nu_points,
                                                     sigma_bar=zw)
             eps_bar += eps_sop
-        active.append(dict(si=si, p=p, zw=zw, de=w_star - eps, Bp=Bp,
-                           wc_bar=wc_bar, res=res, rs=rs, route=route))
+        active.append(integral_state(Bp, zw, w_star, eps, nu_points,
+                                     nu_weights, wc_bar, si=si, p=p, res=res,
+                                     rs=rs, route=route))
 
     # Pass 2: the integral term's reverse pass, frequency outside, over the
     # frequencies this rank owns. Partial over frequencies: reduced once.
@@ -776,12 +787,11 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         proj_bar = proj_tau.zeros_like()
         for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
             for m, k in enumerate(fb.ks):
-                nu, wt = nu_points[k], nu_weights[k]
                 lu = scipy.linalg.lu_factor(eye - fb.chi0[m])
                 chi0_bar = np.zeros((naux, naux))
                 for a in active:
                     WtB = scipy.linalg.lu_solve(lu, a['Bp'])
-                    bb, cb, e_k = integral_term_reverse(a, WtB, k, nu, wt)
+                    bb, cb, e_k = integral_term_reverse(a, WtB, k)
                     Bp_bars[a['si']] += bb
                     chi0_bar += cb
                     eps_bar_part += e_k

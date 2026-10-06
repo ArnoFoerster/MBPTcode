@@ -226,7 +226,6 @@ def test_cd_residue_count_and_guard_match_the_record(name):
         continuation='cd', factors=factors,
         ntau=records[0]['cd_grid']['ntau_gw'])
     assert diagnostics['nfreq_cd'] == records[0]['cd_grid']['nfreq_cd']
-    assert diagnostics['cd_grid_resolved']
     for rec, got in zip(records, diagnostics['states']):
         row = rec['routes']['cd']['params']
         assert got['residues'] == row['residues'], rec['orbital_label']

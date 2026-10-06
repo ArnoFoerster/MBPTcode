@@ -15,9 +15,8 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import CD_NFREQ, CD_POLE_RESOLUTION, HARTREE_TO_EV
+from src.Base.constants import CD_NFREQ, HARTREE_TO_EV
 from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.GW.contour_deformation import root_pole_distance
 from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
 from src.gradients.isdf_derivatives import (exx_double_counting,
                                             exx_double_counting_Y,
@@ -247,16 +246,13 @@ def test_solvated_excited_surface_gradient_matches_finite_difference(water):
     reaction field's own quasiparticle shift rides the factors instead, its
     adjoint on (eps, X, D) alongside the self-energy's.
 
-    THE STEP IS THE ORDINARY ONE AND THE QUADRATURE IS WHAT MAKES IT SO.
-    Eq. (18) raises this HOMO by 1.67 eV, which brings its quasiparticle root
-    to 8.1e-4 Ha of eps_(HOMO-1), where the pole of G puts a Lorentzian of that
-    half-width on the imaginary-frequency integrand at nu = 0. A 64-point
-    Gauss-Legendre grid starts at 6.2e-5 Ha and steps across it, and the
-    residual then behaves like nothing: 1.2e-4 Ha/Bohr at h = 2e-3 against
-    3.0e-7 at 5e-4. `_grow_cd_grid` measures that distance on the frozen
-    quasiparticle set and doubles the grid to 128 points, whose first frequency
-    is 1.6e-5 Ha, and the residual becomes flat in h -- 5.8e-8 at 2e-3, 8.1e-8
-    at 1e-3, 7.8e-8 at 5e-4 -- which is the fit adjoint's own floor.
+    THE STEP IS THE ORDINARY ONE ON THE ORDINARY GRID. Eq. (18) raises this
+    HOMO by 1.67 eV, which brings its quasiparticle root to 8.1e-4 Ha of
+    eps_(HOMO-1), where the pole of G puts a Lorentzian of that half-width on
+    the imaginary-frequency integrand at nu = 0. A plain 64-point quadrature
+    steps across it (1.2e-4 Ha/Bohr at h = 2e-3 against 3.0e-7 at 5e-4); with
+    the singular part in closed form (`cd_integral_weights`) the residual is
+    the fit adjoint's own floor at every h.
     """
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
     s = RPABSESurface(water, ks_factory, environment=env)
@@ -271,7 +267,7 @@ def test_solvated_excited_surface_gradient_matches_finite_difference(water):
         m.build(False, False)
         return s.total_energy(m)
 
-    assert s.excited.nfreq_cd == 128, 'the CD grid was not grown to the pole'
+    assert s.excited.nfreq_cd == CD_NFREQ, 'the CD grid was resized'
     h = 2e-3
     f = [energy_at(d * h) for d in (1, -1, 2, -2)]
     fd = (8 * (f[0] - f[1]) - (f[2] - f[3])) / (12 * h)
@@ -279,50 +275,42 @@ def test_solvated_excited_surface_gradient_matches_finite_difference(water):
         f'|analytic - FD| = {abs(fd - g[0, 2]):.2e} Ha/Bohr'
 
 
-def test_the_cd_grid_is_sized_from_the_root_to_pole_distance(water):
-    """The quadrature grows only where a root sits close to a pole of G.
+def test_the_cd_grid_is_never_resized(water):
+    """A root beside a neighbouring orbital energy asks nothing of the grid.
 
     Gas phase: the water/B3LYP quasiparticle roots stay 1.2e-2 Ha from their
-    nearest neighbouring orbital energy, 204 times the 64-point grid's first
-    frequency, so nothing is resized and every gas-phase number is the one it
-    was. In the continuum Eq. (18) closes that to 8.1e-4 Ha, 13 times the first
-    frequency, and the grid doubles once.
+    nearest neighbouring orbital energy. In the continuum Eq. (18) closes that
+    to 8.1e-4 Ha, 13 times the 64-point grid's first frequency; with the
+    singular part in closed form both keep the chain's own quadrature.
     """
     gas = RPABSESurface(water, ks_factory)
     gas.total_energy(water)
-    assert gas.excited.cd_sized
-    assert gas.excited.nfreq_cd == CD_NFREQ, 'the gas phase was resized'
+    assert gas.excited.nfreq_cd == CD_NFREQ
 
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
     s = RPABSESurface(water, ks_factory, environment=env)
     s.total_energy(water)
-    assert s.excited.nfreq_cd == 2 * CD_NFREQ
-    assert len(s.excited.nu) == 2 * CD_NFREQ
-    assert s.excited.gw_grid.cosft_wt.shape[0] == 2 * CD_NFREQ, \
-        'the imaginary-time grid kept the old frequency axis'
-    # and the rule it was sized by holds at the frozen roots
+    assert s.excited.nfreq_cd == CD_NFREQ
+    assert s.excited.gw_grid.cosft_wt.shape[0] == CD_NFREQ
+    # the case that stresses it: a root within 40 first nodes of a
+    # neighbouring orbital energy
     eps = np.asarray(s.excited.mf0.mo_energy, float)
-    d = root_pole_distance(eps, [s.excited.qp_seeds[int(p)]
-                                 for p in s.excited.qp_set], s.excited.qp_set)
-    assert s.excited.nu.min() * CD_POLE_RESOLUTION <= d
+    d = min(abs(s.excited.qp_seeds[int(p)] - eps[q])
+            for p in s.excited.qp_set for q in range(len(eps)) if q != int(p))
+    assert d < 40 * s.excited.nu.min(), d
 
 
 def test_the_solvated_surface_has_no_step_over_the_stencil(water):
-    """Second differences of the solvated surface, which is where the step was.
+    """Second differences of the solvated surface across the HOMO's crossing.
 
     The energy is sampled every 1 mBohr from -10 to +10 and differenced twice,
-    so a kink shows as a spike rather than as a slope. Over the span the 2 mBohr
-    stencil reaches, the curvature is flat to 1.3 % of its 0.406 Ha/Bohr^2; on
-    the 64-point grid it ran to 3.75 and 2.25 Ha/Bohr^2 at -4 and -3 mBohr,
-    which is what put 1.2e-4 Ha/Bohr into a finite difference that reads those
-    points.
-
-    A CROSSING SURVIVES FURTHER OUT and no quadrature removes it: 8 mBohr along
-    -z the HOMO root sits 6e-6 Ha from eps_(HOMO-1), inside even the 128-point
-    grid's first frequency of 1.6e-5 Ha, and the residue term and the integral
-    term cancel exactly only in the unquadratured integral. What is left there
-    is one point displaced by 0.9 meV -- a second difference of 1.8 meV, down
-    from 21.6 on the 64-point grid.
+    so a kink shows as a spike rather than as a slope. 8 mBohr along -z the
+    HOMO root sits 6e-6 Ha from eps_(HOMO-1), inside any practical grid's
+    first frequency; the residue term and the integral term cancel there on
+    the grid because the singular part is in closed form
+    (`cd_integral_weights`). The 64-point second differences fall
+    monotonically from 0.3978 to 0.3938 Ha/Bohr^2 across the scan, 0.2 % over
+    the stencil: the third derivative and nothing else.
     """
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
     s = RPABSESurface(water, ks_factory, environment=env)
@@ -341,11 +329,11 @@ def test_the_solvated_surface_has_no_step_over_the_stencil(water):
     d2 = (e[2:] - 2 * e[1:-1] + e[:-2]) / h ** 2
     med = np.median(d2)
     stencil = d2[5:14]                      # the second differences at |dz| <= 4 mBohr
-    assert np.abs(stencil - med).max() < 0.02 * abs(med), \
+    assert np.abs(stencil - med).max() < 0.005 * abs(med), \
         f'over the stencil {np.array2string(stencil, precision=3)}'
     # what the worst second difference anywhere in the scan is worth in energy
     kink = float(np.abs(d2 - med).max()) * h ** 2 * HARTREE_TO_EV
-    assert kink < 3e-3, (f'a {kink * 1e3:.2f} meV step at the pole crossing: '
+    assert kink < 1e-6, (f'a {kink * 1e3:.2f} meV step at the pole crossing: '
                          f'{np.array2string(d2, precision=2)}')
 
 

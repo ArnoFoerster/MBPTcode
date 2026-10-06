@@ -13,8 +13,8 @@ states sit at different minima, so E_0 does not cancel between them.
 Frozen conventions: the chain fixes seven discrete choices at the reference
 geometry, each a discontinuity in the surface otherwise: the quasiparticle
 set, the frame orientation, the interpolation pair layout, the Newton branch
-(pole guard and seed), the contour-deformation quadrature sized against the
-root-to-pole distance, the residue backend, and the scissor the orbitals
+(pole guard and seed), the contour-deformation quadrature (its scale w0 is
+read off the reference gap), the residue backend, and the scissor the orbitals
 outside the set carry. `refreeze` rebuilds all of them at a new geometry with
 the same settings; the optimizer in `src/properties/optimize.py` uses it to
 measure how far the walked surface drifted from the one the fit would choose
@@ -67,8 +67,7 @@ from src.Base.constants import (FIT_CHOLESKY_BLOCK, ROOT_FOLLOW_MARGIN_MIN,
 from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                 BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
                                 BSE_FORCE_RESIDUAL_TOL,
-                                BSE_DENSE_MAX_NOV, CD_NFREQ, CD_NFREQ_MAX,
-                                CD_POLE_RESOLUTION, HARTREE_TO_EV,
+                                BSE_DENSE_MAX_NOV, CD_NFREQ, HARTREE_TO_EV,
                                 OUTSIDE_TREATMENTS, SOP_N_POLES)
 from src.Base.declaration import Excitation, SurfacePhysics
 from src.Base.environment import attached_environment, environment_label
@@ -76,9 +75,7 @@ from src.Base.utils.mpi_grid import current_comm
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
-                                                        cd_grid_range,
-                                                        cd_grid_resolves,
-                                                        root_pole_distance)
+                                                        cd_grid_range)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               frozen_scissor)
@@ -168,7 +165,6 @@ class ExcitedStateChain(FactorChain):
                  sop_stride=None,
                  solver='auto', dense_max_nov=BSE_DENSE_MAX_NOV,
                  nroots=BSE_DAVIDSON_NROOTS, bse_conv_tol=BSE_DAVIDSON_CONV_TOL,
-                 cd_pole_resolution=CD_POLE_RESOLUTION,
                  mf=None, environment=None, factorization=None, radii=None,
                  sliced=None, fit=None, fit_block=None,
                  bse_adjoint='explicit'):
@@ -237,7 +233,6 @@ class ExcitedStateChain(FactorChain):
         self.qp_window = qp_window
         self.degeneracy_tol, self.e_min_below_gap = degeneracy_tol, e_min_below_gap
         self.ntau_gw, self.nfreq_cd = ntau_gw, nfreq_cd
-        self.cd_pole_resolution = cd_pole_resolution
 
         eps = np.asarray(self.mf0.mo_energy, float)
         occ, virt = get_occ_virt_indices(eps, self.nocc)
@@ -268,10 +263,6 @@ class ExcitedStateChain(FactorChain):
         # fixed poles, so a set re-fitted per geometry puts the poles' motion
         # into the energy and not into the force.
         self.sop_poles = {}
-        # Whether the contour-deformation quadrature has been sized against the
-        # root-to-pole distance yet; that happens on the first quasiparticle
-        # solve and is then frozen with everything else.
-        self.cd_sized = False
 
     # ------------------------------------------------------------ declaration
     @property
@@ -345,45 +336,6 @@ class ExcitedStateChain(FactorChain):
         self.nu, self.wt, self.gw_grid, self.w0_cd = cd_frequency_grid(
             eps, self.nocc, ntau=self.ntau_gw, nfreq_cd=self.nfreq_cd,
             e_min_below_gap=self.e_min_below_gap)
-
-    def _grow_cd_grid(self, roots, eps, states):
-        """Double the contour-deformation grid while its first frequency does
-        not resolve the root-to-pole spike; True when the grid changed.
-
-        The spike is the Lorentzian of half-width d = |eps^QP_p - eps_q| that
-        the pole of G at a neighbouring orbital energy puts on the
-        imaginary-frequency integrand at nu = 0 (`root_pole_distance`). A grid
-        whose smallest node sits at a comparable frequency integrates the
-        wrong function there, and the Newton converges on whatever zero the
-        truncated self-energy has: a satellite, or nothing.
-
-        Sized once, at the reference geometry, and frozen: a quadrature
-        re-decided per geometry steps the surface like a re-decided residue
-        route.
-        """
-        if self.cd_sized:
-            return False
-        d = root_pole_distance(eps, roots, states)
-        resolved = cd_grid_resolves(self.nu, eps, roots, states,
-                                    resolution=self.cd_pole_resolution)
-        if not resolved and self.nfreq_cd < CD_NFREQ_MAX:
-            self._build_cd_grid(min(2 * self.nfreq_cd, CD_NFREQ_MAX), eps)
-            # the frozen branch belongs to the grid it was found on
-            self.pole_offsets.clear()
-            self.qp_seeds.clear()
-            self.sop_poles.clear()
-            return True
-        self.cd_sized = True
-        if not resolved:
-            warnings.warn(
-                f'a quasiparticle root of this set lies {d:.2e} Ha from a '
-                f'neighbouring orbital energy, which the contour-deformation '
-                f'quadrature does not resolve at its {CD_NFREQ_MAX}-point '
-                f'ceiling (smallest frequency {self.nu.min():.2e} Ha). The '
-                f'self-energy of that orbital is integrated over a spike the '
-                f'grid steps across, so its energy and its force answer '
-                f'different functions.', RuntimeWarning, stacklevel=2)
-        return False
 
     @staticmethod
     def _qp_set(eps, nocc, window, tol):
@@ -479,17 +431,11 @@ class ExcitedStateChain(FactorChain):
 
     def _qp_set_solve(self, x_mo, d_sigma, eps, mu, xc_correction, weights,
                       states=None, tape=None, rows_block=None):
-        """((eps^QP values, adjoints), route_out) for a quasiparticle set, with
-        the contour-deformation grid sized on the first pass.
-
-        The sizing needs the roots and the roots need a grid, so the solve is
-        repeated while `_grow_cd_grid` doubles the quadrature under it. That
-        costs one extra pass at the reference geometry and nothing afterwards,
-        because everything it decided is frozen on the chain.
+        """((eps^QP values, adjoints), route_out) for a quasiparticle set.
 
         tape: an earlier solve's `QPSetTape` on the same factors, and each
         repeat reads the one before it, so proj(tau) and the slices are
-        swept once however often the quadrature grows (`QPSetTape.reads`).
+        swept once however often the solve repeats (`QPSetTape.reads`).
         rows_block: the adjoints in grid tiles over the ranks
         (`qp_set_gradient`).
         """
@@ -502,31 +448,12 @@ class ExcitedStateChain(FactorChain):
                                   route_out=route_out, tape=tape,
                                   rows_block=rows_block, **self._qp_kw())
             tape = route_out.get('tape', tape)
-            grew = self._grow_cd_grid(out[0], eps, states)
             # A calibrated shift is read by the solve after the one that
-            # measured it, so the map triggers one repeat. The short circuit
-            # matters: freezing on a pass that grew the grid would
-            # `setdefault` the roots of an under-resolved quadrature, so this
-            # call must stay inside the `or`.
-            if not (grew or self._freeze_newton_branch(
-                    route_out, eps, xc_correction, states)):
+            # measured it, so the map triggers one repeat.
+            if not self._freeze_newton_branch(
+                    route_out, eps, xc_correction, states):
                 break
         return out, route_out
-
-    def _size_cd_grid(self, x_mo, d_sigma, eps, mu, mf, shift, orb):
-        """Size the contour-deformation quadrature before a single-orbital
-        solve reads it, on the frozen set widened by the orbital asked for.
-
-        One quasiparticle carries no adjoint here: the grid is a property of
-        the whole set, so a chain reaches the same quadrature whether it is
-        driven through a BSE excitation or through one quasiparticle.
-        """
-        if self.cd_sized:
-            return
-        states = np.union1d(self.qp_set, [orb])
-        self._qp_set_solve(x_mo, d_sigma, eps, mu,
-                           self._xc_correction(mf, states, shift),
-                           np.zeros(len(states)), states=states)
 
     def _tile_kw(self):
         return {} if self.tile_gb is None else {'tile_gb': self.tile_gb}
@@ -1136,7 +1063,6 @@ class ExcitedStateChain(FactorChain):
         # finite-difference check shows as a small gradient error. On
         # Hartree-Fock it is zero.
         d_sigma = d if d_bare is None else d_bare
-        self._size_cd_grid(x_mo, d_sigma, eps, mu, mf, shift, orb)
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         qp_out = {}
         with self.phase('t_qp'):
@@ -1163,7 +1089,6 @@ class ExcitedStateChain(FactorChain):
         shift, screening = self._reaction_field(x_mo, d, d_bare, eps)
         orb = self.nocc - 1 + offset
         d_sigma = d if d_bare is None else d_bare
-        self._size_cd_grid(x_mo, d_sigma, eps, mu, mf, shift, orb)
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         qp_out = {}
         with self.phase('t_qp_backward'):
@@ -1331,7 +1256,7 @@ class ExcitedStateChain(FactorChain):
             at_mean_field=self.at_mean_field, solver=self.solver,
             dense_max_nov=self.dense_max_nov, nroots=self.nroots,
             bse_conv_tol=self.bse_conv_tol,
-            cd_pole_resolution=self.cd_pole_resolution, outside=self.outside,
+            outside=self.outside,
             scissor=self.scissor, n_poles=self.n_poles,
             sop_stride=self.sop_stride,
             environment=self.environment, factorization=factorization,
