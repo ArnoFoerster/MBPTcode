@@ -47,7 +47,7 @@ from src.SingleReference.LinearResponse.riccati import (
     channel_corrections_from_amplitudes, channel_corrections_from_phonons,
     require_stable_channel, ring_channel, solve_riccati)
 
-PAIR_ROUTES = ('phonon', 'riccati')
+PAIR_ROUTES = ('phonon', 'riccati', 'ccd')
 
 
 def build_tdhf_matrices(eps, g, nocc):
@@ -63,7 +63,7 @@ def build_tdhf_matrices(eps, g, nocc):
     return A, B
 
 
-def pair_channels(eps, g, nocc, route='phonon'):
+def pair_channels(eps, g, nocc, route='phonon', t=None):
     """{'eh', 'pp', 'hh'} -> {'T', 'dH', 'dN'} for the spin-orbital pairs.
 
     eh: TDHF (A, B, A), T of shape (nov, nov); dH is block II's, block I
@@ -71,9 +71,15 @@ def pair_channels(eps, g, nocc, route='phonon'):
     pp: ppRPA N+2 (A_pp, B_pp, C_pp), T (n_oo, n_vv), dH and dN (n_vv, n_vv).
     hh: ppRPA N-2, amplitudes T_pp^T (n_vv, n_oo), dH and dN (n_oo, n_oo);
         pair Hamiltonian -C_pp.
+    route='ccd': every T from the spin-orbital CCD amplitude t (required),
+        see ccd_channels.
     """
     if route not in PAIR_ROUTES:
         raise ValueError(f"route={route!r}; expected one of {PAIR_ROUTES}")
+    if (route == 'ccd') != (t is not None):
+        raise ValueError("t is the amplitude of route 'ccd' and only of it")
+    if route == 'ccd':
+        return ccd_channels(eps, g, nocc, t)
     A, B = build_tdhf_matrices(eps, g, nocc)
     App, Bpp, Cpp = build_pprpa_matrices(eps, g, nocc)
     require_stable_channel(A, B, 'spin-orbital TDHF channel')
@@ -211,6 +217,29 @@ def first_order_channels(eps, g, nocc):
     return {'eh': {'T': T_eh, 'dH': np.zeros((nov, nov)), 'dN': np.zeros((nov, nov))},
             'pp': {'T': T_pp, 'dH': np.zeros((npv, npv)), 'dN': np.zeros((npv, npv))},
             'hh': {'T': T_pp.T, 'dH': np.zeros((npo, npo)), 'dN': np.zeros((npo, npo))}}
+
+
+def ccd_channels(eps, g, nocc, t):
+    """Every channel from one spin-orbital CCD amplitude t[i,j,a,b] = t_ij^ab:
+    the amplitudes laid out as in first_order_channels, (dH, dN) from
+    riccati.channel_corrections_from_amplitudes with the bare-kernel pair
+    matrices -- (B, A) for eh, (B_pp, C_pp) for pp, (-B_pp^T, -A_pp) for hh."""
+    nso = len(eps)
+    nv = nso - nocc
+    iu, ju = pair_indices(nocc)
+    au, bu = pair_indices(nv)
+    nov = nocc * nv
+    A, B = build_tdhf_matrices(eps, g, nocc)
+    App, Bpp, Cpp = build_pprpa_matrices(eps, g, nocc)
+    T_eh = t.transpose(1, 3, 0, 2).reshape(nov, nov)           # [jc, ia] = t_ij^ac
+    T_eh = 0.5 * (T_eh + T_eh.T)
+    T_pp = t[iu, ju][:, au, bu]
+    dH_eh, dN_eh = channel_corrections_from_amplitudes(B, A, T_eh)
+    dH_pp, dN_pp = channel_corrections_from_amplitudes(Bpp, Cpp, T_pp)
+    dH_hh, dN_hh = channel_corrections_from_amplitudes(-Bpp.T, -App, T_pp.T)
+    return {'eh': {'T': T_eh, 'dH': dH_eh, 'dN': dN_eh},
+            'pp': {'T': T_pp, 'dH': dH_pp, 'dN': dN_pp},
+            'hh': {'T': T_pp.T, 'dH': dH_hh, 'dN': dN_hh}}
 
 
 def build_pencil(s, nocc, static_correction=None, route='phonon',

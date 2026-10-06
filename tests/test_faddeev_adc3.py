@@ -26,6 +26,10 @@ What pins what:
    the restricted Faddeev supermatrix from the spin-orbital one.
 5. The matrix-free operator against the dense builder, and a Davidson root
    through the public ADCSolver API against the dense spectrum.
+6. pair_route='ccd' (one CCD T2 in every channel): pyscf's DF-CCD against an
+   independent spin-orbital CCD; the singlet/triplet recoupling of t2 against
+   the first-order channels; restricted against spin-orbital through W; and
+   v -> lam v, under which CCD-Faddeev-ADC(3) - ADC(3) must go as lam^4.
 
 Run: python tests/test_faddeev_adc3.py, or under pytest.
 """
@@ -37,12 +41,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import gto, scf
+from pyscf.cc.addons import spatial2spin
 
 from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC import (ADCSolver, ADCSolverRestricted,
                                      ADCSolverUnrestricted)
 from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC import adc_u_faddeev as FU
+from src.SingleReference.ADC import cc_amplitudes as CA
+from src.SingleReference.CC import amplitudes as CCA
 from src.SingleReference.ADC.adc_u_dense_full import C_2h1p_block, C_2p1h_block
 from src.SingleReference.LinearResponse.pp_rpa import build_pprpa_matrices
 
@@ -224,6 +231,98 @@ def check_matrix_free(sr, nocc):
     return ok
 
 
+def ccd_spin_orbital(eps, g, nocc, tol=1e-13, max_iter=500):
+    """Spin-orbital CCD from the generated CC doubles residual (CC/amplitudes,
+    T1 = T3 = 0), Jacobi steps, independent of pyscf. Returns (t[i,j,a,b],
+    E_corr)."""
+    nso = len(eps)
+    o, v = slice(0, nocc), slice(nocc, nso)
+    nv = nso - nocc
+    f = np.diag(eps)
+    eo, ev = eps[o], eps[v]
+    e_abij = 1.0 / (eo[None, None, :, None] + eo[None, None, None, :]
+                    - ev[:, None, None, None] - ev[None, :, None, None])
+    t1 = np.zeros((nv, nocc))
+    t3 = np.zeros((nv, nv, nv, nocc, nocc, nocc))
+    t2 = g[v, v, o, o] * e_abij
+    for _ in range(max_iter):
+        step = CCA.doubles_residual(t1, t2, t3, f, g, o, v) * e_abij
+        t2 = t2 + step
+        if np.abs(step).max() < tol:
+            break
+    else:
+        raise RuntimeError('spin-orbital CCD not converged')
+    e_corr = 0.25 * np.einsum('ijab,abij->', g[o, o, v, v], t2)
+    return t2.transpose(2, 3, 0, 1), e_corr
+
+
+def homo_root(H, homo):
+    """(IP, weight) of the ionization root with the largest HOMO weight."""
+    w, X = np.linalg.eigh(H)
+    wt = X[homo] ** 2 * (w < 0)
+    k = np.argmax(wt)
+    return -w[k], wt[k]
+
+
+def check_ccd_route(mf, sr, so, nocc, W, scaling=False):
+    ok = True
+    eps = mf.mo_energy
+    t2, e_cc = CA.ccd_t2_restricted(mf, return_energy=True, conv_tol=1e-12,
+                                    conv_tol_normt=1e-10)
+    t_so = spatial2spin(t2)
+    t_ref, e_ref = ccd_spin_orbital(so.eps, so.g, 2 * nocc)
+    d = max(abs(e_ref - e_cc), np.abs(t_ref - t_so).max())
+    ok &= check(d < 1e-7, 'pyscf DF-CCD == independent spin-orbital CCD',
+                f'{d:.1e}')
+    # the recoupling of t2, gated by the first-order amplitude
+    o, v = slice(0, nocc), slice(nocc, None)
+    ov = np.einsum('Qia,Qjb->iajb', sr.B_aa[:, o, v], sr.B_aa[:, o, v])
+    t1 = ov.transpose(0, 2, 1, 3) / (
+        eps[o, None, None, None] + eps[None, o, None, None]
+        - eps[None, None, v, None] - eps[None, None, None, v])
+    ch = FR.ccd_channels(eps, nocc, t1, sr.B_aa)
+    ch1 = FR.first_order_channels(eps, nocc, sr.B_aa)
+    d = max([np.abs(ch['eh'][sp]['T'] - ch1['eh'][sp]['T']).max()
+             for sp in FR.SPINS]
+            + [np.abs(ch['pp']['t'] - FR._alpha_beta_ladder(
+                ch1['pp'], nocc, len(eps) - nocc)).max()])
+    ok &= check(d < 1e-12, 'first-order t2 recouples to the first-order channels',
+                f'{d:.1e}')
+    chu = FU.ccd_channels(so.eps, so.g, 2 * nocc, spatial2spin(t1))
+    chu1 = FU.first_order_channels(so.eps, so.g, 2 * nocc)
+    d = max(np.abs(chu[k]['T'] - chu1[k]['T']).max() for k in ('eh', 'pp', 'hh'))
+    ok &= check(d < 1e-12, 'spin-orbital: the same for the reference', f'{d:.1e}')
+    # restricted against spin-orbital, dense and matrix-free
+    chr_ = FR.ccd_channels(eps, nocc, t2, sr.B_aa)
+    Hr = FR.build_supermatrix(sr, nocc, channels=chr_)
+    Hs = FU.build_supermatrix(so, 2 * nocc, channels=FU.pair_channels(
+        so.eps, so.g, 2 * nocc, route='ccd', t=t_so))
+    d = np.abs(W.T @ Hs @ W - Hr).max()
+    ok &= check(d < 1e-10, 'restricted CCD-Faddeev-ADC(3) == W^T (spin-orbital) W',
+                f'{d:.1e}')
+    aop, _, _ = FR.build_operator(sr, nocc, channels=chr_)
+    x = np.random.default_rng(3).standard_normal(len(Hr))
+    d = np.abs(aop(x) - Hr @ x).max()
+    ok &= check(d < 1e-9, 'matrix-free CCD-Faddeev-ADC(3) == dense', f'{d:.1e}')
+    if not scaling:
+        return ok
+    # v -> lam v at fixed orbital energies: CCD-Faddeev-ADC(3) - ADC(3) ~ lam^4
+    diffs = []
+    for lam in (0.1, 0.05):
+        g = lam * so.g
+        s = ADCSolverUnrestricted.from_arrays(so.eps, g)
+        t, _ = ccd_spin_orbital(so.eps, g, 2 * nocc, tol=1e-15)
+        Hf = FU.build_supermatrix(s, 2 * nocc,
+                                  channels=FU.ccd_channels(so.eps, g, 2 * nocc, t))
+        H3 = s.build_supermatrix(2 * nocc)
+        diffs.append(abs(homo_root(Hf, 2 * nocc - 1)[0]
+                         - homo_root(H3, 2 * nocc - 1)[0]))
+    slope = np.log(diffs[0] / diffs[1]) / np.log(2.0)
+    ok &= check(abs(slope - 4.0) < 0.15, 'CCD-Faddeev-ADC(3) - ADC(3) ~ lam^4',
+                f'slope {slope:.2f}')
+    return ok
+
+
 def check_solver_api(mf, nocc):
     ok = True
     e_mf, e_d = [], None
@@ -233,6 +332,13 @@ def check_solver_api(mf, nocc):
         ok &= check(bool(np.all(s.last_result['converged'])),
                     f'Davidson converged ({route})')
         e_mf.append(e[0])
+    s = ADCSolver(mf, level='faddeev_adc3', df=True, pair_route='ccd')
+    Hc = s.build_supermatrix(nocc)
+    ch = FR.ccd_channels(s.eps, nocc, CA.ccd_t2_restricted(
+        mf, conv_tol=1e-10, conv_tol_normt=1e-8), s.B_aa)
+    d = np.abs(Hc - FR.build_supermatrix(s, nocc, channels=ch)).max()
+    ok &= check(d < 1e-8, "pair_route='ccd' runs CCD on the mean field",
+                f'{d:.1e}')
     s = ADCSolver(mf, level='faddeev_adc3', df=True, matrix_free=False)
     ed, Zd = s.solve()
     k = np.argmin(np.abs(ed - e_mf[0]))
@@ -296,6 +402,9 @@ def run():
         all_ok &= check_eh_treatments(sr, so, nocc, W)
         print('-- matrix-free operator')
         all_ok &= check_matrix_free(sr, nocc)
+        print('-- the CCD pair route')
+        all_ok &= check_ccd_route(mf, sr, so, nocc, W,
+                                  scaling=(basis == 'sto-3g'))
     print('\n-- public API (H2O/6-31G)')
     all_ok &= check_solver_api(mf, nocc)
     print('\n-- an unstable reference')
