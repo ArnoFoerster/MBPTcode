@@ -1,99 +1,65 @@
 """The ISDF-K SCF divided over the ranks: the interpolation points in fixed
 tiles, and the auxiliary shells of the integral-direct Coulomb matrix.
 
-WHY. At a six-chlorophyllide hexamer model / cc-pVTZ (534 atoms, nao 12204, naux
-31260) the fitted three-centre tensor is 18.6 TB, 37 TB with the second one a
-range-separated functional builds, so the mean field's exchange is the ISDF
-one (`isdf_jk.ISDFJK`),
+On a large system the fitted three-centre tensor does not fit in memory, so
+the mean field's exchange is the ISDF one (`isdf_jk.ISDFJK`),
 
     K = X^T [Z o (X Dm X^T)] X,     Z = M^T V M,     X[P, mu] = chi_mu(r_P),
 
-three M^2 x nao contractions on M = 117762 points, and its Coulomb matrix is
-pyscf's integral-direct DF-J, which stores no tensor. On one rank that is the
-whole SCF, and Z alone is 111 GB.
+three M^2 x nao contractions, and its Coulomb matrix is pyscf's
+integral-direct DF-J, which stores no tensor.
 
-WHAT A RANK HOLDS. The grid index is cut into the fixed tiles of the
+What a rank holds. The grid index is cut into the fixed tiles of the
 row-distributed fit (`separable_ri.fit_rows`, `FIT_CHOLESKY_BLOCK` points),
-owned block-cyclically -- tile t by rank t % size, the fit's own layout, so
-M^T never moves. A rank holds, for its tiles: X_t, M^T_t, and per operator
-either Z's rows (Z_t = G_t M^T, G_t = M^T_t V, 'dense') or G_t alone, Z's
-blocks then formed per build ('factored'). No rank holds X, M, Z or
-X Dm X^T whole. V is evaluated by every rank in fixed slabs of auxiliary
-shells and never held whole either.
+owned block-cyclically (tile t by rank t % size, the fit's own layout, so M^T
+never moves). A rank holds, for its tiles: X_t, M^T_t, and per operator either
+Z's rows (Z_t = G_t M^T, G_t = M^T_t V, 'dense') or G_t alone, Z's blocks then
+formed per build ('factored'). No rank holds X, M, Z or X Dm X^T whole. V is
+evaluated by every rank in fixed slabs of auxiliary shells and never held
+whole either.
 
-HOW K IS BUILT. The density enters through its occupied factor, since
-pyscf tags every density it builds with its orbitals: Dm = C~ C~^T with
-C~ = C_occ sqrt(n), so X Dm X^T = Y Y^T with Y = X C~, M^2 nocc and not
-M^2 nao (an untagged density takes Y = X Dm, the general form). For every
-column tile j in tile order its owner broadcasts [Y_j | X_j (| M^T_j)], and
-each rank adds, for each of its row tiles i,
+K. The density enters through its occupied factor, since pyscf tags every
+density it builds with its orbitals: Dm = C~ C~^T with C~ = C_occ sqrt(n), so
+X Dm X^T = Y Y^T with Y = X C~, M^2 nocc and not M^2 nao (an untagged density
+takes Y = X Dm, the general form). For every column tile j in tile order its
+owner broadcasts [Y_j (| M^T_j)], every other rank evaluates X_j on the tile's
+points itself (the owner's one call, the same bits, so the tile's nao columns
+are not communicated), and each rank adds, for each of its row tiles i,
 
     T_i += [(Y_i Y_j^T) o Z_ij] X_j,         then  K_r = sum_i X_i^T T_i,
 
 so every GEMM has a shape fixed by the tiles, T_i is summed over j in one
-order at every rank count, and the rank's partial K_r goes into ONE
-reduction with J -- a sum over the grid, re-associated at the rank
-boundaries like every Fock partial of the distributed DF SCF.
+order at every rank count, and the rank's partial K_r goes into one reduction
+with J: a sum over the grid, re-associated at the rank boundaries like every
+Fock partial of the distributed DF SCF. The two requests a range-separated
+functional makes per density, K and K_lr, are served by one pass of the tiles
+(`_exchange`): Y_i Y_j^T formed once, each operator's T its own.
 
 J. `df_jk.get_j`'s two integral passes, the auxiliary shells cut into
-contiguous blocks of about naux / size functions: pass 1 gives each rank
-the exact rows of (P|mu nu) Dm_{mu nu} for its shells, gathered verbatim;
-the metric solve rho = V^-1 j is every rank's own, locked to rank 0's; pass
-2 is each rank's shells' partial of sum_P (P|mu nu) rho_P, reduced with K.
+contiguous blocks of about naux / size functions: pass 1 gives each rank the
+exact rows of (P|mu nu) Dm_{mu nu} for its shells, gathered verbatim; the
+metric solve rho = V^-1 j is every rank's own, locked to rank 0's; pass 2 is
+each rank's shells' partial of sum_P (P|mu nu) rho_P, reduced with K.
 
-THE DRIVER IS `distributed_df.distributed_mean_field`, unchanged:
-`distributed_df_jk` hands an ISDF mean field this handle, which locksteps the
-density and its orbitals at entry and reduces its partials, so pyscf's loop
-runs on every rank on the same numbers.
+The driver is `distributed_df.distributed_mean_field`: `distributed_df_jk`
+hands an ISDF mean field this handle, which locksteps the density and its
+orbitals at entry and reduces its partials, so pyscf's loop runs on every rank
+on the same numbers.
 
-THREADS. The driver holds BLAS at one thread for pyscf's OpenMP (`nr_rks` on
+Threads. The driver holds BLAS at one thread for pyscf's OpenMP (`nr_rks` on
 the DFT grid, the DF-J passes). The row fit, G and Z's rows and the K builds
 are BLAS GEMMs, and the metric's factor and solve LAPACK: each takes back the
 pool the driver's wrap took (`threads.blas_full_pool`), so it runs on the
-count the process had before the SCF -- the count a one-rank handle built
-outside it runs on, which keeps the tiles its tiles bit for bit -- while the
+count the process had before the SCF (the count a one-rank handle built
+outside it runs on, which keeps the tiles its tiles bit for bit), while the
 libcint passes inside it (the metric slabs, the fit's three-centre integrals)
 drop to one again. `scf_isdf_blas_fit`, `scf_isdf_blas_kernel` and
 `scf_isdf_blas_k` record the counts they ran on.
 
-WHAT THE NUMBERS DO. The row fit is another realization of the serial fit's
-estimator (not its bits), and the reductions re-associate J and K, so the
-distributed SCF lands on the serial ISDF-K SCF within the SCF's own
-convergence threshold, the same on every rank.
-
-MEASURED, anthracene/cc-pVDZ/LRC-wPBEh on two workstation threads (M 3552 in 7
-tiles, nao 246, naux 924, nocc 47), the one-rank handle: the row fit 12.8
-s; one operator's Z rows 0.75 s (31 GF/s); a K build 0.23 s, 34 GF/s on
-2 M^2 (nocc + nao) + 2 M nao^2, against 0.32 s for the serial ISDFJK's K on
-the density itself; J 1.7 s, pyscf's integral-direct DF-J either way.
-
-SCALED TO THE HEXAMER / cc-pVTZ (M 117762 in 230 tiles of 512, nao 12204,
-naux 31260, nocc 1062), per rank, 8 / 16 ranks, Z held for the bare and the
-long-range operator (a rank's ~29 / ~15 tiles, ~14720 / ~7360 rows):
-
-  array, GB                                     8 ranks   16 ranks
-  X tiles                                       1.44      0.72
-  M^T tiles                                     3.68      1.84
-  Z rows, two operators                         27.7      13.9
-  G tiles, while one operator's Z forms         3.68      1.84
-  T rows, one per density                       1.44      0.72
-  Y tiles; a streamed tile; a Hadamard block    0.13; 0.05; 0.002
-  metric slab, while G forms                    0.13      0.13
-  K and J partials                              2.38      2.38
-  DF-J's metric factor (twice that as it forms) 7.8       7.8
-  held through the SCF                          ~45       ~27
-  the row fit's own peak, in the build          ~23       ~17
-
-  flops per rank                                8 ranks   16 ranks
-  a K build, 2 M^2 (nocc + nao) + 2 M nao^2     5.0e13    2.5e13
-  Z's rows once per operator, 2 M^2 naux        1.1e14    5.4e13
-  G once per operator, 2 M naux^2               2.9e13    1.4e13
-
-At the measured 17 GF/s a core, 16 cores a rank, a K build is ~190 s at 8
-ranks and ~95 s at 16, each operator's Z ~500 s / ~250 s once; the DF-J,
-11289 s a build on one core, ~90 s / ~45 s where it divides over the 128 /
-256 cores. Every K build receives the other ranks' Y and X tiles, 12.5 GB a
-rank. Factored, a build pays 2 M^2 naux / size again and holds no Z rows.
+The row fit is another realization of the serial fit's estimator (not its
+bits), and the reductions re-associate J and K, so the distributed SCF lands
+on the serial ISDF-K SCF within the SCF's own convergence threshold, the same
+on every rank.
 """
 import contextlib
 import time
@@ -111,7 +77,7 @@ from src.Base.constants import (FIT_CHOLESKY_BLOCK,
 from src.Base.distributed_df import (_counted, _lockstep_density,
                                      _reduce_parts, _spent)
 from src.Base.isdf_jk import ISDFJK, isdf_grid, range_coulomb
-from src.Base.separable_ri import fit_M_streaming
+from src.Base.separable_ri import DEFAULT_PAIR_TOL, FitTiles, fit_M_streaming
 from src.Base.utils import memory
 from src.Base.utils.mpi_grid import (allgather_ranges, broadcast,
                                      broadcast_rows, contiguous_block,
@@ -129,11 +95,14 @@ ISDF_BLAS_KEYS = ('scf_isdf_blas_fit', 'scf_isdf_blas_kernel',
 #: `scf_isdf_fit`, the row fit inside the build; `scf_isdf_kernel`, the
 #: interaction's rows (G, and Z's rows where they are held), per operator;
 #: `scf_fock_j` and `scf_fock_k`, the two partials; `scf_isdf_stream`, the
-#: column tiles' broadcasts inside the K builds; `scf_requests_k`, the K
-#: builds this rank contributed to; and `ISDF_BLAS_KEYS`.
+#: column tiles' broadcasts inside the K builds; `scf_isdf_collocation`, the
+#: other ranks' X tiles evaluated inside them; `scf_requests_k`, the K
+#: builds this rank contributed to; `scf_isdf_k_passes`, the passes of the
+#: column tiles that made them (one serves both operators of a
+#: range-separated functional); and `ISDF_BLAS_KEYS`.
 ISDF_TIMING_KEYS = ('scf_isdf_fit', 'scf_isdf_kernel', 'scf_fock_j',
-                    'scf_fock_k', 'scf_isdf_stream',
-                    'scf_requests_k') + ISDF_BLAS_KEYS
+                    'scf_fock_k', 'scf_isdf_stream', 'scf_isdf_collocation',
+                    'scf_requests_k', 'scf_isdf_k_passes') + ISDF_BLAS_KEYS
 
 
 class _DirectCoulomb:
@@ -250,6 +219,7 @@ class DistributedISDFJK(df.df.DF):
         super().__init__(source.mol, auxbasis=source.auxbasis)
         comm = current_comm() if comm is None else comm
         self.comm, self.timings, self.source = comm, timings, source
+        source._distributed_twin = True
         self.max_memory = source.max_memory
         self.stdout, self.verbose = source.stdout, source.verbose
         self.tile = FIT_CHOLESKY_BLOCK if tile is None else int(tile)
@@ -268,7 +238,7 @@ class DistributedISDFJK(df.df.DF):
         self.X = self.MT = None
         #: {array: most bytes of it this rank held at once}, read off arrays.
         self.held = {}
-        #: The row fit's own ledger (`RowFit.held`).
+        #: The row fit's own memory record (`RowFit.held`).
         self.fit_held = {}
         #: 'dense' (Z's rows held per operator) or 'factored' (G held, Z's
         #: blocks formed per build); rank 0's decision.
@@ -277,6 +247,19 @@ class DistributedISDFJK(df.df.DF):
         self.omega_kernels = {}
         self._coulomb = {}
         self._replaced = None
+        self._forget_exchange()
+
+    def _forget_exchange(self):
+        """No K request remembered: `_exchange`'s bookkeeping empty."""
+        #: {operator key: the keys asked for after it on the same density}
+        self._companions = {}
+        #: {operator key: omega}
+        self._omegas = {}
+        #: (key, density stack, occupied factors) of the last K request
+        self._last_k = None
+        #: {operator key: K partial} made beside the last request's operator
+        #: for its density, and the key that pass was asked for
+        self._pending, self._pending_origin = {}, None
 
     # -- construction --------------------------------------------------------
 
@@ -322,8 +305,7 @@ class DistributedISDFJK(df.df.DF):
         self.MT = fit.mt
         self.fit_held = dict(fit.held)
         del fit
-        self.X = {t: mol.eval_gto('GTOval_sph', coords[slice(*self.tiles[t])])
-                  for t in self.mine}
+        self.X = {t: self._collocation(t) for t in self.mine}
         self._hold('X_tiles', self.X.values())
         self._hold('MT_tiles', self.MT.values())
         _spent(self.timings, 'scf_build_slices', t_build)
@@ -331,6 +313,12 @@ class DistributedISDFJK(df.df.DF):
                   % (len(self.mine), len(self.tiles), nk, mol.nao_nr(),
                      self.auxmol.nao_nr()), *t0)
         return self
+
+    def _collocation(self, t):
+        """X_t, the AOs on tile t's points: one call per tile, so its owner's
+        tile and any other rank's evaluation of it are the same bits."""
+        return self.mol.eval_gto('GTOval_sph',
+                                 self.coords[slice(*self.tiles[t])])
 
     def _hold(self, name, arrays):
         """`held[name]`: the most bytes the arrays named so have summed to."""
@@ -449,7 +437,7 @@ class DistributedISDFJK(df.df.DF):
             _spent(self.timings, 'scf_fock_j', t_j)
         if with_k:
             t_k = time.time()
-            vk = self.exchange_partial(stack, factors, omega)
+            vk = self._exchange(stack, factors, omega)
             _spent(self.timings, 'scf_fock_k', t_k)
             _counted(self.timings, 'scf_requests_k')
         _spent(self.timings, 'scf_fock_jk', t0)
@@ -470,6 +458,54 @@ class DistributedISDFJK(df.df.DF):
                 self.mol, self.auxbasis, omega, direct_scf_tol, self.comm)
         return self._coulomb[key]
 
+    def _exchange(self, stack, factors, omega):
+        """This rank's K partial for `omega` on a locked density.
+
+        pyscf asks a range-separated functional for K twice per density, the
+        bare operator then the attenuated one (`rks.get_veff`), and both
+        passes receive the same Y tiles and form the same Y_i Y_j^T.
+        So a request makes, in one pass, its own operator and every operator
+        asked for after it on one density the last time; those wait as
+        partials of this density and answer their own request when it comes
+        for the same bits, a later density dropping them. Every rank sees the
+        same requests on the same locked densities, so it takes the same
+        decisions, and each partial is the bits a pass of its own makes.
+        """
+        key = _omega_key(omega)
+        self._omegas[key] = omega
+        last = self._last_k
+        same = last is not None and _same_density(last[1], last[2], stack,
+                                                  factors)
+        if not same:
+            self._drop_pending()
+        elif key != last[0]:
+            follow = self._companions.setdefault(last[0], [])
+            if key not in follow:
+                follow.append(key)
+        self._last_k = (key, stack.copy(),
+                        None if factors is None else [c.copy()
+                                                      for c in factors])
+        if key in self._pending:
+            return self._pending.pop(key)
+        keys = [key] + [k for k in self._companions.get(key, ()) if k != key]
+        parts = self.exchange_partials(stack, factors,
+                                       [self._omegas[k] for k in keys])
+        self._pending = dict(zip(keys[1:], parts[1:]))
+        self._pending_origin = key
+        memo = [self._last_k[1]] + list(self._last_k[2] or []) + parts[1:]
+        self._hold('K_memo', memo)
+        return parts[0]
+
+    def _drop_pending(self):
+        """Forget the partials no request came for, and that their operators
+        follow the one they were made beside."""
+        if self._pending:
+            unused = set(self._pending)
+            origin = self._pending_origin
+            self._companions[origin] = [k for k in self._companions[origin]
+                                        if k not in unused]
+        self._pending, self._pending_origin = {}, None
+
     def exchange_partial(self, dms, factors, omega=None):
         """This rank's partial of K for a stack of densities: its row tiles'
         X_i^T sum_j [(Y_i Y_j^T) o Z_ij] X_j, the column tiles in order.
@@ -477,14 +513,20 @@ class DistributedISDFJK(df.df.DF):
         factors: the occupied factors C~ (Dm = C~ C~^T) per density, or None
             for the general form Y = X Dm, the column side X itself.
         """
-        with blas_full_pool() as pool:
-            vk = self._exchange_rows(dms, factors, omega)
-        _ran_on(self.timings, 'scf_isdf_blas_k', pool)
-        return vk
+        return self.exchange_partials(dms, factors, [omega])[0]
 
-    def _exchange_rows(self, dms, factors, omega):
-        """`exchange_partial` on the caller's BLAS pool."""
-        kernel = self.interaction(omega)
+    def exchange_partials(self, dms, factors, omegas):
+        """`exchange_partial` for each operator of `omegas`, in one pass of
+        the column tiles: each the bits a pass of its own makes."""
+        with blas_full_pool() as pool:
+            vks = self._exchange_rows(dms, factors, omegas)
+        _ran_on(self.timings, 'scf_isdf_blas_k', pool)
+        _counted(self.timings, 'scf_isdf_k_passes')
+        return vks
+
+    def _exchange_rows(self, dms, factors, omegas):
+        """`exchange_partials` on the caller's BLAS pool."""
+        kernels = [self.interaction(omega) for omega in omegas]
         dense = self.z_mode == 'dense'
         nset, nao = len(dms), dms.shape[-1]
         naux = self.auxmol.nao_nr()
@@ -492,40 +534,73 @@ class DistributedISDFJK(df.df.DF):
             Y = {t: [np.dot(x, dm) for dm in dms] for t, x in self.X.items()}
         else:
             Y = {t: [np.dot(x, c) for c in factors] for t, x in self.X.items()}
+        # streamed: Y_j (factored densities) and M^T_j (factored Z); X_j is
+        # evaluated where it is not held, nao columns a tile not sent
         widths = ([] if factors is None else [c.shape[1] for c in factors])
-        cols = np.cumsum([0] + widths + [nao] + ([] if dense else [naux]))
+        cols = np.cumsum([0] + widths + ([] if dense else [naux]))
 
         def pack(j):
-            parts = ([] if factors is None else Y[j]) + [self.X[j]]
+            parts = ([] if factors is None else Y[j])
             return np.hstack(parts + ([] if dense else [self.MT[j]]))
 
-        T = {t: [np.zeros((len(x), nao)) for _ in range(nset)]
-             for t, x in self.X.items()}
+        # T[n][i][s]: operator n, row tile i, density s
+        T = [{t: [np.zeros((len(x), nao)) for _ in range(nset)]
+              for t, x in self.X.items()} for _ in kernels]
         self._hold('Y_tiles', [y for ys in Y.values() for y in ys])
-        self._hold('T_rows', [a for ts in T.values() for a in ts])
+        self._hold('T_rows', [a for Tn in T for ts in Tn.values() for a in ts])
         for j, (j0, j1) in enumerate(self.tiles):
-            buf = self._column_tile(j, pack, int(cols[-1]))
-            X_j = buf[:, cols[nset if factors is not None else 0]:
-                      cols[(nset if factors is not None else 0) + 1]]
+            buf = (self._column_tile(j, pack, int(cols[-1])) if cols[-1]
+                   else None)
+            X_j = self.X.get(j)
+            if X_j is None:
+                t_x = time.time()
+                X_j = self._collocation(j)
+                _spent(self.timings, 'scf_isdf_collocation', t_x)
+                self.held['X_tile'] = int(X_j.nbytes)
             for i in self.mine:
-                Z_ij = (kernel[i][:, j0:j1] if dense
-                        else np.dot(kernel[i], buf[:, cols[-2]:].T))
+                Z_ij = [kernel[i][:, j0:j1] if dense
+                        else np.dot(kernel[i], buf[:, cols[-2]:].T)
+                        for kernel in kernels]
                 for s in range(nset):
                     right = (X_j if factors is None
                              else buf[:, cols[s]:cols[s + 1]])
                     A = np.dot(Y[i][s], right.T)
-                    A *= Z_ij
-                    T[i][s] += np.dot(A, X_j)
+                    for n, Z in enumerate(Z_ij):
+                        # the last operator takes A itself, as a lone pass
+                        AZ = A if n == len(Z_ij) - 1 else A.copy()
+                        AZ *= Z
+                        T[n][i][s] += np.dot(AZ, X_j)
+                        del AZ
                 self.held['A_block'] = max(self.held.get('A_block', 0),
-                                           int(Z_ij.nbytes))
-            del buf
-        vk = np.zeros((nset, nao, nao))
-        for i in self.mine:
-            for s in range(nset):
-                vk[s] += np.dot(self.X[i].T, T[i][s])
-        return vk
+                                           int(Z_ij[0].nbytes))
+                if len(Z_ij) > 1:
+                    self.held['A_copy'] = self.held['A_block']
+            del buf, X_j
+        vks = []
+        for Tn in T:
+            vk = np.zeros((nset, nao, nao))
+            for i in self.mine:
+                for s in range(nset):
+                    vk[s] += np.dot(self.X[i].T, Tn[i][s])
+            vks.append(vk)
+        return vks
 
     # -- bookkeeping ---------------------------------------------------------
+
+    def fit_tiles(self):
+        """This rank's M^T tiles and the fit they are, read-only views
+        (`separable_ri.FitTiles`), or None before the build: the settings
+        are the ones `build` hands the row fit, so a later stage asking for
+        the same fit reads these instead of making it again."""
+        if self.MT is None:
+            return None
+        source = self.source
+        return FitTiles(self.mol, self.auxmol, self.coords, self.tile,
+                        self.MT, self.comm, self.fit_held,
+                        l_max_second=source.l_max_second,
+                        pair_tol=DEFAULT_PAIR_TOL,
+                        regularization=source.regularization,
+                        block_memory_gb=source.block_memory_gb)
 
     def held_bytes(self):
         """{array: bytes} this rank holds now, read off the arrays: the X and
@@ -563,7 +638,7 @@ class DistributedISDFJK(df.df.DF):
         return self
 
     def uninstall(self):
-        """Put the mean field's own ISDFJK back, KEEPING the tiles: a
+        """Put the mean field's own ISDFJK back, keeping the tiles: a
         downstream reader of `mf.with_df` (a gradient, the factors a GW run
         takes from the SCF) would read one rank's tiles as the grid."""
         pair, self._replaced = self._replaced, None
@@ -578,6 +653,7 @@ class DistributedISDFJK(df.df.DF):
         self.X = self.MT = None
         self.omega_kernels, self._coulomb = {}, {}
         self.z_mode = None
+        self._forget_exchange()
         return self
 
 
@@ -592,6 +668,23 @@ def _shell_slabs(ao_loc, width):
             s0 = s - 1
     out.append((s0, len(ao_loc) - 1))
     return out
+
+
+def _omega_key(omega):
+    """An operator's key in `omega_kernels`: 0.0 for the bare Coulomb."""
+    return '%.6f' % (0.0 if omega is None else omega)
+
+
+def _same_density(stack, factors, other_stack, other_factors):
+    """Whether two locked densities and their occupied factors are the same
+    bits."""
+    if not np.array_equal(stack, other_stack):
+        return False
+    if factors is None or other_factors is None:
+        return factors is None and other_factors is None
+    return (len(factors) == len(other_factors)
+            and all(np.array_equal(a, b)
+                    for a, b in zip(factors, other_factors)))
 
 
 def _ran_on(timings, key, threads):
@@ -622,18 +715,17 @@ def _occupied_factors(dms):
 def distributed_isdf_jk(mf, comm=None, timings=None, tile=None, build=True):
     """Give an ISDF mean field a `with_df` holding this rank's tiles.
 
-    Returns the handle, installed, or None on a one-rank world, where `mf` is
-    left exactly as it came in -- its own `ISDFJK`, the serial path,
-    untouched. `uninstall()` puts the ISDFJK back while the tiles stay.
+    Returns the handle, installed, or None on a one-rank world, where `mf`
+    keeps its own `ISDFJK`, the serial path. `uninstall()` puts the ISDFJK
+    back while the tiles stay.
     build: False leaves the build (collective) to the first J/K request, so
     that a distributed SCF started next times it as its own stage.
 
     The build runs on the caller's BLAS pool, never one dropped to a thread
-    -- inside `blas_single_threaded`, the pool that wrap took: the row fit
-    is GEMM-bound and holds only its libcint passes at one thread itself,
-    and a BLAS's bits follow its thread count, so tiles fitted at another
-    count than a one-rank handle's are not its tiles -- at 16 threads a rank
-    K moved by 1e2 of its reassociation response.
+    (inside `blas_single_threaded`, the pool that wrap took): the row fit is
+    GEMM-bound and holds only its libcint passes at one thread itself, and a
+    BLAS's bits follow its thread count, so tiles fitted at another count
+    than a one-rank handle's are not its tiles.
     """
     comm = current_comm() if comm is None else comm
     if comm is None or comm.Get_size() == 1:

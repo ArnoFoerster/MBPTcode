@@ -1,86 +1,78 @@
 """The excited-state potential-energy surface of the cubic BSE@GW gradient.
 
 The gradient chain in `qp_space_time`/`bse_isdf`/`isdf_derivatives` returns
-dOmega/dR, the derivative of an EXCITATION energy. A geometry optimization
-needs the derivative of the excited state's TOTAL energy,
+dOmega/dR, the derivative of an excitation energy. A geometry optimization
+needs the derivative of the excited state's total energy,
 
     E_ex(R) = E_0(R) + Omega(R),     dE_ex/dR = dE_0/dR + dOmega/dR
 
 with E_0 the mean-field ground state, so the ground-state gradient is added
-here and never inside the chain. That split matters for what comes after it:
-in an ADIABATIC singlet-triplet gap the two states sit at DIFFERENT minima, so
-E_0 does not cancel between them and has to be carried consistently.
+here and never inside the chain. In an adiabatic singlet-triplet gap the two
+states sit at different minima, so E_0 does not cancel between them.
 
-THE FROZEN CONVENTIONS. The chain fixes seven discrete choices at the
-reference geometry -- the quasiparticle set, the frame orientation, the
-interpolation pair layout, the Newton branch with the pole guard it steps
-around and the seed it starts from, the contour-deformation quadrature sized
-against the root-to-pole distance, the residue backend, and the scissor the
-orbitals OUTSIDE the set carry -- because each is a discontinuity in the
-surface otherwise.
-`refreeze` rebuilds all of them at a new geometry with the same settings,
-which is how the optimizer in `src/properties/optimize.py` measures the drift
-of the surface it walked from the one the fit would choose at the end.
+Frozen conventions: the chain fixes seven discrete choices at the reference
+geometry, each a discontinuity in the surface otherwise: the quasiparticle
+set, the frame orientation, the interpolation pair layout, the Newton branch
+(pole guard and seed), the contour-deformation quadrature sized against the
+root-to-pole distance, the residue backend, and the scissor the orbitals
+outside the set carry. `refreeze` rebuilds all of them at a new geometry with
+the same settings; the optimizer in `src/properties/optimize.py` uses it to
+measure how far the walked surface drifted from the one the fit would choose
+at the end.
 
-THE SURROUNDINGS enter through the chain's `environment`
+The surroundings enter through the chain's `environment`
 (`src.Base.environment`): a polarizable continuum dresses the auxiliary gauge
 and adds its static reaction-field operator to the quasiparticle equation,
 fixed point charges enter the mean field, the gas phase does nothing. The
-energy sees the whole of an environment or none of it, and the gradient asks
-the environment for its own adjoints. A continuum supplies both, so a solvated
-force is analytic, for a restricted reference and a molecule. An environment
-without a derivative says so through `differentiable`, and the chain then
-reports energies and refuses forces rather than returning the gas-phase
-adjoints, which would be wrong by the whole reaction-field response while
-looking reasonable.
+gradient asks the environment for its own adjoints; a continuum supplies them,
+so a solvated force is analytic for a restricted reference and a molecule. An
+environment without a derivative says so through `differentiable`, and the
+chain then reports energies and refuses forces.
 
-THE CASIDA STEP follows production's one memory rule by default
-(`solver='auto'`, `bse.solver_choice`): dense while the (A, B) pair fits in
-BSE_DENSE_MAX_GB -- every root, in a fixed order, the only form a
-finite-difference check should difference -- and matrix-free through
-production's ISDF Davidson (`solve_casida_davidson`) above it, for either
-spin -- kappa = 0 drops the bare-exchange term from the block action and the
-screened term is spin-independent. A named `solver` is not vetoed by the rule:
-'dense' at size is a caller paying the memory deliberately. The
-adjoint is matrix-free either way, and the static W it differentiates is the
-one the Davidson solved with. `bse_adjoint` names its realization:
-'explicit' (`bse_backward`) contracts the eigenvectors against the
-three-index blocks of `bse_cache`, built at the first reverse call off a
+The Casida step follows `bse.solver_choice` by default (`solver='auto'`):
+dense while the (A, B) pair fits in BSE_DENSE_MAX_GB (every root, in a fixed
+order, the form a finite-difference check should difference), matrix-free
+through the ISDF Davidson (`solve_casida_davidson`) above it, for either spin
+(kappa = 0 drops the bare-exchange term from the block action). A named
+`solver` is not vetoed by the rule. The adjoint is matrix-free either way and
+differentiates the static W the Davidson solved with. `bse_adjoint` names its
+realization: 'explicit' (`bse_backward`) contracts the eigenvectors against
+the three-index blocks of `bse_cache`, built at the first reverse call off a
 forward pass and kept with it, so an energy never pays for them; 'grid'
 (`isdf_bse_adjoint`) is the reverse of the ISDF block action and forms no
-three-index block, forward or reverse. The two agree to rounding, not in
-the bits.
+three-index block. The two agree to rounding, not in the bits.
 
-SLICED FACTORS (`sliced=True`, over more than one rank) reach every stage
-as ONE `SlicedFactors`: the Davidson block action reads its rows, and the
-static W, the quasiparticle solve, the BSE cache and adjoint, the chi0 adjoint
-and the nuclear assembly each gather what they read whole once and drop it,
-so between geometries a rank holds its grid rows alone and every number is
-the whole layout's bit for bit. A continuum that dresses the interaction is
-refused on them at construction: Eq. (18) needs the bare gauge beside the
-dressed one. On the row fit (`fit='rows'`) the same stages read the rows the
-fit itself built, never a whole fit: bitwise the same at every rank count,
-and another realization -- and, where the pair screen drops a pair, another
-estimator -- than the replicated fit's (`FrozenFactorization`).
+Sliced factors (`sliced=True`, over more than one rank) reach every stage as
+one `SlicedFactors`: the Davidson block action reads its rows, and the other
+stages each gather what they read whole once and drop it, so between
+geometries a rank holds its grid rows alone and every number is the whole
+layout's bit for bit. A continuum that dresses the interaction is refused on
+them (Eq. (18) needs the bare gauge beside the dressed one). On the row fit
+(`fit='rows'`) the same stages read the rows the fit built: bitwise the same
+at every rank count, and another realization (and, where the pair screen
+drops a pair, another estimator) than the replicated fit
+(`FrozenFactorization`).
 
-Everything computed FROM this surface -- geometry optimization, normal modes,
-Huang-Rhys factors, adiabatic gaps, reorganization energies, rates -- lives in
+Everything computed from this surface (geometry optimization, normal modes,
+Huang-Rhys factors, adiabatic gaps, reorganization energies, rates) lives in
 `src/properties/` and knows only the `PotentialEnergySurface` protocol.
 """
 import warnings
 
 import numpy as np
 
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.constants import (ROOT_FOLLOW_MARGIN_MIN,
+from src.Base.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.constants import (FIT_CHOLESKY_BLOCK, ROOT_FOLLOW_MARGIN_MIN,
                                 ROOT_FOLLOW_WEIGHT_MIN)
 from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
-                                BSE_DAVIDSON_NROOTS,
+                                BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
+                                BSE_FORCE_RESIDUAL_TOL,
                                 BSE_DENSE_MAX_NOV, CD_NFREQ, CD_NFREQ_MAX,
                                 CD_POLE_RESOLUTION, HARTREE_TO_EV,
                                 OUTSIDE_TREATMENTS, SOP_N_POLES)
 from src.Base.declaration import Excitation, SurfacePhysics
 from src.Base.environment import attached_environment, environment_label
+from src.Base.utils.mpi_grid import current_comm
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
@@ -93,7 +85,7 @@ from src.SingleReference.GW.qp_states import (calibrate_scissor,
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
-    isdf_bse_backward, isdf_interstate_backward)
+    isdf_bse_backward, isdf_bse_backward_rows, isdf_interstate_backward)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
 from src.SingleReference.base import get_occ_virt_indices
@@ -113,60 +105,54 @@ from src.properties.nonadiabatic import (follow_state, mo_overlap,
                                          state_overlap)
 from src.gradients.qp_space_time import (qp_gradient_space_time,
                                          qp_set_gradient)
-from src.gradients.space_time_adjoint import chi0_backward
+from src.gradients.space_time_adjoint import (chi0_backward,
+                                              chi0_backward_rows)
 
 
 class ExcitedStateChain(FactorChain):
     """Frozen conventions, and the energy and gradient that follow from them.
 
     `scf_factory(mol) -> mf` is how a displaced geometry gets a mean field; it
-    must converge the ORBITAL gradient to ~1e-11 (see `check_scf_quality`).
+    must converge the orbital gradient to ~1e-11 (see `check_scf_quality`).
 
-    `solver='auto'` is production's one memory rule (`bse.solver_choice`,
-    resolved in `solver_used`): dense while the Casida pair (A, B) fits in
-    BSE_DENSE_MAX_GB, matrix-free above it. It is the default because a pair
-    count alone decides nothing -- at a hundred atoms the dense pair is
-    terabytes, and under the Tamm-Dancoff form a count rule picks dense
-    always -- while at the sizes a finite-difference gate runs the rule
-    resolves to the dense route anyway, so the default costs those cases
-    neither a number nor an ordering.
+    `solver='auto'` is `bse.solver_choice`'s memory rule (resolved in
+    `solver_used`): dense while the Casida pair (A, B) fits in
+    BSE_DENSE_MAX_GB, matrix-free above it. A pair-count rule would pick dense
+    for every Tamm-Dancoff problem; at the sizes of a finite-difference gate
+    the memory rule resolves to dense anyway.
 
     `residue_route='explicit'` takes the real-axis residues of Sigma^c as they
     stand: a residue backend decided per state, or per geometry, is not one
     surface.
 
-    `bse_adjoint` is how the Hellmann-Feynman adjoint of the root is
-    realized (BSE_ADJOINTS): 'explicit' through the three-index blocks of
-    `bse_cache`, (naux, nocc, nvir) each, built at the first reverse call;
-    'grid' closed over the ISDF grid (`isdf_bse_adjoint`), which forms none.
-    The same surface: the forward pass does not read it, and the two forces
-    agree to rounding.
+    `bse_adjoint` realizes the Hellmann-Feynman adjoint of the root
+    (BSE_ADJOINTS): 'explicit' through the (naux, nocc, nvir) three-index
+    blocks of `bse_cache`, built at the first reverse call; 'grid' closed over
+    the ISDF grid (`isdf_bse_adjoint`), which forms none. The forward pass
+    does not read it, and the two forces agree to rounding.
 
-    `qp_window=2` is the frontier set, QPStates('frontier', 2) by the declared
-    name: the two occupied and two virtual orbitals around the gap, widened
-    over degenerate blocks. It is what this class solves explicitly, and the
-    orbitals outside it carry what `outside` says.
+    `qp_window=2` is the frontier set, QPStates('frontier', 2): the two
+    occupied and two virtual orbitals around the gap, widened over degenerate
+    blocks.
 
-    `outside` decides what the orbitals with no quasiparticle equation of
-    their own carry on the BSE diagonal: 'mean-field' leaves each at its
-    eigenvalue, 'scissor' adds the frozen shift `calibrate_scissor` reads off
-    the explicitly solved roots at the reference geometry. That shift is a
-    NUMBER, so d eps^QP_p/dR = d eps_p/dR for those orbitals and the adjoint
-    chain carries no term for it. The `scissor` keyword is a different thing:
-    a tier for the states INSIDE the set whose pole model is inadmissible.
+    `outside` sets what the orbitals with no quasiparticle equation of their
+    own carry on the BSE diagonal: 'mean-field' leaves each at its eigenvalue,
+    'scissor' adds the frozen shift `calibrate_scissor` reads off the
+    explicitly solved roots at the reference geometry. That shift is a
+    constant, so d eps^QP_p/dR = d eps_p/dR for those orbitals. The `scissor`
+    keyword is different: a tier for the states inside the set whose pole
+    model is inadmissible.
 
     Under ranks (`with distributed(comm):`) every rank runs the chain whole
-    and the kernels it calls divide the M^2 sweeps of the quasiparticle
-    solve and of the static screening -- the tau points of proj(tau) and of
-    the quasiparticle solve's adjoint, the contour-deformation frequencies,
-    the rows of Zt in the Davidson block action -- and hand every rank the
-    same bits. The static-W adjoint's sweep (`chi0_backward`) is not divided:
-    every rank runs all of its tau points. What the chain forms on its own
-    from them, the three branches that carry (eps_bar, X_bar, D_bar) to the
-    nuclei, ends in the one `lockstep` of `FactorChain.nuclear_gradient`, so
-    both forces here are rank 0's on every rank; the mean-field force
-    `total_gradient` adds is `FactorChain.mean_field_gradient`'s, rank 0's on
-    every rank as well.
+    and the kernels divide the M^2 sweeps (the tau points of proj(tau) and of
+    the quasiparticle adjoint, the contour-deformation frequencies, the rows
+    of Zt in the Davidson block action), handing every rank the same bits.
+    The static-W adjoint (`chi0_backward_rows`) and the quasiparticle reverse
+    sweep run tile-major, each rank holding the factors' adjoints by its grid
+    tiles (`_adjoint_rows`). The nuclear assembly ends in the `lockstep` of
+    `FactorChain.nuclear_gradient`, and the mean-field force is
+    `FactorChain.mean_field_gradient`'s, so both forces are rank 0's on every
+    rank.
     """
 
     READS_SLICED_FACTORS = True
@@ -192,7 +178,7 @@ class ExcitedStateChain(FactorChain):
                          radii=radii, sliced=sliced, fit=fit,
                          fit_block=fit_block)
         self.spin, self.state, self.bse_tda = spin, state, bse_tda
-        # `track='overlap'` follows the STATE; None follows the index.
+        # `track='overlap'` follows the state; None follows the index.
         self.track = track
         self._followed = None          # (mol, mo_coeff, X, Y) of the last step
         self._anchor = None            # ... and of the first, for drift
@@ -206,7 +192,7 @@ class ExcitedStateChain(FactorChain):
         self.scissor = scissor
         self.n_poles = n_poles
         self.sop_stride = sop_stride
-        # `scissor='calibrate'` asks for the tier to be BUILT at the reference
+        # `scissor='calibrate'` asks for the tier to be built at the reference
         # geometry: the states Eq. (27) excludes are solved properly there by
         # the fallback route, and their converged roots are the calibration.
         # Uncalibrated (a shift of zero) costs meaningfully more in both the
@@ -227,7 +213,7 @@ class ExcitedStateChain(FactorChain):
         # first forward calibrates it, a {orbital: shift} mapping afterwards,
         # which is what `frozen_scissor` reads.
         self.outside_shift = None
-        # What the chain this one was refrozen FROM had calibrated, so the
+        # What the chain this one was refrozen from had calibrated, so the
         # record can say how far the convention moved with the geometry.
         self.outside_shift_before = None
         self.is_ks = xc_hybrid_coeff(self.mf0)[0]
@@ -243,6 +229,8 @@ class ExcitedStateChain(FactorChain):
                              f'{BSE_ADJOINTS}')
         self.bse_adjoint = bse_adjoint
         self.nroots, self.bse_conv_tol = nroots, bse_conv_tol
+        # each Davidson's {'stats', 'timings'}, kept while a stage timer is set
+        self.davidson_solves = []
         # Kept verbatim so `refreeze` can rebuild the same surface elsewhere:
         # a setting that is re-derived instead of preserved makes the refrozen
         # surface a different one, and its energy incomparable with this one's.
@@ -271,10 +259,15 @@ class ExcitedStateChain(FactorChain):
         # `refreeze` re-derives it at the new geometry like the rest.
         self.pole_offsets = {}
         # The reference geometry's converged roots, handed back as the Newton
-        # SEED at every displaced geometry so that the iteration lands on the
+        # seed at every displaced geometry so that the iteration lands on the
         # branch this surface was built on rather than on whichever one the
         # mean-field eigenvalue is nearest to.
         self.qp_seeds = {}
+        # The pole model's positions per orbital, fitted at the reference
+        # geometry and held: the SOP adjoint differentiates the amplitudes at
+        # fixed poles, so a set re-fitted per geometry puts the poles' motion
+        # into the energy and not into the force.
+        self.sop_poles = {}
         # Whether the contour-deformation quadrature has been sized against the
         # root-to-pole distance yet; that happens on the first quasiparticle
         # solve and is then frozen with everything else.
@@ -283,13 +276,13 @@ class ExcitedStateChain(FactorChain):
     # ------------------------------------------------------------ declaration
     @property
     def physics_ground_state(self):
-        """E_0 = E_KS[xc], the mean field's OWN energy.
+        """E_0 = E_KS[xc], the mean field's own energy.
 
         `total_energy` is `mf.e_tot + Omega` and carries no correlation term of
         its own, so the functional under the state is the mean field's,
         whatever that mean field is: GroundState('dft', xc) for a Kohn-Sham
         factory and GroundState('dft', 'hf') for Hartree-Fock. The dRPA ground
-        state of Toelle Eq. (15) is a DIFFERENT surface and is composed in
+        state of Toelle Eq. (15) is a different surface and is composed in
         `RPABSESurface`, which declares its own.
         """
         return declared_ground_state(self.mf0, 'dft')
@@ -317,10 +310,10 @@ class ExcitedStateChain(FactorChain):
     def physics(self):
         """What this chain computes: E_KS + Omega, in its own environment.
 
-        DECLARED HERE, not stamped from outside. A surface built through
-        `potential_energy_surface` is CHECKED against this rather than labelled
-        by it, so a dispatcher that built the chain with settings the caller
-        did not ask for is a refusal instead of a mislabelled number.
+        Declared here rather than stamped from outside: a surface built
+        through `potential_energy_surface` is checked against it, so a chain
+        built with settings the caller did not ask for is refused rather than
+        mislabelled.
         """
         return SurfacePhysics(self.physics_ground_state,
                               self.physics_excitation,
@@ -331,20 +324,18 @@ class ExcitedStateChain(FactorChain):
         """The contour-deformation quadrature and the imaginary-time grid whose
         frequency axis it is, at `nfreq_cd` points.
 
-        Production's `cd_frequency_grid` builds it, so the surface a gradient
-        walks and the quadrature an energy route integrates on are one choice
-        made in one place -- including the refusal when e_min_below_gap eats
-        the whole gap, which no imaginary-time grid represents.
+        `cd_frequency_grid` builds it, so a gradient walks the quadrature an
+        energy route integrates on, including the refusal when
+        e_min_below_gap eats the whole gap.
 
-        ntau_gw is 24 rather than the 18 the imaginary axis alone would need.
-        The cosine transform wants the grid's 1/y fit at y = d only, so
-        [gap, e_max]; the cosh transform a residue needs it at y = d -/+ w',
-        which reaches down to gap - w' and is why e_min sits BELOW the gap.
-        Widening the range that far costs points. Measured on benzene/cc-pVDZ
-        with e_min = 0.5 gap: every DFT starting point failed the Laplace
-        backend's representation gate at 18 points and passed cleanly at 24;
-        Hartree-Fock passes either way because its quasiparticle corrections,
-        and hence its residue frequencies, are much smaller.
+        ntau_gw is 24 rather than the 18 the imaginary axis alone needs: the
+        cosine transform wants the grid's 1/y fit on [gap, e_max], the cosh
+        transform of a residue at y = d -/+ w', down to gap - w', which is why
+        e_min sits below the gap. On benzene/cc-pVDZ with e_min = 0.5 gap,
+        every DFT starting point fails the Laplace backend's representation
+        gate at 18 points and passes at 24; Hartree-Fock passes either way
+        (smaller quasiparticle corrections, hence smaller residue
+        frequencies).
         """
         self.nfreq_cd = int(nfreq_cd)
         # the range the tau axis is fitted on, recorded beside the grid it
@@ -360,17 +351,15 @@ class ExcitedStateChain(FactorChain):
         not resolve the root-to-pole spike; True when the grid changed.
 
         The spike is the Lorentzian of half-width d = |eps^QP_p - eps_q| that
-        the pole of G at a NEIGHBOURING orbital energy puts on the
+        the pole of G at a neighbouring orbital energy puts on the
         imaginary-frequency integrand at nu = 0 (`root_pole_distance`). A grid
         whose smallest node sits at a comparable frequency integrates the
-        wrong function there, and the Newton then converges on whatever zero
-        the truncated self-energy has -- a satellite, or nothing at all.
+        wrong function there, and the Newton converges on whatever zero the
+        truncated self-energy has: a satellite, or nothing.
 
-        Sized ONCE, at the reference geometry, and frozen: a quadrature
-        re-decided per geometry is a step in the surface of the same family as
-        a re-decided residue route, and the displaced roots sit closer to the
-        pole than the reference one anyway, so the reference is the conservative
-        place to measure from only if what is measured there is held.
+        Sized once, at the reference geometry, and frozen: a quadrature
+        re-decided per geometry steps the surface like a re-decided residue
+        route.
         """
         if self.cd_sized:
             return False
@@ -382,6 +371,7 @@ class ExcitedStateChain(FactorChain):
             # the frozen branch belongs to the grid it was found on
             self.pole_offsets.clear()
             self.qp_seeds.clear()
+            self.sop_poles.clear()
             return True
         self.cd_sized = True
         if not resolved:
@@ -404,7 +394,7 @@ class ExcitedStateChain(FactorChain):
         half of a pair a quasiparticle energy and leaving the other at the mean
         field differentiates across an arbitrary rotation.
 
-        `window` is a half-width, 'all', or a SEQUENCE of orbital indices --
+        `window` is a half-width, 'all', or a sequence of orbital indices:
         the set a `QPStates` declaration resolved to, which is already the
         whole answer and is taken as given rather than widened again.
         """
@@ -424,6 +414,7 @@ class ExcitedStateChain(FactorChain):
         kw = {'residue_route': self.residue_route,
               'pole_offset': self.pole_offsets,
               'w0': self.qp_seeds,
+              'sop_poles': self.sop_poles,
               'n_poles': self.n_poles,
               'sop_stride': self.sop_stride,
               'scissor': self.scissor_map or self.scissor}
@@ -432,25 +423,27 @@ class ExcitedStateChain(FactorChain):
         return kw
 
     def _freeze_newton_branch(self, route_out):
-        """Keep the guard band and the root each quasiparticle solve resolved
-        to, once. True when a calibrated shift was added and the solve has to
-        be repeated to read it.
+        """Keep the guard band, the root and the pole set each quasiparticle
+        solve resolved to, once. True when a calibrated shift was added and
+        the solve has to be repeated to read it.
 
         The first solve is the reference geometry's in every path that then
         displaces it, so `setdefault` freezes that one: a displaced geometry
-        reports what it used, starts from the reference root and changes
-        neither.
+        reports what it used, starts from the reference root, evaluates the
+        pole model on the reference poles and changes none of them.
         """
         for p, off in route_out.get('pole_offsets', {}).items():
             self.pole_offsets.setdefault(int(p), float(off))
         roots = route_out.get('roots', {})
         for p, w in roots.items():
             self.qp_seeds.setdefault(int(p), float(w))
+        for p, poles in route_out.get('sop_poles', {}).items():
+            self.sop_poles.setdefault(int(p), np.array(poles, float))
         if self.scissor != 'calibrate':
             return False
-        # Tier the states the route ACTUALLY sent to the real axis. A second
-        # reading of Eq. (27) would test the root where the route tested the
-        # start, and disagree on exactly the marginal states.
+        # Tier the states the route sent to the real axis. A second reading of
+        # Eq. (27) would test the root where the route tested the start, and
+        # disagree on the marginal states.
         eps0 = np.asarray(self.mf0.mo_energy, float)
         grew = False
         for p, route in self._routes_taken(route_out).items():
@@ -474,7 +467,7 @@ class ExcitedStateChain(FactorChain):
         return {int(p): route for p in route_out.get('roots', {})}
 
     def _qp_set_solve(self, x_mo, d_sigma, eps, mu, xc_correction, weights,
-                      states=None):
+                      states=None, tape=None, rows_block=None):
         """((eps^QP values, adjoints), route_out) for a quasiparticle set, with
         the contour-deformation grid sized on the first pass.
 
@@ -482,6 +475,12 @@ class ExcitedStateChain(FactorChain):
         repeated while `_grow_cd_grid` doubles the quadrature under it. That
         costs one extra pass at the reference geometry and nothing afterwards,
         because everything it decided is frozen on the chain.
+
+        tape: an earlier solve's `QPSetTape` on the same factors, and each
+        repeat reads the one before it, so proj(tau) and the slices are
+        swept once however often the quadrature grows (`QPSetTape.reads`).
+        rows_block: the adjoints in grid tiles over the ranks
+        (`qp_set_gradient`).
         """
         states = self.qp_set if states is None else states
         while True:
@@ -489,16 +488,15 @@ class ExcitedStateChain(FactorChain):
             out = qp_set_gradient(x_mo, d_sigma, eps, self.nocc, self.gw_grid,
                                   self.nu, self.wt, states, weights,
                                   mu=mu, xc_correction=xc_correction,
-                                  route_out=route_out,
-                                  **self._qp_kw())
+                                  route_out=route_out, tape=tape,
+                                  rows_block=rows_block, **self._qp_kw())
+            tape = route_out.get('tape', tape)
             grew = self._grow_cd_grid(out[0], eps, states)
-            # A calibrated shift is read by the solve AFTER the one that
-            # measured it, so the map triggers one repeat.
-            #
-            # The SHORT CIRCUIT is load-bearing: freezing on a pass that grew
-            # the grid would `setdefault` the roots an under-resolved
-            # quadrature produced. Hoisting this call out of the `or` reads as
-            # a tidy-up and is a silent accuracy regression.
+            # A calibrated shift is read by the solve after the one that
+            # measured it, so the map triggers one repeat. The short circuit
+            # matters: freezing on a pass that grew the grid would
+            # `setdefault` the roots of an under-resolved quadrature, so this
+            # call must stay inside the `or`.
             if not (grew or self._freeze_newton_branch(route_out)):
                 break
         return out, route_out
@@ -523,25 +521,18 @@ class ExcitedStateChain(FactorChain):
 
     def solver_used(self, n_ov):
         """'dense' or 'davidson' for a pair space of n_ov, resolving 'auto'
-        through production's ONE rule, `bse.solver_choice`.
+        through `bse.solver_choice`: dense while the Casida pair (A, B) fits in
+        BSE_DENSE_MAX_GB (the Tamm-Dancoff form is not exempt; the dense route
+        builds both blocks either way). `dense_max_nov` is an extra cap that
+        may only tighten the rule; at its default it is the rule's own
+        boundary.
 
-        The rule is dense while the Casida pair (A, B) fits in
-        BSE_DENSE_MAX_GB; `solver_choice`'s docstring is where it is stated and
-        why the Tamm-Dancoff form is not exempt from it (the dense route builds
-        both blocks either way). `dense_max_nov` is an explicit cap ON TOP of
-        that rule and may only tighten it: at its default it IS the rule's own
-        boundary, so the two agree exactly, and a smaller value forces the
-        matrix-free route earlier than memory alone would.
-
-        A TAMM-DANCOFF PROBLEM ABOVE THE RULE IS REFUSED, not served densely.
+        A Tamm-Dancoff problem above the rule is refused:
         `solve_casida_davidson` solves the full Casida problem and takes no
-        `tda`, so routing there would return roots of a different kernel from
-        the declared one; and staying dense pays exactly the memory the rule
-        exists to refuse. Triplets DO go through Davidson -- kappa = 0 removes
-        the bare-exchange term from the block action and nothing else changes.
-        Refusing at CONSTRUCTION on the string `solver` would reject 'auto' at
-        sizes where it was going to pick dense anyway, which is why the refusal
-        is here, where the pair count is known.
+        `tda`, and staying dense pays the memory the rule refuses. Triplets do
+        go through Davidson (kappa = 0 removes the bare-exchange term from the
+        block action). The refusal is here, where the pair count is known, so
+        'auto' is not rejected at sizes where it picks dense.
         """
         if self.solver != 'auto':
             return self.solver
@@ -571,20 +562,18 @@ class ExcitedStateChain(FactorChain):
         """Calibrate the scissor the orbitals outside the set carry, once.
 
         `calibrate_scissor` gives every outside orbital the quasiparticle
-        correction of the explicitly solved orbital NEAREST it in orbital
-        energy, so the occupied ones take an occupied probe's shift and the
-        virtual ones a virtual probe's -- two tiers, which is where the
-        sensitivity splits: an outsize error on a core state moves a frontier
+        correction of the explicitly solved orbital nearest it in energy, so
+        occupied orbitals take an occupied probe's shift and virtual ones a
+        virtual probe's. An error on a core state moves a frontier
         quasiparticle by a fraction of a meV, the inner valence by orders of
         magnitude more per eV.
 
-        Frozen at the FIRST forward, which is the reference geometry's in
-        every path that then displaces it, and held from then on like the
-        Newton branch and the quadrature. A shift re-derived per geometry
-        steps the surface wherever the nearest probe changes, and it would put
-        a d(shift)/dR into a force that has no term for it -- the shift being
-        a constant is exactly what lets `_fold_to_nuclei` send the seed of an
-        outside orbital straight to the mean-field eigenvalue.
+        Frozen at the first forward (the reference geometry's) and held, like
+        the Newton branch and the quadrature: a shift re-derived per geometry
+        steps the surface wherever the nearest probe changes and would put a
+        d(shift)/dR into a force that has no term for it. Its constancy is
+        what lets `_fold_to_nuclei` send an outside orbital's seed straight to
+        the mean-field eigenvalue.
         """
         if self.outside_shift is not None:
             return
@@ -616,33 +605,23 @@ class ExcitedStateChain(FactorChain):
         return out
 
     def _env_static_outside(self, shift, norb):
-        """<p|Sigma^env|p> on the orbitals the quasiparticle window LEFT OUT,
-        zero on the ones inside it (where `_xc_correction` already carries it).
+        """<p|Sigma^env|p> on the orbitals the quasiparticle window leaves out,
+        zero inside it (where `_xc_correction` already carries it).
 
-        THE WINDOW IS AN APPROXIMATION TO GW, NOT TO A REACTION FIELD. Leaving
-        an orbital at its mean-field eigenvalue is defensible for
-        Sigma_x - v_xc + Sigma_c: that correction varies smoothly across the
-        spectrum, so most of it cancels in the eps_a - eps_i the BSE diagonal
-        actually uses. It is not defensible for an environment. Sigma^solv is
-        ~ +lambda/2 on EVERY occupied orbital and ~ -lambda/2 on EVERY virtual
-        one, and the direct kernel's vtilde reaches EVERY pair; the two cancel
-        for a compact electron-hole pair only if both halves reach the same
-        orbitals. A pair that gets the kernel's half and not the diagonal's
-        keeps a whole lambda of spurious BLUE shift -- and since the window is
-        centred on the HOMO/LUMO, the roots it drops are exactly the LOCAL
-        ones, which a continuum should barely move.
+        The window approximates GW, not a reaction field. Leaving an orbital
+        at its mean-field eigenvalue is defensible for
+        Sigma_x - v_xc + Sigma_c, which varies smoothly across the spectrum
+        and largely cancels in eps_a - eps_i. Sigma^solv is ~ +lambda/2 on
+        every occupied and ~ -lambda/2 on every virtual orbital, and the
+        direct kernel's vtilde reaches every pair; the two cancel for a
+        compact electron-hole pair only if both reach the same orbitals.
+        Without this term a pair outside the window keeps a whole lambda of
+        spurious blue shift, and those are the local roots a continuum should
+        barely move (on C2H4...F2/cc-pVDZ at eps = 2.5, window 2, the lowest
+        local root changes sign and magnitude without it).
 
-        Measured on C2H4...F2 / cc-pVDZ at eps = 2.5, window 2 (orbitals
-        15-18 of 76): the lowest local root, 11 -> LUMO with CT weight 0.01,
-        shifted sign and magnitude without this term and settled close to its
-        converged value with it, while the charge-transfer root, whose
-        orbitals both sit inside the window, barely moved either way. Nothing
-        outside the window ever got Sigma^solv, so the defect grew with how
-        far a root reached from the gap.
-
-        Free: Eq. (18) is one vector over the whole spectrum whatever the
-        window is. Gas phase passes None and the diagonal is untouched,
-        bitwise.
+        Eq. (18) is one vector over the whole spectrum, so this is free. Gas
+        phase passes None and the diagonal is untouched, bitwise.
         """
         if shift is None:
             return None
@@ -655,28 +634,25 @@ class ExcitedStateChain(FactorChain):
         + sum_p w^env_p <p|Sigma^env|p>.
 
         On a Kohn-Sham reference the static correction is part of the
-        quasiparticle energy, so its own dependence on the orbitals and on the
-        nuclei has to be carried like any other -- the Y piece BEFORE the
-        multiplier solve, because it shares Lambda, and the skeleton piece in
-        the assembly. The gate is on Sigma_x - v_xc alone, which vanishes
-        identically on Hartree-Fock.
+        quasiparticle energy, so its dependence on the orbitals and nuclei is
+        carried: the Y piece before the multiplier solve (it shares Lambda),
+        the skeleton in the assembly. The gate is on Sigma_x - v_xc alone,
+        which vanishes on Hartree-Fock.
 
-        The environment's static term rides the same slot and supplies its own
-        two pieces (`static_self_energy_adjoint`) -- zero for the gas phase and
-        for fixed charges, the reaction field's own orbital response and
-        skeleton for a continuum, and a refusal for an unrestricted reference,
-        so a dressed energy can never come back with a gas-phase force.
+        The environment's static term rides the same slot with its own two
+        pieces (`static_self_energy_adjoint`): zero for the gas phase and
+        fixed charges, the reaction field's orbital response and skeleton for
+        a continuum, a refusal for an unrestricted reference.
 
-        IT DOES NOT ALWAYS RIDE AT THE SAME WEIGHTS. Outside the quasiparticle
-        window `_env_static_outside` puts Sigma^env on the BSE diagonal where
-        Sigma_x - v_xc does not go, and there is no Newton equation there to
-        renormalize it, so those orbitals carry their bare adjoint in
-        `env_weights` and zero in `weights_full`. Default: the two coincide,
-        which is the single-quasiparticle case.
+        The weights can differ: outside the quasiparticle window
+        `_env_static_outside` puts Sigma^env on the BSE diagonal with no
+        Newton equation to renormalize it, so those orbitals carry their bare
+        adjoint in `env_weights` and zero in `weights_full`. By default the
+        two coincide (the single-quasiparticle case).
 
-        on_the_factors: the continuum rides Eq. (18), whose adjoint reaches the
-        nuclei through (eps, X, D) in the caller. The COHSEX operator's own
-        adjoint must NOT be added on top, or the reaction field enters the
+        on_the_factors: the continuum rides Eq. (18), whose adjoint reaches
+        the nuclei through (eps, X, D) in the caller; the COHSEX operator's
+        own adjoint must not be added too, or the reaction field enters the
         force twice.
         """
         if on_the_factors:
@@ -694,13 +670,13 @@ class ExcitedStateChain(FactorChain):
                 qp_xc_correction_skeleton(mf, weights_full, self.nocc) + g_env)
 
     def _xc_correction(self, mf, states, reaction_field=None):
-        """<p|Sigma_x - v_xc|p> + <p|Sigma^env|p> for `states`: production's
-        static term, evaluated with THIS geometry's environment attached.
+        """<p|Sigma_x - v_xc|p> + <p|Sigma^env|p> for `states`, evaluated with
+        this geometry's environment attached (the previous attachment is put
+        back afterwards).
 
         Computed on Hartree-Fock too, where the first part is round-off rather
         than an exact zero; the environment's part is first order in vtilde
-        and zeroth in v and survives there. The previous attachment is put
-        back afterwards.
+        and zeroth in v and survives there.
         """
         with attached_environment(mf, self.environment_at(mf.mol)):
             return qp_xc_correction(mf, states, reaction_field=reaction_field)
@@ -720,10 +696,10 @@ class ExcitedStateChain(FactorChain):
         """(Eq. (18) on this geometry's factors, the static screening it was
         built from), or (None, None) in the gas phase.
 
-        Built on the SAME axis as the BSE kernel's static W, so the two
-        screenings a solvated run needs come off one grid -- and the dressed
-        member IS the kernel's W, so a caller that already has it passes the
-        pair rather than rebuilding chi0(0) in the dressed gauge twice.
+        Built on the same axis as the BSE kernel's static W, so the two
+        screenings a solvated run needs come off one grid; the dressed member
+        is the kernel's W, so a caller that already has it passes the pair
+        rather than rebuilding chi0(0) in the dressed gauge.
         """
         if d_bare is None:
             return None, None
@@ -737,7 +713,7 @@ class ExcitedStateChain(FactorChain):
 
     def _casida(self, x_mo, d, eps_qp, w_aux):
         """(Omega, X, Y, cache): every root densely, or the lowest `nroots`
-        matrix-free on the SAME static W, sorted.
+        matrix-free on the same static W, sorted.
 
         The cache is what the explicit adjoint reads. The dense route's blocks
         are the ones its Casida matrices were built from and ride along on the
@@ -759,13 +735,22 @@ class ExcitedStateChain(FactorChain):
         # gathered once per build, never per trial vector.
         factors = x_mo if isinstance(x_mo, SlicedFactors) else (x_mo, d)
         # Hellmann-Feynman reads the eigenvectors, so an unconverged root is a
-        # wrong force rather than a slightly wrong energy: refused, not warned.
-        om, xn, yn = solve_casida_davidson(lr, self.nocc, nroots=self.nroots,
-                                           polarizability='BSE', W_aux=w_aux,
-                                           isdf_factors=factors,
-                                           conv_tol=self.bse_conv_tol,
-                                           spin=self.spin,
-                                           refuse_unconverged=True)
+        # wrong force rather than a slightly wrong energy: refused, not warned
+        # -- but only a root the force reads (the state and those below it,
+        # every root when the state is followed by overlap), and only above
+        # the residual the force needs, BSE_FORCE_RESIDUAL_TOL.
+        solve = ({'stats': {}, 'timings': {}} if self.timer is not None
+                 else {'stats': None, 'timings': None})
+        if self.timer is not None:
+            self.davidson_solves.append(solve)
+        om, xn, yn = solve_casida_davidson(
+            lr, self.nocc, nroots=self.nroots, polarizability='BSE',
+            W_aux=w_aux, isdf_factors=factors, conv_tol=self.bse_conv_tol,
+            max_cycle=BSE_FORCE_MAX_CYCLE, spin=self.spin,
+            stats=solve['stats'], timings=solve['timings'],
+            refuse_unconverged=True,
+            read_roots=None if self.track is not None else self.state + 1,
+            read_tol=max(self.bse_conv_tol, BSE_FORCE_RESIDUAL_TOL))
         order = np.argsort(om)
         return om[order], xn[:, order], yn[:, order], {}
 
@@ -777,9 +762,9 @@ class ExcitedStateChain(FactorChain):
         return om, pieces[:9] + (cache, xn, yn) + pieces[12:]
 
     def kernel_pieces(self, mol, mf):
-        """Everything `_forward` builds BEFORE the Casida solve, in its layout.
+        """Everything `_forward` builds before the Casida solve, in its layout.
 
-        The same sixteen-long tuple `_forward` returns, with an empty cache
+        The same seventeen-long tuple `_forward` returns, with an empty cache
         and no roots (`xn`, `yn` are None): the quasiparticle energies, the
         static screening and the factors the BSE matrix is made of. A quantity
         that needs the kernel but not the supermolecular roots -- the diabatic
@@ -787,7 +772,7 @@ class ExcitedStateChain(FactorChain):
         its gradient: `_fold_to_nuclei` reads nothing from the roots.
         """
         x_mo, d, eps, mu, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
-        # ONE STATIC SCREENING. The BSE kernel's W and the dressed half of
+        # One static screening: the BSE kernel's W and the dressed half of
         # Eq. (18) are the same [1 - chi0(0)]^-1 on the same axis; the orbital
         # densities are Eq. (18)'s alone.
         with self.phase('t_screening'):
@@ -797,23 +782,25 @@ class ExcitedStateChain(FactorChain):
             pair = (None if d_bare is None else
                     (dressed, static_screening(x_mo, d_bare, eps, self.nocc,
                                                self.w_grid)))
-        # THE SELF-ENERGY SCREENS BARE. Eq. (18) is the static approximation to
+        # The self-energy screens bare: Eq. (18) is the static approximation to
         # Sigma[W_solv] - Sigma[W_gas], so screening Sigma dynamically as well
         # counts the reaction field twice; the kernel below keeps D.
         shift, screening = self._reaction_field(x_mo, d, d_bare, eps,
                                                 screening=pair)
         d_sigma = d if d_bare is None else d_bare
+        qp_tape = None
         if self.at_mean_field:
             eps_qp = eps
         else:
             with self.phase('t_qp'):
-                ws = self._qp_set_solve(
+                out, route_out = self._qp_set_solve(
                     x_mo, d_sigma, eps, mu,
                     self._xc_correction(mf, self.qp_set, shift),
-                    np.zeros(len(self.qp_set)))[0][0]
+                    np.zeros(len(self.qp_set)))
+            ws, qp_tape = out[0], route_out.get('tape')
             eps_qp = eps.copy()
             eps_qp[self.qp_set] = ws
-            # OUTSIDE THE SET, THE FROZEN SCISSOR. Calibrated on these roots
+            # Outside the set, the frozen scissor, calibrated on these roots
             # at the reference geometry and spent unchanged afterwards; the
             # environment's static term below is added on top of it, not
             # instead of it.
@@ -826,8 +813,11 @@ class ExcitedStateChain(FactorChain):
         env_outside = self._env_static_outside(shift, len(eps))
         if env_outside is not None:
             eps_qp = eps_qp + env_outside
+        # The quasiparticle set's tape rides with the pieces: the reverse
+        # solve reads proj(tau) and the slices from it instead of sweeping
+        # them again, bitwise.
         return (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, {},
-                None, None, mu, d_bare, shift, screening)
+                None, None, mu, d_bare, shift, screening, qp_tape)
 
     def spectrum(self, mol=None, mf=None):
         """Every excitation energy the Casida step returned, ascending, in Hartree."""
@@ -848,18 +838,18 @@ class ExcitedStateChain(FactorChain):
         return mf.e_tot + om, mf.e_tot, om
 
     def tracked_state(self, mol, mf, om, pieces):
-        """Which root of THIS geometry is the state being followed.
+        """Which root of this geometry is the state being followed.
 
         `self.state` is an index into an energy-ordered manifold, and an
         optimizer that keeps it follows whatever is n-th at each step rather
         than one state. Following the overlap with the previous step keeps the
-        identity through a crossing, where the index is exactly what changes.
+        identity through a crossing, where the index is what changes.
 
         Propagates step to step rather than against the first geometry: the
         overlap with a distant reference decays, and a relaxation moves far.
         The price is that a sequence of small misassignments can ratchet onto
-        a different state, so the overlap with the ORIGINAL anchor is logged
-        beside each step and is what shows that if it happens.
+        a different state, so the overlap with the original anchor is logged
+        beside each step to show it.
         """
         xn, yn = pieces[10], pieces[11]
         if self.track is None:
@@ -903,10 +893,10 @@ class ExcitedStateChain(FactorChain):
         """(X_mo, D, eps_qp, W_aux, nocc, cache, Xn, Yn) out of `_forward`.
 
         The positional tail every Casida-level adjoint takes, named once so a
-        seed cannot be wired to the wrong member of a sixteen-long tuple.
+        seed cannot be wired to the wrong member of a seventeen-long tuple.
         """
         (_, _, _, _, x_mo, d, _, eps_qp, w_aux, cache, xn, yn,
-         _, _, _, _) = pieces
+         _, _, _, _, _) = pieces
         return x_mo, d, eps_qp, w_aux, self.nocc, cache, xn, yn
 
     def _casida_seeds(self, pieces, n, m=None):
@@ -918,6 +908,20 @@ class ExcitedStateChain(FactorChain):
         reads the same blocks and builds them once.
         """
         x_mo, d, eps_qp, w_aux, nocc, cache, xn, yn = self._casida_args(pieces)
+        block = self._adjoint_rows(x_mo)
+        if self.bse_adjoint == 'grid' and block is not None:
+            # the grid adjoint's own rows, moved into the adjoint's tiles:
+            # X_bar and D_bar are never whole on any rank
+            comm = current_comm()
+            e_bar, x_rows, d_rows, w_bar = isdf_bse_backward_rows(
+                n, x_mo, d, eps_qp, w_aux, nocc, xn, yn, spin=self.spin,
+                bse_tda=self.bse_tda, bra=m, comm=comm)
+            npts = (x_mo.npts if isinstance(x_mo, SlicedFactors)
+                    else len(x_mo))
+            return (e_bar,
+                    GridTileRows.from_blocks(x_rows, npts, block, comm),
+                    GridTileRows.from_blocks(d_rows, npts, block, comm),
+                    w_bar)
         if self.bse_adjoint == 'grid':
             kw = dict(spin=self.spin, bse_tda=self.bse_tda)
             if m is None:
@@ -934,51 +938,103 @@ class ExcitedStateChain(FactorChain):
         return interstate_backward(m, n, x_mo, d, eps_qp, w_aux, nocc, cache,
                                    xn, yn, **self._tile_kw())
 
+    def _adjoint_rows(self, x_mo):
+        """The tile edge the factors' adjoints are held in over the ranks,
+        or None serially, where they are whole.
+
+        Over more than one rank every adjoint of X_mo and D is `GridTileRows`
+        in the row fit's tiles (`fit_block`, `FIT_CHOLESKY_BLOCK` on the
+        replicated fit), owned t % size: the sweeps are tile-major and the
+        fit adjoint reads the same tiles, so no rank holds a whole pair. The
+        factors' own layout, sliced or whole, reaches the same calls, so the
+        two layouts keep one force.
+        """
+        comm = current_comm()
+        if comm is None or comm.Get_size() < 2:
+            return None
+        return FIT_CHOLESKY_BLOCK if self.fit_block is None else self.fit_block
+
+    @staticmethod
+    def _as_rows(a, block):
+        """`a` as `GridTileRows` in tiles of `block`: a whole array cut to
+        this rank's tiles, verbatim, and tiles handed back as they are."""
+        if isinstance(a, GridTileRows):
+            return a
+        return GridTileRows.from_whole(np.asarray(a), block, current_comm())
+
     def _fold_to_nuclei(self, pieces, eqp_bar, x_bar, d_bar, w_bar):
         """(natm, 3) from the four Casida-level adjoints, and diagnostics.
 
-        Everything below the Casida step is LINEAR in the seed, so the same
-        sequence -- quasiparticle, screening, reaction field, Kohn-Sham
-        correction, integrals -- carries dOmega_n and the interstate element
-        <m| dH |n> without knowing which it is holding.
+        Everything below the Casida step is linear in the seed, so the same
+        sequence (quasiparticle, screening, reaction field, Kohn-Sham
+        correction, integrals) carries dOmega_n and the interstate element
+        <m| dH |n> alike.
+
+        x_bar and d_bar are consumed: every stage's adjoint is added into them
+        in place, in a fixed order, so the reverse pass holds one pair of the
+        factors' shape beside the stage at work.
+
+        Over ranks the pair is `GridTileRows` (`_adjoint_rows`): the seeds are
+        cut to this rank's tiles, and the quasiparticle and chi0 sweeps return
+        their adjoints in the same tiles, tile-major.
         """
         (mol, mf, auxmol, crd, x_mo, d, eps, eps_qp, w_aux, cache, xn, yn,
-         mu, d_bare, shift, screening) = pieces
+         mu, d_bare, shift, screening, qp_tape) = pieces
+        block = self._adjoint_rows(x_mo)
+        if block is not None:
+            x_bar, d_bar = self._as_rows(x_bar, block), self._as_rows(d_bar,
+                                                                      block)
         d_sigma = d if d_bare is None else d_bare
         d_bar_bare = None if d_bare is None else np.zeros(d_bare.shape)
+        if d_bar_bare is not None and block is not None:
+            d_bar_bare = self._as_rows(d_bar_bare, block)
         eps_bar = np.zeros_like(eps)
         mask = self._outside_window(len(eps))
         if self.at_mean_field:
             eps_bar += eqp_bar
         else:
-            # the whole set folds through ONE proj(tau) sweep
+            # the whole set folds through one proj(tau) sweep
             with self.phase('t_qp_backward'):
                 (_, e_qp, x_qp, d_qp), qp_out = self._qp_set_solve(
                     x_mo, d_sigma, eps, mu,
                     self._xc_correction(mf, self.qp_set, shift),
-                    eqp_bar[self.qp_set])
+                    eqp_bar[self.qp_set], tape=qp_tape, rows_block=block)
+            # read once: its proj(tau) rows and slices are not held through
+            # the rest of the reverse pass (a later reverse off the same
+            # forward sweeps them again)
+            for tape in (qp_tape, qp_out.pop('tape', None)):
+                if tape is not None:
+                    tape.release()
             eps_bar += e_qp
-            # Outside the set eps^QP_p is eps_p, or eps_p plus a FROZEN
+            # Outside the set eps^QP_p is eps_p, or eps_p plus a frozen
             # scissor: a constant either way, so the seed passes straight to
             # the mean-field eigenvalue and the shift adds no term of its own.
             eps_bar[mask] += eqp_bar[mask]
-            x_bar = x_bar + x_qp
-            # Sigma screened with the BARE factor, so its adjoint lands there
+            x_bar += x_qp
+            # Sigma screened with the bare factor, so its adjoint lands there
             if d_bare is None:
-                d_bar = d_bar + d_qp
+                d_bar += d_qp
             else:
-                d_bar_bare = d_bar_bare + d_qp
+                d_bar_bare += d_qp
+            del x_qp, d_qp
         with self.phase('t_screening_backward'):
             chi0_bar = screening_backward(w_aux, w_bar)
-            e2, x2, d2 = chi0_backward(chi0_bar[None, :, :], x_mo, d, eps,
-                                       self.nocc, self.w_grid)
-        eps_bar, x_bar, d_bar = eps_bar + e2, x_bar + x2, d_bar + d2
+            if block is None:
+                e2, x2, d2 = chi0_backward(chi0_bar[None, :, :], x_mo, d, eps,
+                                           self.nocc, self.w_grid)
+            else:
+                e2, x2, d2 = chi0_backward_rows(chi0_bar[None, :, :], x_mo, d,
+                                                eps, self.nocc, self.w_grid,
+                                                block=block)
+        eps_bar = eps_bar + e2
+        x_bar += x2
+        d_bar += d2
+        del x2, d2
 
         w_corr = np.zeros(len(eps))
         if not self.at_mean_field:
-            # Z PER STATE, as on the single-quasiparticle path: each orbital in
-            # the set has its own pole strength and its own correction, so one
-            # shared factor would be as wrong as none.
+            # Z per state, as on the single-quasiparticle path: each orbital in
+            # the set has its own pole strength and its own correction.
             w_corr[self.qp_set] = qp_out['z'] * eqp_bar[self.qp_set]
         # Sigma^env reaches further than Sigma_x - v_xc does: outside the
         # window `_env_static_outside` put it straight on the BSE diagonal,
@@ -991,14 +1047,19 @@ class ExcitedStateChain(FactorChain):
                 e_rf, x_rf, dd_rf, db_rf = reaction_field_backward(
                     w_env, x_mo, d, d_bare, eps, self.nocc, grid=self.w_grid,
                     screening=screening)
-            eps_bar, x_bar = eps_bar + e_rf, x_bar + x_rf
-            d_bar, d_bar_bare = d_bar + dd_rf, d_bar_bare + db_rf
-        y_xc, g_xc = self._xc_chain(mf, w_corr, w_env,
-                                    on_the_factors=shift is not None)
-        grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
-                                            eps_bar, x_bar, d_bar,
-                                            y_extra=y_xc, g_extra=g_xc,
-                                            d_bar_bare=d_bar_bare)
+            eps_bar = eps_bar + e_rf
+            x_bar += x_rf
+            d_bar += dd_rf
+            d_bar_bare += db_rf
+            del x_rf, dd_rf, db_rf
+        # the Sigma_x - v_xc skeleton's fit adjoint rides the assembly's
+        with self.one_fit_adjoint(mf):
+            y_xc, g_xc = self._xc_chain(mf, w_corr, w_env,
+                                        on_the_factors=shift is not None)
+            grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
+                                                eps_bar, x_bar, d_bar,
+                                                y_extra=y_xc, g_extra=g_xc,
+                                                d_bar_bare=d_bar_bare)
         return grad, dict(diags, **self.outside_record())
 
     def excitation_gradient(self, mol=None, mf=None):
@@ -1040,12 +1101,10 @@ class ExcitedStateChain(FactorChain):
         x_mo, d, eps, mu, _, _, _, d_bare = self._factors_for(mol, mf)
         shift, _ = self._reaction_field(x_mo, d, d_bare, eps)
         orb = self.nocc - 1 + offset
-        # The correction belongs HERE as much as in the gradient. Omitting it
-        # from the forward while the reverse carries it makes the two describe
-        # different functions -- and a finite difference of THIS against a
-        # gradient of THAT looks exactly like a small but nonzero gradient
-        # error, which is how it was found. On Hartree-Fock it is zero and the
-        # two agree by construction rather than by accident.
+        # The correction belongs in the forward as in the gradient: without it
+        # here the energy and the force describe different functions, which a
+        # finite-difference check shows as a small gradient error. On
+        # Hartree-Fock it is zero.
         d_sigma = d if d_bare is None else d_bare
         self._size_cd_grid(x_mo, d_sigma, eps, mu, mf, shift, orb)
         qp_out = {}
@@ -1085,17 +1144,16 @@ class ExcitedStateChain(FactorChain):
                 xc_correction=float(self._xc_correction(mf, [orb], shift)[0]),
                 route_out=qp_out, **self._qp_kw())
         self._freeze_newton_branch(qp_out)
-        # THE CORRECTION CARRIES Z, NOT 1. The Newton condition is
-        # w = eps_p + Delta_p + Sigma_c(w), so every term on the right is
-        # renormalized by Z = [1 - dSigma_c/dw]^-1 on its way into dw --
-        # including Delta_p. Weighting it by 1 instead leaves an error of
-        # (1 - Z) times the correction's own gradient, which on a valence
-        # quasiparticle is a sizeable fraction of the total.
+        # The correction carries Z, not 1: the Newton condition is
+        # w = eps_p + Delta_p + Sigma_c(w), so every term on the right,
+        # Delta_p included, is renormalized by Z = [1 - dSigma_c/dw]^-1 on its
+        # way into dw. Weighting it by 1 leaves an error of (1 - Z) times the
+        # correction's gradient, a sizeable fraction of a valence total.
         w_corr = np.zeros(len(eps))
         w_corr[orb] = float(z_fac)
         d_bar_bare = None
         if shift is not None:
-            # Sigma screened bare, so the adjoint above is on the BARE factor;
+            # Sigma screened bare, so the adjoint above is on the bare factor;
             # the dressed one is reached only through Eq. (18).
             d_bar_bare, d_bar = d_bar, np.zeros(d.shape)
             with self.phase('t_reaction_field_backward'):
@@ -1104,11 +1162,13 @@ class ExcitedStateChain(FactorChain):
                     screening=screening)
             eps_bar, x_bar = eps_bar + e_rf, x_bar + x_rf
             d_bar, d_bar_bare = d_bar + dd_rf, d_bar_bare + db_rf
-        y_xc, g_xc = self._xc_chain(mf, w_corr,
-                                    on_the_factors=shift is not None)
-        grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo, eps_bar,
-                                            x_bar, d_bar, y_extra=y_xc,
-                                            g_extra=g_xc, d_bar_bare=d_bar_bare)
+        with self.one_fit_adjoint(mf):
+            y_xc, g_xc = self._xc_chain(mf, w_corr,
+                                        on_the_factors=shift is not None)
+            grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
+                                                eps_bar, x_bar, d_bar,
+                                                y_extra=y_xc, g_extra=g_xc,
+                                                d_bar_bare=d_bar_bare)
         # Z enters dw/dR and not w, so a route with Sigma's value right and
         # its slope wrong returns an exact energy with a wrong force. Without
         # Z in the record nothing says so.
@@ -1142,7 +1202,7 @@ class ExcitedStateChain(FactorChain):
 
         The orbital `offset` from the HOMO, in Hartree: how much further the
         level moves once the solvent has relaxed around the charged state.
-        The ion's energy E_0 -/+ eps^QP moves by -/+ this, <= 0. On the SAME
+        The ion's energy E_0 -/+ eps^QP moves by -/+ this, <= 0. On the same
         factors and grid as the chain's own Eq. (18), so its gradient
         (`equilibrium_shift_gradient`) is of this number and not of the
         density-fitted one `calc_qp_energy(equilibrium=True)` adds.
@@ -1192,8 +1252,11 @@ class ExcitedStateChain(FactorChain):
         gradient including its auxiliary-basis response.
         """
         mol, mf = self.mean_field(mol, mf)
-        g_om, diags = self.excitation_gradient(mol, mf)
-        g_0 = self.mean_field_gradient(mf)
+        # one fit adjoint for both: the mean field's exchange skeleton rides
+        # the excitation's assembly
+        with self.one_fit_adjoint(mf, mean_field=True):
+            g_om, diags = self.excitation_gradient(mol, mf)
+            g_0 = self.mean_field_gradient(mf)
         diags = dict(diags, e_scf=mf.e_tot, grad_scf_max=float(np.abs(g_0).max()),
                      grad_omega_max=float(np.abs(g_om).max()))
         return g_0 + g_om, mf.e_tot + diags['omega'], diags
@@ -1206,22 +1269,18 @@ class ExcitedStateChain(FactorChain):
     def refreeze(self, mol, factorization=None):
         """The same surface with every frozen convention rebuilt at `mol`.
 
-        The pair layout, frames, quasiparticle set, the Newton branch, the
-        scissor the orbitals outside the set carry and both quadrature grids
-        are re-derived from `mol` and its own mean field, and so are atomic
-        radii, which depend only on the elements; radii given
-        explicitly are the choice itself and travel verbatim, since a grid
-        tailored at the reference geometry is the one the whole walk uses.
-        every setting that was a CHOICE is carried over verbatim, including the
-        resolved tau count, so that only the geometry differs between the two
-        surfaces. The contour-deformation grid starts from the size this chain
-        grew to rather than from the constructor's, so refreezing never steps
-        BACK to a quadrature already found too coarse; the new geometry may
-        grow it further. The environment is the same object; it rebuilds itself
-        around the atoms.
+        The pair layout, frames, quasiparticle set, Newton branch, pole-model
+        poles, outside scissor and both quadrature grids are re-derived from
+        `mol` and its own mean field, as are atomic radii (element-only).
+        Every setting that is a choice travels verbatim, explicit radii and
+        the resolved tau count included, so only the geometry differs. The
+        contour-deformation grid starts from the size this chain grew to, so
+        refreezing never returns to a quadrature found too coarse; the new
+        geometry may grow it further. The environment is the same object and
+        rebuilds itself around the atoms.
         """
         # The tracked index, not the constructor's. A refrozen chain starts a
-        # fresh overlap history, so it has to be told which root IS the state
+        # fresh overlap history, so it has to be told which root is the state
         # at this geometry: following moved off `self.state` precisely when a
         # crossing was passed, and rebuilding on the old index would hand the
         # outer loop the state that was crossed rather than the one followed.

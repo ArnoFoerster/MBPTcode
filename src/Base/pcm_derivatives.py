@@ -1,47 +1,57 @@
-"""Nuclear derivatives of the PCM reaction field for two INDEPENDENT vectors.
+"""Nuclear derivatives of the PCM reaction field for two independent vectors.
 
-pyscf differentiates the solvation energy, `0.5 v^T K^-1 R v`, in which the
-same grid potential sits on both sides: `grad/pcm.py:grad_solver` takes no
-vector argument at all and reads `v` and `q` out of the PCM object. Every
-adjoint of a screened quantity needs the bilinear form instead --
+pyscf differentiates the solvation energy `0.5 v^T K^-1 R v`, with the same
+grid potential on both sides (`grad/pcm.py:grad_solver` reads `v` and `q` out
+of the PCM object). An adjoint of a screened quantity needs the bilinear form
 
     d/dR [ v_left^T K^-1 R v_right ]        v_left != v_right
 
--- because the left vector is an adjoint and the right one a density. The two
-are the same object only for the mean-field energy.
-
-The generalization is mechanical once the roles are named: in pyscf's terms
-`vK_1 = K^-T v` is the LEFT role and `q = K^-1 R v` the RIGHT one, and every
-term is already written as `vK_1 ... q`. So the bilinear derivative is that same
-expression with the two built from different vectors and the 0.5 that belongs to
-the energy removed. `solver_bilinear_gradient(pcm, v, v)` reproduces
-`2 * grad_solver(dm)` exactly, which is the gate.
+since the left vector is an adjoint and the right one a density. In pyscf's
+terms `vK_1 = K^-T v` is the left role and `q = K^-1 R v` the right one, and
+every term is written as `vK_1 ... q`, so the bilinear derivative is the same
+expression with the two built from different vectors and without the energy's
+0.5. `solver_bilinear_gradient(pcm, v, v)` reproduces `2 * grad_solver(dm)`.
 
 The geometry enters K and R through S, D and A only; `charge_exp`, `norm_vec`,
-`weights` and the radii have exactly zero nuclear derivative, and
-`grid_coords[k] = atom_coords[owner(k)] + R_vdw[k] * norm_vec[k]` exactly, so a
-cavity point moves rigidly with its own atom.
+`weights` and the radii have zero nuclear derivative, and
+`grid_coords[k] = atom_coords[owner(k)] + R_vdw[k] * norm_vec[k]`, so a cavity
+point moves rigidly with its own atom.
 
-SIZE: `get_dD_dS` materializes (ngrids, ngrids, 3) arrays, so this route holds
-three times what the PCM's own K costs -- fine to a few thousand cavity points,
-and NOT the production path at a 60-atom emitter, where those are terabytes.
+`get_dD_dS` materializes (ngrids, ngrids, 3) arrays, three times the PCM's own
+K: fine to a few thousand cavity points, too large beyond that.
 `pyscf.solvent.hessian.pcm`'s `get_dS_dot_q` family contracts the same
-derivatives against a vector without ever forming them, and is what a large
-system needs; the algebra below is unchanged by that substitution.
+derivatives against a vector without forming them; the algebra below is
+unchanged by that substitution.
 
-TRAP: the retained point set depends on the geometry through `w*switch > 1e-16`,
-so `ngrids` can change between displaced geometries. The energy stays continuous
-because a dropped point carries no weight, but a finite-difference check must
-freeze the point set at the reference geometry -- see `frozen_surface`.
+The retained point set depends on the geometry through `w*switch > 1e-16`, so
+`ngrids` can change between displaced geometries. The energy stays continuous
+(a dropped point carries no weight), but a finite-difference check must freeze
+the point set at the reference geometry; see `frozen_surface`.
 """
 import numpy as np
-from pyscf import lib
-from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc, grad_qv,
+from pyscf import df as pyscf_df
+from pyscf import gto, lib
+from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 
-from src.Base.constants import PCM_CROSS_TERM_STEP
+from src.Base.constants import ISDF_TILE_GB, PCM_CROSS_TERM_STEP
 
 PI = np.pi
+
+#: The largest (comp, nao, nao, nk) block of three-centre integrals libcint
+#: can write: its driver strides component n of the block by
+#: n * nao * nao * nk held in a C int, which wraps negative past 2^31 - 1 and
+#: puts every component after the first below the array. pyscf blocks its PCM
+#: cavity integrals by `max_memory` alone, so with a large memory share a
+#: molecule of about a hundred atoms in a double-zeta basis asks for a block
+#: past the limit and crashes.
+LIBCINT_BLOCK_LIMIT = 2 ** 31 - 1
+
+#: The largest `max_memory` (MB) at which every pyscf PCM routine's own blocks
+#: stay under LIBCINT_BLOCK_LIMIT: they take int(max_memory * 0.9e6 / 8 /
+#: nao^2 / c) cavity points for a comp-c integral (c = 1, 3 or 9), so
+#: nao^2 * nk * comp <= max_memory * 0.9e6 / 8 for all of them.
+PYSCF_PCM_MAX_MEMORY_MB = LIBCINT_BLOCK_LIMIT * 8 / 0.9e6
 
 CPCM = ('C-PCM', 'CPCM', 'COSMO')
 IEFPCM = ('IEF-PCM', 'IEFPCM')
@@ -49,21 +59,102 @@ SSVPE = ('SS(V)PE',)
 
 
 def by_atom(per_point, gridslice):
-    """Sum a (ngrids, 3) point contribution onto the atom each point rides.
-
-    Public because every cavity-derivative consumer needs it: a surface point
-    moves rigidly with the atom that owns it, so scattering a per-point
-    quantity onto atoms is the last step of each of them.
-    """
+    """Sum a (ngrids, 3) per-point contribution onto the atom each point
+    moves rigidly with; the last step of every cavity derivative."""
     return np.asarray([per_point[p0:p1].sum(axis=0) for p0, p1 in gridslice])
+
+
+def cavity_blocks(nao, ngrids, comp=3, budget_gb=ISDF_TILE_GB):
+    """[(k0, k1)] slices of the cavity grid, one (comp, nao, nao, k1 - k0)
+    three-centre integral block each.
+
+    Every block holds nao^2 nk comp under LIBCINT_BLOCK_LIMIT, the bound that
+    keeps libcint's component stride inside a C int, and its array under
+    `budget_gb`. The flop count does not depend on the blocking.
+    """
+    per_point = int(nao) * int(nao) * max(int(comp), 1)
+    by_index = LIBCINT_BLOCK_LIMIT // per_point
+    if by_index < 1:
+        raise ValueError(
+            f'one cavity point already needs {per_point} integrals, past the '
+            f'{LIBCINT_BLOCK_LIMIT} libcint can index in one block')
+    by_memory = int(budget_gb * 1024 ** 3 / (8.0 * per_point))
+    nk = max(1, min(by_index, by_memory))
+    return [(k0, min(k0 + nk, ngrids)) for k0 in range(0, ngrids, nk)]
+
+
+def bound_pyscf_pcm_blocks(pcmobj):
+    """Cap `pcmobj.max_memory` at PYSCF_PCM_MAX_MEMORY_MB and return it.
+
+    For the PCM routines pyscf runs itself -- the reaction-field gradient of a
+    pyscf `Gradients()` object, the PCM Hessian -- whose cavity blocks this
+    module does not plan. Their block sizes come from `max_memory` only; below
+    the cap no block passes LIBCINT_BLOCK_LIMIT, unless pyscf's floor of 400
+    points does it alone (nao above ~1300).
+    """
+    pcmobj.max_memory = min(float(pcmobj.max_memory), PYSCF_PCM_MAX_MEMORY_MB)
+    return pcmobj
+
+
+def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=ISDF_TILE_GB):
+    """(natm, 3) of the surface charges' interaction with the density `dm`,
+    differentiated through the integrals at fixed charges: pyscf's
+    `grad/pcm.py:grad_qv`, term for term, on `cavity_blocks` (pyscf's own
+    blocking by `max_memory` passes LIBCINT_BLOCK_LIMIT at about 90 atoms in
+    cc-pVDZ with a large memory budget).
+    """
+    if not pcmobj._intermediates:
+        pcmobj.build()
+    dm = np.asarray(dm, float)
+    dm_cache = pcmobj._intermediates.get('dm', None)
+    if dm_cache is None or np.linalg.norm(dm_cache - dm) >= 1e-10:
+        pcmobj._get_vind(dm)
+    if q_sym is None:
+        q_sym = pcmobj._intermediates['q_sym']
+    mol = pcmobj.mol
+    nao = mol.nao
+    grid_coords = pcmobj.surface['grid_coords']
+    exponents = pcmobj.surface['charge_exp']
+    ngrids = q_sym.shape[0]
+    blocks = cavity_blocks(nao, ngrids, comp=3, budget_gb=budget_gb)
+
+    int3c2e_ip1 = mol._add_suffix('int3c2e_ip1')
+    cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env,
+                                         int3c2e_ip1)
+    dvj = np.zeros((3, nao))
+    for p0, p1 in blocks:
+        fakemol = gto.fakemol_for_charges(grid_coords[p0:p1],
+                                          expnt=exponents[p0:p1] ** 2)
+        v_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=int3c2e_ip1,
+                                      aosym='s1', cintopt=cintopt)
+        dvj += np.einsum('xijk,ij,k->xi', v_nj, dm, q_sym[p0:p1])
+        del v_nj
+
+    int3c2e_ip2 = mol._add_suffix('int3c2e_ip2')
+    cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env,
+                                         int3c2e_ip2)
+    dq = np.empty((3, ngrids))
+    for p0, p1 in blocks:
+        fakemol = gto.fakemol_for_charges(grid_coords[p0:p1],
+                                          expnt=exponents[p0:p1] ** 2)
+        q_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=int3c2e_ip2,
+                                      aosym='s1', cintopt=cintopt)
+        dq[:, p0:p1] = np.einsum('xijk,ij,k->xk', q_nj, dm, q_sym[p0:p1])
+        del q_nj
+
+    gridslice = pcmobj.surface['gslice_by_atom']
+    aoslice = mol.aoslice_by_atom()
+    dq = np.asarray([np.sum(dq[:, p0:p1], axis=1) for p0, p1 in gridslice])
+    dvj = 2.0 * np.asarray([np.sum(dvj[:, p0:p1], axis=1)
+                            for p0, p1 in aoslice[:, 2:]])
+    return dq + dvj
 
 
 def solver_bilinear_gradient(pcmobj, v_left, v_right):
     """(natm, 3) of d/dR [v_left^T K^-1 R v_right], the vectors held fixed.
 
-    The cavity's response to the nuclei, with no assumption that the two sides
-    come from one density. `grad_solver`'s own quantity is the v_left = v_right
-    case at half this value.
+    `grad_solver`'s own quantity is the v_left = v_right case at half this
+    value.
     """
     method = pcmobj.method.upper()
     if not pcmobj._intermediates:
@@ -73,15 +164,15 @@ def solver_bilinear_gradient(pcmobj, v_left, v_right):
     A, D, S, K = inter['A'], inter['D'], inter['S'], inter['K']
     R = inter['R']
 
-    # A batch of vector PAIRS is summed over, so the ngrids^2 derivative
-    # intermediates below are built once rather than once per pair -- the
-    # auxiliary adjoint needs naux of them.
+    # A batch of vector pairs is summed over, so the ngrids^2 derivative
+    # intermediates are built once rather than once per pair (the auxiliary
+    # adjoint needs naux pairs).
     v_left = np.atleast_2d(np.asarray(v_left, float))
     v_right = np.atleast_2d(np.asarray(v_right, float))
     if v_left.shape != v_right.shape:
         raise ValueError(f'left and right batches disagree: {v_left.shape} '
                          f'vs {v_right.shape}')
-    # The two roles. Everything below is bilinear in exactly these.
+    # The two roles; everything below is bilinear in these.
     vK_1 = np.linalg.solve(K.T, v_left.T).T
     q = np.linalg.solve(K, R.dot(v_right.T)).T
 
@@ -141,8 +232,8 @@ def solver_bilinear_gradient(pcmobj, v_left, v_right):
         de_dR *= fac_R
 
         # K = S - fac_K (D A S + (D A S)^T), so every term appears twice, once
-        # with the transpose acting on the LEFT role -- which is exactly where a
-        # bilinear form stops agreeing with the quadratic one.
+        # with the transpose acting on the left role; this is where the
+        # bilinear form departs from the quadratic one.
         de_dS0 = split(vK_1, q, dS) + diagonal(vK_1 * q, dSii)
         vK_1_DA = vK_1 @ DA
         de_dS1 = split(vK_1_DA, q, dS) + diagonal(vK_1_DA * q, dSii)
@@ -172,23 +263,22 @@ def frozen_surface(pcmobj):
 
     `pcm.py` keeps a cavity point only while `weight * switch > 1e-16`, so a
     displaced geometry can carry a different number of points. The energy is
-    continuous across that -- a dropped point contributes nothing -- but a
-    finite-difference gate that compares per-point arrays is not, and a changed
-    count is the signal to widen the step or move the reference.
+    continuous across that, but per-point arrays are not; a changed count
+    means the step must be widened or the reference moved.
     """
     return pcmobj.surface['grid_coords'].shape[0]
 
 
 def solvation_gradient(pcmobj, dm):
-    """(natm, 3) of d/dR of the solvation energy of a FIXED density matrix.
+    """(natm, 3) of d/dR of the solvation energy of a fixed density matrix.
 
-    pyscf's three pieces summed: the derivative of the potential integrals at
-    fixed surface charges, the nuclear term, and the cavity solver's own
-    response. Each re-solves q = K^-1 R v for whatever density it is handed, so
-    this is the energy of `dm` in its OWN reaction field, not of `dm` in the
-    mean field's.
+    pyscf's three pieces summed: potential integrals at fixed surface charges,
+    the nuclear term, and the cavity solver's response. Each re-solves
+    q = K^-1 R v for the density it is handed, so this is the energy of `dm` in
+    its own reaction field, not in the mean field's.
     """
-    return (np.asarray(grad_qv(pcmobj, dm)) + np.asarray(grad_nuc(pcmobj, dm))
+    return (potential_integral_gradient(pcmobj, dm)
+            + np.asarray(grad_nuc(pcmobj, dm))
             + np.asarray(grad_solver(pcmobj, dm)))
 
 
@@ -196,31 +286,23 @@ def reaction_field_fock_skeleton(pcmobj, dm, gamma_ao,
                                  step=PCM_CROSS_TERM_STEP):
     """(natm, 3) of d/dR Tr[gamma_ao V_PCM[dm]], both densities held fixed.
 
-    What a CORRELATED relaxed density owes the ground-state reaction field. A
-    mean field's own force answers the SCF density alone; a dRPA or BSE
-    gradient also carries gamma, and V_PCM sits in the Fock, so the skeleton of
-    Tr[gamma F] has a reaction-field entry exactly as it has a Coulomb one.
-    Omitting it leaves a force that is stationary for neither functional --
-    4e-04 Ha/Bohr on water/cc-pVDZ in water.
+    The reaction-field term a correlated relaxed density gamma (dRPA, BSE)
+    owes: V_PCM sits in the Fock, so the skeleton of Tr[gamma F] has a
+    reaction-field entry as it has a Coulomb one. Omitting it leaves a force
+    stationary for neither functional (4e-04 Ha/Bohr on water/cc-pVDZ in
+    water).
 
-    NO TRUNCATION ERROR. The solvation energy is EXACTLY quadratic in the
-    density it is built from, E = (1/2)(v[dm] + v[N]) Q (v[dm] + v[N]) with v
-    linear in dm and Q the cavity response, so
+    The solvation energy E = (1/2)(v[dm] + v[N]) Q (v[dm] + v[N]) is quadratic
+    in the density (v linear in dm, Q the cavity response), so
 
         d/dR B[gamma, dm + N] = [G(dm + t.gamma) - G(dm - t.gamma)] / 2t
 
-    holds at ANY t, the quadratic and gamma-independent parts cancelling
-    identically. `step` is a conditioning choice, not an accuracy one; measured
-    step-independent to 3e-15 from t = 1e-1 to 1e-3.
+    holds at any t; `step` only sets the conditioning (step-independent to
+    3e-15 from t = 1e-1 to 1e-3). A forward difference would leave
+    (t/2) B[gamma, gamma] behind, so this costs two solver gradients.
 
-    COST is two solver gradients, so a correlated force pays pyscf's PCM
-    gradient three times over: `grad_solver` materializes the (ngrids, ngrids,
-    3) derivatives this module's header sizes, and the two calls here cannot be
-    folded into one without losing exactness -- a forward difference leaves
-    (t/2) B[gamma, gamma] behind.
-
-    The charge cache is restored to `dm` on the way out, since pyscf's pieces
-    leave the PCM object holding the charges of whatever they were last given.
+    The PCM charge cache is restored to `dm` on return, since pyscf's pieces
+    leave it holding the charges of the last density they were given.
     """
     g = np.asarray(gamma_ao, float)
     g = 0.5 * (g + g.T)

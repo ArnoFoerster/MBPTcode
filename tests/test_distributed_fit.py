@@ -8,54 +8,47 @@ at the default 148 points per atom, with tiles of `TILE` points so that the
 444- and 888-point grids are cut into 7 and 14 tiles and every rank count
 owns a different set of them:
 
-  * BITWISE ACROSS RANK COUNTS: every rank's rows of X_mo, D and X_ao are the
-    same rows of the one-rank run, bit for bit, and the quasiparticle window
-    and the whole ISDF BSE on them are the same distributed solves on the
+  * across rank counts every rank's rows of X_mo, D and X_ao are the same
+    rows of the one-rank run, bit for bit, and the quasiparticle window and
+    the whole ISDF BSE on them are the same distributed solves on the
     one-rank fit's whole arrays;
-  * ROWS-ONLY MEMORY, read off the objects: the factors a rank holds are its
-    `contiguous_block` of rows, and every grid-indexed array the fit held --
-    the Gram tiles, F D^T, the collocation, the gathered panel, D before and
-    after it moves -- is the size of the tiles the rank owns;
-  * THE ANCHORED GATE against the replicated fit: D, the quasiparticle
+  * rows-only memory, read off the objects: the factors a rank holds are its
+    `contiguous_block` of rows, and every grid-indexed array the fit held
+    (the Gram tiles, F D^T, the collocation, the gathered panel, D before and
+    after it moves) is the size of the tiles the rank owns;
+  * the anchored gate against the replicated fit: D, the quasiparticle
     energies, W(0) and the BSE roots of the row fit sit within
     `FIT_REASSOCIATION_K` times the distance the replicated fit itself moves
-    when its three-centre blocks are cut per shell and summed in reverse --
-    a bar measured on this run, never a fixed number, the roots' anchor
-    floored at what the Davidson resolves (`roots_resolution` of
+    when its three-centre blocks are cut per shell and summed in reverse (a
+    bar measured on this run), the roots' anchor floored at what the
+    Davidson resolves (`roots_resolution` of
     tests/test_distributed_fit_mpi.py);
-  * the new collectives the fit rests on (`reduce_max`, `broadcast_rows`,
+  * the collectives the fit rests on (`reduce_max`, `broadcast_rows`,
     `allgather_ranges`, `cyclic_tiles_to_blocks`) against their serial
     meaning;
-  * THE KEPT PAIRS' INTEGRALS ALONE (`KeptIntegrals`): every kept (mu nu|P)
+  * the kept pairs' integrals alone (`KeptIntegrals`): every kept (mu nu|P)
     is the bits of the whole shell block's call over every nu shell, block
     by block and shell by shell on ethylene/cc-pVTZ (f shells break the
-    runs) for the screened pairs and a sparse subset of them, the rows of
+    runs) for the screened pairs and a sparse subset of them; the rows of
     the fit are bitwise those of the whole-block evaluation at 1 and 3
-    ranks, and the ledger's `shell_block` holds between one and two times
+    ranks; and the fit's held `shell_block` is between one and two times
     the largest kept block, below the whole block and its l <= 2 copy, when
     a loose screen drops pairs;
-  * THE METRIC ROOT ON ONE RANK (`metric_root`, `RowFit.metric_root_rows`):
+  * the metric root on one rank (`metric_root`, `RowFit.metric_root_rows`):
     the root is `aux_metric_sqrt`'s to 1e-12, bare and dressed, held in two
     metric-sized arrays; D on it is bitwise at 1/2/3/8 ranks with the root
     on rank 0 alone and a slab elsewhere, within the anchored bar of the
     replicated fit, and an indefinite dressed metric is refused on every
     rank;
-  * A FROZEN LAYOUT in place of the screen (`layout=`, what a walk passes to
+  * a frozen layout in place of the screen (`layout=`, what a walk passes to
     keep the reference geometry's pairs): the geometry's own layout gives the
     screened rows bitwise at 1 and 3 ranks, another layout another D, and
-    the replicated fit refuses one.
+    the replicated fit, which the gradient chain runs on the frozen layout,
+    reads it alike.
 
-SHOWN TO FAIL, the kept-pair evaluation: one kept nu shell's run dropped
-(its rows left unevaluated) fails the integral and the fit-level gates;
-restored and byte-compared.
-
-SHOWN TO FAIL: a tile edge that follows the rank's share (nk / 2 size points
-in place of the fixed edge) fails the cross-rank gate at all six multi-rank
-points, the one-rank points passing as they must; restored and
-byte-compared. A rank's rows batched into one GEMM (the trailing update, the
-three-centre contraction) passed here: the workstation's MKL gives those rows
-the same bits at every call shape, which OpenBLAS does not, so that class of
-defect shows under tests/test_distributed_fit_mpi.py on the cluster.
+A rank's rows batched into one GEMM is invisible here on a BLAS that gives
+those rows the same bits at every call shape (MKL); OpenBLAS does not, and
+tests/test_distributed_fit_mpi.py covers that class of defect.
 """
 import os
 import subprocess
@@ -99,8 +92,9 @@ SIZES = [1, 2, 3, 8]
 NROOTS = 3
 
 REPO = Path(__file__).resolve().parents[1]
-#: The pass before its co-densities ran in `row_map`'s threads: every tile
-#: of M^T it made is the tile this tree must still make, bit for bit.
+#: A tree whose pass runs its co-densities on one thread rather than in
+#: `row_map`'s threads: every tile of M^T it makes is the tile this tree must
+#: make, bit for bit.
 ONE_THREAD_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
 #: The thread caps of the subprocess gate; `OMP_NUM_THREADS` alone is set per
 #: probe, which moves the pass's pool and neither BLAS nor Accelerate.
@@ -242,8 +236,8 @@ def test_rows_are_bitwise_across_rank_counts(case, size, request):
 
 @pytest.mark.parametrize('size', [2, 3, 8])
 def test_each_rank_holds_rows_only(water, size):
-    """THE MEMORY ASSERTION: the factors and every grid-indexed array the fit
-    held are the rank's own tiles or rows, read off the arrays."""
+    """The factors and every grid-indexed array the fit held are the rank's
+    own tiles or rows, read off the arrays."""
     mol, mf, _ = water
     nao = mol.nao_nr()
     naux = df.addons.make_auxmol(mol, auxbasis=AUXBASIS).nao_nr()
@@ -395,9 +389,9 @@ def test_new_collectives(size):
 
 
 def whole_block(mol, auxmol, shells, mu, nu):
-    """The kept pairs' (mu nu|P) the way the pass took them before it
-    evaluated them alone: one `aux_e2` call over the whole shell block and
-    every nu shell, building its own optimizer, the kept pairs picked."""
+    """The kept pairs' (mu nu|P) picked from one `aux_e2` call over the whole
+    shell block and every nu shell, building its own optimizer: the reference
+    for `KeptIntegrals`."""
     sh0, sh1 = shells
     e3c = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
                            shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas))
@@ -568,7 +562,9 @@ def test_an_indefinite_dressed_root_is_refused_on_every_rank(water):
 def test_a_frozen_layout_replaces_the_screen(ethylene, size):
     """A frozen `test_set_layout` in place of the screen: the geometry's own
     layout gives the screened fit's rows bitwise at every rank, and a layout
-    holding other pairs gives another D. The replicated fit refuses one."""
+    holding other pairs gives another D. The replicated fit reads the layout
+    the same way: its own layout gives the screened M bitwise, the other
+    layout another M."""
     mol, mf, _ = ethylene
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     coords = one_rank(mol, mf)[3]
@@ -587,8 +583,11 @@ def test_a_frozen_layout_replaces_the_screen(ethylene, size):
     for r, (a, b, c) in enumerate(zip(screened, frozen, moved)):
         assert a[0] == b[0] and a[1].tobytes() == b[1].tobytes(), r
         assert relative(c[1], a[1]) > 1e-3, (r, relative(c[1], a[1]))
-    with distributed(None), pytest.raises(ValueError, match="fit='rows'"):
-        fit_M_streaming(mol, auxmol, coords, layout=own)
+    with distributed(None):
+        whole = [fit_M_streaming(mol, auxmol, coords, layout=layout)
+                 for layout in (None, own, other)]
+    assert whole[1].tobytes() == whole[0].tobytes()
+    assert relative(whole[2], whole[0]) > 1e-3, relative(whole[2], whole[0])
 
 
 def extracted(tmp_path_factory, commit):
@@ -635,9 +634,9 @@ def row_fits_three_ways(tmp_path_factory):
 @pytest.mark.parametrize('name', [c[0] for c in PROBE_CASES])
 def test_row_fit_is_the_one_thread_trees_bits(row_fits_three_ways, name,
                                              size):
-    """Every tile of M^T the ranks own is the bytes the pass made when its
-    screening and its kept co-densities ran on one thread, on a pool of two
-    threads and of one, and the tiles cover the grid."""
+    """Every tile of M^T the ranks own, on a pool of two threads and of one,
+    is the bytes of the `ONE_THREAD_COMMIT` tree, whose screening and kept
+    co-densities run on one thread, and the tiles cover the grid."""
     old, two, one = row_fits_three_ways
     key = f'{name}_{size}'
     assert not np.isnan(two[key]).any(), key

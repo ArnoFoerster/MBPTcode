@@ -6,7 +6,7 @@ With a separable (ISDF) ERI,
     (ia|jb) = sum_PQ X_o[P,i] X_v[P,a] Z[P,Q] X_o[Q,j] X_v[Q,b]
 
 the particle-hole bubble separates into an occupied and a virtual half that each
-carry only ONE orbital index,
+carry only one orbital index,
 
     Pi_PQ(i.tau) = G^o_PQ(tau) * G^v_PQ(tau)          (elementwise)
     G^o_PQ(tau)  = sum_i X_o[P,i] X_o[Q,i] e^{+eps_i tau}
@@ -25,8 +25,8 @@ Sign convention follows `imaginary_frequency._f_rpa`: f(i.w) = -2 d/(d^2 + w^2)
 and chi0 = 2 (C_ov f) C_ov^T; the cosine transform maps e^{-d tau} to
 2d/(d^2 + w^2), hence the leading -2 below.
 
-ONE KERNEL FOR BOTH SIDES OF THE CODE. `polarizability_projected_tau` is the
-N^3 sweep, and it is the only implementation of it: the energy routes stream
+One kernel serves both sides: `polarizability_projected_tau` is the N^3
+sweep and its only implementation. The energy routes stream
 it into chi0 here, and the gradient chain
 (`gradients.space_time_adjoint.polarizability_tau`) runs it over every tau
 point through `polarizability_projected_sweep` and keeps the result whole,
@@ -35,17 +35,17 @@ proj(tau) and the adjoint lands back on an array of that shape. The reverse
 pass mirrors this kernel's tiling block for block. A change to the arithmetic,
 the tiling or the tau partition therefore reaches both, and
 tests/test_space_time_shared_kernel.py pins the two callers to each other.
-`polarizability_projected_rows` is the same sweep held by AUXILIARY ROWS over
+`polarizability_projected_rows` is the same sweep held by auxiliary rows over
 the ranks (`ProjRows`), which is how the quasiparticle solves keep it: each
 rank its rows of every tau slice, every transform over tau made one auxiliary
 row per call so that a row is the same bits at every rank count.
 
-THE GRID-ROW SPLIT. A tau split leaves every rank past ntau idle and hands each
+Grid-row split: a tau split leaves every rank past ntau idle and hands each
 rank whole (naux, naux) slices of every frequency. `chi0_frequency_rows`
 splits the (tau point, grid-row tile) pairs of the sweep instead, the tiles
 being the serial kernel's (`polarizability_tiles`), so the work divides past
 ntau ranks and a rank forms only its tiles' (rows, M) Green's-function blocks.
-proj(tau) is then a SUM over the ranks' tiles, reduce-scattered to auxiliary
+proj(tau) is then a sum over the ranks' tiles, reduce-scattered to auxiliary
 rows (re-associated, the one reduced sum of the sweep), and chi0(i.nu) is
 accumulated on those rows with the serial elementwise update, so every row of
 chi0 is the serial update of its proj rows, bitwise.
@@ -60,7 +60,7 @@ beside the rest of the reverse pass.
 `rpa_correlation_energy_space_time` is the dRPA energy's own forward sweep, and
 `want_tape=True` hands back what a reverse pass through it consumes --
 proj(tau) and the two partitions it was built on, so a reverse pass over ranks
-splits exactly as the forward sweep did. The gradient's
+splits as the forward sweep did. The gradient's
 `space_time_adjoint.rpa_energy_and_adjoint` calls it rather than sweeping
 again, so there is one E_c^dRPA in the code and the adjoint cannot drift from
 the energy it differentiates.
@@ -94,8 +94,8 @@ class RPAEnergyTape:
 
     proj_tau is the one whole object of the N^3 route, (ntau, naux, naux), from
     which every frequency is a fixed linear combination; the two index sets are
-    the tau points and the frequencies THIS rank owns, so the reverse pass
-    splits exactly as the forward did and its reductions carry the same
+    the tau points and the frequencies this rank owns, so the reverse pass
+    splits as the forward did and its reductions carry the same
     disjoint slots. Both are None in a serial run.
     """
 
@@ -105,24 +105,55 @@ class RPAEnergyTape:
 
 
 class FrequencyBlock(NamedTuple):
-    """One serial block of the frequency axis as `ProjRows.blocks` yields it.
+    """One serial block, or one round, of the frequency axis as
+    `ProjRows.blocks` yields it.
 
-    block:  every frequency of the block, the serial block's own list
+    block:  every frequency of the block, the serial block's own list, or of
+            the round, one frequency per rank (`frequency_rounds`)
     owners: the rank that factorizes each of them, or None where every rank
             takes every frequency whole
     ks:     the frequencies this rank takes, in block order
     chi0:   their chi0(i.nu), whole, (len(ks), naux, naux); a reverse pass
             overwrites them with their adjoints before `ProjRows.fold`
+    serial: for a round, the pass's `SerialFolds`, which `ProjRows.fold`
+            folds the adjoint rows through by serial block; None for a block
     """
 
     block: list
     owners: list
     ks: list
     chi0: np.ndarray
+    serial: object = None
+
+
+class SerialFolds:
+    """The adjoint rows of one reverse frequency pass taken by rounds, held
+    until their serial block is whole: each serial block is then folded into
+    projbar with the serial call on the serial block's rows, in block order,
+    so the fold is the serial fold bitwise whatever the rounds."""
+
+    def __init__(self, spans):
+        self.spans = list(spans)
+        self.rows = {}
+
+    def take(self, k, rows):
+        """Frequency k's adjoint rows, (nrows, naux), this rank's."""
+        if k in self.rows:
+            raise ValueError(f'frequency {k} handed back twice in one pass')
+        self.rows[k] = rows
+
+    def whole(self):
+        """((k0, k1), its rows stacked (k1 - k0, nrows, naux)) for every
+        serial block whose rows are all here, in block order, each once."""
+        while self.spans and all(k in self.rows
+                                 for k in range(*self.spans[0])):
+            k0, k1 = self.spans.pop(0)
+            yield (k0, k1), np.stack([self.rows.pop(k)
+                                      for k in range(k0, k1)])
 
 
 class ProjRows:
-    """proj(tau) held by AUXILIARY ROWS: this rank's rows [r0, r1) of every tau
+    """proj(tau) held by auxiliary rows: this rank's rows [r0, r1) of every tau
     slice, (ntau, r1 - r0, naux), the `contiguous_block` of naux it owns.
 
     Every consumer of proj(tau) is linear in it and elementwise in (P, Q) --
@@ -136,7 +167,7 @@ class ProjRows:
     axis a frequency or a tau point (`gather_slices` hands a rank any slices
     it names).
 
-    THE ROWS ARE THE SAME BITS AT EVERY RANK COUNT. A GEMM's rows depend on
+    The rows are the same bits at every rank count. A GEMM's rows depend on
     the call's shape (`owned_frequency_blocks`), and a rank's row block is a
     shape that changes with the rank count, so every transform over tau here
     is made one auxiliary row at a time (`transform_rows`,
@@ -144,7 +175,7 @@ class ProjRows:
     one rank holds all of them or eight share them. A serial ProjRows is the
     whole sweep, its rows every row, and takes the same calls.
 
-    Exactly one whole-matrix read is answered: np.tensordot(c, proj,
+    One whole-matrix read is answered: np.tensordot(c, proj,
     axes=(0, 0)) for a weight vector c, the real-frequency screening's, which
     comes back whole on every rank (`transform`). Every other numpy function
     raises rather than gather the whole array behind the caller's back.
@@ -204,54 +235,98 @@ class ProjRows:
         return allgather_rows(out, self.comm)
 
     def blocks(self, cosft_wt, tile_gb, freq_indices=None, live=3):
-        """`FrequencyBlock` for every serial block of the frequency axis, on
-        every rank and in the same order, since every rank holds rows of every
-        frequency.
+        """`FrequencyBlock` for every serial block of the frequency axis, or
+        with owners for every round of it, on every rank and in the same
+        order, since every rank holds rows of every frequency.
 
         freq_indices: this rank's frequencies, the round-robin `partition`;
-        each is gathered whole to it alone. None gives every rank every
-        frequency, gathered to all. Every rank transforms its rows of the
-        whole serial block, one auxiliary row at a time, so a frequency's rows
-        are the same bits whoever owns it.
+        each is gathered whole to it alone, by rounds (`_rounds`): one
+        exchange hands each rank its frequency of the round, so every owner
+        factorizes at once. None gives every rank every frequency, gathered to
+        all. Every rank transforms its rows of the whole serial block, one
+        auxiliary row at a time, so a frequency's rows are the same bits
+        whoever owns it.
         """
         size, rank = self._size_rank()
         nfreq = cosft_wt.shape[0]
-        mine = None
+        spans = frequency_blocks(nfreq, self.naux, tile_gb, live=live)
         if freq_indices is not None and size > 1:
             mine = sorted(int(k) for k in np.atleast_1d(freq_indices))
             if mine != list(partition(nfreq, rank, size)):
                 raise ValueError('proj(tau) by rows routes each frequency to '
                                  'its round-robin owner; this rank was '
                                  f'handed {mine}')
+            yield from self._rounds(cosft_wt, spans)
+            return
         nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
-        for k0, k1 in frequency_blocks(nfreq, self.naux, tile_gb, live=live):
+        for k0, k1 in spans:
             block = list(range(k0, k1))
             rows = transform_rows(cosft_wt[block], self.rows)
             if size == 1:
                 yield FrequencyBlock(block, None, block, rows)
                 continue
-            owners = None if mine is None else [k % size for k in block]
-            ks = (block if owners is None
-                  else [k for k, o in zip(block, owners) if o == rank])
-            chi0 = np.empty((len(ks), self.naux, self.naux))
-            for m, k in enumerate(block):
-                owner = None if owners is None else owners[m]
-                here = owner is None or owner == rank
-                exchange_rows(
-                    rows[m], [(0, nrows) if owner in (None, s) else (0, 0)
-                              for s in range(size)],
-                    chi0[ks.index(k)] if here else empty,
-                    [b if here else (0, 0) for b in self.bounds], self.comm)
+            chi0 = np.empty((len(block), self.naux, self.naux))
+            for m in range(len(block)):
+                exchange_rows(rows[m], [(0, nrows)] * size, chi0[m],
+                              self.bounds, self.comm)
             rows = None
-            yield FrequencyBlock(block, owners, ks, chi0)
+            yield FrequencyBlock(block, None, block, chi0)
+
+    def _rounds(self, cosft_wt, spans):
+        """`FrequencyBlock` for every round of the frequency axis: rank j
+        owns the round's j-th frequency, which is its round-robin one.
+
+        Each serial block is transformed with the serial call, as `blocks`
+        does, and its rows wait in `ready` until their round; one exchange
+        per round sends every frequency's rows to its owner, so the owners'
+        factorizations run concurrently between two collectives instead of
+        one owner at a time. A round holds one (naux, naux) of rows a rank
+        on top of the serial block."""
+        size, rank = self._size_rank()
+        nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
+        todo, ready = iter(spans), {}
+        serial = SerialFolds(spans)
+        for rnd in frequency_rounds(cosft_wt.shape[0], size):
+            while not all(k in ready for k in rnd):
+                k0, k1 = next(todo)
+                block = list(range(k0, k1))
+                rows = transform_rows(cosft_wt[block], self.rows)
+                ready.update(zip(block, rows))
+            send = np.empty((len(rnd) * nrows, self.naux))
+            for j, k in enumerate(rnd):
+                send[j * nrows:(j + 1) * nrows] = ready[k]
+            for k in rnd:
+                ready.pop(k, None)
+            ks = rnd[rank:rank + 1]
+            chi0 = np.empty((len(ks), self.naux, self.naux))
+            exchange_rows(send, round_ranges(len(rnd), nrows, size),
+                          chi0[0] if ks else empty,
+                          [b if ks else (0, 0) for b in self.bounds],
+                          self.comm)
+            send = None
+            yield FrequencyBlock(rnd, list(range(len(rnd))), ks, chi0, serial)
 
     def fold(self, cosft_wt, fb):
         """self += sum_{k in fb.block} cosft_wt[k, :] fb.chi0(k), on this
         rank's rows: the adjoint of `blocks`' transform, fb.chi0 holding each
         owned frequency's adjoint whole. The owners hand every rank its rows,
         and each rank adds the whole serial block into its rows, one row at a
-        time -- the serial association, at every rank count."""
+        time -- the serial association, at every rank count. A round's
+        adjoints come back in one exchange and wait in `fb.serial` until
+        their serial block is whole, which is then folded as one."""
         size, rank = self._size_rank()
+        if fb.serial is not None:
+            nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
+            rows = np.empty((len(fb.block) * nrows, self.naux))
+            exchange_rows(fb.chi0[0] if fb.ks else empty,
+                          [b if fb.ks else (0, 0) for b in self.bounds], rows,
+                          round_ranges(len(fb.block), nrows, size), self.comm)
+            for j, k in enumerate(fb.block):
+                fb.serial.take(k, rows[j * nrows:(j + 1) * nrows])
+            for (k0, k1), blk in fb.serial.whole():
+                fold_frequency_rows(self.rows, cosft_wt[list(range(k0, k1))],
+                                    blk)
+            return
         if size == 1 or fb.owners is None:
             rows = fb.chi0[:, self.r0:self.r1]
         else:
@@ -335,7 +410,7 @@ def polarizability_imaginary_time(X_o, X_v, eps_o, eps_v, tau_points,
     """Pi_PQ(i.tau) on the interpolation grid, shape (ntau, M, M).
 
     X_o, X_v :     (M, n_occ) and (M, n_vir) collocation, occupied and virtual.
-    eps_o, eps_v : orbital energies SHIFTED so every eps_v - eps_o > 0; any
+    eps_o, eps_v : orbital energies shifted so every eps_v - eps_o > 0; any
                    chemical potential inside the gap does this.
     beta :         inverse temperature, giving the bosonic periodic object
                    Pi(tau) + Pi(beta - tau) that a Matsubara/IR grid needs.
@@ -343,7 +418,7 @@ def polarizability_imaginary_time(X_o, X_v, eps_o, eps_v, tau_points,
 
     The mirror term is not a small correction: e^{i nu_n beta} = 1 for bosonic
     frequencies, so tau -> beta - tau maps the integral onto itself and the
-    mirror contributes exactly as much as the direct term. Dropping it is a
+    mirror contributes as much as the direct term. Dropping it is a
     factor of two at every beta.
     """
     M = X_o.shape[0]
@@ -424,7 +499,7 @@ def split_branches(X, eps, nocc, mu=None):
 def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
                                  tile_memory_gb=ISDF_TILE_GB, out=None,
                                  work=None, tiles=None):
-    """chi0 at ONE imaginary time, already projected to the auxiliary basis:
+    """chi0 at one imaginary time, already projected to the auxiliary basis:
 
         proj_ab(tau) = -2 sum_PQ D[P,a] (Go_PQ Gv_PQ) D[Q,b]
 
@@ -432,8 +507,8 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
     them, so the M x M object never exists. Contract the Pi block with D first:
     the other order builds an (naux, M) intermediate instead.
 
-    THE ONE KERNEL OF THE N^3 SWEEP, for the energy routes and the gradient
-    chain alike -- see the module docstring. The reverse pass in
+    The one kernel of the N^3 sweep, for the energy routes and the gradient
+    chain alike (see the module docstring). The reverse pass in
     `gradients.space_time_adjoint.polarizability_backward` mirrors this tiling,
     so the row budget here, 3 * M * 8 bytes per row, is a convention and not a
     private detail.
@@ -514,8 +589,8 @@ def polarizability_projected_rows(X, D, eps, nocc, tau_points, mu=None,
     same way, but no rank holds the (ntau, naux, naux) array: in each round
     every rank computes its next tau point into one (naux, naux) buffer and
     hands each rank that point's rows (`exchange_rows`). Each slice is its
-    tau owner's verbatim, so every row is the one the zero-padded all-reduce
-    delivered. Serially the result wraps the whole sweep.
+    tau owner's verbatim, so every row is the one a zero-padded all-reduce of
+    the sweep gives. Serially the result wraps the whole sweep.
 
     comm: None is `current_comm()`. X and D whole.
     """
@@ -675,6 +750,21 @@ def frequency_blocks(nfreq, naux, tile_gb, live):
     return [(k0, min(k0 + nb, nfreq)) for k0 in range(0, nfreq, nb)]
 
 
+def frequency_rounds(nfreq, size):
+    """The frequency axis in rounds of `size`: round t is t size, ...,
+    (t + 1) size - 1, its j-th frequency owned by rank j -- the round-robin
+    owner, k % size."""
+    return [list(range(k0, min(k0 + size, nfreq)))
+            for k0 in range(0, nfreq, size)]
+
+
+def round_ranges(n, nrows, size):
+    """Per rank, the rows of a round's buffer of n frequencies, nrows rows
+    each, that belong to the frequency rank j owns: the j-th, none past n."""
+    return [(j * nrows, (j + 1) * nrows) if j < n else (0, 0)
+            for j in range(size)]
+
+
 def transform_rows(c, rows):
     """sum_tau c[..., tau] rows[tau], (c.shape[:-1], nrows, naux), one
     auxiliary row at a time.
@@ -694,8 +784,8 @@ def fold_frequency_rows(out, c, blk):
     """out += c^T blk over a serial block of frequencies, (ntau, nrows, naux)
     from c (nb, ntau) and blk (nb, nrows, naux), one auxiliary row at a time:
     the adjoint of `transform_rows` in its row-fixed call shape, the whole
-    serial block on every rank (`ProjRows.fold`), with a (ntau, naux)
-    temporary per row where the whole product was (ntau, naux, naux)."""
+    serial block on every rank (`ProjRows.fold`), so the temporary is
+    (ntau, naux) per row rather than (ntau, naux, naux)."""
     for i in range(blk.shape[1]):
         out[:, i, :] += np.tensordot(c, blk[:, i, :], axes=(0, 0))
 
@@ -705,7 +795,7 @@ def spin_summed(kernel, X_mos, D, spectra, noccs, *args, **kwargs):
     chi0_alpha + chi0_beta, from the kernel's restricted form.
 
     Every kernel here carries the closed-shell spin factor 2 of
-    `polarizability_projected_tau`, so one spin's own contribution is HALF the
+    `polarizability_projected_tau`, so one spin's own contribution is half the
     kernel called on that spin's collocation, spectrum and occupation. Each
     spin sits at its own mid-gap, which cancels from the pair product
     e^{(eps_i - mu) tau} e^{-(eps_a - mu) tau} and only keeps the two factors
@@ -746,13 +836,11 @@ def three_index_slice(X, D, p, tile_gb=ISDF_TILE_GB):
 def b_block(X, D, p_idx, q_idx, Y=None):
     """B[P, p, q] = sum_k X[k,p] Y[k,q] D[k,P] for one index block, Y = X by default.
 
-    Written as one GEMM per bra function rather than a single einsum. The flops
-    are identical; the library path is not. numpy's einsum falls off BLAS for
-    a three-operand contraction carrying a batch index and runs it at ~2
-    GFlop/s, where the same work as matrix products reaches 60-85 -- measured,
-    a factor of FORTY. Looping the outer index also keeps the working set at
-    (M, n_q) instead of the (M, n_p n_q) an einsum path materializes, which at
-    production sizes is the difference between fitting and not.
+    One GEMM per bra function rather than a single einsum: numpy's einsum
+    falls off BLAS for a three-operand contraction with a batch index (~2
+    GFlop/s, against 60-85 for the same work as matrix products), and looping
+    the outer index keeps the working set at (M, n_q) instead of the
+    (M, n_p n_q) an einsum path materializes.
     """
     Xp, Xq = X[:, p_idx], (X if Y is None else Y)[:, q_idx]
     out = np.empty((D.shape[1], Xp.shape[1], Xq.shape[1]))
@@ -765,7 +853,7 @@ def three_index_ov(X, D, eps, nocc, tile_gb=ISDF_TILE_GB):
     """C_ov[P, (i,a)] = sum_k D[k,P] X[k,i] X[k,a], (naux, nocc*nvirt).
 
     The particle-hole block of the three-index tensor -- the O(N^4) object a
-    contour deformation's RESIDUE term needs, because W at a real frequency has
+    contour deformation's residue term needs, because W at a real frequency has
     no imaginary-time form and is built from it explicitly. Frontier states
     sweep no residues and never need it. Tiled so the (rows, nocc*nvirt) pair
     block stays inside tile_gb.
@@ -788,12 +876,11 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
 
     ks are the frequencies of the block this caller owns -- all of them when
     `freq_indices` is None -- and the rows are sum_tau cosft_wt[ks, tau]
-    proj_tau for exactly those; a block with no owned frequency is skipped
-    outright. The frequency axis of the contour deformation is the one whose
-    per-point work is a naux^3 factorization and whose results are per point,
-    which is what makes it the reduction-free axis to split.
+    proj_tau for those; a block with no owned frequency is skipped. The
+    contour deformation's frequency axis has a naux^3 factorization per point
+    and per-point results, which makes it the reduction-free axis to split.
 
-    EVERY ROW IS THE SERIAL ROW, on any BLAS. A GEMM row is not a function of
+    Every row is the serial row, on any BLAS. A GEMM row is not a function of
     that row alone: OpenBLAS picks its tail kernel and its threading from the
     call's shape, so rows a rank transforms on their own differ from the
     serial block's in the last bits: on water/cc-pVDZ at 3 of 24 frequencies a
@@ -840,12 +927,12 @@ def owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices=None,
 def laplace_representation_error(grid, eps, nocc, freq, pair_energies=None):
     """max over y = d +- freq of |y sum_k w_k e^{-y tau_k} - 1|: how well the
     grid's bare quadrature carries this real frequency, on the pair energies
-    that actually occur. inf when freq reaches the gap (a real pole).
+    that occur. inf when freq reaches the gap (a real pole).
 
     pair_energies: d itself, in place of the pairs (eps, nocc) spans -- both
     spins of an unrestricted reference.
 
-    The gate on the imaginary-time form of W at a REAL frequency, which is what
+    The gate on the imaginary-time form of W at a real frequency, which is what
     a contour-deformation residue below the particle-hole gap asks for:
     -2d/(d^2 - w^2) = -int 2 cosh(w tau) e^{-d tau} dtau holds only where the
     grid still represents e^{-y tau} on every y = d -/+ w.
@@ -881,7 +968,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     one block at a time (`owned_frequency_blocks`), so the axis is never whole
     and the peak is proj(tau) plus one block.
 
-    screening = (N, g): the interaction that builds the LOGARITHM is rescaled
+    screening = (N, g): the interaction that builds the logarithm is rescaled
     to v + g(w) vtilde while D stays in the dressed gauge. In that gauge the
     rescaling is a similarity on chi0 alone -- with N = V_d^(-1/2) vtilde
     V_d^(-1/2), V_d = V + vtilde, and S_w = I - (1 - g_w) N,
@@ -890,8 +977,8 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
 
     so g == 1 is the dressed interaction (the default) and g == 0 the bare one.
     g is one scalar per frequency, N one naux x naux matrix.
-    counter_term = C: the LINEAR term becomes Tr(C c_w) in place of Tr(c_w).
-    C = I - N puts the BARE interaction there, which is what an exact block
+    counter_term = C: the linear term becomes Tr(C c_w) in place of Tr(c_w).
+    C = I - N puts the bare interaction there, which is what an exact block
     fold of the log-determinant over a non-overlapping solvent keeps, and what
     leaves the leading solute-solvent dispersion term in the energy instead of
     cancelling it (`solvated_rpa_energy.fold_terms` chooses the pair).
@@ -901,7 +988,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     ntau x naux^2 over disjoint slots; the frequency loop is split over
     frequencies, whose partial E_c is one scalar reduction. Each frequency's
     chi0 is the serial one bitwise (`owned_frequency_blocks`), so only that
-    sum re-associates; serial is bitwise unchanged. None is `current_comm()`.
+    sum re-associates. None is `current_comm()`.
     The inputs are identical by construction and are not broadcast; an audited
     run compares their digests and those of E_c and proj(tau)
     (`mpi_grid.agreement`).

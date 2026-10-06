@@ -11,10 +11,10 @@ all three end in `qp_solve.solve_qp_from_imaginary_axis`.
 
 Four silent traps, all handled here:
 
-  * W must come from the SAME factors as Sigma. pyscf's cderi is L^-1-whitened,
+  * W must come from the same factors as Sigma. pyscf's cderi is L^-1-whitened,
     a separable RI fits with the symmetric V^-1/2, and mixing the two gauges
     moves the QP energy by ~1.4 eV while staying self-consistent.
-  * The tau grid uses the SELF-ENERGY's energy range, not the polarizability's:
+  * The tau grid uses the self-energy's energy range, not the polarizability's:
     Sigma is a product, so its decay rates are sums.
   * The tau and frequency axes are decoupled; one grid cannot serve both the
     tau->omega transform and the Sigma quadrature.
@@ -61,7 +61,7 @@ from src.Base.utils.time_frequency import (TimeFrequencyGrid, COSINE_WT,
 from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.GW.imaginary_time import (
     SigmaPairs, self_energy_matrix_imaginary_time, self_energy_diagonal_rows,
-    sigma_ao_to_mo_diagonal, self_energy_fit_ranges,
+    sigma_ao_to_mo_diagonal, self_energy_fit_ranges, screening_frequency_grid,
     screened_interaction_rows, screened_interaction_tau_blocked,
     minimax_points_for_gw, minimax_points_for_gw_unrestricted,
     unrestricted_fit_ranges, DEFAULT_TAU_TARGET)
@@ -82,17 +82,18 @@ DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                       block_memory_gb=4.0, pair_tol=DEFAULT_PAIR_TOL,
                       n_start=1, grid_accuracy=None, comm=None, timings=None,
-                      sliced=False, fit='replicated', fit_block=None):
+                      sliced=False, fit='replicated', fit_block=None,
+                      fit_tiles=None):
     """(X_mo, D, X_ao, coords) of the Duchemin-Blase separable RI, Z = D D^T.
 
-    X_ao is the collocation the fit actually produces; X_mo = X_ao C is the
+    X_ao is the collocation the fit produces; X_mo = X_ao C is the
     form most consumers want. Both are returned because inverting one back to
     the other needs a square C, which a large basis does not guarantee.
 
     Interpolation points come from covariant atomic frames, so the answer does
     not depend on the orientation of the molecule.
 
-    THE GRID IS ONE OBJECT, so a keyword naming it is never dropped. Three
+    The grid is one object, so a keyword naming it is never dropped. Three
     keywords can name it and each combination has one outcome:
 
       grid_accuracy alone   `resolve_isdf_grid` sets `counts` and `n_start`.
@@ -104,7 +105,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                             and a run-time re-optimization onto another local
                             minimum of a multi-modal surface, which is a grid
                             nothing validated.
-      radii alone           the radii ARE the grid; no row is consulted.
+      radii alone           the radii are the grid; no row is consulted.
       radii+counts          where a row exists for those counts the two must
                             agree to `ISDF_RADII_MATCH_TOL` or the call is
                             refused, and the row's `origin` is honoured -- it
@@ -115,68 +116,62 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
 
     grid_accuracy:   an accuracy level of `ISDF_GRID_ACCURACY` or four explicit
                      shell counts, resolved by `resolve_isdf_grid`, which
-                     refuses anything the radii table has not got. It sets
-                     `counts` AND `n_start`, since a validated row is keyed on
-                     both.
+                     refuses anything the radii table lacks. It sets `counts`
+                     and `n_start`, since a validated row is keyed on both.
     radii:           per-element shell radii; optimized per element if omitted.
     block_memory_gb: caps the working set of the fit's blocked loops. It does
-                     not change the answer, but it IS a speed knob as well as a
-                     memory one -- one `aux_e2` call per block, each rebuilding
-                     a shell-pair list over nbas x auxnbas. See `build_D_F`;
-                     size it from the memory available.
+                     not change the answer but is a speed knob as well (one
+                     `aux_e2` call per block, each rebuilding a shell-pair list
+                     over nbas x auxnbas; see `build_D_F`); size it from the
+                     memory available.
     comm:            spreads the fit's three-centre pass over ranks
                      (`build_separable_ri`); `current_comm()` when None, serial
-                     without either. The call is RANK 0's on every rank twice
-                     over: at entry the mean-field arrays it reads and the
-                     points it placed are locksteps of rank 0's -- each rank
-                     converged its own SCF, and a run-time radius
-                     re-optimization or the `eigh` of the atomic frames can
-                     place the points elsewhere on another rank -- and at exit
-                     the factors are (`replicate_factors`), since the fit's
-                     replicated Cholesky tail is dense arithmetic that need not
-                     repeat bitwise across ranks. Every consumer downstream
-                     therefore receives identical factors and does not
-                     broadcast them again.
-    timings:         dict, filled at phase boundaries on every rank, same
-                     pattern as `solve_qp_energy_space_time`. `fit_points` is
-                     this function's own interpolation-point build
+                     without either. The result is rank 0's on every rank: at
+                     entry the mean-field arrays and the placed points are
+                     locksteps of rank 0's (each rank converged its own SCF,
+                     and a run-time radius re-optimization or the frames'
+                     `eigh` can place points differently on another rank), and
+                     at exit so are the factors (`replicate_factors`), since
+                     the fit's replicated Cholesky tail need not repeat
+                     bitwise across ranks. Consumers downstream receive
+                     identical factors and do not broadcast them again.
+    timings:         dict, filled at phase boundaries on every rank.
+                     `fit_points` is the interpolation-point build
                      (`molecular_points_covariant`); `fit_collocation`,
                      `fit_integrals`, `fit_integrals_reduce`, `fit_gram`,
                      `fit_cholesky`, `fit_solve`, `fit_blocks` and
                      `fit_blocks_total` come from `fit_M_streaming` through
-                     `build_separable_ri`, unchanged; `fit_assembly` is that
-                     function's X tail PLUS this function's own tail (the
-                     dressed metric, the MO/AO projections, replication) --
-                     the two add into one key rather than each keeping a
-                     phase the call graph does not actually separate.
-                     `fit_total` is this call, start to return, on whichever
-                     rank asked. Radius lookup or run-time re-optimization,
-                     before `fit_points`, has no phase of its own: it is a
-                     table read on every tabulated grid and is not timed. The
-                     clock reads touch no bit of the factors.
+                     `build_separable_ri`; `fit_assembly` is that function's X
+                     tail plus this function's own (the dressed metric, the
+                     MO/AO projections, replication), in one key; `fit_total`
+                     is this call, start to return. The radius lookup has no
+                     phase of its own. The clock reads touch no bit of the
+                     factors.
     sliced:          over more than one rank, return a `SlicedFactors`: this
                      rank's contiguous block of the grid rows of X_mo, D and
-                     X_ao, cut from the whole, lockstepped products after the
-                     whole arrays are formed exactly as above, so a consumer
-                     that gathers one gets the replicated array bit for bit
-                     (`sliced_factors` carries the table of who reads what).
-                     Ignored serially and on one rank, where the tuple is
-                     already all there is.
-    fit:             'replicated' (the default above) or 'rows': the fit
+                     X_ao, cut from the whole, lockstepped products, so a
+                     consumer that gathers one gets the replicated array bit
+                     for bit (`sliced_factors` carries the table of who reads
+                     what). Ignored serially and on one rank.
+    fit:             'replicated' (the default) or 'rows': the fit
                      distributed by grid rows (`separable_ri.fit_rows`), so
                      that no rank holds the Gram matrix, F D^T, the solve, the
                      collocation or any factor whole. It returns
                      `SlicedFactors` over more than one rank whatever `sliced`
-                     says -- there is no whole array to cut -- and the tuple
-                     on one rank. Its rows are bitwise identical at every rank
-                     count and are not the replicated fit's bits: a different
-                     realization of the same estimator, within a few of the
-                     replicated fit's own reassociation responses. `timings`
-                     carries the same keys; `fit_assembly` is the metric, the
+                     says, and the tuple on one rank. Its rows are bitwise
+                     identical at every rank count but are not the replicated
+                     fit's bits: another realization of the same estimator,
+                     within a few of the replicated fit's reassociation
+                     responses. `fit_assembly` is then the metric, the
                      projections and the move of D to the contiguous rows.
     fit_block:       grid points per tile of fit='rows' (`FIT_CHOLESKY_BLOCK`
                      when None); any fixed value is bitwise across rank
                      counts, two values differ by rounding.
+    fit_tiles:       fit='rows' only: a `separable_ri.FitTiles` of this fit
+                     held by another stage (the distributed ISDF-K SCF's,
+                     `DistributedISDFJK.fit_tiles`), read instead of fitting
+                     where its points and settings are this call's, ignored
+                     otherwise; `timings['fit_reused_tiles']` says it was read.
     """
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
@@ -214,7 +209,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
             radii[el], _, origins[el] = runtime_atomic_radii(
                 el, mol.basis, auxbasis, counts, n_start=n_start)
     else:
-        # Explicit radii ARE the grid and are honoured. Where the caller ALSO
+        # Explicit radii are the grid and are honoured. Where the caller also
         # named counts the table may describe the same grid, and then the two
         # specifications have to agree: `origin` belongs to the row, not to the
         # recipe, so a matching row brings its nuclear point with it.
@@ -257,7 +252,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
             (mf.mo_energy, mf.mo_coeff, mf.mo_occ, coords), comm, check=True)
     if fit == 'rows':
         return _row_factors(mf, mol, auxmol, coords, block_memory_gb, pair_tol,
-                            comm, timings, fit_block, _t0)
+                            comm, timings, fit_block, _t0, fit_tiles)
     # Z = M^T V M is never read here: D = M^T V^1/2 below carries the metric.
     X, _, M = build_separable_ri(mol, coords, auxmol=auxmol,
                                  block_memory_gb=block_memory_gb,
@@ -280,14 +275,15 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
 
 
 def _row_factors(mf, mol, auxmol, coords, block_memory_gb, pair_tol, comm,
-                 timings, fit_block, t0):
-    """`separable_factors`' fit='rows' tail: the row-distributed fit, then
-    X_mo, D = M^T V^1/2 and X_ao on this rank's contiguous rows, each read in
-    the fit's own tiles; `SlicedFactors` over more than one rank."""
+                 timings, fit_block, t0, fit_tiles=None):
+    """`separable_factors`' fit='rows' tail: the row-distributed fit (or the
+    tiles handed in of it), then X_mo, D = M^T V^1/2 and X_ao on this rank's
+    contiguous rows, each read in the fit's own tiles; `SlicedFactors` over
+    more than one rank."""
     row_fit = fit_M_streaming(mol, auxmol, coords,
                               block_memory_gb=block_memory_gb,
                               pair_tol=pair_tol, comm=comm, timings=timings,
-                              fit='rows', block=fit_block)
+                              fit='rows', block=fit_block, tiles=fit_tiles)
     _t = _time.time()
     many = comm is not None and comm.Get_size() > 1
     X_mo = row_fit.mo_rows(mf.mo_coeff)
@@ -372,7 +368,7 @@ def replicate_factors(factors, comm):
 def _ao_collocation(X_mo, mf):
     """X_ao[k, mu] = chi_mu(r_k), inverted from the MO collocation X_mo = X_ao C.
 
-    FALLBACK ONLY -- `separable_factors` returns X_ao directly, because the
+    Fallback only: `separable_factors` returns X_ao directly, because the
     inversion is not always available. It is exact where it works: MO
     coefficients are S-orthonormal, C^T S C = I, so C^-1 = C^T S. But it needs a
     square C, and a mean field that dropped linear dependencies gives only a
@@ -394,7 +390,7 @@ def _dyson_in_place(chi0, rows, static_index=None, transform=None):
     """W(i.omega_k) = [I - chi0(i.omega_k)]^-1 over chi0's rows `rows`, in place.
 
     Diagonal in frequency: each row is one naux^3 inversion that reads no other
-    row. The omega = 0 passenger `static_index` is inverted once, DRESSED, since
+    row. The omega = 0 passenger `static_index` is inverted once, dressed, since
     it is the BSE kernel's static screening and outside the Sigma quadrature;
     every other row takes chi0 into the bare gauge first when `transform` is set.
     """
@@ -578,37 +574,31 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     """Sigma_c on the imaginary axis -> quasiparticle energy, one per state.
 
     reaction_field is the continuum's Eq. (18) shift when the route built W,
-    and REPLACES the COHSEX fallback inside `static_exchange_diagonal`.
+    and replaces the COHSEX fallback inside `static_exchange_diagonal`.
     spin: the channel of an unrestricted reference, whose (2, ...)
     reaction_field and sigma_x_matrix the static term indexes.
 
-    Two costs, and only one of them carries a state index. <Sigma_x - v_xc> is
-    ONE exchange build for the whole window, so it precedes the loop and stays
-    shared; the Pade fit of Sigma_pp(i.omega) and the root search on
-    w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w) are per state and share
-    nothing, since each state has its own sample line (occupied states sit on
-    the other branch) and its own scalar equation. On a quasiparticle SET --
-    the whole BSE diagonal -- that loop is the larger of the two and it is
-    what `comm` splits.
+    <Sigma_x - v_xc> is one exchange build for the whole window, so it
+    precedes the loop; the Pade fit of Sigma_pp(i.omega) and the root search
+    on w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w) are per state (each
+    state has its own sample line and its own scalar equation). On a
+    quasiparticle set (the whole BSE diagonal) that loop is the larger cost,
+    and it is what `comm` splits.
 
-    comm: rank r takes states r, r + nranks, ... and the roots are all-gathered
-    back into state order, so every rank returns the whole window. The static
-    term is replicated from rank 0 first: the loop must solve one calculation's
-    equation wherever a state lands, and a K built independently per rank
-    agrees only to its last bits. Nothing else changes -- Sigma arrives
-    all-reduced and identical, and each root is the same scalar iteration on
-    the same numbers -- so a partitioned window is BITWISE the serial one,
-    which `tests/test_qp_states_over_ranks.py` gates per state. Ranks with more
-    ranks than states own an empty block and only serve the gather.
+    comm: rank r takes states r, r + nranks, ... and the roots are
+    all-gathered back into state order, so every rank returns the whole
+    window. The static term is replicated from rank 0 first, since a K built
+    independently per rank agrees only to its last bits; Sigma arrives
+    all-reduced and identical, so a partitioned window is bitwise the serial
+    one (`tests/test_qp_states_over_ranks.py` gates it per state). Ranks
+    beyond the number of states own an empty block and only serve the gather.
 
-    NO WINDOW SIZE DIVIDES THE STATIC TERM: K and v_xc are built whole and
-    then indexed, so a two-state window pays what the whole diagonal pays.
-    `sigma_x_matrix` hands that build in from the caller, which removes it
-    outright, and the diagonal it yields is the built one bit for bit; failing
-    that the RANKS divide it, where the mean field carries the slices a
-    distributed SCF left on it -- one K and one quadrature over the ranks
-    instead of on each of them. A mean field converged one rank at a time has
-    no such slices and the build stays replicated, which is what it was.
+    No window size divides the static term: K and v_xc are built whole and
+    then indexed. `sigma_x_matrix` hands that build in from the caller (the
+    diagonal it yields is the built one bit for bit); otherwise the ranks
+    divide it where the mean field carries the slices a distributed SCF left
+    on it, and a mean field converged one rank at a time builds it
+    replicated.
     """
     states = np.atleast_1d(p_state)
     scalar = np.ndim(p_state) == 0
@@ -691,45 +681,41 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     distribute:  over more than one rank the in-core route is split over
                  grid rows as well as tau points (`_qp_grid_rows`): the
                  (tau, tile) and (tau, block pair) items of both M^2 sweeps
-                 go over the ranks, so the stage divides past ntau ranks,
-                 and chi0 and Wt(tau) are held by auxiliary rows, each
+                 go over the ranks, so the stage divides past ntau ranks;
+                 chi0 and Wt(tau) are held by auxiliary rows, each
                  frequency's W whole on its owner alone, Sigma as the
-                 states' diagonal -- no whole (M, M) block, stack of
+                 states' diagonal, with no whole (M, M) block, stack of
                  (naux, naux) slices or AO self-energy on any rank. proj(tau)
                  and the self-energy's branch sums are reduced and
                  re-associate; every other step is an output partition. The
-                 quasiparticle window's per-state Pade and Newton split over
-                 the STATES (`_finish_qp`), which needs no reduction at all
-                 and is bitwise. With freq_block or scratch_dir the tau
-                 partition moves inside each frequency block and Wt is held
-                 rows-per-rank (`_qp_blocked`); that path still splits tau
-                 points alone and every rank there inverts every frequency.
-                 None (the default) distributes over `comm`, or over
-                 `current_comm()` when no comm is given, and runs serially
-                 without either; True with neither probes MPI's world; False
-                 keeps this call's own splits serial, while the kernels it
-                 calls still read the context -- a serial reference inside a
-                 distributed region belongs under `distributed(None)`.
-                 THE ANSWER IS RANK 0's: the mean-field arrays and eps_anchor
-                 are locksteps of rank 0's before anything is sized from them,
-                 and the quasiparticle energies are locksteps of rank 0's on
-                 the way out. The factors and sigma_x_matrix are identical by
-                 construction -- `separable_factors` and the static-exchange
-                 build leave their outputs identical on every rank -- so they
-                 are not broadcast again; an audited run
-                 (`distributed(comm, audit=True)`) compares their digests on
-                 entry and W(omega=0)'s on exit (`mpi_grid.agreement`).
+                 window's per-state Pade and Newton split over the states
+                 (`_finish_qp`), with no reduction and bitwise. With
+                 freq_block or scratch_dir the tau partition moves inside
+                 each frequency block and Wt is held rows-per-rank
+                 (`_qp_blocked`); that path splits tau points alone and every
+                 rank inverts every frequency. None (the default) distributes
+                 over `comm`, or over `current_comm()` when no comm is given,
+                 and runs serially without either; True with neither probes
+                 MPI's world; False keeps this call's own splits serial,
+                 while the kernels it calls still read the context (a serial
+                 reference inside a distributed region belongs under
+                 `distributed(None)`). The answer is rank 0's: the mean-field
+                 arrays and eps_anchor are locksteps of rank 0's before
+                 anything is sized from them, and so are the quasiparticle
+                 energies on the way out. The factors and sigma_x_matrix are
+                 identical by construction and not broadcast again; an
+                 audited run (`distributed(comm, audit=True)`) compares their
+                 digests on entry and W(omega=0)'s on exit
+                 (`mpi_grid.agreement`).
     comm:        the communicator `distribute` splits over.
     extras:      dict; receives W(omega=0) for a BSE on the same factors.
     eps_anchor:  the eps_p anchoring w = eps_p + <Sigma_x - v_xc> +
                  Re Sigma_c(w), when it differs from the spectrum that builds
-                 G, P0 and W. That is the evGW case and the only one: the
-                 screening follows the corrected eigenvalues while the equation
-                 stays anchored on the mean field. Anchoring it on the ITERATE
-                 instead adds each cycle's correction a second time, which
-                 shows as a gap opening by the same amount every cycle and
-                 never converging. None means the two coincide, which is G0W0
-                 and leaves this route bitwise unchanged.
+                 G, P0 and W: the evGW case, where the screening follows the
+                 corrected eigenvalues while the equation stays anchored on
+                 the mean field. Anchoring it on the iterate instead adds each
+                 cycle's correction a second time (a gap opening by the same
+                 amount every cycle). None means the two coincide (G0W0).
     sigma_x:     which K builds the static exchange, see
                  `static_exchange_diagonal`. 'mf' on an ISDF mean field puts
                  the grid's K error into every QP energy at first order;
@@ -751,7 +737,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     if distribute is None:
         distribute = comm is not None
     mpi_comm, rank, nranks = (grid_comm(comm) if distribute else (None, 0, 1))
-    # BEFORE the grid is sized: `ntau` is an integer read off the spectrum, so
+    # Before the grid is sized: `ntau` is an integer read off the spectrum, so
     # ranks whose eigenvalues differ in the last bits can pick different point
     # counts and then all-reduce chi0 buffers of different lengths.
     if nranks > 1:
@@ -774,7 +760,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     # R = e_max/e_min grows as the gap closes, so a fixed ntau is wrong at one
     # end of any size series.
     if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        # Sized from the ANCHOR spectrum when one is given: an evGW iterate
+        # Sized from the anchor spectrum when one is given: an evGW iterate
         # opens the gap cycle by cycle, and a grid that followed it would make
         # each cycle integrate a different functional. The mean field has the
         # smallest gap, so its count is the conservative one.
@@ -795,7 +781,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                   mpi_comm, audit_only=True,
                   label='solve_qp_energy_space_time inputs')
 
-    # THE SELF-ENERGY SCREENS BARE AND TAKES THE CONTINUUM AS A STATIC SHIFT.
+    # The self-energy screens bare and takes the continuum as a static shift:
     # Duchemin et al. build Sigma from the gas-phase W and put the whole
     # reaction field in their Eq. (18), the COHSEX approximation to
     # Sigma[W_solv] - Sigma[W_gas]; screening Sigma dynamically as well counts
@@ -811,13 +797,16 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     # not a quadrature here -- chi0 is transformed onto it only so the Dyson
     # inversion, which is not diagonal in time, can be done, and W comes
     # straight back. A round trip on ntau points carries no more information.
+    # It is built over the range W's way back to tau is fitted over, rW, not
+    # over the bare window (`screening_frequency_grid`).
     if nfreq is None or (isinstance(nfreq, str) and nfreq.lower() == 'auto'):
         if ntau not in minimax_supported_sizes():
             raise ValueError(
                 f"nfreq='auto' needs a tabulated minimax frequency grid at "
                 f'ntau = {ntau}; GreenX has {minimax_supported_sizes()}. Pass an '
                 'explicit nfreq.')
-        freq_points, freq_weights = minimax_frequency_grid(ntau, e_min, e_max)
+        freq_points, freq_weights = screening_frequency_grid(ntau, eps, nocc,
+                                                             mu=mu)
     else:
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     pade_freq = gauss_legendre_grid(npade, w0=w0)[0]
@@ -910,11 +899,11 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
                              sigma_x, eps_anchor, sigma_x_matrix, tile_gb):
     """`solve_qp_energy_space_time` on an unrestricted reference, channel `spin`.
 
-    ONE W from chi0_alpha + chi0_beta (`spin_summed`), each spin in its own
+    One W from chi0_alpha + chi0_beta (`spin_summed`), each spin in its own
     collocation X_mo,s = X_ao C_s off the one factorization, and then the
     restricted self-energy sweep in the channel's orbitals: Sigma_s = -G_s W
     carries no spin factor, so the restricted kernel on (X_mo,s, eps_s,
-    nocc_s) IS it. The time and frequency grids span both spins' transitions,
+    nocc_s) is it. The time and frequency grids span both spins' transitions,
     which both build the W they carry, and the self-energy's fit ranges span
     both channels (`unrestricted_fit_ranges`). Each channel samples Sigma on
     the line through its own mid-gap and carries its own static exchange and
@@ -1079,12 +1068,11 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
     so the peak is Wt plus one block instead of the whole frequency axis.
 
     mpi is (comm, rank, nranks) from `grid_comm`, (None, 0, 1) when serial.
-    Under MPI the tau partition sits INSIDE the frequency blocks: each rank
+    Under MPI the tau partition sits inside the frequency blocks: each rank
     projects its own tau points into a block, the block is all-reduced, and
-    each rank folds it into its own rows of Wt alone -- so Wt costs
+    each rank folds it into its own rows of Wt alone, so Wt costs
     ntau/nranks x naux^2 per rank and the self-energy sweep runs over those
-    same rows (`screened_interaction_tau_blocked`). This is exactly the path
-    production memory forces, so it is the one that most needs the ranks.
+    same rows (`screened_interaction_tau_blocked`).
     """
     mpi_comm, rank, nranks = mpi
     tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
@@ -1092,7 +1080,7 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                     if nranks > 1 else None)
     rW, _ = self_energy_fit_ranges(eps, nocc, mu=mu)
 
-    # Fit the omega -> tau weights on the UNEXTENDED axis, then pad with a zero
+    # Fit the omega -> tau weights on the unextended axis, then pad with a zero
     # column: every output tau is fitted from all input frequencies, so letting
     # omega = 0 into the fit refits every other coefficient.
     # A continuum wants W(0) even when the caller asked for no extras, so the

@@ -6,62 +6,254 @@ The derivative tensor dX/dR is never formed, only its contraction against a
 given adjoint.
 
 On the row-distributed fit both parts run in the fit's own tiles
-(`row_fit_adjoint` over `separable_ri.fit_rows_adjoint`, and X_mo^T X_bar by
-`orbital_rotation_rows`), so no rank forms an array of the grid by a
-factor's or the fit's width, and the result is the same bits at every rank
-count; the whole forms below (`dfactor_adjoint_gauges`,
-`collocation_adjoint`) are the replicated fit's.
+(`row_fit_adjoint` over `separable_ri.fit_rows_adjoints`, and X_mo^T X_bar by
+`orbital_rotation_rows`), so no rank forms an array of the grid by a factor's
+or the fit's width, and the result is the same bits at every rank count. The
+whole forms (`dfactor_adjoint_gauges`, `collocation_adjoint`) serve the
+replicated fit; the whole fit adjoint is refused above
+`WHOLE_FIT_ADJOINT_MAX_GB` (`require_whole_fit_adjoint`).
 
-X depends on the geometry three times over, through the fit and the
-collocation, through the points translating with their atom, and through the
-local frames turning with the environment. All three are needed to gate below
-1e-4.
+One fit adjoint per force: the interpolated exchange skeletons of a force (the
+relaxed density's, Sigma_x - v_xc's and the ISDF-K mean field's own)
+differentiate the same row fit as the chain wherever their grid is its points,
+and that adjoint is linear in its seeds. Inside a force's `one_fit_adjoint`
+window each skeleton leaves its seeds (`PendingFitAdjoint`), and the chain's
+assembly contracts them with its own in one `fit_rows_adjoints` call per fit:
+the seed-free work (Gram factor, three-centre pass, collocations, derivative
+integrals) once, the seed-linear part per point chain and per separately
+reported force.
+
+X depends on the geometry three times: through the fit and the collocation,
+through the points translating with their atom, and through the local frames
+turning with the environment. All three are needed to gate below 1e-4.
 
 An axis of a frame carries a pure gauge sign, and no sign convention is
-continuous everywhere. `continued_frames` therefore carries the convention over
-from a reference and differentiates that.
+continuous everywhere, so `continued_frames` carries the convention over from
+a reference and differentiates that.
 
-Derivative-integral signs are measured, not transcribed. pyscf's int2c2e_ip1,
+Derivative-integral signs are measured, not transcribed: pyscf's int2c2e_ip1,
 int3c2e_ip1 and int3c2e_ip2 are all +(grad .), so every nuclear derivative
 built from them carries a minus.
 """
+import threading
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
-from src.Base.constants import (FIT_CHOLESKY_BLOCK,
+from src.Base.constants import (FIT_CHOLESKY_BLOCK, FIT_REALIZATIONS,
                                 ORBITAL_MULTIPLIER_MAX_ITER,
                                 ORBITAL_MULTIPLIER_TOL,
-                                THREE_CENTER_BLOCK_BYTES)
+                                THREE_CENTER_BLOCK_BYTES,
+                                WHOLE_FIT_ADJOINT_MAX_GB)
 from src.Base.dispersion import refuse_dispersion_under_rpa
 import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf import scf as pyscf_scf
 from pyscf.grad import rhf as grad_rhf
 
+from src.Base.distributed_df import distributed_fock, distributed_handles
+from src.Base.distributed_isdf_jk import DistributedISDFJK
 from src.Base.environment import dresses_interaction
-from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force, range_coulomb
+from src.Base.isdf_jk import (ISDFJK, isdf_grid, mean_field_skeleton_force,
+                              range_coulomb)
 from src.Base.pcm_derivatives import reaction_field_fock_skeleton
-from src.Base.pyscf_interface import (aux_metric_inverse, fock_mo,
-                                      response_kernel)
+from src.Base.pyscf_interface import fock_mo, response_kernel
 from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_PAIR_TOL,
                                    DEFAULT_REGULARIZATION, _FRAME_DECAY,
-                                   _ao_l_labels, atomic_frames, atomic_points,
+                                   AdjointSeeds, _ao_l_labels, _content_key,
+                                   atomic_frames, atomic_points,
                                    aux_metric_sqrt, build_D_F, fit_M_stable,
-                                   fit_rows_adjoint, rows_transpose_product,
+                                   fit_rows_adjoints,
+                                   rows_transpose_product, screened_layout,
                                    subshells, test_set_D, test_set_layout)
+from src.Base.skeleton_tiles import (fitted_fock_skeleton,
+                                     isdf_exchange_seeds, xc_grid_skeleton)
 from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import current_comm
+from src.Base.utils.mpi_grid import current_comm, lockstep
 from src.gradients.multipliers import solve_orbital_multipliers
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.LinearResponse.rpa_energy import (
     exchange_channels, exx_double_counting, rsh_split, xc_hybrid_coeff)
+
+#: The row-fit adjoint pending on this thread (`one_fit_adjoint`): each
+#: simulated rank is a thread assembling its own force.
+_PENDING = threading.local()
+
+
+class FitKey:
+    """What a row fit's adjoint is a function of, by content: the molecule,
+    the auxiliary basis, the points, the pair layout, the tile edge and the
+    estimator's settings. Seeds of one key share one
+    `separable_ri.fit_rows_adjoints` call (`contract`)."""
+
+    def __init__(self, mol, auxmol, coords, layout, block, l_max_second=2,
+                 regularization=DEFAULT_REGULARIZATION, block_memory_gb=4.0):
+        self.mol, self.auxmol = mol, auxmol
+        self.coords, self.layout = np.asarray(coords), layout
+        self.block = int(block)
+        self.settings = dict(l_max_second=int(l_max_second),
+                             regularization=float(regularization),
+                             block_memory_gb=float(block_memory_gb))
+        self.key = (_content_key(mol), _content_key(auxmol),
+                    self.coords.tobytes(),
+                    tuple(np.asarray(a, dtype=kind).tobytes() for a, kind
+                          in zip(layout, (np.int64, np.int64, np.float64))),
+                    self.block, tuple(sorted(self.settings.items())))
+
+    def __eq__(self, other):
+        return isinstance(other, FitKey) and self.key == other.key
+
+    def __hash__(self):
+        return hash(self.key)
+
+    def contract(self, targets):
+        """[RowFitAdjoint] of `targets` (`AdjointSeeds`) on this fit."""
+        return fit_rows_adjoints(self.mol, self.auxmol, self.coords,
+                                 self.layout, targets, block=self.block,
+                                 **self.settings)
+
+
+class PointChain:
+    """How a point adjoint P[g] = dE/dr_g reaches the nuclei for one grid:
+    r_g = p_g F_i + R_i over the clouds `pts_local` and their owners, the
+    frames F_i turning with the geometry or not (`with_frames`)."""
+
+    def __init__(self, pts_local, owner, frames, with_frames,
+                 decay=_FRAME_DECAY):
+        self.pts_local = [np.asarray(p) for p in pts_local]
+        self.owner = np.asarray(owner)
+        self.frames = None if frames is None else np.asarray(frames)
+        self.with_frames, self.decay = bool(with_frames), float(decay)
+
+    def same(self, other):
+        """Whether `other` takes a point adjoint to the same force."""
+        if (self.with_frames != other.with_frames or self.decay != other.decay
+                or len(self.pts_local) != len(other.pts_local)
+                or not np.array_equal(self.owner, other.owner)
+                or not all(np.array_equal(a, b) for a, b in
+                           zip(self.pts_local, other.pts_local))):
+            return False
+        if not self.with_frames:
+            return True
+        if self.frames is None or other.frames is None:
+            return self.frames is None and other.frames is None
+        return np.array_equal(self.frames, other.frames)
+
+    def __call__(self, mol, P):
+        return point_chain(mol, P, self.pts_local, self.owner,
+                           frames=self.frames, decay=self.decay,
+                           with_frames=self.with_frames)
+
+
+class PendingFitAdjoint:
+    """The row fit's adjoint seeds the exchange skeletons of one force leave
+    for its assembly instead of contracting them (`one_fit_adjoint`).
+
+    A skeleton inside the window deposits its seeds (`deposit`) and returns
+    what reaches the nuclei outside the fit. The assembly contracts them with
+    its own fit adjoint (`contract`, from `row_fit_adjoint`) in one
+    `fit_rows_adjoints` call per fit: deposits on the same fit and point chain
+    pool into one target, their seeds summed in deposit order
+    (`separable_ri.summed_seeds`), the chain's own first where its points
+    close the same way; the rest (the chain's frozen frames against the mean
+    field's turning ones, and the mean field's own force, reported apart)
+    ride the same call as targets of their own, sharing every seed-free part.
+    The deposits' share of the force is `settle`'s; the mean field's
+    skeleton, contracted ahead where its force follows (`mean_field`), waits
+    in `stash` for that force (`take`).
+    """
+
+    def __init__(self, mf, mean_field=False):
+        self.mf = mf
+        self.mean_field = bool(mean_field)
+        self.open = True
+        self.deposits = []
+        self.share = None
+        self.stash = None
+
+    def deposit(self, key, chain, seeds):
+        """Hold one skeleton's seeds for the assembly's call."""
+        self.deposits.append((key, chain, seeds))
+
+    def take(self, request):
+        """The mean field's exchange skeleton for `request` (dm, dm_other,
+        prefactor, channels) where it was contracted ahead, once; else
+        None."""
+        if self.stash is None or not _same_request(self.stash[0], request):
+            return None
+        value, self.stash = self.stash[1], None
+        return value
+
+    def contract(self, key=None, seeds=None, chain=None):
+        """The chain's own target's `RowFitAdjoint` (None without one), and
+        every deposit contracted in the call of its fit; the window closes.
+
+        A deposit whose fit and point chain are the chain's pools into the
+        chain's target, so its share is inside the chain's branches; the
+        others' (natm, 3) add into `share`. Where the mean field's force
+        follows and its exchange skeleton is on a fit this call contracts,
+        it rides along and waits in `stash`.
+        """
+        self.open = False
+        entries = []
+        if seeds is not None:
+            entries.append({'key': key, 'chain': chain, 'seeds': [seeds],
+                            'role': 'own'})
+        for k, c, s in self.deposits:
+            for entry in entries:
+                if entry['key'] == k and entry['chain'].same(c):
+                    entry['seeds'].append(s)
+                    break
+            else:
+                entries.append({'key': k, 'chain': c, 'seeds': [s],
+                                'role': 'deposit'})
+        self.deposits = []
+        if self.mean_field and self.stash is None:
+            ahead = _mean_field_exchange_target(
+                self.mf, {e['key'] for e in entries})
+            if ahead is not None:
+                entries.append(ahead)
+        own, share = None, None
+        keys = []
+        for entry in entries:
+            if entry['key'] not in keys:
+                keys.append(entry['key'])
+        for k in keys:
+            group = [e for e in entries if e['key'] == k]
+            outs = k.contract([e['seeds'] for e in group])
+            for entry, out in zip(group, outs):
+                if entry['role'] == 'own':
+                    own = out
+                    continue
+                points = entry['chain'](k.mol, out.fit_points
+                                        + out.coll_points)
+                if entry['role'] == 'deposit':
+                    value = out.fit_centre + out.coll_centre + points
+                    share = value if share is None else share + value
+                else:
+                    centre = out.fit_centre + out.coll_centre + entry['two']
+                    self.stash = (entry['request'], lockstep(centre + points))
+        if share is not None:
+            share = lockstep(share)
+            self.share = share if self.share is None else self.share + share
+        return own
+
+    def settle(self):
+        """(natm, 3): the deposits' share of the force, contracted now where
+        no chain target took them; 0.0 without any. The window closes."""
+        if self.deposits:
+            self.contract()
+        self.open = False
+        share, self.share = self.share, None
+        return 0.0 if share is None else share
 
 
 def point_layout(mol, radii_by_element, origin_by_element=None):
     """(pts_local, atom_of_point): the atom-local clouds and their owners.
 
     The half of `separable_ri.molecular_points_covariant` that a derivative
-    needs and that one does not return. Production stacks the placed points and
+    needs and that one does not return. It stacks the placed points and
     keeps only the coordinates, while a chain rule on r_g = p_g F_i + R_i needs
     p_g and i separately. The two share the `atomic_points` call and the
     stacking order, which is what fixes the row order of X.
@@ -230,15 +422,23 @@ def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
         G   = Dt Dt^T + reg I
         M   = (F Dt^T) G^-1 d
 
-    so the reverse pass is that read backwards, with the inverse contributing
-    Gbar = -G^-1 Ginv_bar G^-1. No dM/dR is ever formed, and G is the matrix the
-    forward pass already factorized.
+    so the reverse pass is that read backwards. With B = A G^-1 (A = F Dt^T)
+    and A_bar = B_bar G^-1, the inverse contributes
+
+        G_bar = -G^-1 A^T B_bar G^-1 = -B^T A_bar,
+
+    low rank and formed from those two single solves -- the row fit's
+    G_bar = -W Z^T (`separable_ri.fit_rows_adjoints`). No dM/dR is ever
+    formed, and G is the matrix the forward pass already factorized.
 
     Nothing here forms G^-1. G is floored by `regularization` and reaches a
-    large condition number on a production basis, and the adjoint applies its
-    inverse twice, so an explicit inverse loses most of double precision. G is
-    symmetric positive definite, so one Cholesky factorization serves every
-    solve. `fit_adjoint_conditioning` reports the amplification.
+    large condition number on a large basis. Applying G^-1 to the
+    (nk, nk) product A^T B_bar and again to its result carries a last-bit
+    change of M_bar about 1e4 times further than the low-rank form does, as
+    on the row fit (tests/test_fit_adjoint_stability.py), and an explicit
+    inverse loses most of double precision. G is symmetric positive definite,
+    so one Cholesky factorization serves every solve.
+    `fit_adjoint_conditioning` reports the amplification.
     """
     s = np.sqrt(np.einsum('kr,kr->k', D, D))
     s = np.where(s == 0.0, 1.0, s)
@@ -253,12 +453,12 @@ def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
 
     B_bar = M_bar * d[None, :]
     d_bar = np.einsum('bk,bk->k', M_bar, B)
-    del B
     A_bar = scipy.linalg.cho_solve(cho, B_bar.T).T
-    Y = scipy.linalg.cho_solve(cho, A.T @ B_bar)          # G^-1 K
-    del A, B_bar
-    G_bar = -scipy.linalg.cho_solve(cho, Y.T).T           # -G^-1 K G^-1
-    del Y, cho
+    del A, B_bar, cho
+    # G_bar = -G^-1 A^T B_bar G^-1 = -B^T A_bar: low rank, from the two
+    # single solves already made, never G^-1 applied to an (nk, nk) product
+    G_bar = -(B.T @ A_bar)
+    del B
     F_bar = A_bar @ Dt
     # Dt_bar = A_bar^T F + (G_bar + G_bar^T) Dt, the Dt term formed first so
     # that Dt is gone before the F term: three arrays of D's shape at most
@@ -436,7 +636,7 @@ def shell_blocks(mol, per_ao_bytes, max_bytes):
     while sh0 < mol.nbas:
         sh1 = sh0 + 1
         # int() because ao_loc_nr() is int32 while a slab is nao*naux*8 bytes or
-        # more. The product wraps negative on a production system, the test then
+        # more. The product wraps negative on a large system, the test then
         # passes for every block, and the loop asks for the whole tensor.
         while (sh1 < mol.nbas
                and int(ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao_bytes <= max_bytes):
@@ -456,7 +656,7 @@ def three_centre_adjoint(mol, auxmol, G3, omega=0.0, max_bytes=THREE_CENTER_BLOC
     only the low-l ones, so the two orbital positions are contracted separately.
     The derivative integrals are contracted where they are made, blocked over
     the shells of the differentiated index, since a whole (3, nao, nao, naux)
-    tensor is gigabytes at production size.
+    tensor is gigabytes on a large system.
     """
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     ao_loc = mol.ao_loc_nr()
@@ -524,7 +724,7 @@ def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
 
 
 def product_pairs(mol, l_max_second=2):
-    """(mu, nu, weight) of EVERY pair of the test set's product basis, (all
+    """(mu, nu, weight) of every pair of the test set's product basis, (all
     AOs) x (AOs with l <= l_max_second), in `test_set_layout`'s order.
 
     These are the columns the Gram matrix of `fit_M_streaming` and
@@ -540,6 +740,35 @@ def product_pairs(mol, l_max_second=2):
             np.tile(w, nao))
 
 
+def whole_fit_adjoint_gb(nao, naux, npoint, ngram):
+    """GB the fit adjoint formed whole holds at once on one rank: the test
+    set over `ngram` product pairs and the auxiliaries, (npoint, ngram +
+    naux), three times (D_test, its adjoint, one temporary), F of that
+    width, and the (nao, nao, naux) three-centre tensor with its adjoint."""
+    width = ngram + naux
+    return 8 * (3 * npoint * width + naux * width
+                + 2 * nao * nao * naux) / 1e9
+
+
+def require_whole_fit_adjoint(nao, naux, npoint, ngram, what):
+    """`whole_fit_adjoint_gb`, refused above `WHOLE_FIT_ADJOINT_MAX_GB`
+    before any of those arrays exists; the row fit's adjoint serves the same
+    estimator in grid-row tiles."""
+    gb = whole_fit_adjoint_gb(nao, naux, npoint, ngram)
+    if gb > WHOLE_FIT_ADJOINT_MAX_GB:
+        raise MemoryError(
+            f'{what} forms the fit adjoint whole: the test set over every '
+            f'product pair, ({npoint}, {ngram} + {naux}), three times, F and '
+            f'the ({nao}, {nao}, {naux}) three-centre tensor with its '
+            f'adjoint, {gb:.3g} GB on every rank, above '
+            f'WHOLE_FIT_ADJOINT_MAX_GB = {WHOLE_FIT_ADJOINT_MAX_GB:g} GB. Use '
+            f"the row fit, fit='rows' (a FrozenFactorization with "
+            f"sliced=True, fit='rows'; the default of the exchange "
+            f'skeletons), whose adjoint runs in the grid-row tiles of '
+            f'`separable_ri.fit_rows_adjoint`.')
+    return gb
+
+
 def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
                            atom_of_point, frames=None, decay=_FRAME_DECAY,
                            regularization=DEFAULT_REGULARIZATION,
@@ -552,7 +781,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
         D[g,P] = sum_Q M[Q,g] Vh[Q,P]      Mbar = Vh Dbar^T,  Vhbar = M Dbar
         Mbar  --fit_adjoint-->  (Dtest_bar, F_bar)
         Dtest  columns are collocations: AO pairs, then auxiliaries
-        F      columns are w_c V^-1 (mu nu|.) for pairs, and exactly the
+        F      columns are w_c V^-1 (mu nu|.) for pairs, and the
                identity for auxiliaries, which therefore contributes nothing
         Vh     contributes through the square-root Frechet adjoint, and V^-1
                inside F contributes a second term to V_bar
@@ -565,14 +794,17 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     their centre terms differ but the point and frame chain is shared.
 
     gram_layout: the (mu, nu, weight) pairs the Gram matrix and the row
-    balancing sum over, where they are more than the pairs F carries
-    (`layout`): `product_pairs(mol)` for the estimator of `fit_rows`, whose
-    Gram matrix is the unscreened product. Its extra columns enter D_test
-    and carry F = 0, so they reach the force through the collocation alone.
-    None: `layout` for both, the estimator of `FrozenFactorization._fit`.
+    balancing sum over; None is every product pair (`product_pairs`), the
+    estimator of `fit_M_streaming` and `fit_rows`. Its columns beyond
+    `layout`'s enter D_test and carry F = 0, so they reach the force through
+    the collocation alone. Refused above `WHOLE_FIT_ADJOINT_MAX_GB`
+    (`require_whole_fit_adjoint`).
     """
+    if gram_layout is None:
+        gram_layout = product_pairs(mol)
+    require_whole_fit_adjoint(mol.nao_nr(), auxmol.nao_nr(), len(coords),
+                              len(gram_layout[0]), 'dfactor_adjoint_gauges')
     mu, nu, wc = layout
-    npair = len(mu)
     naux = auxmol.nao_nr()
     ao = mol.eval_gto('GTOval_sph', coords)
     V = auxmol.intor('int2c2e', aosym='s1')
@@ -586,16 +818,11 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     del e3c
     F_pairs = np.linalg.solve(V, g_cols) * wc[None, :]
     del g_cols
-    if gram_layout is None:
-        gmu, gnu, gw = mu, nu, wc
-        cols = slice(0, npair)
-        F = np.hstack([F_pairs, np.eye(naux)])
-    else:
-        gmu, gnu, gw = gram_layout
-        cols = pair_positions(layout, gram_layout, mol.nao_nr())
-        F = np.zeros((naux, len(gmu) + naux))
-        F[:, cols] = F_pairs
-        F[:, len(gmu):] = np.eye(naux)
+    gmu, gnu, gw = gram_layout
+    cols = pair_positions(layout, gram_layout, mol.nao_nr())
+    F = np.zeros((naux, len(gmu) + naux))
+    F[:, cols] = F_pairs
+    F[:, len(gmu):] = np.eye(naux)
     del F_pairs
     ngram = len(gmu)
     D_test = test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
@@ -634,7 +861,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
         g_bar = VinvFb * wc[None, :]                       # adjoint on (mu nu|P)
         np.add.at(G3, (mu, nu), g_bar.T)
         if dressed:
-            # V_gauge = V + vtilde, so Y is the adjoint on BOTH; a term that
+            # V_gauge = V + vtilde, so Y is the adjoint on both; a term that
             # differentiated vtilde alone adds only here.
             kernel_bar = (Y if gauge.kernel_bar is None
                           else Y + gauge.kernel_bar)
@@ -669,27 +896,31 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
 
 def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                     pts_local, atom_of_point, frames=None, decay=_FRAME_DECAY,
-                    with_frames=True, block=None):
+                    with_frames=True, block=None, pending=None):
     """(g_collocation, g_fit, held): the collocation branch of X_bar and the
     fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
     the frozen `layout` (its Gram matrix over every product pair).
 
-    `separable_ri.fit_rows_adjoint` runs both in the fit's tiles and returns
-    their centre terms and point adjoints, the same bits on every rank at
-    every rank count; the point and frame chain closes them here, on the
-    (nk, 3) point adjoints, which are not grid-by-width. `dfactor_adjoint_gauges`
-    with `gram_layout=product_pairs(mol)` and `collocation_adjoint` are the
-    same derivatives formed whole, to the rounding of the fit's balanced
-    Gram matrix.
+    `separable_ri.fit_rows_adjoints` runs both in the fit's tiles and
+    returns their centre terms and point adjoints, the same bits on every
+    rank at every rank count; the point and frame chain closes them here, on
+    the (nk, 3) point adjoints, which are not grid-by-width.
+    `dfactor_adjoint_gauges` with `gram_layout=product_pairs(mol)` and
+    `collocation_adjoint` are the same derivatives formed whole, to the
+    rounding of the fit's balanced Gram matrix.
+
+    pending: the force's `PendingFitAdjoint`, whose skeletons' seeds ride
+    the same call (`PendingFitAdjoint.contract`); a skeleton pooled into
+    this target arrives inside these two branches.
     """
-    adjoint = fit_rows_adjoint(mol, auxmol, coords, d_bar, layout, x_bar=x_bar,
-                               mo_coeff=mo_coeff, block=block)
-    g_coll = adjoint.coll_centre + point_chain(
-        mol, adjoint.coll_points, pts_local, atom_of_point, frames=frames,
-        decay=decay, with_frames=with_frames)
-    g_fit = adjoint.fit_centre + point_chain(
-        mol, adjoint.fit_points, pts_local, atom_of_point, frames=frames,
-        decay=decay, with_frames=with_frames)
+    key = FitKey(mol, auxmol, coords, layout,
+                 FIT_CHOLESKY_BLOCK if block is None else block)
+    chain = PointChain(pts_local, atom_of_point, frames, with_frames, decay)
+    seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff)
+    adjoint = (key.contract([seeds])[0] if pending is None
+               else pending.contract(key, seeds, chain))
+    g_coll = adjoint.coll_centre + chain(mol, adjoint.coll_points)
+    g_fit = adjoint.fit_centre + chain(mol, adjoint.fit_points)
     return g_coll, g_fit, adjoint.held
 
 
@@ -724,9 +955,9 @@ def pair_positions(layout, gram_layout, nao):
 def require_no_range_separation(mf, what):
     """Refuse a derivative that would silently drop the long-range exchange.
 
-    No skeleton here calls it any more, since `fock_partial_skeleton`, its
-    fitted twin, `qp_xc_correction_skeleton` and `isdf_exchange_skeleton` all
-    carry every channel. It remains as the refusal a single-channel route owes
+    The skeletons in this module (`fock_partial_skeleton`, its fitted twin,
+    `qp_xc_correction_skeleton`, `isdf_exchange_skeleton`) carry every
+    channel and do not need it; it is the refusal a single-channel route owes
     its caller.
 
     The forward quantities are safe on a range-separated hybrid, since `v_xc` is
@@ -801,9 +1032,18 @@ def _delta_o_response(mf):
     kern = response_kernel(mf, environment=False)
 
     def apply(x):
-        vj, vk = mf.get_jk(mf.mol, x, hermi=1)
+        with distributed_fock(mf, build=False):
+            vj, vk = mf.get_jk(mf.mol, x, hermi=1)
         return vj - 0.5 * vk - kern(x)
     return apply
+
+
+def sigma_x_minus_vxc(mf, dm):
+    """Sigma_x - v_xc in the AO basis, -K/2 - (get_veff - J), at density dm;
+    under ranks from the distributed SCF's handles."""
+    with distributed_fock(mf, build=False):
+        return -0.5 * mf.get_k(mf.mol, dm) - (mf.get_veff(mf.mol, dm)
+                                              - mf.get_j(mf.mol, dm))
 
 
 def qp_xc_correction_Y(mf, weights, nocc):
@@ -811,15 +1051,14 @@ def qp_xc_correction_Y(mf, weights, nocc):
 
     The same shape as `fock_partial_Y`, with the Fock replaced by this
     operator: two terms, one from the two-sided MO transform and one from the
-    operator's own density dependence. It must enter the Lagrangian BEFORE the
+    operator's own density dependence. It must enter the Lagrangian before the
     multiplier solve, because it shares Lambda with every other contribution.
     """
     C = mf.mo_coeff
     gs = np.diag(np.asarray(weights, float))
     g_ao = C @ gs @ C.T
     dm = mf.make_rdm1()
-    o_ao = -0.5 * mf.get_k(mf.mol, dm) - (mf.get_veff(mf.mol, dm)
-                                          - mf.get_j(mf.mol, dm))
+    o_ao = sigma_x_minus_vxc(mf, dm)
     o_mo = C.T @ o_ao @ C
     Y = 2.0 * (o_mo @ gs)
     Y[:, :nocc] += 4.0 * (C.T @ _delta_o_response(mf)(g_ao) @ C)[:, :nocc]
@@ -839,7 +1078,7 @@ def qp_xc_correction_skeleton(mf, weights, nocc):
         return np.zeros((mf.mol.natm, 3))
     C = mf.mo_coeff
     gs = np.diag(np.asarray(weights, float))
-    # Sigma_x is the FULL-RANGE exact exchange whatever the reference is, and
+    # Sigma_x is the full-range exact exchange whatever the reference is, and
     # v_xc carries the reference's own channels, so Sigma_x - v_xc is one
     # full-range unit minus each of them. On a global hybrid that collapses to
     # the single weight 1 - a_x.
@@ -901,8 +1140,14 @@ def exx_double_counting_skeleton(mf, mol=None):
         # the very same ISDFJK object. The points, collocation and fit matrix
         # are then bit-identical and everything but the exchange fraction
         # cancels. A fresh fit would leave its own realization in the
-        # difference.
+        # difference, and so would the other realization of it, so the
+        # distributed SCF's handle travels with the fit.
         hf.with_df = with_df
+        handles = getattr(mf, '_distributed', None)
+        if handles is not None:
+            for partner in (hf, ks):
+                if getattr(partner, '_distributed', None) is None:
+                    partner._distributed = handles
     return (np.asarray(mean_field_skeleton_force(hf))
             - np.asarray(mean_field_skeleton_force(ks)))
 
@@ -911,7 +1156,7 @@ def exx_double_counting_Y(mf, nocc):
     """Orbital-rotation gradient of (E_x^exact - E_xc).
 
     One term, where `qp_xc_correction_Y` needs two. The functional derivative of
-    this energy with respect to the density is exactly the operator
+    this energy with respect to the density is the operator
     `qp_xc_correction` carries, dE/dD = Sigma_x - v_xc, and an energy does not
     depend on the coefficients through the states as <p|O[D]|p> does.
 
@@ -921,8 +1166,7 @@ def exx_double_counting_Y(mf, nocc):
         return np.zeros((np.shape(mf.mo_coeff)[-1],) * 2)
     C = mf.mo_coeff
     dm = mf.make_rdm1()
-    o_ao = -0.5 * mf.get_k(mf.mol, dm) - (mf.get_veff(mf.mol, dm)
-                                          - mf.get_j(mf.mol, dm))
+    o_ao = sigma_x_minus_vxc(mf, dm)
     Y = np.zeros((C.shape[1], C.shape[1]))
     Y[:, :nocc] = 4.0 * (C.T @ o_ao @ C)[:, :nocc]
     return Y
@@ -990,7 +1234,7 @@ def isdf_exchange_adjoints(X, Z, dm, a_x, dm_other=None):
     return X_bar, Z_bar
 
 
-def isdf_fock_partial_exchange(mf, gamma, channels=None):
+def isdf_fock_partial_exchange(mf, gamma, channels=None, fit=None):
     """(natm, 3) exchange half of a folded Fock partial, from ISDF factors.
 
     The folded two-particle density Gamma_abcd = gamma_ab D_cd - gamma_ac D_bd/2
@@ -1004,16 +1248,41 @@ def isdf_fock_partial_exchange(mf, gamma, channels=None):
 
     `channels` overrides the reference's own, because
     `qp_xc_correction_skeleton` needs Sigma_x - v_xc, one full-range unit minus
-    each of the reference's channels.
+    each of the reference's channels. `fit` is `isdf_exchange_skeleton`'s.
     """
     C = mf.mo_coeff
     g_ao = C @ (0.5 * (gamma + gamma.T)) @ C.T
     return isdf_exchange_skeleton(mf, dm=g_ao, dm_other=mf.make_rdm1(),
-                                  prefactor=2.0, channels=channels)
+                                  prefactor=2.0, channels=channels, fit=fit)
+
+
+def exchange_fit(mf, fit=None):
+    """The realization of the fit an ISDF exchange skeleton differentiates,
+    both of the SCF's estimator: `fit` as given, else 'rows', the row fit's
+    tiles on any rank count (the distributed ISDF-K SCF's own where the mean
+    field carries its handle). The whole form ('replicated') differentiates
+    the same estimator through the dense Gram matrix, whose conditioning
+    holds it to 1e-8 of the SCF energy's derivative on ethylene/cc-pVDZ
+    PBE0 (one reassociation of it moves the force 2.1e-8) where the rows
+    reach 5e-10."""
+    if fit is None:
+        return 'rows'
+    if fit not in FIT_REALIZATIONS:
+        raise ValueError(f'fit={fit!r}: one of {FIT_REALIZATIONS}')
+    return fit
+
+
+def isdf_scf_handle(mf):
+    """The `DistributedISDFJK` a distributed ISDF-K SCF left on `mf` for the
+    current ranks, or None."""
+    handles = distributed_handles(mf)
+    if handles is None or not isinstance(handles[0], DistributedISDFJK):
+        return None
+    return handles[0]
 
 
 def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
-                           channels=None):
+                           channels=None, fit=None):
     """(natm, 3) of d/dR E_K^ISDF with the density matrix held fixed.
 
     The whole ISDF branch of the force: the collocation's adjoint, the fit's
@@ -1021,27 +1290,44 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     differentiated as it is built in `z_mode='dense'`. `z_mode='factored'` holds
     L = V^(1/2) M instead, and its Z differs by the modes the square root
     truncates, which is negligible on a bare Coulomb metric.
+
+    fit: 'replicated' rebuilds the fit whole below, W and Z (M, M) and the
+    Gram matrix (M, M) on every rank, and is refused above
+    `WHOLE_FIT_ADJOINT_MAX_GB`; 'rows' is `_exchange_skeleton_rows`, in the
+    row fit's grid-row tiles over the ranks; None is `exchange_fit`'s choice.
     """
-    with_df = mf.with_df
-    mol, auxmol, crd = with_df.mol, with_df.auxmol, with_df.coords
+    fit = exchange_fit(mf, fit)
     dm = mf.make_rdm1() if dm is None else np.asarray(dm)
     channels = exchange_channels(mf) if channels is None else list(channels)
+    if fit == 'rows':
+        return _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels)
+    with_df = mf.with_df
+    mol, auxmol, crd = with_df.mol, with_df.auxmol, with_df.coords
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     reg = with_df.regularization
 
-    # The fit is rebuilt, not taken from the mean field, so that one
-    # realization of the estimator is differentiated. `fit_adjoint` reverses
-    # `fit_M_stable` on a frozen column set, while `fit_M_streaming` builds its
-    # Gram matrix from the unscreened test set. The two cannot be mixed.
+    # The fit is rebuilt, not taken from the mean field, so that the function
+    # differentiated is a single realization of the SCF's estimator
+    # (`fit_M_streaming`: the Gram matrix over every product pair, F over the
+    # screened ones): `fit_adjoint` reverses `fit_M_stable` on D over every
+    # product pair with F zero on the screened ones. Taking the SCF's own M
+    # instead mixes two realizations, which differ in their near-null space
+    # and move this force above the gradient's reproducibility floor.
+    gram = product_pairs(mol, l_max_second=with_df.l_max_second)
+    gmu, gnu, gw = gram
+    ngram = len(gmu)
+    require_whole_fit_adjoint(nao, naux, len(crd), ngram,
+                              "isdf_exchange_skeleton(fit='replicated')")
     layout = test_set_layout(mol, crd, l_max_second=with_df.l_max_second)
     mu, nu, wc = layout
-    npair = len(mu)
-    D_test = test_set_D(mol, auxmol, crd, layout)
+    cols = pair_positions(layout, gram, nao)
+    D_test = test_set_D(mol, auxmol, crd, gram)
     V = auxmol.intor('int2c2e', aosym='s1')
     e3c = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e',
                                  aosym='s1').reshape(nao, nao, naux)
-    F = np.hstack([np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :],
-                   np.eye(naux)])
+    F = np.zeros((naux, ngram + naux))
+    F[:, cols] = np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :]
+    F[:, ngram:] = np.eye(naux)
     M = fit_M_stable(D_test, F, reg)
     X = mol.eval_gto('GTOval_sph', crd)
 
@@ -1073,33 +1359,193 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     Dtest_bar, F_bar = fit_adjoint(D_test, F, M_bar, reg)
 
     # F's pair columns are w_c V^-1 (mu nu|P), so they reach the metric a
-    # second time and the three-centre integrals once; its auxiliary block is
-    # exactly the identity and contributes nothing.
-    VinvFb = np.linalg.solve(V, F_bar[:, :npair])
-    V_bar -= F[:, :npair] @ VinvFb.T
+    # second time and the three-centre integrals once; its screened columns
+    # are zero and its auxiliary block the identity, and neither
+    # contributes.
+    VinvFb = np.linalg.solve(V, F_bar[:, cols])
+    V_bar -= F[:, cols] @ VinvFb.T
     G3 = np.zeros_like(e3c)
     np.add.at(G3, (mu, nu), (VinvFb * wc[None, :]).T)
 
     # One collocation adjoint for both slots: the exchange's own X and the
     # test set's AO pairs are the same evaluation on the same points.
     ao_bar = X_bar.copy()
-    pair_bar = Dtest_bar[:, :npair] * wc[None, :]
-    np.add.at(ao_bar.T, mu, (pair_bar * X[:, nu]).T)
-    np.add.at(ao_bar.T, nu, (pair_bar * X[:, mu]).T)
+    pair_bar = Dtest_bar[:, :ngram] * gw[None, :]
+    np.add.at(ao_bar.T, gmu, (pair_bar * X[:, gnu]).T)
+    np.add.at(ao_bar.T, gnu, (pair_bar * X[:, gmu]).T)
 
     # The attenuated metrics reach the fit nowhere else -- F is built on the
-    # BARE operator -- so they contribute through their own derivative alone.
+    # bare operator -- so they contribute through their own derivative alone.
     grad = (two_centre_adjoint(auxmol, V_bar)
             + three_centre_adjoint(mol, auxmol, G3))
     for omega, vb in attenuated:
         grad = grad + two_centre_adjoint(auxmol, vb, omega=omega)
     c_ao, P = basis_centre_forces(mol, crd, ao_bar)
-    c_aux, P_aux = basis_centre_forces(auxmol, crd, Dtest_bar[:, npair:])
+    c_aux, P_aux = basis_centre_forces(auxmol, crd, Dtest_bar[:, ngram:])
     grad += c_ao + c_aux
     pts_local, owner = point_layout(mol, with_df.grid_radii,
                                     with_df.grid_origins)
     return grad + point_chain(mol, P + P_aux, pts_local, owner,
                               frames=atomic_frames(mol)[0], with_frames=True)
+
+
+def _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels):
+    """`isdf_exchange_skeleton` on the row fit (`skeleton_tiles`), rank 0's
+    on every rank.
+
+    The grid is the mean field's own, from its placed points or, where the
+    distributed SCF left its ISDFJK unbuilt, from the same `isdf_grid` call
+    that SCF's handle placed its points with; the handle's M^T and
+    collocation tiles are reused rather than refitted. The pair layout is
+    the row fit's own screen at these points.
+
+    Inside a force's `one_fit_adjoint` window the fit adjoint is not run
+    here: the seeds go to the window and this returns the attenuated
+    metrics' term alone, the rest arriving with the assembly's one call; a
+    mean-field skeleton that call contracted ahead is read from it. Where
+    every operator's channels sum to a zero weight -- a pure functional's
+    exchange, or Sigma_x - v_xc on Hartree-Fock -- E_K is zero and nothing
+    is run.
+    """
+    weights = {}
+    for omega, weight in channels:
+        weights[omega] = weights.get(omega, 0.0) + weight
+    if not any(weight != 0.0 for weight in weights.values()):
+        return np.zeros((mf.mol.natm, 3))
+    pending = pending_fit_adjoint(mf)
+    if pending is not None:
+        ahead = pending.take((dm, dm_other, prefactor, channels))
+        if ahead is not None:
+            return ahead
+    key, chain, mt, X = _exchange_rows_fit(mf)
+    seeds, two, _ = isdf_exchange_seeds(
+        key.mol, key.auxmol, key.coords, key.layout, dm, dm_other=dm_other,
+        prefactor=prefactor, channels=channels, mt=mt, X=X, block=key.block,
+        **key.settings)
+    if pending is not None and pending.open:
+        pending.deposit(key, chain, seeds)
+        return lockstep(two)
+    adjoint = key.contract([seeds])[0]
+    centre = adjoint.fit_centre + adjoint.coll_centre + two
+    return lockstep(centre + chain(key.mol, adjoint.fit_points
+                                   + adjoint.coll_points))
+
+
+def _exchange_rows_fit(mf):
+    """(FitKey, PointChain, M^T tiles, X tiles) of the row fit the ISDF-K
+    mean field's exchange skeleton differentiates: its grid, the distributed
+    SCF's tiles where it carries them (None elsewhere), and its points'
+    chain, which follows the atomic frames of each geometry."""
+    with_df = mf.with_df
+    mol = with_df.mol
+    handle = isdf_scf_handle(mf)
+    if with_df.coords is not None and with_df.grid_radii is not None:
+        coords, radii, origins = (with_df.coords, with_df.grid_radii,
+                                  with_df.grid_origins)
+    else:
+        coords, radii, origins = lockstep(isdf_grid(
+            mol, counts=with_df.counts if with_df._named_counts else None,
+            radii=with_df.radii, auxbasis=with_df.auxbasis,
+            n_start=with_df.n_start, return_info=True))
+    if handle is not None and not np.array_equal(handle.coords, coords):
+        raise RuntimeError(
+            "the distributed SCF's interpolation points are not this mean "
+            "field's grid, so its fit is not the one the energy used")
+    auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
+    block = handle.tile if handle is not None else FIT_CHOLESKY_BLOCK
+    layout = screened_layout(mol, coords, l_max_second=with_df.l_max_second,
+                             block=block)
+    key = FitKey(mol, auxmol, coords, layout, block,
+                 l_max_second=with_df.l_max_second,
+                 regularization=with_df.regularization,
+                 block_memory_gb=with_df.block_memory_gb)
+    pts_local, owner = point_layout(mol, radii, origins)
+    chain = PointChain(pts_local, owner, atomic_frames(mol)[0], True)
+    if handle is None:
+        return key, chain, None, None
+    return key, chain, handle.MT, handle.X
+
+
+def mean_field_exchange_wanted(mf):
+    """Whether the ISDF-K mean-field force of `mf` carries an interpolated
+    exchange skeleton: a hybrid's, the one predicate that force and the
+    pending call's stash both read."""
+    return (isinstance(getattr(mf, 'with_df', None), ISDFJK)
+            and xc_hybrid_coeff(mf)[1] != 0.0)
+
+
+def _mean_field_exchange_target(mf, keys):
+    """The mean-field force's exchange skeleton as a target of a pending
+    call -- its key, chain, seeds, attenuated term and the request it
+    answers -- where its fit is among `keys`; None otherwise."""
+    if not mean_field_exchange_wanted(mf):
+        return None
+    key, chain, mt, X = _exchange_rows_fit(mf)
+    if key not in keys:
+        return None
+    dm = mf.make_rdm1()
+    channels = exchange_channels(mf)
+    seeds, two, _ = isdf_exchange_seeds(
+        key.mol, key.auxmol, key.coords, key.layout, dm, prefactor=1.0,
+        channels=channels, mt=mt, X=X, block=key.block, **key.settings)
+    return {'key': key, 'chain': chain, 'seeds': [seeds], 'role': 'mean_field',
+            'two': two, 'request': (dm, None, 1.0, channels)}
+
+
+def _same_request(a, b):
+    """Whether two exchange-skeleton requests (dm, dm_other, prefactor,
+    channels) ask for the same number."""
+    (dm_a, other_a, p_a, ch_a), (dm_b, other_b, p_b, ch_b) = a, b
+    if (other_a is None) != (other_b is None):
+        return False
+    return (np.array_equal(dm_a, dm_b)
+            and (other_a is None or np.array_equal(other_a, other_b))
+            and float(p_a) == float(p_b)
+            and [tuple(map(float, c)) for c in ch_a]
+            == [tuple(map(float, c)) for c in ch_b])
+
+
+def pending_fit_adjoint(mf):
+    """The `PendingFitAdjoint` of the force this thread assembles on `mf`,
+    or None."""
+    pending = getattr(_PENDING, 'current', None)
+    return pending if pending is not None and pending.mf is mf else None
+
+
+@contextmanager
+def one_fit_adjoint(mf, mean_field=False):
+    """A window in which the exchange skeletons of one force on `mf` leave
+    their row-fit adjoint seeds for its assembly, which contracts them with
+    its own in one `fit_rows_adjoints` call per fit (`PendingFitAdjoint`).
+
+    Opened around every skeleton that reaches a nuclear gradient and that
+    gradient itself; a window already open on `mf` is joined. The first
+    `PendingFitAdjoint.contract` or `settle` closes it, so a skeleton called
+    after the assembly runs its own adjoint again. mean_field: the mean
+    field's own force follows inside this block, and its exchange skeleton
+    rides the same call, read back when that force asks for it. Leaving the
+    block with seeds no assembly contracted raises: that force would miss
+    them.
+    """
+    outer = getattr(_PENDING, 'current', None)
+    if outer is not None and outer.mf is mf and outer.open:
+        outer.mean_field = outer.mean_field or bool(mean_field)
+        yield outer
+        return
+    pending = PendingFitAdjoint(mf, mean_field)
+    _PENDING.current = pending
+    try:
+        yield pending
+    finally:
+        _PENDING.current = outer
+    if pending.deposits:
+        raise RuntimeError(
+            f'{len(pending.deposits)} exchange skeleton(s) left row-fit '
+            'adjoint seeds that no nuclear assembly contracted: the force '
+            'would miss their fit and collocation terms')
+    if pending.stash is not None:
+        warnings.warn('the mean-field exchange skeleton was contracted ahead '
+                      'of a force that never asked for it', RuntimeWarning)
 
 
 def fock_partial_skeleton(mf, gamma, nocc):
@@ -1163,24 +1609,28 @@ def fock_partial_skeleton(mf, gamma, nocc):
 
 
 def xc_skeleton(mf, gamma):
-    """(natm, 3) of d/dR Tr[gamma v_xc], MO coefficients held fixed.
+    """(natm, 3) of d/dR Tr[gamma v_xc^DFT], MO coefficients held fixed and the
+    Becke grid moving with the atoms, as the energy's grid does.
 
     The exchange-correlation half of the Kohn-Sham Fock partial. It appears
     once, not twice. The Coulomb and exchange terms come from a four-index
     object in which gamma and the density enter symmetrically, while v_xc is
     not bilinear in the density.
 
-    `pyscf.hessian.rks._get_vxc_deriv1` supplies dv_xc/dR including the
-    density's response to the basis functions moving, which is the skeleton
-    definition. Its convention was measured against a finite difference, not
-    assumed.
+    The grid's own motion is part of it. The fixed-grid derivative (the AOs
+    and the density moving through the kernel) misses the points riding with
+    their atoms and the Becke weights' response, which is the whole of an
+    excitation force's translation residual on a Kohn-Sham reference, larger
+    on a range-separated functional than on a global hybrid;
+    `skeleton_tiles.xc_grid_skeleton` carries all three terms.
     """
-    from pyscf.hessian import rks as _hrks
+    if mf.do_nlc():
+        raise NotImplementedError(
+            f'{mf.xc!r} carries a VV10 kernel, whose skeleton is not built')
     C = mf.mo_coeff
     g_ao = C @ (0.5 * (gamma + gamma.T)) @ C.T
-    vmat = _hrks._get_vxc_deriv1(mf.Hessian(), C, mf.mo_occ,
-                                 getattr(mf, 'max_memory', 4000))
-    return np.einsum('axij,ij->ax', np.asarray(vmat), g_ao)
+    return xc_grid_skeleton(mf.mol, mf.grids, mf._numint, mf.xc, g_ao,
+                            np.asarray(mf.make_rdm1()))
 
 
 def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False):
@@ -1262,7 +1712,14 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
         Jbar[ab,P] = gamma_ab (Vinv b)_P + D_ab (Vinv a)_P - [gamma K^P D]_ab
         Vbar       = -(Vinv a)(Vinv b)^T + (1/2) Vinv T Vinv      (symmetrized)
 
-    with K^P = sum_Q Vinv[P,Q] J^Q. Storage is three-index throughout.
+    with K^P = sum_Q Vinv[P,Q] J^Q. Nothing of the (nao, nao, naux) shape is
+    formed: `skeleton_tiles.fitted_fock_skeleton` streams the three-centre
+    integrals and their derivatives over fixed auxiliary tiles, the tiles
+    divided over the current ranks and their (natm, 3) addends reduced once.
+    Every omega = 0 channel is one exchange at the channels' summed weight;
+    a long-range one is the four-centre `exchange_channel_skeleton`, rank 0's
+    on every rank. The exchange term costs naux nao^2 nocc, what
+    density-fitted exchange costs anywhere.
 
     `channels` is `exchange_channels(mf)`, and a range-separated hybrid's
     second channel carries its own density fit. `coulomb=False` leaves the
@@ -1270,91 +1727,21 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
     Kohn-Sham reference the XC half comes from `xc_skeleton`, which the caller
     adds.
     """
-    mol = mf.mol
     C = mf.mo_coeff
     g_ao = C @ (0.5 * (gamma + gamma.T)) @ C.T
     D = mf.make_rdm1()
-    nao, naux = mol.nao_nr(), auxmol.nao_nr()
-
-    def _fit(omega):
-        """(J, V) of the density fit under the operator of one channel.
-
-        A long-range channel cannot reuse the Coulomb fit, since
-        (ab|erf(omega r)/r|cd) has its own three- and two-centre integrals.
-        """
-        with mol.with_range_coulomb(omega), auxmol.with_range_coulomb(omega):
-            j = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e',
-                                       aosym='s1').reshape(nao, nao, naux)
-            v = auxmol.intor('int2c2e', aosym='s1')
-        return j, v
-
-    J, V = _fit(0.0)
-    a = np.einsum('ab,abP->P', g_ao, J, optimize=True)
-    b = np.einsum('cd,cdP->P', D, J, optimize=True)
-    # A direct solve on the Coulomb metric, which is full rank and well
-    # conditioned. Routing it through the regularized inverse costs an order of
-    # magnitude of precision for no benefit, and only the long-range metric
-    # needs the regularization.
-    Va, Vb = np.linalg.solve(V, a), np.linalg.solve(V, b)
-
-    # GEMMs, not einsums. A three-operand contraction carrying the auxiliary
-    # batch index falls off BLAS and runs an order of magnitude slower for
-    # identical flops.
-    def _sandwich(Tn):
-        """g_ao Tn[P] D for every P, as two large GEMMs.
-
-        The einsum falls off BLAS on the batch index, and a Python loop over
-        naux issues hundreds of GEMMs too small to amortize their call
-        overhead. Folding the batch index into the free dimension keeps one
-        matrix product a side.
-        """
-        left = (g_ao @ Tn.transpose(1, 0, 2).reshape(nao, naux * nao))
-        left = left.reshape(nao, naux, nao).transpose(1, 0, 2).reshape(
-            naux * nao, nao)
-        return (left @ D).reshape(naux, nao, nao)
-
-    # The Coulomb half is never range-separated and is built once. The exchange
-    # half is built once per channel, each with its own fit and its own
-    # derivative integrals.
-    c = 1.0 if coulomb else 0.0
-    grad = np.zeros((mol.natm, 3))
-    if c:
-        Jbar_c = (g_ao[:, :, None] * Vb[None, None, :]
-                  + D[:, :, None] * Va[None, None, :])
-        grad += (three_centre_adjoint(mol, auxmol, Jbar_c)
-                 + two_centre_adjoint(auxmol, -np.outer(Va, Vb)))
-        del Jbar_c
+    full = 0.0
     for omega, weight in channels:
-        if weight == 0.0:
-            continue
-        if omega != 0.0:
-            grad += exchange_channel_skeleton(mf, g_ao, D, omega, weight)
-            continue
-        Jw, Vw = J, V
-        # T first and K^P after, each three-index tensor dropped at its last
-        # use: at most J and three more of its size are alive at once
-        GJ = _sandwich(Jw.transpose(2, 0, 1))
-        T = GJ.reshape(naux, -1) @ Jw.reshape(-1, naux)
-        del GJ
-        # The LONG-RANGE metric is numerically singular, so it is inverted on
-        # its numerical range and never solved through.
         if omega == 0.0:
-            Kw = np.linalg.solve(Vw, Jw.reshape(-1, naux).T).reshape(naux, nao,
-                                                                     nao)
-        else:
-            Kw = (aux_metric_inverse(Vw)
-                  @ Jw.reshape(-1, naux).T).reshape(naux, nao, nao)
-        GK = _sandwich(Kw)
-        del Kw
-        if omega == 0.0:
-            VTV = np.linalg.solve(Vw, np.linalg.solve(Vw, T).T).T
-        else:
-            Vwi = aux_metric_inverse(Vw)
-            VTV = Vwi @ T @ Vwi
-        GK_bar = -GK.transpose(1, 2, 0)
-        del GK
-        grad += weight * (
-            three_centre_adjoint(mol, auxmol, GK_bar, omega=omega)
-            + two_centre_adjoint(auxmol, 0.5 * VTV, omega=omega))
-        del GK_bar
+            full += weight
+    occ = mf.mo_occ
+    grad = fitted_fock_skeleton(
+        mf.mol, auxmol, g_ao, D,
+        occ=C[:, occ > 0] * np.sqrt(occ[occ > 0]) if full else None,
+        coulomb=coulomb, exchange=full)
+    for omega, weight in channels:
+        if omega != 0.0 and weight != 0.0:
+            # pyscf's threaded derivative K: one rank's bits on all of them
+            grad = grad + lockstep(exchange_channel_skeleton(mf, g_ao, D,
+                                                             omega, weight))
     return grad

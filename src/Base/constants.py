@@ -11,42 +11,40 @@ BOHR_TO_ANGSTROM = 0.52917721092
 DEFAULT_BROADENING_ETA = 1e-3
 
 # Relative eigenvalue floor for inverting an auxiliary-basis metric. The
-# LONG-RANGE metric of a range-separated hybrid is numerically singular --
-# erf(omega r)/r is smooth, so tight auxiliary functions go linearly dependent
-# under it -- so the fit is inverted on its numerical range rather than solved
+# long-range metric of a range-separated hybrid is numerically singular
+# (erf(omega r)/r is smooth, so tight auxiliary functions go linearly dependent
+# under it), so the fit is inverted on its numerical range rather than solved
 # through.
 AUX_METRIC_LINDEP = 1e-10
 
-# Relative eigenvalue floor of the Coulomb metric's SQUARE ROOT, the gauge of
+# Relative eigenvalue floor of the Coulomb metric's square root, the gauge of
 # the separable factors (D = M^T V^1/2): a direction below it is the metric's
 # numerical null space and is dropped from the root rather than carried at
 # the rounding level. Far below AUX_METRIC_LINDEP because the root is never
 # inverted: a small eigenvalue enters it as w^1/2, which is harmless.
 AUX_METRIC_ROOT_FLOOR = 1e-12
 
-# How negative, relative to the largest eigenvalue, a DRESSED metric v + vtilde
+# How negative, relative to the largest eigenvalue, a dressed metric v + vtilde
 # may be before its root is refused. v + vtilde is a positive kernel, so a
 # negative eigenvalue beyond rounding means the discretized reaction field
-# over-screens the bare interaction -- an error of the cavity or of eps, not
-# a truncation to be dropped.
+# over-screens the bare interaction: an error of the cavity or of eps, not a
+# truncation to be dropped.
 AUX_METRIC_INDEFINITE_TOL = 1e-10
 
 # Validated ISDF interpolation grids: {basis: {level: (A1, A2, A3, B1)}}, the
-# Lebedev sub-shell replica counts measured to reach an accuracy. THE ONLY
-# PLACE A VALIDATED COUNT IS WRITTEN DOWN; a re-measured grid is corrected here
-# and nowhere else.
+# Lebedev sub-shell replica counts measured to reach an accuracy; the only
+# place a validated count is written down.
 #
-# A LEVEL IS AN ACCURACY TARGET, NOT A SIZE: the largest deviation of the three
+# A level is an accuracy target, not a size: the largest deviation of the three
 # lowest BSE roots from `solve_bse_df` at the same mean field, over ten
 # molecules spanning H C N O P S Si B with the roots matched between the two
 # routes. G1 < 8 meV, G2 < 4 meV, G3 < 2 meV, at 6*A1 + 8*A2 + 12*A3 + 24*B1
 # points per atom.
 #
-# THE LADDER IS NOT MONOTONE, so an entry licenses ITS OWN count and no other.
-#
-# EVERY GAP IS A REFUSAL, NOT A FALLBACK: a missing level means nobody measured
-# it, so a neighbouring level, a larger count and another basis are all
-# equally unlicensed.
+# The ladder is not monotone, so an entry licenses its own count and no other.
+# A missing level is a refusal, not a fallback: nobody measured it, so a
+# neighbouring level, a larger count and another basis are all equally
+# unlicensed.
 ISDF_GRID_ACCURACY = {
     'cc-pvdz':     {'G1': (16, 10, 6, 2), 'G2': (16, 10, 6, 2),
                     'G3': (32, 20, 12, 4)},
@@ -59,7 +57,7 @@ ISDF_GRID_ACCURACY = {
 
 # Multi-start descents behind every grid tabulated above. A shipped radii row is
 # keyed on its recipe as well as its counts, so the same counts found from one
-# start are a DIFFERENT grid and not the one that was scored.
+# start are a different grid and not the one that was scored.
 ISDF_GRID_N_START = 8
 
 # Highest auxiliary angular momentum the ISDF interpolation grid represents.
@@ -130,12 +128,11 @@ QSGW_BLOCK_ELEMS = 2**24
 # |a| > 4.1 eV at s = 100. Off the diagonal the kernel K(a, b) is at most
 # (1 + sqrt 2) / (2 max(|a|, |b|)) at every s, so a virtual's near-pole terms
 # stay out of its couplings to the occupied orbitals, the block that rotates the
-# density; mode A carries them there at size 1/eta. Marie and Loos find their
-# accuracy plateau from s = 50 and recommend 500 or 1000, judged on convergence
-# from a HF start. On water cc-pVDZ from s = 200 up the high virtuals carry two
-# self-consistent branches and PBE and PBE0 starts end 0.9 to 1.6 meV apart at
-# the frontier; at s = 100 they agree to 1e-4 meV, with HOMO and LUMO about
-# 1 meV from s = 1000.
+# density; mode A carries them there at size 1/eta. Marie and Loos recommend
+# 500 or 1000 (accuracy plateau from s = 50, judged from a HF start). On water
+# cc-pVDZ from s = 200 up the high virtuals carry two self-consistent branches
+# and PBE and PBE0 starts end 0.9 to 1.6 meV apart at the frontier; at s = 100
+# they agree to 1e-4 meV, with HOMO and LUMO about 1 meV from s = 1000.
 QSGW_SRG_FLOW = 100.0
 # Relative error bound of the quadrature behind the SRG kernel,
 # (1 - exp(-s lam)) / lam = int_0^s exp(-t lam) dt ~ sum_n w_n exp(-t_n lam):
@@ -186,11 +183,35 @@ ISDF_TILE_GB = 4.0
 # Grid points per tile of the row-distributed ISDF fit (`fit_rows`): the Gram
 # tiles, the Cholesky panels and diagonal blocks, the substitution blocks, the
 # three-centre contraction and the projections all run on tiles of this edge,
-# owned block-cyclically. FIXED, never derived from the rank count: a GEMM's
+# owned block-cyclically. Fixed, never derived from the rank count: a GEMM's
 # bits depend on its call shape, so the same tile sequence whoever owns it is
 # what makes the factor, the solve and D bitwise identical at every rank
 # count. 512 keeps the trailing update's inner dimension at two BLAS panels.
 FIT_CHOLESKY_BLOCK = 512
+
+# How an ISDF fit is realized: 'replicated', the whole fit on every rank
+# (`fit_M_streaming`), or 'rows', `separable_ri.fit_rows` by the grid-row tiles
+# above. A realization, not a functional: both solve one estimator, the Gram
+# matrix over every product pair and F D^T over the screened pairs.
+FIT_REALIZATIONS = ('replicated', 'rows')
+
+# GB of float64 the fit adjoint formed whole may hold on one rank: the test set
+# over every product pair and the auxiliaries, (M, nao*n2 + naux), three times
+# (D_test, its adjoint, one temporary), F of the same width and the whole
+# (nao, nao, naux) three-centre tensor with its adjoint, estimated before any
+# is allocated (`isdf_derivatives.whole_fit_adjoint_gb`). The size grows as
+# M * nao^2 and does not divide by the rank count, since every rank forms it.
+# Above the cap the whole form refuses and names the row fit, whose adjoint
+# runs in the fit's grid-row tiles (`fit='rows'`).
+WHOLE_FIT_ADJOINT_MAX_GB = 256.0
+
+# The most a composed force may move, in Ha/Bohr, when the Casida-level seeds
+# its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
+# A fit adjoint formed from single solves of the Gram matrix (cond ~ 2e8)
+# carries such a change to ~1e-12 on water/cc-pVDZ, whole fit and row fit
+# alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8
+# (tests/test_fit_adjoint_stability.py).
+FIT_ADJOINT_ULP_RESPONSE_MAX = 1e-10
 
 # How many times the replicated fit's own reassociation response a different
 # realization of the same fit may sit from it. The response is measured on the
@@ -204,7 +225,7 @@ FIT_CHOLESKY_BLOCK = 512
 # whole digits.
 FIT_REASSOCIATION_K = 10
 
-# How many times a MEASURED repeat or reassociation response of a number that
+# How many times a measured repeat or reassociation response of a number that
 # number may move when a comparison spans two SCF runs, two threaded pyscf K
 # builds or a sum reduced in another order. pyscf's OpenMP GEMM (`lib.ddot`)
 # adds its K-split partials in thread-arrival order, so at 16 threads no pyscf
@@ -212,8 +233,7 @@ FIT_REASSOCIATION_K = 10
 # rather than the method; the response is measured where the comparison runs
 # (the serial force re-associated on one BLAS thread, or the spread of repeated
 # evaluations on one mean field). Three puts the BSE@GW excitation force's gate
-# at 5.4e-8 Ha/Bohr on water/cc-pVDZ, where that response is 1.8e-8, far under
-# the 1.49e-3 a real defect moved it (ranks differentiating two grids).
+# at 5.4e-8 Ha/Bohr on water/cc-pVDZ, where that response is 1.8e-8.
 COMPOSED_GRAD_K = 3
 
 # How far a Casida vector may sit from <X|X> - <Y|Y> = 1 before a consumer
@@ -248,31 +268,31 @@ POLARIZABILITY_FIELD = 1e-3
 POLARIZABILITY_SCF_TOL = 1e-12
 
 # Density-direction step for the reaction field's cross term in a correlated
-# gradient (src/Base/pcm_derivatives.py). The solvation energy is EXACTLY
-# quadratic in the density it is built from, so the central difference this
-# scales carries no truncation error and the value is a conditioning choice
-# only: measured step-independent to 3e-15 from 1e-1 down to 1e-3.
+# gradient (src/Base/pcm_derivatives.py). The solvation energy is quadratic in
+# the density it is built from, so the central difference this scales carries
+# no truncation error and the value is a conditioning choice only (measured
+# step-independent to 3e-15 from 1e-1 down to 1e-3).
 PCM_CROSS_TERM_STEP = 1e-2
 
 # Contour deformation of the GW self-energy
 # (src/SingleReference/GW/contour_deformation.py). A pole of G at
-# |omega - eps_q| below RESIDUE_ON_CONTOUR_TOL counts as ON the contour.
+# |omega - eps_q| below RESIDUE_ON_CONTOUR_TOL counts as on the contour.
 # QP_POLE_OFFSET is how far off an orbital energy the quasiparticle iteration
 # is kept: at omega = eps_q the imaginary-axis integrand collapses onto nu = 0
 # and no quadrature resolves it (water/cc-pVDZ: exact to 3e-14 at 1e-3, only
-# 5e-6 at 1e-4 -- a floor, not a tuning knob).
+# 5e-6 at 1e-4; a floor, not a tuning knob).
 RESIDUE_ON_CONTOUR_TOL = 1e-10
 QP_POLE_OFFSET = 1e-3
 # The smallest offset the Newton iteration may fall back to when a
-# quasiparticle root lies INSIDE the guard band -- the guard then undoes every
+# quasiparticle root lies inside the guard band, where the guard undoes every
 # step and the iteration deadlocks at a fixed point that is not the root.
 QP_POLE_OFFSET_MIN = 1e-6
-# Below this pole strength a converged root is a SATELLITE, not the
+# Below this pole strength a converged root is a satellite, not the
 # quasiparticle. f(w) = w - eps_p - Sigma(w) diverges at every eps_q, so it has
 # a genuine zero just to either side of each one, with Z = 1/(1 - dSigma/dw)
 # going to zero there because the slope diverges.
 QP_POLE_STRENGTH_MIN = 0.1
-# Margin (Hartree) past the residue frequencies of the Newton START that the
+# Margin (Hartree) past the residue frequencies of the Newton start that the
 # tau grid must carry for the Laplace residue backend to be chosen: the root
 # moves by the quasiparticle correction, a few tenths of an eV to 2 eV.
 RESIDUE_FREQ_MARGIN = 0.1
@@ -282,19 +302,19 @@ RPA_ENERGY_NFREQ = 40
 # Gauss-Legendre points on the imaginary-frequency half of a contour
 # deformation.
 CD_NFREQ = 64
-# How far inside the root-to-pole distance the FIRST contour-deformation
+# How far inside the root-to-pole distance the first contour-deformation
 # frequency has to sit. A grid whose smallest node is not well inside the
 # root-to-pole gap loses the Lorentzian spike the pole of G puts on the
 # imaginary-frequency integrand, and the Newton is left on whatever the
 # truncated self-energy has a zero at.
 CD_POLE_RESOLUTION = 40.0
-# Where doubling the contour-deformation grid gives up. A root sitting ON a
+# Where doubling the contour-deformation grid gives up. A root sitting on a
 # pole of G is resolved by no quadrature, so the growth must stop somewhere
 # and say so rather than run the cost up.
 CD_NFREQ_MAX = 512
 # Imaginary-time points behind the contour-deformation grid. The cosine
 # transform onto the imaginary-frequency quadrature would be converged at 18;
-# a residue asks the same grid for the cosh transform at a REAL frequency w',
+# a residue asks the same grid for the cosh transform at a real frequency w',
 # which reaches down to gap - w' and needs the wider range these points buy.
 CD_NTAU = 24
 
@@ -321,10 +341,10 @@ SOP_CLEARANCE_MIN = 0.05
 # is ill-conditioned by construction once the poles crowd; the cutoff is what
 # keeps the amplitudes of a near-degenerate pair finite.
 SOP_FIT_RCOND = 1e-12
-# Auxiliary poles by default, set by the GRADIENT rather than the energy: the
+# Auxiliary poles by default, set by the gradient rather than the energy: the
 # energy is converged at 8 and the derivative needs 12.
 SOP_N_POLES = 12
-# Fit the auxiliary poles on every n-th orbital column. They are COMMON to all
+# Fit the auxiliary poles on every n-th orbital column. They are common to all
 # orbitals, so a subset places them, and the least squares is dense and cubic
 # in the columns kept.
 SOP_FIT_STRIDE = 8
@@ -340,7 +360,7 @@ QP_WINDOW_Z_MIN = 0.5
 # The bare Laplace quadrature error a residue frequency must be carried to
 # before the cosh transform of proj(tau) may stand in for an explicit chi0(w')
 # (src/SingleReference/GW/real_screening.py::LaplaceRealScreening). It gates a
-# REPRESENTATION, not an iteration: the transform is exact only while every
+# representation, not an iteration: the transform is exact only while every
 # pair energy d -/+ w' still lies inside the grid's fitted 1/y range, and past
 # that the residue is not inaccurate but meaningless.
 LAPLACE_SCREENING_TOL = 1e-8
@@ -356,11 +376,11 @@ UPFOLDED_BSE_DENSE_LIMIT = 4000
 SIGMA_FIT_ERROR_MAX = 1e-2
 
 # BSE Casida solver: dense below this occupied-virtual pair count, the
-# matrix-free ISDF/DF Davidson above (12000 pairs is ~1.2 GB per block and a
-# few minutes of eigh). `solve_bse`'s solver='auto' compares BSE_DENSE_MAX_GB
-# against 2 * n_ov**2 * 8 bytes, the dense route's own (A, B) storage --
-# TDA is NOT exempt, since the dense route builds B whether or not `tda` is
-# set and only the eigensolver drops it. BSE_DENSE_MAX_GB is the memory form
+# matrix-free ISDF/DF Davidson above (12000 pairs is ~1.2 GB per block).
+# `solve_bse`'s solver='auto' compares BSE_DENSE_MAX_GB against
+# 2 * n_ov**2 * 8 bytes, the dense route's own (A, B) storage; TDA is not
+# exempt, since the dense route builds B whether or not `tda` is set and only
+# the eigensolver drops it. BSE_DENSE_MAX_GB is the memory form
 # of BSE_DENSE_MAX_NOV so the two spellings of the boundary cannot drift apart.
 BSE_DENSE_MAX_NOV = 12000
 BSE_DENSE_MAX_GB = 2 * BSE_DENSE_MAX_NOV**2 * 8 / 1e9
@@ -371,10 +391,10 @@ BSE_DENSE_MAX_GB = 2 * BSE_DENSE_MAX_NOV**2 * 8 / 1e9
 DERIV_BLOCK_BYTES = 2 << 30
 
 # Ha. The static <p|Sigma_x - v_xc|p> shift vanishes on a Hartree-Fock
-# reference, where v_xc IS Sigma_x, but only analytically: evaluated there it
+# reference, where v_xc is Sigma_x, but only analytically: evaluated there it
 # is round-off, while a Kohn-Sham reference carries tenths of a Hartree. A
 # gradient route that cannot differentiate the shift must therefore ask
-# whether one is PRESENT by magnitude and not by nonzeroness, a shift this
+# whether one is present by magnitude and not by nonzeroness, a shift this
 # size having no force.
 XC_SHIFT_GRADIENT_TOL = 1e-10
 
@@ -411,24 +431,50 @@ ORBITAL_MULTIPLIER_RESIDUAL_TOL = 1e-7
 
 # BSE Casida solver on the gradient chain: the ISDF Davidson's root count and
 # residual tolerance. Tighter than the solver's own default because
-# Hellmann-Feynman reads the EIGENVECTORS and their convergence lands in the
+# Hellmann-Feynman reads the eigenvectors and their convergence lands in the
 # force directly.
 BSE_DAVIDSON_NROOTS = 5
 BSE_DAVIDSON_CONV_TOL = 1e-8
+# Residual |r| a root the force reads needs, where the Davidson stopped above
+# BSE_DAVIDSON_CONV_TOL: its eigenvector error is |r| over the gap to the
+# roots outside the trial space, and the force moves by it at first order.
+# On C1 ethylene/cc-pVDZ (SOP chain, 5 roots spanning 0.073 Ha) the S1 force
+# moves by 7e-3 |r| Ha/Bohr down to the fit's floor, 3e-9 at |r| = 1e-7; a
+# spectrum ten times denser keeps 1e-7 under ISDF_GRADIENT_FLOOR.
+BSE_FORCE_RESIDUAL_TOL = 1e-7
 
 # Coulomb-metric fit error at which an ISDF atomic grid has stopped being a
-# coarse grid and become a FAILED FIT; see `separable_ri.optimize_atomic_radii`.
+# coarse grid and become a failed fit; see `separable_ri.optimize_atomic_radii`.
 ISDF_FIT_ERROR_FAILED = 1.0
 
 # Working-set cap for one block of the three-centre integral (mu nu|P) when the
 # ISDF fit gathers its test-set pairs; memory only, the integrals are unchanged.
 THREE_CENTER_BLOCK_BYTES = 2 << 30
 
+# Auxiliary functions per tile of the fitted Fock skeleton
+# (`Base.skeleton_tiles`): tile t of consecutive auxiliary shells is rank
+# t % size's, and its (mu nu|P) and derivative integrals are made, contracted
+# and dropped in slabs of the first AO index under THREE_CENTER_BLOCK_BYTES.
+# Fixed by the basis, never by the rank count, so each tile's contribution is
+# the same bits whoever computes it. A tile of the exchange's
+# L = (mu nu|P) C_occ holds nao * nocc * SKELETON_AUX_TILE doubles, and the
+# auxiliary set splits into naux / SKELETON_AUX_TILE tiles, several a rank on
+# a large system.
+SKELETON_AUX_TILE = 32
+
+# Points per tile of the xc skeleton's Becke-grid sum (`Base.skeleton_tiles`,
+# `xc_grid_skeleton`): tile t of the mean field's own sorted grid is rank
+# t % size's, a multiple of pyscf's 56-point screening block. Fixed by the
+# grid, never by the rank count or the free memory, so each tile's addend is
+# the same bits whoever computes it. One tile holds the AO values to second
+# order, 10 * nao * XC_SKELETON_TILE doubles.
+XC_SKELETON_TILE = 1008
+
 # Geometries whose rebuilt environment a gradient chain retains. The reuse is
-# WITHIN one geometry -- an energy and a gradient ask for the reaction field
-# several times at the point they are evaluated at -- and there is none across
+# within one geometry (an energy and a gradient ask for the reaction field
+# several times at the point they are evaluated at); there is none across
 # geometries, since a finite-difference sweep or a relaxation visits each one
-# once and never returns.
+# once.
 ENVIRONMENT_CACHE_SIZE = 2
 
 # Orbital-gradient ceiling max |F_ia| for a trustworthy gradient Lagrangian,
@@ -437,27 +483,35 @@ ENVIRONMENT_CACHE_SIZE = 2
 # digit of the force.
 SCF_GRAD_TOL = 1e-9
 
-# What a mean field is converged to when it will be DIFFERENTIATED. The
-# Lagrangian assumes the occupied-virtual Fock block vanishes, so a loose SCF
-# biases the force rather than degrading it gracefully.
-SCF_DIFFERENTIABLE_CONV_TOL = 1e-14
-SCF_DIFFERENTIABLE_GRAD_TOL = 1e-11
-
-# What a mean field is converged to when only an ENERGY is taken from it. The
-# pair above is at or below the noise floor of an exchange-correlation
-# quadrature grid, so a Kohn-Sham reference spends its cycles chasing grid
-# noise -- several times the cycles this pair takes, for the same excitation
-# energy.
-# Hartree-Fock carries no grid and does not care either way.
+# What a mean field is converged to when only an energy is taken from it. An
+# energy test at 1e-14 is at or below the noise floor of an
+# exchange-correlation quadrature grid, so a Kohn-Sham reference spends its
+# cycles chasing grid noise -- several times the cycles this pair takes, for
+# the same excitation energy. Hartree-Fock carries no grid and does not care
+# either way.
 SCF_ENERGY_CONV_TOL = 1e-10
 SCF_ENERGY_GRAD_TOL = 1e-7
+
+# What a mean field is converged to when it will be differentiated. The
+# Lagrangian assumes the occupied-virtual Fock block vanishes, so a loose SCF
+# biases the force rather than degrading it gracefully: the force moves by
+# |dF| <= 1.2 |g| (|g| = ||2 F_vo||_F; S1 forces of formaldehyde, ethylene
+# and acetaldehyde/cc-pVDZ at HF, PBE0 and LRC-wPBEh on ISDF-K), so the
+# orbital gradient is what this pair converges. The energy test is made
+# non-binding: an energy at |g| is converged to O(|g|^2 / gap), and one ulp
+# of a total energy is 2.2e-16 |E|, so |dE| < 1e-14 is met above ~50 Ha only
+# by a cycle that repeats the density bit for bit, which on a large system
+# need never happen. At 1e-10 the forces sit within 5e-11 Ha/Bohr of the
+# 1e-14 runs', their own reproducibility floor between two SCF runs.
+SCF_DIFFERENTIABLE_CONV_TOL = SCF_ENERGY_CONV_TOL
+SCF_DIFFERENTIABLE_GRAD_TOL = 1e-11
 
 # Overlap-based root following, <Psi(prev)|Psi(now)> from `properties.
 # nonadiabatic.follow_state`. Below ROOT_FOLLOW_WEIGHT_MIN the state being
 # followed has no counterpart in the displaced manifold: it left the solved
 # window, or nroots is too small to hold it. ROOT_FOLLOW_MARGIN_MIN is the gap
-# between the best overlap and the runner-up -- a SMALL MARGIN IS NOT A SMALL
-# WEIGHT, since two roots that have mixed share the reference character and
+# between the best overlap and the runner-up; a small margin is not a small
+# weight, since two roots that have mixed share the reference character and
 # both overlaps are moderate.
 ROOT_FOLLOW_WEIGHT_MIN = 0.5
 ROOT_FOLLOW_MARGIN_MIN = 0.2
@@ -468,7 +522,7 @@ ROOT_FOLLOW_MARGIN_MIN = 0.2
 # reference geometry.
 OUTSIDE_TREATMENTS = ('scissor', 'mean-field')
 
-# Single-pole energy Omega_p (eV) of a solvent's ELECTRONIC response. Duchemin,
+# Single-pole energy Omega_p (eV) of a solvent's electronic response. Duchemin,
 # Amblard and Blase, J. Chem. Theory Comput. 20, 9072 (2024) write
 # eps_opt(w)^-1 = 1 + (eps_inf^-1 - 1) f(w; Omega_p) and show that the spatial
 # and frequency degrees of freedom of the reaction field then decouple, so
@@ -487,7 +541,7 @@ SOLVENT_PLASMON_EV = {
 }
 
 # ---------------------------------------------------------------------------
-# src/properties/: everything computed FROM a potential-energy surface
+# src/properties/: everything computed from a potential-energy surface
 # ---------------------------------------------------------------------------
 
 # Reciprocal centimetres per Hartree, for a vibrational frequency.
@@ -601,29 +655,26 @@ HEAVY_ATOM_Z = 36
 # contractions and land far inside this.
 QDPT_HERMITICITY_TOL = 1e-12
 # Davidson residual for a spin-orbit manifold. Looser than the gradient
-# chains' because a coupling is a contraction over the WHOLE vector rather
+# chains' because a coupling is a contraction over the whole vector rather
 # than a single eigenvalue, and averages its residual down.
 SOC_MANIFOLD_CONV_TOL = 1e-5
 
 # Cartesian geometry optimizer, Hartree/Bohr and Bohr; all four must hold.
-# `opt_grad_max` is the largest force component AT THE CONVERGED GEOMETRY, the
+# `opt_grad_max` is the largest force component at the converged geometry, the
 # residual the convergence test is applied to. The name is not `grad_max`
-# because that word also means the driving force at a fixed input geometry --
-# a different number about a different geometry -- and a threshold that can be
-# read as either is a threshold nobody can check a record against.
+# because that word also means the driving force at a fixed input geometry, a
+# different number about a different geometry.
 GEOM_OPT_CONV = {'opt_grad_max': 4.5e-4, 'grad_rms': 3.0e-4,
                  'step_max': 1.8e-3, 'step_rms': 1.2e-3}
-# The superseded spelling of the same threshold, carried for one release so a
-# caller reading GEOM_OPT_CONV['grad_max'] -- or passing a stored `conv` dict
-# that spells it that way -- still gets the number it always got. `optimize`
-# accepts either spelling and refuses the two disagreeing.
+# The deprecated spelling of the same threshold. `optimize` accepts either
+# spelling and refuses the two disagreeing.
 GEOM_OPT_CONV['grad_max'] = GEOM_OPT_CONV['opt_grad_max']
 
 # Conformer search over the soft torsions of a twisted emitter.
 # A bond is drawn when the internuclear distance is within this factor of the
 # sum of the two covalent radii.
 CONFORMER_BOND_SCALE = 1.25
-# ... and it counts as SINGLE, hence torsionally soft, only above this fraction
+# ... and it counts as single, hence torsionally soft, only above this fraction
 # of the same sum, which stands in for a bond order the connectivity does not
 # carry. A C=C at 1.33 A is 0.88 of 2 r_C and an amide C-N at 1.33 A is 0.92 of
 # r_C + r_N, while a C-C single bond at 1.53 A is 1.01 and butadiene's central
@@ -639,8 +690,8 @@ CONFORMER_TORSION_GRID = 3
 # bounds the cost: five soft torsions on a donor-acceptor emitter is already
 # 243 relaxations, each a full excited-state optimization.
 CONFORMER_MAX_STARTS = 64
-# Two relaxed structures are ONE conformer when they agree in energy to this
-# (Hartree) AND in superposed heavy-atom RMSD to this (Angstrom). 1e-4 Ha is
+# Two relaxed structures are one conformer when they agree in energy to this
+# (Hartree) and in superposed heavy-atom RMSD to this (Angstrom). 1e-4 Ha is
 # 2.7 meV, a tenth of k_B T at room temperature and far below any gap that
 # changes a population; 0.15 A sits above the geometric residual of a loose
 # relaxation and below the 0.5-1 A that separates a gauche minimum from an anti
@@ -665,7 +716,7 @@ CONFORMER_TEMPERATURE = 300.0
 # The ISDF interpolation grid `properties.surfaces.potential_energy_surface`
 # asks for when the caller names none: the level of ISDF_GRID_ACCURACY
 # validated to 4 meV on the three lowest BSE roots. A basis or an element with
-# no row at it is REFUSED there rather than dropped to a coarser default,
+# no row at it is refused there rather than dropped to a coarser default,
 # which is a different factorization and not a coarser one.
 SURFACE_GRID_ACCURACY = 'G2'
 
@@ -736,29 +787,26 @@ ALLOCATION_MEMORY_FRACTION = 0.6
 # (`Base.utils.time_frequency.minimax_transform_weights`), relative to the
 # largest singular value of that row's design matrix. The fit is a per-point
 # least squares solved through an SVD, and below `_REGULARIZATION_ABOVE` points
-# it carries NO Tikhonov term, so the filter is 1/S: an exactly zero singular
+# it carries no Tikhonov term, so the filter is 1/S: an exactly zero singular
 # value gives 0/0 and one below 1.5e-162 squares to zero and gives an
-# infinity. Either fills a row of the transform with non-numbers that then
-# propagate into W(i.tau) and the self-energy. Both are reached in production
-# -- a minimax tau point large enough that exp(-x tau) underflows over the
-# whole node range leaves an exactly zero COLUMN in the design matrix.
-# This separates arithmetically zero from small: the smallest relative
-# singular value any grid in this code reaches is 2e-17, and GreenX inverts
-# those deliberately (conditioning is the regularization's business, not this
-# cutoff's), so the value sits far below anything a fit uses and drops only
-# what the arithmetic itself cannot invert.
+# infinity, either filling a row of the transform with non-numbers that
+# propagate into W(i.tau) and the self-energy. Both occur: a minimax tau point
+# large enough that exp(-x tau) underflows over the whole node range leaves an
+# exactly zero column in the design matrix. The cutoff separates
+# arithmetically zero from small: the smallest relative singular value any
+# grid here reaches is 2e-17, and GreenX inverts those deliberately
+# (conditioning is the regularization's business), so it drops only what the
+# arithmetic cannot invert.
 TRANSFORM_FIT_RCOND = 1e-100
 
 
 # Lebedev order of the cavity surface: 11 is 50 points per sphere against
-# pyscf's own default of 29, which is 302. The continuum's cost is the SURFACE
-# POTENTIAL of the density, n_ao^2 x n_surf, so this is the only knob that
-# moves it -- and it buys almost nothing to refine. Measured: formaldehyde's
-# solvation energy in toluene moves 0.4 meV between order 11 and order 29
-# while the potential costs four times more at 29, and biphenyl's relaxed
-# inter-ring torsion is IDENTICAL at orders 11 and 17 to a hundredth of a
-# degree. The worry that a gradient might be more sensitive than an energy,
-# the surface moving with the atoms, does not survive a full relaxation.
+# pyscf's own default of 29, which is 302. The continuum's cost is the surface
+# potential of the density, n_ao^2 x n_surf, so this is the only knob that
+# moves it, and refining it buys almost nothing: formaldehyde's solvation
+# energy in toluene moves 0.4 meV between orders 11 and 29, and biphenyl's
+# relaxed inter-ring torsion agrees at orders 11 and 17 to a hundredth of a
+# degree.
 PCM_LEBEDEV_ORDER = 11
 
 
@@ -775,11 +823,11 @@ DAVIDSON_FLOOR_EPS_MULTIPLE = 1e3
 # pyscf `real_eig`'s own linear-dependence threshold, passed explicitly because
 # the Davidson's preconditioner sizes corrections against it.
 DAVIDSON_LINDEP = 1e-12
-# Hartree. The residual below which a Davidson correction is SIZED for
+# Hartree. The residual below which a Davidson correction is sized for
 # real_eig's linear-dependence test rather than handed over at its raw length
-# r / (d - omega). Above it the raw length clears pyscf's absolute test, and
-# leaving it raw there keeps every solve at conv_tol >= 1e-5 bitwise what it
-# was, since a root is only corrected while |r| > conv_tol.
+# r / (d - omega). Above it the raw length clears pyscf's absolute test and is
+# left raw, so a solve at conv_tol >= 1e-5 (a root is only corrected while
+# |r| > conv_tol) is pyscf's own unsized iteration.
 DAVIDSON_SIZED_RESIDUAL = 1e-5
 # The smallest part of a sized Davidson correction that may lie outside the
 # trial subspace, as a fraction of the correction, for it to be added; nearly
@@ -796,11 +844,10 @@ DAVIDSON_MIN_NEW_FRACTION = 1e-3
 # The build cuts the three-centre integrals by AO-pair column and stores them
 # by auxiliary row, so every round holds four buffers of (naux, block width):
 # the two integral buffers, the piece this rank sends and the pieces it
-# receives. Sizing the block against the SLICE rather than against free memory
-# is what keeps the peak near the slice the split exists to fit -- at 0.5 the
-# build peaks at 1.5x the slice, where a single exchange of the whole column
-# layout would peak at 3x and give back what dividing the auxiliary index
-# bought.
+# receives. Sizing the block against the slice rather than against free memory
+# keeps the peak near the slice the split exists to fit: at 0.5 the build
+# peaks at 1.5x the slice, where a single exchange of the whole column layout
+# would peak at 3x.
 DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
 
 # The digest `mpi_grid.agreement` compares across ranks: an array's C-ordered
@@ -812,9 +859,9 @@ DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
 # seed serves: it changes every digest, never a verdict between ranks running
 # one tree.
 AGREEMENT_DIGEST_SEED = 1
-# 64-bit words per block of that digest. The uint64 matrix-vector product over
-# the blocks runs 18 GB/s at 4096 against 12 GB/s at 16384 and 65536, where
-# blake2b over the same bytes runs 0.29 GB/s.
+# 64-bit words per block of that digest; a throughput knob only (4096 was the
+# fastest block length measured for the uint64 matrix-vector product over the
+# blocks, which runs far faster than blake2b over the same bytes).
 AGREEMENT_DIGEST_BLOCK = 4096
 
 # The (A - B) probe replicated over ranks (`LinearResponse.davidson`) runs its
@@ -845,7 +892,7 @@ PROBE_START_MIX = 0.1
 BSE_ADJOINTS = ('explicit', 'grid')
 
 # Grid points per row tile of the grid BSE adjoint
-# (`LinearResponse.isdf_bse_adjoint`). FIXED, never derived from a memory
+# (`LinearResponse.isdf_bse_adjoint`). Fixed, never derived from a memory
 # budget or a rank count: a GEMM's bits depend on its call shape, so one tile
 # sequence is what lets the rows be handed to their owners unchanged. Each
 # rank holds its own row tiles and streams the other ranks' column tiles,
@@ -856,7 +903,7 @@ BSE_ADJOINT_TILE_ROWS = 256
 # naux * nocc * nvir * 8 bytes, that the explicit residue backend of the
 # quasiparticle solves may build. The backend holds C_ov, the adjoint Cov_bar
 # of the state in its reverse pass and one more block of that size inside each
-# residue evaluation or push, three at once, whole on EVERY rank: at this limit
+# residue evaluation or push, three at once, whole on every rank: at this limit
 # 768 GB a rank. Above it the route cannot run at any rank count, and the
 # answer is the Laplace backend (residues below the particle-hole gap, from
 # proj(tau)) or the pole model, which build no block.
@@ -865,7 +912,7 @@ EXPLICIT_RESIDUE_MAX_GB = 256.0
 # Auxiliary rows per slab of W_bar in the distributed grid BSE adjoint
 # (`LinearResponse.isdf_bse_adjoint`): slab s is summed by rank s % nranks
 # over the grid tiles in tile order, and the slabs are then gathered verbatim.
-# FIXED, like BSE_ADJOINT_TILE_ROWS and for the same reason: a slab is a
+# Fixed, like BSE_ADJOINT_TILE_ROWS and for the same reason: a slab is a
 # GEMM's row count, so it must not follow the rank count. The grid index is
 # cut in BSE_ADJOINT_TILE_ROWS tiles on both sides of every M^2 product, so
 # one pass holds (2 nT + 4) (tile, tile) blocks, 6.3 MB, not (rows, M) tiles.
@@ -898,8 +945,9 @@ ISDF_SCF_METRIC_SLAB = 512
 # three-centre pass (`Base.separable_ri`): a shell block's test co-densities
 # are screened and built a slab of grid rows at a time, and its kept
 # (mu nu|P) rows gathered a slab of auxiliary functions at a time, so no
-# block is ever whole and each slab is made, scaled and reduced while it is still in cache. A cost
-# knob only: every element is the same product whatever the slab.
+# block is ever whole and each slab is made, scaled and reduced while it is
+# still in cache. A cost knob only: every element is the same product whatever
+# the slab.
 FIT_ROW_CHUNK_BYTES = 4 << 20
 
 # Edge, in grid points, of the square tiles in which the replicated ISDF fit
@@ -918,17 +966,22 @@ FIT_TRANSPOSE_TILE = 256
 # The space is raised to DAVIDSON_SPACE_CYCLES of real_eig's per-cycle
 # increment, never past what this rank's memory holds of its four
 # pair-space-long holders per trial pair and never below real_eig's own bound,
-# so every solve pyscf already held whole runs exactly as it did. Where no
-# allocation says what this rank's memory is -- a single machine outside
-# SLURM, whose max_memory is pyscf's process default -- the whole holders are
-# held within DAVIDSON_SPACE_GB instead.
+# so a solve that fits within real_eig's own space runs pyscf's iteration.
+# Where no allocation says what this rank's memory is (a single machine
+# outside SLURM, whose max_memory is pyscf's process default), the whole
+# holders are held within DAVIDSON_SPACE_GB instead.
 DAVIDSON_SPACE_CYCLES = 50
 DAVIDSON_SPACE_GB = 16
+# Cycle cap of the gradient chain's Davidson: three trial spaces of
+# DAVIDSON_SPACE_CYCLES increments, so a solve whose space collapses twice
+# still reaches its tolerance. It differs from the solver's default cap of 100
+# cycles only for a solve that needs more.
+BSE_FORCE_MAX_CYCLE = 3 * DAVIDSON_SPACE_CYCLES
 
 # Fraction of this rank's max_memory (the allocation's share a job hands pyscf,
 # `Base.utils.memory.allocation_max_memory_mb`) that the Davidson's trial space
 # (`LinearResponse.davidson`) may take together with the block action's own
-# working set -- its kernel rows and tiles and one batch's buffers -- counted
+# working set (its kernel rows and tiles and one batch's buffers), counted
 # on the pair rows this rank holds. One half is real_eig's own rule, which
 # gives its holders half of max_memory; the action's arrays come off that half
 # rather than out of the other, which the factors, W, the mean field and the
@@ -939,7 +992,7 @@ DAVIDSON_SPACE_FRACTION = 0.5
 
 # Pair rows per tile of the Casida/BSE Davidson's trial space distributed over
 # ranks (`LinearResponse.trial_space`): a rank holds the rows of its
-# contiguous run of tiles of V, W, U1 and U2. FIXED, never derived from a rank
+# contiguous run of tiles of V, W, U1 and U2. Fixed, never derived from a rank
 # count: a GEMM's bits depend on its call shape, so one tile sequence is what
 # makes the row products the same bits at every rank count. A cost knob
 # otherwise: a tile of this height costs about what the untiled rows do, a
@@ -964,14 +1017,14 @@ DAVIDSON_PRECONDITIONERS = ('bare', 'screened')
 # D^T (X_o o X_o) and D^T (X_v o X_v) (`LinearResponse.davidson`): tile t is
 # rows [4096 t, 4096 (t + 1)) of the grid, cut only where a rank's rows begin
 # or end, and a rank adds its tiles' (naux, n_occ + n_vir) addends in tile
-# order before ONE reduction. FIXED by the grid, never by the rank count; a
+# order before one reduction. Fixed by the grid, never by the rank count; a
 # tile's squares are 4096 (n_occ + n_vir) doubles beside the
 # (naux, n_occ + n_vir) sum.
 DAVIDSON_DIAGONAL_TILE = 4096
 
-# Bohr within which an explicit set of ISDF shell radii counts as THE shipped
+# Bohr within which an explicit set of ISDF shell radii counts as the shipped
 # table row for the same (element, basis, auxbasis, counts). Both sides are
-# float64 -- one read back from the JSON table, one held by the caller -- so
+# float64 (one read back from the JSON table, one held by the caller), so
 # agreement is either exact to the last bit or the two are different grids:
 # neighbouring rows differ in the second decimal, and a run-time
 # re-optimization onto another local minimum lands 1e-3 Bohr or further away.
@@ -981,7 +1034,8 @@ ISDF_RADII_MATCH_TOL = 1e-10
 
 # Bytes of W(i.omega) - I per chunk of the omega -> tau transform of the
 # space-time self-energy (`GW.imaginary_time`): the frequencies are folded into
-# Wt(i.tau) a chunk at a time, naux^2 doubles a frequency. The chunk is also the association of that sum -- one GEMM per
-# chunk, added in chunk order -- which the row-distributed transform keeps, so
-# it is fixed by naux alone and never by the rank count.
+# Wt(i.tau) a chunk at a time, naux^2 doubles a frequency. The chunk is also
+# the association of that sum (one GEMM per chunk, added in chunk order),
+# which the row-distributed transform keeps, so it is fixed by naux alone and
+# never by the rank count.
 SCREENED_CHUNK_BYTES = 2 << 30

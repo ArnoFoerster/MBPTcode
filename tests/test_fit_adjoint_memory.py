@@ -2,35 +2,26 @@
 
 The replicated fit's adjoint (`isdf_derivatives.fit_adjoint`) and the test set
 it differentiates (`separable_ri.test_set_D`) are the widest arrays of a
-state-pair force: D is (M, npair + naux), 9.4 GiB at anthracene/cc-pVTZ. Their
-traced peak increments on ethylene/cc-pVDZ at 148 points per atom (M 888, D
-(888, 2400), 17.05 MB), each beside the whole-array form it replaced, which is
-kept below as the reference and gives the same bits:
-
-                    whole-array form      blocked
-    fit_adjoint     101.5 MB  5.95 |D|    44.9 MB  2.63 |D|
-    test_set_D       47.9 MB  2.81 |D|    29.5 MB  1.73 |D|
-
-The blocked adjoint holds two arrays of D's shape beside D where the whole
-form held four and a transient, and its last update D_bar, F_bar and one
-block of 512 grid rows (30.3 MB); the test set holds D and one block of 512
-pair columns instead of three whole-width products. At anthracene a block is
-5% of D's rows and 0.4% of its columns.
+state-pair force: D is (M, npair + naux). On ethylene/cc-pVDZ at 148 points
+per atom each is compared with a whole-array form written out below, which
+gives the same bits. The blocked adjoint holds two arrays of D's shape beside
+D where the whole form holds four and a transient, and its last update holds
+D_bar, F_bar and one block of `FIT_CHOLESKY_BLOCK` grid rows; the test set
+holds D and one block of pair columns instead of three whole-width products.
 
 The mean field abandoned at each geometry is a reference cycle
 (`pyscf_interface.response_kernel` caches pyscf's closure on it), freed only
 by the cyclic collector, which `FactorChain.mean_field` runs before the next
-SCF. With automatic collection off, four consecutive excitation gradients at
-four displaced geometries peak within 0.1 MB of each other on the whole fit
-(99.7 MB) and on the row fit (55.9 MB).
+SCF; with automatic collection off, consecutive excitation gradients at
+displaced geometries peak flat on the whole fit and on the row fit.
 
-SHOWN TO FAIL, then restored and byte-compared (`cmp`): the last update of
-`fit_adjoint` restored to the whole-array form (`D_bar += (s_bar / s)[:, None]
-* D`) failed `test_fit_adjoint_holds_two_arrays_of_d_beside_it` on that line,
-37.4 MB against the 32.1 MB bound; the collection removed from
-`FactorChain.mean_field` failed `test_consecutive_gradients_peak_flat`, each
-gradient keeping its predecessor's mean field and fit, peaks 99.8, 104.0,
-108.2, 112.3 MB.
+The whole form refuses above `WHOLE_FIT_ADJOINT_MAX_GB`, estimated from the
+shapes before any array exists (`isdf_derivatives.whole_fit_adjoint_gb`):
+the test set over every product pair three times, F and the three-centre
+tensor with its adjoint. The chlorophyllide dimer is refused with the row fit
+named; with the cap below water's estimate, `dfactor_adjoint_gauges`,
+`isdf_exchange_skeleton(fit='replicated')` and the chain's `nuclear_gradient`
+refuse before the three-centre integrals or the test set are built.
 """
 import gc
 import inspect
@@ -38,6 +29,7 @@ import os
 import re
 import sys
 import tracemalloc
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -46,17 +38,39 @@ import pytest
 import scipy.linalg
 from pyscf import gto, scf
 
-from src.Base.constants import FIT_CHOLESKY_BLOCK
+from src.Base.constants import FIT_CHOLESKY_BLOCK, WHOLE_FIT_ADJOINT_MAX_GB
+from src.Base.isdf_jk import isdf_jk
 from src.Base.separable_ri import DEFAULT_REGULARIZATION
 # aliased on import: pytest collects a module-level `test_*` callable
 from src.Base.separable_ri import test_set_D as build_test_set
+from src.gradients import isdf_derivatives
 from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FrozenFactorization
-from src.gradients.isdf_derivatives import fit_adjoint
+from src.gradients.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.isdf_derivatives import (dfactor_adjoint_gauges,
+                                            fit_adjoint,
+                                            isdf_exchange_skeleton,
+                                            product_pairs,
+                                            require_whole_fit_adjoint,
+                                            whole_fit_adjoint_gb)
 
 BASIS = 'cc-pvdz'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
+WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+#: The molecules the whole-form gates run on.
+CAP_MOLECULES = {
+    'water': WATER,
+    'ethylene': ETHYLENE,
+    'formaldehyde': ('C 0 0 -0.5296; O 0 0 0.6763; H 0 0.9357 -1.1172; '
+                     'H 0 -0.9357 -1.1172'),
+    'benzene': '; '.join(
+        f'{el} {r * np.cos(k * np.pi / 3):.6f} {r * np.sin(k * np.pi / 3):.6f} 0'
+        for el, r in (('C', 1.3915), ('H', 2.4715)) for k in range(6))}
+#: The chlorophyllide dimer, (nao, AOs with l <= 2, naux of the -RI set,
+#: grid points) at cc-pVDZ and cc-pVTZ, and the band the estimate must fall
+#: in, in GB.
+DIMER_SHAPES = ((1780, 1780, 6648, 52688, 4.4e3, 4.6e3),
+                (4068, 3382, 10420, 79032, 2.9e4, 3.1e4))
 #: Headroom on every pinned bound: numpy's own bookkeeping, not an array.
 HEADROOM = 1.05
 #: Bytes a pinned bound allows beyond the arrays it names.
@@ -110,8 +124,7 @@ def whole_fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
     B_bar = M_bar * d[None, :]
     d_bar = np.einsum('bk,bk->k', M_bar, B)
     A_bar = scipy.linalg.cho_solve(cho, B_bar.T).T
-    Y = scipy.linalg.cho_solve(cho, A.T @ B_bar)
-    G_bar = -scipy.linalg.cho_solve(cho, Y.T).T
+    G_bar = -(B.T @ A_bar)
     F_bar = A_bar @ Dt
     Dt_bar = A_bar.T @ F + (G_bar + G_bar.T) @ Dt
     D_bar = d[:, None] * Dt_bar
@@ -284,6 +297,64 @@ def test_consecutive_gradients_peak_flat():
             assert max(peaks[tag]) - min(peaks[tag]) < FLAT, (tag, peaks[tag])
     # the row fit forms no array of the test set's width
     assert max(peaks['rows']) < min(peaks['whole']), peaks
+
+
+def test_the_whole_fit_adjoint_refuses_the_dimer():
+    """The chlorophyllide dimer's whole-form adjoint, estimated from its
+    shapes alone: refused, and the refusal names the row fit."""
+    for nao, n2, naux, npoint, low, high in DIMER_SHAPES:
+        gb = whole_fit_adjoint_gb(nao, naux, npoint, nao * n2)
+        print(f'\ndimer nao {nao}: {gb:.3g} GB')
+        assert low < gb < high, gb
+        with pytest.raises(MemoryError) as refusal:
+            require_whole_fit_adjoint(nao, naux, npoint, nao * n2, 'probe')
+        message = str(refusal.value)
+        assert 'WHOLE_FIT_ADJOINT_MAX_GB' in message
+        assert "fit='rows'" in message
+
+
+def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
+    """With the cap below water's estimate, every whole form refuses before
+    it builds the three-centre tensor or the test set."""
+    mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
+    fz = FrozenFactorization(mol)
+    auxmol, crd = fz.auxmol(mol), fz.coords(mol)
+
+    def built(*args, **kwargs):
+        raise AssertionError('an array of the whole form was built')
+
+    mf = isdf_jk(scf.RHF(mol), auxbasis=BASIS + '-ri')
+    mf.with_df.build()
+    monkeypatch.setattr(isdf_derivatives, 'WHOLE_FIT_ADJOINT_MAX_GB', 1e-4)
+    monkeypatch.setattr(isdf_derivatives, 'test_set_D', built)
+    monkeypatch.setattr(isdf_derivatives.pyscf_df.incore, 'aux_e2', built)
+    d_bar = np.zeros((len(crd), auxmol.nao_nr()))
+    stub = SimpleNamespace(factorization=SimpleNamespace(fit='replicated'))
+    calls = {
+        'dfactor_adjoint_gauges': lambda: dfactor_adjoint_gauges(
+            mol, auxmol, crd, [(d_bar, None)], fz.layout, fz.pts_local,
+            fz.owner),
+        'isdf_exchange_skeleton': lambda: isdf_exchange_skeleton(
+            mf, dm=np.eye(mol.nao_nr()), channels=[(0.0, 1.0)],
+            fit='replicated'),
+        'FactorChain.nuclear_gradient': lambda: FactorChain.nuclear_gradient(
+            stub, mol, None, auxmol, crd, None, None, None, None)}
+    for what, call in calls.items():
+        with pytest.raises(MemoryError, match='WHOLE_FIT_ADJOINT_MAX_GB'):
+            call()
+
+
+@pytest.mark.parametrize('name', ['water', 'ethylene', 'formaldehyde',
+                                  'benzene'])
+def test_the_test_molecules_pass_the_cap(name):
+    """The molecules the whole form's gates run on sit orders under it."""
+    mol = gto.M(atom=CAP_MOLECULES[name], basis=BASIS, verbose=0)
+    fz = FrozenFactorization(mol)
+    gb = require_whole_fit_adjoint(mol.nao_nr(), fz.auxmol(mol).nao_nr(),
+                                   len(fz.coords(mol)),
+                                   len(product_pairs(mol)[0]), name)
+    print(f'\n{name}: {gb:.3g} GB')
+    assert gb < 1e-2 * WHOLE_FIT_ADJOINT_MAX_GB
 
 
 if __name__ == '__main__':

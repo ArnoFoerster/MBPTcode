@@ -1,29 +1,27 @@
-"""The vertical, emission and adiabatic energies of one state, with BOTH
+"""The vertical, emission and adiabatic energies of one state, with both
 surfaces of every difference built from one declaration.
 
-An adiabatic quantity is a difference of two total energies at two different
-geometries, and nothing about the number says which two surfaces produced it.
-Two relaxations of one molecule were subtracted with E_KS + Omega on one side
-and E_HF + (E_x^HF - E_xc)[rho] + E_c^dRPA + Omega on the other, 0.9 eV apart,
-and no object could refuse it. Here a `SurfaceSpec` IS the declaration and it
-builds both surfaces of the difference, so the same-functional guarantee is
-structural rather than a convention the caller is asked to keep:
+An adiabatic quantity is a difference of two total energies at two geometries,
+and nothing about the number says which two surfaces produced it: E_KS + Omega
+against E_HF + (E_x^HF - E_xc)[rho] + E_c^dRPA + Omega can differ by 0.9 eV
+for one molecule. A `SurfaceSpec` is the declaration and builds both surfaces
+of the difference, so the same-functional guarantee is structural rather than
+a convention the caller keeps:
 
     spec = SurfaceSpec(GroundState('rpa', 'hf'), chi0='dense-qb',
                        factorization='four-index')
     record = calc_adiabatic_excitation(spec, Excitation('singlet'), mol, rhf)
 
-Every record carries the physics it is of, the realization that computed it,
-the resolved numerics, E_0's additive terms AT EACH GEOMETRY, the residual
-|dE/dR| at the minimum and the driving force at the reference geometry under
-names that cannot be confused, the energy the refreeze moved, and the commit
-it was produced on. `grad_max` is a field name nowhere here: it means the
-driving force at R0 in one half of the repository and the residual at R* in
-the other, and an adiabatic record must not inherit that.
+Every record carries the physics, the realization that computed it, the
+resolved numerics, E_0's additive terms at each geometry, the residual |dE/dR|
+at the minimum and the driving force at the reference geometry under distinct
+names, the energy the refreeze moved, and the commit it was produced on. No
+field here is named `grad_max`: elsewhere that name means the driving force at
+R0 in some places and the residual at R* in others.
 
 A state is declared by spin and root index, never by irreducible
 representation: `Excitation(irrep=...)` has no realization that follows it and
-`potential_energy_surface` refuses it, which these routines inherit unchanged.
+`potential_energy_surface` refuses it.
 Take the irrep from the spectrum with `src.properties.characters` and declare
 the root it came out as.
 """
@@ -54,14 +52,14 @@ from src.properties.vibronic import adiabatic_gap, relax_state
 SPEC_AXES = ('ground_state', 'environment', 'chi0', 'residues', 'solver',
              'factorization', 'qp_states')
 
-#: The axes a surface with NO state on it reads. The residue backend, the
+#: The axes a surface with no state on it reads. The residue backend, the
 #: eigensolver and the quasiparticle set belong to a state: E_0 has no
 #: self-energy, no Casida eigenproblem and no set of explicitly solved
 #: orbitals, so they are dropped for the ground surface rather than refused.
 GROUND_AXES = ('ground_state', 'environment', 'chi0', 'factorization')
 
 #: What a record whose relaxation never ran says instead of a shift. A null
-#: that does not say why it is null reads exactly like a measured zero.
+#: that does not say why it is null reads like a measured zero.
 NOT_RELAXED = 'not measured: no relaxation ran'
 
 
@@ -74,24 +72,22 @@ class SurfaceSpec:
     stands in) and the realization (how chi0 is built, how the self-energy's
     real-axis residues are taken, which eigensolver runs, how (pq|rs) is
     represented, which orbitals carry an explicitly solved quasiparticle
-    energy). A quantity that differences two geometries takes ONE spec, so the
+    energy). A quantity that differences two geometries takes one spec, so the
     functional under the excited state and the functional under the ground
     state cannot be two functionals.
 
-    An axis left None is the entry point's OWN default, read off its signature
-    at construction and stored: a spec that spelled the defaults again would be
-    a second set of them, which is what put three `solver` defaults in three
-    constructors.
+    An axis left None is the entry point's own default, read off its signature
+    at construction and stored, so the spec holds no second set of defaults.
 
     numerics: the grids, caps and tolerances the realization reads, as a sorted
         tuple of (key, value) pairs so that the spec hashes and two specs
         written in different orders compare equal. A mapping is accepted and
-        normalized. One value that is itself a mapping -- an explicit ISDF
-        `counts` -- travels verbatim and makes that spec unhashable rather than
+        normalized. A value that is itself a mapping (an explicit ISDF
+        `counts`) travels verbatim and makes that spec unhashable rather than
         being rewritten into something the realizing class does not read.
 
-    A spec carries no communicator: how many ranks added the same terms up is
-    not part of what a surface computes. Inside `with distributed(comm):`
+    A spec carries no communicator: the rank count is not part of what a
+    surface computes. Inside `with distributed(comm):`
     every rank builds both surfaces of the difference from the one spec, and
     the kernels they reach divide their sweeps over the ranks.
     """
@@ -146,25 +142,38 @@ def normalized_numerics(numerics):
                         key=lambda pair: pair[0]))
 
 
-def surface_of(spec, excitation, mol, scf_factory):
+def surface_of(spec, excitation, mol, scf_factory, mf=None):
     """The surface `spec` declares with `excitation` on it; None gives E_0's own.
 
-    Both come from one spec, which is what makes their difference a difference
-    of one functional with itself at two geometries. The axes only a state has
-    -- the residue backend, the eigensolver, the quasiparticle set -- and the
-    numerics the ground row does not read are dropped on the way to the ground
-    surface: E_0 has nothing for them to resolve, and passing them would be
-    refused by the entry point rather than honoured.
+    `mf` is a reference mean field already converged for this declaration at
+    `mol`; None converges one.
+
+    Both surfaces come from one spec, so their difference is of one
+    functional with itself at two geometries. The axes only a state has (the
+    residue backend, the eigensolver, the quasiparticle set) and the numerics
+    the ground row does not read are dropped for the ground surface, since the
+    entry point would refuse them.
     """
     kwargs = spec.as_kwargs()
     if excitation is not None:
-        return potential_energy_surface(mol, scf_factory,
+        return potential_energy_surface(mol, scf_factory, mf=mf,
                                         excitation=excitation, **kwargs)
     row = find_row(spec.ground_state, None, spec.chi0, spec.factorization)
     ground = {name: kwargs[name] for name in GROUND_AXES}
     ground.update((key, value) for key, value in spec.numerics
                   if key in row.numerics)
-    return potential_energy_surface(mol, scf_factory, **ground)
+    return potential_energy_surface(mol, scf_factory, mf=mf, **ground)
+
+
+def ground_surface_of(spec, excited, mol, scf_factory):
+    """E_0's surface of `spec` at `mol`, on the excited surface's reference.
+
+    One SCF per record: a surface that holds its converged reference (`mf0`,
+    the excited chain's) hands it to the ground surface, which declares its
+    functional off it and, in the gas phase, evaluates E_0 at `mol` on it.
+    """
+    return surface_of(spec, None, mol, scf_factory,
+                      mf=getattr(excited, 'mf0', None))
 
 
 def git_commit():
@@ -208,9 +217,9 @@ def quasiparticle_diagnostics(info):
     Z and the backend that produced the residues are properties of the
     quasiparticle solve, not of the declaration: `residues='auto'` picks per
     orbital, and a root with Z near zero is a satellite the state was built on.
-    A route that exposes neither -- the dense quasi-boson surface has no
+    A route that exposes neither (the dense quasi-boson surface has no
     residue backend, and a neutral excitation folds its whole set through one
-    solve -- reports None, which is not a Z of zero.
+    solve) reports None, which is not a Z of zero.
     """
     z = info.get('qp_z')
     return (None if z is None else float(z)), info.get('qp_route')
@@ -221,13 +230,13 @@ def ground_state_at(surface, mol, total=None):
 
     The total is the surface's own (`vibronic.energy_at`'s number, on the mean
     field the surface itself evaluates on) and the terms are that total
-    decomposed through the ONE assembly, `ground_state_energy`: E_c^dRPA is
-    taken as E_0 - E_HF[rho] so that the three terms sum to the number the
-    surface reported rather than to a second evaluation of it.
+    decomposed through `ground_state_energy`: E_c^dRPA is taken as
+    E_0 - E_HF[rho] so that the three terms sum to the number the surface
+    reported rather than to a second evaluation of it.
 
-    THE CONVENTIONS ARE THE REFERENCE GEOMETRY'S, wherever `mol` is. A ground
+    The conventions are the reference geometry's wherever `mol` is; a ground
     surface refrozen at each geometry would make E_0(R*) and E_0(R0) two
-    surfaces, and their difference the drift between them.
+    surfaces.
     """
     mf = surface_mean_field(surface, mol)
     declared = surface.physics.ground_state
@@ -241,15 +250,15 @@ def ground_state_at(surface, mol, total=None):
 def relaxation_fields(info, prefix=''):
     """What an optimizer's record contributes, renamed away from `grad_max`.
 
-    `info['grad_max']` and `info['opt_grad_max']` are ONE number under two
-    names -- the residual |dE/dR| at the converged geometry -- and the first is
-    what the driving force at the INPUT geometry is called everywhere else.
-    Only the unambiguous name travels.
+    `info['grad_max']` and `info['opt_grad_max']` are one number under two
+    names (the residual |dE/dR| at the converged geometry), and the first is
+    what the driving force at the input geometry is called elsewhere. Only the
+    unambiguous name travels.
 
-    The refreeze shift is reported twice because it is two measurements of one
-    approximation: how far the geometry moved when the frozen conventions were
-    rebuilt (Bohr) and how much energy that motion was worth (meV). Either is
-    None only when the outer loop did not run, and `refreeze` then says why.
+    The refreeze shift is reported as how far the geometry moved when the
+    frozen conventions were rebuilt (Bohr) and how much energy that motion was
+    worth (meV). Either is None only when the outer loop did not run, and
+    `refreeze` then says why.
     """
     residual = info.get('opt_grad_max')
     shift = info.get('refreeze_shift')
@@ -266,19 +275,18 @@ def relaxation_fields(info, prefix=''):
 
 
 def driving_force(info):
-    """max |dE/dR| at the FIRST geometry of a relaxation, from its own history."""
+    """max |dE/dR| at the first geometry of a relaxation, from its own history."""
     history = info.get('history') or []
     return float(history[0]['grad_max']) if history else None
 
 
 def excitation_energy(info, e_n, e_0):
-    """Omega_n at one geometry: the surface's OWN number wherever it reports one.
+    """Omega_n at one geometry: the surface's own number wherever it reports one.
 
-    A neutral excitation's Omega is a root of the Casida problem and every
-    route that solves one hands it back with the gradient; rebuilding it as a
-    difference of two -76 Hartree totals would move it by their rounding. A
-    charged surface reports no Omega -- its excitation IS -/+ eps^QP -- and
-    there the difference of the two totals is the quantity exactly.
+    A neutral excitation's Omega is a Casida root handed back with the
+    gradient; rebuilding it as a difference of two large totals would move it
+    by their rounding. A charged surface reports no Omega (its excitation is
+    -/+ eps^QP), and there the difference of the two totals is the quantity.
     """
     omega = info.get('omega')
     return float(e_n - e_0) if omega is None else float(omega)
@@ -288,10 +296,9 @@ def vertical_block(excited, ground, mol):
     """Omega_n(R0), the two total energies it is the difference of, and the
     force that says how far R0 is from the excited state's own minimum.
 
-    Omega is the excited surface's OWN number, taken off the gradient that
-    measures the driving force rather than recomputed: this layer records and
-    differences, and may not move a number by so much as a rounding. The
-    gradient is `surface.evaluate`'s, rank 0's on every rank.
+    Omega is the excited surface's own number, taken off the gradient that
+    measures the driving force rather than recomputed. The gradient is
+    `surface.evaluate`'s, rank 0's on every rank.
 
     On sliced factors the record carries `factor_gathers`, the whole-array
     gathers the factors at R0 made up to that force, by name: one per sweep
@@ -323,11 +330,10 @@ def vertical_block(excited, ground, mol):
 def emission_block(excited, ground, mol, refreeze, engine, optimizer):
     """(the vertical record extended to the relaxed state, the relaxation record).
 
-    E_0 AT THE EXCITED STATE'S MINIMUM, not at R0: the emission energy is the
-    vertical gap of the RELAXED geometry, and the ground state is not at its
-    own minimum there. Both energies come off the same pair of frozen
-    conventions, the reference geometry's, so their difference is one surface
-    pair evaluated twice and not two surfaces compared.
+    E_0 is taken at the excited state's minimum, not at R0: the emission
+    energy is the vertical gap at the relaxed geometry. Both energies come off
+    the reference geometry's frozen conventions, so their difference is one
+    surface pair evaluated twice.
     """
     record = vertical_block(excited, ground, mol)
     relaxed = relax_state(excited, mol, engine=engine, refreeze=refreeze,
@@ -357,14 +363,13 @@ def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
 
     The two-surface form of `calc_adiabatic_excitation`, for a pair somebody
     else constructed. `compare_surfaces` is the refusal: a differing
-    ground-state functional or environment raises `PhysicsMismatch` BEFORE
+    ground-state functional or environment raises `PhysicsMismatch` before
     either relaxation runs, and a surface with no declared physics is refused
-    too, since what its E_0 is cannot be read off it.
+    too.
 
-    `ground_realization_differs` is what it reports rather than refuses: the
-    two halves of an adiabatic energy are realized differently by construction
-    -- E_0 has no residue backend, no eigensolver and no quasiparticle set --
-    and the list names those fields.
+    `ground_realization_differs` is reported rather than refused: E_0 has no
+    residue backend, eigensolver or quasiparticle set, so the two halves are
+    realized differently by construction; the list names those fields.
     """
     report = compare_surfaces(surface_excited, surface_ground)
     started = time.perf_counter()
@@ -391,14 +396,13 @@ def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
 def calc_vertical_excitation(spec, excitation, mol, scf_factory):
     """Omega_n(R0) in eV: the excitation energy at the geometry as given.
 
-    No geometry moves, so the residual at a minimum and the refreeze drift do
-    not exist and are None with the marker saying so; the driving force at R0
-    is the gradient that does exist, and is what says whether this vertical
-    number stands at a stationary point of anything.
+    No geometry moves, so the residual at a minimum and the refreeze drift are
+    None with the marker saying so; the driving force at R0 says how far the
+    geometry is from a stationary point.
     """
     started = time.perf_counter()
     excited = surface_of(spec, excitation, mol, scf_factory)
-    ground = surface_of(spec, None, mol, scf_factory)
+    ground = ground_surface_of(spec, excited, mol, scf_factory)
     record = vertical_block(excited, ground, mol)
     record['provenance'] = provenance(time.perf_counter() - started)
     return record
@@ -408,16 +412,15 @@ def calc_emission_energy(spec, excitation, mol, scf_factory, refreeze=1,
                          engine='auto', **optimizer):
     """Omega_n(R*_n) in eV: the gap at the relaxed geometry of the state.
 
-    The state is relaxed from `mol` and the ground state is NOT: emission
-    leaves the excited minimum for the ground surface at that same geometry,
-    which is why E_0 is evaluated there and not at R0. `relaxation_depth_eV`
-    is what the state shed getting there, and `refreeze_shift_meV` is what the
-    frozen conventions were worth in the same units -- the honest error bar on
-    the number above it.
+    The state is relaxed from `mol` and the ground state is not: emission
+    leaves the excited minimum for the ground surface at the same geometry,
+    so E_0 is evaluated there. `relaxation_depth_eV` is what the state shed
+    getting there, and `refreeze_shift_meV` is the frozen conventions' error
+    bar on the result.
     """
     started = time.perf_counter()
     excited = surface_of(spec, excitation, mol, scf_factory)
-    ground = surface_of(spec, None, mol, scf_factory)
+    ground = ground_surface_of(spec, excited, mol, scf_factory)
     record, _ = emission_block(excited, ground, mol, refreeze, engine, optimizer)
     record['provenance'] = provenance(time.perf_counter() - started)
     return record
@@ -427,16 +430,14 @@ def calc_adiabatic_excitation(spec, excitation, mol, scf_factory, refreeze=1,
                               engine='auto', **optimizer):
     """E_n(R*_n) - E_0(R*_0) in eV: both states at their own minima.
 
-    The quantity a 0-0 energy is built on, and the one the same-functional
-    guarantee exists for: the two minima are on two surfaces, so E_0 does not
-    cancel and every term of it has to be the same term on both sides. Carries
-    the vertical and emission blocks with it, and both refreeze shifts, since
-    an adiabatic energy is only as converged as the looser of its two
-    relaxations.
+    The two minima are on two surfaces, so E_0 does not cancel and every term
+    of it has to be the same on both sides. Carries the vertical and emission
+    blocks and both refreeze shifts, since an adiabatic energy is only as
+    converged as the looser of its two relaxations.
     """
     started = time.perf_counter()
     excited = surface_of(spec, excitation, mol, scf_factory)
-    ground = surface_of(spec, None, mol, scf_factory)
+    ground = ground_surface_of(spec, excited, mol, scf_factory)
     record = adiabatic_energy(excited, ground, mol, refreeze=refreeze,
                               engine=engine, **optimizer)
     record['provenance'] = provenance(time.perf_counter() - started)
@@ -448,16 +449,14 @@ def calc_adiabatic_gap(spec_a, excitation_a, spec_b, excitation_b, mol,
     """E_a(R*_a) - E_b(R*_b) in eV: the adiabatic gap of two states, each at
     its own minimum.
 
-    Delta-E_ST when a is the singlet and b the triplet. REFUSED unless the two
-    specs declare the same ground-state functional and the same environment:
-    the two states relax by different amounts, so E_0 does not cancel out of
-    the difference, and a mean-field E_0 differenced against E_HF + E_c^dRPA is
-    6.3 eV of correlation energy on water that only one side carries. The
-    refusal is taken on the DECLARATIONS, before an integral is computed.
+    Delta-E_ST when a is the singlet and b the triplet. Refused unless the two
+    specs declare the same ground-state functional and environment: the two
+    states relax by different amounts, so E_0 does not cancel (a mean-field
+    E_0 against E_HF + E_c^dRPA is 6.3 eV of correlation energy on water). The
+    refusal is taken on the declarations, before an integral is computed.
 
-    The realizations may differ and are reported side by side: a dense oracle
-    and a cubic production route are meant to be differenced, and
-    `realization_differs` is what says which of the two to trust where they do.
+    The realizations may differ and are reported side by side
+    (`realization_differs`), e.g. a dense oracle against a cubic route.
     """
     started = time.perf_counter()
     refuse_incomparable(spec_a.physics(excitation_a), spec_b.physics(excitation_b))
@@ -465,11 +464,11 @@ def calc_adiabatic_gap(spec_a, excitation_a, spec_b, excitation_b, mol,
     surface_b = surface_of(spec_b, excitation_b, mol, scf_factory)
     report = compare_surfaces(surface_a, surface_b)
     record_a, relaxed_a = emission_block(
-        surface_a, surface_of(spec_a, None, mol, scf_factory), mol, refreeze,
-        engine, optimizer)
+        surface_a, ground_surface_of(spec_a, surface_a, mol, scf_factory),
+        mol, refreeze, engine, optimizer)
     record_b, relaxed_b = emission_block(
-        surface_b, surface_of(spec_b, None, mol, scf_factory), mol, refreeze,
-        engine, optimizer)
+        surface_b, ground_surface_of(spec_b, surface_b, mol, scf_factory),
+        mol, refreeze, engine, optimizer)
     return {'gap_eV': adiabatic_gap(relaxed_a, relaxed_b) * HARTREE_TO_EV,
             'physics': {'label': report['physics'],
                         'record': (surface_a.physics, surface_b.physics)},

@@ -1,111 +1,48 @@
 """`calc_qp_energy(continuation=...)`: the contour and the pole model in production.
 
 `mode` is the chi0 realization and `continuation` is how that chi0 reaches the
-real axis. The reference for the three continuation-free ones is
-`tests/qp_energy_continuation_baseline.json`, the `qp_routes` section of
-a recorded baseline of what the route audit returned on water, formaldehyde and
-thioformaldehyde -- cc-pVDZ, density-fitted RHF on cc-pvdz-ri, conv_tol 1e-12,
-conv_tol_grad 1e-11 -- through the gradient chain's
-`qp_gradient_space_time(want_grad=False)`. The geometries, the shell counts and
-the SCF energy are read out of the record itself, so the gate compares against
-the run that produced it and not against a second definition of it.
+real axis. The reference is the `qp_routes` section of
+`tests/qp_energy_continuation_baseline.json`, a record of the route audit on
+water, formaldehyde and thioformaldehyde (cc-pVDZ, density-fitted RHF on
+cc-pvdz-ri, conv_tol 1e-12, conv_tol_grad 1e-11) through the gradient chain's
+`qp_gradient_space_time(want_grad=False)`. Geometries, shell counts and the SCF
+energy are read from the record, so the gate compares against the run that
+produced it.
 
-THE FACTORS COME FROM THE CHAIN. `ExcitedStateChain` fits M with
-`separable_ri.fit_M_stable` and `space_time.separable_factors` with
-`build_separable_ri`; the two X_ao agree bitwise and the two D do not (Z differs
-by 1.1e-08 relative on water). The audit tool handed every ISDF route the
-chain's factors, so this gate hands production the same ones through the
-`factors` hook -- a bitwise gate on the continuation cannot also carry a
-different factorization.
+`ExcitedStateChain` fits M with `separable_ri.fit_M_streaming` on its frozen
+pair layout, which at the reference geometry is the geometry's own screen, so
+its X_mo and D are `space_time.separable_factors`' bit for bit (gated below).
+The gates hand production the chain's factors through the `factors` hook so
+the fit is formed once per molecule.
 
-  cd    energy AND Z bitwise on all nine rows.
-  lap   energy AND Z bitwise on all nine rows. No row of the record refused or
-        fell back -- every one carries `residue_route_taken` 'laplace' -- so all
-        nine gate the cosh transform itself. Against `cd` the six frontier rows
-        are bitwise, sweeping no residue at all, and the three homo-1 rows that
-        do sweep one differ by -6.9e-14 eV (water), -3.6e-15 (formaldehyde) and
-        -2.1e-14 (thioformaldehyde) in the root, and -3.2e-15, -1.6e-15 and 0 in
-        Z: two backends for one equation, and the difference is the
-        quadrature's. The bare Laplace fit at the frequencies the converged
-        roots asked for is 1.5e-11, 1.5e-11 and 2.5e-11, against the 1e-08 of
-        `LAPLACE_SCREENING_TOL`.
-  sop   Z bitwise on all nine rows; the energy bitwise on five and one ulp of
-        the root out on four. The cause is the Newton SEED and nothing else:
-        the audit tool's chain freezes the contour root of its grid-sizing pass
-        and starts the pole model's Newton there, while production starts every
-        state at eps_p pushed off its own pole. Both iterate the same
-        closed-form model to the same fixed point, and the last accepted step
-        -- taken as soon as |step| < QP_CD_NEWTON_TOL, with a residual then of
-        order its square -- rounds differently from the two starts. Seeding
-        production from the contour root reproduces all nine bitwise and costs
-        a full O(N^4) contour solve per state, which is the whole expense the
-        pole model exists to avoid. Gated at `SOP_SEED_TOL_EV` instead, 250
-        times the largest difference seen.
-  pade  bitwise against the baseline's `space-time` row, which is
-        `calc_qp_energy(mode='space-time')` itself. NOT against its `st-pade`
-        row: that one is the gradient chain's own Pade on the CONTOUR grid
+The record was written with a fit whose Gram matrix runs over the screened
+pairs alone, a different estimator wherever the screen drops pairs. The routes
+are therefore pinned bitwise to a recording through the one fit
+(tests/one_fit_pins.json), and the record is held within `RECORD_MOVE_EV` /
+`RECORD_MOVE_Z` of it: water keeps all 576 pairs, formaldehyde drops 6 of 1444,
+thioformaldehyde 114 of 1764.
+
+  cd    energy and Z bitwise on all nine rows.
+  lap   energy and Z bitwise on all nine rows. Every record row carries
+        `residue_route_taken` 'laplace', so all nine gate the cosh transform
+        itself. Against `cd` the six frontier rows, which sweep no residue,
+        are bitwise; the three homo-1 rows that sweep one differ by at most
+        6.9e-14 eV in the root and 3.2e-15 in Z, the quadrature's difference.
+        The bare Laplace fit at the frequencies the converged roots ask for
+        is at most 2.5e-11, against the 1e-08 of `LAPLACE_SCREENING_TOL`.
+  sop   energy and Z bitwise against the pins. Against the record the root
+        may be one ulp out: the audit chain starts the pole model's Newton at
+        the contour root, production at eps_p pushed off its own pole; both
+        reach the same fixed point, and the last accepted step (|step| <
+        QP_CD_NEWTON_TOL) rounds differently from the two starts. Seeding
+        production from the contour root would cost a full O(N^4) contour
+        solve per state, the expense the pole model exists to avoid.
+        `SOP_SEED_TOL_EV` covers the difference.
+  pade  bitwise against the pinned `space-time` row, which is
+        `calc_qp_energy(mode='space-time')` itself, and not against the
+        `st-pade` row: that is the gradient chain's Pade on the contour grid
         (ntau 24, e_min half the gap), a different quadrature, and the test
         asserts the two differ.
-
-Every gate was shown once to fail, by breaking in the source what it watches
-and running this file against a backup copy, restored and `cmp`-verified. The
-seven below ran against the 19 tests the file then held:
-
-  * the residue term of Sigma dropped (`if res:` -> `if False:` in `sigma_cd`):
-    3 failed, 16 passed. The cd energy gate goes on the three rows that sweep a
-    residue -- water homo-1 by 0.143 eV, formaldehyde homo-1 by 0.058 eV,
-    thioformaldehyde homo-1 by 1.513 eV -- and holds on the six frontier rows,
-    which sweep none. The residue-COUNT gate still passes: the set is unchanged
-    and only its value was thrown away, which is why the count is not a
-    substitute for the energy.
-  * the guard band doubled (`QP_POLE_OFFSET` -> `2 * QP_POLE_OFFSET` in
-    `newton_seeds`): 5 failed, 14 passed. The Newton starts 1e-03 Ha further
-    from eps_p, converges to the same root and rounds its last step
-    differently, so formaldehyde and thioformaldehyde homo-1 lose bitwise
-    equality (by 3.6e-15 and 1.1e-16 eV) while water's three rows round back
-    onto the same bits -- and the guard diagnostic disagrees with the record on
-    all three molecules, which is the gate that catches it everywhere.
-  * the pole fit's stride shifted by one (`stride=sop_stride + 1` in
-    `_contour_roots`): 4 failed, 15 passed. The auxiliary poles are placed from
-    other columns of wc and the sop energies move by 8.3e-07, 7.1e-08 and
-    3.4e-07 eV, 1e5 to 1e6 times `SOP_SEED_TOL_EV`.
-  * the tau axis built on [gap, e_max] instead of reaching below the gap
-    (`gap - shift` -> `gap` in `cd_frequency_grid`): 10 failed, 9 passed. It is
-    the grid the chain's docstring warns about, and it moves the transform, the
-    screening and therefore both contour routes.
-  * the space-time default continuation switched from 'pade' to 'cd' in
-    `MODE_CONTINUATIONS`: 4 failed, 15 passed. `calc_qp_energy(mode=
-    'space-time')` then silently returns the contour number, which is what the
-    default gate exists to catch.
-  * 'n_poles' dropped from `SOP_KEYWORDS`: 1 failed, 18 passed. The keyword is
-    then accepted for continuation='cd', which reads no pole model and would
-    ignore it.
-  * the Eq. (27) admission never refusing (`if not admits:` -> `if False:`): 1
-    failed, 18 passed. The pole model then returns a number for a core state,
-    which is the one failure mode `compressible` exists for.
-
-and the three below against the 29 it holds now:
-
-  * the cosh weights' normalization dropped (`w = 2.0 * grid.tau_weights` ->
-    `w = grid.tau_weights` in `real_screening.real_frequency_weights`): 6
-    failed, 23 passed. chi0(w') is then half of itself and the three rows that
-    sweep a residue move by -0.064 eV (water homo-1), -0.027 (formaldehyde
-    homo-1) and -0.554 (thioformaldehyde homo-1) against both the record and
-    `cd` -- 1e11 times the 1e-12 eV the two backends are held to. The six
-    frontier rows hold, which is why the gate runs on all nine and not on the
-    three alone.
-  * the validity check never firing (`if not err < self.tol:` -> `if False:` in
-    `LaplaceRealScreening._weights`): 1 failed, 28 passed. Every gated row is
-    below the gap, so only the refusal test sees it -- and what it sees is not a
-    wrong number but a Newton walking off on a screening the grid does not
-    represent and giving up after 100 steps.
-  * 'laplace' silently served from the explicit backend (`if continuation ==
-    'cd'` -> `in ('cd', 'laplace')` and the `LaplaceRealScreening` build skipped
-    in `solve_qp_energy_contour`): 10 failed, 19 passed. Every laplace gate
-    goes. The record's laplace rows are NOT cd's on the three that sweep a
-    residue, the diagnostics cannot report a representation error a backend
-    without one has, and the refusal never fires -- while the laplace-against-cd
-    gate would pass by construction, which is why it is not the only one.
 """
 import json
 import pathlib
@@ -119,21 +56,39 @@ from src.Base.constants import (CD_NFREQ, HARTREE_TO_EV,
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         solve_qp_energy_contour)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.excited_state import ExcitedStateChain
 
 BASELINE = json.loads((pathlib.Path(__file__).resolve().parent
                        / 'qp_energy_continuation_baseline.json').read_text())
+#: The record's rows re-recorded through the one fit.
+PINS = json.loads((pathlib.Path(__file__).resolve().parent
+                   / 'one_fit_pins.json').read_text())['qp_routes']
 
 MOLECULES = ('water', 'formaldehyde', 'thioformaldehyde')
 
-#: Largest quasiparticle energy difference the sop gate accepts, in eV. The
-#: route is bitwise but for the Newton seed, whose last-step rounding is worth
-#: one ulp of the root -- 3.6e-15 eV at worst on these nine rows.
+#: How far the one fit moves each molecule's roots (eV) and pole strengths
+#: from the record, with headroom: the realization alone on water, which keeps
+#: every pair, and growing with the pairs the screen drops (6 on
+#: formaldehyde, 114 on thioformaldehyde).
+RECORD_MOVE_EV = {'water': 1e-10, 'formaldehyde': 1e-7,
+                  'thioformaldehyde': 5e-5}
+RECORD_MOVE_Z = {'water': 1e-11, 'formaldehyde': 5e-9,
+                 'thioformaldehyde': 5e-6}
+#: Added to `RECORD_MOVE_EV` for the space-time row alone, in eV: the record
+#: was written on a W frequency grid that does not span the range its
+#: transform is fitted over, which moves that row by -4.967e-4 (water),
+#: -2.574e-4 (formaldehyde) and +4.53e-6 (thioformaldehyde).
+W_GRID_MOVE_EV = {'water': 5e-4, 'formaldehyde': 2.6e-4,
+                  'thioformaldehyde': 5e-6}
+
+#: Largest quasiparticle energy difference the sop gate accepts, in eV: the
+#: route differs from the record only in the Newton seed, whose last-step
+#: rounding is worth one ulp of the root.
 SOP_SEED_TOL_EV = 1e-12
 
 #: What the two residue backends of one contour may differ by, in eV and in Z.
-#: They solve the same equation and the six frontier rows are bitwise; the
-#: three that sweep a residue are 6.9e-14 eV and 3.3e-15 apart at worst.
+#: They solve the same equation; only the rows that sweep a residue differ.
 LAPLACE_CD_TOL_EV = 1e-12
 LAPLACE_CD_TOL_Z = 1e-13
 
@@ -197,15 +152,42 @@ def contour_run(name, continuation):
     return records, energies, z
 
 
+def assert_pinned(name, rec, route, energy, pole_strength=None, slack=0.0):
+    """`energy` (and Z) bitwise the one-fit pin of `route` for `rec`, and
+    the record within the one fit's move of it (plus `slack` eV)."""
+    where = (name, rec['orbital_label'], route)
+    pin = PINS[name][rec['orbital_label']][route]
+    row = rec['routes'][route]
+    assert row['status'] == 'ok'
+    assert energy == pin['energy_eV'], (where, energy - pin['energy_eV'])
+    moved = abs(energy - row['energy_eV'])
+    assert moved <= RECORD_MOVE_EV[name] + slack, (where, moved)
+    if pole_strength is not None:
+        assert pole_strength == pin['z'], (where, pole_strength - pin['z'])
+        moved = abs(pole_strength - row['z'])
+        assert moved <= RECORD_MOVE_Z[name], (where, moved)
+
+
+@pytest.mark.parametrize('name', MOLECULES)
+def test_the_chain_factors_are_productions(name):
+    """X_mo and D of the chain are `separable_factors`' at the same grid,
+    bitwise: both fit with `fit_M_streaming` on the same points and pairs."""
+    mol, mf, factors, chain, records = case(name)
+    rec = records[0]
+    x_mo, d, _, _ = separable_factors(mf, mol, auxbasis=rec['auxbasis'],
+                                      counts=rec['isdf']['counts'],
+                                      n_start=rec['isdf']['n_start'])
+    assert np.array_equal(factors[0], x_mo)
+    assert np.array_equal(factors[1], d)
+
+
 @pytest.mark.parametrize('name', MOLECULES)
 def test_contour_grid_reproduces_the_chain(name):
-    """`cd_frequency_grid` IS the chain's `_build_cd_grid`, bitwise.
+    """`cd_frequency_grid` is the chain's `_build_cd_grid`, bitwise.
 
-    The production helper had to be copied rather than imported -- the chain
-    lives in `src.gradients`, which production may not depend on -- so the copy
-    is pinned to the original on every molecule of the record: the quadrature,
-    its weights, the imaginary-time axis it is the frequency side of, and the
-    cosine transform between them.
+    Production may not depend on `src.gradients`, so the helper is a copy,
+    pinned to the original on every molecule: the quadrature, its weights, the
+    imaginary-time axis and the cosine transform between them.
     """
     mol, mf, factors, chain, records = case(name)
     eps = np.asarray(mf.mo_energy, float)
@@ -223,24 +205,20 @@ def test_contour_grid_reproduces_the_chain(name):
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_cd_reproduces_the_baseline_bitwise(name):
-    """The contour route, energy and pole strength, `==` against the record."""
+    """The contour route, energy and pole strength, `==` against the pins,
+    the record within the one fit's move."""
     records, energies, z = contour_run(name, 'cd')
     for rec, energy, pole_strength in zip(records, energies, z):
-        row = rec['routes']['cd']
-        assert row['status'] == 'ok'
-        assert energy == row['energy_eV'], (name, rec['orbital_label'],
-                                            energy - row['energy_eV'])
-        assert pole_strength == row['z'], (name, rec['orbital_label'],
-                                           pole_strength - row['z'])
+        assert_pinned(name, rec, 'cd', energy, pole_strength)
 
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_cd_residue_count_and_guard_match_the_record(name):
-    """The residue SET and the guard band, which decide which branch was solved.
+    """The residue set and the guard band, which decide which branch was solved.
 
     Two routes can agree on an energy and have solved different equations; the
-    residue count is what says the contour swept the same poles, and the guard
-    band is the Newton path the record was written on.
+    residue count says the contour swept the same poles, and the guard band is
+    the Newton path the record was written on.
     """
     mol, mf, factors, chain, records = case(name)
     _, _, diagnostics = solve_qp_energy_contour(
@@ -258,33 +236,27 @@ def test_cd_residue_count_and_guard_match_the_record(name):
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_laplace_reproduces_the_baseline_bitwise(name):
-    """The cubic residue backend, energy and pole strength, `==` the record.
+    """The cubic residue backend, energy and pole strength, `==` the pins,
+    the record within the one fit's move.
 
-    No row of the record refused or fell back -- every one carries
-    `residue_route_taken` 'laplace' and no warning -- so all nine are gated as
-    solved by the cosh transform and none as a fallback.
+    Every record row carries `residue_route_taken` 'laplace', so all nine are
+    gated as solved by the cosh transform and none as a fallback.
     """
     records, energies, z = contour_run(name, 'laplace')
     for rec, energy, pole_strength in zip(records, energies, z):
-        row = rec['routes']['laplace']
-        assert row['status'] == 'ok'
-        assert row['params']['residue_route_taken'] == 'laplace'
-        assert energy == row['energy_eV'], (name, rec['orbital_label'],
-                                            energy - row['energy_eV'])
-        assert pole_strength == row['z'], (name, rec['orbital_label'],
-                                           pole_strength - row['z'])
+        assert rec['routes']['laplace']['params']['residue_route_taken'] == \
+            'laplace'
+        assert_pinned(name, rec, 'laplace', energy, pole_strength)
 
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_laplace_and_cd_agree_below_the_gap(name):
-    """Two backends for one equation: the same root and the same Z.
+    """Two backends for one equation: the same root and Z below the gap.
 
-    The contour is identical up to where each residue reads W -- the explicit
-    O(N^4) chi0(w') or the O(N^3) cosh transform of proj(tau) -- so below the
-    particle-hole gap the two are one number, and the difference is the
-    quadrature's and not the route's. The six frontier rows sweep no residue at
-    all and are bitwise; the three that do sweep one differ by at most
-    6.9e-14 eV in the root and 3.3e-15 in Z.
+    The contour is identical up to where each residue reads W, the explicit
+    O(N^4) chi0(w') or the O(N^3) cosh transform of proj(tau), so the two
+    differ only by quadrature, within `LAPLACE_CD_TOL_EV` / `LAPLACE_CD_TOL_Z`;
+    rows that sweep no residue are bitwise.
     """
     records, laplace, z_laplace = contour_run(name, 'laplace')
     _, cd, z_cd = contour_run(name, 'cd')
@@ -298,14 +270,13 @@ def test_laplace_and_cd_agree_below_the_gap(name):
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_laplace_diagnostics_name_the_route_and_its_representation_error(name):
-    """What the driver decided: the backend that ran, and how well it was fit.
+    """The diagnostics name the backend that ran and how well it was fit.
 
-    Two routes can agree on an energy and have solved different equations. The
-    residue count says the contour swept the same poles, `residue_route_taken`
-    says which backend answered them, and `representation_error` is the bare
-    Laplace quadrature's residual at the frequencies the converged root
-    actually asked for -- the measurable the route's validity rests on, and
-    None exactly where no residue was swept.
+    The residue count says the contour swept the same poles,
+    `residue_route_taken` says which backend answered them, and
+    `representation_error` is the bare Laplace quadrature's residual at the
+    frequencies the converged root asked for (below `LAPLACE_SCREENING_TOL`),
+    None where no residue was swept.
     """
     mol, mf, factors, chain, records = case(name)
     _, _, diagnostics = solve_qp_energy_contour(
@@ -329,13 +300,11 @@ def test_laplace_refuses_a_residue_the_tau_grid_cannot_carry():
     """Above the gap the cosh transform does not exist, and the refusal says so.
 
     chi0(w') = int 2 cosh(w' tau) proj(tau) dtau holds only while the grid's
-    bare 1/y quadrature still carries every pair energy d -/+ w', so a state
-    whose contour sweeps a residue past that is refused rather than served from
-    the explicit backend under the name asked for -- a silent fallback would
-    return a different functional. No row of the record was refused, so the gate
-    is shown where it must fire: water's oxygen 1s sweeps a residue 19 Ha out,
-    and its 2a1, 0.64 Ha out, is already past the grid's e_min. Both are states
-    continuation='cd' answers.
+    bare 1/y quadrature carries every pair energy d -/+ w', so a state whose
+    contour sweeps a residue past that is refused rather than silently served
+    from the explicit backend. Water's oxygen 1s sweeps a residue 19 Ha out and
+    its 2a1, 0.64 Ha out, is past the grid's e_min; continuation='cd' answers
+    both.
     """
     mol, mf, factors, chain, records = case('water')
     isdf = dict(factors=factors, ntau=records[0]['cd_grid']['ntau_gw'])
@@ -356,29 +325,22 @@ def test_laplace_refuses_a_residue_the_tau_grid_cannot_carry():
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_sop_reproduces_the_baseline(name):
-    """The pole model: Z bitwise, the energy inside one ulp of the root.
-
-    The module docstring carries the reason the energy is not bitwise on every
-    row and what seeding it bitwise would cost.
+    """The pole model, energy and Z bitwise against the pins; the record
+    within the one fit's move and one ulp of the root beyond it (the Newton
+    seed, see the module docstring).
     """
     records, energies, z = contour_run(name, 'sop')
     for rec, energy, pole_strength in zip(records, energies, z):
-        row = rec['routes']['sop']
-        assert row['status'] == 'ok'
-        assert abs(energy - row['energy_eV']) <= SOP_SEED_TOL_EV, (
-            name, rec['orbital_label'], energy - row['energy_eV'])
-        assert pole_strength == row['z'], (name, rec['orbital_label'],
-                                           pole_strength - row['z'])
+        assert_pinned(name, rec, 'sop', energy, pole_strength,
+                      slack=SOP_SEED_TOL_EV)
 
 
 def test_sop_refuses_a_state_eq27_excludes():
     """Eq. (27) excludes the oxygen 1s of water, and the refusal names it.
 
-    No row of the record was refused -- all nine are frontier or first inner
-    valence -- so the refusal is shown where it must fire: a core state sweeps
-    poles many particle-hole gaps away, the individual poles of W matter there
-    rather than their envelope, and no number of them converges. The contour
-    serves the same state.
+    A core state sweeps poles many particle-hole gaps away, where the
+    individual poles of W matter rather than their envelope and no number of
+    them converges. The contour serves the same state.
     """
     mol, mf, factors, chain, records = case('water')
     with pytest.raises(ValueError) as refusal:
@@ -398,12 +360,15 @@ def test_sop_refuses_a_state_eq27_excludes():
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_pade_is_todays_space_time_route(name):
-    """The default continuation, and 'pade' named, ARE today's space-time route.
+    """The default continuation and 'pade' named are the space-time route.
 
     Bitwise against `calc_qp_energy(mode='space-time')` with no continuation
-    named and against the record's `space-time` row. The record's `st-pade` row
-    is a different quadrature -- the gradient chain's Pade on the CONTOUR grid
-    -- and is asserted to differ, so that the two are never read as one number.
+    named and against the pinned `space-time` row, the record's within the
+    one fit's move plus `W_GRID_MOVE_EV`. The record's `st-pade` row is a
+    different quadrature (the gradient chain's Pade on the contour grid) and
+    is asserted to differ. At 18 points the W fit and the Sigma fits are both
+    near 1e-3, and the Pade continuation turns 1e-6 Ha changes in them into
+    sub-meV moves of the root.
     """
     mol, mf, factors, chain, records = case(name)
     rec = records[0]
@@ -414,18 +379,18 @@ def test_pade_is_todays_space_time_route(name):
     default = calc_qp_energy(mf, **shared)
     named = calc_qp_energy(mf, continuation='pade', **shared)
     assert default == named
-    assert default == row['energy_eV'], (name, default - row['energy_eV'])
+    assert_pinned(name, rec, 'space-time', default,
+                  slack=W_GRID_MOVE_EV[name])
     assert default != rec['routes']['st-pade']['energy_eV']
 
 
 def test_eps_anchor_carries_the_quasiparticle_slope():
-    """dw/d(eps_p) by the anchor IS the Z the contour Newton returns.
+    """dw/d(eps_p) by the anchor is the Z the contour Newton returns.
 
     `eps_anchor` shifts the eps_p the equation is anchored on and leaves G, W
     and the pole guard on the mean field, so by the implicit function theorem
-    the derivative of the root with respect to it is exactly Z. That makes the
-    keyword's one use a check on the other: a central difference of the whole
-    route against the closed-form slope it reports.
+    the derivative of the root with respect to it is Z. A central difference of
+    the whole route is checked against the closed-form slope it reports.
     """
     mol, mf, factors, chain, records = case('water')
     rec = records[0]
@@ -446,8 +411,8 @@ def test_eps_anchor_carries_the_quasiparticle_slope():
 def test_validity_table_refuses_and_admits_each_pair():
     """Every (mode, continuation) refusal, each paired with the case it allows.
 
-    A refusal that is never contrasted with the call it is meant to let through
-    passes for a mode that refuses everything.
+    A refusal not contrasted with the call it lets through would also pass for
+    a mode that refuses everything.
     """
     mol, mf, factors, chain, records = case('water')
     rec = records[0]
@@ -530,8 +495,8 @@ def test_return_z_follows_the_continuation():
         energy, z = calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
                                    continuation=continuation, return_z=True,
                                    **isdf)
-        assert abs(energy - rec['routes'][continuation]['energy_eV']) <= \
-            SOP_SEED_TOL_EV
+        pin = PINS['water'][rec['orbital_label']][continuation]['energy_eV']
+        assert abs(energy - pin) <= SOP_SEED_TOL_EV
         assert 0.0 < z <= 1.0
     with pytest.raises(ValueError, match='not differentiable'):
         calc_qp_energy(mf, state=rec['orbital'], mode='space-time',

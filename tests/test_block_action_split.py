@@ -1,60 +1,45 @@
 """Nothing in the ISDF block action is computed at full grid length per rank.
 
-The row split of Zt divides the three M^2 n_occ passes, and for a while that
-was all it divided: z X_v^T, the diagonal p of P, p D and the tail contraction
-X_o^T (Zt * P) X_v ran WHOLE on every rank, an Amdahl floor the docstring of
-`isdf_block_action` put at 15% of a four-rank action and the cluster measured
-as 1.75x on two ranks where the split alone predicts 2x.
+Besides the row split of Zt (the three M^2 n_occ passes), each of the four
+smaller terms follows the rows, with the collective its shape asks for:
 
-Each of the four now follows the rows, and each takes the collective its shape
-asks for:
-
-  z X_v^T   an output partition -- a rank builds the grid rows it owns and the
-            ranks ALL-GATHER them (`mpi_grid.allgather_blocks`), because the
-            exchange reads the whole grid index. Gathered, not summed: a row
-            is computed once, by its owner.
-  p, p D    a reduction -- p is per grid point, so a rank forms its own rows
+  z X_v^T   an output partition: a rank builds the grid rows it owns and the
+            ranks all-gather them (`mpi_grid.allgather_blocks`), because the
+            exchange reads the whole grid index; each row is computed once,
+            by its owner.
+  p, p D    a reduction: p is per grid point, so a rank forms its own rows
             and contracts them with its own rows of D; naux doubles cross.
-  the tail  a reduction -- X_o^T (Zt * P) is partial over the rows in its
+  the tail  a reduction: X_o^T (Zt * P) is partial over the rows in its
             first index and whole in its second, so one reduce-scatter of
             (n_occ, M), laid out in owner order, hands each rank only its own
             columns, which it contracts with X_v.
 
-Gated here, on water/cc-pVDZ and ethylene/cc-pVDZ Hartree-Fock (888 grid points
-against water's 444, so the row blocks are not a handful of rows):
+The setup's screened-kernel rows follow the same rule: serially they are
+D_mine (W D^T), naux^2 M multiply-adds and an (naux, M) array on every rank;
+under a comm they are (D_mine W) D^T, nmine naux^2 + nmine naux M with an
+(nmine, naux) intermediate, both divided by the rank count. The two
+associations differ in their last bits. The TDHF branch, D_mine D^T, has no
+inner product to reassociate.
 
-  * the SERIAL action is bitwise what it was, against the roots and vectors of
-    the code before any rank split existed (`BASELINE_COMMIT`), unpacked into
-    a temporary directory and run in its own process. Serially the whole split
-    collapses -- the row block is the whole grid -- and every expression must
-    be the one it replaces, character for character in the arithmetic if not
-    in the source;
-  * at 2 and 3 simulated ranks the roots sit within 1e-11 Ha of the serial
-    ones, which is the standard the row split has always been held to (it
-    re-associates the sums it reduces, so it is not bitwise), and every rank
-    returns the same bits as every other and ran as many cycles: each runs the
-    same iteration on the lockstepped action output;
-  * every rank reports its own block-action count and time, and
-    `davidson_block_action_by_rank` carries all of them, which is the number
-    the cluster reads the scaling off;
-  * the per-rank HEAD work, measured off the shapes of the GEMM the action
-    actually runs, falls with the rank count and sums across the ranks to the
-    serial head -- no grid point's head is paid twice;
-  * one rank's own slice, perturbed by 1 + 1e-6 before it travels, MOVES the
-    roots -- separately for the gathered z X_v^T, for the reduced tail and for
-    the kernel rows this rank builds. A split whose pieces did not reach the
-    answer would swallow the perturbation, and the gate fails if any does.
+Gated on water/cc-pVDZ and ethylene/cc-pVDZ Hartree-Fock (ethylene's 888 grid
+points make the row blocks more than a handful of rows):
 
-The SETUP takes the same treatment as the loop. This rank's rows of the
-screened kernel are D_mine (W D^T) serially, where the inner product is naux^2
-M multiply-adds and an (naux, M) array on every rank; under a rank count they
-are (D_mine W) D^T, the same matrix from nmine naux^2 + nmine naux M and an
-(nmine, naux) intermediate, both of which the rank count divides. The two
-associations differ in their last bits, so the serial one stands as it was --
-the bitwise gate above is what holds it there -- and the reassociated rows are
-gated against it at the level double precision allows, 1e-13 relative, where
-water and ethylene measure 1.5e-16 and 1.1e-15. The TDHF branch, D_mine D^T,
-has no inner product to reassociate and is bitwise the same either way.
+  * the serial action is bitwise the roots and vectors of the tree before any
+    rank split (`BASELINE_COMMIT`), unpacked into a temporary directory and
+    run in its own process with its W frequency axis moved onto rW, the range
+    its transform is fitted over;
+  * at 2 and 3 simulated ranks the roots lie within 1e-11 Ha of the serial
+    ones (the split reassociates the sums it reduces), and every rank returns
+    the same bits after the same number of cycles;
+  * every rank reports its own block-action count and time, collected in
+    `davidson_block_action_by_rank`;
+  * the per-rank head work, read off the shapes of the GEMM the action runs,
+    falls with the rank count and sums over the ranks to the serial head;
+  * one rank's slice, scaled by 1 + 1e-6 before it travels, moves the roots,
+    separately for the gathered z X_v^T, the reduced tail and the kernel rows
+    this rank builds;
+  * the reassociated kernel rows agree with the serial association to 1e-13
+    relative, and the TDHF rows are bitwise the same either way.
 """
 import copy
 import os
@@ -89,27 +74,24 @@ MOLECULES = {
 }
 #: Ha. The row split sums the ranks' partials in rank order instead of inside
 #: one GEMM, so a distributed root differs from the serial one in its last
-#: bits. Every distributed BSE probe in this repository has landed inside this.
+#: bits.
 ROOT_TOL = 1e-11
-#: The perturbation one rank's slice carries, and the smallest root shift that
-#: counts as the answer having noticed it. 1e-6 on a slice is six orders above
-#: ROOT_TOL; anything that reaches the reduction cannot hide inside it.
+#: The perturbation one rank's slice carries, and the smallest root shift
+#: that counts as the answer having noticed it; both lie well above ROOT_TOL.
 SLICE_SCALE = 1.0 + 1e-6
 MOVED = 1e-9
 #: Relative to max|Zt|. The distributed association of this rank's kernel rows
-#: against the serial one: two products of the same three factors in the other
-#: order, so what separates them is double precision over an naux-long sum.
-#: Measured 1.5e-16 at water and 1.1e-15 at ethylene, at 2 and 3 ranks.
+#: against the serial one: the same three factors multiplied in the other
+#: order, separated by double-precision rounding over an naux-long sum
+#: (1.5e-16 at water, 1.1e-15 at ethylene).
 REASSOCIATION_TOL = 1e-13
 
 REPO = Path(__file__).resolve().parents[1]
-#: The commit before the block action was split over ranks at all, so the
-#: bitwise gate compares this tree against code that could not have moved a
-#: bit for the reason being tested here. Pinned rather than `HEAD`, which
-#: once this change lands would compare the tree with itself.
+#: A tree whose block action is not split over ranks, so the bitwise gate
+#: compares against code that cannot move a bit for the reason tested here.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
-#: A shared machine: the archived probe is capped rather than left to size
-#: itself against the whole node, as every subprocess gate in this repo is.
+#: The archived probe's thread caps, so it does not size itself against the
+#: whole machine.
 THREAD_CAPS = {name: '2' for name in
                ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
@@ -126,6 +108,16 @@ from pyscf import gto, scf
 
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+
+import src.SingleReference.GW.space_time as _archived_space_time
+from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
+from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
+
+# the one change since the pinned commit: W's frequencies span rW, the range
+# its transform back to tau is fitted over, not the bare window
+_archived_space_time.minimax_frequency_grid = (
+    lambda n, e_min, e_max: _minimax_frequency_grid(n, _PAD[0] * e_min,
+                                                    _PAD[1] * e_max))
 
 warnings.simplefilter('ignore')
 out = {{}}
@@ -147,11 +139,10 @@ np.savez({out!r}, **out)
 class _MatmulLog(np.ndarray):
     """A trial vector that records the shapes of every matmul it enters.
 
-    The head of the block action is one GEMM of the vector against X_v, so the
-    grid length THAT GEMM runs over is the grid length this rank's head paid
-    for -- M serially, its own row block under a comm. Reading it off the
-    operands is a measurement; a count derived from the partition alone would
-    only restate `contiguous_block`.
+    The head of the block action is one GEMM of the vector against X_v, so
+    the grid length that GEMM runs over is the length this rank's head paid
+    for: M serially, its own row block under a comm. Reading it off the
+    operands measures it rather than restating `contiguous_block`.
     """
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -217,10 +208,9 @@ def cases():
 
 @pytest.fixture(scope='module')
 def serial_roots(cases):
-    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank.
-
-    Divided by the bare d, asked for: the archive's Davidson knew no other
-    preconditioner, and the default is now the screened diagonal."""
+    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank,
+    with the bare diagonal preconditioner (the only one the archived Davidson
+    has)."""
     out = {}
     for name, c in cases.items():
         omega, X, Y, _ = solve_bse_isdf(c['mf'], c['mol'], c['nocc'],
@@ -283,8 +273,8 @@ def rank_copy(c):
 @pytest.mark.parametrize('name', sorted(MOLECULES))
 def test_serial_roots_are_bitwise_the_archived_ones(name, serial_roots,
                                                     archived_roots):
-    """One rank owns every grid row, so the split must reduce to the code it
-    replaces -- not to within a tolerance, to the bit."""
+    """With one rank owning every grid row, the roots and vectors are bitwise
+    the archived pre-split code's."""
     omega, X, Y = serial_roots[name]
     assert bitwise(archived_roots[name + '_omega'], omega)
     assert bitwise(archived_roots[name + '_X'], X)
@@ -295,21 +285,14 @@ def test_serial_roots_are_bitwise_the_archived_ones(name, serial_roots,
 @pytest.mark.parametrize('name', sorted(MOLECULES))
 def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
                                                  size):
-    """The roots off the split action, and the counters the cluster reads.
+    """The roots of the split action within ROOT_TOL of the serial ones (the
+    reduced terms sum in rank order, so not bitwise), bitwise across the
+    ranks after the same cycle count, and the per-rank block-action counters.
 
-    Not bitwise against serial and cannot be: the reduced terms sum in rank
-    order rather than inside one GEMM. Bitwise ACROSS the ranks, which they
-    must be -- every one of them runs the same iteration on the same
-    lockstepped action output, as its identical cycle count shows, and the
-    result is lockstepped from rank 0 at the end.
-
-    Both solves divide by the bare d, asked for: the gate isolates the row
-    split's re-association. The default preconditioner is now the screened
-    diagonal, itself one reduction over the ranks' grid rows whose last bits
-    move with the rank count, and with it ethylene's roots sat 2.4e-11 and
-    1.5e-10 Ha from the serial ones at 2 and 3 ranks -- a moved iteration
-    path at the Davidson's resolution, gated where the screened diagonal is
-    (test_davidson_preconditioner, test_probe_after_davidson).
+    Both solves use the bare diagonal preconditioner to isolate the row
+    split's reassociation: the default screened diagonal is itself a
+    reduction over grid rows whose last bits move with the rank count, and
+    is gated in test_davidson_preconditioner and test_probe_after_davidson.
     """
     c = cases[name]
     omega0 = serial_roots[name][0]
@@ -344,12 +327,9 @@ def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('name', sorted(MOLECULES))
 def test_head_work_falls_with_the_rank_count(cases, name, size):
-    """The head's own GEMM shapes, serially and per rank.
-
-    Every grid point's head is paid exactly once across the ranks -- the
-    lengths sum to M -- and no rank pays more than its block, so the head
-    falls with the rank count instead of standing as the Amdahl floor it was.
-    """
+    """The head's own GEMM shapes, serially and per rank: each grid point's
+    head is paid once across the ranks (the lengths sum to M) and no rank pays
+    more than its block, so the head falls with the rank count."""
     c = cases[name]
     no, nv, naux, npts = c['nocc'], c['nvir'], c['naux'], c['npts']
     eps = np.asarray(c['mf'].mo_energy, float)
@@ -377,16 +357,13 @@ def test_head_work_falls_with_the_rank_count(cases, name, size):
 @pytest.mark.parametrize('piece', ['gathered_zXv', 'reduced_tail'])
 def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
                                                 piece):
-    """One rank's own slice, scaled before it travels, must reach the answer.
+    """One rank's own slice, scaled before it travels, moves the roots.
 
-    The last rank is the one perturbed, so an implementation that quietly let
-    rank 0's copy stand for everyone's would be caught. `qp=False` puts the
-    BSE on the mean field: the quasiparticle stage runs its own reductions and
-    none of them is what this gate is about.
-
-    The patch is asserted to have FIRED. A perturbation applied to a
-    collective that the action no longer makes would leave the roots exactly
-    where they were, and the gate would then be passing on nothing.
+    The last rank is perturbed, so rank 0's copy standing in for everyone's
+    would be caught. `qp=False` puts the BSE on the mean field, keeping the
+    quasiparticle stage's own reductions out of the gate. The patch is
+    asserted to have run, so the gate cannot pass on a collective the action
+    does not make.
     """
     c = cases['water']
     target = size - 1
@@ -432,14 +409,9 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
 @pytest.mark.parametrize('name', sorted(MOLECULES))
 def test_reassociated_kernel_rows_match_the_serial_association(cases, name,
                                                                size):
-    """This rank's rows of the screened kernel, built in the order a rank count
-    makes cheap, against the order one rank builds them in.
-
-    The distributed rows must DIFFER in their bits -- the whole point is that
-    the inner product is a different one -- and agree to what double precision
-    over an naux-long sum allows. The TDHF branch has no inner product to
-    reassociate and must come back bitwise the same either way.
-    """
+    """This rank's rows of the screened kernel in the distributed association
+    against the serial one: different bits (the inner product differs),
+    agreeing to REASSOCIATION_TOL; the TDHF rows are bitwise the same."""
     c = cases[name]
     D, W_aux, npts = c['factors'][1], c['W_aux'], c['npts']
     comms = simulated_world(size)
@@ -459,13 +431,9 @@ def test_reassociated_kernel_rows_match_the_serial_association(cases, name,
 @pytest.mark.parametrize('size', SIZES)
 def test_a_perturbed_kernel_row_block_moves_the_roots(cases, monkeypatch,
                                                       size):
-    """One rank's D_mine W, scaled before it meets D^T, must reach the answer.
-
-    The reassociation is only worth taking if the intermediate it forms is the
-    one the roots are built from; a setup whose rows were quietly rebuilt or
-    overwritten elsewhere would swallow this. The last rank is the one
-    perturbed, and the patch is asserted to have fired.
-    """
+    """One rank's D_mine W, scaled before it meets D^T, moves the roots, so
+    the roots are built from that intermediate. The last rank is perturbed,
+    and the patch is asserted to have run."""
     c = cases['water']
     target = size - 1
     fired = []

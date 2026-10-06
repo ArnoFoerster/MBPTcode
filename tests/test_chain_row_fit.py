@@ -11,20 +11,20 @@ its own Mole:
 
   (a) the rows every rank holds, at the reference and at a displaced
       geometry, are bitwise the same rows of a one-rank run of the chain;
-  (b) THE ANCHORED GATE: against the whole-fit sliced chain at the SAME rank
+  (b) the anchored gate: against the whole-fit sliced chain at the same rank
       count, the composed state-pair force, energy and root at a displaced
       geometry, the BSE roots at the reference, the dRPA force and a
       one-cycle optimizer step sit within `FIT_REASSOCIATION_K` times the
-      distance the whole-fit chain itself moves when the sums of its fit
-      over the test set are cut per shell and accumulated in reverse -- a bar
-      measured on the run;
-  (c) THE MEMORY SCAN: at every evaluation the walk asks for, before it and
+      distance the whole-fit chain itself moves when its fit's three-centre
+      sum is cut per shell and accumulated in reverse (a bar measured on
+      the run);
+  (c) the memory scan: at every evaluation the walk asks for, before it and
       right after each factor build inside it, no array reachable from the
       surface has the whole grid on one axis and a factor's or the fit's
       width on the other (X_mo, X_ao, D, M, F D^T, the Gram matrix), and
       every rows object is the row fit's own, its ledger naming every
-      grid-indexed array of the fit at this rank's tiles; and at EVERY
-      FORCE, the nuclear assembly traced line by line in every frame under
+      grid-indexed array of the fit at this rank's tiles; and at every
+      force, the nuclear assembly traced line by line in every frame under
       src/ (`traced`): no array it names holds the grid by a factor's, the
       fit's or the test set's width (the Gram matrix, the test set's
       collocation, M, F D^T, a whole adjoint) beyond the X_bar and D_bar
@@ -35,43 +35,42 @@ its own Mole:
       sliced chain's, {X_mo 7, D 8, X_o 3, X_v 2}, less the X_mo of its two
       nuclear assemblies, which stream X_mo by tiles on the row fit.
 
-WATER CANNOT TELL THE TWO ESTIMATORS APART, which is why ethylene is here.
-The row fit's Gram matrix is the unscreened product (A A^T) o (B B^T) and its
-F D^T keeps the screened pairs; `FrozenFactorization._fit` screens both. At
-water/cc-pVDZ the screen keeps every pair (576 of 576) and the two are one
-estimator; at ethylene/cc-pVDZ it drops 72 of 2304 and they are 2.0e-4 of D
-apart. So on ethylene the row-fit chain is gated against its own estimator
-formed whole (every product pair in D, one Cholesky of the whole Gram
-matrix) on that fit's own reassociation bar; its dRPA force against a
-five-point finite difference of its own energy is gated in
-tests/test_chain_row_fit_adjoint.py, beside the adjoint's own gates.
+Both realizations solve the estimator of `fit_M_streaming`: the Gram matrix
+over every product pair, (A A^T) o (B B^T) + P P^T, and F D^T over the
+screened pairs. Water/cc-pVDZ keeps every pair (576 of 576), where any
+screening of the Gram is invisible; ethylene/cc-pVDZ drops 72 of 2304. So on
+ethylene the row fit and the replicated fit are gated against the estimator
+formed whole (every product pair in D, one Cholesky of the whole Gram matrix)
+on its own reassociation bar, and a screened-Gram estimator (Gram and
+right-hand side both screened) is shown to fail that bar. The dRPA force
+against a five-point finite difference of its own energy is gated in
+tests/test_chain_row_fit_adjoint.py.
 
-SHOWN TO FAIL, then restored and byte-compared (`cmp`): `row_fit_factors`
-falling back to the whole fit -- `FrozenFactorization._fit` at the geometry,
-D = M^T V^(1/2) formed whole and the rows cut from it
-(`SlicedFactors.from_whole`) -- failed (c) at 2, 3 and 8 ranks on every scan
-(rows without the fit's ledger), while (a), (b) and (d) stayed green: the
-same rows and the same numbers, only formed whole.
+Only (c) catches `row_fit_factors` falling back to the whole fit (D formed
+whole and the rows cut from it by `SlicedFactors.from_whole`): the rows and
+the numbers are the same, only formed whole.
 """
 import functools
 import inspect
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import numpy as np
 import pytest
 import scipy.linalg
-from pyscf import gto
+from pyscf import df as pyscf_df, gto
 
-from src.Base.constants import FIT_REASSOCIATION_K, HARTREE_TO_EV
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.Base.constants import (FIT_REASSOCIATION_K, HARTREE_TO_EV,
+                                ISDF_GRADIENT_FLOOR)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base import separable_ri
 from src.Base.separable_ri import (DEFAULT_REGULARIZATION, aux_metric_sqrt,
                                    fit_M_stable)
-from src.Base.sliced_factors import SlicedFactors, whole_factor
+from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
+                                     whole_factor)
 from src.Base.solvent_screening import SolventScreening
 from src.Base.utils.mpi_grid import (contiguous_block, distributed, lockstep,
                                      partition, run_simulated)
@@ -111,11 +110,9 @@ FD_STEP = 1e-4
 #: The Cartesian components of ethylene the finite difference takes: an H
 #: in-plane, a C along the bond, another H along the bond.
 FD_COMPONENTS = ((2, 1), (0, 2), (3, 2))
-#: The Davidson residual of the anchored gates, below the fit's response. At
-#: the default `BSE_DAVIDSON_CONV_TOL` the solver's own convergence moved
-#: ethylene's second root 7.0e-10 Ha between the row fit and its estimator
-#: formed whole, where one reassociation of the fit moves it 5.6e-13; at this
-#: residual the two are 2.1e-13 and 3.6e-13.
+#: The Davidson residual of the anchored gates, below the fit's response: at
+#: the default `BSE_DAVIDSON_CONV_TOL` the solver's own convergence moves the
+#: roots more than one reassociation of the fit does.
 GATE_BSE_CONV_TOL = 1e-9
 #: The whole-array gathers of one composed force on the row fit: the
 #: whole-fit chain's, less the X_mo of its two nuclear assemblies, which
@@ -132,7 +129,7 @@ def row_kw(block=TILE):
 
 
 def state_pair(atom=H2O, **kw):
-    """The composed singlet surface on this rank's OWN Mole, the Casida step
+    """The composed singlet surface on this rank's own Mole, the Casida step
     matrix-free so the block action runs on rows."""
     mol = molecule(atom)
     return RPABSESurface(mol, chain_scf, spin='singlet', mf=chain_scf(mol),
@@ -161,10 +158,17 @@ def relative(a, b):
                  / max(np.linalg.norm(np.asarray(b)), 1e-300))
 
 
+def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
+    """`separable_ri.ao_blocks` with every shell its own block, last first:
+    the replicated fit's three-centre sum F D^T reassociated once, the
+    anchor of the whole-fit chain."""
+    return [(s, s + 1) for s in reversed(range(mol.nbas))]
+
+
 def reassociated_fit(mol, layout):
     """`fit_M_stable` with its three sums over the test set -- the row norms,
     the Gram matrix and F Dt^T -- cut per mu shell and accumulated in
-    reverse: one reordering of the whole fit's own sums, the gate's anchor."""
+    reverse: one reordering of the whole form's own sums, its anchor."""
     mu = np.asarray(layout[0])
     ao_loc = mol.ao_loc_nr()
     shells = [np.flatnonzero((mu >= ao_loc[s]) & (mu < ao_loc[s + 1]))
@@ -378,7 +382,10 @@ def watch(surface, log, rank, size):
                           ledgers=ledgers, **kwargs):
             bound = inspect.signature(type(half).nuclear_gradient).bind(
                 half, *args, **kwargs)
-            inputs = [bound.arguments['x_bar'], bound.arguments['d_bar']]
+            # adjoints held in grid tiles are their rows
+            inputs = [bound.arguments[k].rows
+                      if isinstance(bound.arguments[k], GridTileRows)
+                      else bound.arguments[k] for k in ('x_bar', 'd_bar')]
             found = set()
             ledgers.clear()
             out = traced(lambda: assemble(*args, **kwargs), found,
@@ -432,12 +439,14 @@ def observables(surface, log=None, rank=0, size=1):
 
 
 def whole_assembly(gram=True):
-    """`FactorChain.row_fit_branches` formed WHOLE, the nuclear assembly
-    before the row fit had an adjoint of its own: the collocation adjoint
-    and `dfactor_adjoint_gauges` on every rank, over every product pair
-    (`gram`, the row fit's estimator) or over the frozen test set alone
-    (`_fit`'s), with no ledger."""
+    """`FactorChain.row_fit_branches` formed whole: the collocation adjoint
+    and `dfactor_adjoint_gauges` on every rank, its Gram matrix over every
+    product pair (`gram`, the one fit) or over the frozen test set alone
+    (the screened-Gram estimator), with no ledger. Adjoints held in grid
+    tiles are gathered whole."""
     def branches(self, mol, mf, auxmol, crd, x_bar, d_bar, **extra):
+        x_bar, d_bar = (a.gather() if isinstance(a, GridTileRows) else a
+                        for a in (x_bar, d_bar))
         g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                      self.pts_local, self.owner,
                                      frames=self.frames,
@@ -445,14 +454,16 @@ def whole_assembly(gram=True):
         g_fit = dfactor_adjoint_gauges(
             mol, auxmol, crd, [(d_bar, None)], self.layout, self.pts_local,
             self.owner, frames=self.frames, with_frames=self.with_frames,
-            gram_layout=product_pairs(mol) if gram else None)
+            gram_layout=product_pairs(mol) if gram else self.layout)
         return g_coll, g_fit, None
     return branches
 
 
 def gathered_rotation(x_mo, x_bar, block=None):
-    """Y = X_mo^T X_bar on X_mo gathered whole, the product before the row
-    fit streamed it."""
+    """Y = X_mo^T X_bar on X_mo gathered whole, the unstreamed reference; an
+    adjoint held in grid tiles is gathered whole."""
+    if isinstance(x_bar, GridTileRows):
+        x_bar = x_bar.gather()
     return whole_factor(x_mo, 'X_mo').T @ x_bar
 
 
@@ -512,10 +523,6 @@ def test_state_pair_on_the_row_fit(size, monkeypatch):
     within the anchored bar of the whole-fit sliced chain at the same rank
     count; no whole factor or fit array at any evaluation; the gathers of
     the whole-fit chain."""
-    with distributed(None):
-        reference = FrozenFactorization(own_water())
-    anchor = reassociated_fit(own_water(), reference.layout)
-
     def run(tag):
         def rank(comm):
             log = [] if tag == 'rows' else None
@@ -528,7 +535,7 @@ def test_state_pair_on_the_row_fit(size, monkeypatch):
 
     whole, rows = run('whole'), run('rows')
     with monkeypatch.context() as patch:
-        patch.setattr(factor_chain, 'fit_M_stable', anchor)
+        patch.setattr(separable_ri, 'ao_blocks', per_shell_reversed)
         bar = run('whole')
     for r in range(size):
         lines, ratios = anchored(whole[r], bar[r], rows[r], GATED)
@@ -565,21 +572,25 @@ def test_the_scan_sees_a_whole_fit():
 
 
 # ------------------------------------------------------------- ethylene
-def product_fit_factors(fit):
-    """`FactorChain.row_fit_factors` replaced by the row fit's ESTIMATOR
-    formed whole -- every product pair in the Gram matrix, F on the frozen
-    test set, solved by `fit` -- and the rows cut from it: the reference
-    realization of the ethylene gate, and with a reassociated `fit` its bar."""
+def product_fit_factors(fit, gram=True):
+    """`FactorChain.row_fit_factors` replaced by the estimator formed whole
+    (every product pair in the Gram matrix with `gram`, the frozen test set
+    alone otherwise; F on the frozen test set; solved by `fit`) and the rows
+    cut from it: the reference realization of the ethylene gate, and with a
+    reassociated `fit` its bar."""
     def factors(chain, mol, mf, auxmol, crd):
-        gram = product_pairs(mol)
+        cols = product_pairs(mol) if gram else chain.layout
         mu, nu, wc = chain.layout
+        naux = auxmol.nao_nr()
         V = auxmol.intor('int2c2e', aosym='s1')
-        e3 = factor_chain.test_set_three_center(mol, auxmol, mu, nu)
-        F = np.zeros((auxmol.nao_nr(), len(gram[0]) + auxmol.nao_nr()))
-        F[:, pair_positions(chain.layout, gram, mol.nao_nr())] = (
-            np.linalg.solve(V, e3.T) * wc[None, :])
-        F[:, len(gram[0]):] = np.eye(auxmol.nao_nr())
-        M = lockstep(fit(separable_ri.test_set_D(mol, auxmol, crd, gram), F))
+        e3c = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e',
+                                     aosym='s1').reshape(mol.nao, mol.nao,
+                                                         naux)
+        F = np.zeros((naux, len(cols[0]) + naux))
+        F[:, pair_positions(chain.layout, cols, mol.nao_nr())] = (
+            np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :])
+        F[:, len(cols[0]):] = np.eye(naux)
+        M = lockstep(fit(separable_ri.test_set_D(mol, auxmol, crd, cols), F))
         x_ao = mol.eval_gto('GTOval_sph', crd)
         whole = (x_ao @ mf.mo_coeff, M.T @ aux_metric_sqrt(auxmol, None, V=V),
                  x_ao, crd)
@@ -589,20 +600,18 @@ def product_fit_factors(fit):
     return factors
 
 
-def test_ethylene_row_fit_is_its_own_estimator(monkeypatch):
-    """Where the pair screen drops pairs, the row-fit chain sits within the
-    anchored bar of its own estimator formed whole, and `_fit`'s estimator,
-    which it does not realize, outside that bar in every quantity.
+def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
+    """On ethylene, where the pair screen drops pairs, the row-fit chain
+    agrees with the estimator formed whole within the anchored bar, the
+    replicated-fit chain too in its energy and root and within
+    `ISDF_GRADIENT_FLOOR` of the row fit in its forces, and the screened-Gram
+    estimator lies outside the bar in every quantity.
 
-    On the default preconditioner, the screened diagonal, the BSE roots are
-    held within the Davidson's own certificate instead of the bar: that
-    diagonal is formed from the factors themselves, so the fit's last bits
-    reach the Davidson's path as well as its operator, and the roots of the
-    row fit and of its estimator formed whole part by more than the
-    reassociation bar. Every root lies within GATE_BSE_CONV_TOL of the whole
-    fit's, sqrt(nroots) GATE_BSE_CONV_TOL / |roots| relative; the anchored
-    bar on the BSE roots is held on the bare d, asked for, and every other
-    quantity on the bar as before.
+    The default screened-diagonal preconditioner is formed from the factors,
+    so the fit's last bits reach the Davidson's path; the bar on the BSE roots
+    is therefore checked with the bare diagonal, and with the default the
+    roots are checked within the Davidson tolerance,
+    sqrt(nroots) * GATE_BSE_CONV_TOL / |roots| relative.
     """
     mol = molecule(ETHYLENE)
 
@@ -623,40 +632,57 @@ def test_ethylene_row_fit_is_its_own_estimator(monkeypatch):
     keys = ('force', 'energy', 'root', 'bse_roots', 'drpa_force')
     on_bar = ('force', 'energy', 'root', 'drpa_force')
 
-    def three(patch):
-        """rows, whole and bar, on whatever `patch` holds."""
-        rows = run(**row_kw())
+    def four(patch):
+        """rows, replicated, whole and bar, on whatever `patch` holds."""
+        rows, replicated = run(**row_kw()), run(sliced=True)
         patch.setattr(FactorChain, 'row_fit_factors',
                       product_fit_factors(fit_M_stable))
         whole = run(**row_kw())
         patch.setattr(FactorChain, 'row_fit_factors', product_fit_factors(
             reassociated_fit(mol, product_pairs(mol))))
         bar = run(**row_kw())
-        return rows, whole, bar
+        return rows, replicated, whole, bar
 
-    replicated = run(sliced=True)
     with monkeypatch.context() as patch:
-        rows, whole, bar = three(patch)
+        rows, replicated, whole, bar = four(patch)
+        patch.setattr(FactorChain, 'row_fit_factors',
+                      product_fit_factors(fit_M_stable, gram=False))
+        retired = run(**row_kw())
     with monkeypatch.context() as patch:
         patch.setattr(excited_state, 'solve_casida_davidson',
                       functools.partial(solve_casida_davidson,
                                         preconditioner='bare'))
-        bare = three(patch)
-    bare_own, bare_near = anchored(bare[1], bare[2], bare[0], ('bse_roots',))
+        bare = four(patch)
+    bare_own, bare_near = anchored(bare[2], bare[3], bare[0], ('bse_roots',))
+    bare_same, bare_beside = anchored(bare[2], bare[3], bare[1],
+                                      ('bse_roots',))
     certificate = (np.sqrt(len(whole['bse_roots'])) * GATE_BSE_CONV_TOL
                    / np.linalg.norm(whole['bse_roots']))
-    assert relative(rows['bse_roots'], whole['bse_roots']) <= certificate
+    for got in (rows, replicated):
+        assert relative(got['bse_roots'], whole['bse_roots']) <= certificate
     own, near = anchored(whole, bar, rows, on_bar)
-    other, apart = anchored(whole, bar, replicated, keys)
-    print('\nethylene, 2 ranks, against its own estimator: ' + '; '.join(own)
-          + '\n  the replicated fit against the same: ' + '; '.join(other)
+    # the replicated forces carry the whole-form adjoint, where the row fit
+    # and its reference carry the tiled one: its forward numbers are on the
+    # bar, its forces on the floor
+    same, beside = anchored(whole, bar, replicated, ('energy', 'root'))
+    other, apart = anchored(whole, bar, retired, keys)
+    print('\nethylene, 2 ranks, the row fit against the one estimator: '
+          + '; '.join(own)
+          + '\n  the replicated fit against the same: ' + '; '.join(same)
+          + '\n  the retired estimator against the same: ' + '; '.join(other)
           + '\n  on the bare d, the row fit: ' + '; '.join(bare_own)
+          + ', the replicated fit: ' + '; '.join(bare_same)
           + f"\n  max |d force| row fit - replicated "
             f"{np.abs(rows['force'] - replicated['force']).max():.2e} "
             f"Ha/Bohr, |d root| "
             f"{abs(rows['root'] - replicated['root']) * HARTREE_TO_EV:.2e} eV")
     assert max(near.values()) <= FIT_REASSOCIATION_K, own
+    assert max(beside.values()) <= FIT_REASSOCIATION_K, same
     assert max(bare_near.values()) <= FIT_REASSOCIATION_K, bare_own
+    assert max(bare_beside.values()) <= FIT_REASSOCIATION_K, bare_same
+    for key in ('force', 'drpa_force'):
+        assert (np.abs(replicated[key] - rows[key]).max()
+                < ISDF_GRADIENT_FLOOR), key
     assert min(apart.values()) > FIT_REASSOCIATION_K, other
 
 
@@ -740,6 +766,7 @@ def test_what_the_row_fit_cannot_serve_is_refused():
     # one rank is the row fit too, and the whole grid
     x_mo, d, *_ = chain.factors_at(chain.mol0, chain.mf0)
     assert isinstance(x_mo, np.ndarray) and len(x_mo) == chain.M
+
 
 
 if __name__ == '__main__':

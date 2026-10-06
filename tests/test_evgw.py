@@ -1,16 +1,11 @@
 """evGW: the spectrum reinjected into G and P0 until it stops moving.
 
-The two properties worth gating are an IDENTITY and a DIVERGENCE.
-
-The identity: the first cycle screens with the mean field's own eigenvalues, so
-it IS G0W0. If it ever stops being, the loop is not starting where it claims to.
-
-The divergence: the loop converges only because the quasiparticle equation stays
-anchored on the mean field while the screening follows the iterate. Anchor it on
-the iterate instead and each cycle adds its own correction a second time. That
-version still runs, still prints plausible numbers and never converges, so the
-test asserts it FAILS -- otherwise nothing here would notice the anchor being
-dropped.
+Two properties carry the gate, an identity and a divergence. The first cycle
+screens with the mean field's own eigenvalues, so it is G0W0. The loop
+converges only because the quasiparticle equation stays anchored on the mean
+field while the screening follows the iterate; anchored on the iterate, each
+cycle adds its own correction a second time and the gap runs away, which the
+test asserts so that a dropped anchor is noticed.
 
 evGW0 (`screening='fixed'`) is gated on the Casida problem being solved once
 for the whole loop and on its gap landing between G0W0 and evGW. In a
@@ -78,7 +73,7 @@ def check_the_first_cycle_is_g0w0(mf):
 
 
 def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
-    """evGW screens with the OPENED gap, so P0 is less polarizable, W less
+    """evGW screens with the opened gap, so P0 is less polarizable, W less
     screening, and the gap ends above the G0W0 one. A loop that came back below
     it would have the feedback backwards."""
     nocc = mf.mol.nelectron // 2
@@ -100,11 +95,15 @@ def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
     return ok
 
 
-def check_the_high_virtuals_do_not_decide_convergence(mf):
-    """They are discretised continuum, not quasiparticles: the solver picks a
-    different root for them from one cycle to the next, so a criterion over the
-    whole spectrum never converges even though the gap is stationary. The
-    residual they carry is reported rather than hidden."""
+def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
+    """The default decides convergence on the frontier pair; asked to decide
+    it on every state the loop converges within ten cycles, and cut short it
+    warns and reports the residual.
+
+    Converging on every state needs W's frequency grid to span the range its
+    transform to imaginary time is fitted over; frequencies built for the bare
+    transition window leave the high virtuals wandering from cycle to cycle.
+    """
     nocc = mf.mol.nelectron // 2
     _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20)
     ok = check(info['converged'] and set(info['converge_on']) == {nocc - 1, nocc},
@@ -115,21 +114,27 @@ def check_the_high_virtuals_do_not_decide_convergence(mf):
                 f"{info['residual_untested'] * HARTREE_TO_EV:.3e} eV vs "
                 f"{info['history'][-1] * HARTREE_TO_EV:.3e}")
     all_states = np.arange(len(np.asarray(mf.mo_energy)))
+    _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
+                               max_cycle=20)
+    ok &= check(wide['converged'] and len(wide['history']) <= 10,
+                'converging on every orbital converges too',
+                f"{len(wide['history'])} cycles, "
+                f"{wide['history'][-1] * HARTREE_TO_EV:.3e} eV")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
-                                   max_cycle=8)
-    ok &= check(not wide['converged']
-                and any('did not converge' in str(w.message) for w in caught),
-                'converging on every orbital does not, and says so')
+        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
+                                    max_cycle=3)
+    ok &= check(not short['converged']
+                and any('did not converge' in str(w.message) for w in caught)
+                and short['history'][-1] > wide['history'][-1],
+                'cut short, it does not converge and says so')
     return ok
 
 
 def check_the_anchor_is_what_makes_it_converge(mf):
-    """THE DISCRIMINATING TEST. Drive the same loop by hand with the equation
-    anchored on the ITERATE and it must diverge, opening the gap by a
-    near-constant amount every cycle. Without this, dropping `eps_anchor`
-    would leave every other test here passing."""
+    """The same loop driven by hand with the equation anchored on the iterate
+    diverges, opening the gap by more than 1 eV every cycle; without this
+    check, dropping `eps_anchor` would leave every other test here passing."""
     eps0 = np.asarray(mf.mo_energy, float)
     nocc = mf.mol.nelectron // 2
     states = np.arange(len(eps0))
@@ -140,8 +145,8 @@ def check_the_anchor_is_what_makes_it_converge(mf):
     eps = eps0.copy()
     gaps = []
     for _ in range(4):
-        # no eps_anchor: the route uses the iterate for BOTH the screening and
-        # the eps_p of w = eps_p + ... , which is the mistake
+        # no eps_anchor: the route uses the iterate for both the screening and
+        # the eps_p of w = eps_p + ..., which is the mistake
         w = np.asarray(solve_qp_energy_space_time(
             shifted_mean_field(mf, eps), mf.mol, nocc, states, ntau=ntau), float)
         eps = eps.copy()
@@ -194,7 +199,7 @@ def check_every_orbital_is_updated(mf):
 
 
 def check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
-    """A fixed point reached faster must be the SAME fixed point; an
+    """A fixed point reached faster must be the same fixed point; an
     accelerator that moved the answer would be extrapolating a different map.
     The comparison is against the damped linear mixing DIIS replaces, since on
     a two-electron system the undamped iteration already converges in five."""
@@ -247,8 +252,8 @@ def check_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
 
 
 def check_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
-    """`eps_anchor=None` must leave the single-shot route BITWISE as it was, or
-    threading the keyword moved every existing G0W0 number."""
+    """Anchoring the single-shot route on the mean field's own eigenvalues is
+    bitwise the unanchored call."""
     nocc = mf.mol.nelectron // 2
     states = np.arange(len(np.asarray(mf.mo_energy)))
     plain = np.asarray(solve_qp_energy_space_time(mf, mf.mol, nocc, states,
@@ -351,10 +356,9 @@ def check_the_refusals(mf):
 
 
 def check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
-    """The point of the loop. chi0 must be evaluated once per cycle on the
-    CURRENT eigenvalues, and W is its Dyson inverse -- a screening cached on
-    the geometry instead of the spectrum would leave every cycle re-solving
-    against the mean field's W and converge to G0W0 with extra steps.
+    """chi0 is evaluated once per cycle on the current eigenvalues, and W is
+    its Dyson inverse; a screening cached on the geometry instead of the
+    spectrum would converge to G0W0 with extra steps.
 
     The norm falling is the physics: the gap opens, chi0 is less polarizable,
     W is less screened.
@@ -388,11 +392,10 @@ def check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
 
 
 def check_screen_at_selects_which_spectrum_builds_w(mf):
-    """The convention is the LEVEL OF THEORY: G0W0 screens W0 at the mean
-    field, evGW at its fixed point. An explicit `qp` array therefore defaults
-    to the standard G0W0 split, and `screen_at='qp'` is the opt-in for an array
-    that IS a converged spectrum. The difference is tens of meV between the DF
-    and full-integral routes, so the knob has to reach the W build."""
+    """G0W0 screens W0 at the mean field, evGW at its fixed point. An explicit
+    `qp` array therefore defaults to the G0W0 split, and `screen_at='qp'` is
+    the opt-in for an array that is a converged spectrum; the knob must reach
+    the W build."""
     eps_qp, _ = evgw_eigenvalues(mf, mf.mol, max_cycle=3, tol=0.0)
     nocc = mf.mol.nelectron // 2
     seen = {}
@@ -464,8 +467,8 @@ def check_an_unrestricted_reference_is_driven_channel_by_channel():
                 f"{fixed['cycles']} cycles")
     # The space-time route drives the same loop: one W from both spins of the
     # iterate, each channel's self-energy. Its frontier fixed points sit within
-    # the continuation's error of the Casida loop's -- 3.3 meV at most here,
-    # the beta pair, where Pade feeds every deep level back into W.
+    # the continuation's error of the Casida loop's (largest on the beta pair,
+    # where Pade feeds every deep level back into W).
     eps_st, st = evgw_eigenvalues(mf, mol, mode='space-time')
     frontier = [(0, na - 1), (0, na), (1, nb - 1), (1, nb)]
     worst = max(abs(eps_st[s, p] - eps[s, p]) for s, p in frontier) * HARTREE_TO_EV
@@ -480,7 +483,7 @@ def check_evgw0_keeps_w_and_moves_the_poles():
     solved once for the whole loop, and only the poles of Sigma_c follow the
     iterate. Its gap lands between G0W0 and evGW on water: the moved poles open
     it, the frozen W leaves it below the loop that screens less every cycle.
-    The first cycle IS the Casida G0W0, or the loop starts elsewhere."""
+    The first cycle is the Casida G0W0."""
     mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol)
@@ -546,13 +549,10 @@ def check_evgw0_keeps_w_and_moves_the_poles():
 def check_the_reaction_field_follows_the_iterate():
     """In a continuum the reaction field's Delta W screens with the eigenvalues
     it is built at, so the evGW step on the Casida route rebuilds its term
-    every cycle at the iterate, as the imaginary-axis routes do by calling
-    calc_qp_energy on the shifted view. On water with a continuum of
-    eps_inf = 1.78 and a spectrum opened by 0.5 eV, one step equals
-    calc_qp_energy on that view anchored on the mean field, every state within
-    1e-10 Ha; the term itself moves the HOMO by more than 1e-6 Ha between the
-    two spectra, ten thousand times that, so a term kept at the mean field
-    would show. evGW0 keeps it at the mean field with the rest of W."""
+    every cycle at the iterate. On water with eps_inf = 1.78 and a spectrum
+    opened by 0.5 eV, one step equals calc_qp_energy on that view anchored on
+    the mean field to 1e-10 Ha, while the term moves the HOMO by more than
+    1e-6 Ha between the two spectra. evGW0 keeps it at the mean field."""
     mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
@@ -663,7 +663,7 @@ def run():
     all_ok &= check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf)
     all_ok &= check_screen_at_selects_which_spectrum_builds_w(mf)
     print('\n-- 4. convergence machinery')
-    all_ok &= check_the_high_virtuals_do_not_decide_convergence(mf)
+    all_ok &= check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf)
     all_ok &= check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf)
     all_ok &= check_the_shift_view_does_not_move_the_original(mf)
     all_ok &= check_the_shift_view_builds_j_and_k_on_the_direct_path(mf)

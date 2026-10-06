@@ -8,51 +8,40 @@ and the orbital-rotation product X_mo^T X_bar run in the same tiles.
 Gated over 1, 2, 3 and 8 simulated ranks (`run_simulated`) on water/cc-pVDZ
 Hartree-Fock at 148 points per atom in tiles of `TILE` points (7 tiles):
 
-  (a) BITWISE ACROSS RANK COUNTS on fixed adjoints, water and ethylene:
-      `fit_rows_adjoint` (its centre terms and point adjoints, fit and
-      collocation) and `orbital_rotation_rows` give every rank the bits of
-      the one-rank run. THE ANCHORED BAR against the whole adjoint
-      (`dfactor_adjoint_gauges` over every product pair,
-      `collocation_adjoint`, X_mo^T X_bar in one product): each branch sits
+  (a) On fixed adjoints, water and ethylene: `fit_rows_adjoint` (its centre
+      terms and point adjoints, fit and collocation) and
+      `orbital_rotation_rows` give every rank the one-rank run's bits. Against
+      the whole adjoint (`dfactor_adjoint_gauges` over every product pair,
+      `collocation_adjoint`, X_mo^T X_bar in one product) each branch lies
       within `FIT_REASSOCIATION_K` times what the whole branch moves when its
-      own sums are reordered -- the fit's sums over the test set cut per
-      shell and accumulated in reverse, the collocation's and the product's
-      sums over the grid cut per tile and accumulated in reverse.
-  (b) THE FORCE: the composed state-pair force at a displaced geometry and
-      the dRPA force on the row fit, the new assembly against the whole one
+      own sums are reordered: the fit's sums over the test set cut per shell
+      and accumulated in reverse, the collocation's and the product's sums
+      over the grid cut per tile and accumulated in reverse.
+  (b) The force: the composed state-pair force at a displaced geometry and
+      the dRPA force on the row fit, the tiled assembly against the whole one
       at the same rank count. Bitwise between the two: the energy, the root
       and every adjoint the kernels hand the assembly (eps_bar, X_bar,
-      D_bar) -- the same run up to the assembly. Anchored: the orbital,
-      collocation and fit branches and the force, within
-      `FIT_REASSOCIATION_K` times what the whole assembly's force moves when
-      its fit's sums are reordered. Every rank holds rank 0's force.
-  (c) THE MEMORY SCAN at every force (`test_chain_row_fit.watch`): every
-      line of every frame under src/ inside the nuclear assembly is traced,
-      and no array it names holds the grid by a factor's, the fit's or the
-      test set's width, or the dense (mu nu|P), beyond the X_bar and D_bar
-      handed in; the adjoint's ledger holds every grid-indexed array at this
-      rank's tiles, the metric root and its adjoint on rank 0 alone. The
-      scan fails the whole assembly.
-  (d) the dRPA force of ethylene on the row fit (72 of 2304 pairs screened)
+      D_bar). Anchored: the orbital, collocation and fit branches and the
+      force, within `FIT_REASSOCIATION_K` times what the whole assembly's
+      force moves when its fit's sums are reordered. Every rank holds rank
+      0's force.
+  (c) The memory scan at every force (`test_chain_row_fit.watch`): every line
+      of every frame under src/ inside the nuclear assembly is traced, and no
+      array it names holds the grid by a factor's, the fit's or the test
+      set's width, or the dense (mu nu|P), beyond the X_bar and D_bar handed
+      in; the adjoint's ledger holds every grid-indexed array at this rank's
+      tiles, the metric root and its adjoint on rank 0 alone. The scan fails
+      the whole assembly.
+  (d) The dRPA force of ethylene on the row fit (72 of 2304 pairs screened)
       against a five-point difference of its own energy, beside the whole
-      assembly of the same estimator and the one of `_fit`'s.
-  (e) THE MEAN FIELD'S OWN FORCE is rank 0's on every rank. pyscf blocks a
-      density-fitted gradient's auxiliary index by the process's free
-      memory, so separate processes re-associate it differently; here each
-      simulated rank reports its own free memory to `pyscf.df.grad.rhf`
-      (`RankMemoryLib`) and the composed `total_gradient`, whole-fit and
-      row-fit, must still be the same bits on every rank at 3 and 8 ranks.
-      Without the lockstep in `FactorChain.mean_field_gradient` it failed
-      at 3 ranks for both layouts, rank 1 != rank 0, as the 8-rank cluster
-      run of tests/test_mpi_routes.py did.
-
-SHOWN TO FAIL, then restored and byte-compared (`cmp`): the adjoint's Gram
-stream silently falling back to the whole Gram matrix -- S = (X X^T) o
-(B B^T) + P P^T formed over the whole grid on every rank and read by tile
-for d_bar -- left (a), the force and branch gates of (b) and the ledger
-green, and failed the traced scan of (c) at 2, 3 and 8 ranks on all three
-forces, naming the whole Gram matrix (444, 444) and the whole collocations
-it was formed from, (444, 24) and (444, 84).
+      assembly of the same estimator and the screened-Gram estimator (the
+      Gram matrix over the screened pairs alone), which misses it.
+  (e) The mean field's own force is rank 0's on every rank. pyscf blocks a
+      density-fitted gradient's auxiliary index by the process's free memory,
+      so separate processes reassociate it differently; here each simulated
+      rank reports its own free memory to `pyscf.df.grad.rhf`
+      (`RankMemoryLib`), and the composed `total_gradient`, whole-fit and
+      row-fit, is the same bits on every rank at 3 and 8 ranks.
 """
 import inspect
 import os
@@ -68,7 +57,7 @@ from pyscf.df.grad import rhf as pyscf_df_grad
 from src.Base.constants import FIT_REASSOCIATION_K, ISDF_GRADIENT_FLOOR
 from src.Base import separable_ri
 from src.Base.separable_ri import DEFAULT_REGULARIZATION, fit_rows_adjoint
-from src.Base.sliced_factors import SlicedFactors
+from src.Base.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
 from src.gradients import isdf_derivatives
 from src.gradients.factor_chain import FrozenFactorization
@@ -90,9 +79,9 @@ SIZES = [1, 2, 3, 8]
 
 
 def reassociated_fit_adjoint(mol, gram):
-    """`isdf_derivatives.fit_adjoint` with its sums over the test set -- the
-    row norms, the Gram matrix, F Dt^T and the balancing's row sums -- cut
-    per mu shell and accumulated in reverse: the whole adjoint's anchor."""
+    """`isdf_derivatives.fit_adjoint` with its sums over the test set (the
+    row norms, the Gram matrix, F Dt^T and the balancing's row sums) cut per
+    mu shell and accumulated in reverse: the whole adjoint's anchor."""
     mu = np.asarray(gram[0])
     ao_loc = mol.ao_loc_nr()
     shells = [np.flatnonzero((mu >= ao_loc[s]) & (mu < ao_loc[s + 1]))
@@ -229,6 +218,19 @@ def test_the_adjoint_on_fixed_adjoints(atom):
 
 
 # ------------------------------------------------------------ (b) and (c)
+def logged(a):
+    """A copy of the adjoint `a` for the log, whole: grid tiles gathered with
+    the force's scan paused, since the log's copy is not the force's."""
+    if not isinstance(a, GridTileRows):
+        return np.array(a)
+    tracer = sys.gettrace()
+    sys.settrace(None)
+    try:
+        return a.gather()
+    finally:
+        sys.settrace(tracer)
+
+
 def record(surface, branches, inputs):
     """Wrap both halves of `surface` so that every nuclear assembly logs the
     adjoints the kernels hand it into `inputs` and its three branches into
@@ -239,7 +241,7 @@ def record(surface, branches, inputs):
         def logged_inputs(*args, assemble=assemble, half=half, **kwargs):
             got = inspect.signature(type(half).nuclear_gradient).bind(
                 half, *args, **kwargs).arguments
-            inputs.append(tuple(np.array(got[k])
+            inputs.append(tuple(logged(got[k])
                                 for k in ('eps_bar', 'x_bar', 'd_bar')))
             return assemble(*args, **kwargs)
 
@@ -262,7 +264,7 @@ def per_shell_blocks(mol, nk, n2, naux, block_memory_gb):
 
 @pytest.mark.parametrize('size', SIZES)
 def test_the_force_on_the_row_fit_adjoint(size, monkeypatch):
-    """The composed and the dRPA force of the row fit, the new assembly
+    """The composed and the dRPA force of the row fit, the tiled assembly
     against the whole one at the same rank count, every force scanned."""
     monkeypatch.setattr(separable_ri, 'ao_blocks', per_shell_blocks)
 
@@ -324,8 +326,8 @@ def test_the_force_on_the_row_fit_adjoint(size, monkeypatch):
 
 
 def test_the_scan_fails_the_whole_assembly(monkeypatch):
-    """The traced scan finds what the whole assembly forms -- the Gram
-    matrix, the test set's collocation, the dense (mu nu|P) -- and the
+    """The traced scan finds what the whole assembly forms (the Gram
+    matrix, the test set's collocation, the dense (mu nu|P)), and the
     ledger check finds no ledger."""
     def rank(comm):
         log = []
@@ -349,8 +351,8 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
 # ------------------------------------------------------------------- (d)
 def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     """The dRPA force of the row fit against a five-point difference of its
-    own energy, beside the whole assembly of the same estimator and the one
-    of `_fit`'s, which misses it."""
+    own energy, beside the whole assembly of the same estimator and that of
+    the screened-Gram estimator, which misses it."""
     mol = molecule(ETHYLENE)
     with distributed(None):
         chain = RPAGroundStateChain(mol, chain_scf, **row_kw())
@@ -371,16 +373,17 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
             fd.append((values[0] - 8 * values[1] + 8 * values[2] - values[3])
                       / (12 * FD_STEP))
         others = {}
-        for name, gram in (('whole', True), ("_fit's", False)):
+        for name, gram in (('whole', True), ('retired', False)):
             with monkeypatch.context() as patch:
                 patch_whole_assembly(patch, gram=gram)
                 others[name] = chain.total_gradient()[0]
     pick = lambda g: np.array([g[ia, x] for ia, x in FD_COMPONENTS])
     err = np.abs(pick(grad) - fd).max()
     whole = np.abs(pick(others['whole']) - fd).max()
-    wrong = np.abs(pick(others["_fit's"]) - fd).max()
+    wrong = np.abs(pick(others['retired']) - fd).max()
     print(f'\nethylene dRPA on the row fit: |analytic - fd| {err:.2e}, the '
-          f"whole assembly {whole:.2e}, _fit's estimator {wrong:.2e} Ha/Bohr")
+          f'whole assembly {whole:.2e}, the retired estimator {wrong:.2e} '
+          'Ha/Bohr')
     assert err < ISDF_GRADIENT_FLOOR
     assert whole < ISDF_GRADIENT_FLOOR
     assert wrong > 100 * ISDF_GRADIENT_FLOOR

@@ -1,23 +1,22 @@
 """Every distributed route reproduces the serial answer under simulated ranks.
 
 `mpi_grid.simulated_world` runs each rank in a thread of this process and
-reduces through shared memory, so the whole distributed code path -- the tau
+reduces through shared memory, so the whole distributed code path (the tau
 partitions, the frequency partitions, the row split of Zt, every reduction
-and its placement -- runs here, where MPI itself cannot start (the sandboxed
-test runner refuses the socket MPI_Init binds). What it does not test is the
-wire protocol; tests/test_mpi_routes.py under mpirun does.
+and its placement) runs here without MPI. The wire protocol is tested by
+tests/test_mpi_routes.py under mpirun.
 
-Two and three ranks, because one of each kind of imbalance is enough to catch
-a partition that only works when everything divides evenly: with 8 tau points
-and 24 frequencies, three ranks leave remainders on both axes.
+Two and three ranks: with 8 tau points and 24 frequencies, three ranks leave
+remainders on both axes, which catches a partition that only works when
+everything divides evenly.
 
 Gates, all against the serial call in the same process:
   * quasiparticle-set gradient (`qp_set_gradient`): roots bitwise, the three
-    adjoints at 1e-11 relative -- the frequency-outside reverse pass sums the
-    states' adjoints in a different order under a partition;
-  * the SINGLE-state quasiparticle gradient (`qp_gradient_space_time`), the
+    adjoints at 1e-11 relative (the frequency-outside reverse pass sums the
+    states' adjoints in a different order under a partition);
+  * the single-state quasiparticle gradient (`qp_gradient_space_time`), the
     same partition with one state, on the contour-deformation and the
-    pole-model route -- and again at 8 and 16 ranks, where the fixture has
+    pole-model route, and again at 8 and 16 ranks, where the fixture has
     fewer tau points than ranks and the surplus own an empty block;
   * dRPA correlation energy and adjoint (`rpa_energy_and_adjoint`);
   * the BSE kernel's static W (`static_screening`);
@@ -29,14 +28,14 @@ Gates, all against the serial call in the same process:
     its GW stage's diagonal and W(0), bitwise the BSE that solves them itself;
   * the in-core GW route split over grid rows (`_qp_grid_rows`) at 2, 3, 8,
     32 and 64 ranks, on tiles and blocks small enough that from 3 ranks up
-    the ranks share a tau point's tiles and block pairs: its two REDUCED sums
-    -- proj(tau) over the grid-row tiles, the branch sums of Sigma over the
-    block pairs -- on their rounding bound (tests/reduction_bounds.py): the
+    the ranks share a tau point's tiles and block pairs: its two reduced sums
+    (proj(tau) over the grid-row tiles, the branch sums of Sigma over the
+    block pairs) on their rounding bound (tests/reduction_bounds.py): the
     serial kernel's addends in its order are its result, every rank's
     partial its own items' addends in that order, bitwise, and the reduced
     sum within `join_bound` of the exact sum of the ranks' partials, half an
     ulp per join of two of them, floored at one ulp of its largest element;
-    its OUTPUT PARTITIONS bitwise: chi0's rows the serial update of the
+    its output partitions bitwise: chi0's rows the serial update of the
     gathered proj rows, each W and W(0) the serial inversion of its gathered
     chi0, Wt's rows those of one rank on the same W, the pair-built Sigma the
     transform of its reduced branch sums, the driver's W(0) the kernels';
@@ -49,16 +48,15 @@ Gates, all against the serial call in the same process:
     the serial force's sums on one BLAS thread moves it, floored at
     `COMPOSED_GRAD_FLOOR` for the excitation force and at the ISDF gradient
     reproducibility floor for the quasiparticle force;
-  * that the ranks are made to hold ONE calculation and to follow ONE
-    iteration: `replicate`, and the BSE run with rank 1 handed a perturbed
-    spectrum and perturbed factors, which must come back as rank 0's roots,
-    bitwise, with every rank's Davidson taking rank 0's iteration count; the
-    GW window with rank 1
-    handed a perturbed mean field, which its entry lockstep repairs, and
-    perturbed factors, which it does NOT broadcast again -- factors are
-    identical by construction, `separable_factors` locksteps its own -- and
+  * that the ranks hold one calculation and follow one iteration:
+    `replicate`, and the BSE run with rank 1 handed a perturbed spectrum and
+    perturbed factors, which must come back as rank 0's roots, bitwise, with
+    every rank's Davidson taking rank 0's iteration count; the GW window with
+    rank 1 handed a perturbed mean field, which its entry lockstep repairs,
+    and perturbed factors, which it does not broadcast again (factors are
+    identical by construction; `separable_factors` locksteps its own) and
     which an audited run reports instead (`mpi_grid.agreement`);
-  * that they hold ONE GRID, which a chain decides for itself rather than
+  * that they hold one grid, which a chain decides for itself rather than
     receiving: a `FactorChain` built on every rank with rank 1's radii,
     frames and fit perturbed must end with rank 0's radii, clouds, frames,
     points, pair layout and fit, the radii search having run on every rank;
@@ -70,62 +68,14 @@ Gates, all against the serial call in the same process:
     grid here bitwise and still refuse a NaN row.
 Water/cc-pVDZ, Hartree-Fock, one factorization shared by every test.
 
-WHICH GATES ARE BITWISE. A reduction over disjoint zero-padded slots --
-proj(tau) and the branch sums of the self-energy, where a rank writes only the
-tau points it owns -- adds exact zeros and is bitwise. Everything reduced as a
-PARTIAL SUM is re-associated instead: chi0 accumulates its tau points as they
+Which gates are bitwise. A reduction over disjoint zero-padded slots
+(proj(tau) and the branch sums of the self-energy, where a rank writes only the
+tau points it owns) adds exact zeros and is bitwise. Everything reduced as a
+partial sum is re-associated instead: chi0 accumulates its tau points as they
 arrive, Wt(tau) and projbar sum over frequencies, so a partition sums the same
-terms in a different order and the agreement is at the last bits, not in them.
-Those gates are relative, and the tolerance says so -- `SIGMA_REL` where the
-re-associated sum is a cancelling one and the last bits move further.
-
-EVERY GATE HERE WAS SHOWN TO FAIL. A reduction turned into a no-op (the
-collective still called, on a copy, so the ranks stay in step and the failure
-is a wrong answer rather than a deadlock) breaks exactly the gate that covers
-it:
-
-  reduction made a no-op                 gates that then fail
-  chi0 in `static_screening`             static_screening (both sizes) and
-                                         both chain gradients, 1.2e-2 and
-                                         1.6e-2 Ha/Bohr out
-  Wt(tau) in `screened_interaction_tau`  screened_interaction_tau, and every
-                                         self-energy forward and backward
-  Wt_bar in selfenergy_BLOCK_backward    the block gate only; the diagonal
-                                         one still passes
-  Wt_bar in selfenergy_DIAG_backward     the diagonal gate only
-  projbar in `qp_gradient_space_time`    both routes of the single-state
-                                         gradient and both chain gradients,
-                                         1.6e-3 and 2.2e-3 Ha/Bohr out
-
-  replicate made a no-op                 test_replicate_overwrites_every_rank;
-                                         and the
-                                         perturbed-rank BSE, where the mixed
-                                         partials put min eig(A-B) at
-                                         -0.031 Ha and the driver refused the
-                                         solve as an unstable REFERENCE -- the
-                                         defect wearing the mask of physics
-  the GW window's entry lockstep of the  the perturbed-mean-field GW window:
-  mean field removed                     every rank 0.45 Ha off serial, the
-                                         ranks' chi0 partials taken from two
-                                         spectra
-  TRANSFORM_FIT_RCOND raised to 1e-14    test_transform_pseudo_inverse: this
-                                         grid's omega -> tau weights move in
-                                         the sixth digit
-  the construction lockstep of           the radii, 5% apart -- the first of
-  `FrozenFactorization` removed          the six arrays that gate compares
-  `coords`'s lockstep removed            test_placed_points_are_rank_zeros,
-                                         rank 1's continued frames placing its
-                                         own points; the frozen-frame gate
-                                         still passes, its points being one
-                                         function of the locked clouds
-  `shareable_factors`'s lockstep         the fit M, rank 1's 1e-6 intact;
-  removed                                X_ao and the layout are the same
-                                         function of one grid and stay
-                                         bitwise, which is what says it is
-                                         the fit this one carries
-  the cache temporary named on the       test_cache_write_survives_a_shared_path,
-  pid again (`write_json_atomic`)        with a JSONDecodeError inside the file
-                                         the rename published
+terms in a different order and agrees to the last bits. Those gates are
+relative: `SIGMA_REL` where the re-associated sum is a cancelling one and the
+last bits move further.
 """
 import copy
 import json
@@ -190,19 +140,19 @@ from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, ROW_NTAU,
 
 NTAU, NFREQ = 8, 24
 REL = 1e-11
-#: The self-energy routes re-associate a CANCELLING sum. Wt(tau) is
+#: The self-energy routes re-associate a cancelling sum. Wt(tau) is
 #: sum_w Ctw[t,w] (W_w - I) with minimax weights that alternate in sign and
 #: are large against Wt itself, so a partition over frequency moves the last
-#: bits by the cancellation factor of that sum -- measured 1e-12 here against
-#: the 1e-16 of a benign one, and unchanged from 8 to 24 tau points, which is
-#: what says it is the transform and not the grid's fit.
+#: bits by the cancellation factor of that sum (1e-12 here against the 1e-16
+#: of a benign one, unchanged from 8 to 24 tau points: the transform, not the
+#: grid's fit).
 SIGMA_REL = 1e-10
 SIZES = [2, 3]
 #: More ranks than the fixture has items on an axis, where the surplus own an
-#: EMPTY block: 8 ranks is one tau point each, 16 leaves eight ranks with no
+#: empty block: 8 ranks is one tau point each, 16 leaves eight ranks with no
 #: tau point at all and every rank one or two frequencies. Run on the
-#: single-state gradient alone -- it carries both partitions and every
-#: reduction of the set route on one state, at a sixteenth of the cost.
+#: single-state gradient alone, which carries both partitions and every
+#: reduction of the set route on one state.
 MANY = [8, 16]
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -272,7 +222,7 @@ def test_qp_set_gradient(water, size, route):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('route', ['explicit', 'sop'])
 def test_qp_gradient_space_time(water, size, route):
-    """The SINGLE-state route carries `qp_set_gradient`'s partition.
+    """The single-state route carries `qp_set_gradient`'s partition.
 
     Both branches of the reverse pass are exercised: 'explicit' takes the
     contour-deformation weights, where eps_bar picks up the Lorentzian's own
@@ -302,17 +252,17 @@ def test_qp_gradient_space_time(water, size, route):
 @pytest.mark.parametrize('size', MANY)
 @pytest.mark.parametrize('route', ['explicit', 'sop'])
 def test_qp_gradient_space_time_empty_blocks(water, size, route):
-    """The same route where a rank owns NOTHING on an axis.
+    """The same route where a rank owns nothing on an axis.
 
     An empty block must contribute what the serial sum contributes for those
-    indices -- nothing, in the same shape and dtype -- so eight tau points over
+    indices (nothing, in the same shape and dtype), so eight tau points over
     sixteen ranks give the serial answer as exactly as two ranks do:
     `partition` hands back an empty index array, the sweep writes no slot, and
     the reduction adds exact zeros. The frequency axis is never empty here (24
     over 16) but drops to one row a rank, which is where a contraction written
     for a block rather than a row would break.
 
-    BITWISE HERE IS A PROPERTY OF THIS COMMUNICATOR, not of the route: the
+    Bitwise here is a property of this communicator, not of the route: the
     simulated reduction adds the ranks' buffers in rank order. A real
     `Allreduce` adds them in whatever order its tree picks, which the
     zero-padded forward partitions survive and the reverse pass's partial sums
@@ -440,8 +390,8 @@ def test_selfenergy_diag_and_backward(water, size):
 def test_rpa_energy_and_adjoint(water, size):
     w = water
     args = (w['X'], w['D'], w['eps'], w['nocc'], w['grid'])
-    # (E_c, eps_bar, X_bar, D_bar) first; a fold adjoint may follow in trees
-    # that carry the solvated dRPA fold, and is not this test's business
+    # (E_c, eps_bar, X_bar, D_bar) first; a fold adjoint (the solvated dRPA
+    # fold) may follow and is not this test's business
     e0, eps0, X0, D0 = rpa_energy_and_adjoint(*args, mu=w['mu'])[:4]
 
     def one_rank(comm):
@@ -456,9 +406,9 @@ def test_rpa_energy_and_adjoint(water, size):
 def test_static_w_and_bse(water, size):
     # probe=False here: this gate is the reduction, and the probe is a second
     # eigensolver in front of it. Replicated on every rank it is a Lanczos
-    # (`davidson._lanczos_lowest`), not ARPACK -- scipy's eigsh holds one
+    # (`davidson._lanczos_lowest`), not ARPACK (scipy's eigsh holds one
     # process-wide lock across its whole iteration, so rank threads deadlock
-    # in it -- and test_bse_is_rank_zeros_with_perturbed_ranks turns it on.
+    # in it); test_bse_is_rank_zeros_with_perturbed_ranks turns it on.
     w = water
     _, _, W0 = isdf_bse_factors(w['mf'], w['mol'], w['nocc'], factors=w['factors'])
     om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
@@ -821,18 +771,14 @@ def chain_scf(mol):
 
 
 def own_chain():
-    """A chain on this rank's OWN Mole.
+    """A chain on this rank's own Mole.
 
-    ONE MOLE PER RANK, AND NOT BECAUSE OF THE PHYSICS. The nuclear gradient
-    reaches pyscf's `hcore_generator`, which evaluates the nuclear-attraction
-    derivative inside `mol.with_rinv_at_nucleus(ia)` -- an IN-PLACE write to
-    the shared `mol._env`. Real ranks are separate processes and never see
-    each other's; two rank THREADS sharing one Mole overwrite each other's
-    rinv origin, and the barriers here make them collide reliably (measured:
-    the ranks then return gradients 0.5 Ha/Bohr apart, and disagree with each
-    other, while the distributed sweeps themselves agree bitwise across
-    ranks). That is an artifact of simulating ranks inside one process, not a
-    property of the distribution; giving each rank its own Mole removes it.
+    One Mole per rank is an artifact of simulating ranks in one process, not
+    physics: the nuclear gradient reaches pyscf's `hcore_generator`, which
+    evaluates the nuclear-attraction derivative inside
+    `mol.with_rinv_at_nucleus(ia)`, an in-place write to the shared
+    `mol._env`. Two rank threads sharing one Mole overwrite each other's rinv
+    origin and return gradients far apart; real ranks are separate processes.
     """
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
     return ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol))
@@ -911,32 +857,29 @@ def test_replicate_overwrites_every_rank(water):
 def test_frozen_conventions_are_rank_zeros(monkeypatch):
     """The chain's grid and its fit are rank 0's on every rank that decided them.
 
-    THE ROUTES REPLICATE THEIR INPUTS; THE CHAIN DECIDES ITS OWN. Every
-    distributed entry point starts by overwriting the ranks' mean field and
-    factors with rank 0's, which is why they agree across ranks. A chain does
-    not: it freezes radii, interpolation points, frames and a pair layout at
-    the reference geometry, and each rank would freeze its own -- ranks on
-    different machines then carry different surfaces, whose forces differ by
-    1e-3 Ha/Bohr and more.
+    The routes replicate their inputs (every distributed entry point
+    overwrites the ranks' mean field and factors with rank 0's); a chain
+    decides its own, freezing radii, interpolation points, frames and a pair
+    layout at the reference geometry, and without a lockstep ranks on
+    different machines would carry different surfaces.
 
     Rank 1 is given an atomic optimizer that returns radii 5% larger, frames
-    and a fit off in their last bits -- the three ways a rank on another
-    machine differs: a local descent on a multi-modal objective landing on
-    another minimum, an `eigh`, and a dense solve. None may survive: the radii,
-    the clouds, the frames, the points, the pair layout and the fit come back
-    bitwise rank 0's. Every rank runs the search, as serial code, and the
-    counter shows it did -- the lockstep after it is what makes the answer one.
+    and a fit off in their last bits: the three ways a rank on another
+    machine differs (a local descent on a multi-modal objective landing on
+    another minimum, an `eigh`, and a dense solve). The radii, the clouds, the
+    frames, the points, the pair layout and the fit must come back bitwise
+    rank 0's. Every rank runs the search, as serial code, and the counter
+    shows it did; the lockstep after it makes the answer one.
 
-    A perturbation is needed to see any of this at all. Two rank THREADS run
-    the same arithmetic on the same libraries and agree bit for bit, where
-    separate processes on separate machines need not -- so the divergence is
-    INJECTED here, and what is gated is that the lockstep erases it.
+    Two rank threads run the same arithmetic on the same libraries and agree
+    bit for bit, so the divergence is injected here, and what is gated is
+    that the lockstep erases it.
     """
     calls = []
     local = threading.local()
     real_radii = factor_chain.runtime_atomic_radii
     real_frames = factor_chain.atomic_frames
-    real_fit = factor_chain.fit_M_stable
+    real_fit = factor_chain.fit_M_streaming
 
     def rank():
         return getattr(local, 'rank', 0)
@@ -954,13 +897,13 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
         axes, degenerate = real_frames(mol, **kw)
         return (axes if rank() == 0 else axes * (1.0 + 1e-12)), degenerate
 
-    def fit(D, F, **kw):
-        out = real_fit(D, F, **kw)
+    def fit(mol, auxmol, coords, **kw):
+        out = real_fit(mol, auxmol, coords, **kw)
         return out if rank() == 0 else out * (1.0 + 1e-6)
 
     monkeypatch.setattr(factor_chain, 'runtime_atomic_radii', optimizer)
     monkeypatch.setattr(factor_chain, 'atomic_frames', frames)
-    monkeypatch.setattr(factor_chain, 'fit_M_stable', fit)
+    monkeypatch.setattr(factor_chain, 'fit_M_streaming', fit)
 
     def one_rank(comm):
         local.rank = comm.Get_rank()
@@ -994,7 +937,7 @@ def test_placed_points_are_rank_zeros(monkeypatch):
     """The interpolation points placed at a displaced geometry are rank 0's.
 
     Frozen frames place the points by one small matmul of the locked clouds,
-    which two rank threads compute bit for bit alike; CONTINUED frames are
+    which two rank threads compute bit for bit alike; continued frames are
     re-derived at every geometry (`continued_frames`, through the `eigh` of
     `atomic_frames`), which is where a rank's own bits enter. Rank 1's
     continued frames are moved in their last bits here, and every rank must
@@ -1026,7 +969,7 @@ def test_cache_write_survives_a_shared_path(tmp_path):
     The radii cache is written by whichever rank optimizes first, and a job
     array optimizes the same element from every machine at once onto one
     shared filesystem. A temporary named on the pid is not unique across
-    MACHINES -- pids repeat from one machine to the next -- so the two writers
+    machines (pids repeat from one machine to the next), so the two writers
     open the same temporary, each truncating the other's bytes, and the rename
     then publishes a torn file that every reader takes for a cache hit. Two
     threads of one process reproduce it exactly, since they share a pid.
@@ -1061,10 +1004,10 @@ def test_cache_write_survives_a_shared_path(tmp_path):
 
 def _rank_inputs(w, comm, shift=1e-3, scale=1.0 + 1e-6, mean_field=True,
                  factors=True):
-    """This rank's own mean field and factors; rank 1's are PERTURBED.
+    """This rank's own mean field and factors; rank 1's are perturbed.
 
-    The perturbation is enormous next to the last-bit drift it stands for --
-    1 mHa on the virtuals and 1e-6 on the orbitals, 1e-6 on the collocation --
+    The perturbation is enormous next to the last-bit drift it stands for
+    (1 mHa on the virtuals and 1e-6 on the orbitals, 1e-6 on the collocation),
     so nothing that reads rank 1's data or follows rank 1's decisions can come
     back with rank 0's answer by accident. `mean_field` and `factors` choose
     which of the two rank 1 gets wrong.
@@ -1084,19 +1027,18 @@ def _rank_inputs(w, comm, shift=1e-3, scale=1.0 + 1e-6, mean_field=True,
 
 @pytest.mark.parametrize('size', SIZES)
 def test_bse_is_rank_zeros_with_perturbed_ranks(water, size):
-    """The whole ISDF BSE returns RANK 0's roots when the other ranks arrive
-    with different numbers -- and every rank takes rank 0's iteration.
+    """The whole ISDF BSE returns rank 0's roots when the other ranks arrive
+    with different numbers, and every rank takes rank 0's iteration.
 
-    Two defects at once, both seen under real ranks at this very setting. (1)
-    The ranks' data: rank 1's spectrum and factors are replaced by rank 0's, so
-    the reduced exchange partials belong to one calculation. (2) The ranks'
-    decisions: every rank runs the Davidson, on trial vectors the block action
-    locksteps at entry and an action output identical on every rank, so every
-    rank takes rank 0's decisions and the batch shapes cannot diverge -- under
-    real ranks the divergence showed as MPI_ERR_TRUNCATE in the batch reduction
-    and as a subspace Cholesky failing on one rank alone. The vind-call and
-    iteration counts are therefore rank 0's on every rank, and the roots,
-    locked to rank 0's on the way out, are rank 0's bits.
+    (1) The ranks' data: rank 1's spectrum and factors are replaced by rank
+    0's, so the reduced exchange partials belong to one calculation. (2) The
+    ranks' decisions: every rank runs the Davidson, on trial vectors the block
+    action locksteps at entry and an action output identical on every rank, so
+    the batch shapes cannot diverge (under real ranks a divergence shows as
+    MPI_ERR_TRUNCATE in the batch reduction or a subspace Cholesky failing on
+    one rank alone). The vind-call and iteration counts are therefore rank 0's
+    on every rank, and the roots, locked to rank 0's on the way out, are rank
+    0's bits.
 
     Not bitwise against the serial call, and cannot be: the row split
     re-associates the sum over grid points inside the block action. 1e-10 is
@@ -1138,12 +1080,11 @@ def test_qp_window_is_rank_zeros_with_perturbed_mean_field(water, size):
     """The distributed GW window returns rank 0's quasiparticle energies when
     rank 1 arrives with another mean field.
 
-    BITWISE, unlike the BSE: the mean-field arrays are a lockstep of rank 0's
+    Bitwise, unlike the BSE: the mean-field arrays are a lockstep of rank 0's
     before the grid is sized from them, the reduction hands every rank the
     same chi0 and the same Sigma, and the Pade continuation and Newton that
-    follow end in a lockstep of rank 0's roots. That matters downstream --
-    these energies are the BSE diagonal, and a window that drifts between
-    ranks is a kernel that drifts with it.
+    follow end in a lockstep of rank 0's roots. These energies are the BSE
+    diagonal, so a window that drifted between ranks would drift the kernel.
     """
     w = water
     window = np.array([w['nocc'] - 1, w['nocc']])
@@ -1166,15 +1107,15 @@ def test_qp_window_is_rank_zeros_with_perturbed_mean_field(water, size):
 @pytest.mark.parametrize('size', SIZES)
 def test_qp_window_reports_perturbed_factors_under_audit(water, size):
     """Factors are identical by construction, so the window does not broadcast
-    them again; an audited run SAYS when they are not.
+    them again; an audited run reports when they are not.
 
-    Rank 1's collocation is 1e-6 off. The window leaves it so -- it moves no
-    factor bytes -- and every rank's audit counts the disagreement at the
+    Rank 1's collocation is 1e-6 off. The window leaves it so (it moves no
+    factor bytes), and every rank's audit counts the disagreement at the
     window's entry, where a production run would not look. The ranks still
     return one set of roots, rank 0's, since the window ends in a lockstep of
     them; that they are not the serial roots is the drift the audit reported.
-    With the same inputs on every rank the audit finds nothing, which is what
-    a cluster run shows to prove its kernels' inputs held one set of bits.
+    With the same inputs on every rank the audit finds nothing, which is how
+    a multi-node run shows its kernels' inputs held one set of bits.
     """
     w = water
     window = np.array([w['nocc'] - 1, w['nocc']])
@@ -1206,11 +1147,10 @@ def test_qp_window_reports_perturbed_factors_under_audit(water, size):
 
 # ------------------------------------------- the transform's pseudo-inverse
 def _weights(kind, grid, e_min, e_max, rcond=None):
-    """The transform, optionally with the pseudo-inverse cutoff DISABLED.
+    """The transform, optionally with the pseudo-inverse cutoff disabled.
 
-    A negative rcond keeps every singular value, which is the expression this
-    routine carried before the cutoff existed -- so the two calls are the
-    before and after of the change, on the same grid, in the same process.
+    A negative rcond keeps every singular value: the bare 1/S filter, on the
+    same grid in the same process.
     """
     saved = time_frequency.TRANSFORM_FIT_RCOND
     try:
@@ -1228,17 +1168,16 @@ def test_transform_pseudo_inverse(water):
     The fit is a per-point least squares through an SVD, and below 20 points
     it carries no Tikhonov term: the filter is 1/S. A minimax tau point large
     enough that exp(-x tau) underflows over the whole node range leaves an
-    exactly zero COLUMN in the design matrix, hence an exactly zero singular
-    value, hence 0/0 -- a NaN row in the transform. It is silent twice over:
+    exactly zero column in the design matrix, hence an exactly zero singular
+    value, hence 0/0, a NaN row in the transform. It is silent twice over:
     the fit error of a NaN row is NaN, and `max(x, nan)` returns x, so the
-    fit-error warning never sees it. That is the warning the cluster raised.
+    fit-error warning never sees it.
 
-    BITWISE, and that is the point. The smallest relative singular value the
-    grids here reach is 2.4e-17, and the cutoff sits at 1e-100: small values
-    are still inverted, exactly as GreenX inverts them -- cutting at the
-    SVD's backward error instead would have moved this grid's omega -> tau
-    weights in the sixth digit, which is a change to the physics and not a
-    NaN fix.
+    The cutoff leaves these grids bitwise. The smallest relative singular
+    value they reach is 2.4e-17 and the cutoff sits at 1e-100, so small values
+    are still inverted, as GreenX inverts them; cutting at the SVD's backward
+    error instead would move this grid's omega -> tau weights in the sixth
+    digit.
     """
     w = water
     grid = w['grid']
@@ -1257,7 +1196,7 @@ def test_transform_pseudo_inverse(water):
     assert max(0.0, float('nan')) == 0.0       # a NaN never wins the max
 
     # A tau point so large that exp(-x tau) underflows for every node leaves
-    # an exactly zero COLUMN, and a singular value whose square is zero.
+    # an exactly zero column, and a singular value whose square is zero.
     tau = np.array([0.1, 1.0, 10.0, 2.0e3])
     omega = np.array([0.5, 1.0, 2.0, 4.0])
     x = e_min * (e_max / e_min) ** (np.arange(400) / 399.0)

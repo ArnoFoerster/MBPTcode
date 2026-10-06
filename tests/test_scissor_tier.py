@@ -3,17 +3,17 @@
 `compressible` splits the quasiparticle set at reach = 1, and reach is not the
 same cut as "core": on benzene the six carbon 1s states sit at reach 22.5 but
 three inner-valence states at 18-22 eV sit at 1.19 and 1.71, outside the wall
-and nowhere near the core. Those three are also where the leverage is -- a
-20 eV error on the core moves a frontier quasiparticle by 0.05 meV, the inner
-valence by 3.6-10 meV per eV -- so the shift they take has to be calibrated on
-explicit roots rather than guessed, and frozen so the tier boundary cannot move
-between geometries.
+and nowhere near the core. Those three carry the leverage (a 20 eV error on
+the core moves a frontier quasiparticle by 0.05 meV, the inner valence by
+3.6-10 meV per eV), so their shift is calibrated on explicit roots and frozen
+so the tier boundary cannot move between geometries.
 """
 import types
 
 import numpy as np
 import pytest
 
+from src.SingleReference.GW.sum_over_poles import compressible
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.qp_space_time import (calibrate_scissor, frozen_scissor,
                                          scissor_route)
@@ -50,11 +50,9 @@ def test_a_probe_is_required():
 
 
 def test_the_shift_is_frozen_not_recomputed():
-    """The same shifts must come back for a DISPLACED geometry's eigenvalues.
-
-    That is the whole point of freezing: the tier assignment and the shift are
-    decided once, so a state cannot change tier as the geometry moves and put a
-    step in the surface.
+    """The same shifts come back for a displaced geometry's eigenvalues: the
+    tier assignment and the shift are decided once, so a state cannot change
+    tier as the geometry moves and put a step in the surface.
     """
     roots = {0: -11.6, 1: -1.50}
     shifts = calibrate_scissor(EPS, NOCC, roots, excluded=[0, 1, 2])
@@ -66,7 +64,6 @@ def test_the_shift_is_frozen_not_recomputed():
 
 def test_the_excluded_set_is_read_off_reach_not_off_depth():
     """`compressible` decides, and it is not a depth threshold in disguise."""
-    from src.SingleReference.GW.sum_over_poles import compressible
     eps = np.array([-11.0, -0.9, -0.62, -0.35, 0.18, 0.44, 0.83])
     nocc = 4
     gap = (eps[nocc:][None, :] - eps[:nocc][:, None]).min()
@@ -79,10 +76,10 @@ def test_the_excluded_set_is_read_off_reach_not_off_depth():
 
 
 def test_a_mapping_is_the_tier_and_outranks_the_reach_test():
-    """The boundary case that made this necessary: benzene's orbital 9 reads
-    reach 1.04 at the Newton start and 0.87 at its converged root, so a
-    per-geometry test can put it on either side. A state named in the mapping
-    is shifted regardless; one not named takes the pole model regardless."""
+    """The boundary case: benzene's orbital 9 reads reach 1.04 at the Newton
+    start and 0.87 at its converged root, so a per-geometry test can put it on
+    either side. A state named in the mapping is shifted regardless; one not
+    named takes the pole model regardless."""
     eps = np.array([-11.0, -0.9, -0.62, -0.35, 0.18, 0.44, 0.83])
     nocc = 4
     frontier = float(eps[nocc - 1] + 0.01)
@@ -102,9 +99,8 @@ def test_a_scalar_still_auto_detects():
 
 
 def test_a_string_scissor_defers_rather_than_being_parsed_as_a_number():
-    """'calibrate' is a REQUEST, carried until the reference geometry has
-    solved the excluded states. Treating it as a shift would raise, and
-    treating it as a mapping would silently shift nothing."""
+    """'calibrate' is a request, carried until the reference geometry has
+    solved the excluded states; it is neither a shift nor a mapping."""
     eps = np.array([-11.0, -0.9, -0.62, -0.35, 0.18, 0.44, 0.83])
     nocc = 4
     assert frozen_scissor('calibrate', 0) is None
@@ -130,8 +126,8 @@ def _stub_surface(scissor, excluded=(1,)):
     reads, over a `qp_set_gradient` that reports which route each state took.
 
     The stub sends `excluded` to the real axis while no shift is on file for
-    it, and to the scissor once one is -- which is the whole behaviour the
-    calibration depends on and none of the arithmetic it does not.
+    it, and to the scissor once one is: the behaviour the calibration depends
+    on, without the arithmetic.
     """
     surface = object.__new__(ExcitedStateChain)
     surface.qp_set = np.array([1, 3])
@@ -139,6 +135,7 @@ def _stub_surface(scissor, excluded=(1,)):
     surface.gw_grid = surface.nu = surface.wt = None
     surface.residue_route = 'sop'
     surface.pole_offsets, surface.qp_seeds, surface.scissor_map = {}, {}, {}
+    surface.sop_poles = {}
     surface.scissor = scissor
     surface.n_poles = 12
     surface.sop_stride = None
@@ -169,12 +166,10 @@ def _stub_solve(monkeypatch, surface, excluded=(1,), root=-1.50):
 
 def test_a_calibrated_solve_is_repeated_so_the_gradient_reads_the_shift(
         monkeypatch):
-    """The pass that MEASURES a shift is the pass that solved the state on the
-    real axis, so it cannot also be the pass that uses it.
-
-    Without the repeat the map is written after the last solve and the
-    gradient -- and every displaced build seeded from it -- silently runs the
-    fallback, which is bit-for-bit the uncalibrated answer.
+    """The pass that measures a shift solved the state on the real axis, so
+    the solve is repeated: otherwise the map is written after the last solve
+    and the gradient, and every displaced build seeded from it, runs the
+    uncalibrated fallback.
     """
     surface = _stub_surface('calibrate')
     calls = _stub_solve(monkeypatch, surface)
@@ -207,11 +202,10 @@ def test_an_uncalibrated_surface_never_repeats_the_solve(monkeypatch):
 
 def test_nothing_is_frozen_from_a_pass_that_grew_the_grid(monkeypatch):
     """The roots and guard bands are frozen by `setdefault`, so freezing on a
-    pass that then doubled the quadrature locks in the under-resolved ones.
-
-    Guards the short circuit in `_qp_set_solve`: hoisting the freeze out of
-    the `or` into its own name passes every other gate here and silently seeds
-    the whole chain from a grid that was thrown away.
+    pass that then doubled the quadrature would lock in the under-resolved
+    ones. Guards the short circuit in `_qp_set_solve`: hoisting the freeze out
+    of the `or` passes every other gate here and seeds the chain from the
+    discarded grid.
     """
     surface = _stub_surface(None)
     roots = iter((-9.9, -1.50))          # coarse grid first, then the real one

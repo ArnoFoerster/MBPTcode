@@ -2,90 +2,56 @@
 
 A surface carries no communicator: inside `with distributed(comm):` every rank
 builds it and evaluates it whole, the kernels it reaches divide their sweeps
-over the ranks, and `surface.evaluate` -- the boundary a property routine
-hands a geometry across -- locks the geometry to rank 0's on the way in and the
+over the ranks, and `surface.evaluate` (the boundary a property routine hands
+a geometry across) locks the geometry to rank 0's on the way in and the
 energy, force and diagnostics on the way out. Six gates:
 
-  (a) SERIALLY every surface is what it was before any of this existed:
-      `tests/baseline_3f09ac0.json`, recorded before these classes ever took
-      a communicator, bitwise -- `==` on the energy, `np.array_equal` on the
-      gradient taken through `evaluate` -- and none of them carries a `comm`.
-      A single-machine gate by design: the numbers were recorded by a pyscf without
-      OpenMP, which repeats its bits, and a threaded pyscf adds its K-split
-      partials in thread-arrival order and cannot meet them.
-  (b) Under `run_simulated` (sizes 2 and 3; `run_simulated` enters the
-      context on each rank-thread) the composed and single-chain surfaces
-      reproduce the SAME surface evaluated serially, and every rank returns
-      the same bits. Every rank converges its own SCF, so the comparison
-      spans two SCF runs and its bar is anchored: `COMPOSED_GRAD_K` times
-      what the serial surface's energy and force move when it is evaluated
-      again on one BLAS thread (`one_thread`), at least a floor -- 1e-12 Ha
-      for the energy, the ISDF gradient reproducibility floor for the force
-      of one chain's sweeps, and `COMPOSED_GRAD_FLOOR`
-      (tests/test_mpi_routes.py) for RPABSESurface, which combines TWO
-      chains' distributed sweeps (the ground state's frequency loop and the
-      excited state's tau/frequency/Davidson ones). MEASURED (max abs force
-      in Ha/Bohr; every rank's energy bitwise the serial one; size 8 run
-      outside the suite):
-                           one-thread repeat   size=2     size=3     size=8
-          RPAGroundStateChain      3.786e-09  2.698e-09  3.068e-09  1.626e-09
-          RPABSESurface            1.652e-08  1.421e-08  6.265e-09  1.414e-08
-          RPAQPSurface             6.593e-09  2.674e-09  1.822e-09  3.287e-09
-      the one-thread repeat moving the energies 1.4e-14, 4.7e-13 and
-      2.8e-14 Ha.
+  (a) Serially no surface carries a `comm`, and its energy and gradient are
+      bitwise the pins (tests/one_fit_pins.json), the recorded baseline
+      (`BASELINE_PATH`) within `RECORD_MOVE` of them. A single-machine gate:
+      the pins were recorded by a pyscf without OpenMP, which repeats its
+      bits; a threaded pyscf adds its K-split partials in thread-arrival
+      order and cannot meet them.
+  (b) Under `run_simulated` (2 and 3 ranks) the composed and single-chain
+      surfaces reproduce the same surface evaluated serially, and every rank
+      returns the same bits. Each rank converges its own SCF, so the bar is
+      anchored: `COMPOSED_GRAD_K` times what the serial energy and force move
+      when evaluated again on one BLAS thread (`one_thread`), at least a
+      floor: 1e-12 Ha for the energy, the ISDF gradient reproducibility floor
+      for one chain's force, and `COMPOSED_GRAD_FLOOR`
+      (tests/test_mpi_routes.py) for RPABSESurface, which combines two
+      chains' distributed sweeps.
   (c) `potential_energy_surface` inside the context builds the same surface
       a direct constructor does, bitwise, and refuses a `comm=` keyword by
-      name: a communicator handed to a surface would be a second way to the
-      ranks, disagreeing with the context the moment the two differ.
-  (d) THE GEOMETRY LOCKSTEP. Rank 1's geometry is moved by one ulp before an
-      evaluation, which is what an optimizer whose arithmetic drifted on one
-      node would hand the surface. Every rank still returns the unperturbed
-      energy and force, bitwise; rank 1's Mole ends holding rank 0's
-      coordinates; and an audited run counts exactly ONE repaired lockstep on
-      rank 1 -- the geometry, by the ulp itself -- and nothing downstream,
-      because every kernel then sees rank 0's molecule. Run on a factory that
-      converges its own SCF and on a build-only one, whose SCF the ranks
-      converge together (`converged_factory`). SHOWN TO FAIL with the geometry
-      lockstep removed from `evaluate` (2 ranks), on both: rank 1 evaluates
-      its own molecule, its Mole keeps the perturbed coordinate, and the
-      audit counts 7 of 15 locksteps repaired on rank 1 with the
-      self-converging factory and 77 of 91 with the build-only one, the
-      largest difference 2.7e-3 either way -- the mean field of another
-      molecule. With the self-converging factory the force is nonetheless
-      bitwise the unperturbed one: each rank converges its own SCF, and the
-      mean field, the placed points, the fit, the chain's own share and the
-      result are each locked further down, so rank 1's molecule reaches no
-      reduction. With the build-only factory it does -- rank 1's J/K
-      partials of its own molecule enter the distributed SCF -- and the force
-      is 8.7e-9 Ha/Bohr away from the unperturbed one on EVERY rank, rank 0
-      included.
-  (e) THE CHAIN'S OWN SHARE OF THE GRADIENT. The orbital response, the
-      collocation and the fit branch a chain forms from the kernels' adjoints
-      are serial code on every rank, and across nodes they carry each node's
-      last bits; `nuclear_gradient` ends in one lockstep. Rank 1's orbital
-      branch is moved by 1e-12 Ha/Bohr here, and every rank must return rank
-      0's gradient bitwise. SHOWN TO FAIL with that lockstep removed: rank 1
-      returns its own, 1e-12 away. That gradient is the serial one within the
-      routes test's anchored bar: `COMPOSED_GRAD_K` times what the serial
-      force moves on one BLAS thread (`one_thread_scatter`), at least
-      `COMPOSED_GRAD_FLOOR`, since the partition re-associates the sums the
-      orbital response amplifies.
-  (f) THE MEAN FIELD A CHAIN OR SURFACE ACCEPTS. A mean field each rank
-      converged alone differs across nodes by its last bits and by the gauge
-      of its orbitals, so every place the physics layer takes one in locks it
-      to rank 0's: a chain's `mf=`, the one `mean_field` is handed at another
-      geometry, the entry point's reference and the mean-field surface's own.
-      Rank 1's copy is given its lowest orbital energy one ulp up and its
-      last orbital's sign flipped -- another node's SCF, in miniature -- and
-      every rank must end holding rank 0's arrays. SHOWN TO FAIL with each of
-      the four `lockstep_mean_field` calls removed in turn: rank 1 keeps its
-      own orbitals, at that entry and no other.
+      name: a communicator handed to a surface would be a second route to
+      the ranks, which could disagree with the context.
+  (d) The geometry lockstep: rank 1's geometry is moved by one ulp before an
+      evaluation, as an optimizer whose arithmetic drifted on one rank would
+      hand it. Every rank still returns the unperturbed energy and force
+      bitwise, rank 1's Mole ends holding rank 0's coordinates, and an
+      audited run counts one repaired lockstep on rank 1 (the geometry, by
+      the ulp) and nothing downstream. Run on a factory that converges its
+      own SCF and on a build-only one, whose SCF the ranks converge together
+      (`converged_factory`).
+  (e) The chain's own share of the gradient: the orbital response,
+      collocation and fit branch a chain forms from the kernels' adjoints are
+      serial code on every rank, so `nuclear_gradient` ends in one lockstep.
+      Rank 1's orbital branch is moved by 1e-12 Ha/Bohr and every rank
+      returns rank 0's gradient bitwise, within the anchored bar of the
+      serial one (`one_thread_scatter`, at least `COMPOSED_GRAD_FLOOR`, since
+      the partition reassociates the sums the orbital response amplifies).
+  (f) The mean field a chain or surface accepts: one each rank converged
+      alone differs in its last bits and its orbital gauge, so every entry
+      that takes one locks it to rank 0's (a chain's `mf=`, the one
+      `mean_field` is handed at another geometry, the entry point's reference
+      and the mean-field surface's own). Rank 1's copy has its lowest orbital
+      energy one ulp up and its last orbital's sign flipped, and every rank
+      ends holding rank 0's arrays.
 
-ONE MOLE PER RANK wherever two rank threads differentiate, for the reason
-`tests/test_simulated_ranks.py` documents at length: the nuclear gradient's
-Hcore derivative writes into `mol._env` in place (`mol.with_rinv_at_nucleus`),
-and two rank THREADS of one process sharing a Mole corrupt each other's rinv
-origin.
+One Mole per rank wherever two rank threads differentiate: the nuclear
+gradient's Hcore derivative writes into `mol._env` in place
+(`mol.with_rinv_at_nucleus`), so two rank threads sharing a Mole corrupt each
+other's rinv origin (tests/test_simulated_ranks.py).
 """
 import json
 import os
@@ -114,6 +80,11 @@ from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, one_thread,
                                    one_thread_scatter)
 
 BASELINE_PATH = pathlib.Path(__file__).resolve().parent / 'baseline_3f09ac0.json'
+#: (a)'s pinned energies and gradients.
+PINS = json.loads((BASELINE_PATH.parent / 'one_fit_pins.json').read_text())[
+    'surface_comm']
+#: How far (a)'s record may sit from the pins: energy (Ha), gradient (Ha/Bohr).
+RECORD_MOVE = (1e-12, 5e-8)
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -121,15 +92,13 @@ H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: factory, fits and differentiates at a geometry of its own.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'
 SIZES = [2, 3]
-#: The least of the energy bar. E_c^dRPA's own frequency-loop reduction is
-#: exact to REL=1e-11 relative (test_simulated_ranks.py); every rank's energy
-#: is measured bitwise the serial one here, on all three surfaces at 2, 3 and
-#: 8 ranks.
+#: The least of the energy bar (Ha); E_c^dRPA's frequency-loop reduction is
+#: exact to 1e-11 relative (test_simulated_ranks.py).
 ENERGY_FLOOR = 1e-12
 #: The coordinate (atom, axis) rank 1 moves by one ulp in (d).
 PERTURBED = (1, 1)
 #: What (e) adds to rank 1's orbital branch, in Ha/Bohr: four orders below
-#: the reproducibility floor, far above the last bits a node would differ by.
+#: the reproducibility floor, far above the last bits ranks differ by.
 BRANCH_OFFSET = 1e-12
 
 
@@ -142,7 +111,7 @@ def chain_scf(mol):
 
 
 def chain_scf_unrun(mol):
-    """The same mean field BUILT AND NOT RUN: the chain converges it, over
+    """The same mean field built and not run: the chain converges it over
     the ranks of the context (`converged_factory`)."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
@@ -150,25 +119,25 @@ def chain_scf_unrun(mol):
 
 
 def own_water(atom=H2O):
-    """This rank's OWN Mole; see the module docstring on `mol._env`."""
+    """This rank's own Mole; see the module docstring on `mol._env`."""
     return gto.M(atom=atom, basis=BASIS, verbose=0)
 
 
 def own_ground():
-    """A fresh RPAGroundStateChain on this rank's OWN Mole."""
+    """A fresh RPAGroundStateChain on this rank's own Mole."""
     mol = own_water()
     return RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol))
 
 
 def own_bse():
-    """A fresh RPABSESurface on this rank's OWN Mole, ONE mean field shared
+    """A fresh RPABSESurface on this rank's own Mole, one mean field shared
     by its two halves."""
     mol = own_water()
     return RPABSESurface(mol, chain_scf, spin='singlet', mf=chain_scf(mol))
 
 
 def own_qp():
-    """A fresh RPAQPSurface on this rank's OWN Mole."""
+    """A fresh RPAQPSurface on this rank's own Mole."""
     mol = own_water()
     return RPAQPSurface(mol, chain_scf, mf=chain_scf(mol))
 
@@ -219,16 +188,20 @@ def _r0(baseline, label):
      lambda mol, f: ExcitedStateChain(mol, f, spin='singlet'))])
 def test_serially_every_surface_is_the_baseline(baseline, baseline_water,
                                                 baseline_scf, label, build):
-    recorded = _r0(baseline, label)
+    recorded, pin = _r0(baseline, label), PINS[label]
     surface = build(baseline_water, baseline_scf)
     assert not hasattr(surface, 'comm')
-    # bitwise against the workstation's recording: a single-machine gate by
-    # design (a)
-    assert surface.total_energy() == recorded['total_energy']
+    # bitwise against the pins: a single-machine gate, see (a)
+    energy = surface.total_energy()
+    assert energy == pin['total_energy']
+    assert abs(energy - recorded['total_energy']) <= RECORD_MOVE[0]
     grad, e_g, _ = evaluate(surface, baseline_water)
-    assert e_g == recorded['gradient_energy']
-    assert np.array_equal(np.asarray(grad, float),
-                          np.asarray(recorded['gradient'], float))
+    assert e_g == pin['gradient_energy']
+    assert abs(e_g - recorded['gradient_energy']) <= RECORD_MOVE[0]
+    grad = np.asarray(grad, float)
+    assert np.array_equal(grad, np.asarray(pin['gradient'], float))
+    moved = np.abs(grad - np.asarray(recorded['gradient'], float)).max()
+    assert moved <= RECORD_MOVE[1], moved
 
 
 # --------------------------------------------------------------------- (b)
@@ -265,11 +238,10 @@ def test_every_rank_evaluates_the_serial_surface(own, floor, size):
 
 # --------------------------------------------------------------------- (c)
 def test_the_entry_point_builds_the_direct_surface_inside_the_context():
-    """`potential_energy_surface` resolves its OWN qp_window/scissor/outside
-    (the admitted set, 'calibrate', 'scissor') before building the row's
-    class, which is a different realization from `RPABSESurface`'s raw
-    defaults; the directly built surface reads those resolved settings off
-    the dispatched one so the comparison isolates the dispatch alone.
+    """`potential_energy_surface` resolves its own qp_window/scissor/outside
+    (the admitted set, 'calibrate', 'scissor'), unlike `RPABSESurface`'s raw
+    defaults; the directly built surface reads those settings off the
+    dispatched one, so the comparison isolates the dispatch.
     """
     ground = GroundState('rpa', 'hf')
     excitation = Excitation('singlet')
@@ -393,7 +365,7 @@ def test_the_chains_own_share_of_the_gradient_is_rank_zeros(monkeypatch):
 # --------------------------------------------------------------------- (f)
 def perturbed_scf(mol):
     """`chain_scf`, with rank 1's orbital energy one ulp up and its last
-    orbital's sign flipped: what another node's own SCF hands back."""
+    orbital's sign flipped: what another rank's own SCF may hand back."""
     mf = chain_scf(mol)
     comm = current_comm()
     if comm is not None and comm.Get_rank() == 1:

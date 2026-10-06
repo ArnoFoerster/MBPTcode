@@ -35,19 +35,20 @@ optional third-party one.
 | response derivatives (finite field) | `test_mp3_finite_field`, `test_uhf_mp2_relaxed_finite_field` |
 | GW self-energy and QP equation | `test_self_energy_formulas`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy`, `test_static_exchange_reuse` |
 | eigenvalue self-consistency | `test_evgw` |
-| imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_sigma_blocking_and_screening`, `test_mpi_grid_distribution` |
+| imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_sigma_blocking_and_screening`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
 | ISDF factorization | `test_isdf_jk`, `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_static_exchange_routes`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space` |
-| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance` |
+| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks` |
+| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record` |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
 | fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
 | an environment from a charged structure file, and the diabatic gradient in it | `test_protein_environment` (unit tests in seconds; the gradient gate about 10 minutes) |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
 | MPI: the context, `lockstep` and the collectives | `test_mpi_context`, `test_mpi_grid_primitives`, `test_mpi_map`, `test_layering` |
-| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors` |
+| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
 | MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_block_action_trims`, `test_davidson_lockstep`, `test_distributed_trial_space` |
-| MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf` |
+| MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf`, `test_distributed_scf_grid`, `test_orbital_response_distributed`, `test_state_pair_force_distributed_ks` |
 | MPI: surfaces and the optimizer over ranks | `test_surface_comm`, `test_optimize_under_ranks` |
 | periodic: GDF integrals, response, W, BSE, self-energy | `test_pbc_df_integrals`, `test_pbc_casida`, `test_pbc_w`, `test_pbc_bse`, `test_pbc_amplitudes`, `test_pbc_self_energy`, `test_pbc_sigma_folding`, `test_pbc_rpa`, `test_pbc_kpath` |
 | periodic: ISDF / THC | `test_pbc_isdf_gamma`, `test_pbc_isdf_kpts`, `test_pbc_isdf_kindex`, `test_pbc_isdf_symm`, `test_pbc_isdf_rpa`, `test_pbc_isdf_gw`, `test_pbc_isdf_2d`, `test_thc_rank_grids`, `test_thc_metallic_frequency_grid` |
@@ -72,16 +73,16 @@ the next one assumes:
   moves no point. Deterministic, continuous through planar geometries, and the
   energy invariant under every sign pattern.
 - `test_grid_radii_optimizer` — the radii themselves, against Duchemin & Blase's
-  published tables. The objective is multi-modal, so a single descent is a
-  lottery; this pins that multi-start fixes it, that `n_start=1` still means the
-  old single descent, and that recipes coexist in the shipped table.
+  published tables. The objective is multi-modal, so a single descent is
+  unreliable; this checks that multi-start fixes it, that `n_start=1` gives a
+  single descent, and that recipes coexist in the shipped table.
 - `test_static_exchange_routes` — the QP step's static exchange. `Sigma_x` built
   from the mean field's own K inherits the SCF route's error at first order, so
   this pins the streamed density-fitted build against the stored-tensor one and
   against the routing.
 
 `test_bse_screening_energies` guards the other half of the same question: not
-which basis W is expressed in, but which ENERGIES it is screened at. The BSE
+which basis W is expressed in, but which energies it is screened at. The BSE
 diagonal carries the quasiparticle energies while W is screened at the
 mean-field ones, and a 4-center solver has to be told that with `eps_screen=`
 because it rebuilds the direct term itself. Getting it wrong is worth more than
@@ -92,12 +93,12 @@ action against the dense Casida solver, plus the negative control of pairing
 ISDF factors with a cderi-gauge `W_aux`, which stays self-consistent and gives
 the wrong spectrum.
 
-## The two tests that assert a FAILURE, and why
+## The two tests that assert a failure, and why
 
 Both guard properties that nothing else in the suite would notice going away.
 
 `test_evgw` drives the loop by hand with the quasiparticle equation anchored on
-the ITERATE instead of the mean field, and asserts that it DIVERGES — the gap
+the iterate instead of the mean field, and asserts that it diverges — the gap
 opening by more than an eV every cycle. That version still runs and still
 prints plausible numbers, so without the assertion, dropping `eps_anchor` would
 leave every other check in the file passing.
@@ -119,7 +120,7 @@ respond, therefore screens nothing, and must move the quasiparticle energy
 through the mean field alone.
 
 `test_reaction_field` then checks the economy that makes the shift affordable:
-ΔW needs ONE χ₀, the bare screening following from the dressed one by a
+ΔW needs one χ₀, the bare screening following from the dressed one by a
 congruence in the auxiliary gauge, and the compact contraction that never
 builds ΔW must equal the explicit form that does.
 
@@ -141,9 +142,9 @@ The MPI rows of the table above are pytest files that also run as scripts
 (`python tests/test_kernel_lockstep.py`). They run every rank as a thread of
 one process (`mpi_grid.run_simulated`), with the real collectives moving real
 bytes, because MPI cannot initialize inside a sandboxed test runner; they gate
-the algebra of every split, not the wire. Several compare against the code as
-it stood before the port, extracted with `git archive` from a pinned commit
-and run in its own process, so they need the repository's history.
+the algebra of every split, not the wire. Several compare against a reference
+version of the code, extracted with `git archive` from a pinned commit and
+run in its own process, so they need the repository's history.
 
 `test_mpi_routes` is the wire check: every distributed route against its
 serial reference, inside one `with distributed(comm):`, under real ranks:

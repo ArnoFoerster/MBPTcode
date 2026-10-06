@@ -9,26 +9,26 @@ MBPT_USE_MPI=0 the script runs serially even where mpi4py is installed.
 `main(comm)` takes the communicator, so `run_simulated(main, n)` runs the same
 checks over thread-ranks where MPI cannot start.
 
-THE RUN IS ONE DISTRIBUTED REGION. `main` enters `with distributed(comm):`
-once, as a job script does, and every rank runs every driver replicated -- the
-SCF loop, the Davidson, the chains; MPI lives inside the kernels, which
+The run is one distributed region. `main` enters `with distributed(comm):`
+once, as a job script does, and every rank runs every driver replicated (the
+SCF loop, the Davidson, the chains); MPI lives inside the kernels, which
 lockstep at entry what can differ between ranks and all-reduce or gather their
 partials. A kernel called without `comm=` inside the region takes the region's
-communicator (the CONTEXT path, which is what a chain or a driver reaches); one
-called with `comm=comm` takes it explicitly (the EXPLICIT path, the kernel's
+communicator (the context path, which is what a chain or a driver reaches); one
+called with `comm=comm` takes it explicitly (the explicit path, the kernel's
 own entry). Both are gated, each check says which it covers, and the serial
 reference beside it is computed on every rank inside `distributed(None)`. An
 exception on any rank aborts the job through the region's guard instead of
 leaving the others waiting in a collective.
 
-THE INPUTS ARE ONE CALCULATION'S. The factors are built inside the region, so
+The inputs are one calculation's. The factors are built inside the region, so
 their points, the mean-field arrays they read and the fit's replicated tail are
 rank 0's on every rank; every kernel below takes those inputs, identical by
 construction, and a serial reference on rank r is of the same numbers as rank
 0's. The chain gates compare against rank 0's serial force, since each rank
 converges the chain's SCF on its own.
 
-FOUR STANDARDS, each where the design puts it:
+Four standards:
   bitwise   a lockstepped output, or an output partition (rows computed once
             and gathered verbatim): identical on every rank, and identical to
             serial where the only reductions add exact zeros
@@ -63,7 +63,7 @@ Checks (path; standard):
   * static W, `isdf_bse_factors` (context): against serial (reduced)
   * the ISDF BSE, `solve_bse_isdf` (context): roots, (A-B) probe and GW
     diagonal against serial (reduced); every rank holds rank 0's roots
-    (bitwise) after the same Davidson -- `davidson_vind_calls` and
+    (bitwise) after the same Davidson, `davidson_vind_calls` and
     `davidson_iterations` equal to rank 0's (exact)
   * the same BSE with rank != 0 handed a perturbed spectrum and perturbed
     factors (explicit): roots against serial (reduced), the perturbation
@@ -95,7 +95,7 @@ Checks (path; standard):
   * the route's two reduced sums on this run's ranks (explicit, recorded on
     the communicator): proj(tau) over the grid-row tiles and the branch sums
     of Sigma over the block pairs, each against the serial kernel's own
-    addends -- in its order they are its result (bitwise), this rank's
+    addends: in its order they are its result (bitwise), this rank's
     partial of every tau point is its own items' addends in that order
     (bitwise), and what it receives lies within `join_bound` of the exact
     sum of the ranks' partials, half an ulp per join, floored at one ulp of
@@ -111,7 +111,7 @@ Checks (path; standard):
   * `static_screening` (explicit) (reduced); `screened_interaction_tau`,
     `selfenergy_diag` and its backward pass (context), `selfenergy_block` and
     its backward pass (explicit) (reduced, `SIGMA_REL`)
-  * the BSE@GW chain, `ExcitedStateChain` in the region (context): ONE grid on
+  * the BSE@GW chain, `ExcitedStateChain` in the region (context): one grid on
     every rank (bitwise hashes), the excitation force (anchored), the
     quasiparticle force (anchored, at least `ISDF_GRADIENT_FLOOR`)
   * the chain with a build-only factory (context: the chain converges its SCF
@@ -119,11 +119,11 @@ Checks (path; standard):
     ranks (bitwise), mf0 against the self-converged one (reduced) and a
     stationary point of the serial SCF to its own conv_tol_grad, its force
     against the serial force off that same mean field (anchored); at one
-    rank, where that is `mf.kernel()`, ONE plain run of it on the mean field
+    rank, where that is `mf.kernel()`, one plain run of it on the mean field
     the factory built, no distributed handles left on it, and the chain
     holding that run's energy and orbitals (bitwise)
   * the state-pair surface on sliced factors, `RPABSESurface(sliced=True)`
-    (context), both layouts handed ONE reference and ONE displaced mean
+    (context), both layouts handed one reference and one displaced mean
     field: its composed force, energy and root at a displaced geometry
     against the whole layout's on the same ranks (anchored: `COMPOSED_GRAD_K`
     times the largest difference between `SLICED_SAMPLES` evaluations of one
@@ -136,11 +136,12 @@ Checks (path; standard):
     tests/test_force_serial_shaped.py shows on a shape-sensitive BLAS
   * the same surface on the row-distributed fit, `fit='rows'` (context),
     every surface on the same reference and displaced mean field: its
-    composed force against the whole-fit sliced surface on the same ranks
-    (anchored: `FIT_REASSOCIATION_K` times what one reassociation of the
-    whole fit's sums moves that force), every rank rank 0's (bitwise), and
-    nothing reachable from it holding the grid whole beside a factor's or
-    the fit's width, its rows the row fit's own at this rank's tiles
+    composed force against the whole-fit sliced surface on the same ranks,
+    one estimator in two realizations (anchored: `FIT_REASSOCIATION_K`
+    times what reassociating the whole fit's three-centre sum moves that
+    force), every rank rank 0's (bitwise), and nothing reachable from it
+    holding the grid whole beside a factor's or the fit's width, its rows the
+    row fit's own at this rank's tiles
     (exact); the row fit's own adjoint in the nuclear assembly against the
     whole adjoint of the same estimator (anchored: `FIT_REASSOCIATION_K`
     times what reordering the whole adjoint's sums over the test set moves
@@ -149,8 +150,8 @@ Checks (path; standard):
     width beyond the X_bar and D_bar handed in, and the adjoint's ledger at
     this rank's tiles, the metric root on rank 0 alone (exact)
   * the state-pair surface on sliced factors with the grid BSE adjoint,
-    `bse_adjoint='grid'`, and with the default one (context), both handed ONE
-    reference and ONE displaced mean field with pyscf's OpenMP on one thread,
+    `bse_adjoint='grid'`, and with the default one (context), both handed one
+    reference and one displaced mean field with pyscf's OpenMP on one thread,
     each route gated over the ranks against its own serial kernel and never
     against the other: the two surfaces' energy and root (bitwise: one
     forward pass, the adjoint is all that differs); at the reverse call the
@@ -162,18 +163,19 @@ Checks (path; standard):
     force every rank's rank 0's (bitwise); no three-index block reachable
     from the chain or its forward pass at the reverse call, where the default
     route's cache is found (exact); the grid kernel traced line by line in
-    every frame it enters: no array with the whole grid on an axis outside
-    the one named boundary gather of X_bar and D_bar
-    (`adjoints_at_the_boundary`), no whole-factor gather (exact). The two
-    routes' forces are printed beside each other, not gated: their seeds
-    agree to a few ulp, the fold's exact image of the difference is 1e-16
-    Ha/Bohr, and what the computed forces differ by is the fold's own
-    rounding, a fit adjoint of Gram condition 2e8 carrying last-bit input
-    changes to 1e-8 Ha/Bohr; the routes' identity is gated serially, on the
-    seeds, at a derived rounding bound (tests/test_bse_grid_adjoint.py)
+    every frame it enters: no array with the whole grid on an axis, X_bar
+    and D_bar handed on in grid tiles with no boundary gather
+    (`adjoints_at_the_boundary`, one serially), no whole-factor gather
+    (exact). The two routes' forces are printed beside each other, not
+    gated: their seeds agree to a few ulp, the fold's exact image of the
+    difference is 1e-16 Ha/Bohr, and what the computed forces differ by is
+    the fold's own rounding, a fit adjoint of Gram condition 2e8 carrying
+    last-bit input changes to 1e-8 Ha/Bohr; the routes' identity is gated
+    serially, on the seeds, at a derived rounding bound
+    (tests/test_bse_grid_adjoint.py)
   * the lockstep counters of the whole run: calls and bytes identical on every
     rank (exact; `lockstep` is a collective)
-  * ONE audited chain forward, `distributed(comm, audit=True)`, on a mean field
+  * one audited chain forward, `distributed(comm, audit=True)`, on a mean field
     each rank converged alone: no `agreement` found the ranks apart, and the
     audit ran; `mismatched_calls` and `max_abs_diff` report the cross-rank
     drift the locksteps absorbed
@@ -202,18 +204,19 @@ from src.Base.constants import (COMPOSED_GRAD_K, FIT_REASSOCIATION_K,
                                 QP_BISECTION_TOL,
                                 HARTREE_TO_EV, ISDF_GRADIENT_FLOOR)
 from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
-from src.Base.utils.grids import (gauss_legendre_grid, minimax_frequency_grid,
-                                  minimax_time_grid)
+from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
 from src.Base.utils.mpi_grid import (SimulatedComm, broadcast,
                                      contiguous_block, distributed,
                                      grid_comm, lockstep_stats, partition)
 from src.Base import separable_ri
 from src.Base.separable_ri import DEFAULT_REGULARIZATION
-from src.Base.sliced_factors import SlicedFactors, whole_factor
+from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
+                                     whole_factor)
 from src.Base.utils.time_frequency import (COSINE_WT, TimeFrequencyGrid,
                                            minimax_transform_weights)
 from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screened_interaction_rows,
+                                                   screening_frequency_grid,
                                                    self_energy_branch_sums,
                                                    self_energy_fit_ranges)
 from src.SingleReference.GW.space_time import (DEFAULT_NPADE, _dyson_owned,
@@ -232,7 +235,7 @@ from src.SingleReference.LinearResponse.space_time import (
 from src.gradients import factor_chain, isdf_derivatives
 from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
 from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.factor_chain import FactorChain
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
                                             product_pairs)
@@ -252,33 +255,30 @@ from tests.reduction_bounds import reduced_sum_verdict
 
 warnings.simplefilter('ignore')
 
-#: The LOWER BOUND of the excitation gradient's gate, in Ha/Bohr. The gate
+#: The lower bound of the excitation gradient's gate, in Ha/Bohr. The gate
 #: itself is `COMPOSED_GRAD_K` times the re-association scatter measured on
 #: the machine at hand (`one_thread_scatter`) wherever that is larger, because
-#: the composed force scatters by more than this on a machine with more
-#: threads than the workstation this number was read on: 6.0e-9 over two ranks
-#: there, 1.57e-8 over one rank per node on two cluster nodes at 16 threads,
-#: against a 1.8e-8 one-thread repeat of the SERIAL force on the workstation
-#: (water/cc-pVDZ). Held alone, a number read on one machine gates the other
-#: machine's BLAS rather than its distribution.
+#: the composed force scatters more on machines with more BLAS threads
+#: (water/cc-pVDZ: 6.0e-9 over two ranks on a two-thread workstation, 1.57e-8
+#: over one rank on each of two 16-thread nodes, against a 1.8e-8 one-thread
+#: repeat of the serial force). A fixed number read on one machine would gate
+#: another machine's BLAS rather than its distribution.
 COMPOSED_GRAD_FLOOR = 1.5e-8
-#: Wt(tau) = sum_w Ctw[t,w] (W_w - I) is a CANCELLING sum -- the minimax
-#: weights alternate in sign and are large against Wt itself -- so a
+#: Wt(tau) = sum_w Ctw[t,w] (W_w - I) is a cancelling sum (the minimax
+#: weights alternate in sign and are large against Wt itself), so a
 #: partition over frequency re-associates it and moves the last bits by
 #: that cancellation factor, 1e-12 here rather than 1e-16.
 SIGMA_REL = 1e-10
 #: How many times its own ulp response the pole model may sit from serial.
 #: `fit_poles` reads its poles off a nonsymmetric eigenvalue problem built from
 #: a least-squares solve, so a last-bit change of the screening arrives
-#: magnified by a factor the fixture sets: the same code on three 8-rank runs
-#: read sop adjoints 5.0e-12, 2.1e-10 and 4.8e-9 from serial, each run on a
-#: freshly converged mean field. So the bar is measured, not fixed: the root,
-#: Z and adjoints of the serial sop gradient with X moved one ulp per element
-#: (`sop_anchor`). On the workstation fixture that anchor is 2.1e-13 Ha, 5.0e-12
-#: and 5.8e-11, and the last-bit wc change a shape-dependent GEMM made before
-#: the rows were cut from the serial block moved the answer by 0.63 of it at
-#: the median and 2.5 at most over 41 draws; five covers that twice and fails
-#: a deviation of ten anchors. A real defect in this chain shows 1e-3.
+#: magnified by a factor the fixture sets (sop adjoints of three 8-rank runs,
+#: each on a freshly converged mean field, sat 5.0e-12 to 4.8e-9 from serial).
+#: So the bar is measured, not fixed: the root, Z and adjoints of the serial
+#: sop gradient with X moved one ulp per element (`sop_anchor`). A last-bit
+#: change of wc moves the answer by 0.63 anchors at the median and 2.5 at most
+#: over 41 draws; five covers that twice and fails a deviation of ten anchors.
+#: A real defect in this chain shows 1e-3.
 SOP_ANCHOR_K = 5
 #: Fixed ulp draws the anchor takes the largest response over: one draw alone
 #: spans 3.9e-12 to 5.9e-11 on the adjoints.
@@ -301,9 +301,9 @@ SLICED_CHAIN_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
 #: How many times each layout of the sliced section is evaluated on the same
 #: mean fields: the spread of a layout's own repeats is the bar the layouts
 #: are compared at. A threaded pyscf moves a scalar like the root by a
-#: roughly Gaussian amount per run; with three samples a layout the larger
-#: same-layout difference sits under a third of the cross-layout one in 0.16%
-#: of runs, with two in 3.7%.
+#: roughly Gaussian amount per run; with three samples the largest same-layout
+#: difference sits under a third of the cross-layout one in 0.16% of runs
+#: (3.7% with two).
 SLICED_SAMPLES = 3
 #: The row fit's tile edge here: water's 444 points in 7 tiles, so every rank
 #: count owns a different set of them and the tiled Cholesky crosses ranks.
@@ -390,10 +390,10 @@ class Gate:
 #: `SimulatedComm`'s own methods: under real MPI a reduction or a broadcast is
 #: one opaque C call with no Python frame to trace at all. Only the simulated
 #: stand-in runs them as Python, and while one is on the stack its locals can
-#: alias ANOTHER rank's buffer through the shared `_SimulatedWorld` state (the
-#: loop variable a reduce-scatter sums another rank's deposited partial into,
-#: e.g.) -- memory that rank never held, made visible only by the threads
-#: sharing one process. The census must not count what it sees through them.
+#: alias another rank's buffer through the shared `_SimulatedWorld` state (e.g.
+#: the loop variable a reduce-scatter sums another rank's deposited partial
+#: into): memory that rank never held, visible only because the threads share
+#: one process. The census must not count what it sees through them.
 SIMULATED_COMM_CODES = frozenset(
     fn.__code__ for fn in vars(SimulatedComm).values() if inspect.isfunction(fn))
 
@@ -565,20 +565,20 @@ def sop_anchor(X, D, eps, nocc, grid, nu, wt, p, mu, ref):
 
 
 def grid_tag(chain, m):
-    """(points, radii, layout) of the grid THIS rank's chain differentiates.
+    """(points, radii, layout) of the grid this rank's chain differentiates.
 
     The interpolation points, the radii they come from and the pair columns the
-    fit keeps ARE the functional, so two ranks holding different ones are
-    differentiating two surfaces. It shows up nowhere else: every route gate
-    passes, because each kernel locksteps what it reads, and only the
-    end-to-end force carries the difference -- 1.5e-3 Ha/Bohr over two nodes,
-    which reads as a bad gradient rather than as a grid nobody agreed on.
+    fit keeps are the functional, so two ranks holding different ones
+    differentiate two surfaces. Every route gate still passes, because each
+    kernel locksteps what it reads; only the end-to-end force carries the
+    difference (of order 1e-3 Ha/Bohr), which reads as a bad gradient rather
+    than as a grid nobody agreed on.
 
-    A difference of that size is a DISCRETE one. The same force moves 1.6e-2
-    per unit relative change of the radii (water/cc-pVDZ), so the last bits of
-    an `eigh` or of a dense solve reach 1e-17 here and cannot be it: a grid
-    explanation needs the radii themselves to land elsewhere, or the pair
-    screen to keep another column set. All three are hashed for that reason.
+    A difference of that size is a discrete one: the force moves 1.6e-2 per
+    unit relative change of the radii (water/cc-pVDZ), so last-bit
+    differences of an `eigh` or a dense solve cannot explain it; the radii
+    must land elsewhere or the pair screen keep another column set. All three
+    are hashed for that reason.
     """
     radii = repr([(el, [(s, np.asarray(chain.radii[el][s]).tolist())
                         for s in sorted(chain.radii[el])])
@@ -607,9 +607,9 @@ def chain_scf(m):
 
 
 def chain_scf_unrun(m):
-    """The same mean field BUILT AND NOT RUN: the chain converges it.
+    """The same mean field built and not run: the chain converges it.
 
-    `chain_scf` runs its own SCF, which every rank then repeats -- the one
+    `chain_scf` runs its own SCF, which every rank then repeats, the one
     stage of a chain that does not divide. Leaving the `kernel()` out hands it
     to `factor_chain.converged_factory`, which converges it through
     `distributed_mean_field` on the region's ranks: every rank runs pyscf's
@@ -668,19 +668,18 @@ def one_thread(evaluate):
 
 
 def one_thread_scatter(m, mf, g_ref):
-    """|d| between a serial excitation force and the SAME force with BLAS held
-    to one thread: what re-associating these sums costs on THIS machine.
+    """|d| between a serial excitation force and the same force with BLAS held
+    to one thread: what re-associating these sums costs on this machine.
 
     A thread count is a summation order. The reductions inside every threaded
-    GEMM of the chain re-associate when it changes, which is what a partition
-    over tau and over frequency does to the sweeps, and the orbital-response
-    solve amplifies the last bits of either the same way -- so this is the
-    size of difference the distribution is entitled to produce, measured where
-    the test runs rather than carried in from another machine.
+    GEMM of the chain re-associate when it changes, as a partition over tau
+    and over frequency does to the sweeps, and the orbital-response solve
+    amplifies the last bits of either the same way, so this is the size of
+    difference the distribution is entitled to produce, measured where the
+    test runs.
 
-    It is the SOLVERS' tolerances that this does not measure, and they are not
-    what moves the force: the Lagrangian's lgmres tightened a hundredfold
-    (ORBITAL_MULTIPLIER_TOL 1e-11 -> 1e-13, its residual 5.9e-12 -> 8.8e-14)
+    The solvers' tolerances are not what moves the force: tightening the
+    Lagrangian's lgmres a hundredfold (ORBITAL_MULTIPLIER_TOL 1e-11 -> 1e-13)
     moves this gradient 4.8e-13, and the Casida step here is dense (95 pairs,
     well under BSE_DENSE_MAX_NOV) so BSE_DAVIDSON_CONV_TOL never enters. The
     scatter measured here is 1.8e-8 Ha/Bohr, four orders above either.
@@ -824,7 +823,7 @@ def same_davidson(gate, label, om, info):
 
     The Davidson runs on every rank on the block action's lockstepped output
     and its roots are lockstepped at the end, so the roots are bitwise rank
-    0's; the counts are what the lockstep cannot repair after the fact -- a
+    0's; the counts are what the lockstep cannot repair after the fact: a
     rank that took another decision would have called the action a different
     number of times, and the last lockstep would hide that it iterated on
     alone.
@@ -882,9 +881,9 @@ def bse_routes(gate, mf, mol, F):
                f'{seen[0][1]}, {seen[0][2]} action(s), |d| vs serial '
                f'{d_sign:.2e}')
 
-    # THE RANKS NEED NOT ARRIVE WITH THE SAME NUMBERS. Across nodes a rank's
+    # The ranks need not arrive with the same numbers. Across nodes a rank's
     # own SCF and fit do not repeat bit for bit; here rank != 0 is handed a
-    # spectrum shifted by 1e-3 Ha and factors scaled by 1 + 1e-6 -- far more
+    # spectrum shifted by 1e-3 Ha and factors scaled by 1 + 1e-6, far more
     # than the last-bit drift, so a run that took its data or its Davidson
     # decisions from such a rank could not land on the serial roots. It must:
     # the entry locksteps write rank 0's arrays into every rank's buffers, and
@@ -902,9 +901,9 @@ def bse_routes(gate, mf, mol, F):
     d = np.abs(om_p - om_s).max() * HARTREE_TO_EV
     gate.check(d < 1e-9, 'BSE roots [explicit] with rank != 0 perturbed == serial',
                f'|d| = {d:.2e} eV')
-    # BITWISE, because the fixture's factors and spectrum are rank 0's on
+    # Bitwise, because the fixture's factors and spectrum are rank 0's on
     # every rank already: overwriting the perturbation with rank 0's copy must
-    # leave exactly the fixture's bits behind, not something near them.
+    # leave the fixture's bits behind, not something near them.
     overwritten = (all(np.array_equal(a, b) for a, b in zip(F_r, F))
                    and np.array_equal(mf_r.mo_energy, mf.mo_energy))
     gate.check(overwritten, "the perturbed factors and spectrum were overwritten "
@@ -959,8 +958,8 @@ def sliced_factors_routes(gate, mf, mol, F):
 
     `separable_factors(sliced=True)` cuts each rank's rows from the same
     lockstepped fit as the fixture's, and every stage that reads an array
-    whole gathers it once through `mpi_grid.allgather_rows` -- the row-counted
-    Allgatherv this is the real-MPI gate of -- so the energies are the
+    whole gathers it once through `mpi_grid.allgather_rows` (the row-counted
+    Allgatherv this is the real-MPI gate of), so the energies are the
     fixture's bitwise.
     """
     gate.section('sliced factors (SlicedFactors)')
@@ -1014,7 +1013,7 @@ def grid_row_axes(eps, nocc):
     omega -> tau weights of W - I, the chi0 frequencies and mu."""
     e_min, e_max = eps[nocc] - eps[nocc - 1], eps[-1] - eps[0]
     mu = 0.5 * (eps[nocc - 1] + eps[nocc])
-    fp, fw = minimax_frequency_grid(ROW_NTAU, e_min, e_max)
+    fp, fw = screening_frequency_grid(ROW_NTAU, eps, nocc, mu=mu)
     grid = TimeFrequencyGrid.minimax_split(ROW_NTAU, e_min, e_max,
                                            np.append(fp, 0.0),
                                            np.append(fw, 0.0))
@@ -1098,8 +1097,8 @@ def grid_row_sums(gate, mf, mol, F, w0_route):
 
     proj(tau) through `chi0_frequency_rows` and the branch sums of Sigma
     through `self_energy_branch_sums` on this run's communicator, recorded:
-    the serial kernel's addends -- one per grid-row tile, one per block pair
-    -- in its order are its result, bitwise; this rank's partial of every
+    the serial kernel's addends (one per grid-row tile, one per block pair)
+    in its order are its result, bitwise; this rank's partial of every
     tau point is its own items' addends in that order, bitwise; and what it
     receives lies within `join_bound` of the exact sum of the ranks'
     partials at every element, floored at one ulp of the serial sum's
@@ -1250,13 +1249,13 @@ def qp_set_and_rpa(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
     states = [nocc - 2, nocc - 1, nocc, nocc + 1]
     weights = np.array([0.3, -1.1, 0.8, 0.45])
     # the explicit residue backend only: it is the route every checkout has.
-    # BITWISE ROOTS, BY CONSTRUCTION. The roots read proj(tau) and wc and
-    # nothing else reduced, and both reductions add exact zeros: a rank writes
-    # only its own tau slots and its own frequency rows. The rows themselves
+    # Bitwise roots by construction: the roots read proj(tau) and wc and
+    # nothing else reduced, and both reductions add exact zeros (a rank writes
+    # only its own tau slots and its own frequency rows). The rows themselves
     # are cut out of the serial block's transform (`owned_frequency_blocks`),
     # because a GEMM that transforms only a rank's rows gives other bits on
-    # OpenBLAS -- which failed this gate on a cluster at 8 ranks, 3 rows a rank.
-    # The adjoints are partial sums over the partition and re-associate.
+    # OpenBLAS. The adjoints are partial sums over the partition and
+    # re-associate.
     route = 'explicit'
     ref = serial(qp_set_gradient, X_mo, D, eps, nocc, grid, nu, wt, states,
                  weights, mu=mu, residue_route=route)
@@ -1288,7 +1287,7 @@ def qp_set_and_rpa(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
 def single_state_qp(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
     """The single-state quasiparticle gradient on both residue routes."""
     gate.section('single-state quasiparticle gradient')
-    # The ADJOINTS are not bitwise across rank counts: the reverse pass's
+    # The adjoints are not bitwise across rank counts: the reverse pass's
     # projbar and Bp_bar are partials over the frequencies a rank owns, and an
     # all-reduce adds them in whatever order its tree picks. The root and Z
     # read only wc, the same zero-padded rows cut from the serial blocks as in
@@ -1388,13 +1387,13 @@ def chain_end_to_end(gate, mol):
         g_ex = ExcitedStateChain(mol, chain_scf, mf=mf_grad).excitation_gradient()[0]
         g_qp = ExcitedStateChain(mol, chain_scf,
                                  mf=mf_grad).quasiparticle_gradient(0)[0]
-    # WHAT THE FORCES ARE COMPARED AT, measured before they are compared:
-    # each rank re-associates its own serial forces by differentiating them
-    # again on one BLAS thread. The gates take RANK 0's, because both numbers
-    # they compare are rank 0's -- the serial reference below and the
-    # distributed gradient, whose every kernel input is locked to rank 0's --
-    # while the others are printed, since a node that reproduces itself less
-    # well than rank 0 is worth seeing even though it does not set the gate.
+    # The bars the forces are compared at, measured first: each rank
+    # re-associates its own serial forces by differentiating them again on one
+    # BLAS thread. The gates take rank 0's, because both numbers they compare
+    # are rank 0's (the serial reference below and the distributed gradient,
+    # whose every kernel input is locked to rank 0's); the others are printed,
+    # since a rank that reproduces itself less well than rank 0 is worth
+    # seeing even though it does not set the gate.
     # Every rank's references are done first: simulated ranks share one BLAS
     # pool, which a one-thread region holds at one thread for all of them.
     gate.everyone(None)
@@ -1412,9 +1411,9 @@ def chain_end_to_end(gate, mol):
                   f'|deps^QP/dR| max {np.abs(g_qp).max():.9f} Ha/Bohr; one-thread '
                   f'repeat {reps[0][0]:.2e} / {reps[0][1]:.2e} Ha/Bohr')
         return mf_grad, g_ex, gate_bar
-    # WHAT EACH RANK IS DIFFERENTIATING, before the forces are compared. The
-    # chain freezes its own radii, points, frames and pair layout -- a kernel
-    # locksteps its inputs, a chain decides its conventions -- so this is the
+    # What each rank is differentiating, before the forces are compared. The
+    # chain freezes its own radii, points, frames and pair layout (a kernel
+    # locksteps its inputs, a chain decides its conventions), so this is the
     # one thing the route gates above cannot see. The mean field is printed
     # beside it because it is the other per-rank input, and the two say which
     # of them a failing force below belongs to.
@@ -1463,20 +1462,20 @@ def chain_end_to_end(gate, mol):
 def build_only_factory(gate, mol, mf_grad, g_ex, gate_bar):
     """The chain whose factory builds a mean field and leaves it unrun."""
     gate.section('the chain with a build-only factory')
-    # NO `mf=` HERE, WHICH IS THE POINT. A mean field handed to a chain is the
-    # user's and is taken as it is; the SCF this exercises is the one the chain
-    # runs ITSELF through its factory, and with `chain_scf_unrun` that SCF is
-    # converged over the region's ranks instead of on each of them. Its
-    # reference is the self-converging factory's mean field, `mf_grad`, and
-    # rank 0's serial force off it, `g_ex` -- the same two numbers the block
-    # above compares against.
+    # No `mf=` here: a mean field handed to a chain is the user's and is taken
+    # as it is; the SCF this exercises is the one the chain runs itself
+    # through its factory, and with `chain_scf_unrun` that SCF is converged
+    # over the region's ranks instead of on each of them. Its reference is the
+    # self-converging factory's mean field, `mf_grad`, and rank 0's serial
+    # force off it, `g_ex`, the same two numbers the block above compares
+    # against.
     runs = []
     chain_unrun = ExcitedStateChain(mol, recorded(chain_scf_unrun, runs))
     mf0 = chain_unrun.mf0
     d_scf = abs(mf0.e_tot - mf_grad.e_tot)
     n_mo = gate.distinct(mf0.mo_coeff)
     g_unrun = chain_unrun.excitation_gradient()[0]
-    # THE FORCE IS COMPARED OFF ITS OWN MEAN FIELD. Two SCF runs of the same
+    # The force is compared off its own mean field. Two SCF runs of the same
     # equations, each to conv_tol_grad, land a round-off apart, and the fit
     # adjoint amplifies that into the force: from other initial guesses the
     # serial force on this water moves by 0.9-1.4e-8 Ha/Bohr, the size of the
@@ -1516,14 +1515,14 @@ def build_only_factory(gate, mol, mf_grad, g_ex, gate_bar):
                    'ranks == serial off its mean field',
                    f'|d| = {d_ex_unrun:.2e} vs gate {gate_bar:.2e} Ha/Bohr')
         return
-    # Without a communicator `distributed_mean_field` IS `mf.kernel()`, the
-    # call the factory would have made itself on the object it built: ONE run
+    # Without a communicator `distributed_mean_field` is `mf.kernel()`, the
+    # call the factory would have made itself on the object it built: one run
     # of it with no initial guess, pyscf's own path with no distributed
-    # handles left behind, and the chain holding that run's bits -- not close
+    # handles left behind, and the chain holding that run's bits, not close
     # to them. The run is compared with itself, not with `mf_grad`, because
-    # two SCF runs of a threaded pyscf do not repeat their bits.
-    # The FORCE is compared with the serial one off mf0, at the anchored bar
-    # the block above measured.
+    # two SCF runs of a threaded pyscf do not repeat their bits. The force is
+    # compared with the serial one off mf0, at the anchored bar the block
+    # above measured.
     run = runs[0] if len(runs) == 1 else None
     plain = (run is not None and run['mf'] is mf0 and not run['args']
              and set(run['kwargs']) <= {'dm0'}
@@ -1552,9 +1551,9 @@ def sliced_chain_routes(gate, mol, gate_bar):
     geometry, cut from the products the whole layout forms; each kernel
     gathers what it reads whole through `mpi_grid.allgather_rows`, once per
     sweep or solve, and the Davidson runs on the rows. Both layouts are handed
-    ONE reference and ONE displaced mean field, so the layout is all that
-    differs between them -- and pyscf's own work inside each chain, its K
-    builds and the mean field's force, which a threaded pyscf does not repeat
+    one reference and one displaced mean field, so the layout is all that
+    differs between them, besides pyscf's own work inside each chain (its K
+    builds and the mean field's force), which a threaded pyscf does not repeat
     bit for bit. What that work moves is measured by evaluating each layout
     `SLICED_SAMPLES` times on the same mean fields, the largest difference
     between two evaluations of one layout, and the force, the energy and the
@@ -1565,10 +1564,9 @@ def sliced_chain_routes(gate, mol, gate_bar):
     if gate.size == 1:
         gate.info('one rank: sliced=True lays nothing out')
         return
-    # ONE MEAN FIELD FOR BOTH LAYOUTS. Two SCF runs of a threaded pyscf do not
-    # repeat their bits, and the force carries that difference: 1.97e-8
-    # Ha/Bohr between the layouts on eight cluster nodes at 16 threads when
-    # each converged its own.
+    # One mean field for both layouts: two SCF runs of a threaded pyscf do not
+    # repeat their bits, and the force carries that difference (2e-8 Ha/Bohr
+    # at 16 threads when each layout converges its own).
     mf_ref = chain_scf(mol)
     here = gto.M(atom=WATER_DISPLACED, basis='cc-pvdz', verbose=0)
     mf_here = chain_scf(here)
@@ -1584,7 +1582,7 @@ def sliced_chain_routes(gate, mol, gate_bar):
             out[tag].append((np.asarray(g), e, diags, ex))
     g_w, e_w, d_w, _ = out['whole'][0]
     g_s, e_s, d_s, ex = out['sliced'][0]
-    # WHAT THE CHAINS' OWN PYSCF WORK MOVES, read off each layout's repeats
+    # What the chains' own pyscf work moves, read off each layout's repeats
     # (under an emulated 16-thread race: 6e-9 to 1.4e-8 Ha/Bohr in the
     # force, 36 to 83 ulp in the root, the energy not at all). A repeat that
     # lands on the same bits resolves nothing below one ulp of the number,
@@ -1632,10 +1630,18 @@ def sliced_chain_routes(gate, mol, gate_bar):
                'or solve, every rank', f'{gathers[0]} on rank 0')
 
 
+def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
+    """`separable_ri.ao_blocks` with every shell its own block, last first:
+    the whole fit's three-centre sum F D^T reassociated once, the anchor of
+    the row fit."""
+    return [(s, s + 1) for s in reversed(range(mol.nbas))]
+
+
 def reassociated_fit(mol, layout):
     """`fit_M_stable` with its sums over the test set -- the row norms, the
     Gram matrix and F Dt^T -- cut per mu shell and accumulated in reverse:
-    one reordering of the whole fit's own sums, the anchor of the row fit."""
+    one reordering of the whole-form fit's own sums, the anchor of the
+    whole nuclear assembly."""
     mu = np.asarray(layout[0])
     ao_loc = mol.ao_loc_nr()
     shells = [np.flatnonzero((mu >= ao_loc[s]) & (mu < ao_loc[s + 1]))
@@ -1712,7 +1718,10 @@ def reassociated_fit_adjoint(mol, gram):
 def whole_row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar, **extra):
     """`FactorChain.row_fit_branches` formed whole on every rank: the
     collocation adjoint and `dfactor_adjoint_gauges` over every product
-    pair, the row fit's estimator, with no ledger."""
+    pair, the row fit's estimator, with no ledger. Adjoints held in grid
+    tiles are gathered whole."""
+    x_bar, d_bar = (a.gather() if isinstance(a, GridTileRows) else a
+                    for a in (x_bar, d_bar))
     g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                  self.pts_local, self.owner,
                                  frames=self.frames,
@@ -1725,7 +1734,9 @@ def whole_row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar, **extra):
 
 
 def gathered_rotation(x_mo, x_bar, block=None):
-    """X_mo^T X_bar on X_mo gathered whole."""
+    """X_mo^T X_bar on X_mo gathered whole, X_bar in grid tiles gathered."""
+    if isinstance(x_bar, GridTileRows):
+        x_bar = x_bar.gather()
     return whole_factor(x_mo, 'X_mo').T @ x_bar
 
 
@@ -1768,7 +1779,9 @@ def scan_assembly(chain, found, ledgers):
     def traced_force(*args, **kwargs):
         got = inspect.signature(type(chain).nuclear_gradient).bind(
             chain, *args, **kwargs).arguments
-        inputs = [got['x_bar'], got['d_bar']]
+        # adjoints held in grid tiles are their rows
+        inputs = [got[k].rows if isinstance(got[k], GridTileRows) else got[k]
+                  for k in ('x_bar', 'd_bar')]
 
         def local(frame, event, arg):
             if event in ('line', 'return'):
@@ -1856,13 +1869,16 @@ def row_fit_chain_routes(gate, mol):
     whole-fit sliced surface on the same ranks.
 
     `fit='rows'` builds each rank's rows with `separable_ri.fit_rows`, so no
-    rank forms the fit whole; it is another realization than the whole fit's
-    (and on water, where the pair screen keeps every pair, the same
-    estimator), so the force is gated at an anchored bar: what the whole-fit
-    surface's force moves when its fit's sums are reassociated, measured on
-    these ranks. One rank is the row fit too. Every surface is handed ONE
-    reference and ONE displaced mean field, so the bars measure fits and
-    their adjoints, not two SCF runs of a threaded pyscf.
+    rank forms the fit whole; it is another realization of the whole fit's
+    estimator (`fit_M_streaming` on the frozen layout, every product pair in
+    the Gram matrix), so the force is gated at an anchored bar: what the
+    whole-fit surface's force moves when its fit's three-centre sum is
+    reassociated, measured on these ranks. A different estimator on either
+    side (the Gram matrix over the screened pairs alone, say, on a molecule
+    whose screen drops pairs) sits 5e4 bars away. One rank is the row fit
+    too. Every surface is handed one reference and one displaced mean field,
+    so the bars measure fits and their adjoints, not two SCF runs of a
+    threaded pyscf.
     """
     gate.section('the state-pair surface on the row-distributed fit')
     mf_ref = chain_scf(mol)
@@ -1879,18 +1895,9 @@ def row_fit_chain_routes(gate, mol):
         return surface, np.asarray(g), e
 
     _, g_whole, e_whole = force(sliced=True)
-    anchor = reassociated_fit(mol, FrozenFactorization(mol).layout)
-    fit_now = factor_chain.fit_M_stable
-    # Over thread-ranks the module is shared: no rank swaps the fit before
-    # every rank is done with the whole one, nor back before every rank has
-    # used the reassociated one.
-    gate.everyone(None)
-    factor_chain.fit_M_stable = anchor
-    try:
-        _, g_bar, _ = force(sliced=True)
-    finally:
-        gate.everyone(None)
-        factor_chain.fit_M_stable = fit_now
+    _, g_bar, _ = swapped(gate, [(separable_ri, 'ao_blocks',
+                                  per_shell_reversed)],
+                          lambda: force(sliced=True))
     found, ledgers = set(), []
 
     def scanned(surface):
@@ -1968,7 +1975,7 @@ def row_fit_chain_routes(gate, mol):
 def grid_adjoint_routes(gate, mol):
     """The state-pair surface on sliced factors with the grid BSE adjoint and
     with the default one, each over the ranks against its own serial kernel,
-    on ONE reference and ONE displaced mean field.
+    on one reference and one displaced mean field.
 
     The two routes are never compared with each other here. Their seeds agree
     to a few ulp, but the fold carries the last bits of its input to 1e-8
@@ -1976,14 +1983,14 @@ def grid_adjoint_routes(gate, mol):
     bar between them is a draw of that rounding; their identity is gated
     serially on the seeds (tests/test_bse_grid_adjoint.py). Over the ranks
     each route is exact: the seeds are the serial kernel's bits on the
-    gathered factors, and the grid route's force is the fold of exactly
-    those serial seeds.
+    gathered factors, and the grid route's force is the fold of those serial
+    seeds.
     """
     gate.section('the grid BSE adjoint on sliced factors')
     if gate.size == 1:
         gate.info('one rank: sliced=True lays nothing out')
         return
-    # ONE MEAN FIELD FOR BOTH ADJOINTS: two SCF runs of a threaded pyscf do
+    # One mean field for both adjoints: two SCF runs of a threaded pyscf do
     # not repeat their bits, and the force and energy would carry them.
     mf_ref = chain_scf(mol)
     here = gto.M(atom=WATER_DISPLACED, basis='cc-pvdz', verbose=0)
@@ -2077,12 +2084,14 @@ def grid_adjoint_routes(gate, mol):
                'no three-index block reachable from the grid-adjoint chain '
                "at its reverse call, where the default route's cache is",
                f'grid {found_g}, default {found_d}')
-    gate.check(seeds_g and all(call['whole'] == [] and call['boundary'] == 1
-                               and call['gathers'] == {}
-                               for call in seeds_g),
+    # over ranks X_bar and D_bar stay in grid tiles: no boundary gather
+    boundary = 1 if gate.size == 1 else 0
+    gate.check(seeds_g and all(call['whole'] == []
+                               and call['boundary'] == boundary
+                               and call['gathers'] == {} for call in seeds_g),
                'no whole-grid array at any line of the grid adjoint on this '
-               'rank outside its one named boundary gather of X_bar and '
-               'D_bar, no whole-factor gather inside it',
+               f'rank, {boundary} boundary gather(s) of X_bar and D_bar, no '
+               'whole-factor gather inside it',
                '; '.join(f"whole {call['whole']}, boundary "
                          f"{call['boundary']}, gathers {call['gathers']}"
                          for call in seeds_g))
@@ -2188,8 +2197,9 @@ def probe_grid_seeds(ex, log):
                    if m is None else
                    isdf_interstate_backward(m, n, X, D, eq, w, no, xn, yn,
                                             **kw))
-        # copies, as the default route's probe takes them
-        seeds = tuple(np.array(a, copy=True) for a in out)
+        # seeds in grid tiles are compared gathered, after the trace
+        seeds = tuple(a.gather() if isinstance(a, GridTileRows) else a
+                      for a in out)
         log.append(dict(whole=sorted(whole), boundary=len(entered),
                         gathers=grew, seeds=seeds, ref=ref,
                         same=all(np.array_equal(a, b)
@@ -2220,12 +2230,12 @@ def lockstep_counters(gate, stats):
 
 
 def audited_forward(gate, mol):
-    """ONE chain forward under `distributed(comm, audit=True)`.
+    """One chain forward under `distributed(comm, audit=True)`.
 
-    On a mean field each rank converged ALONE, so the locksteps have something
+    On a mean field each rank converged alone, so the locksteps have something
     to absorb across nodes: `mismatched_calls` and `max_abs_diff` report how
-    often a rank's input differed from rank 0's and by how much -- zero on one
-    machine, where two processes repeat each other's bits. What must be zero
+    often a rank's input differed from rank 0's and by how much (zero on one
+    machine, where two processes repeat each other's bits). What must be zero
     everywhere is `disagreements`: every `agreement` a kernel makes compares
     digests of inputs and outputs that are identical by construction, so one
     disagreement is a kernel handing on something it never locked.

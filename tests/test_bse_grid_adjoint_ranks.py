@@ -1,65 +1,35 @@
 """The grid BSE adjoint (`LinearResponse.isdf_bse_adjoint`) distributed over
-simulated ranks (`run_simulated`: threads of this process with the real
-collectives), RHF/cc-pVDZ at 148 points per atom, on the chain's own roots
-and vectors, the factors cut by `SlicedFactors.from_whole`:
+simulated ranks (`run_simulated`), RHF/cc-pVDZ at 148 points per atom, on the
+chain's own roots and vectors, the factors cut by `SlicedFactors.from_whole`:
 
-  (a) THE SAME BITS AT EVERY RANK COUNT: eps_bar, X_bar, D_bar and W_bar of
-      dOmega_0 and of the interstate element at 1, 2, 3 and 8 ranks, every
-      rank's the one-rank run's, singlet and triplet, full and Tamm-Dancoff,
-      water and ethylene, in the default 256-point tiles and in 64-point ones
-      (more tiles than ranks); and the composed excitation force and
-      interstate element of a sliced chain with `bse_adjoint='grid'` at 1, 2,
-      3 and 8 ranks the same bits as the same chain whose grid adjoint every
-      rank runs serially on the gathered factors, every rank rank 0's;
-  (b) THE MEMORY SCAN: every frame under src/ traced line by line through
-      the kernel on every rank at 2, 3 and 8 ranks, no array with the whole
-      grid on an axis at any line outside the one named boundary gather of
-      X_bar and D_bar (`adjoints_at_the_boundary`), no whole-factor gather,
-      and the kernel's held-bytes ledger, read off its arrays, equal to this
-      rank's rows and tiles entry by entry; the same scan finds the whole
-      factors of the serial-replicated realization, so it can fail;
-  (c) THE SHAPE-SENSITIVE BLAS: with the kernel's GEMMs scaled by one plus
-      a multiple of their call shape (`ShapeSensitiveNumpy`, the stand-in of
-      tests/test_frequency_rows_serial_shaped.py extended to every dimension),
-      every rank at 2, 3 and 8 ranks is still bitwise the one-rank run under
-      the same stand-in; the stand-in moves the result, and a tile of 128
-      points in place of 256 moves it by far more than a last bit;
-  (d) THE STREAMS: each tile computed by exactly one rank, broadcast once per
-      pass (the column pass and the W_bar pass), each rank receiving every
-      other rank's tiles once per pass, three halo and two hand-back row
-      exchanges.
-
-Measured on a two-thread workstation: every bitwise gate exact; under the
-stand-in the adjoints move 3.9e-6 to 4.2e-6 off the real BLAS and a
-128-point tile moves them 1.7e-6 to 1.8e-6 more, every rank still the
-one-rank run's bits; the replicated adjoint in 128-point tiles moves the
-composed force 9.0e-9 Ha/Bohr at 2 ranks by its seeds alone: they sit at
-most 0.003 of the derived bound, and the fold of the default-tile seeds on
-the reblocked run's pieces is the distributed force bitwise. A 1e-10
-relative move of D_bar's largest element in the reblocked kernel puts its
-seeds at 236 bounds while the force moves 6.8e-9, less than the clean
-reblocking did; a dropped W_bar is 1.3e12 bounds; a 1e-12 change of W_bar in
-the reblocked run's fold breaks the one-fold gate.
-
-SHOWN TO FAIL, then restored and byte-compared (`cmp`): the kernel reading
-its column tiles of D out of D gathered whole (`whole_factor(D, 'D')` before
-the column pass, each tile sliced from it). The scan failed at 2, 3 and 8
-ranks, D (444, 84) seen at the gather's line in `isdf_bse_backward_rows`
-and in `sliced_factors._gathered`, `allgather_rows` and `allgather_blocks`,
-while the bitwise gate stayed green: a gather moves bytes, not bits.
+  (a) eps_bar, X_bar, D_bar and W_bar of dOmega_0 and of the interstate
+      element at 1, 2, 3 and 8 ranks are the one-rank run's bits on every
+      rank (singlet and triplet, full and TDA, water and ethylene, 256- and
+      64-point tiles); the composed force and interstate element of a sliced
+      chain with `bse_adjoint='grid'` are bitwise those of the same chain with
+      the grid adjoint run serially on the gathered factors;
+  (b) a line-by-line trace of every frame under src/ finds no whole-grid
+      array outside the boundary gather (`adjoints_at_the_boundary`), no
+      whole-factor gather, and the kernel's held-bytes ledger equal to this
+      rank's rows and tiles; the same scan finds the whole factors of the
+      serial-replicated realization, so it can fail;
+  (c) with the kernel's GEMMs scaled by a function of their call shape
+      (`ShapeSensitiveNumpy`), every rank is still bitwise the one-rank run;
+  (d) each tile is computed by one rank and broadcast once per pass (column
+      and W_bar), with three halo and two hand-back row exchanges.
 """
 import os
 import sys
 import warnings
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import numpy as np
 import pytest
 from pyscf import gto, lib
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from src.Base.constants import BSE_ADJOINT_TILE_ROWS
-from src.Base.sliced_factors import SlicedFactors, whole_factor
+from src.Base.sliced_factors import GridTileRows, SlicedFactors, whole_factor
 from src.Base.utils.mpi_grid import (contiguous_block, distributed,
                                      run_simulated)
 from src.SingleReference.LinearResponse import isdf_bse_adjoint
@@ -82,8 +52,7 @@ CASES = [
     ('ethylene', 'singlet', False, 'davidson'),
 ]
 #: The shape-sensitive stand-in's relative change per unit of a GEMM's rows,
-#: columns and inner dimension: tens of them move a result by ~1e-7, a
-#: million last bits.
+#: columns and inner dimension (tens of units move a result by ~1e-7).
 SHAPE_SKEW = 2.0 ** -30
 #: How far a tile-shape change moves the result under the stand-in at the
 #: least; a last-bit reassociation moves it ~1e-15.
@@ -243,11 +212,27 @@ def serial_replicated(kernel, first_factor, **override):
     return run
 
 
+def serial_replicated_rows(**override):
+    """`isdf_bse_backward_rows` (the chain's grid adjoint over more than one
+    rank, dOmega_n and, with `bra`, the interstate element) realized by
+    `serial_replicated`: the whole adjoint on every rank, cut to its
+    `contiguous_block` rows."""
+    whole = serial_replicated(isdf_bse_backward, 1, **override)
+
+    def run(*args, comm=None, **kwargs):
+        e_bar, x_bar, d_bar, w_bar = whole(*args, **kwargs)
+        r0, r1 = contiguous_block(len(x_bar), comm.Get_rank(),
+                                  comm.Get_size())
+        return e_bar, x_bar[r0:r1], d_bar[r0:r1], w_bar
+
+    run.calls = whole.calls
+    return run
+
+
 @pytest.fixture
 def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
-    order, so two runs of a chain repeat their bits; a no-op on a pyscf
-    built without OpenMP, which warns that it is."""
+    """pyscf's OpenMP GEMM on one thread, so its K partials are summed in one
+    order and two runs of a chain repeat their bits; a no-op without OpenMP."""
     threads = lib.num_threads()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -301,8 +286,11 @@ def test_the_composed_force_is_the_replicated_adjoints(size, monkeypatch,
     element = serial_replicated(isdf_interstate_backward, 2)
     monkeypatch.setattr(excited_state, 'isdf_bse_backward', omega)
     monkeypatch.setattr(excited_state, 'isdf_interstate_backward', element)
+    rows = serial_replicated_rows()
+    monkeypatch.setattr(excited_state, 'isdf_bse_backward_rows', rows)
     rep = run_simulated(grid_forces, size, factory_of)
-    assert len(omega.calls) == len(element.calls) == size
+    # serially the whole kernels, over ranks the rows kernel, twice a rank
+    assert len(omega.calls) + len(element.calls) + len(rows.calls) == 2 * size
     for r in range(size):
         assert bitwise(dist[r], rep[r]), f'rank {r} of {size}: {dist[r]}'
         assert bitwise(dist[r], dist[0]), f'rank {r} of {size} != rank 0'
@@ -312,10 +300,9 @@ def test_the_composed_force_is_the_replicated_adjoints(size, monkeypatch,
 
 
 def traced_grid_forces(comm, factory_of):
-    """`grid_forces`, and at every reverse call this chain's seeds recorded
-    beside the default-tile kernel's run serially on the gathered factors,
-    which the same fold then carries on the same pieces: (the forces, the
-    records)."""
+    """`grid_forces`, recording at every reverse call this chain's seeds
+    beside the default-tile kernel's run serially on the gathered factors and
+    folded on the same pieces: (the forces, the records)."""
     factory = factory_of(comm.Get_rank())
     mol = own_molecule('water')
     chain = ExcitedStateChain(mol, factory, mf=factory(mol),
@@ -336,7 +323,9 @@ def traced_grid_forces(comm, factory_of):
                                             **kw))
         calls.append(dict(n=n, m=m, ref=ref, inputs=(X, D, eq, w, no, xn, yn),
                           spin=chain.spin, tda=chain.bse_tda,
-                          seeds=tuple(np.array(a, copy=True) for a in out)))
+                          seeds=tuple(a.gather() if isinstance(a, GridTileRows)
+                                      else np.array(a, copy=True)
+                                      for a in out)))
         return out
 
     def folded(pieces, *own):
@@ -353,16 +342,13 @@ def traced_grid_forces(comm, factory_of):
 
 
 def test_the_force_carries_the_adjoints_bits(monkeypatch, pyscf_one_thread):
-    """At 2 ranks the replicated adjoint in 128-point tiles, a reblocking of
-    the same sums, moves the composed force off the distributed one's bits
-    -- so the bitwise gate above can fail -- and by its seeds alone: on
-    every rank the root is the distributed run's, the same fold of the
-    default-tile kernel's seeds on the reblocked run's own pieces is the
-    distributed force bitwise, and the reblocked seeds lie within the derived
-    rounding bound of the default-tile ones (`grid_bound_ratios`). The force
-    difference itself is the fold's own rounding of those seeds, printed:
-    the fit adjoint carries last-bit changes of its input to ~1e-8 Ha/Bohr,
-    so a bar on it would gate a draw."""
+    """At 2 ranks the replicated adjoint in 128-point tiles moves the composed
+    force off the distributed bits (so the bitwise gate can fail), by its
+    seeds alone: the root is unchanged, the fold of the default-tile seeds on
+    the reblocked run's pieces is the distributed force bitwise, and the
+    reblocked seeds lie within the derived rounding bound
+    (`grid_bound_ratios`). The force difference is only printed: the fit
+    adjoint carries last-bit input changes to ~1e-8 Ha/Bohr."""
     factory_of = mean_fields(2)
     dist = run_simulated(grid_forces, 2, factory_of)
     monkeypatch.setattr(excited_state, 'isdf_bse_backward',
@@ -371,6 +357,8 @@ def test_the_force_carries_the_adjoints_bits(monkeypatch, pyscf_one_thread):
     monkeypatch.setattr(excited_state, 'isdf_interstate_backward',
                         serial_replicated(isdf_interstate_backward, 2,
                                           tile_rows=128))
+    monkeypatch.setattr(excited_state, 'isdf_bse_backward_rows',
+                        serial_replicated_rows(tile_rows=128))
     moved = run_simulated(traced_grid_forces, 2, factory_of)
     for r, (forces, calls) in enumerate(moved):
         d = max(float(np.abs(np.asarray(a) - np.asarray(b)).max())
@@ -453,8 +441,8 @@ def scanned(case, tile):
 @pytest.mark.parametrize('size', SIZES)
 def test_no_rank_holds_a_whole_grid_array(inputs, case, tile, size):
     """(b) and (d): no whole-grid array at any line of the kernel outside
-    the boundary gather, no whole-factor gather, the ledger this rank's rows
-    and tiles, every tile streamed once per pass."""
+    the boundary gather, no whole-factor gather, the held-bytes ledger this
+    rank's rows and tiles, and each tile streamed once per pass."""
     x, d, eq, w, no, xn, yn, spin, tda = inputs[case]
     npts, nmo, naux = x.shape[0], x.shape[1], d.shape[1]
     nv, nT = nmo - no, 2 if tda else 4

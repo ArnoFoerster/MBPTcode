@@ -1,19 +1,11 @@
 """ISDF (separable-RI) J and K for the SCF, in place of a density-fitted cderi.
 
-WHY THIS EXISTS
----------------
 pyscf's DF builds `cderi`, naux x nao(nao+1)/2, and streams it once per SCF
-iteration; a range-separated hybrid such as LRC-wPBEh builds a SECOND one for
-the erf-attenuated operator (see `pyscf/df/df.py::range_coulomb`, which caches
-an entire parallel DF object per omega), and both are read every iteration.
+iteration; a range-separated hybrid builds a second one for the
+erf-attenuated operator (`pyscf/df/df.py::range_coulomb`). The separable RI of
+Duchemin and Blase (`src/Base/separable_ri.py`), which the GW/BSE code runs
+on, has far smaller factors X (M, nao) and D (naux, M):
 
-The GW/BSE half of this pipeline already runs on the separable RI of Duchemin
-and Blase (`src/Base/separable_ri.py`), whose factors X (M, nao) and D
-(naux, M) are far smaller. The SCF was the only consumer of the dense cderi
-left.
-
-THE SAME FACTORIZATION, CONTRACTED FOR J AND K
-----------------------------------------------
     (mu nu | la si) ~= sum_{PQ} X_{P mu} X_{P nu} Z_{PQ} X_{Q la} X_{Q si}
 
 with X[P, mu] = chi_mu(r_P) on the interpolation grid and Z = M^T V M. Both
@@ -23,60 +15,41 @@ Coulomb matrices follow by contraction, with no three-index tensor anywhere:
     J     = X^T diag(Z rho) X                                    O(M nao^2)
     K     = X^T [ Z .* (X Dm X^T) ] X        .* elementwise      O(M^2 nao)
 
-K is the expensive one and its cost is 4 M^2 nao, or 3 with the hermitian
-shortcut -- the M^2-nao contraction appears twice, once forming the Hadamard
-argument and once contracting it back. The largest object ever formed is a
-block of rows of an (M, M) matrix.
+K costs 4 M^2 nao, or 3 with the hermitian shortcut; the largest object ever
+formed is a block of rows of an (M, M) matrix.
 
-AND ONLY K IS USABLE, WHICH IS THE POINT OF THIS MODULE
--------------------------------------------------------
-The two contractions do not ask the interpolation for the same thing. In K,
-mu and nu sit on DIFFERENT interpolation points, each paired there with the
-density -- a sum over occupied orbitals, therefore compact. In J they sit on the
-SAME point as a co-density product X_{P mu} X_{P nu}, an arbitrary AO pair,
-diffuse x diffuse included. `separable_ri.build_D_F` fits M against test
-co-densities {all AOs} x {AOs with l <= l_max_second}, and `l_max_second` is 2,
-so an f x f product is never in the test set at all.
+Only K is usable. In K, mu and nu sit on different interpolation points, each
+paired there with the density (a sum over occupied orbitals, therefore
+compact). In J they sit on the same point as a co-density product
+X_{P mu} X_{P nu} of an arbitrary AO pair, diffuse x diffuse included, while
+`separable_ri.build_D_F` fits M against test co-densities {all AOs} x {AOs with
+l <= l_max_second = 2}, so an f x f product is never in the test set. On
+benzene/cc-pVTZ the worst |dJ| element (a carbon 4f with itself) is 2.4e-1
+against 1.1e-3 for the f block of K, and the SCF collapses by 129 eV; widening
+the test set to l <= 3 takes that element to 2.9e-2 and the SCF still
+collapses (by 142 eV), so the failure is variational. So `j_route` defaults
+to 'df-direct': J from pyscf's integral-direct DF-J, which stores no
+three-index tensor either. ISDF-K on that footing lands within 17 meV of DF-K
+on the same auxiliary basis, the size of the RI error it sits on top of.
 
-Measured, benzene/cc-pVTZ on the published grids: the worst |dJ| element is a
-carbon 4f with itself at 2.4e-1, against 1.1e-3 for the f block of K -- 222x --
-and the SCF collapses by 129 eV. Widening the test set to l <= 3 takes that
-element to 2.9e-2 and leaves K alone, confirming the mechanism, and the SCF then
-collapses by 142 eV instead: the failure is variational, not one bad element.
-So `j_route` defaults to 'df-direct': J from
-pyscf's integral-direct DF-J, which stores no three-index tensor either.
-ISDF-K on that footing lands within 17 meV of DF-K on the same auxiliary
-basis, the size of the RI error it sits on top of.
+Z is (M, M), far smaller than the cderi, and `z_mode='dense'` holds it;
+`z_mode='factored'` keeps L = V^{1/2} M, (naux, M), and rebuilds Z's rows per
+block, trading time for resident memory by a ratio that grows with naux/nao.
+`z_mode='auto'` picks from max_memory.
 
-WHAT IS STORED
---------------
-Z itself is (M, M), far smaller than the cderi it replaces, so
-`z_mode='dense'` holds it. `z_mode='factored'` instead keeps L = V^{1/2} M,
-shape (naux, M), and rebuilds Z's rows per block: at cc-pVTZ about 1.6x the
-time for 2.4x less resident memory -- and the ratio moves with naux/nao, so it
-widens as the auxiliary basis does. `z_mode='auto'` picks from max_memory.
-
-RANGE SEPARATION
-----------------
-The ISDF ansatz approximates the CO-DENSITY, rho_{mu nu}(r) ~= sum_P X_{P mu}
-X_{P nu} xi_P(r), and the operator only enters through Z_PQ = (xi_P | w | xi_Q).
-So a second operator needs a second Z and NOTHING ELSE: same grid, same X, same
-fitting coefficients M, with V replaced by the attenuated two-centre metric.
-
-It is also EXACT in the metric: Z is linear in V and V_SR + V_LR = V, so
-K_SR(omega) + K_LR(omega) = K_bare to machine precision (9.8e-15, see
-tests/test_isdf_jk.py). A refitted M_omega would forfeit that identity.
-
-The residual worry is that M is fitted against the BARE Coulomb metric
-(`separable_ri.fit_error_coulomb` is the objective the grid radii were optimized
-against), so it is only minimized in that norm. `refit_omega=True` builds an
-independent M_omega from attenuated three-centre integrals for comparison; the
-measurement says the refit buys 3-4x on water and NOTHING on benzene (1.778e-2
-either way), for a second full factorization. Reuse is also the numerically
-safer route: the attenuated metric is singular where the bare one is merely
-ill-conditioned -- 214 of 420 auxiliary functions in the null space on
-benzene/cc-pVDZ-RI at omega = 0.2 -- and Z_w = M^T V_w M only ever multiplies
-BY it, while refitting has to invert it.
+Range separation. The ISDF ansatz approximates the co-density,
+rho_{mu nu}(r) ~= sum_P X_{P mu} X_{P nu} xi_P(r), and the operator only enters
+through Z_PQ = (xi_P | w | xi_Q), so a second operator needs a second Z and
+nothing else: same grid, X and M, with V replaced by the attenuated
+two-centre metric. Z is linear in V and V_SR + V_LR = V, so
+K_SR(omega) + K_LR(omega) = K_bare to machine precision (tests/test_isdf_jk.py);
+a refitted M_omega would forfeit that identity. M is minimized only in the
+bare Coulomb norm; `refit_omega=True` builds an independent M_omega from
+attenuated three-centre integrals for comparison (3-4x better on water, no
+gain on benzene, for a second full factorization). Reuse is also numerically
+safer: the attenuated metric is singular where the bare one is merely
+ill-conditioned, and Z_w = M^T V_w M only multiplies by it, while refitting has
+to invert it.
 
 References
 ----------
@@ -98,6 +71,7 @@ from pyscf.lib import logger
 from pyscf.scf.dispersion import parse_disp
 
 from src.Base.constants import ISDF_RADII_MATCH_TOL
+from src.Base.pcm_derivatives import solvation_gradient
 from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    _ao_l_labels, atomic_grid, build_D_F,
                                    fit_M_stable, fit_M_streaming,
@@ -105,6 +79,7 @@ from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    optimize_atomic_radii, resolve_isdf_grid,
                                    shipped_radii_lookup, default_auxbasis)
 from src.Base.utils import memory
+from src.Base.utils.mpi_grid import current_comm
 
 #: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
 #: one factorization when the caller wants that. 148 points per atom.
@@ -123,14 +98,14 @@ _METRIC_EIG_TOL = 1e-12
 
 @contextlib.contextmanager
 def range_coulomb(mol, auxmol, omega):
-    """`omega` on BOTH molecules, the way `pyscf/df/df.py::range_coulomb` does.
+    """`omega` on both molecules, the way `pyscf/df/df.py::range_coulomb` does.
 
     omega > 0 is the long-range erf(omega r)/r, omega < 0 the short-range
     complement, 0 or None the bare operator -- pyscf's convention, which
     `dft/rks.py::get_veff` relies on when it asks for `omega=-omega`.
 
     Both molecules, because a three-centre integral is driven by a concatenated
-    Mole whose _env inherits the FIRST argument's range-omega slot; setting only
+    Mole whose _env inherits the first argument's range-omega slot; setting only
     the auxiliary one silently leaves int3c2e bare.
     """
     if omega is None:
@@ -151,7 +126,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
               return_info=False, grid_accuracy=None):
     """Interpolation points for `mol`, the same way `space_time` picks them.
 
-    THE GRID IS ONE OBJECT, so a keyword naming it is never dropped -- the
+    The grid is one object, so a keyword naming it is never dropped; the
     same decision table as `space_time.separable_factors`:
 
       grid_accuracy alone   `resolve_isdf_grid` sets `counts` and `n_start`.
@@ -161,13 +136,12 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                             and a run-time re-optimization onto another local
                             minimum of a multi-modal surface, which is a grid
                             nothing validated.
-      radii alone           the radii ARE the grid; no row is consulted.
+      radii alone           the radii are the grid; no row is consulted.
       radii+counts          where a row exists for those counts the two must
                             agree to `ISDF_RADII_MATCH_TOL` or the call is
-                            refused, and the row's `origin` is honoured -- it
-                            places one extra point at the nucleus, so dropping
-                            it builds a 306-point carbon grid where a
-                            Duchemin-Blase row describes 307.
+                            refused, and the row's `origin` is honoured (it
+                            places one extra point at the nucleus: 307 points
+                            for a Duchemin-Blase carbon row, not 306).
       nothing               `DEFAULT_COUNTS`, sized for double zeta.
 
     Shells are rotated into covariant atomic frames so the grid rotates with
@@ -176,7 +150,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
     grid_accuracy:   an accuracy level of `ISDF_GRID_ACCURACY` or four explicit
                      shell counts, resolved by `resolve_isdf_grid`, which
                      refuses anything the radii table has not got. It sets
-                     `counts` AND `n_start`, since a validated row is keyed on
+                     `counts` and `n_start`, since a validated row is keyed on
                      both.
     radii:           per-element shell radii; optimized per element if omitted.
     n_start: descents per element in `optimize_atomic_radii`. The single
@@ -207,11 +181,10 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
     if radii is None:
         radii, origins = {}, {}
         for el in elements:
-            # One table, one lookup, at the counts asked for -- the published
-            # cc-pVTZ grids are rows in it at their own counts rather than a
-            # substitution for a caller who named no size, which would make a
-            # grid-convergence study at cc-pVTZ return the same number for
-            # every count and read as convergence.
+            # One table lookup at the counts asked for: a published grid is a
+            # row at its own counts, never substituted for other counts (a
+            # grid-convergence study would then return the same number at
+            # every count).
             try:
                 radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
                                                      counts)
@@ -227,7 +200,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                                                   n_start=n_start)[0]
                 origins[el] = False
     else:
-        # Explicit radii ARE the grid and are honoured. Where the caller ALSO
+        # Explicit radii are the grid and are honoured. Where the caller also
         # named counts the table may describe the same grid, and then the two
         # specifications have to agree: `origin` belongs to the row, not to
         # the recipe, so a matching row brings its nuclear point with it.
@@ -266,7 +239,7 @@ def metric_sqrt(V, tol=_METRIC_EIG_TOL):
 
     V is a Coulomb (or attenuated Coulomb) two-centre matrix, positive
     semidefinite by construction, but the attenuated one is numerically
-    singular -- so a Cholesky is not available and the small modes are dropped.
+    singular, so a Cholesky is not available and the small modes are dropped.
     """
     w, v = np.linalg.eigh(V)
     keep = w > tol * max(w.max(), 1e-300)
@@ -275,22 +248,19 @@ def metric_sqrt(V, tol=_METRIC_EIG_TOL):
 
 def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
                 regularization=DEFAULT_REGULARIZATION, metric_rcond=1e-10):
-    """M refitted against the ATTENUATED metric -- the "second factorization".
+    """M refitted against the attenuated metric, the "second factorization".
 
     Same least-squares estimator as `separable_ri.fit_M`, but the RI fitting
     coefficients it targets are taken with the range-separated operator:
 
         F^w_{beta,rho} = sum_gamma [V_w^{-1}]_{beta gamma} (gamma | w | rho)
 
-    A PSEUDO-inverse, not an LU solve. The attenuated two-centre metric is
-    numerically singular where the bare one is merely ill-conditioned -- on
+    A pseudo-inverse, not an LU solve: the attenuated two-centre metric is
+    numerically singular where the bare one is merely ill-conditioned (on
     water/cc-pVDZ-RI, cond(V) = 2.5e5 against cond(V_w) = 2.5e18 at
-    omega = 0.3, with 14 of 84 eigenvalues at the level of the smallest
-    negative one. `separable_ri.build_D_F`'s `lu_solve` on that returns noise,
-    and a DF reconstruction of the attenuated ERI built the same way is wrong
-    in the third significant figure (1.6e-1 absolute) purely from the inverse.
-    That fragility is the refit route's, not the reuse route's: Z_w = M^T V_w M
-    only ever multiplies BY the metric.
+    omega = 0.3), and `separable_ri.build_D_F`'s `lu_solve` on it returns
+    noise. The reuse route has no such fragility: Z_w = M^T V_w M only
+    multiplies by the metric.
     """
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
@@ -311,7 +281,7 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
     F = (e3c[:, second, :].reshape(-1, naux) @ Vinv).T
     F *= np.tile(w, nao)[None, :]
     # The auxiliary block of the test set: F^w(gamma) = V_w^{-1} V_w, which is
-    # the identity only on the retained modes -- so it is written out rather
+    # the identity only on the retained modes, so it is written out rather
     # than assumed, unlike the bare case where `build_D_F` puts an eye there.
     D = np.hstack([D, aux_on_grid])
     F = np.hstack([F, Vinv @ V])
@@ -359,8 +329,8 @@ def _row_blocks(nk, block):
 def isdf_j(X, zrows, dms, block):
     """J for a stack of density matrices.
 
-    Only the DIAGONAL of X Dm X^T is needed, so J never touches an (M, M)
-    object at all -- it is O(M nao^2), and the whole memory question is K's.
+    Only the diagonal of X Dm X^T is needed, so J never touches an (M, M)
+    object: it is O(M nao^2), and the memory question is K's.
     """
     nk, nao = X.shape
     nset = len(dms)
@@ -382,7 +352,7 @@ def isdf_k(X, zrows, dms, block):
     """K = X^T [Z .* (X Dm X^T)] X, blocked over the interpolation index.
 
     The Hadamard product is why K cannot be reassociated into something
-    cheaper: Z's ELEMENTS are needed, not its action. What blocking buys is
+    cheaper: Z's elements are needed, not its action. What blocking buys is
     that only `block` rows of it exist at a time, (block, M) against (M, M).
 
     General in Dm: no hermiticity is assumed, so this is also the hermi=0 path.
@@ -416,8 +386,8 @@ def isdf_k_symmetric(X, zrows, dms, block):
         T = np.zeros((nk, nao))
         for bi, (p0, p1) in enumerate(blocks):
             # columns past p1 belong to the upper triangle and are never read;
-            # asking for them would hand back exactly the rebuild work the
-            # triangular loop exists to avoid.
+            # asking for them would redo the rebuild work the triangular loop
+            # avoids.
             Zp = zrows.rows(p0, p1, 0, p1)
             for q0, q1 in blocks[:bi + 1]:
                 A = Y[p0:p1] @ X[q0:q1].T
@@ -450,22 +420,20 @@ class ISDFJK(df.df.DF):
                  l_max_second=2, regularization=DEFAULT_REGULARIZATION,
                  block_memory_gb=4.0, progress=None, n_start=1):
         super().__init__(mol, auxbasis=auxbasis or default_auxbasis(mol.basis))
-        # Caps the working set of the fit's blocked loops. It reaches here
-        # because the fit is where the peak is: the Gram matrix is n_k^2, and
-        # everything else in the build is small beside it. It does not change
-        # the answer, but it IS a speed knob: one aux_e2 call per block, each
-        # rebuilding a shell-pair list over nbas x auxnbas -- see
-        # `separable_ri.build_D_F`.
+        # Caps the working set of the fit's blocked loops, where the build's
+        # peak is (the Gram matrix is n_k^2). It does not change the answer
+        # but is a speed knob: one aux_e2 call per block, each rebuilding a
+        # shell-pair list over nbas x auxnbas (`separable_ri.build_D_F`).
         self.block_memory_gb = block_memory_gb
         # None follows mol.verbose, so the knob that turns on the mean field's
         # output turns on the factorization's too, which can run for minutes
         # to hours.
         self.progress = (mol.verbose > 0) if progress is None else progress
         self.counts = counts or DEFAULT_COUNTS
-        # Whether the CALLER named counts. `isdf_grid` refuses explicit radii
-        # that contradict the table row at named counts, so defaulting here and
-        # passing the default on would fabricate that name and refuse a caller
-        # who gave radii alone -- for whom the radii ARE the grid.
+        # Whether the caller named counts. `isdf_grid` refuses explicit radii
+        # that contradict the table row at named counts, so passing the default
+        # on would refuse a caller who gave radii alone, for whom the radii are
+        # the grid.
         self._named_counts = counts is not None
         self.radii = radii
         self.n_start = n_start
@@ -473,34 +441,28 @@ class ISDFJK(df.df.DF):
         self.block = block
         self.refit_omega = refit_omega
         self.use_symmetry = use_symmetry
-        # j_route: 'isdf' is the pure method and what the validation sweep
-        # measures; 'df-direct' is the DEFAULT because the measurements say so.
-        # It takes J from pyscf's INTEGRAL-DIRECT DF-J (`df_jk.get_j`), which
-        # stores nothing but the (naux, naux) metric -- so the no-cderi
-        # property is untouched -- and it removes the entire failure mode.
-        # Benzene/cc-pVDZ on the fallback grid: -128810 meV with ISDF J,
-        # -225 meV with DF-J, IDENTICAL ISDF exchange in both. On grids that
-        # are fine it still buys an order of magnitude on orbital energies
-        # (water/PBE0 HOMO +25.7 -> -0.6 meV). J is also the cheap term --
-        # O(M nao^2) here against K's O(M^2 nao) -- so the trade is not
-        # symmetric.
+        # j_route: 'isdf' is the pure method, for validation; 'df-direct', the
+        # default, takes J from pyscf's integral-direct DF-J (`df_jk.get_j`),
+        # which stores only the (naux, naux) metric and removes ISDF-J's
+        # variational failure (benzene/cc-pVDZ on the fallback grid: -128810
+        # meV with ISDF J, -225 meV with DF-J, the same ISDF exchange in both;
+        # water/PBE0 HOMO +25.7 -> -0.6 meV on a good grid). J is the cheap
+        # term, O(M nao^2) against K's O(M^2 nao).
         self.j_route = j_route
         self._jdf = {}
         # Relative Coulomb-energy tolerance for the one-off `check`, run on the
-        # first density the SCF asks about. A bad interpolation grid is not a
-        # hypothetical: benzene/cc-pVDZ on `optimize_atomic_radii`'s default
-        # local descent puts 0.31 Ha of error into a single J element and
-        # collapses the SCF by 129 eV, while K stays good to 5e-3. Silent is
-        # the wrong failure mode for that. None disables the check.
+        # first density the SCF asks about: benzene/cc-pVDZ on
+        # `optimize_atomic_radii`'s default single descent puts 0.31 Ha of
+        # error into a single J element and collapses the SCF by 129 eV, while
+        # K stays good to 5e-3. None disables the check.
         self.check_tol = check_tol
         self._checked = False
         self.grid_warning = None
-        # Angular momentum cutoff on the SECOND index of the test co-densities
+        # Angular momentum cutoff on the second index of the test co-densities
         # M is fitted against (`separable_ri.build_D_F`). The default of 2 is
         # the published scheme's and is right for K, whose co-densities always
-        # carry an occupied orbital. It is exactly why J fails: an f x f AO
-        # product is never in the test set. Raise it to fit what J needs, at a
-        # larger test set and a proportionally longer fit.
+        # carry an occupied orbital; it is why J fails (an f x f AO product is
+        # never in the test set). Raising it enlarges the test set and the fit.
         self.l_max_second = l_max_second
         self.regularization = regularization
 
@@ -514,6 +476,8 @@ class ISDFJK(df.df.DF):
         self.grid_origins = None
         self._z = {}             # omega key -> _ZRows
         self._built = False
+        # True once a `DistributedISDFJK` divides this handle over ranks
+        self._distributed_twin = False
 
     # -- construction --------------------------------------------------------
 
@@ -524,6 +488,16 @@ class ISDFJK(df.df.DF):
     def build(self):
         if self._built:
             return self
+        comm = current_comm()
+        if (self._distributed_twin and comm is not None
+                and comm.Get_size() > 1):
+            raise RuntimeError(
+                'this ISDFJK is divided over the ranks by a DistributedISDFJK, '
+                'and building it whole here would form the (M, M) Gram matrix '
+                'and hold X and M whole on every rank. A J/K request on this '
+                'mean field under ranks belongs inside '
+                'distributed_fock(mf, build=False), which answers it from the '
+                "distributed SCF's tiles.")
         log = logger.new_logger(self)
         t0 = (logger.process_clock(), logger.perf_counter())
         mol = self.mol
@@ -543,12 +517,10 @@ class ISDFJK(df.df.DF):
         log.timer('ISDF factorization (M = %d points, nao = %d, naux = %d)'
                   % (self.nk, mol.nao_nr(), self.auxmol.nao_nr()), *t0)
         if self.j_route == 'isdf':
-            # Not a tolerance question. On benzene/cc-pVDZ, re-optimizing the
-            # radii with basin hopping takes the probe error from 8.5e-3 to
-            # 3.3e-4 -- inside any reasonable tolerance -- and the SCF still
+            # Not a tolerance question: on benzene/cc-pVDZ a basin-hopping grid
+            # takes the probe error from 8.5e-3 to 3.3e-4 and the SCF still
             # collapses by 5.6 eV, because the variational optimization seeks
             # out the modes where the interpolated Coulomb operator is weak.
-            # There is no probe value at which j_route='isdf' becomes safe.
             log.warn('j_route=\'isdf\' builds the Coulomb matrix from the '
                      'interpolation. That is measurably unsafe in an SCF: the '
                      'minimization finds the modes the fit underestimates, and '
@@ -587,7 +559,7 @@ class ISDFJK(df.df.DF):
         with range_coulomb(self.mol, self.auxmol, om):
             V = self.auxmol.intor('int2c2e', aosym='s1')
 
-        # Resolved ONCE: it reads the process's memory, which the dense branch
+        # Resolved once: it reads the process's memory, which the dense branch
         # then changes, so asking twice can report a mode that was not used.
         mode = self._resolve_z_mode()
         if mode == 'dense':
@@ -612,13 +584,12 @@ class ISDFJK(df.df.DF):
     def probe_densities(self):
         """Densities to test the interpolation against, cheapest first.
 
-        NOT the SCF's own density. The failure this catches is a J operator
-        with bad modes that the SCF then VARIATIONALLY FINDS, so testing at a
-        physical density misses it: on benzene/cc-pVDZ with the fallback grid,
-        the exact HF density gives a Coulomb error of 3.5e-4 while the SCF
-        still collapses by 129 eV. The core-Hamiltonian guess -- far too
-        diffuse to be physical, which is the point -- gives 8.5e-3 there and
-        4.8e-5 on the published grid, a factor of 175 apart.
+        Not the SCF's own density: the failure this catches is a J operator
+        with bad modes that the SCF then finds variationally, which a physical
+        density misses (on benzene/cc-pVDZ with the fallback grid, the exact HF
+        density gives a Coulomb error of 3.5e-4 while the SCF collapses by
+        129 eV). The core-Hamiltonian guess, far too diffuse to be physical,
+        gives 8.5e-3 there and 4.8e-5 on the published grid.
         """
         out = {}
         for key in ('minao', '1e'):
@@ -632,21 +603,17 @@ class ISDFJK(df.df.DF):
         """max relative Coulomb-energy error against integral-direct DF-J.
 
         The reference is `df_jk.get_j`, which stores no three-index tensor
-        either -- two screened integral passes and the (naux, naux) metric --
-        so this costs about one J build per probe and is affordable once per
-        SCF even at the sizes this method exists for.
+        either, so this costs about one J build per probe.
 
-        J is the right probe rather than K, because J is what reads the part
-        of the fit nobody constrained -- co-densities of two arbitrary AOs,
-        including the high-l products that `l_max_second` leaves out of the
-        test set entirely. In every case measured here a grid bad enough to
-        matter shows up in J one to two orders of magnitude before it shows up
-        in K: benzene/cc-pVDZ on the fallback grid puts 0.31 Ha into a single J
-        element while K stays good to 5e-3. It is also the cheap term.
+        J is the probe rather than K because J reads the part of the fit
+        nobody constrained, co-densities of two arbitrary AOs including the
+        high-l products `l_max_second` leaves out of the test set; a bad grid
+        shows up in J one to two orders of magnitude before K. It is also the
+        cheap term.
 
-        A pass is necessary, not sufficient. It says the grid is not obviously
-        broken; it does NOT license `j_route='isdf'`, which fails variationally
-        at probe values far below any tolerance. See `build`.
+        A pass is necessary, not sufficient: it does not license
+        `j_route='isdf'`, which fails variationally at probe values far below
+        any tolerance (see `build`).
         """
         if not self._built:
             self.build()
@@ -668,16 +635,15 @@ class ISDFJK(df.df.DF):
     def check_k(self, dms=None, omega=None):
         """Exchange-energy error of ISDF-K against stored-cderi DF-K, in Hartree.
 
-        `check` probes J because a broken grid shows there first -- but J is
-        protected by `j_route='df-direct'`, so on the production route the ONLY
-        term the grid touches is K, and a K error too small to trip the J probe
-        is not small in absolute terms: 1e-3 relative on a 178-atom molecule is
-        0.12 Ha in the SCF energy, i.e. 30 meV on every BSE root. This is the
-        instrument for that. It returns (max |dE_x| in Ha, max relative), with
-        E_x = -1/4 tr(D K) for a closed-shell D.
+        `check` probes J because a broken grid shows there first, but with
+        `j_route='df-direct'` the only term the grid touches is K, and a K
+        error too small to trip the J probe is not small in absolute terms on
+        a large molecule (1e-3 relative can be a tenth of a Hartree). Returns
+        (max |dE_x| in Ha, max relative), with E_x = -1/4 tr(D K) for a
+        closed-shell D.
 
         The reference builds a three-index tensor, naux x nao^2 / 2, so this is a
-        SMALL-MOLECULE calibration tool for choosing grids, not a check to run
+        small-molecule calibration tool for choosing grids, not a check to run
         inside a production SCF. `omega` probes the attenuated K a range-
         separated functional also builds.
         """
@@ -761,9 +727,8 @@ class ISDFJK(df.df.DF):
 
         `df_jk.get_jk` routes to `df_jk.get_j` whenever `with_k` is false and
         `_cderi is None`, and that path is two screened passes over int3c2e
-        with only the (naux, naux) metric held. So this keeps the whole point
-        of the exercise -- no three-index tensor on disk or in core -- while
-        taking J from the RI-V fit rather than the interpolation.
+        with only the (naux, naux) metric held: no three-index tensor on disk
+        or in core, and J from the RI-V fit rather than the interpolation.
         """
         key = '%.6f' % (0.0 if omega is None else omega)
         if key not in self._jdf:
@@ -810,12 +775,11 @@ class ISDFJK(df.df.DF):
 def separable_factors_from_jk(mf):
     """(X_mo, D, X_ao, coords) for GW/BSE, from an SCF that already fitted.
 
-    `space_time.separable_factors` and `ISDFJK.build` construct the SAME
-    factorization -- `isdf_grid` and the grid block in `separable_factors` are
-    the same published tables, the same `optimize_atomic_radii` fallback and the
-    same covariant frames, and `metric_sqrt`'s tolerance is `separable_factors`'
-    1e-12 -- so a BSE run on top of an ISDF SCF takes the SCF's rather than
-    building it twice.
+    `space_time.separable_factors` and `ISDFJK.build` construct the same
+    factorization (the same published tables, `optimize_atomic_radii`
+    fallback and covariant frames, and `metric_sqrt`'s tolerance is
+    `separable_factors`' 1e-12), so a BSE run on top of an ISDF SCF takes the
+    SCF's rather than building it twice.
 
     Returns the same pair `separable_factors` would, in the same auxiliary
     gauge, which is the part that must not drift: pairing factors from one fit
@@ -842,14 +806,12 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
 
     Routes through pyscf's own `density_fit` so the `_DFHF` mixin (which is
     what dispatches `get_jk(..., omega=...)` for a range-separated hybrid) is
-    installed exactly as usual, then swaps the DF object underneath it.
+    installed as usual, then swaps the DF object underneath it.
 
     The returned mean field carries `attach_isdf_gradient`, so its
-    `Gradients()` is the ISDF force: pyscf's own differentiates the FITTED
+    `Gradients()` is the ISDF force: pyscf's own differentiates the fitted
     interaction, 8.4e-5 Ha/Bohr from a finite difference of this route's own
-    energy on water/cc-pVDZ/B3LYP where the ISDF force sits at 7e-8, and a
-    geometry optimizer that asks the mean field for its gradient would
-    otherwise walk downhill on a different surface.
+    energy on water/cc-pVDZ/B3LYP where the ISDF force sits at 7e-8.
     """
     out = mf.density_fit(auxbasis=auxbasis or default_auxbasis(mf.mol.basis))
     out.with_df = ISDFJK(mf.mol, auxbasis=auxbasis, counts=counts, radii=radii,
@@ -859,27 +821,25 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
                          block_memory_gb=block_memory_gb, progress=progress,
                          n_start=n_start)
     out.with_df.max_memory = mf.max_memory
-    # cycle: the gradient package imports this module for ISDFJK itself.
-    # EVERY ISDF mean field gets the right force, rather than each caller
-    # remembering to ask for it: pyscf's own gradient differentiates the fitted
-    # interaction and would send any optimizer downhill on a different surface.
+    # Every ISDF mean field gets the ISDF force rather than each caller asking
+    # for it: pyscf's own gradient differentiates the fitted interaction.
+    # cycle: gradients.isdf_mean_field imports ISDFJK from this module
     from src.gradients.isdf_mean_field import attach_isdf_gradient
     return attach_isdf_gradient(out)
 
 
 class _NoExactExchange(dft.numint.NumInt):
-    """A numint reporting NO exact exchange, with the functional untouched.
+    """A numint reporting no exact exchange, with the functional untouched.
 
     pyscf's Kohn-Sham `get_veff` and its gradient both read the exchange
     fractions from `rsh_and_hybrid_coeff` and never by re-parsing the string,
-    so zeroing them here removes the exact exchange and leaves `eval_xc`
-    exactly as it was -- which for a range-separated functional is the
-    SHORT-RANGE DFT exchange libxc holds under the same name.
+    so zeroing them here removes the exact exchange and leaves `eval_xc` as it
+    was, which for a range-separated functional is the short-range DFT
+    exchange libxc holds under the same name.
 
-    This replaces appending "- a_x*HF" to the functional, which could not
-    express a range-separated hybrid at all and could not survive a
-    dispersion suffix, since `b3lyp-d3bj - 0.2*HF` is not a name pyscf can
-    split. Zeroing the coefficients has neither problem.
+    Appending "- a_x*HF" to the functional instead could not express a
+    range-separated hybrid and could not survive a dispersion suffix
+    (`b3lyp-d3bj - 0.2*HF` is not a name pyscf can split).
     """
 
     def rsh_and_hybrid_coeff(self, xc_code, spin=0):
@@ -895,16 +855,13 @@ class _NoExactExchange(dft.numint.NumInt):
 def _base_functional(xc):
     """`xc` with any empirical-dispersion suffix removed.
 
-    KEYED ON THE DISPERSION VERSION, NOT ON `parse_disp`'s FIRST RETURN. That
-    element is documented as "xc_code_for_dftd3" -- the name to hand the DFTD3
-    library -- and when there is no dispersion there is nothing to hand it, so
-    reading element 0 unconditionally can yield None for a plain functional.
-    Reading it through `disp` instead falls back to `xc` itself whenever no
-    dispersion suffix was present.
+    Keyed on the dispersion version, not on `parse_disp`'s first return: that
+    element is "xc_code_for_dftd3", the name to hand the DFTD3 library, and
+    can be None for a plain functional; with no dispersion suffix `xc` itself
+    is returned.
 
     The dispersion is a function of the geometry alone and the caller that
-    takes this reference's gradient adds its force back separately, which is
-    why it comes off here at all.
+    takes this reference's gradient adds its force back separately.
     """
     base, disp, _ = parse_disp(xc)
     out = xc if disp is None else base
@@ -919,21 +876,19 @@ def _base_functional(xc):
 def exchange_free_reference(mf):
     """`mf` at its own orbitals with the exact-exchange fraction taken out.
 
-    Everything the ISDF route did NOT interpolate, in one pyscf mean field: the
+    Everything the ISDF route did not interpolate, in one pyscf mean field: the
     functional minus its a_x*HF term, density-fitted on the same auxiliary basis
     (which is where `j_route='df-direct'` takes J from) and carrying the
     converged coefficients, orbital energies and occupations, so that its
     gradient's one-electron, Coulomb, exchange-correlation and energy-weighted
     overlap terms are the ISDF route's own.
 
-    The SAME grid objects as the mean field's: a Kohn-Sham energy is a property
+    The same grid objects as the mean field's: a Kohn-Sham energy is a property
     of its quadrature, and a finite difference taken against a different grid
     would be differencing two functionals.
 
-    An empirical dispersion correction is left OUT of the name here, because
-    pyscf reads the damping from the functional string and `b3lyp-d3bj -
-    0.2*HF` is not a string it can split. It is a function of the geometry
-    alone, so the caller adds its force back separately rather than losing it.
+    An empirical dispersion correction is left out of the name (see
+    `_base_functional`); the caller adds its force back separately.
     """
     # Kohn-Sham iff the reference carries a functional, the same test
     # `mean_field_skeleton_force` makes below.
@@ -941,7 +896,7 @@ def exchange_free_reference(mf):
     # Hartree-Fock minus its exchange is the empty functional, which is what
     # `_NO_FUNCTIONAL` already is. A Kohn-Sham reference keeps its own
     # functional and has the exact-exchange fractions zeroed instead of
-    # subtracted by name -- see `_NoExactExchange`.
+    # subtracted by name (`_NoExactExchange`).
     xc = _base_functional(mf.xc) if is_ks else _NO_FUNCTIONAL
     ref = dft.RKS(mf.mol, xc=xc).density_fit(auxbasis=mf.with_df.auxbasis)
     if is_ks:
@@ -953,7 +908,7 @@ def exchange_free_reference(mf):
 
 
 def mean_field_skeleton_force(mf):
-    """dE/dR of the energy THIS mean field reported, whatever built its exchange.
+    """dE/dR of the energy this mean field reported, whatever built its exchange.
 
     One call site for every correlated chain that adds a Lagrangian on top of
     the mean-field force. pyscf's gradient is right for a fitted reference and
@@ -973,7 +928,6 @@ def mean_field_skeleton_force(mf):
         # in water.
         with_solvent = getattr(mf, 'with_solvent', None)
         if with_solvent is not None:
-            from src.Base.pcm_derivatives import solvation_gradient
             force = force + np.asarray(solvation_gradient(with_solvent,
                                                           mf.make_rdm1()))
         return force
@@ -984,30 +938,21 @@ def mean_field_skeleton_force(mf):
 
 
 def refuse_isdf_jk_gradient(mf, what):
-    """Raise if `mf` answers its exchange from ISDF factors and a NUCLEAR FORCE
-    is about to be taken from PYSCF's own gradient.
+    """Raise if `mf` answers its exchange from ISDF factors and a nuclear force
+    is about to be taken from pyscf's own gradient.
 
-    pyscf's density-fitted gradient differentiates the three- and two-centre
-    integrals of a FITTED interaction. It knows nothing of the interpolation
-    points or the fit matrix this route builds K from, so what it returns is
-    the force of the fitted functional evaluated on the interpolated one --
-    a gradient of a different function than the energy just reported.
+    pyscf's density-fitted gradient differentiates the integrals of a fitted
+    interaction and knows nothing of the interpolation points or the fit
+    matrix this route builds K from, so it returns a gradient of a different
+    function than the energy reported.
 
-    THE GROUND-STATE FORCE ITSELF IS BUILT, and this guard is not the way to
-    it: `src.gradients.isdf_mean_field.isdf_mean_field_gradient` replaces the
-    fitted exchange derivative by the ISDF one and agrees with a central
-    difference of this route's own energy, falling as h^2 the way the fitted
-    route does. What remains fitted -- and why every caller of this guard
-    still gets refused -- is the LAGRANGIAN a correlated chain adds on top:
-    `fock_partial_skeleton` routes a density-fitted mean field to
-    `fock_partial_skeleton_df`, whose exchange half is built from the
-    auxiliary basis, and `exx_double_counting_skeleton` differences two fitted
-    pyscf gradients. So a GW, BSE or dRPA force on an ISDF mean field is still
-    the derivative of a different function, while the SCF force is not.
-
-    Energies are unaffected and are what this route exists for: at production
-    scale the fitted three-index tensor can reach tens of terabytes, so there
-    the choice is ISDF or nothing.
+    The ground-state force itself is built elsewhere
+    (`src.gradients.isdf_mean_field.isdf_mean_field_gradient`). What remains
+    fitted, and why every caller of this guard is refused, is the Lagrangian a
+    correlated chain adds on top: `fock_partial_skeleton` routes a
+    density-fitted mean field to `fock_partial_skeleton_df`, whose exchange
+    half is built from the auxiliary basis, and `exx_double_counting_skeleton`
+    differences two fitted pyscf gradients. Energies are unaffected.
     """
     with_df = getattr(mf, 'with_df', None)
     if not isinstance(with_df, ISDFJK):

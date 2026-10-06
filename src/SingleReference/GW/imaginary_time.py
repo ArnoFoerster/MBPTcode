@@ -21,6 +21,7 @@ from src.Base.constants import ISDF_TILE_GB, SCREENED_CHUNK_BYTES
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (agreement, contiguous_block,
                                      current_comm, partition, reduce_sum)
+from src.Base.utils.grids import minimax_frequency_grid
 from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
                                           minimax_transform_weights,
                                           minimax_points_for_accuracy,
@@ -117,10 +118,10 @@ def self_energy_imaginary_time(X, D, W_tilde_aux_tau, eps, nocc, tau_points,
         interaction, W - V, already on the imaginary-time axis.
 
     Returns (Sigma_lesser, Sigma_greater). The frequency-axis self-energy
-    follows by transforming their SUM with the cosine kernel and their
-    DIFFERENCE with the sine kernel -- the even and odd parts of Sigma(i.tau)
-    respectively. Both transforms are carried by TimeFrequencyGrid, which
-    carries the reference for them.
+    follows by transforming their sum with the cosine kernel and their
+    difference with the sine kernel (the even and odd parts of Sigma(i.tau)).
+    Both transforms are carried by TimeFrequencyGrid, which carries the
+    reference for them.
     """
     n = X.shape[1]
     ntau = len(tau_points)
@@ -138,12 +139,12 @@ def self_energy_fit_ranges(eps, nocc, mu=None):
     """
     The two exponential-decay ranges the space-time self-energy needs.
 
-    * Wt(i.tau): the RPA screened interaction has spectral weight BELOW the
-      smallest independent-particle transition -- collective excitations sit
-      under the HOMO-LUMO gap -- so a range starting at the gap misfits exactly
-      where Wt is largest. Measured on the Wt(i.w) -> tau -> Wt(i.w) round trip
+    * Wt(i.tau): the RPA screened interaction has spectral weight below the
+      smallest independent-particle transition (collective excitations sit
+      under the HOMO-LUMO gap), so a range starting at the gap misfits where
+      Wt is largest. Measured on the Wt(i.w) -> tau -> Wt(i.w) round trip
       at ntau=18: 1.3e-3 with [gap, e_max], 5.0e-8 with the widened range.
-    * Sigma(i.tau) = -G Wt is a PRODUCT, so its decay rates are SUMS
+    * Sigma(i.tau) = -G Wt is a product, so its decay rates are sums
       |eps_m - mu| + Omega_S and reach far beyond either factor's range.
 
     Returns ((w_lo, w_hi), (sig_lo, sig_hi)).
@@ -159,27 +160,40 @@ def self_energy_fit_ranges(eps, nocc, mu=None):
             (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
 
 
+def screening_frequency_grid(ntau, eps, nocc, mu=None):
+    """(points, weights): the minimax frequencies W(i.omega) is sampled on.
+
+    Built over rW, the range the omega -> tau fit of W - I (`COSINE_WT`)
+    represents e^{-x tau} on. A set built for the bare window [e_min, e_max]
+    does not reach the fit's padding at either end, and the fit then stalls
+    near 1e-3 however many points it is given. chi0 is fitted onto these
+    frequencies one output row at a time from its own bare-window tau axis.
+    """
+    rW, _ = self_energy_fit_ranges(eps, nocc, mu=mu)
+    return minimax_frequency_grid(ntau, *rW)
+
+
 def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
                           npoints_max=34):
     """Smallest minimax time grid that resolves every range the route integrates.
 
-    The space-time route uses ONE ntau for three different fits, over three
+    The space-time route uses one ntau for three different fits, over three
     different energy ranges, and the widest one binds:
 
         chi0(i.tau) -> chi0(i.omega)   [e_min, e_max]        the bare gap ratio
         W(i.omega)  -> W(i.tau)        rW, widened below the gap
-        Sigma(i.tau)-> Sigma(i.omega)  rS, widest -- Sigma is a PRODUCT, so its
-                                       decay rates are SUMS (see
+        Sigma(i.tau)-> Sigma(i.omega)  rS, widest: Sigma is a product, so its
+                                       decay rates are sums (see
                                        `self_energy_fit_ranges`)
 
-    R = e_max/e_min grows as the gap closes, so this necessarily returns more
+    R = e_max/e_min grows as the gap closes, so this returns more
     points for a longer acene than a shorter one at fixed accuracy: naphthalene
     needs 16 where hexacene needs 18. A hardcoded ntau is therefore wrong at one
     end or the other of any size series.
 
     Returns (npoints, worst_error). If no tabulated size reaches `target` the
     best available is returned instead, and the second value is the accuracy
-    actually obtained -- callers should not assume `target` was met.
+    obtained; callers should not assume `target` was met.
     """
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
@@ -197,7 +211,7 @@ def unrestricted_fit_ranges(spectra, noccs):
     the union of both spin channels, each at its own mid-gap.
 
     W is built from both spins' transitions, so its range is theirs together;
-    Sigma_s = -G_s W decays at |eps_m,s - mu_s| + Omega_S, and ONE pair of
+    Sigma_s = -G_s W decays at |eps_m,s - mu_s| + Omega_S, and one pair of
     ranges covering both channels lets either channel's sweep read the same
     transforms. A closed shell run unrestricted gets the restricted ranges.
     """
@@ -296,38 +310,33 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     """
     Wt(i.tau) = sum_w Ctw[.,w] ( [I - chi0(i.w)]^-1 - I ), in one blocked pass.
 
-    The in-core route builds all of chi0 (nfreq, naux, naux), inverts it in
-    place, then transforms
-
-    The catch is that every block needs all of proj(tau) again, and rebuilding
-    those IS the N^3 cost of the method -- so recomputing them costs a factor
-    nfreq/freq_block in time. `scratch_dir` avoids that by caching them.
+    Frequencies are processed in blocks of `freq_block`, so chi0 is not held
+    for the whole axis. Every block needs all of proj(tau) again, and
+    rebuilding them is the N^3 cost of the method, so recomputing costs a
+    factor nfreq/freq_block in time; `scratch_dir` caches them on disk.
 
     transform: `bare_gauge_transform`, when a reaction field dresses the
-    factors. Wt is then the BARE screening -- the self-energy takes the
-    continuum as Duchemin et al.'s static Eq. (18) shift instead, and screening
-    it dynamically as well would count the same polarization twice. The
-    captured `static_out['w_static']` stays DRESSED, because the BSE kernel it
-    is carried for is built in the dressed gauge with the dressed factors.
+    factors. Wt is then the bare screening: the self-energy takes the
+    continuum as Duchemin et al.'s static Eq. (18) shift, and screening it
+    dynamically as well would count the same polarization twice. The captured
+    `static_out['w_static']` stays dressed, because the BSE kernel it is
+    carried for is built in the dressed gauge with the dressed factors.
 
-    tau_indices / tau_out_indices / comm: THE TAU PARTITION, INSIDE EACH
-    FREQUENCY BLOCK. This rank projects only the input points `tau_indices`
+    tau_indices / tau_out_indices / comm: the tau partition inside each
+    frequency block. This rank projects only the input points `tau_indices`
     into the block, the block is all-reduced over `comm` (nb x naux^2 per
-    block, nfreq x naux^2 over the sweep -- the same volume the in-core route
-    reduces, no more), every rank inverts the block, and this rank folds it
-    into ONLY ITS OWN output rows `tau_out_indices`. So the M^2 sweep is
-    divided, Wt is held rows-per-rank -- ntau/nranks x naux^2 instead of
-    ntau x naux^2 -- and the proj(tau) cache holds this rank's points alone.
-    The self-energy sweep downstream reads Wt[k] only for the tau points it
-    owns, so the two partitions must coincide: hand it the same
-    `tau_out_indices`. Serial (all None) is bitwise unchanged. With all three
-    None the comm is `current_comm()`, and a context of several ranks splits
-    the INPUT points here (`partition`) while every rank folds every output
-    row, so the return is the whole Wt, identical on every rank; a partition
-    handed in without a comm stays the caller's own partial, never reduced
-    here. An audited run compares the inputs' digests, and on the way out those
-    of W(omega = 0) and of a whole Wt -- rows held per rank differ by design
-    and are not compared.
+    block, nfreq x naux^2 over the sweep), every rank inverts it, and this
+    rank folds it into its own output rows `tau_out_indices` only. The M^2
+    sweep is divided, Wt is held rows-per-rank (ntau/nranks x naux^2), and the
+    proj(tau) cache holds this rank's points alone. The self-energy sweep
+    downstream reads Wt[k] only for the tau points it owns, so hand it the
+    same `tau_out_indices`. With all three None the comm is `current_comm()`,
+    and several ranks split the input points here (`partition`) while every
+    rank folds every output row, so the return is the whole Wt, identical on
+    every rank; a partition handed in without a comm stays the caller's
+    partial, never reduced here. An audited run compares the inputs' digests
+    and, on the way out, those of W(omega = 0) and of a whole Wt (rows held
+    per rank differ by design and are not compared).
 
     X is the MO collocation, or `SlicedFactors` over `comm`, whose occupied
     and virtual columns `split_branches` gathers whole once for the sweep.
@@ -336,7 +345,7 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     `tau_out_indices` is None, matching what `self_energy_matrix_imaginary_time`
     builds internally when Wt_tau is None; otherwise a dict
     {tau index: (naux, naux)} holding the owned rows, which every consumer
-    indexes as Wt[k] exactly as before.
+    indexes as Wt[k].
     """
     naux, nfreq, ntau = D.shape[1], grid.nfreq, grid.ntau
     nb = int(freq_block or nfreq)
@@ -400,8 +409,8 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                     b[:] = transform.T @ b @ transform     # chi0 into the bare gauge
                 b[:] = np.linalg.inv(eye - b)
                 b[dg] -= 1.0                  # the correlation part, W - I
-            # ONE OUTPUT TAU AT A TIME. `Wt += tensordot(Ctw[:, k0:k1], blk)`
-            # materializes a temporary the size of Wt itself
+            # one output tau at a time: `Wt += tensordot(Ctw[:, k0:k1], blk)`
+            # would materialize a temporary the size of Wt
             for i, t in enumerate(rows_out):
                 Wt[i] += np.tensordot(Ctw[t, k0:k1], blk, axes=(0, 0))
             del blk
@@ -476,21 +485,20 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
 
         Sigma_{mu nu}(tau) = sum_PQ X_ao[P,mu] (Zt_PQ * Ghat_PQ) X_ao[Q,nu]
 
-    Two collocation matrices are involved and they are NOT interchangeable.
+    Two collocation matrices are involved and they are not interchangeable.
     Ghat needs the occupied/virtual split, so it is built from the MO
     collocation X_mo = X_ao @ mo_coeff; the outer indices are AO, so they use
     X_ao. Passing an MO-basis X for both silently returns Sigma in the MO basis
     instead.
 
     Cost per tau is O(M^2 N + M N^2): two GEMMs and a Hadamard product for the
-    WHOLE matrix, not per element. That is the O(N^3)-for-everything claim --
-    the frequency route needs O(N^3) per state, so it only matches this for a
-    handful of states.
+    whole matrix, not per element. The frequency route needs O(N^3) per
+    state, so it matches this only for a handful of states.
 
     Wt_tau: the screened interaction already on the time grid. Pass it when the
-    caller built W blockwise (`screened_interaction_tau_blocked`) and W_omega --
-    (nfreq, naux, naux), the largest array on this route -- was never formed at
-    all; W_omega is then ignored.
+    caller built W blockwise (`screened_interaction_tau_blocked`) and W_omega
+    ((nfreq, naux, naux), the largest array on this route) was not formed;
+    W_omega is then ignored.
 
     block_memory_gb caps the per-block working set. It does not change the
     answer or the flop count, only the peak allocation.
@@ -499,7 +507,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     are further apart than the cutoff. Sigma^{<,>}_PQ decays in |r_P - r_Q| --
     G at a rate set by the gap, Wt because it is screened -- so the surviving
     fraction falls with system size, which is where the cubic scaling is
-    actually realized. A magnitude bound is NOT usable here: Cauchy-Schwarz on
+    realized. A magnitude bound is not usable here: Cauchy-Schwarz on
     ||G[P]|| ||G[Q]|| discards the row overlap that carries the decay, and
     measured on benzene it drops 34% of pairs where only 3.7% are negligible.
 
@@ -509,7 +517,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     therefore exact, with each rank threading its own GEMMs -- the same
     two-level split `chi0_imaginary_frequency` supports.
 
-    Memory is (len(omega_out), nao, nao) complex -- the returned array and
+    Memory is (len(omega_out), nao, nao) complex: the returned array and
     little else; the time points are folded in as they are built. Project it
     down with one of
 
@@ -527,7 +535,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
         Ctw, _ = minimax_transform_weights(COSINE_WT, tau_points, omega_in,
                                            *rW, warn=False)
         Wt_tau = _transform_screened(Ctw, W_omega)
-    # else the caller built it blockwise and W_omega was never formed at all
+    # else the caller built it blockwise and W_omega was not formed
 
     X_mo = X_ao @ mo_coeff
     X_o, X_v = X_mo[:, occ], X_mo[:, virt]
@@ -539,17 +547,15 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     S, _ = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS,
                                      warn=False)
 
-    # STREAMED OVER TAU, not staged. The tau -> omega transform is a sum over
-    # tau, so each time point can be folded into the output as soon as it is
-    # built and never stored. Staging Sigma^{<,>}(tau) first would hold two
-    # (ntau, nao, nao) arrays, and forming `sig_g +/- sig_l` for the transform
-    # two more -- and with both grids on 'auto' nfreq == ntau, so those are the
-    # same size as the result itself. Measured peak was 6.1 (n, nao, nao)
-    # float64 stacks against the 2 this array actually needs.
+    # Streamed over tau: the tau -> omega transform is a sum over tau, so each
+    # time point is folded into the output as soon as it is built. Staging
+    # Sigma^{<,>}(tau) would hold two (ntau, nao, nao) arrays, and
+    # `sig_g +/- sig_l` two more, each the size of the result when
+    # nfreq == ntau.
     # zeros, not empty: with tau_indices set only the owned points contribute
     # and the rest must add nothing, since the caller reduces over subsets.
     out = np.zeros((len(omega_out), nao, nao), dtype=complex)
-    # BLOCKED OVER THE INTERPOLATION INDEX. Zt, G_l and G_g are each (M, M),
+    # Blocked over the interpolation index: Zt, G_l and G_g are each (M, M),
     # and the unblocked form holds three of them plus the Hadamard temporary.
     # Every term is a sum over P, so cutting that index costs nothing:
     # the three GEMMs become (b, M) row slabs, the outer contraction
@@ -576,12 +582,6 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
         Xo_t = X_o * np.exp(e_o * tau)
         Xv_t = X_v * np.exp(-e_v * tau)
 
-        # Cauchy-Schwarz bound per interpolation point, so a block pair whose
-        # product cannot reach the tolerance is skipped without being built.
-        # |G^<_PQ| <= ||X_o[P] e^{e tau/2}|| ||X_o[Q] e^{e tau/2}|| and
-        # |Zt_PQ| <= ||D[P]|| ||Wt||_F ||D[Q]||, the Frobenius norm standing in
-        # for the spectral one so the bound stays cheap. Rigorous, not heuristic:
-        # a skipped pair is bounded, never estimated.
         T_l = np.zeros((nao, M))
         T_g = np.zeros((nao, M))
         for ip, (p0, p1) in enumerate(pairs):
@@ -686,7 +686,7 @@ def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
     naux^3 inversion at each frequency and frequency is the compute axis here;
     tau_out carries no inversion and splitting it would replicate every one of
     them. Unlike the contour-deformation contraction this axis is not
-    reduction-free -- Wt(tau) is a SUM over frequencies -- so the split ends in
+    reduction-free (Wt(tau) is a sum over frequencies), so the split ends in
     one all-reduce of the result, ntau_out x naux^2. Each inversion is the
     serial one bitwise, its chi0 rows cut from the serial block
     (`owned_frequency_blocks`), so only that sum re-associates. None is
@@ -718,7 +718,7 @@ def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
 
 def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
                      intermediate=None, tile_gb=ISDF_TILE_GB, comm=None):
-    """Sigma^c_pq(i.omega_out) for p, q in `states`: the self-energy MATRIX on a
+    """Sigma^c_pq(i.omega_out) for p, q in `states`: the self-energy matrix on a
     block, (nfreq_out, nstates, nstates), by the space-time route.
 
     `selfenergy_diag`'s construction with both bra and ket free,

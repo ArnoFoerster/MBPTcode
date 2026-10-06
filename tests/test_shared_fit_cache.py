@@ -1,24 +1,20 @@
 """The fit cache is split at the gauge, and the gauge stays per chain.
 
-`FactorChain.factors` is not a pure function of the factorization: its last step
-dresses the auxiliary gauge with the chain's own environment. The cache is
-therefore keyed before the gauge -- `shareable_factors` returns (X_ao, Mfit, V),
-which is 96.6% of the per-geometry cost, and each chain applies its own
+`FactorChain.factors` is not a pure function of the factorization: its last
+step dresses the auxiliary gauge with the chain's own environment. The cache
+is therefore keyed before the gauge: `shareable_factors` returns (X_ao, Mfit,
+V), nearly all of the per-geometry cost, and each chain applies its own
 `aux_metric_sqrt`.
 
-The cost and retention of that cache are gated in test_frozen_factorization.py,
-which owns `FrozenFactorization`. Here: that the split moved no bits, and that
-two environments on one factorization keep separate gauges.
+The cost and retention of that cache are gated in test_frozen_factorization.py.
+Here: the split fit is bitwise the fit assembled in one piece, and two
+environments on one factorization keep separate gauges.
 """
 import numpy as np
 import pytest
-from pyscf import df as pyscf_df, gto, scf
+from pyscf import gto, scf
 
-# `test_set_D` is aliased on import: pytest COLLECTS any module-level
-# callable whose name starts with `test_`, so importing it plainly adds a
-# phantom test that errors on missing fixtures.
-from src.Base.separable_ri import aux_metric_sqrt, fit_M_stable
-from src.Base.separable_ri import test_set_D as build_test_set_D
+from src.Base.separable_ri import aux_metric_sqrt, fit_M_streaming
 from src.Base.solvent_screening import SolventScreening
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.rpa_ground_state import RPAGroundStateChain
@@ -41,22 +37,16 @@ def mol():
 
 
 def _fit_the_old_way(chain, mol, auxmol, crd, layout):
-    """The fit assembled in one piece, to check the split against."""
-    mu_i, nu_i, wc_l = layout
-    naux = auxmol.nao_nr()
-    Dt = build_test_set_D(mol, auxmol, crd, layout)
+    """The fit assembled in one piece, to check the split against: the
+    production fit on the frozen layout, then the chain's gauge."""
     V = auxmol.intor('int2c2e', aosym='s1')
-    e3 = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e',
-                                aosym='s1').reshape(mol.nao, mol.nao, naux)
-    F = np.hstack([np.linalg.solve(V, e3[mu_i, nu_i, :].T) * wc_l[None, :],
-                   np.eye(naux)])
-    M = fit_M_stable(Dt, F)
+    M = fit_M_streaming(mol, auxmol, crd, layout=layout)
     return (mol.eval_gto('GTOval_sph', crd),
             M.T @ aux_metric_sqrt(auxmol, chain.environment_at(mol), V=V))
 
 
 def test_the_split_is_bitwise(mol):
-    """Splitting the fit at the gauge must not move a single bit."""
+    """The fit split at the gauge is bitwise the fit in one piece."""
     ch = RPAGroundStateChain(mol, rhf)
     fac = ch.factorization
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
@@ -67,10 +57,9 @@ def test_the_split_is_bitwise(mol):
 
 
 def test_two_environments_do_not_share_a_gauge(mol):
-    """THE GATE THIS SPLIT EXISTS FOR. Two chains on ONE factorization with
-    DIFFERENT environments must get different D, and each must equal what it
-    would get standing alone. If this ever fails, a solvated calculation is
-    silently using someone else's screening."""
+    """Two chains on one factorization with different environments get
+    different D, each equal to what it gets standing alone, so a solvated
+    calculation never uses another chain's screening."""
     shared = FrozenFactorization(mol, basis=BASIS, auxbasis=BASIS + '-ri')
     auxmol, crd = shared.auxmol(mol), shared.coords(mol)
     gas = RPAGroundStateChain(mol, rhf, factorization=shared)

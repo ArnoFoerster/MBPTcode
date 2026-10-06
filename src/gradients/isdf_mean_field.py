@@ -1,106 +1,75 @@
 """The nuclear force of a mean field whose exchange comes from ISDF factors.
 
-WHAT IS WRONG WITHOUT THIS
---------------------------
-`src.Base.isdf_jk.ISDFJK` gives an SCF a `with_df` that answers `get_jk` with
-integral-direct DF Coulomb and exchange built from the interpolative separable
-density fit,
+`src.Base.isdf_jk.ISDFJK` gives an SCF integral-direct DF Coulomb and an
+exchange built from the interpolative separable density fit,
 
     K = X^T [Z .* (X D X^T)] X,   X[P,mu] = chi_mu(r_P),   Z = M^T V M.
 
-pyscf's own `mf.Gradients()` differentiates the FITTED interaction and knows
-nothing of the interpolation points or of M, so the force it returns is the
-gradient of a different function than the energy just reported: on
-water/cc-pVDZ/B3LYP it misses 4.0e-4 Ha/Bohr, and the miss is CONSTANT as the
-finite-difference step shrinks while the difference itself converges as h^2.
+pyscf's `mf.Gradients()` differentiates the fitted interaction and knows
+nothing of the interpolation points or of M, so its force belongs to a
+different function (on water/cc-pVDZ/B3LYP it misses 4.0e-4 Ha/Bohr, constant
+as the finite-difference step shrinks). Only the exchange term is replaced:
 
-THE ONE TERM THAT IS WRONG, AND THE ASSEMBLY THAT REPLACES IT
--------------------------------------------------------------
-Everything else in that mean field is pyscf's and correct: the one-electron and
-nuclear terms, the overlap (Pulay) term, the exchange-correlation functional,
-and -- on the default `j_route='df-direct'` -- the Coulomb term, which comes
-from pyscf's integral-direct DF-J on the same auxiliary basis. So the force is
+    dE/dR = dE_nuc + Tr[D dh] - Tr[W dS] + dE_J|_D + dE_xc|_D + dE_K^ISDF|_D
+          + dE_disp,        W = C n eps C^T,
 
-    dE/dR = g[reference functional MINUS its exact-exchange fraction]
-          + d/dR E_K^ISDF at fixed density,
+every two-electron and grid term at fixed density, each in fixed tiles over
+the ranks (`src.Base.skeleton_tiles`): the one-electron and overlap terms by
+atoms, the Coulomb term (the Coulomb half of the fitted Fock skeleton at
+g = D) by auxiliary tiles, the xc energy on the moving Becke grid by grid
+tiles, and the exchange on the row fit's tiles. Tile addends are summed in
+tile order, so the force is the same bits at every rank count. The non-exchange
+terms agree with pyscf's gradient of the same functional with exact exchange
+zeroed (`exchange_free_reference`) to 1e-13 on the unpruned grid pyscf's
+full response differentiates; the SCF's own grid is pruned by density, and
+this force is the derivative of that grid's energy.
 
-with the first member ONE pyscf gradient at the ISDF orbitals rather than a
-hand-assembled sum: `exchange_free_reference` removes the exact exchange by
-subtracting `a_x*HF` from the functional, which leaves the exchange-correlation
-grid term, the Coulomb term, the one-electron term and the energy-weighted
-overlap term bit-identical to what the ISDF route actually minimized. Building
-those by hand instead is where the coefficients go wrong, and the check that
-the two halves are consistent is exact: putting the FITTED exchange skeleton
-(`fock_partial_skeleton_df` at gamma = D, halved) in place of the ISDF one
-reproduces pyscf's own density-fitted gradient to 1e-12.
-
-No orbital-response term appears, and that is not an approximation. The ISDF
-exchange matrix is EXACTLY the functional derivative of the ISDF exchange
-energy, dE_K/dD = -(a_x/2) K, so the SCF is variational for the energy this
-route reports and the Hellmann-Feynman-plus-Pulay structure holds unchanged.
-
-THE ENERGY, AS A SCALAR IN THE FACTORS
---------------------------------------
-K's four collocations collapse onto one symmetric (M, M) object:
+No orbital-response term appears: the ISDF exchange matrix is the functional
+derivative of the ISDF exchange energy, dE_K/dD = -(a_x/2) K, so the SCF is
+variational for the reported energy. That energy is a scalar in one symmetric
+(M, M) object,
 
     E_K = -(a_x/4) Tr[D K] = -(a_x/4) sum_PQ Z_PQ W_PQ^2,   W = X D X^T
 
-(closed shell, Tr D = N). Its reverse pass is therefore two adjoints, one on
-the collocation and one on Z, and from there the chain is the one the
-correlated route already runs: the fit's Z-vector, the two- and three-centre
-derivative integrals, the AO and auxiliary centres, and the interpolation
-points translating and turning with their atoms.
+(closed shell), so its reverse pass is two adjoints, on the collocation and on
+Z, followed by the fit's chain shared with the correlated route. X depends on
+geometry twice: through the basis functions at fixed points
+(`basis_centre_forces`) and through the points moving and turning with their
+atoms (`point_chain`, including the derivative of `isdf_grid`'s covariant
+atomic frames). Dropping the point translation breaks |grad.sum|; dropping the
+frame rotation does not, since a frame rotation is translation-invariant.
 
-X CARRIES BOTH GEOMETRY DEPENDENCES and both are carried: the basis functions
-differentiated at a fixed point (`basis_centre_forces`) and the points
-themselves moving with the atoms that own them (`point_chain`, with the frame
-derivative, since `isdf_grid` places the shells in covariant atomic frames that
-turn as the environment does). Dropping either one leaves a force that still
-looks plausible, and only one of them is caught for free: the points' own
-translation breaks |grad.sum|, while the frames turning leaves it near round-off
-because a frame rotation is translation-invariant.
+Not covered: the analytic Hessian of a correlated energy on such a mean field
+(refused by `refuse_isdf_jk_gradient` in `src.properties.vibronic`). Correlated
+first-derivative forces are covered: the folded Fock partial's exchange half
+is `isdf_fock_partial_exchange`, and the exact-exchange double counting is
+built on the mean field's own `ISDFJK`, so a GW, BSE or dRPA force reads the
+same exchange the energy did. `require_isdf_gradient_support` refuses
+`j_route='isdf'`, an unrestricted reference, a mean field without interpolated
+exchange, and injected interpolation points (no atom-local decomposition).
+Range-separated hybrids are covered: one exchange channel per operator, each
+attenuated metric with its own two-centre derivative.
 
-WHAT THIS DOES NOT COVER
-------------------------
-The analytic HESSIAN of a correlated energy on such a mean field, which
-`refuse_isdf_jk_gradient` still refuses (`src.properties.vibronic`): a second
-derivative of the factors is not built. The first-derivative correlated force
-IS covered: the folded Fock partial's exchange half comes from
-`isdf_fock_partial_exchange`, built from the ISDF factors rather than the
-auxiliary basis, and the exact-exchange double counting is built on the mean
-field's own `ISDFJK` (`exx_double_counting_skeleton`, `reference_energy`)
-rather than a fresh fit, so a GW, BSE or dRPA force reads the same exchange
-the energy did. The dRPA ground-state force is gated against a
-Richardson-extrapolated finite difference of its own reported energy to
-1.5e-8 Ha/Bohr on PBE0 and 1.7e-8 on LRC-wPBEh.
-
-`require_isdf_gradient_support` refuses, by name: `j_route='isdf'` (the Coulomb
-term would then be interpolated too, and the reference gradient's DF-J
-derivative would be the wrong function), an unrestricted reference, a mean
-field whose exchange is not interpolated at all, and a factorization whose
-interpolation points were injected from outside, whose decomposition into
-atom-local clouds is then unknown. A range-separated hybrid is covered: its
-exchange is one channel per operator sharing the bare fit, and each attenuated
-metric carries its own two-centre derivative.
-
-WHERE THE PIECES LIVE
----------------------
-Only the assembly is here. `exchange_free_reference` is a forward mean field
-and lives in production (`src.Base.isdf_jk`); `isdf_exchange_skeleton` and its
-adjoints live with every other adjoint of the factorization
-(`src.gradients.isdf_derivatives`). Both are re-exported from here, so this
-module still names the whole force.
+This module only assembles the force; it re-exports the exchange pieces from
+`src.gradients.isdf_derivatives` and `exchange_free_reference`.
 """
 import types
 
 import numpy as np
 from pyscf import scf as pyscf_scf
+from pyscf.grad import rhf as rhf_grad
+from pyscf.grad import rks as rks_grad
 
 from src.Base.dispersion import dispersion_gradient
-from src.Base.isdf_jk import ISDFJK, exchange_free_reference  # noqa: F401
-from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
+from src.Base.isdf_jk import (  # noqa: F401
+    ISDFJK, _base_functional, exchange_free_reference,
+    mean_field_skeleton_force)
+from src.Base.skeleton_tiles import (fitted_coulomb_energy_skeleton,
+                                     one_electron_energy_skeleton,
+                                     xc_energy_grid_skeleton)
 from src.gradients.isdf_derivatives import (  # noqa: F401
-    isdf_exchange_adjoints, isdf_exchange_skeleton, isdf_fock_partial_exchange)
+    _auxmol_of, exchange_fit, isdf_exchange_adjoints, isdf_exchange_skeleton,
+    isdf_fock_partial_exchange, isdf_scf_handle, mean_field_exchange_wanted)
 
 
 def require_isdf_gradient_support(mf, what):
@@ -120,8 +89,8 @@ def require_isdf_gradient_support(mf, what):
             f'different adjoint.')
     if with_df.j_route != 'df-direct':
         raise NotImplementedError(
-            f'{what} takes the Coulomb derivative from pyscf\'s density-fitted '
-            f'gradient, which is the right function only for '
+            f'{what} takes the Coulomb derivative from the density-fitted '
+            f'skeleton, which is the right function only for '
             f"j_route='df-direct'; this mean field builds J from the "
             f'interpolation (j_route={with_df.j_route!r}), whose derivative is '
             'not built. That route is measurably unsafe in an SCF anyway -- '
@@ -135,37 +104,25 @@ def require_isdf_gradient_support(mf, what):
 
 
 def attach_isdf_gradient(mf):
-    """Give an ISDF mean field a `nuc_grad_method` that differentiates ITS energy.
+    """Give an ISDF mean field a `nuc_grad_method` that differentiates its energy.
 
-    WITHOUT THIS, ANY OPTIMIZER WALKS DOWNHILL ON THE WRONG SURFACE. pyscf's
-    own gradient differentiates the FITTED interaction and knows nothing of the
-    interpolation, so it returns the force of a different function than the
-    energy the SCF just reported. Both geomeTRIC and pyberny take the mean
-    field and ask IT for a gradient, so no dispatch at the call site can reach
-    them; the object itself has to answer correctly.
+    Geometry optimizers (geomeTRIC, pyberny) ask the mean field itself for a
+    gradient, so the object must return the ISDF force rather than pyscf's
+    fitted one. The class subclasses the gradient pyscf would have built,
+    keeping `as_scanner`, and replaces only `kernel`.
 
-    Subclassing the gradient pyscf would have built keeps `as_scanner` and
-    everything the geometry optimizers need, and replaces only the number.
-
-    A CONTINUUM WRAPPED AROUND IT LATER needs this called again on the wrapped
-    object. The method is bound to the mean field it was attached to, and
-    pyscf's `solvent.PCM` copies the instance dictionary, so the wrapped object
-    would inherit a gradient of the UNWRAPPED, never-converged one. A stale
-    binding found here is dropped before the new one is made, `kernel` refuses
-    one it is handed, and the force itself is `mean_field_skeleton_force`, which
-    adds the reaction field's fixed-density term that pyscf's PCM mixin would
-    otherwise have supplied.
+    A continuum wrapped around the mean field later needs this called again on
+    the wrapped object: `solvent.PCM` copies the instance dictionary, so it
+    would inherit a gradient bound to the unwrapped, unconverged one. Stale
+    bindings are dropped here, `kernel` refuses an unconverged base, and
+    `mean_field_skeleton_force` adds the reaction field's fixed-density term.
     """
-    # cycle: isdf_jk imports this module for attach_isdf_gradient
-    from src.Base.isdf_jk import mean_field_skeleton_force
-
     for stale in ('nuc_grad_method', 'Gradients'):
         mf.__dict__.pop(stale, None)
-    # A PCM mean field's own gradient class is pyscf's solvent MIXIN, which
-    # wraps another gradient object rather than a mean field; subclass the
-    # plain gradient of the SCF underneath, and keep the wrapped mean field as
-    # the base, whose force `mean_field_skeleton_force` completes with the
-    # reaction field.
+    # A PCM mean field's gradient class is pyscf's solvent mixin, which wraps
+    # another gradient object; subclass the plain SCF's gradient and keep the
+    # wrapped mean field as the base (`mean_field_skeleton_force` adds the
+    # reaction field).
     plain = mf.undo_solvent() if getattr(mf, 'with_solvent', None) is not None \
         else mf
     for stale in ('nuc_grad_method', 'Gradients'):
@@ -190,26 +147,54 @@ def attach_isdf_gradient(mf):
     return mf
 
 
-def isdf_mean_field_gradient(mf):
+def isdf_mean_field_gradient(mf, fit=None):
     """(natm, 3) force of a converged SCF whose exchange is from ISDF factors.
 
-    `exchange_free_reference`'s gradient carries every term the interpolation
-    does not touch, including the Pulay term, `isdf_exchange_skeleton` supplies
-    the one it does, and the empirical dispersion correction -- which the
-    reference's name cannot keep -- is added from the mean field's own name.
-    `grid_response=True` because the quadrature moves with the atoms and the
-    finite difference this is gated against sees that.
+    The module docstring's sum, each term at fixed density in fixed tiles over
+    the ranks, plus the empirical dispersion correction named by the mean
+    field. The xc quadrature moves with the atoms; a VV10 kernel's term is
+    pyscf's full response, whole.
 
-    A pure functional never asks ISDFJK for K -- with `j_route='df-direct'` the
-    interpolation then enters the energy nowhere at all -- so the reference IS
-    the whole force, and no factorization is built to find that out.
+    A pure functional with `j_route='df-direct'` has no interpolation in its
+    energy, so no factorization is built. With the row fit (`fit`,
+    `exchange_fit`'s choice when None) the whole factorization is not built
+    either; its skeleton reads the tiles alone.
     """
     require_isdf_gradient_support(mf, 'the ISDF mean-field gradient')
-    g0 = exchange_free_reference(mf).Gradients()
-    g0.grid_response = True
-    grad = np.asarray(g0.kernel()) + dispersion_gradient(mf)
-    if xc_hybrid_coeff(mf)[1] == 0.0:
+    mol = mf.mol
+    dm = np.asarray(mf.make_rdm1(mf.mo_coeff, mf.mo_occ))
+    dme = rhf_grad.make_rdm1e(mf.mo_energy, mf.mo_coeff, mf.mo_occ)
+    handle = isdf_scf_handle(mf)
+    auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
+    grad = rhf_grad.grad_nuc(mol)
+    # the generator's with_rinv_at_nucleus writes its molecule: a private one
+    grad = grad + one_electron_energy_skeleton(
+        mol, rhf_grad.Gradients(mf).hcore_generator(mol.copy()), dm, dme)
+    grad = grad + fitted_coulomb_energy_skeleton(mol, auxmol, dm)
+    if hasattr(mf, 'xc'):
+        grad = grad + xc_energy_grid_skeleton(
+            mol, mf.grids, mf._numint, _base_functional(mf.xc), dm)
+        if mf.do_nlc():
+            grad = grad + _nlc_gradient(mf, dm)
+    grad = grad + dispersion_gradient(mf)
+    if not mean_field_exchange_wanted(mf):
         return grad
-    if not mf.with_df._built:
+    fit = exchange_fit(mf, fit)
+    if fit == 'replicated' and not mf.with_df._built:
         mf.with_df.build()
-    return grad + isdf_exchange_skeleton(mf)
+    return grad + isdf_exchange_skeleton(mf, fit=fit)
+
+
+def _nlc_gradient(mf, dm):
+    """(natm, 3) of d/dR E_VV10[dm] on the moving grid: pyscf's full
+    response, assembled as its `grad_elec` does, whole on every rank."""
+    mol, ni = mf.mol, mf._numint
+    xc = mf.xc if ni.libxc.is_nlc(mf.xc) else mf.nlc
+    if mf.nlcgrids.coords is None:
+        mf.nlcgrids.build(with_non0tab=True)
+    enlc, vnlc = rks_grad.get_nlc_vxc_full_response(ni, mol, mf.nlcgrids, xc,
+                                                    dm)
+    out = np.asarray(enlc, float).copy()
+    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+        out[ia] += 2.0 * np.einsum('xij,ij->x', vnlc[:, p0:p1], dm[p0:p1])
+    return out

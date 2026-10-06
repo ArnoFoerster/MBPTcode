@@ -1,19 +1,16 @@
 """Where the ISDF BSE Davidson spends its wall clock, serially and under a comm.
 
-The stage total says the Davidson is the largest term of a production BSE and
-nothing about WHY a rank count stops helping it. `info['timings']` therefore
-carries the loop broken up: the block action, its collectives included; the
-part of it spent in those collectives (the entry lockstep of the trial
-vectors, the head's gather, the reductions) plus the lockstep of the result,
-`davidson_comm`; the subspace work, which every rank runs whole and no rank
-count divides; the action's own build, which is paid once before the first
-trial vector and shows in no per-iteration term; what the locksteps moved,
-`davidson_lockstep_mb`, and what their digests proved every rank held
-already, `davidson_lockstep_skipped_mb`; and the counts -- iterations, vectors
-applied, largest subspace -- that say whether the cost is the action or the
-number of times the guess made the solver call it.
+`info['timings']` carries the loop broken up: the block action, its
+collectives included; the part spent in those collectives (the entry
+lockstep of the trial vectors, the head's gather, the reductions) plus the
+lockstep of the result, `davidson_comm`; the subspace work, which every rank
+runs whole; the action's own build, paid once before the first trial vector;
+what the locksteps moved, `davidson_lockstep_mb`, and what their digests
+showed every rank already held, `davidson_lockstep_skipped_mb`; and the
+counts (iterations, vectors applied, largest subspace) that say whether the
+cost is the action or the number of times the solver calls it.
 
-The block action is split further, into its local pieces
+The block action is split further into its local pieces
 (`davidson_action_<piece>`: the GEMMs, the Hadamard product, the Hartree
 term, the owner-order write, the batch's element-wise terms), which with the
 collectives inside it (`davidson_comm_gather`, `_reduce_grid`,
@@ -22,39 +19,25 @@ subspace work is split likewise where the trial space is cut by pair rows
 (`davidson_subspace_<piece>`, zero serially), beside the bytes this rank's
 holders take (`davidson_trial_space_mb`).
 
-Gated here: the keys exist on every rank; the parts do not exceed the whole;
-the counts are consistent with the `stats` the same run reports, so the two
-cannot drift into two spellings of one number; every rank runs the same
-iteration, so every rank reports rank 0's counts and lockstep volume and a
-subspace of its own; and the whole dict survives `json.dumps`, so a caller
-can record it as JSON.
+Gated on water/cc-pVDZ Hartree-Fock: the keys exist on every rank; the parts
+do not exceed the whole; the counts equal the `stats` the same run reports;
+every rank reports rank 0's counts and lockstep volume and a subspace of its
+own; and the whole dict survives `json.dumps`.
 
-The timers themselves move no bits: the same roots and vectors come back from
-this code and from the uninstrumented one, bit for bit.
-
-Water/cc-pVDZ Hartree-Fock, the setting every distributed test in this
-directory uses (tests/test_simulated_ranks.py, tests/test_mpi_routes.py).
-
-The `qp` stage carries the same kind of breakdown, from the space-time GW
+The `qp` stage carries the same kind of breakdown from the space-time GW
 solve `qp='G0W0'` (or `self_consistency='evGW'`) runs underneath: `qp_chi0`,
 `qp_dyson`, `qp_sigma`, the exchange build `qp_static` and the per-state root
-search `qp_states` (`GW/space_time.py`'s own `timings` dict, merged into `t`
-by `_QPStageTimings`). Gated here beside the Davidson breakdown: the keys
-exist serially and under a comm; the parts stay inside the `qp` stage they
-came from; evGW's cycles SUM into those same keys rather than overwriting,
-with `qp_cycles` saying how many; and the timers move no bits, checked against
-the pre-instrumentation code itself, extracted with `git archive` and run in
-its own process.
+search `qp_states` (`GW/space_time.py`'s own `timings` dict, merged by
+`_QPStageTimings`). Gated: the keys exist serially and under a comm; the
+parts stay inside the `qp` stage; evGW's cycles sum into those keys, with
+`qp_cycles` saying how many.
 
-That last check is BITWISE and serial: the pre-instrumentation commit has no
-communicator, so there is nothing to run under ranks there. Under a comm the
-block action splits its head over the same grid rows as its exchange and
-gathers it, and reduces the intermediate its tail contracts
-(`isdf_block_action`), so a distributed run sums in rank order where a serial
-one sums inside one GEMM; the distributed gates above therefore compare every
-rank with rank 0, not with the archive.
-
-Run as a script, this file hands itself to pytest and exits with its verdict.
+The timers move no bits: serially, the roots and vectors are bitwise those
+of a pinned tree without the `qp_*` timers, extracted with `git archive` and
+run in its own process with its W frequency axis moved onto rW, the range its
+transform is fitted over. The pinned tree has no communicator, and a
+distributed run sums in rank order, so the distributed gates compare every
+rank with rank 0 instead.
 """
 import copy
 import json
@@ -99,20 +82,16 @@ TIMING_KEYS = ('davidson_block_action', 'davidson_subspace', 'davidson_comm',
 #: The collectives inside the block action; the lockstep kind also holds the
 #: result's, which is outside it.
 ACTION_COMM_KINDS = ('gather', 'reduce_grid', 'reduce_pairs')
-#: Every rank fills these too: chi0/sigma/the exchange build/the root search
-#: of the space-time QP solve all run -- and time -- on every rank.
+#: Every rank fills these too: the space-time QP solve's chi0, sigma,
+#: exchange build and root search all run, and are timed, on every rank.
 QP_TIMING_KEYS = ('qp_chi0', 'qp_dyson', 'qp_sigma', 'qp_static', 'qp_states')
 
 REPO = Path(__file__).resolve().parents[1]
-#: A commit before the `qp_*` timers were added, so the bitwise gate below
-#: compares this tree against code that could not have moved a bit for the
-#: reason being tested here. Pinned rather than `HEAD`: once this file's own
-#: change lands, `HEAD` would include it and the comparison would stop meaning
-#: anything.
+#: A tree without the `qp_*` timers, so the bitwise gate below compares
+#: against code that cannot move a bit for the reason tested here.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
-#: A shared machine: the archived probe is capped rather than left to size
-#: itself against the whole node, the way every subprocess gate in this
-#: directory is.
+#: The archived probe's thread caps, so it does not size itself against the
+#: whole machine.
 THREAD_CAPS = {name: '2' for name in
               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
@@ -130,6 +109,16 @@ from pyscf import gto, scf
 
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+
+import src.SingleReference.GW.space_time as _archived_space_time
+from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
+from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
+
+# the one change since the pinned commit: W's frequencies span rW, the range
+# its transform back to tau is fitted over, not the bare window
+_archived_space_time.minimax_frequency_grid = (
+    lambda n, e_min, e_max: _minimax_frequency_grid(n, _PAD[0] * e_min,
+                                                    _PAD[1] * e_max))
 
 warnings.simplefilter('ignore')
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
@@ -180,15 +169,14 @@ def _check_iterating_rank(t, stats):
     assert t['davidson_iterations'] >= 1
     assert t['davidson_vectors_applied'] >= NROOTS
     assert t['davidson_subspace_max'] >= NROOTS
-    # One spelling of each number: the timings and the stats read the same
-    # counters, and a rename that touched only one of them stops here.
+    # the timings and the stats read the same counters
     assert t['davidson_iterations'] == stats['davidson_vind_calls']
     assert t['davidson_vectors_applied'] == stats['davidson_block_actions']
     assert t['davidson_block_action'] == stats['davidson_action_s']
     # A vind call applies an X block and a Y block, so the subspace is never
     # more than half the vectors the action saw.
     assert 2 * t['davidson_subspace_max'] <= t['davidson_vectors_applied']
-    # The action's local pieces all ran -- a singlet BSE has every one -- and
+    # The action's local pieces all ran (a singlet BSE has every one), and
     # with its own collectives they stay inside it.
     pieces = [t[f'davidson_action_{piece}'] for piece in ACTION_PIECES]
     assert min(pieces) > 0.0
@@ -220,7 +208,7 @@ def _check_qp_stage(t, against='qp'):
 
 def test_serial_davidson_timings(water):
     """Serially there is no traffic, and the loop is the action plus the
-    subspace work -- the two terms a rank count treats differently."""
+    subspace work."""
     w = water
     _, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=NROOTS,
                                    probe=True, progress=False,
@@ -295,13 +283,11 @@ def test_distributed_davidson_timings(water, size):
 
 
 def test_qp_stage_timings_class_sums_additive_keys_only():
-    """`_QPStageTimings` is the object evGW's cycles write into once each:
-    the per-stage keys accumulate across repeated writes, which is what a
-    second cycle's own call means, and everything else (`nranks`,
-    `ntau_auto`, ...) takes the latest write, since those describe the run
-    rather than accumulate over it. A caller-supplied dict is written into
-    directly, not copied, so `gw_kwargs['timings']` still carries the final
-    numbers under its own name."""
+    """`_QPStageTimings`, which evGW's cycles write into once each: the
+    per-stage keys accumulate across repeated writes, everything else
+    (`nranks`, `ntau_auto`, ...) takes the latest write. A caller-supplied
+    dict is written into directly, not copied, so `gw_kwargs['timings']`
+    carries the final numbers."""
     caller = {'t_chi0': 1.0}
     qs = _QPStageTimings(caller)
     assert qs.target is caller
@@ -320,11 +306,10 @@ def test_qp_stage_timings_class_sums_additive_keys_only():
 
 
 def test_evgw_qp_stage_sums_over_cycles(water):
-    """evGW re-enters the space-time QP solve once per cycle on the SAME
-    `timings` object (`evgw_eigenvalues` is never edited to make this
-    work): the merged `qp_*` keys are the TOTAL over the cycles it
-    ran, not the last one's, and `qp_cycles` says how many. `tol=1e-12` never
-    converges in two cycles, so the count is deterministic."""
+    """evGW re-enters the space-time QP solve once per cycle on the same
+    `timings` object: the merged `qp_*` keys are the total over the cycles,
+    and `qp_cycles` says how many. `tol=1e-12` never converges in two cycles,
+    so the count is deterministic."""
     w = water
     _, _, _, info = solve_bse_isdf(
         w['mf'], w['mol'], w['nocc'], nroots=NROOTS, probe=False,
@@ -339,8 +324,8 @@ def test_evgw_qp_stage_sums_over_cycles(water):
 
 @pytest.fixture(scope='session')
 def archive(tmp_path_factory):
-    """The BSE Davidson's own code before the `qp_*` timers were added,
-    unpacked into a temporary directory."""
+    """The pinned tree without the `qp_*` timers, unpacked into a temporary
+    directory."""
     out = tmp_path_factory.mktemp('qp_timings_baseline')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
@@ -355,7 +340,7 @@ def archive(tmp_path_factory):
 
 
 def _archived_bse_roots(archive_dir, tmp_path):
-    """(omega, X, Y) from the pre-instrumentation code, run as its own process."""
+    """(omega, X, Y) from the pinned tree, run as its own process."""
     script = tmp_path / 'probe.py'
     out = tmp_path / 'roots.npz'
     script.write_text(BITWISE_PROBE.format(archive=str(archive_dir),
@@ -377,14 +362,11 @@ def _bitwise(a, b):
 
 
 def test_qp_timings_move_no_bits(water, tmp_path_factory, archive):
-    """The timers only read the clock: the pre-instrumentation code's own
-    roots and vectors, run as a subprocess on the extracted tree, against
-    this tree's, BITWISE -- nothing between the two trees touches the
-    arithmetic of a one-rank solve.
+    """The timers only read the clock: the pinned tree's roots and vectors,
+    run as a subprocess on the extracted tree, are bitwise this tree's.
 
-    Both trees divide by the bare d, this one asked for it: the default
-    preconditioner is now the screened diagonal, which the pre-instrumentation
-    tree does not have, and which moves the serial roots' last bits.
+    This tree is asked for the bare diagonal preconditioner, the only one the
+    pinned tree has; the default screened diagonal moves the roots' last bits.
     """
     tmp = tmp_path_factory.mktemp('qp_timings_bitwise')
     omega_old, X_old, Y_old = _archived_bse_roots(archive, tmp)

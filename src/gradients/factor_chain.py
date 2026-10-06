@@ -1,8 +1,8 @@
 """The frozen ISDF factorization a cubic gradient chain differentiates, and the
 three branches that carry adjoints on its factors to the nuclei.
 
-Every target on the space-time route -- a quasiparticle energy, a BSE
-excitation, the dRPA correlation energy -- is a function of the orbital
+Every target on the space-time route (a quasiparticle energy, a BSE
+excitation, the dRPA correlation energy) is a function of the orbital
 energies eps, the collocation X_mo = X_ao C and the auxiliary factor D, and its
 reverse pass ends with adjoints (eps_bar, X_bar, D_bar). From there on nothing
 depends on the target:
@@ -11,70 +11,61 @@ depends on the target:
     X_bar through the interpolation points -> the collocation adjoint
     D_bar                                  -> the fit adjoint
 
-Neither does what has to be decided ONCE, at the reference geometry, for the
-surface to be smooth at all: the grid radii, the pair layout and the frames.
-Re-deciding any of them per geometry puts a step into the energy that no
-gradient can follow.
-
-The surroundings enter through ONE object, the chain's `environment`
-(src.Base.environment): it builds the mean field at each geometry, dresses the
-auxiliary gauge, supplies the static one-body term production adds, and owns
-the adjoints of both. A chain therefore cannot see half of a reaction field.
+The grid radii, pair layout and frames are decided once, at the reference
+geometry: re-deciding any of them per geometry puts a step into the energy.
+The surroundings enter through one object, the chain's `environment`
+(src.Base.environment), which builds the mean field at each geometry, dresses
+the auxiliary gauge, supplies the static one-body term and owns the adjoints
+of both.
 
 A chain carries no communicator. Inside `with distributed(comm):` every rank
-runs it whole, the kernels it calls divide their sweeps over the ranks, and
-the few arrays the chain decides itself -- the grid, the placed points, the
-pair layout, the fit, the assembled nuclear gradient and the mean field's
-own force (`mean_field_gradient`) -- are one `lockstep` each, so every rank
-holds rank 0's bits of them.
+runs it whole, the kernels divide their sweeps over the ranks, and the arrays
+the chain decides itself (grid, placed points, pair layout, fit, assembled
+gradient, mean-field force) are each one `lockstep`, so every rank holds rank
+0's bits.
 
-SLICED FACTORS. A factorization built with `sliced=True` holds, over more
-than one rank, each rank's `contiguous_block` of the grid rows of X_mo, D and
-X_ao (`SlicedFactors`), cut from the whole products after they are formed
-exactly as the whole layout forms them, and it keeps no whole fit between
-geometries. Every kernel that reads a factor whole gathers it once per sweep
-or solve and drops it on return; the Davidson block action reads the rows.
-The gathered arrays are the whole ones verbatim, so the LAYOUT adds no
-difference: on one mean field, and on a pyscf that repeats its bits, every
-output is the whole layout's bit for bit. pyscf's own threaded work inside a
-chain -- its K builds and the mean field's force -- does not repeat its bits
-from run to run (its OpenMP GEMM adds the partial sums in thread-arrival
-order), so two evaluations, of either layout, agree to that re-association
-and are compared on an anchored bar.
+Sliced factors: a factorization built with `sliced=True` holds, over more than
+one rank, each rank's `contiguous_block` of the grid rows of X_mo, D and X_ao
+(`SlicedFactors`), cut from the whole products formed as the whole layout
+forms them, and keeps no whole fit between geometries. Kernels that read a
+factor whole gather it once per sweep or solve; the Davidson block action
+reads the rows. The layout adds no difference of its own; pyscf's threaded K
+builds and mean-field force do not repeat their bits from run to run (OpenMP
+GEMM partial sums), so two evaluations agree to that reassociation and are
+compared on an anchored bar. X_bar and D_bar are whole in both layouts
+(all-reduced sums over the tau partition). Larger than any factor and
+untouched by the layout: the fit's nk^2 Gram matrix, proj(tau) of the
+quasiparticle solve (ntau naux^2) and the BSE adjoint's (naux, nocc, nvir)
+blocks.
 
-Per rank, the sliced layout holds its own rows of X_mo, X_ao and D; whole,
-the fit (X_ao, M, (P|Q)) stays cached for every live geometry and the chain
-holds X_mo and D for the whole gradient. The adjoints X_bar and D_bar are whole
-in both layouts: they are all-reduced sums over the tau partition, and the
-orbital response and the fit adjoint contract them over the grid. Larger than
-any factor, and untouched by the layout: the fit's own nk^2 Gram matrix,
-proj(tau) of the quasiparticle solve (ntau naux^2) and the BSE adjoint's
-(naux, nocc, nvir) blocks, which is what bounds the excited-state force on a
-large molecule.
-
-THE ROW FIT. `fit='rows'` (with `sliced=True`) builds the rows with
-`separable_ri.fit_rows` on the frozen points instead of cutting them from a
-whole fit: the Gram matrix, F D^T, the solve and the collocation exist only as
-each rank's tiles, and nothing whole is formed or cached at any geometry.
-The build then peaks in the three-centre pass, where one f shell's (mu nu|P)
-over every nu and P beside the metric's LU sets it: the fit's blocking decides
-that and no rank count lowers it. The rows are bitwise the same at every
-rank count, one rank included, and they realize the row fit's own estimator
-(`FrozenFactorization`), which the fit adjoint then differentiates.
+One estimator: both realizations of the fit solve
+`separable_ri.fit_M_streaming`'s estimator on the frozen pair layout (Gram
+matrix over every product pair, F D^T over the screened pairs), the one the
+ISDF-K SCF, space-time GW and ISDF BSE run, so a force here is the derivative
+of the energy those routes report. The replicated fit is `fit_M_streaming`, bit
+for bit. The row fit (`fit='rows'`, with `sliced=True`) builds the rows with
+`separable_ri.fit_rows` on the frozen points: the Gram matrix, F D^T, the
+solve and the collocation exist only as each rank's tiles. Its peak is the
+three-centre pass (one f shell's (mu nu|P) beside the metric's LU), which no
+rank count lowers. The rows are bitwise the same at every rank count and lie
+within a few reassociation responses (`FIT_REASSOCIATION_K`) of the
+replicated fit's.
 
 The row fit's nuclear assembly runs in the same tiles (`row_fit_branches`,
-`separable_ri.fit_rows_adjoint`): the fit adjoint, the X_mo collocation adjoint
-and X_mo^T X_bar, the same bits at every rank count. Where the whole adjoint
-formed on every rank the Gram matrix, the test set's collocation over every
-product pair and the dense (mu nu|P), it peaks per rank in its three-centre
-pass: the Gram tiles' kept factor, the metric's LU (replicated as in the
-forward pass), three (rows, naux) arrays and one block's coefficients
-broadcast, beside the X_bar and D_bar it is handed and the factor rows. Rank 0
-alone holds four metric-sized arrays for the root's adjoint, at any rank
-count, and reads D_bar whole for M D_bar. What stays whole, and why: X_bar and
-D_bar, the kernels' all-reduced sums over the tau partition; and the pair
-layout, screened once per reference on the whole AO collocation (when the
-factorization is built, never at a force).
+`separable_ri.fit_rows_adjoint`), the same bits at every rank count. Per rank
+it peaks in its three-centre pass (the Gram tiles' kept factor, the metric's
+LU, three (rows, naux) arrays and one block's broadcast coefficients) beside
+X_bar, D_bar and the factor rows; rank 0 alone holds four metric-sized arrays
+for the root's adjoint and reads D_bar whole. The pair layout is screened once
+per reference on the whole AO collocation.
+
+On a distributed ISDF-K SCF the mean field's handle holds this fit's M^T tiles
+wherever the frozen points are its grid (the reference geometry), and the rows
+are read from them (`separable_ri.FitTiles`). A force's row exchange skeletons
+hand their fit-adjoint seeds to the assembly (`one_fit_adjoint`), which
+contracts them with its own in one `fit_rows_adjoints` call. The chain's point
+adjoint closes on the frozen frames and the skeletons' on the SCF's turning
+frames, so the two share one pass but not one seed.
 """
 import time
 import warnings
@@ -88,16 +79,16 @@ from pyscf import df as pyscf_df
 
 from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
 from src.Base.constants import (ENVIRONMENT_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
-                                ISDF_FIT_ERROR_FAILED, SCF_GRAD_TOL,
-                                THREE_CENTER_BLOCK_BYTES)
-from src.Base.distributed_df import distributed_mean_field
+                                FIT_REALIZATIONS, ISDF_FIT_ERROR_FAILED,
+                                SCF_GRAD_TOL)
+from src.Base.distributed_df import distributed_fock, distributed_mean_field
 from src.Base.environment import dresses_interaction, resolve_environment
 from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt,
-                                   default_auxbasis, fit_M_stable,
-                                   fit_M_streaming, resolve_isdf_grid,
-                                   runtime_atomic_radii, subshells, test_set_D,
+                                   default_auxbasis, fit_M_streaming,
+                                   fit_M_whole, resolve_isdf_grid,
+                                   runtime_atomic_radii, subshells,
                                    test_set_layout)
-from src.Base.sliced_factors import SlicedFactors
+from src.Base.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, lockstep, lockstep_mean_field
 from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
@@ -105,36 +96,28 @@ from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             continued_frames,
                                             dfactor_adjoint_gauges,
                                             GaugeAdjoint,
-                                            shell_blocks,
                                             eps_chain_gradient,
                                             exx_double_counting_Y,
                                             exx_double_counting_skeleton,
+                                            isdf_scf_handle, one_fit_adjoint,
                                             orbital_rotation_rows,
-                                            point_layout, row_fit_adjoint)
-
-#: How the fit is realized (`FrozenFactorization`): 'replicated', the whole
-#: fit on every rank, or 'rows', `separable_ri.fit_rows` by grid rows.
-FIT_REALIZATIONS = ('replicated', 'rows')
+                                            pending_fit_adjoint,
+                                            point_layout, product_pairs,
+                                            require_whole_fit_adjoint,
+                                            row_fit_adjoint)
 
 
 def converged_factory(scf_factory):
     """`scf_factory` completed by the chain when it returns a mean field that
-    has been built but not run, so a factory may hand back the cheaper of the
-    two and let the chain finish the SCF.
+    has been built but not run.
 
-    The completion is `distributed_mean_field`, which reads the current
-    `distributed` context: inside one, every rank runs pyscf's own SCF driver
-    against the reduced J/K and the reduced quadrature, each contributing its
-    block of the auxiliary index and of the exchange-correlation grid, and
-    rank 0's spectrum and orbitals end on all of them. That is the one stage
-    of a displaced geometry that does not otherwise divide -- every rank
-    converges the same SCF, so its wall is what it was at one rank however
-    many there are.
-    Outside a region it is `mf.kernel()`, the call the factory would have made
-    itself, so the serial arithmetic is bit for bit what it was. Inside one the
-    mean field it builds must be density-fitted with pyscf's own DF, since the
-    split is over the rows of `cderi`; `distributed_mean_field` refuses any
-    other by name.
+    The completion is `distributed_mean_field`: inside a `distributed`
+    context every rank runs pyscf's SCF driver against the reduced J/K and
+    quadrature, each contributing its block of the auxiliary index and of the
+    xc grid, and rank 0's spectrum and orbitals end on all of them. Outside
+    one it is `mf.kernel()`. Inside one the mean field must use pyscf's own DF
+    (the split is over the rows of `cderi`); `distributed_mean_field` refuses
+    any other.
     """
     def build(mol):
         mf = scf_factory(mol)
@@ -148,7 +131,7 @@ def converged_factory(scf_factory):
 def radii_tag(radii):
     """Hashable summary of an explicit radii set, or None when the atomic
     optimizer decides them: two factorizations differing only in their radii are
-    different functionals and must not be allowed to share."""
+    different functionals and must not share."""
     if radii is None:
         return None
     return tuple((el, tuple(np.round(np.concatenate(
@@ -157,73 +140,46 @@ def radii_tag(radii):
 
 
 class FrozenFactorization:
-    """The ISDF conventions fixed at ONE reference geometry, so that several
-    chains are ONE functional rather than two that happen to agree.
+    """The ISDF conventions fixed at one reference geometry, so that several
+    chains are one functional rather than two that happen to agree.
 
-    Radii, interpolation points, frames and pair layout are discrete choices.
-    Re-deciding them per geometry puts a step in the energy; deciding them
-    twice, once per chain, is subtler -- `separable_factors` is deterministic
-    given the settings, so two chains handed matching settings produce bitwise
-    identical factors and merely pay twice. They diverge silently the moment
-    the settings stop matching: different `counts` or `n_start`, or
-    `frames='continued'`, which carries orientation history from wherever each
-    chain started.
+    Radii, interpolation points, frames and pair layout are discrete choices:
+    re-deciding them per geometry puts a step in the energy, and deciding them
+    once per chain diverges silently when the settings differ (`counts`,
+    `n_start`, or `frames='continued'`, which carries orientation history).
+    Holding them in one object makes sharing structural, and a composed
+    surface costs one fit per geometry.
 
-    Holding them in one object makes the sharing structural rather than a
-    property of the caller passing the same keywords, and a composed surface
-    then costs ONE fit per geometry instead of one per chain.
+    It owns what `separable_factors` consumes and nothing else. The
+    quadratures are not here (dRPA integrates chi0 over frequency, the
+    self-energy over imaginary time; each chain keeps its own), nor is the
+    quasiparticle window. `refreeze` keeps a quadrature fixed between
+    geometries, a different requirement from sharing between chains.
 
-    It owns exactly what `separable_factors` consumes and nothing else. The
-    QUADRATURES ARE NOT HERE: E_c^dRPA integrates chi0 over frequency and the
-    self-energy over imaginary time, different integrands with no reason to
-    share a grid, so each chain keeps its own. Nor is the quasiparticle window,
-    which belongs to whichever chain has one.
+    `grid_accuracy` fixes `counts` and `n_start` together: a validated
+    accuracy level or four shell counts, resolved against the shipped radii
+    table by `resolve_isdf_grid`, which refuses an unoptimized grid.
 
-    The distinction that keeps this boundary from drifting: `refreeze` carries
-    a quadrature so that it does not CHANGE BETWEEN GEOMETRIES, which is not
-    the same requirement as being SHARED BETWEEN CHAINS. Only the second is
-    this object's business.
+    Under ranks the conventions are rank 0's: every rank decides them and one
+    `lockstep` leaves rank 0's radii, fit errors, clouds, owners and frames on
+    all of them; points, pair layout and fit are locksteps of their own.
+    Conventions decided per rank put ranks on different machines on different
+    surfaces (forces differing by 1e-3 Ha/Bohr and more). Serially every
+    lockstep is a no-op.
 
-    `grid_accuracy` is the named way to fix `counts` and `n_start` together --
-    a validated accuracy level or four explicit shell counts, resolved against
-    the shipped radii table by `resolve_isdf_grid`, which refuses a grid nobody
-    optimized rather than re-optimizing one per geometry.
+    `sliced` is the layout of the factors, not part of `settings`: over more
+    than one rank each rank keeps its grid rows of X_mo, D and X_ao
+    (`FactorChain.factors_at`) and no whole fit outlives the cut.
 
-    UNDER RANKS THE CONVENTIONS ARE RANK 0'S, which is the same requirement
-    one step further out. Every rank decides them, as serial code, and one
-    `lockstep` then leaves rank 0's radii, fit errors, clouds, owners and
-    frames on all of them; the placed points, the pair layout and the fit are
-    locksteps of their own, taken where they are built. Deciding them per rank
-    is invisible on one machine -- two processes there run the same arithmetic
-    on the same libraries and agree bit for bit -- and across machines it puts
-    the ranks on different surfaces, whose end-to-end forces differ by 1e-3
-    Ha/Bohr and more. Serially every lockstep is a no-op and the arithmetic is
-    what it was.
-
-    `sliced` is the LAYOUT of the factors, not a choice of functional, and is
-    not among `settings`: over more than one rank each rank keeps its grid
-    rows of X_mo, D and X_ao (`FactorChain.factors_at`) and no whole fit
-    outlives the cut. Serially, and on one rank, it changes nothing.
-
-    `fit` is the REALIZATION of the fit, and like `sliced` it is matched
-    apart from `settings`. 'replicated' is `_fit`: every rank forms the
-    frozen test set, the Gram matrix over its pairs and the Cholesky solve
-    whole. 'rows' (with `sliced=True`) is `separable_ri.fit_rows` on the
-    frozen points, `fit_block` points per tile: no rank holds the Gram
-    matrix, F D^T, the solve, the collocation or a factor whole, the rows
-    are bitwise the same at every rank count, one rank included, and they
-    are not `_fit`'s bits. Nor is it `_fit`'s estimator wherever the pair
-    screen drops a pair: its Gram matrix is the unscreened product
-    (A A^T) o (B B^T), F D^T the screened pairs. On ethylene/cc-pVDZ (72 of
-    2304 pairs dropped) that is 2.0e-4 of D, which moves the composed
-    singlet force 6.3e-7 Ha/Bohr and its root 2.6e-6 eV, 55 to 6e5 times
-    what one reassociation of the row fit's estimator moves them;
-    water/cc-pVDZ, which keeps every pair, cannot tell the two apart.
-    `FactorChain.nuclear_gradient` differentiates that estimator on the row
-    fit. The row fit screens its F columns at each geometry where `_fit`
-    freezes the reference's (`layout`): the two sets agree at the reference
-    by construction, and a pair crossing the tolerance on the way steps the
-    row fit's surface by that pair's share of the fit.
+    `fit` is the realization of the fit, also matched apart from `settings`;
+    both solve `fit_M_streaming`'s estimator on the frozen `layout` (Gram
+    matrix (A A^T) o (B B^T) + P P^T over every product pair, F D^T over the
+    layout's pairs). 'replicated' is `_fit`, `fit_M_streaming` run whole by
+    every rank. 'rows' (with `sliced=True`) is `separable_ri.fit_rows` on the
+    frozen points, `fit_block` points per tile: no rank holds a whole Gram
+    matrix, F D^T, solve, collocation or factor, and the rows are bitwise the
+    same at every rank count and within a few reassociation responses
+    (`FIT_REASSOCIATION_K`) of the replicated fit's.
     """
 
     def __init__(self, mol, basis=None, auxbasis=None, counts=None, n_start=1,
@@ -245,9 +201,9 @@ class FrozenFactorization:
         self.basis = basis or mol.basis
         self.auxbasis = auxbasis or default_auxbasis(self.basis)
         elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
-        # The named way in. It is resolved HERE and stored as plain counts, so
-        # the whole walk -- `rebuilt_at`, `settings`, `require_match` -- keeps
-        # comparing one kind of object and a level cannot mean two grids.
+        # Resolved here and stored as plain counts, so `rebuilt_at`,
+        # `settings` and `require_match` compare one kind of object and a
+        # level cannot mean two grids.
         if grid_accuracy is not None:
             counts, n_start = resolve_isdf_grid(grid_accuracy, self.basis,
                                                 elements, auxbasis=self.auxbasis)
@@ -255,18 +211,16 @@ class FrozenFactorization:
         self.n_start = n_start
         self.frames_mode = frames
         self.with_frames = frames == 'continued'
-        # Explicit radii -- `separable_ri.tailor_grid`'s, say -- replace the
-        # per-element atomic optimization. They are frozen here like every other
-        # discrete choice, so a grid tailored at the reference geometry is the
-        # one the whole walk uses.
+        # Explicit radii (e.g. `separable_ri.tailor_grid`'s) replace the
+        # per-element atomic optimization and are frozen like every other
+        # discrete choice.
         self.radii_tag = radii_tag(radii)
         if radii is not None and not set(elements) <= set(radii):
             raise ValueError(f'radii given for {sorted(radii)} but the molecule '
                              f'holds {elements}')
-        # The fit error is kept, not discarded: it is the only thing that says
-        # whether this grid resolves this basis, and the default count is sized
-        # for double zeta. A caller who does not pass `counts` gets a FAILED fit
-        # for most elements at any larger basis, and nothing else would say so.
+        # The fit error is kept: it is the only signal of whether this grid
+        # resolves this basis. The default count is sized for double zeta and
+        # fails for most elements at larger bases.
         fit_errors = {}
         if radii is None:
             radii = {}
@@ -274,10 +228,10 @@ class FrozenFactorization:
                 radii[el], fit_errors[el], _ = runtime_atomic_radii(
                     el, self.basis, self.auxbasis, self.counts,
                     n_start=n_start)
-        # The radii come out of a local descent on a multi-modal objective
-        # whose minimum moves with the BLAS reduction order, the frames out of
-        # an `eigh`: rank 0's, on every rank, before anything is placed. The
-        # clouds and owners follow from the radii and travel in the same call.
+        # The radii come from a local descent on a multi-modal objective whose
+        # minimum moves with the BLAS reduction order, the frames from an
+        # `eigh`: rank 0's on every rank, before anything is placed. Clouds and
+        # owners follow from the radii and travel in the same call.
         (self.radii, self.fit_errors, self.pts_local, self.owner,
          self.frames) = lockstep((radii, fit_errors,
                                   *point_layout(mol, radii),
@@ -298,10 +252,9 @@ class FrozenFactorization:
                     f'sized for double zeta.', RuntimeWarning, stacklevel=2)
         self.M = len(self.owner)
         self.naux = self.auxmol(mol).nao_nr()
-        # The layout is a screening threshold on collocated products, taken on
-        # rank 0's placed points, and locked as well: its column SET must be
-        # one set, and a rank whose threshold kept another raises on every
-        # rank (the shapes disagree) rather than differentiating its own.
+        # The layout is a screening threshold on collocated products of rank
+        # 0's placed points, locked too: a rank whose threshold kept another
+        # column set raises on every rank (the shapes disagree).
         self.layout = lockstep(test_set_layout(mol, self.coords(mol)))
         # Weak on the Mole: the value is arrays and pins nothing, so an entry
         # dies with its geometry. A weak key is wrong wherever the value
@@ -352,12 +305,10 @@ class FrozenFactorization:
     def rebuilt_at(self, mol):
         """The same conventions re-derived at `mol`.
 
-        Everything this object OWNS is a choice and travels verbatim, radii
-        included: an explicit set IS the choice and has nothing to re-derive,
-        where atomic radii are element-only and rebuild identically. Only what
-        depends on the geometry -- the placed points, the frames, the pair
-        layout -- is derived again. Callers rebuild through here so that a
-        setting added above cannot be silently dropped by one of them.
+        Every owned choice travels verbatim (explicit radii included; atomic
+        radii are element-only and rebuild identically); only the placed
+        points, frames and pair layout are derived again. Callers rebuild
+        through here so that no setting is dropped by one of them.
         """
         return type(self)(mol, basis=self.basis, auxbasis=self.auxbasis,
                           counts=self.counts, n_start=self.n_start,
@@ -374,11 +325,9 @@ class FrozenFactorization:
     def coords(self, mol):
         """Interpolation points r_g = p_g F_i + R_i on frozen or continued frames.
 
-        Rank 0's points on every rank of a distributed run: the grid IS the
-        functional, and ranks whose points differ even in the last bits carry
-        forward quantities and adjoints of two different surfaces. Continued
-        frames are re-derived at every geometry through an `eigh`, which is
-        where a rank's own bits enter.
+        Rank 0's points on every rank: the grid is part of the functional.
+        Continued frames are re-derived at every geometry through an `eigh`,
+        which is where a rank's own bits enter.
         """
         fr = continued_frames(mol, self.frames) if self.with_frames \
             else self.frames
@@ -389,28 +338,22 @@ class FrozenFactorization:
     def shareable_factors(self, mol, auxmol, crd):
         """(X_ao, Mfit, V): the fit at `mol` before the auxiliary gauge.
 
-        The split is drawn before the gauge because `aux_metric_sqrt` dresses
-        it with the chain's own environment, so two chains sharing a layout and
-        carrying different continua must not share a D. Everything above it is
-        environment-independent and cached here, which is most of the
-        per-geometry cost, so several chains of one composed surface pay it once.
+        The gauge is left out because `aux_metric_sqrt` dresses it with the
+        chain's own environment; everything before it is
+        environment-independent and cached, so the chains of one composed
+        surface pay it once.
 
-        Under ranks the fit is rank 0's on every rank, and the lockstep that
-        makes it so is taken on EVERY call, hit or miss. Every rank must reach
-        the same collective at the same call, and a weak-keyed cache does not
-        expire in step across ranks: a rank whose Mole was collected would
-        recompute -- and enter the lockstep -- while the others returned from
-        their cache.
-
-        Sliced over ranks nothing is cached here: the fit is whole only while
-        the rows are cut from its products, and the rows are what the chains
-        share (`cached_rows`). The row fit has no whole fit to share and
-        refuses: `_fit` is another estimator than the one it realizes.
+        Under ranks the fit is rank 0's, and the lockstep is taken on every
+        call, hit or miss, because a weak-keyed cache does not expire in step
+        across ranks. Sliced over ranks nothing is cached here (the chains
+        share the rows, `cached_rows`). The row fit refuses: `_fit` is another
+        realization.
         """
         if self.fit == 'rows':
             raise ValueError(
-                "fit='rows' never forms the whole fit, and `_fit` is not its "
-                "estimator; read the factors through FactorChain.factors_at")
+                "fit='rows' never forms the whole fit, and `_fit` is another "
+                "realization of it; read the factors through "
+                "FactorChain.factors_at")
         if self.slice_comm() is not None:
             return lockstep(self._fit(mol, auxmol, crd))
         hit = self._fit_cache.get(mol)
@@ -420,15 +363,11 @@ class FrozenFactorization:
         return lockstep(hit)
 
     def _fit(self, mol, auxmol, crd):
-        """The least-squares fit itself: (X_ao, M, V) at `mol` on the frozen layout."""
-        mu_i, nu_i, wc_l = self.layout
-        naux = auxmol.nao_nr()
-        Dt = test_set_D(mol, auxmol, crd, self.layout)
-        V = auxmol.intor('int2c2e', aosym='s1')
-        e3 = test_set_three_center(mol, auxmol, mu_i, nu_i)
-        F = np.hstack([np.linalg.solve(V, e3.T) * wc_l[None, :],
-                       np.eye(naux)])
-        return (mol.eval_gto('GTOval_sph', crd), fit_M_stable(Dt, F), V)
+        """(X_ao, M, V) at `mol`: `fit_M_streaming` on the frozen layout."""
+        # every rank runs the serial fit, which `shareable_factors` locksteps
+        M = fit_M_whole(mol, auxmol, crd, self.layout)
+        return (mol.eval_gto('GTOval_sph', crd), M,
+                auxmol.intor('int2c2e', aosym='s1'))
 
     def settings(self):
         """What two chains must agree on to be allowed to share one of these."""
@@ -440,13 +379,11 @@ class FrozenFactorization:
                       radii=None, sliced=None, fit=None, fit_block=None):
         """Refuse a chain whose own settings contradict this factorization.
 
-        Silently resolving to one side is the failure the object exists to
-        prevent: the caller asked for a factorization it is not getting, and
-        every number downstream would be of a functional nobody requested.
-        A layout asked for (`sliced` not None) must be this one's too: the
-        numbers agree, the memory a rank holds does not. So must a fit
-        realization (`fit`, `fit_block` not None): two realizations agree
-        to rounding and no closer.
+        Resolving silently to one side would give numbers of a functional
+        nobody requested. A requested layout (`sliced` not None) must match
+        too (same numbers, different memory per rank), and so must a requested
+        fit realization (`fit`, `fit_block`): two realizations agree only to
+        rounding.
         """
         if sliced is not None and bool(sliced) != self.sliced:
             raise ValueError(
@@ -484,38 +421,32 @@ class FactorChain:
 
     `scf_factory(mol) -> mf` supplies the mean field at a displaced geometry;
     it must converge the orbital gradient to ~1e-11, since the Lagrangian
-    assumes the occupied-virtual Fock block vanishes. A factory that returns a
-    mean field it has BUILT AND NOT RUN hands the convergence to the chain,
-    which divides its Fock build over the ranks (`converged_factory`); one that
-    converges its own is used as it is.
+    assumes the occupied-virtual Fock block vanishes. A mean field returned
+    built but not run is converged by the chain over the ranks
+    (`converged_factory`); a converged one is used as it is.
 
-    Under ranks (`with distributed(comm):`) every rank runs the chain whole.
-    Its frozen factorization is rank 0's on every rank, its mean fields are
-    locked to rank 0's orbitals, and its share of the gradient -- the orbital
-    response, the collocation and the fit branch it forms itself -- is one
-    `lockstep` at the end of `nuclear_gradient`. Without these each rank would
-    decide its own grid and add its own last bits, which agree between two
-    processes of one machine and need not otherwise.
+    Under ranks (`with distributed(comm):`) every rank runs the chain whole:
+    the frozen factorization is rank 0's, mean fields are locked to rank 0's
+    orbitals, and the gradient is one `lockstep` at the end of
+    `nuclear_gradient`.
 
     `sliced` asks for a factorization whose factors are grid rows over the
     ranks (`FrozenFactorization`); None takes the given factorization's
-    layout, or whole factors when the chain builds its own. A chain whose
-    kernels do not all take `SlicedFactors` says so in
-    `READS_SLICED_FACTORS` and refuses a sliced factorization at
-    construction, before any SCF, as does one that reads the bare gauge
-    (`READS_BARE_GAUGE`) in an environment that dresses the interaction.
+    layout, or whole factors. A chain whose kernels do not all take
+    `SlicedFactors` (`READS_SLICED_FACTORS`) refuses a sliced factorization at
+    construction, as does one that reads the bare gauge (`READS_BARE_GAUGE`)
+    in an environment that dresses the interaction.
 
-    `fit` and `fit_block` ask for the fit's realization the same way
-    (`FrozenFactorization`); None takes the given factorization's, or the
-    replicated fit. The row fit ('rows') is refused in an environment that
-    dresses the interaction, for every chain: its D is one gauge's rows,
-    where Eq. (18) reads the bare gauge beside the dressed one, and the
-    gauge adjoint of its estimator is gated in the gas phase alone.
+    `fit` and `fit_block` select the fit's realization the same way; None
+    takes the given factorization's, or the replicated fit. The row fit is
+    refused in an environment that dresses the interaction: its D is one
+    gauge's rows, Eq. (18) reads the bare gauge beside the dressed one, and
+    its tiled adjoint carries the bare gauge alone.
     """
 
     #: Whether every kernel this chain calls reads `SlicedFactors`.
     READS_SLICED_FACTORS = False
-    #: Whether this chain screens with the BARE gauge beside the dressed one
+    #: Whether this chain screens with the bare gauge beside the dressed one
     #: where the environment dresses the interaction (`bare_factor`).
     READS_BARE_GAUGE = False
 
@@ -580,9 +511,9 @@ class FactorChain:
             raise ValueError(
                 f"{type(self).__name__} on the row fit (fit='rows') in "
                 f'{self.environment!r}: its D is one gauge\'s rows, and the '
-                "gauge adjoint of the row fit's estimator is gated in the "
-                "gas phase alone; build the factorization with "
-                "fit='replicated' for a solvated run")
+                "row fit's tiled adjoint carries the bare gauge alone; build "
+                "the factorization with fit='replicated', the same "
+                'estimator, for a solvated run')
         with self.phase('t_scf'):
             self.mf0 = self.environment.mean_field(
                 mol, converged_factory(
@@ -593,8 +524,8 @@ class FactorChain:
         lockstep_mean_field(self.mf0)
         self.scf_residual = check_scf_quality(self.mf0, self.nocc)
 
-        # the SAME objects, not copies: two chains on one factorization share
-        # the arrays, which is what makes their factors bitwise identical
+        # the same objects, not copies, so two chains on one factorization
+        # have bitwise identical factors
         self.radii = factorization.radii
         self.pts_local, self.owner = factorization.pts_local, factorization.owner
         self.frames = factorization.frames
@@ -603,12 +534,8 @@ class FactorChain:
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the reference pair, or a fresh SCF at another geometry,
-        built in the chain's environment.
-
-        The fresh one is converged over the ranks wherever the factory leaves
-        it to them (`converged_factory`): a displaced geometry is a whole SCF,
-        and it is the one stage of a walk that every rank would otherwise
-        compute alone.
+        built in the chain's environment and converged over the ranks where
+        the factory leaves that to the chain (`converged_factory`).
         """
         mol = self.mol0 if mol is None else mol
         if mf is None:
@@ -623,7 +550,7 @@ class FactorChain:
                     mf = self.environment.mean_field(
                         mol, converged_factory(self.scf_factory))
         # Rank 0's orbitals on every rank: the chain forms X_mo = X_ao C and
-        # contracts the kernels' adjoints with THIS mean field's coefficients,
+        # contracts the kernels' adjoints with this mean field's coefficients,
         # and another rank's SCF can differ from rank 0's by the phases and
         # degenerate rotations of its orbitals. A mean field the ranks
         # converged together arrives locked and this rewrites the same bits;
@@ -633,13 +560,8 @@ class FactorChain:
 
     @contextmanager
     def phase(self, key):
-        """Time one stage into `self.timer[key]` (accumulating), or do nothing.
-
-        The forward and reverse halves of a gradient are only comparable when
-        timed apart, so every stage of a chain runs inside one of these; a
-        runner that wants the split sets `timer` to a dict, everyone else pays
-        one attribute read.
-        """
+        """Time one stage into `self.timer[key]` (accumulating), or do nothing
+        when `timer` is None."""
         if self.timer is None:
             yield
             return
@@ -650,12 +572,9 @@ class FactorChain:
             self.timer[key] = self.timer.get(key, 0.0) + time.perf_counter() - t0
 
     def require_differentiable_environment(self):
-        """Refuse a force this environment cannot complete, before paying for it.
-
-        The refusal itself comes from the environment's own adjoints, which
-        raise; asking here means a production-sized reverse pass is not run
-        first only to raise at its last branch.
-        """
+        """Refuse a force this environment cannot complete before the reverse
+        pass runs (the environment's adjoints would raise only at its last
+        branch)."""
         if not self.environment.differentiable:
             raise NotImplementedError(
                 f'{self.environment!r} has no nuclear derivative, so this chain '
@@ -671,57 +590,42 @@ class FactorChain:
         return getattr(mf, 'xc', None) is not None
 
     def reference_energy(self, mol, mf):
-        """E_0^HF of the plasmon formula: production's E_HF AT this density.
+        """E_0^HF of the plasmon formula: E_HF at this density.
 
-        `mf.e_tot` on a Hartree-Fock mean field, and on a Kohn-Sham one the
-        Hartree-Fock energy of ITS density, which is what the plasmon formula
-        wants; the physics is in the production routine. TAKE IT WITH ITS
-        GRADIENT: `kohn_sham_gradient_correction` below carries the two terms
-        that move the force the same way, and a chain that adopts one and not
-        the other is stationary for neither functional.
+        `mf.e_tot` on a Hartree-Fock mean field; on a Kohn-Sham one the
+        Hartree-Fock energy of its density (`rpa_energy.reference_energy`).
+        Take it together with `kohn_sham_gradient_correction`, which moves the
+        force the same way: a chain that adopts one and not the other is
+        stationary for neither functional.
         """
         return reference_energy(mf, mol)
 
     def kohn_sham_gradient_correction(self, mol, mf):
-        """(y_extra, g_extra): what `reference_energy` costs on the gradient side.
+        """(y_extra, g_extra): the gradient-side partner of `reference_energy`.
 
-        `reference_energy` moves the surface from E_KS to E_HF at the same
-        density. These are the two terms that move its DERIVATIVE the same way
-        -- the EXX double-counting orbital response, which enters the Lagrangian
-        before the multiplier solve because it shares Lambda, and its skeleton,
-        which enters the orbital branch. They are the `y_extra` and `g_extra`
-        hooks of `nuclear_gradient`, and those hooks are SHARED: sum into
-        whatever a chain already passes rather than replacing it.
+        The EXX double-counting orbital response (joins the Lagrangian before
+        the multiplier solve, sharing Lambda) and its skeleton (joins the
+        orbital branch). The `y_extra`/`g_extra` hooks of `nuclear_gradient`
+        are shared: sum into what a chain already passes. Both vanish on a
+        Hartree-Fock mean field, so callers add them unconditionally.
 
-        Both are identically zero on a Hartree-Fock mean field, so callers add
-        them unconditionally and that path stays bitwise unchanged.
-
-        USE `mean_field_gradient` FOR THE OTHER HALF. `g_extra` is differenced
-        against pyscf's own mean-field force, so that force must carry the grid
-        response or the cancellation tears.
-
-        A chain with no EXX skeleton of its own does not need these at all: it
-        should REFUSE a Kohn-Sham reference outright, which makes the
-        inconsistent state unreachable instead of merely documented.
+        `g_extra` is differenced against `mean_field_gradient`, which must
+        carry the grid response. A chain with no EXX skeleton of its own
+        should refuse a Kohn-Sham reference outright.
         """
         return (exx_double_counting_Y(mf, self.nocc),
                 exx_double_counting_skeleton(mf, mol))
 
     def mean_field_gradient(self, mf):
-        """pyscf's own force for THIS mean field, with the grid response paired.
+        """pyscf's force for this mean field, with the grid response paired.
 
-        The half of `kohn_sham_gradient_correction` that lives outside the
-        Lagrangian. `grid_response=True` on a KS gradient is not an accuracy
-        knob here: it is the partner of the double-counting skeleton, and
-        setting it on one and not the other tears a cancellation the two are
-        supposed to complete.
+        The half of `kohn_sham_gradient_correction` outside the Lagrangian:
+        `grid_response=True` on a KS gradient is the partner of the
+        double-counting skeleton, not an accuracy knob.
 
-        Rank 0's force on every rank. Every rank computes it, and pyscf
-        blocks a density-fitted gradient's auxiliary index by the free
-        memory of the process it runs in (`max_memory` less the resident
-        size), so ranks whose resident sizes differ re-associate the same
-        sums differently and the force a chain returns would differ in its
-        last bits from rank to rank.
+        Rank 0's force on every rank: pyscf blocks a DF gradient's auxiliary
+        index by the process's free memory, so ranks re-associate the same
+        sums differently.
         """
         if isinstance(getattr(mf, 'with_df', None), ISDFJK):
             # `isdf_mean_field_gradient` sets grid_response on the reference it
@@ -733,21 +637,14 @@ class FactorChain:
         return lockstep(np.asarray(g0.kernel()))
 
     def environment_at(self, mol):
-        """The environment around THIS geometry, built once per geometry.
+        """The environment around this geometry, built once per geometry.
 
-        A cavity moves with the atoms, so each displaced geometry gets its own,
-        and a finite difference of the energy is the derivative of the real
-        surface only because the two displaced points do not share one.
-
-        THE KEY IS THE EXACT BYTES of the atomic charges and coordinates, and
-        the nuclear count. Charges belong in it because a cavity follows the
-        element radii, so coordinates alone do not determine one. The bytes are
-        unrounded because rounding is what lets two finite-difference
-        displacements collide and share a reaction field, which is a wrong force
-        that no energy or gradient gate would report.
-
-        Content rather than `id(mol)` because identity is safe only by
-        accident of what the environments happen to return.
+        A cavity moves with the atoms, so each displaced geometry gets its
+        own. The key is the exact bytes of the atomic charges and coordinates
+        and the atom count: charges because a cavity follows element radii,
+        unrounded because rounding lets two finite-difference displacements
+        share a reaction field (a wrong force no gate would report). Content
+        rather than `id(mol)`, which is safe only by accident.
         """
         key = (mol.atom_charges().tobytes(), mol.atom_coords().tobytes(),
                mol.natm)
@@ -772,7 +669,7 @@ class FactorChain:
     def factors(self, mol, auxmol, crd):
         """(X_ao, D) of the separable RI on the frozen layout, D = M^T V^(1/2).
 
-        The least-squares fit target keeps the BARE metric; only the gauge
+        The least-squares fit target keeps the bare metric; only the gauge
         V^(1/2) is dressed by the environment at this geometry, as in
         `space_time.separable_factors`.
         """
@@ -781,7 +678,7 @@ class FactorChain:
                 Mfit.T @ aux_metric_sqrt(auxmol, self.environment_at(mol), V=V))
 
     def bare_factor(self, mol, auxmol, crd):
-        """D in the BARE gauge, or None when nothing screens.
+        """D in the bare gauge, or None when nothing screens.
 
         The self-energy screens with the bare interaction and takes the
         continuum as Duchemin et al.'s static Eq. (18) shift, while the BSE
@@ -812,16 +709,12 @@ class FactorChain:
         return partner, Mfit.T @ aux_metric_sqrt(auxmol, partner, V=V)
 
     def factors_at(self, mol, mf):
-        """(X_mo, D, eps, auxmol, coords, X_ao) at `mol`.
+        """(X_mo, D, eps, auxmol, coords, X_ao) at `mol`, under one timing phase.
 
-        The factorization every chain starts from, under the one timing phase,
-        so the reference-frozen radii, layout and frames are consulted in
-        exactly one place rather than once per target.
-
-        Sliced over ranks, X_mo, D and X_ao are ONE `SlicedFactors` holding
-        this rank's rows of each (`sliced_factors_at`), and every kernel the
-        chain hands them to gathers what it reads whole. On the row fit they
-        are the rows it built, and on one rank its whole arrays.
+        Sliced over ranks, X_mo, D and X_ao are one `SlicedFactors` holding
+        this rank's rows of each (`sliced_factors_at`); kernels gather what
+        they read whole. On the row fit they are the rows it built, and on one
+        rank its whole arrays.
         """
         auxmol = self.auxmol(mol)
         crd = self.coords(mol)
@@ -842,18 +735,15 @@ class FactorChain:
         """This rank's grid rows of (X_mo, D, X_ao) at `mol`: `SlicedFactors`,
         or on the row fit over one rank its whole (X_mo, D, X_ao).
 
-        On the replicated fit the rows are CUT FROM THE WHOLE PRODUCTS, never
-        formed as row products: X_mo = X_ao C and D = M^T V^(1/2) are built
-        exactly as the whole layout builds them, and only then is this rank's
-        `contiguous_block` kept, since a row block of a GEMM is not the same
-        bits as those rows of the whole GEMM. The whole fit and products are
-        dropped when this returns. On the row fit they are what it built
-        (`row_fit_factors`), and nothing whole exists at any stage.
+        On the replicated fit the rows are cut from the whole products
+        X_mo = X_ao C and D = M^T V^(1/2), built as the whole layout builds
+        them, since a row block of a GEMM is not the same bits as those rows
+        of the whole GEMM; the whole arrays are dropped on return. On the row
+        fit they are `row_fit_factors`' output and nothing whole exists.
 
-        The rows are shared through the factorization with every chain that
-        asks at the same geometry, for the same mean field and in the same
-        gauge -- the two halves of a composed surface pay one fit. The rows are
-        cut for the ranks of the current region (`slice_comm`).
+        The rows are shared through the factorization with every chain asking
+        at the same geometry, mean field and gauge, cut for the ranks of the
+        current region (`slice_comm`).
         """
         env = self.environment_at(mol)
         # The gauge is bare wherever the environment dresses nothing, so every
@@ -875,20 +765,23 @@ class FactorChain:
         """(X_mo, D, X_ao) of the row-distributed fit on the frozen points:
         `SlicedFactors` over more than one rank, whole arrays on one.
 
-        `separable_ri.fit_rows` solves the balanced, regularized estimator
-        with the grid index in fixed tiles of `fit_block` points, so each
-        rank holds only the tiles it owns and its rows are bitwise the
-        one-rank rows at any rank count. X_mo, D = M^T V^(1/2) and X_ao are
-        read off it on this rank's rows, in the fit's own tiles; the metric
-        root is rank 0's, because every tile owner projects with it.
+        `separable_ri.fit_rows` solves the balanced, regularized estimator in
+        fixed tiles of `fit_block` grid points, so each rank holds only its
+        own tiles and its rows are bitwise the one-rank rows. The metric root
+        is rank 0's, since every tile owner projects with it. Not
+        `separable_factors(fit='rows')`, which places its own points on frames
+        recomputed per geometry.
 
-        Not `separable_factors(fit='rows')`: that call places its own points
-        on frames recomputed at each geometry, and the chain differentiates
-        the frozen ones.
+        Where `mf` is a distributed ISDF-K SCF whose grid is these points (the
+        reference geometry), the rows are read from its handle's M^T tiles
+        (`separable_ri.FitTiles`) instead of fitted again.
         """
         comm = self.factorization.slice_comm()
+        handle = isdf_scf_handle(mf)
         fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
-                              block=self.factorization.fit_block)
+                              block=self.factorization.fit_block,
+                              tiles=None if handle is None
+                              else handle.fit_tiles())
         x_mo = fit.mo_rows(mf.mo_coeff)
         d = fit.metric_root_rows(auxmol, self.environment_at(mol))
         x_ao = fit.ao_rows()
@@ -902,69 +795,102 @@ class FactorChain:
                          root_bar=None, kernel_bar=None, extra_gauges=()):
         """(natm, 3) gradient from adjoints on (eps, X_mo, D), with diagnostics.
 
-        X_mo = X_ao C depends on the geometry twice: through C, which enters the
-        Lagrangian as the orbital-rotation gradient X_mo^T X_bar, and through the
-        collocation X_ao, whose adjoint is X_bar C^T.
+        X_mo = X_ao C depends on the geometry through C (the orbital-rotation
+        gradient X_mo^T X_bar in the Lagrangian) and through X_ao (adjoint
+        X_bar C^T).
 
-        eps_bar: the adjoint on the orbital energies, or a full symmetric MO
-            Fock partial dE/dF_pq when the target's one-body term contracts F
-            off the diagonal (an active-space model does).
-        y_extra: orbital-rotation gradient of a term that is not a function of
-            the factors -- the Kohn-Sham static correction, say. It joins Y
-            BEFORE the multiplier solve, because it shares Lambda.
-        g_extra: that term's own skeleton, added to the orbital branch.
-        d_bar_bare: the adjoint on the BARE-gauge factor, when the target
-            screens with both (`bare_factor`). It rides the same fit with no
-            environment, so the cavity's motion reaches the force through
-            the DRESSED factor only -- which is where vtilde actually sits.
-        root_bar, kernel_bar: adjoints on the DRESSED gauge's metric root
+        eps_bar: adjoint on the orbital energies, or a full symmetric MO Fock
+            partial dE/dF_pq when the target's one-body term contracts F off
+            the diagonal (an active-space model does).
+        y_extra: orbital-rotation gradient of a term that is not a function
+            of the factors (e.g. the Kohn-Sham static correction); joins Y
+            before the multiplier solve, sharing Lambda.
+        g_extra: that term's skeleton, added to the orbital branch.
+        d_bar_bare: adjoint on the bare-gauge factor when the target screens
+            with both (`bare_factor`); the cavity's motion reaches the force
+            through the dressed factor only.
+        root_bar, kernel_bar: adjoints on the dressed metric root
             (V + vtilde)^(1/2) and on vtilde alone, from a term that reads the
-            screened metric WITHOUT going through D. The fold's
-            N = R^-1 vtilde R^-1 is that term. They join the dressed gauge so
-            that one Frechet solve and one cavity derivative serve both it and
-            D; differentiating them apart is the same number and twice the
-            reaction-field work.
-        extra_gauges: further `GaugeAdjoint`s of the same fit -- the static
-            partner's factor of an equilibrium-solvated ion (`static_factor`)
-            -- each with its own environment and cavity derivative.
+            screened metric without D (the fold's N = R^-1 vtilde R^-1). They
+            join the dressed gauge so one Frechet solve and one cavity
+            derivative serve both.
+        extra_gauges: further `GaugeAdjoint`s of the same fit (e.g. the
+            static partner's factor of an equilibrium-solvated ion,
+            `static_factor`).
 
-        x_mo may be `SlicedFactors`: the orbital-rotation gradient contracts
-        the grid index, so X_mo is gathered whole for that product alone (on
-        the row fit its tiles stream instead, `orbital_rotation_rows`), and
-        the diagnostics carry `factor_gathers`, the gathers those factors have
-        made, the same on every rank, and on the row fit `fit_held`, the most
-        of each array of the fit rank 0 held at once, in bytes.
+        x_mo may be `SlicedFactors`: X_mo is gathered whole for X_mo^T X_bar
+        alone (on the row fit its tiles stream, `orbital_rotation_rows`), and
+        the diagnostics carry `factor_gathers` and, on the row fit, `fit_held`
+        (rank 0's peak bytes per fit array). x_bar and d_bar may be
+        `GridTileRows`: the row fit reads its own tiles, the replicated fit
+        gathers them.
 
-        On the row fit the fit adjoint differentiates the row fit's own
-        estimator -- the Gram matrix over every product pair, F over the
-        frozen test set -- and runs with the collocation adjoint in the
-        fit's tiles (`row_fit_branches`): no rank forms an array of the grid
-        by a factor's or the fit's width beyond the X_bar and D_bar it is
-        handed, and the diagnostics carry `adjoint_held`, the most of each
-        of its arrays rank 0 held at once, in bytes.
+        The fit adjoint differentiates the one estimator on both
+        realizations: whole (`dfactor_adjoint_gauges` over `product_pairs`) on
+        the replicated fit, in the fit's tiles (`row_fit_branches`) on the row
+        fit, where `adjoint_held` reports rank 0's peak bytes per array.
+
+        The assembly is a `one_fit_adjoint` window on `mf`: row exchange
+        skeletons inside it (the relaxed density's, the caller's
+        Sigma_x - v_xc) leave their seeds to the row fit's adjoint, one
+        `fit_rows_adjoints` call per fit, and their share joins the orbital
+        branch.
         """
-        if self.factorization.fit == 'rows':
+        with one_fit_adjoint(mf) as pending:
+            if self.factorization.fit != 'rows':
+                x_bar, d_bar, d_bar_bare = (
+                    a.gather() if isinstance(a, GridTileRows) else a
+                    for a in (x_bar, d_bar, d_bar_bare))
+            if self.factorization.fit == 'rows':
+                with self.phase('t_orbital'):
+                    y = orbital_rotation_rows(x_mo, x_bar, self.fit_block)
+            else:
+                # refused before the orbital response rather than after it
+                require_whole_fit_adjoint(mol.nao_nr(), auxmol.nao_nr(),
+                                          len(crd), len(product_pairs(mol)[0]),
+                                          'FactorChain.nuclear_gradient')
+                y = (x_mo.require(current_comm()).gather('X_mo')
+                     if isinstance(x_mo, SlicedFactors) else x_mo).T @ x_bar
+            if y_extra is not None:
+                y = y + y_extra
             with self.phase('t_orbital'):
-                y = orbital_rotation_rows(x_mo, x_bar, self.fit_block)
-        else:
-            y = (x_mo.require(current_comm()).gather('X_mo')
-                 if isinstance(x_mo, SlicedFactors) else x_mo).T @ x_bar
-        if y_extra is not None:
-            y = y + y_extra
-        with self.phase('t_orbital'):
-            g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc, Y_extra=y)
-        if g_extra is not None:
-            g_orb = g_orb + g_extra
-        if self.factorization.fit == 'rows':
-            if extra_gauges:
-                raise NotImplementedError(
-                    "a further gauge on the row fit: fit='rows' refuses every "
-                    'environment that dresses the interaction')
-            g_coll, g_fit, held = self.row_fit_branches(
-                mol, mf, auxmol, crd, x_bar, d_bar, d_bar_bare=d_bar_bare,
-                root_bar=root_bar, kernel_bar=kernel_bar)
-            return self._assembled(g_orb, g_coll, g_fit, diags, x_mo,
-                                   adjoint_held=held)
+                g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc,
+                                                  Y_extra=y)
+            if g_extra is not None:
+                g_orb = g_orb + g_extra
+            held = None
+            if self.factorization.fit == 'rows':
+                if extra_gauges:
+                    raise NotImplementedError(
+                        "a further gauge on the row fit: fit='rows' refuses "
+                        'every environment that dresses the interaction')
+                g_coll, g_fit, held = self.row_fit_branches(
+                    mol, mf, auxmol, crd, x_bar, d_bar, d_bar_bare=d_bar_bare,
+                    root_bar=root_bar, kernel_bar=kernel_bar)
+            else:
+                g_coll, g_fit = self.whole_fit_branches(
+                    mol, mf, auxmol, crd, x_bar, d_bar, d_bar_bare=d_bar_bare,
+                    root_bar=root_bar, kernel_bar=kernel_bar,
+                    extra_gauges=extra_gauges)
+            with self.phase('t_fit'):
+                g_orb = g_orb + pending.settle()
+        return self._assembled(g_orb, g_coll, g_fit, diags, x_mo,
+                               adjoint_held=held)
+
+    def one_fit_adjoint(self, mf, mean_field=False):
+        """The window of one force on `mf` whose row exchange skeletons hand
+        their fit adjoint's seeds to the assembly
+        (`isdf_derivatives.one_fit_adjoint`); mean_field: this chain's
+        `mean_field_gradient(mf)` follows inside it and rides the same
+        call."""
+        return one_fit_adjoint(mf, mean_field=mean_field)
+
+    def whole_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar,
+                           d_bar_bare=None, root_bar=None, kernel_bar=None,
+                           extra_gauges=()):
+        """(g_collocation, g_fit) on the replicated fit, both formed whole:
+        `collocation_adjoint` of X_bar C^T and `dfactor_adjoint_gauges` over
+        every product pair; `extra_gauges` as `nuclear_gradient`'s."""
         with self.phase('t_collocation'):
             g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                          self.pts_local, self.owner,
@@ -983,22 +909,23 @@ class FactorChain:
             g_fit = dfactor_adjoint_gauges(mol, auxmol, crd, gauges,
                                            self.layout, self.pts_local,
                                            self.owner, frames=self.frames,
-                                           with_frames=self.with_frames)
-        return self._assembled(g_orb, g_coll, g_fit, diags, x_mo)
+                                           with_frames=self.with_frames,
+                                           gram_layout=product_pairs(mol))
+        return g_coll, g_fit
 
     def row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar,
                          d_bar_bare=None, root_bar=None, kernel_bar=None):
-        """(g_collocation, g_fit, held) on the row fit: the adjoint of
-        `separable_ri.fit_rows`' own estimator on the frozen pair layout and
-        the X_mo collocation adjoint, computed in the fit's tiles
-        (`isdf_derivatives.row_fit_adjoint`), so no rank forms the Gram
-        matrix, the test set's collocation, (mu nu|P), M, F D^T or an
-        adjoint of their size whole; the same bits at every rank count.
-        held: the most bytes of each of its arrays this rank held at once.
+        """(g_collocation, g_fit, held) on the row fit: the fit adjoint of
+        `separable_ri.fit_rows` on the frozen pair layout and the X_mo
+        collocation adjoint, in the fit's tiles
+        (`isdf_derivatives.row_fit_adjoint`). No rank forms the Gram matrix,
+        the test-set collocation, (mu nu|P), M, F D^T or an adjoint of their
+        size whole, and the bits are the same at every rank count. held: the
+        peak bytes of each array this rank held.
 
-        One gauge, the bare metric: the chain refuses the row fit where the
-        environment dresses the interaction, so a second gauge or an
-        adjoint on a dressed root has nowhere to land.
+        One gauge, the bare metric (the chain refuses the row fit in a
+        dressing environment). Inside the force's `one_fit_adjoint` window the
+        call also carries the skeletons' seeds (`PendingFitAdjoint.contract`).
         """
         if not (d_bar_bare is None and root_bar is None
                 and kernel_bar is None):
@@ -1011,7 +938,8 @@ class FactorChain:
                                       mf.mo_coeff, self.layout, self.pts_local,
                                       self.owner, frames=self.frames,
                                       with_frames=self.with_frames,
-                                      block=self.fit_block)
+                                      block=self.fit_block,
+                                      pending=pending_fit_adjoint(mf))
         return adjoint
 
     def _assembled(self, g_orb, g_coll, g_fit, diags, x_mo,
@@ -1038,43 +966,18 @@ class FactorChain:
         return lockstep((grad, diags))
 
 
-def test_set_three_center(mol, auxmol, mu_i, nu_i,
-                          max_bytes=THREE_CENTER_BLOCK_BYTES):
-    """(mu_i nu_i|P) on the test-set pairs alone, blocked over the mu shells.
-
-    The fit reads one row per test-set pair, of order a percent of the dense
-    (nao, nao, naux) three-centre tensor. Building that tensor in order to index
-    it costs nao^2 naux doubles, so it, not the flop count, is what ends the
-    chain at large size. Blocking the first index holds one (block, nao, naux)
-    slab at a time and returns the same rows to the bit.
-    """
-    nao, naux = mol.nao, auxmol.nao_nr()
-    ao_loc = mol.ao_loc_nr()
-    mu_i, nu_i = np.asarray(mu_i), np.asarray(nu_i)
-    out = np.empty((mu_i.size, naux))
-    for sh0, sh1 in shell_blocks(mol, int(nao) * int(naux) * 8, max_bytes):
-        a0, a1 = ao_loc[sh0], ao_loc[sh1]
-        take = np.flatnonzero((mu_i >= a0) & (mu_i < a1))
-        if not take.size:
-            continue
-        blk = pyscf_df.incore.aux_e2(
-            mol, auxmol, intor='int3c2e', aosym='s1',
-            shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas)
-        ).reshape(a1 - a0, nao, naux)
-        out[take] = blk[mu_i[take] - a0, nu_i[take], :]
-        del blk
-    return out
-
-
 def check_scf_quality(mf, nocc, tol=SCF_GRAD_TOL, raise_on_fail=False):
     """max |F_ia| in the MO basis -- the quantity `conv_tol_grad` controls.
 
     The Lagrangian assumes this block vanishes, what is left is amplified in
     the force, and symmetry hides it: a symmetric molecule looks converged and
-    is wrong in the fourth digit.
+    is wrong in the fourth digit. Under ranks the Fock matrix is the
+    distributed SCF's own (`distributed_fock`).
     """
     c = mf.mo_coeff
-    resid = float(np.abs((c.T @ mf.get_fock() @ c)[:nocc, nocc:]).max())
+    with distributed_fock(mf, build=False):
+        fock = mf.get_fock()
+    resid = float(np.abs((c.T @ fock @ c)[:nocc, nocc:]).max())
     if resid > tol:
         msg = (f'the mean field carries |F_ia| = {resid:.2e}, above {tol:.0e}; '
                'the gradient Lagrangian assumes it vanishes. Set '

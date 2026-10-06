@@ -64,8 +64,8 @@ mpirun -n R --bind-to core --map-by slot:PE=T python run.py
 
 ELPA's own OpenMP threads default to one per rank, and `OMP_NUM_THREADS` does
 not reach them; `ELPA_DEFAULT_omp_threads` does, if `pyelpa` is linked against
-the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores: unbound,
-a test solve ran at least ten times slower.
+the OpenMP build of ELPA (`libelpa_openmp`). Bind the ranks to cores: unbound
+ranks run the solve far more slowly.
 
 `pyelpa` is on neither PyPI nor conda-forge. Build it from `python/pyelpa` in
 the source of the installed ELPA version: with ELPA's own
@@ -107,13 +107,12 @@ rank it fails if a solve fell back to `eigh`.
 
 The space-time GW routes, the ISDF fit, the BSE Davidson and the
 density-fitted SCF divide their work over MPI ranks. Every rank runs the whole
-script -- the SCF loop, the Davidson, the gradient chains, the geometry walk --
-and MPI lives only inside the kernels that realize the physics: the tau and
-frequency sweeps of the GW self-energy and its adjoints, the three-centre pass
-of the ISDF fit, the rows of the screened kernel in the BSE block action, the
-pair rows of the BSE Davidson's trial space, and the auxiliary rows and grid
-points of the SCF's J, K and exchange-correlation potential. A driver never takes a communicator; the kernels read it from the
-region the script opens once:
+script -- the SCF loop, the Davidson, the gradient, the geometry optimization --
+and MPI lives only inside the numerical kernels: the time and frequency sweeps
+of the GW self-energy, the ISDF fit, the BSE matrix-vector products, the SCF's
+Coulomb, exchange and exchange-correlation builds, and the pieces of an
+analytic force. A driver never takes a communicator; the kernels read it from
+the region the script opens once:
 
 ```python
 from pyscf import dft, gto
@@ -139,20 +138,14 @@ cores each rank may use (see [Threads](#threads)). Without `mpi4py`, or with
 bit for bit the serial code.
 `mpi4py` is imported on first use, never at module import.
 
-WHY THE RANKS AGREE. Each rank converges its own arithmetic, and two ranks need
-not repeat each other's last bits: an orbital energy, an interpolation point
-or a Davidson residual can differ, and a discrete decision taken from it -- a
-grid size, a trial-vector count, when to stop -- then differs outright. So
-every kernel `lockstep`s at its entry the inputs that can differ between ranks
-(rank 0's copy is written into every rank's buffers), and gathers or
-all-reduces what it computes. Its output is then the same bits on every rank,
-every decision a driver takes from it is the same, and the replicated drivers
-stay in step without any protocol between them. Inputs one kernel hands the
-next are identical by construction and are not broadcast again;
-`with distributed(comm, audit=True):` makes the kernels compare 64-bit digests
-of them (`mpi_grid.agreement`) and count the repairs their locksteps made
-(`mpi_grid.lockstep_stats()`), which is how a run shows that every kernel held
-one set of bits on every rank.
+Two ranks need not agree in the last bits of an orbital energy or a Davidson
+residual, and a decision taken from such a number -- a grid size, when to stop
+-- would then differ between them. So every kernel copies rank 0's version of
+the inputs that can differ to all ranks on entry, and combines what it computes
+so that its output is the same bits on every rank. Every decision a driver
+takes is then the same on every rank, and the drivers stay in step without
+talking to each other. `with distributed(comm, audit=True):` checks at run time
+that the kernels saw identical inputs on every rank.
 
 Two rules follow. A computation meant for one rank only, or a serial reference
 inside the region, runs under `with distributed(None):`, since a kernel that

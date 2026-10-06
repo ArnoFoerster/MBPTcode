@@ -1,35 +1,24 @@
-"""ONE entry point to a potential-energy surface, and the refusals that keep
+"""One entry point to a potential-energy surface, and the refusals that keep
 two of them comparable.
 
-A surface is two things that were never separated before: the PHYSICS it
-declares -- which functional E_0 is, which state sits on it, which environment
-it stands in (`src.Base.declaration.SurfacePhysics`) -- and the REALIZATION
-that computes it: how chi0 is built, how the residues of the self-energy are
-taken, which eigensolver runs, how the four-index integral is factorized, and
-which orbitals carry an explicitly solved quasiparticle energy. Two surfaces of
-the same physics and different realizations may be differenced; two of
-different physics may not, whatever their realizations agree on.
-
-WHAT THIS CURES. Two relaxations of the same molecule disagreed by up to 0.9 eV
-on an adiabatic energy because one surface's E_0 was `mf.e_tot` and the other's
-`mf.e_tot + (E_x^HF - E_xc) + E_c^dRPA`, and no object said which; two
-incompatible quasiparticle windows ran under one name; `solver` had three
-different defaults in three constructors; and an ISDF grid nobody validated
-came in silently at 148 points per atom whenever `counts` was omitted. Each of
-those is a realization choice that was never written down. Here every one of
-them is resolved at construction and recorded on `surface.realization`, and a
-combination that has no realizing class is refused by name rather than
-approximated by the nearest one.
+A surface has two parts: the physics it declares (which functional E_0 is,
+which state sits on it, which environment it stands in;
+`src.Base.declaration.SurfacePhysics`) and the realization that computes it
+(how chi0 is built, how the residues of the self-energy are taken, which
+eigensolver runs, how the four-index integral is factorized, and which
+orbitals carry an explicitly solved quasiparticle energy). Two surfaces of the
+same physics and different realizations may be differenced; two of different
+physics may not. Every realization choice is resolved at construction and
+recorded on `surface.realization`, and a combination that has no realizing
+class is refused by name rather than approximated by the nearest one.
 
     surface = potential_energy_surface(mol, rhf, ground_state=GroundState('rpa', 'hf'),
                                        excitation=Excitation('singlet'))
     print(surface.describe())
     compare_surfaces(surface, other)     # PhysicsMismatch, or what differs
 
-The call returns the realizing class's OWN instance -- `RPABSESurface`,
-`ExcitedStateChain`, `DenseBSESurface` and the rest -- not a wrapper, so every
-existing reach-through into a chain keeps working and `refreeze`, the gradient
-and the property layer are untouched.
+The call returns the realizing class's own instance (`RPABSESurface`,
+`ExcitedStateChain`, `DenseBSESurface`, ...), not a wrapper.
 """
 import functools
 import inspect
@@ -41,7 +30,8 @@ import numpy as np
 from src.Base.constants import OUTSIDE_TREATMENTS, SURFACE_GRID_ACCURACY
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   PhysicsMismatch, QPStates, SurfacePhysics)
-from src.Base.environment import environment_label, resolve_environment
+from src.Base.environment import (NoEnvironment, environment_label,
+                                  resolve_environment)
 from src.Base.separable_ri import default_auxbasis, resolve_isdf_grid
 from src.Base.utils.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
@@ -97,8 +87,7 @@ EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
 RPA_GROUND_NUMERICS = frozenset({'ntau_rpa', 'nfreq_rpa', 'tile_gb'})
 
 #: Combinations that have a class but cannot carry the declaration, with the
-#: reason. A refusal with a reason is the point: silently building the nearest
-#: row is what the declaration exists to stop.
+#: reason.
 DENSE_BSE_REFUSAL = (
     'the dense quasi-boson BSE surface puts E_HF + E_c^dRPA under every '
     'excitation (Toelle Eq. 15) and has no mean-field ground state to offer. '
@@ -113,28 +102,26 @@ REFUSED_ROWS = {
 
 @dataclass(frozen=True)
 class Realization:
-    """HOW a surface computes what its `SurfacePhysics` declares, resolved.
+    """How a surface computes what its `SurfacePhysics` declares, resolved.
 
     Not one field here is a request: `solver` is the eigensolver that will run,
     `grid` the interpolation grid that was looked up, `qp_explicit` the orbital
     indices the declaration came out as at the reference spectrum. A field that
-    a route has no answer for is None -- a mean-field surface has no residue
-    backend, a dense one has no interpolation grid -- and None is a difference
+    a route has no answer for is None (a mean-field surface has no residue
+    backend, a dense one has no interpolation grid), and None is a difference
     like any other.
 
-    outside_treatment: what the orbitals NOT in `qp_explicit` carry on the BSE
+    outside_treatment: what the orbitals not in `qp_explicit` carry on the BSE
         diagonal. 'scissor' is one frozen shift per state, calibrated at the
         reference geometry on the explicitly solved roots
         (`GW.qp_states.calibrate_scissor`); 'mean-field' is the bare
-        eigenvalue. The two cubic rows take the scissor -- explicit inside the
-        window, the frozen shift outside it -- and the dense quasi-boson rows
-        record 'mean-field' because they have no scissor of their own. The two
-        treatments are not the same surface, which is why `compare_surfaces`
-        reports the field.
+        eigenvalue. The two cubic rows take the scissor (explicit inside the
+        window, the frozen shift outside it); the dense quasi-boson rows record
+        'mean-field' because they have no scissor. The two treatments are not
+        the same surface, so `compare_surfaces` reports the field.
 
-    How many ranks evaluated the surface is not a field: a surface carries no
-    communicator, every rank reads the same numbers, and a record that needs
-    the rank count takes it where the run was launched.
+    The rank count is not a field: a surface carries no communicator and every
+    rank reads the same numbers.
     """
     chi0: Optional[str]
     residues: Optional[str]
@@ -159,9 +146,9 @@ class Realization:
 class Row:
     """One line of the dispatch table.
 
-    The first four fields are the key -- the physics kind, the state's type,
+    The first four fields are the key: the physics kind, the state's type,
     and the two realization axes that decide which class can compute it. The
-    rest is what that class needs: the numeric keywords it READS (anything else
+    rest is what that class needs: the numeric keywords it reads (anything else
     is a TypeError naming both), the builder that maps this entry point's
     vocabulary onto its constructor, and the realization fields it fixes.
     """
@@ -207,11 +194,8 @@ class Setup:
 
 @functools.lru_cache(maxsize=1)
 def realizing_classes():
-    """The classes the table dispatches to.
-
-    cycle: src.gradients.excited_state imports src.properties.nonadiabatic, so
-    src.properties cannot import src.gradients at module scope.
-    """
+    """The classes the table dispatches to."""
+    # cycle: src.gradients -> src.properties.__init__ -> this module
     from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                               QuasiparticleSurface)
     from src.gradients.excited_state import ExcitedStateChain
@@ -265,13 +249,13 @@ def resolve_grid(mol, numerics):
 
     With nothing asked for the level is `SURFACE_GRID_ACCURACY`, resolved
     through `resolve_isdf_grid`, which refuses a basis or an element the shipped
-    radii table has not got. THE 148-POINT DEFAULT IS NEVER REACHED FROM HERE:
-    a grid nobody optimized is a different factorization, not a coarse one, and
-    it arrived silently whenever `counts` was omitted.
+    radii table has not got. The unoptimized 148-point default is never reached
+    from here: a grid nobody optimized is a different factorization, not a
+    coarse one.
 
     An explicit `counts`, `radii` or `grid_accuracy` is honoured as given, and
     a `counts` that contradicts a named level is refused rather than resolved
-    to either side -- `separable_factors`' rule, in the same words.
+    to either side (`separable_factors`' rule).
     """
     basis = numerics.get('basis') or mol.basis
     auxbasis = numerics.get('auxbasis') or default_auxbasis(basis)
@@ -314,14 +298,14 @@ def excited_kwargs(setup, row):
     """The keywords `ExcitedStateChain` takes this entry point's realization through.
 
     The explicit quasiparticle set goes in as `qp_window`, which accepts a
-    sequence of orbital indices; `scissor='calibrate'` is what makes the states
-    INSIDE that set whose pole model is inadmissible take a frozen shift built
-    at the reference geometry instead of a real-axis solve, and `outside`
-    decides what the orbitals outside it carry -- the row's own
-    `outside_treatment`, so the record and the chain cannot disagree.
+    sequence of orbital indices; with `scissor='calibrate'` the states inside
+    that set whose pole model is inadmissible take a frozen shift built at the
+    reference geometry instead of a real-axis solve, and `outside` (the row's
+    own `outside_treatment`, so the record and the chain cannot disagree)
+    decides what the orbitals outside it carry.
     """
     kw = {'residue_route': setup.residues}
-    # A row with no Casida eigenproblem -- the charged surface -- resolves no
+    # A row with no Casida eigenproblem (the charged surface) resolves no
     # solver, and handing the chain None is not the same as not asking.
     if setup.solver is not None:
         kw['solver'] = setup.solver
@@ -414,7 +398,7 @@ def build_dense_rpa(row, setup):
 def build_dense_bse(row, setup):
     """E_HF + E_c^dRPA + Omega_nu on the dense quasi-boson route.
 
-    `filter_z=False` keeps exactly the set this entry point resolved: the
+    `filter_z=False` keeps the set this entry point resolved: the
     surface's own Z > 0.5 filter would re-decide it and the two routes would
     then be compared on two different quasiparticle sets.
     """
@@ -447,20 +431,21 @@ def build_mean_field(row, setup):
     """E_KS: the mean field's own energy, with no post-SCF step at all.
 
     The reference mean field travels with it so that reading the declaration
-    off the surface does not converge a second SCF.
+    off the surface does not converge a second SCF; in the gas phase it is
+    also the surface's own mean field at the reference geometry, so E_0 there
+    does not converge a third.
     """
+    own = isinstance(resolve_environment(setup.environment), NoEnvironment)
     return row.cls(setup.mol, setup.scf_factory, mf=setup.mf,
-                   environment=setup.environment), {}
+                   environment=setup.environment, own=own), {}
 
 
 @functools.lru_cache(maxsize=1)
 def dispatch_table():
     """(ground-state kind, state type, chi0, factorization) -> the class that realizes it.
 
-    Every row is a combination someone has a class for. A combination that is
-    not here is refused by name: the nearest row is a different functional or a
-    different approximation, and substituting one is how two relaxations ended
-    up 0.9 eV apart under one label.
+    A combination that is not here is refused by name: the nearest row is a
+    different functional or a different approximation.
     """
     cls = realizing_classes()
     return (
@@ -572,7 +557,7 @@ def refuse_residues_outside_validity(residues, states, eps, nocc):
 
     `compressible` is the wall both 'sop' and 'laplace' stand behind: a state
     within one particle-hole gap of the frontier has a compressible self-energy
-    AND a cubic residue route, a deeper one has neither. Refusing names the
+    and a cubic residue route, a deeper one has neither. Refusing names the
     state and its reach instead of falling back to the explicit O(N^4) build,
     which would make the surface's cost and its error a function of the
     geometry.
@@ -628,17 +613,14 @@ def refuse_undeclared_state(excitation, mol):
 
 
 def declare_physics(surface, physics):
-    """CHECK the realizing class's own declaration, or stamp one where it has none.
+    """Check the realizing class's own declaration, or stamp one where it has none.
 
-    A class that says what it computes is not LABELLED by this entry point: the
-    two declarations are compared, and a disagreement means the dispatcher and
-    the class describe different surfaces. An `Excitation(kernel='bse-tda')`
-    answered by a chain that solves the full kernel would otherwise come back
-    under the declared name carrying the other approximation's number -- the
-    same disease as the two E_0 conventions, one level down.
-
-    A class with no declaration of its own keeps the stamp, which is what makes
-    `compare_surfaces` and `describe` work for it at all.
+    A class that says what it computes is not relabelled: the two declarations
+    are compared, and a disagreement means the dispatcher and the class
+    describe different surfaces (e.g. an `Excitation(kernel='bse-tda')`
+    answered by a chain that solves the full kernel). A class with no
+    declaration of its own keeps the stamp, so `compare_surfaces` and
+    `describe` work for it.
     """
     if getattr(type(surface), 'physics', None) is None:
         surface.physics = physics
@@ -657,9 +639,9 @@ def declare_physics(surface, physics):
 def resolve_solver(solver, row, mf, excitation):
     """The eigensolver that will run, resolving 'auto' through `solver_choice`.
 
-    The rule is the repository's one rule -- dense while the Casida pair (A, B)
-    fits in BSE_DENSE_MAX_GB -- rather than a third constructor default. A row
-    with no eigenproblem records None and refuses to be told one.
+    The rule is `solver_choice`'s: dense while the Casida pair (A, B) fits in
+    BSE_DENSE_MAX_GB. A row with no eigenproblem records None and refuses to be
+    told one.
     """
     if solver not in SOLVERS:
         raise ValueError(f'solver {solver!r} not in {SOLVERS}')
@@ -694,9 +676,9 @@ def resolve_residues(residues, row):
 def resolve_states(qp_states, row, mol, mf, numerics, excitation):
     """(the spec the row honours, its explicit orbitals) at the reference spectrum.
 
-    The set is decided ONCE, here, on the reference mean field, and handed to
-    the class as indices -- so two routes that resolve the same declaration
-    cannot be running two different windows under one name. A row that has no
+    The set is decided once, here, on the reference mean field, and handed to
+    the class as indices, so two routes that resolve the same declaration
+    cannot run two different windows under one name. A row that has no
     set (a ground state, a single charged state) refuses a declaration it
     cannot honour rather than dropping it.
     """
@@ -723,14 +705,11 @@ def reference_mean_field(mol, scf_factory, environment):
     its mean field, and the quasiparticle set, the pair count and the declared
     functional all follow from that spectrum rather than from the raw factory's.
 
-    IT IS READ BEFORE ANY SURFACE EXISTS -- the solver, the quasiparticle set
-    and the declared functional all come off this spectrum -- so a factory that
-    hands back a mean field it has BUILT AND NOT RUN has to be converged here
-    as well as inside the chain, and over the same ranks
-    (`converged_factory`); under ranks its spectrum is rank 0's before any of
-    those is decided from it, since a factory that converges its own does so
-    on each rank alone. Serially, and for a factory that converges its own,
-    this is the call the factory would have made.
+    It is read before any surface exists, so a factory that hands back a mean
+    field built but not run is converged here as well as inside the chain,
+    over the same ranks (`converged_factory`). Under ranks its spectrum is
+    locked to rank 0's before anything is decided from it, since a factory
+    that converges its own does so on each rank alone.
     """
     # cycle: src.gradients.excited_state imports src.properties.nonadiabatic
     from src.gradients.factor_chain import converged_factory
@@ -777,12 +756,12 @@ def correlation_energy(surface):
 
 
 def ground_state_terms(surface):
-    """E_0 and its additive terms at the reference geometry, through the ONE assembly.
+    """E_0 and its additive terms at the reference geometry.
 
-    `ground_state_energy` is that assembly: it takes the declaration and the
-    mean field and reports E_ref, the exact-exchange double counting and
-    E_c^dRPA separately, because an E_0 given as one number cannot be checked
-    against another route's.
+    Through `ground_state_energy`, which takes the declaration and the mean
+    field and reports E_ref, the exact-exchange double counting and E_c^dRPA
+    separately, because an E_0 given as one number cannot be checked against
+    another route's.
     """
     mol, mf = surface.mean_field()
     ground = surface.physics.ground_state
@@ -795,9 +774,8 @@ def ground_state_terms(surface):
 def describe(surface):
     """What this surface computes, what E_0 is worth at its geometry, and how.
 
-    The E_0 terms are evaluated, not named: the disease this entry point cures
-    was two surfaces whose E_0 differed by E_c^dRPA with nothing printing
-    either number.
+    The E_0 terms are evaluated, not only named, so two surfaces whose E_0
+    differ by E_c^dRPA show it.
     """
     physics = surface.physics
     e0 = ground_state_terms(surface)
@@ -822,20 +800,23 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
                              environment=None, chi0='space-time',
                              residues='explicit', solver='auto',
                              factorization='isdf', qp_states=QPStates(),
-                             **numerics):
+                             mf=None, **numerics):
     """The one way to build a potential-energy surface with its physics declared.
 
-    ground_state/excitation/environment are the PHYSICS
+    ground_state/excitation/environment are the physics
         (`src.Base.declaration`): which functional E_0 is, which state sits on
         it, what it stands in. Two surfaces may be differenced only if these
-        agree up to the excitation -- which is what a gap or an IP is.
-    chi0/residues/solver/factorization/qp_states are the REALIZATION: how the
+        agree up to the excitation, which is what a gap or an IP is.
+    chi0/residues/solver/factorization/qp_states are the realization: how the
         polarizability is built, how the self-energy's real-axis residues are
         taken, which eigensolver runs, how (pq|rs) is represented, and which
         orbitals carry an explicitly solved quasiparticle energy.
     **numerics are the grids, caps and tolerances the chosen realization reads.
         One it does not read is a TypeError naming both, because a keyword that
         is silently dropped is a setting the caller believes is in force.
+    mf: the reference mean field of `mol` in `environment` where another
+        surface of the same declaration already converged it (the excited
+        chain's `mf0` for the ground surface of a record); None converges it.
 
     Returns the realizing class's own instance, carrying `physics`,
     `realization`, `numerics` and `describe()`. It carries no communicator:
@@ -852,7 +833,8 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     refuse_undeclared_state(excitation, mol)
     row = find_row(ground_state, excitation, chi0, factorization)
     refuse_foreign_numerics(row, numerics)
-    mf = reference_mean_field(mol, scf_factory, environment)
+    if mf is None:
+        mf = reference_mean_field(mol, scf_factory, environment)
     refuse_undeclared_functional(ground_state, mf)
     used_solver = resolve_solver(solver, row, mf, excitation)
     used_residues = resolve_residues(residues, row)
@@ -881,15 +863,13 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
 def compare_surfaces(a, b):
     """What two surfaces share and what they do not, or a `PhysicsMismatch`.
 
-    A differing EXCITATION is allowed and is the whole point: a gap and an
-    ionization potential are differences of two states on one ground state. A
-    differing ground-state functional or environment is not, and raises --
-    E_c^dRPA is 6.3 eV on water/cc-pVDZ and does not cancel out of a difference
-    that only one side carries.
+    A differing excitation is allowed: a gap and an ionization potential are
+    differences of two states on one ground state. A differing ground-state
+    functional or environment raises (E_c^dRPA is 6.3 eV on water/cc-pVDZ and
+    does not cancel out of a difference that only one side carries).
 
-    The realization differences are REPORTED, not refused: a dense oracle and a
-    cubic production route are meant to be differenced, and the list is what
-    says which of the two numbers to trust where they disagree.
+    Realization differences are reported, not refused: a dense oracle and a
+    cubic route are meant to be differenced.
     """
     for name, surface in (('a', a), ('b', b)):
         if not hasattr(surface, 'physics'):
