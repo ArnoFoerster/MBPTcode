@@ -44,6 +44,7 @@ fails `pole_clearance` instead.
 import warnings
 
 import numpy as np
+import scipy.linalg
 
 from src.Base.constants import (QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL, SOP_CLEARANCE_MIN, SOP_FIT_RCOND, SOP_FIT_STRIDE, SOP_N_POLES)
 from src.SingleReference.GW.contour_deformation import residue_set
@@ -93,7 +94,30 @@ def pole_amplitudes(wc, poles, nu_points, rcond=SOP_FIT_RCOND):
     return pole_pseudoinverse(nu_points, poles, rcond) @ np.asarray(wc, float)
 
 
-def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None):
+def _vector_fit_lstsq(block, rhs):
+    """The vector-fitting least squares, by LAPACK gelsd; by gelss where
+    gelsd's SVD does not converge, which it can on finite, well-scaled
+    blocks, and by gelsy (pivoted QR, no SVD iteration) if gelss fails too."""
+    try:
+        return np.linalg.lstsq(block, rhs, rcond=None)[0]
+    except np.linalg.LinAlgError as exc:
+        failed = exc
+    # numpy's rcond=None cut, so a rank-deficient block keeps its rank
+    cut = np.finfo(float).eps * max(block.shape)
+    for driver, what in (('gelss', 'QR-iteration SVD'), ('gelsy', 'pivoted QR')):
+        warnings.warn(f'vector fitting: the least squares failed on a '
+                      f'{block.shape} block ({failed}); solved by {driver} '
+                      f'({what}) instead', RuntimeWarning, stacklevel=3)
+        try:
+            return scipy.linalg.lstsq(block, rhs, cond=cut,
+                                      lapack_driver=driver)[0]
+        except np.linalg.LinAlgError as exc:
+            failed = exc
+    raise failed
+
+
+def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
+              state=None):
     """Relocate the poles by vector fitting, in the variable u = z^2.
 
     Gustavsen-Semlyen: solve the linear problem for the amplitudes of f and of
@@ -110,8 +134,16 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None):
     stride: fit every stride-th column of wc. The poles are common to all
             orbitals, so they need only enough columns to be determined, and
             the least-squares problem grows linearly in the number kept.
+    state:  the orbital whose self-energy wc is, named by a refusal.
     """
     wc = np.asarray(wc, float)
+    if not np.isfinite(wc).all():
+        bad = np.unique(np.argwhere(~np.isfinite(wc))[:, 1])
+        raise FloatingPointError(
+            f'W_c on the imaginary axis is not finite'
+            f'{"" if state is None else f" for orbital {state}"}: columns '
+            f'{bad[:10].tolist()}{" ..." if bad.size > 10 else ""} of '
+            f'{wc.shape[1]}; no pole model is fitted to it')
     om = np.asarray(poles, float).copy()
     n_poles = om.size
     lo, hi = bounds if bounds is not None else (om[0], om[-1])
@@ -127,7 +159,7 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None):
             rows = slice(j * len(u_s), (j + 1) * len(u_s))
             block[rows, j * n_poles:(j + 1) * n_poles] = kern
             block[rows, -n_poles:] = -f[:, None] * kern
-        x, *_ = np.linalg.lstsq(block, rhs, rcond=None)
+        x = _vector_fit_lstsq(block, rhs)
         zeros = np.linalg.eigvals(np.diag(om ** 2)
                                   - np.ones((n_poles, 1)) @ x[-n_poles:][None, :])
         om = np.sqrt(np.sort(np.clip(np.real(zeros), lo ** 2, hi ** 2)))
@@ -261,13 +293,15 @@ def qp_energy_sop(p, amplitudes, poles, eps, nocc, xc_correction=0.0,
 
 
 def sop_from_wc(wc, nu_points, eps, nocc, n_poles=SOP_N_POLES, relocate=True,
-                stride=SOP_FIT_STRIDE, e_max=None, pair_energies=None):
+                stride=SOP_FIT_STRIDE, e_max=None, pair_energies=None,
+                state=None):
     """(poles, amplitudes) for one state, from its imaginary-axis data.
 
     The one entry point a caller needs: the poles are fitted here and are then
     the frozen object a gradient differentiates through. pair_energies: the
     screening's particle-hole energies, which bound the poles, when they are
-    not the ones (eps, nocc) spans -- see `compressible`.
+    not the ones (eps, nocc) spans -- see `compressible`. state: the orbital,
+    named if its wc is refused.
     """
     d = (ov_energies(eps, nocc) if pair_energies is None
          else np.asarray(pair_energies, float))
@@ -275,5 +309,5 @@ def sop_from_wc(wc, nu_points, eps, nocc, n_poles=SOP_N_POLES, relocate=True,
     poles = initial_poles(n_poles, gap, top)
     if relocate:
         poles = fit_poles(wc, nu_points, poles, stride=stride,
-                          bounds=(gap, top))
+                          bounds=(gap, top), state=state)
     return poles, pole_amplitudes(wc, poles, nu_points)

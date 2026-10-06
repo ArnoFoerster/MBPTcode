@@ -19,14 +19,15 @@ taken from rank 0's numbers on every rank, the record is one record, and what
 comes back is the serial answer.
 
 WHY 1e-6 BOHR IS THE GATE, and where it comes from rather than being tuned.
-The distributed surface reproduces the serial gradient to the ISDF gradient
-reproducibility floor, 1e-8 Ha/Bohr (tests/test_simulated_ranks.py,
-tests/test_surface_comm.py), and the distributed SCF adds nothing the
-Lagrangian amplifies past it -- 2.95e-09 Ha/Bohr at two ranks
-(tests/test_chain_distributed_scf.py). A minimum moves by dx = H^-1 dg under a
-force error dg, and the softest INTERNAL curvature of this molecule is its
-bend, 0.196 Ha/Bohr^2 (the analytic Hessian at cc-pVDZ Hartree-Fock, rigid-body
-modes dropped), so 1e-8 Ha/Bohr propagates to 5e-8 Bohr. 1e-6 Bohr is twenty
+The distributed surface reproduces the serial gradient within
+RANK_SPLIT_FORCE_TOL (tests/test_simulated_ranks.py,
+tests/test_surface_comm.py), and a force off the distributed SCF within
+CONVERGED_SCF_FORCE_TOL (tests/test_chain_distributed_scf.py), the larger
+of the two. A minimum moves by dx = H^-1 dg under a force error dg, and the
+softest INTERNAL curvature of this molecule is its bend, 0.196 Ha/Bohr^2 (the
+analytic Hessian at cc-pVDZ Hartree-Fock, rigid-body modes dropped), so
+CONVERGED_SCF_FORCE_TOL propagates to 5e-9 Bohr; even the 1e-8 Ha/Bohr a
+fit's own re-association can move a force reaches 5e-8. 1e-6 Bohr is twenty
 times that and three orders BELOW `GEOM_OPT_CONV['step_max']` = 1.8e-3 Bohr,
 the radius inside which either walk is converged at all: a rank that took a
 different step moves the geometry by at least a step, which is a thousand
@@ -34,20 +35,18 @@ times the gate. MEASURED here, distributed against the serial walk:
 
     mean-field ground state   size=2  1.46e-13 Bohr   size=3  5.20e-13 Bohr
     the same, through geomeTRIC       size=2  4.08e-13 Bohr
-    BSE@GW, one step          size=2  1.98e-09 Bohr
-    adiabatic, one step each  size=2  1.00e-09 Bohr (state), 0.0 (ground)
+    BSE@GW, one step          size=2  2.37e-13 Bohr
+    adiabatic, one step each  size=2  2.28e-13 Bohr (state), 0.0 (ground)
 
 with the cycle count equal to the serial one in every case and the geometry,
 the energy and the whole record (every history entry) EQUAL between the ranks
 of one run.
 
-1e-6 BOHR IS THE FLOOR OF AN ANCHORED BAR. Every step of either walk runs SCFs
-and forces a threaded pyscf does not repeat bit for bit, so the serial walk is
-taken twice and the distributed geometry is gated at `COMPOSED_GRAD_K` times
-what the repeat moved it, 1e-6 Bohr at the least (`serial_walk`); here the
-repeat moves nothing. The cycle counts stay exact: the ranks walk rank 0's
-walk (`rank_zero_walk`), whose forces sit within the anchored force bar of
-the serial ones, which moves a step by far less than the radius a walk
+THE SERIAL WALK IS TAKEN ONCE and the distributed geometry gated at that
+1e-6 Bohr alone (`GEOMETRY_FLOOR`), not at a multiple of what repeating the
+serial walk moves it. The cycle counts stay exact: the ranks walk rank 0's
+walk (`rank_zero_walk`), whose forces sit within those tolerances of the
+serial ones, which moves a step by far less than the radius a walk
 converges inside, so a different count is a different walk.
 
 THE GATE CAN FAIL, shown two ways rather than argued. The probe puts a defect
@@ -60,7 +59,7 @@ component -- five orders above the 1e-8 floor the gate is derived from:
     on rank 0   1.42e-03 Bohr from the serial minimum, 1400x the gate
     on rank 1   1.46e-13 Bohr, bitwise the unperturbed distributed answer
 
-With the boundary's result lockstep removed the rank-1 defect is no longer
+With the boundary's result lockstep removed the rank-1 defect is not
 harmless: rank 1 walks on its own force, leaves the walk at a different point,
 and the next collective refuses on every rank (`lockstep` meeting a dict on
 rank 1 where rank 0 holds a tuple).
@@ -100,7 +99,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import COMPOSED_GRAD_K, GEOM_OPT_CONV
+from src.Base.constants import GEOM_OPT_CONV
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.utils.mpi_grid import current_comm, run_simulated
 from src.properties.excitations import (SurfaceSpec,
@@ -220,13 +219,10 @@ def ground_walk(factory, **kw):
     return walked(surface, mol, trust=GROUND_TRUST, **kw)
 
 
-def serial_walk(run, keys=('coords',)):
-    """`run()` twice outside the context: the serial reference, and the bar a
-    distributed walk's geometries `keys` are gated at -- `COMPOSED_GRAD_K`
-    times what the repeat moved them, `GEOMETRY_FLOOR` at the least."""
-    reference, again = run(), run()
-    spread = max(np.abs(again[k] - reference[k]).max() for k in keys)
-    return reference, max(GEOMETRY_FLOOR, COMPOSED_GRAD_K * spread)
+def serial_walk(run):
+    """`run()` outside the context: the serial reference, and the bar a
+    distributed walk's geometries are gated at, `GEOMETRY_FLOOR`."""
+    return run(), GEOMETRY_FLOOR
 
 
 def assert_same_walk(reference, results, bar):
@@ -240,6 +236,8 @@ def assert_same_walk(reference, results, bar):
         assert rank['status'] == reference['status']
         assert rank['rejected'] == reference['rejected']
         moved = np.abs(rank['coords'] - reference['coords']).max()
+        print(f'[info] {len(results)} ranks: {moved:.2e} Bohr from the serial '
+              f'walk, {moved / bar:.2e} of GEOMETRY_FLOOR')
         assert moved < bar
     for rank in results[1:]:
         assert np.array_equal(rank['coords'], results[0]['coords'])
@@ -323,15 +321,17 @@ def test_the_adiabatic_entry_point_relaxes_both_surfaces_over_the_ranks():
                 'excited': record['mol_excited_minimum'].atom_coords(),
                 'ground': record['mol_ground_minimum'].atom_coords()}
 
-    reference, bar = serial_walk(lambda: one_run(converged),
-                                 keys=('excited', 'ground'))
+    reference, bar = serial_walk(lambda: one_run(converged))
     results = run_simulated(lambda comm: one_run(built), 2)
 
     for rank in results:
         assert rank['cycles'] == reference['cycles'] == 1
         assert rank['ground_cycles'] == reference['ground_cycles']
         for name in ('excited', 'ground'):
-            assert np.abs(rank[name] - reference[name]).max() < bar
+            moved = np.abs(rank[name] - reference[name]).max()
+            print(f'[info] {name}: {moved:.2e} Bohr from the serial walk, '
+                  f'{moved / bar:.2e} of GEOMETRY_FLOOR')
+            assert moved < bar
     for rank in results[1:]:
         assert rank['adiabatic_eV'] == results[0]['adiabatic_eV']
         assert np.array_equal(rank['excited'], results[0]['excited'])

@@ -36,7 +36,8 @@ import time as _time
 import numpy as np
 from pyscf import df as pyscf_df
 
-from src.Base.constants import ISDF_RADII_MATCH_TOL, ISDF_TILE_GB
+from src.Base.constants import (ISDF_DEFAULT_COUNTS, ISDF_RADII_MATCH_TOL,
+                                ISDF_TILE_GB)
 from src.Base.environment import environment_of
 from pyscf import scf as pyscf_scf
 
@@ -76,7 +77,6 @@ from src.SingleReference.LinearResponse.space_time import (
 DEFAULT_NTAU = 'auto'
 DEFAULT_NFREQ = 'auto'
 DEFAULT_NPADE = 16
-DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 
 
 def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
@@ -112,7 +112,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                             places one extra point at the nucleus, so dropping
                             it builds a 306-point carbon grid where a
                             Duchemin-Blase row describes 307.
-      nothing               `DEFAULT_COUNTS`, sized for double zeta.
+      nothing               `ISDF_DEFAULT_COUNTS`, sized for double zeta.
 
     grid_accuracy:   an accuracy level of `ISDF_GRID_ACCURACY` or four explicit
                      shell counts, resolved by `resolve_isdf_grid`, which
@@ -194,7 +194,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                 f'would be of a functional nobody requested.')
         counts = level_counts
     named_counts = counts is not None
-    counts = counts or DEFAULT_COUNTS
+    counts = counts or ISDF_DEFAULT_COUNTS
 
     if radii is None:
         radii, origins = {}, {}

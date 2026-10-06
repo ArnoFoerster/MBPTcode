@@ -210,7 +210,8 @@ class DistributedISDFJK(df.df.DF):
     """
 
     _keys = {'comm', 'timings', 'source', 'tile', 'tiles', 'mine', 'coords',
-             'X', 'MT', 'held', 'fit_held', 'z_mode', 'omega_kernels'}
+             'X', 'MT', 'held', 'fit_held', 'fit_kept', 'z_mode',
+             'omega_kernels'}
 
     def __init__(self, source, comm=None, timings=None, tile=None):
         if not isinstance(source, ISDFJK):
@@ -240,6 +241,8 @@ class DistributedISDFJK(df.df.DF):
         self.held = {}
         #: The row fit's own memory record (`RowFit.held`).
         self.fit_held = {}
+        #: The row fit's kept pair columns (`RowFit.kept`).
+        self.fit_kept = None
         #: 'dense' (Z's rows held per operator) or 'factored' (G held, Z's
         #: blocks formed per build); rank 0's decision.
         self.z_mode = None
@@ -304,6 +307,7 @@ class DistributedISDFJK(df.df.DF):
         _ran_on(self.timings, 'scf_isdf_blas_fit', pool)
         self.MT = fit.mt
         self.fit_held = dict(fit.held)
+        self.fit_kept = fit.kept
         del fit
         self.X = {t: self._collocation(t) for t in self.mine}
         self._hold('X_tiles', self.X.values())
@@ -600,7 +604,8 @@ class DistributedISDFJK(df.df.DF):
                         l_max_second=source.l_max_second,
                         pair_tol=DEFAULT_PAIR_TOL,
                         regularization=source.regularization,
-                        block_memory_gb=source.block_memory_gb)
+                        block_memory_gb=source.block_memory_gb,
+                        kept=self.fit_kept)
 
     def held_bytes(self):
         """{array: bytes} this rank holds now, read off the arrays: the X and

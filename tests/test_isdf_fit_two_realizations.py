@@ -30,11 +30,10 @@ import pytest
 from pyscf import df as pyscf_df, gto, scf
 
 from src.Base import separable_ri
-from src.Base.constants import FIT_REASSOCIATION_K
+from src.Base.constants import FIT_REASSOCIATION_K, ISDF_DEFAULT_COUNTS
 from src.Base.separable_ri import (DEFAULT_REGULARIZATION, atomic_grid,
                                    aux_metric_sqrt, fit_M_stable,
                                    fit_M_streaming, molecular_points_covariant)
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import pair_positions, product_pairs
 
@@ -69,10 +68,10 @@ def molecule(atom):
 
 
 def shipped_grid(mol):
-    """The interpolation points `separable_factors` places at `DEFAULT_COUNTS`."""
+    """The interpolation points `separable_factors` places at `ISDF_DEFAULT_COUNTS`."""
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
-        radii[el], origins[el] = atomic_grid(el, mol.basis, AUX, DEFAULT_COUNTS)
+        radii[el], origins[el] = atomic_grid(el, mol.basis, AUX, ISDF_DEFAULT_COUNTS)
     return molecular_points_covariant(mol, radii, origin_by_element=origins)
 
 

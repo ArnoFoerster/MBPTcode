@@ -79,8 +79,8 @@ from pyscf import df as pyscf_df
 
 from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
 from src.Base.constants import (ENVIRONMENT_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
-                                FIT_REALIZATIONS, ISDF_FIT_ERROR_FAILED,
-                                SCF_GRAD_TOL)
+                                FIT_REALIZATIONS, ISDF_DEFAULT_COUNTS,
+                                ISDF_FIT_ERROR_FAILED, SCF_GRAD_TOL)
 from src.Base.distributed_df import distributed_fock, distributed_mean_field
 from src.Base.environment import dresses_interaction, resolve_environment
 from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt,
@@ -90,7 +90,6 @@ from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt,
                                    test_set_layout)
 from src.Base.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, lockstep, lockstep_mean_field
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             continued_frames,
@@ -207,7 +206,7 @@ class FrozenFactorization:
         if grid_accuracy is not None:
             counts, n_start = resolve_isdf_grid(grid_accuracy, self.basis,
                                                 elements, auxbasis=self.auxbasis)
-        self.counts = counts or DEFAULT_COUNTS
+        self.counts = counts or ISDF_DEFAULT_COUNTS
         self.n_start = n_start
         self.frames_mode = frames
         self.with_frames = frames == 'continued'
@@ -403,7 +402,7 @@ class FrozenFactorization:
         other = FrozenFactorization.__new__(FrozenFactorization)
         other.basis = basis or self.basis
         other.auxbasis = auxbasis or default_auxbasis(other.basis)
-        other.counts = counts or DEFAULT_COUNTS
+        other.counts = counts or ISDF_DEFAULT_COUNTS
         other.n_start, other.frames_mode = n_start, frames
         # a chain with no opinion on radii accepts the factorization's
         other.radii_tag = radii_tag(radii) if radii is not None else self.radii_tag
@@ -611,7 +610,10 @@ class FactorChain:
 
         `g_extra` is differenced against `mean_field_gradient`, which must
         carry the grid response. A chain with no EXX skeleton of its own
-        should refuse a Kohn-Sham reference outright.
+        should refuse a Kohn-Sham reference outright. The dense surfaces
+        carry the same two terms instead
+        (`dense_surfaces.kohn_sham_gradient_correction`), paired with a
+        grid-response mean-field force (`mean_field_skeleton_force`).
         """
         return (exx_double_counting_Y(mf, self.nocc),
                 exx_double_counting_skeleton(mf, mol))
@@ -765,21 +767,26 @@ class FactorChain:
         """(X_mo, D, X_ao) of the row-distributed fit on the frozen points:
         `SlicedFactors` over more than one rank, whole arrays on one.
 
-        `separable_ri.fit_rows` solves the balanced, regularized estimator in
+        `separable_ri.fit_rows` solves the balanced, regularized estimator on
+        the frozen pair layout, the reference geometry's screen that the fit
+        adjoint differentiates (screened again here, a pair crossing the
+        threshold would step the energy under a force that cannot see it), in
         fixed tiles of `fit_block` grid points, so each rank holds only its
         own tiles and its rows are bitwise the one-rank rows. The metric root
         is rank 0's, since every tile owner projects with it. Not
         `separable_factors(fit='rows')`, which places its own points on frames
         recomputed per geometry.
 
-        Where `mf` is a distributed ISDF-K SCF whose grid is these points (the
-        reference geometry), the rows are read from its handle's M^T tiles
+        Where `mf` is a distributed ISDF-K SCF whose grid is these points and
+        whose own screen kept the frozen layout's pairs (the reference
+        geometry), the rows are read from its handle's M^T tiles
         (`separable_ri.FitTiles`) instead of fitted again.
         """
         comm = self.factorization.slice_comm()
         handle = isdf_scf_handle(mf)
         fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
                               block=self.factorization.fit_block,
+                              layout=self.factorization.layout,
                               tiles=None if handle is None
                               else handle.fit_tiles())
         x_mo = fit.mo_rows(mf.mo_coeff)

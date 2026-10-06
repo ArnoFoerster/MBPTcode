@@ -24,16 +24,15 @@ Checks, water/cc-pVDZ Hartree-Fock, tiles of `TILE` points (7 tiles):
   * bitwise across the ranks' views [context]: every rank's rows of X_mo, D
     and X_ao are the same rows of a one-rank run of the row fit on the same
     points, at `TILE` and at `FIT_CHOLESKY_BLOCK`
-  * the anchored gate [context]: D over all ranks' rows against the serial
-    replicated fit, within `FIT_REASSOCIATION_K` times the replicated fit's
-    own response to one reordering of its three-centre sum (blocks cut per
-    shell, summed in reverse)
+  * the realization gate [context]: D over all ranks' rows against the
+    serial replicated fit within FIT_REALIZATION_REL_TOL, and W(0) within
+    FIT_REALIZATION_OBSERVABLE_REL_TOL, two realizations of one fit
   * the quasiparticle window [explicit] and the whole ISDF BSE [context] on
     the row `SlicedFactors`: bitwise the same distributed solves on the
-    one-rank fit's whole arrays, rank 0's on every rank, and within the
-    anchored bar of the same solves on the replicated fit's `SlicedFactors`,
-    the roots' anchor floored at what the Davidson resolves
-    (`roots_resolution`)
+    one-rank fit's whole arrays, rank 0's on every rank, and within
+    FIT_REALIZATION_OBSERVABLE_REL_TOL of the same solves on the replicated
+    fit's `SlicedFactors`, the roots' bar floored at what the Davidson
+    resolves (`roots_resolution`)
   * the shell block [context]: the rank that evaluated water's one block
     held its kept pairs' integrals and one call over them, the others none
   * the metric root on rank 0 [context]: D = M^T V^1/2 with the root formed
@@ -52,8 +51,9 @@ import numpy as np
 from pyscf import df, gto, scf
 
 from src.Base import separable_ri
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, FIT_REASSOCIATION_K,
-                                HARTREE_TO_EV)
+from src.Base.constants import (FIT_CHOLESKY_BLOCK,
+                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
 from src.Base.separable_ri import (DEFAULT_PAIR_TOL, aux_metric_sqrt,
                                    fit_M_streaming)
 from src.Base.sliced_factors import SlicedFactors
@@ -149,37 +149,12 @@ def relative(a, b):
                  / max(np.linalg.norm(np.asarray(b)), 1e-300))
 
 
-def within_bar(dist, anchor):
-    """The anchored standard: K anchors, and bitwise where the anchor is."""
-    return dist <= FIT_REASSOCIATION_K * anchor
-
-
 def one_rank_rows(mf, mol, coords, block):
     """The row fit on one rank, on the region's own points: the whole tuple
     every rank's rows are held to."""
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     return serial(_row_factors, mf, mol, auxmol, coords, 4.0,
                   DEFAULT_PAIR_TOL, None, None, block, time.time())
-
-
-def reassociated_replicated_fit(gate, mf, mol):
-    """The serial replicated fit with its three-centre blocks cut per shell
-    and summed in reverse: the anchor of every gate below.
-
-    The blocks are the module's `ao_blocks`, patched: thread-ranks share the
-    module, so every rank patches, meets the others, fits, and meets them
-    again before it restores -- no rank's fit reads another's patch state.
-    """
-    real = separable_ri.ao_blocks
-    per_shell_reversed = [(s, s + 1) for s in reversed(range(mol.nbas))]
-    gate.everyone(None)                       # every rank's own fits are done
-    separable_ri.ao_blocks = lambda *args, **kwargs: per_shell_reversed
-    gate.everyone(None)                       # ...and every rank is patched
-    try:
-        return serial(separable_factors, mf, mol, auxbasis=AUXBASIS)
-    finally:
-        gate.everyone(None)                   # every patched fit has run
-        separable_ri.ao_blocks = real
 
 
 def roots_resolution(eps, nocc, roots):
@@ -289,33 +264,31 @@ def views_are_bitwise(gate, mf, mol, part, block):
     return whole
 
 
-def anchored(gate, mf, mol, nocc, part, whole):
-    """The row fit and its consumers against the replicated fit's, anchored
-    on the replicated fit's own reassociation response."""
-    gate.section('the anchored gate against the replicated fit')
+def realization_gate(gate, mf, mol, nocc, part, whole):
+    """The row fit and its consumers against the replicated fit's, two
+    realizations of one fit: D within FIT_REALIZATION_REL_TOL, W(0), the
+    window and the roots within FIT_REALIZATION_OBSERVABLE_REL_TOL."""
+    gate.section('the realization gate against the replicated fit')
     old = serial(separable_factors, mf, mol, auxbasis=AUXBASIS)
-    moved = reassociated_replicated_fit(gate, mf, mol)
     (r0, r1), _, D, _ = rows_of(part)
     sums = np.sum(gate.everyone(np.array([
-        np.sum((D - old[1][r0:r1]) ** 2), np.sum(old[1][r0:r1] ** 2),
-        np.sum((moved[1][r0:r1] - old[1][r0:r1]) ** 2)])), axis=0)
-    dist, anchor = np.sqrt(sums[0] / sums[1]), np.sqrt(sums[2] / sums[1])
-    gate.check(within_bar(dist, anchor), 'D of the row fit [context], all '
-               'ranks\' rows, within the anchored bar of the replicated fit',
-               f'{dist:.2e} against a reassociation of {anchor:.2e} '
-               f'(bar {FIT_REASSOCIATION_K} x)')
-    on_moved = serial(solves, mf, mol, nocc, moved)
-    on_replicated = serial(solves, mf, mol, nocc, old)
-    measured = [relative(a, b) for a, b in zip(on_moved[:2], on_replicated[:2])]
-    # the roots' anchor is never below what the Davidson resolves
-    bar = [measured[0], max(measured[1], on_replicated[2])]
+        np.sum((D - old[1][r0:r1]) ** 2), np.sum(old[1][r0:r1] ** 2)])),
+        axis=0)
+    dist = np.sqrt(sums[0] / sums[1])
+    tol = FIT_REALIZATION_REL_TOL
+    gate.check(dist <= tol, 'D of the row fit [context], all ranks\' rows, '
+               'within FIT_REALIZATION_REL_TOL of the replicated fit',
+               f'{dist:.2e} = {dist / tol:.3f} of {tol:.0e}')
+    obs = FIT_REALIZATION_OBSERVABLE_REL_TOL
+    # the roots' bar is never below what the Davidson resolves
+    resolution = serial(solves, mf, mol, nocc, old)[2]
+    bar = [obs, max(obs, resolution)]
     W_old = serial(isdf_bse_factors, mf, mol, nocc, factors=old)[2]
-    W_moved = serial(isdf_bse_factors, mf, mol, nocc, factors=moved)[2]
     W_rows = isdf_bse_factors(mf, mol, nocc, factors=part)[2]
-    gate.check(within_bar(relative(W_rows, W_old), relative(W_moved, W_old)),
-               'W(0) [context] on the row factors within the anchored bar',
-               f'{relative(W_rows, W_old):.2e} against '
-               f'{relative(W_moved, W_old):.2e}')
+    d_w = relative(W_rows, W_old)
+    gate.check(d_w <= obs, 'W(0) [context] on the row factors within '
+               'FIT_REALIZATION_OBSERVABLE_REL_TOL of the replicated fit\'s',
+               f'{d_w:.2e} = {d_w / obs:.4f} of {obs:.0e}')
 
     gate.section('the window and the BSE on the row factors')
     on_rows = solves(mf, mol, nocc, part, comm=gate.comm)
@@ -329,13 +302,13 @@ def anchored(gate, mf, mol, nocc, part, whole):
     sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True)
                   if gate.size > 1 else old)
     on_old = solves(mf, mol, nocc, sliced_old, comm=gate.comm)
-    for name, got, ref, anchor, seen in zip(('window', 'BSE roots'), on_rows,
-                                            on_old, bar, measured):
+    for name, got, ref, tol in zip(('window', 'BSE roots'), on_rows, on_old,
+                                   bar):
         dist = relative(got, ref)
-        gate.check(within_bar(dist, anchor), f'{name} on the row factors '
-                   'within the anchored bar of the replicated fit\'s sliced '
-                   'factors', f'{dist:.2e} against {anchor:.2e} (reassociation '
-                   f'{seen:.2e}), max |dE| '
+        gate.check(dist <= tol, f'{name} on the row factors within '
+                   'FIT_REALIZATION_OBSERVABLE_REL_TOL of the replicated '
+                   'fit\'s sliced factors', f'{dist:.2e} = {dist / tol:.4f} '
+                   f'of {tol:.0e}, max |dE| '
                    f'{np.abs(got - ref).max() * HARTREE_TO_EV:.2e} eV')
 
 
@@ -357,7 +330,7 @@ def main(comm):
         whole = views_are_bitwise(gate, mf, mol, part, TILE)
         production = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows')
         views_are_bitwise(gate, mf, mol, production, FIT_CHOLESKY_BLOCK)
-        anchored(gate, mf, mol, nocc, part, whole)
+        realization_gate(gate, mf, mol, nocc, part, whole)
         metric_root(gate, mol, part, naux)
     return gate.finish()
 

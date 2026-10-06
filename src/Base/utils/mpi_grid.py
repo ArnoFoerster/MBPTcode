@@ -11,14 +11,13 @@ the process from C rather than raising, so an import at module scope kills jobs
 that never wanted MPI at all.
 
 BEFORE USING THIS, weigh the all-reduce against the compute. On a 1 GbE
-interconnect the chi0 all-reduce (nfreq x naux^2) costs more than the compute
-it saves at every acene size measured -- 2.3 s against 0.0 s at one ring,
-121.7 s against 18.3 s at twelve. Distributing tau across nodes there makes
-the calculation SLOWER. That is a property of the FABRIC, not of the split:
+interconnect the chi0 all-reduce (nfreq x naux^2) can cost more than the
+compute it saves, and distributing tau across nodes there makes the
+calculation SLOWER. That is a property of the FABRIC, not of the split:
 the volume is set by the problem, and on InfiniBand the same bytes move two
 orders of magnitude faster. Job-level parallelism (one molecule or one state
 per node) needs none of this and always scales; `mpi_map` below is that axis
-for the loops a driver used to run in one process.
+for a driver's loops over whole calculations.
 
 WHICH AXIS TO SPLIT. Tau is where the M^2 sweep is, and every tau point feeds
 every frequency, so a tau split always ends in one reduction of (nfreq or
@@ -199,6 +198,73 @@ def reduce_sum(a, comm):
     return a
 
 
+def ordered_sum(addends, comm, shape=None, onto=None):
+    """The sum of every rank's indexed `addends`, [(index, array)], added in
+    index order onto the first (onto `onto` where given, which a kernel that
+    starts its sum from zeros passes): the same bits on every rank and at
+    every rank count, one rank included, where `reduce_sum` joins the ranks'
+    partials in an order the rank count decides. Serially it is the addends'
+    own sum in that order, so a kernel that adds its tiles' addends in tile
+    order onto the first gives the one-rank bits at any rank count.
+
+    Every rank receives every addend (one allgather), so this is for small
+    sums: the cost is the number of addends times the sum's size. Indices are
+    distinct over the ranks; `shape` is the sum's where no rank holds one.
+    """
+    if comm is not None and comm.Get_size() > 1:
+        addends = [pair for part in comm.allgather(list(addends))
+                   for pair in part]
+    addends = sorted(addends, key=lambda pair: pair[0])
+    if onto is not None:
+        total = np.array(onto, dtype=float, copy=True)
+    elif not addends:
+        return np.zeros(shape)
+    else:
+        total, addends = (np.array(addends[0][1], dtype=float, copy=True),
+                          addends[1:])
+    for _, a in addends:
+        total += a
+    return total
+
+
+def ordered_chain_sum(terms, owners, comm, onto):
+    """The sum of n indexed terms in index order onto `onto`, term k held by
+    rank `owners[k]` alone ({k: array} of this rank's): the same bits on
+    every rank and at every rank count, and serially the terms' own sum in
+    order, where `reduce_sum` would join partials in an order the rank count
+    decides.
+
+    For terms too large for `ordered_sum` to gather: the running sum travels
+    from one owner to the next, each adding its terms in index order, and
+    the last owner broadcasts the result. A rank holds the running sum, one
+    copy in flight and its own terms; the running sum crosses once per change
+    of owner along the index, so owners should hold consecutive runs. The
+    owners must hold their terms before the chain starts.
+    """
+    total = np.array(onto, dtype=np.float64, order='C', copy=True)
+    if comm is None or comm.Get_size() == 1:
+        for k in range(len(owners)):
+            total += terms[k]
+        return total
+    size, rank = comm.Get_size(), comm.Get_rank()
+    holder = int(owners[0]) if len(owners) else 0
+    empty = np.empty((0,) + total.shape[1:])
+    for k, owner in enumerate(int(o) for o in owners):
+        if owner != holder:
+            send = [total if (rank == holder and peer == owner) else empty
+                    for peer in range(size)]
+            shapes = [total.shape if (rank == owner and peer == holder)
+                      else empty.shape for peer in range(size)]
+            got = exchange_blocks(send, shapes, comm)
+            if rank == owner:
+                total[...] = got[holder]
+            holder = owner
+        if rank == owner:
+            total += terms[k]
+    broadcast_rows(total, holder, comm)
+    return total
+
+
 def reduce_scatter_rows(a, comm, out=None):
     """This rank's `contiguous_block` of rows of the sum over ranks of `a`.
 
@@ -304,8 +370,8 @@ def allgather_rows(a, comm):
     """`allgather_blocks` counted in ROWS, for an array of any size.
 
     Allgatherv's counts and displacements are C ints. Counted in doubles, the
-    displacement of the last block of D at the chlorophyllide hexamer
-    (117762 x 28236 = 3.3e9 doubles) is past 2^31, so `allgather_blocks`
+    displacement of the last block of a large D (1e5 grid rows by 3e4
+    auxiliary functions, 3e9 doubles) is past 2^31, so `allgather_blocks`
     cannot move it at all; counted in rows of one contiguous row datatype
     they stay below the grid size. The same output partition, verbatim rows,
     the same bits on every rank. float64, like `allgather_blocks`.
@@ -863,11 +929,9 @@ def lockstep(x, comm=None, check=False):
     WHY CHECK. Where the ranks agree by construction -- trial vectors of a
     Davidson run on an all-reduced action, a density from an all-reduced Fock
     matrix, factors fitted on lockstepped orbitals and points -- the broadcast
-    is insurance and a digest is the cheaper proof. At pentacene cc-pVTZ on
-    eight nodes the BSE stage's 332 locksteps (664 MB) found
-    no rank apart, while broadcasting them raised `davidson_comm` from 0.23 s
-    to 3.0 s; the digest runs at 17-18 GB/s (173 MB in 9.8 ms) and sends 8
-    bytes an array. A drifted array still shows in its digest and is
+    is insurance and a digest is the cheaper proof: it reads each array once
+    at memory bandwidth and sends 8 bytes an array, where a broadcast sends
+    the array. A drifted array still shows in its digest and is
     broadcast as unchecked (one changed word always does, several cancel with
     probability ~2^-64), and every rank decides from the same gathered
     digests, so the collectives pair.
@@ -975,8 +1039,8 @@ def lockstep_stats(reset=False):
 def agreement(x, comm=None, label=None, audit_only=False):
     """Whether every rank holds the same bytes in `x`, without moving them.
 
-    WHY. A kernel's large inputs -- the factors, W, proj(tau), 10 to 27 GB at
-    the chlorophyllide hexamer -- come out of upstream kernels that lockstep
+    WHY. A kernel's large inputs (the factors, W, proj(tau), each up to tens
+    of GB) come out of upstream kernels that lockstep
     or all-reduce them, so they are identical by construction and a kernel
     does not broadcast them again. This checks the construction instead: each
     rank reduces its copy to a 64-bit digest and one allgather compares them,
@@ -990,9 +1054,8 @@ def agreement(x, comm=None, label=None, audit_only=False):
     the sum, because an odd weight is invertible mod 2^64; changes in several
     words cancel only where their differences stand in the ratio of two
     pseudo-random weights, ~2^-64, which also catches swapped elements. It
-    measured 10 to 18 GB/s on a workstation, 26 GB in 1.4 to 2.6 s, where
-    blake2b runs at 0.29 GB/s (90 s), sha1 at 0.49 and a 32-bit crc32 at 3.5;
-    a sum over a strided sample would miss the one-ulp drift in an unsampled
+    runs near memory bandwidth, several times faster than blake2b, sha1 or a
+    32-bit crc32; a sum over a strided sample would miss the one-ulp drift in an unsampled
     element, and that drift is what this looks for. The shapes, dtypes and
     container structure are compared with the digests; any other leaf (a
     scalar, a mapping value) by a blake2b digest of its pickle.
@@ -1414,9 +1477,8 @@ def mpi_map(fn, items, comm=None):
 
     This is job-level parallelism for the loops whose iterations are whole
     calculations -- the 6 natm displaced solves of a numerical Hessian or a
-    finite-difference gradient, the starts of a conformer search -- which the
-    task pool used to be the only way to spread and which the drivers ran in
-    one process. Rank r evaluates items r, r + size, ..., so a ragged cost is
+    finite-difference gradient, the starts of a conformer search. Rank r
+    evaluates items r, r + size, ..., so a ragged cost is
     spread rather than piled on one rank; the results travel as Python
     objects (mpi4py's lowercase allgather pickles them), so keep them small
     and picklable -- coordinates and numbers, not a Mole. Without a comm it

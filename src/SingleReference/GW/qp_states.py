@@ -13,9 +13,12 @@ in use:
                pole q the contour deformation sweeps, Om_1 the lowest neutral
                dRPA excitation. threshold='gap' tests against the particle-hole
                gap E_g, which the dRPA guarantees is a lower bound on Om_1 and
-               which needs no screening, no fit and no solve;
-               threshold='omega1' tests against a caller-supplied Om_1, which
-               is the condition itself and is tighter.
+               which needs no screening, no fit and no solve. Since
+               E_g <= Om_1, the reach measured in units of E_g is the larger
+               one, so the gap admits FEWER states than Om_1 would: every
+               orbital it admits, Om_1 admits too. threshold='omega1' tests
+               against a caller-supplied Om_1, which is the condition itself
+               and is looser.
     frontier   [nocc - half_width, nocc + half_width), widened until no
                degenerate block is split. Inside a degenerate subspace the
                eigenvectors are not determined, so giving one member of a pair
@@ -82,8 +85,9 @@ def admitted_by_pole_condition(eps, nocc, p, limit):
 
     `compressible` is this test with limit fixed to the particle-hole gap, the
     dRPA lower bound on Om_1 that needs no solve. Passing the lowest dRPA root
-    instead tests the condition as it is written, which is tighter: the gap
-    admits states the true Om_1 does not.
+    instead tests the condition as it is written, which is looser: reach falls
+    as the limit grows, so with Om_1 >= E_g every state the gap admits is
+    admitted by Om_1 too, and Om_1 may admit some the gap does not.
 
     reach: the worst swept pole in units of `limit`. ok is reach < 1.
     """

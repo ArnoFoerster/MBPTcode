@@ -10,14 +10,15 @@ put omega beyond the lowest auxiliary pole and the denominators of Eq. (25)
 become resonant, which is the one thing no M repairs.
 
 The physics gate at the end is the same comparison on water, where the fit is
-no longer exact and the residual is the compression error.
+not exact and the residual is the compression error.
 """
 import warnings
 
 import numpy as np
 import pytest
+import scipy.linalg
 
-from src.Base.constants import HARTREE_TO_EV, SOP_CLEARANCE_MIN
+from src.Base.constants import HARTREE_TO_EV, SOP_CLEARANCE_MIN, SOP_FIT_RCOND
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW.contour_deformation import residue_set, sigma_cd
 from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
@@ -201,7 +202,7 @@ def test_quasiparticle_solve_lands_on_its_own_fixed_point():
 
 @pytest.mark.parametrize('n_poles, tol_mev', [(8, 5.0), (16, 0.5)])
 def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
-    """The physics gate: a real screening, where the fit is no longer exact."""
+    """The physics gate: a real screening, where the fit is not exact."""
     pyscf = pytest.importorskip('pyscf')
     from pyscf import gto, scf
     from src.Base.pyscf_interface import get_density_fitting_coefficients
@@ -274,3 +275,66 @@ def test_the_guard_bounds_the_value_and_not_the_slope():
     slope = abs(sigma_sop_slope(0.70, fit_amp, fit_poles, EPS, NOCC)
                 - sigma_sop_slope(0.70, ex_amp, POLES, EPS, NOCC))
     assert slope > 1e-2, f'a passing state carries slope error {slope}'
+
+
+def test_a_failed_gelsd_is_solved_by_gelss(monkeypatch):
+    """Where LAPACK gelsd's SVD fails to converge on a finite vector-fitting
+    block, the fit takes gelss, warns, and lands on the poles gelsd finds, to
+    SOP_FIT_RCOND relative on a determined fit."""
+    true = np.array([0.55, 1.90, 4.20])
+    nu, _ = grid()
+    wc = model_wc(nu, poles=true)
+    start = initial_poles(3, 0.3, 6.0)
+    reference = fit_poles(wc, nu, start, bounds=(0.05, 20.0))
+    gelsd = np.linalg.lstsq
+    calls = []
+
+    def fails_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise np.linalg.LinAlgError('SVD did not converge in Linear Least '
+                                        'Squares')
+        return gelsd(*args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, 'lstsq', fails_once)
+    with pytest.warns(RuntimeWarning, match='solved by gelss'):
+        found = fit_poles(wc, nu, start, bounds=(0.05, 20.0))
+    rel = np.abs(found - reference).max() / reference.max()
+    assert rel < SOP_FIT_RCOND, f'gelss {found} vs gelsd {reference}'
+
+
+def test_a_failed_gelss_is_solved_by_gelsy(monkeypatch):
+    """Should gelss's SVD fail as well, pivoted QR (gelsy), which iterates no
+    SVD, solves the determined fit to the same poles."""
+    true = np.array([0.55, 1.90, 4.20])
+    nu, _ = grid()
+    wc = model_wc(nu, poles=true)
+    start = initial_poles(3, 0.3, 6.0)
+    reference = fit_poles(wc, nu, start, bounds=(0.05, 20.0))
+    lstsq = scipy.linalg.lstsq
+
+    def never(*args, **kwargs):
+        raise np.linalg.LinAlgError('SVD did not converge in Linear Least '
+                                    'Squares')
+
+    def no_gelss(*args, **kwargs):
+        if kwargs.get('lapack_driver') == 'gelss':
+            never()
+        return lstsq(*args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, 'lstsq', never)
+    monkeypatch.setattr(scipy.linalg, 'lstsq', no_gelss)
+    with pytest.warns(RuntimeWarning, match='solved by gelsy'):
+        found = fit_poles(wc, nu, start, bounds=(0.05, 20.0))
+    rel = np.abs(found - reference).max() / reference.max()
+    assert rel < SOP_FIT_RCOND, f'gelsy {found} vs gelsd {reference}'
+
+
+def test_a_nonfinite_wc_is_refused_with_its_orbital():
+    """A NaN in W_c never reaches the least squares, where it surfaces as an
+    SVD failure that names nothing."""
+    nu, _ = grid()
+    wc = model_wc(nu)
+    wc[7, 2] = np.nan
+    with pytest.raises(FloatingPointError, match='orbital 38.*columns \\[2\\]'):
+        sop_from_wc(wc, nu, EPS, NOCC, n_poles=3, state=38)

@@ -10,21 +10,20 @@ Hartree-Fock at 148 points per atom in tiles of `TILE` points (7 tiles):
 
   (a) On fixed adjoints, water and ethylene: `fit_rows_adjoint` (its centre
       terms and point adjoints, fit and collocation) and
-      `orbital_rotation_rows` give every rank the one-rank run's bits. Against
-      the whole adjoint (`dfactor_adjoint_gauges` over every product pair,
-      `collocation_adjoint`, X_mo^T X_bar in one product) each branch lies
-      within `FIT_REASSOCIATION_K` times what the whole branch moves when its
-      own sums are reordered: the fit's sums over the test set cut per shell
-      and accumulated in reverse, the collocation's and the product's sums
-      over the grid cut per tile and accumulated in reverse.
+      `orbital_rotation_rows` give every rank the one-rank run's bits.
+      Against the whole adjoint (`dfactor_adjoint_gauges` over every product
+      pair, `collocation_adjoint`, X_mo^T X_bar in one product), at stated
+      tolerances: the fit branch, two realizations of the fit on random
+      seeds, within FIT_REALIZATION_REL_TOL relative; the collocation and the
+      product, re-associated sums over the grid, within
+      REASSOCIATED_SUM_REL_TOL.
   (b) The force: the composed state-pair force at a displaced geometry and
       the dRPA force on the row fit, the tiled assembly against the whole one
       at the same rank count. Bitwise between the two: the energy, the root
       and every adjoint the kernels hand the assembly (eps_bar, X_bar,
-      D_bar). Anchored: the orbital, collocation and fit branches and the
-      force, within `FIT_REASSOCIATION_K` times what the whole assembly's
-      force moves when its fit's sums are reordered. Every rank holds rank
-      0's force.
+      D_bar). The orbital, collocation and fit branches and the forces
+      within FIT_REALIZATION_FORCE_TOL, the whole assembly refitting the
+      estimator with `fit_M_stable`. Every rank holds rank 0's force.
   (c) The memory scan at every force (`test_chain_row_fit.watch`): every line
       of every frame under src/ inside the nuclear assembly is traced, and no
       array it names holds the grid by a factor's, the fit's or the test
@@ -32,10 +31,15 @@ Hartree-Fock at 148 points per atom in tiles of `TILE` points (7 tiles):
       in; the adjoint's ledger holds every grid-indexed array at this rank's
       tiles, the metric root and its adjoint on rank 0 alone. The scan fails
       the whole assembly.
-  (d) The dRPA force of ethylene on the row fit (72 of 2304 pairs screened)
-      against a five-point difference of its own energy, beside the whole
-      assembly of the same estimator and the screened-Gram estimator (the
-      Gram matrix over the screened pairs alone), which misses it.
+  (d) The dRPA force of ethylene on the row fit against a five-point
+      difference of its own energy, beside the whole assembly of the same
+      estimator and the screened-Gram estimator (the Gram matrix over the
+      screened pairs alone), which misses it. One carbon sits
+      `CROSSING_SHIFT` along the bond, 3e-5 Bohr short of a geometry where
+      the screen drops two pairs, so the stencil along that bond straddles
+      the crossing: a fit screened again at each geometry steps the energy
+      there (6.7e-6 Ha/Bohr in the difference), the frozen layout the
+      adjoint differentiates does not.
   (e) The mean field's own force is rank 0's on every rank. pyscf blocks a
       density-fitted gradient's auxiliary index by the process's free memory,
       so separate processes reassociate it differently; here each simulated
@@ -51,15 +55,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-import scipy.linalg
 from pyscf.df.grad import rhf as pyscf_df_grad
 
-from src.Base.constants import FIT_REASSOCIATION_K, ISDF_GRADIENT_FLOOR
+from src.Base.constants import (FIT_REALIZATION_REL_TOL,
+                                FIT_REALIZATION_FORCE_TOL, ISDF_GRADIENT_FLOOR,
+                                REASSOCIATED_SUM_REL_TOL)
 from src.Base import separable_ri
-from src.Base.separable_ri import DEFAULT_REGULARIZATION, fit_rows_adjoint
+from src.Base.separable_ri import fit_rows_adjoint
 from src.Base.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
-from src.gradients import isdf_derivatives
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
@@ -70,88 +74,23 @@ from src.properties.surface import evaluate
 from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
                                       GATE_BSE_CONV_TOL, TILE, bitwise,
                                       molecule, patch_whole_assembly,
-                                      reassociated_fit, relative, row_kw,
+                                      relative, row_kw,
                                       state_pair, watch)
 from tests.test_chain_sliced_factors import (H2O, H2O_DISPLACED, chain_scf,
                                              own_water)
 
 SIZES = [1, 2, 3, 8]
-
-
-def reassociated_fit_adjoint(mol, gram):
-    """`isdf_derivatives.fit_adjoint` with its sums over the test set (the
-    row norms, the Gram matrix, F Dt^T and the balancing's row sums) cut per
-    mu shell and accumulated in reverse: the whole adjoint's anchor."""
-    mu = np.asarray(gram[0])
-    ao_loc = mol.ao_loc_nr()
-    shells = [np.flatnonzero((mu >= ao_loc[s]) & (mu < ao_loc[s + 1]))
-              for s in reversed(range(mol.nbas))]
-    shells = [c for c in shells if len(c)]
-
-    def adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
-        blocks = shells + [np.arange(len(mu), D.shape[1])]
-
-        def rowsum(a, b):
-            out = np.zeros(a.shape[0])
-            for c in blocks:
-                out += np.einsum('kr,kr->k', a[:, c], b[:, c])
-            return out
-
-        s = np.sqrt(rowsum(D, D))
-        s = np.where(s == 0.0, 1.0, s)
-        d = 1.0 / s
-        Dt = D * d[:, None]
-        G = np.zeros((D.shape[0], D.shape[0]))
-        A = np.zeros((F.shape[0], D.shape[0]))
-        for c in blocks:
-            G += Dt[:, c] @ Dt[:, c].T
-            A += F[:, c] @ Dt[:, c].T
-        G[np.diag_indices_from(G)] += regularization
-        cho = scipy.linalg.cho_factor(G, lower=True)
-        B = scipy.linalg.cho_solve(cho, A.T).T
-        B_bar = M_bar * d[None, :]
-        d_bar = np.einsum('bk,bk->k', M_bar, B)
-        A_bar = scipy.linalg.cho_solve(cho, B_bar.T).T
-        Y = scipy.linalg.cho_solve(cho, A.T @ B_bar)
-        G_bar = -scipy.linalg.cho_solve(cho, Y.T).T
-        F_bar = A_bar @ Dt
-        Dt_bar = A_bar.T @ F + (G_bar + G_bar.T) @ Dt
-        D_bar = d[:, None] * Dt_bar
-        d_bar = d_bar + rowsum(Dt_bar, D)
-        s_bar = -d_bar * d ** 2
-        D_bar += (s_bar / s)[:, None] * D
-        return D_bar, F_bar
-
-    return adjoint
-
-
-def patch_reassociated_whole(patch, mol):
-    """The whole assembly's fit with its sums over the test set reordered."""
-    gram = product_pairs(mol)
-    patch_whole_assembly(patch)
-    patch.setattr(isdf_derivatives, 'fit_M_stable', reassociated_fit(mol, gram))
-    patch.setattr(isdf_derivatives, 'fit_adjoint',
-                  reassociated_fit_adjoint(mol, gram))
-
-
-def tile_reversed(npts, block=TILE):
-    """The grid's tiles, last first."""
-    return [slice(t0, min(t0 + block, npts))
-            for t0 in reversed(range(0, npts, block))]
-
-
-def ratio(got, ref, bar):
-    """|got - ref| in units of |bar - ref|; 0 when both are bitwise."""
-    dist, anchor = relative(got, ref), relative(bar, ref)
-    return dist / anchor if anchor else (0.0 if dist == 0 else np.inf), \
-        dist, anchor
+#: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ at 148
+#: points per atom drops two pairs 3.1e-5 Bohr further on.
+CROSSING_SHIFT = 0.15587
 
 
 # ------------------------------------------------------------------- (a)
 @pytest.mark.parametrize('atom', [H2O, ETHYLENE], ids=['water', 'ethylene'])
 def test_the_adjoint_on_fixed_adjoints(atom):
     """fit_rows_adjoint and orbital_rotation_rows bitwise at 1/2/3/8 ranks
-    on fixed adjoints, and within the anchored bar of the whole branches."""
+    on fixed adjoints, and the whole branches within the stated
+    tolerances."""
     mol = molecule(atom)
     with distributed(None):
         fac = FrozenFactorization(mol)
@@ -188,32 +127,17 @@ def test_the_adjoint_on_fixed_adjoints(atom):
                 fac.owner, with_frames=False, gram_layout=product_pairs(mol))
 
         g_fit = whole_fit()
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(isdf_derivatives, 'fit_M_stable',
-                          reassociated_fit(mol, product_pairs(mol)))
-            patch.setattr(isdf_derivatives, 'fit_adjoint',
-                          reassociated_fit_adjoint(mol, product_pairs(mol)))
-            g_fit_bar = whole_fit()
-        xa = x_bar @ C.T
-        g_coll = collocation_adjoint(mol, crd, xa, **chain)
-        g_coll_bar = np.zeros((mol.natm, 3))
-        P = np.zeros((npts, 3))
-        for rows in tile_reversed(npts):
-            c, P[rows] = isdf_derivatives.basis_centre_forces(mol, crd[rows],
-                                                              xa[rows])
-            g_coll_bar += c
-        g_coll_bar += point_chain(mol, P, **chain)
+        g_coll = collocation_adjoint(mol, crd, x_bar @ C.T, **chain)
         y = x_mo.T @ x_bar
-        y_bar = np.zeros_like(y)
-        for rows in tile_reversed(npts):
-            y_bar += x_mo[rows].T @ x_bar[rows]
     lines = []
-    for name, got, ref, bar in (('fit', one[0], g_fit, g_fit_bar),
-                                ('collocation', one[1], g_coll, g_coll_bar),
-                                ('X_mo^T X_bar', one[2], y, y_bar)):
-        k, dist, anchor = ratio(got, ref, bar)
-        lines.append(f'{name}: bar {anchor:.2e}, tiles {dist:.2e} ({k:.2f} x)')
-        assert k <= FIT_REASSOCIATION_K, lines[-1]
+    for name, got, ref, tol in (
+            ('fit', one[0], g_fit, FIT_REALIZATION_REL_TOL),
+            ('collocation', one[1], g_coll, REASSOCIATED_SUM_REL_TOL),
+            ('X_mo^T X_bar', one[2], y, REASSOCIATED_SUM_REL_TOL)):
+        dist = relative(got, ref)
+        lines.append(f'{name}: tiles {dist:.2e} relative, {dist / tol:.3f} '
+                     f'of {tol:.0e}')
+        assert dist <= tol, lines[-1]
     print('\n' + '; '.join(lines))
 
 
@@ -290,34 +214,30 @@ def test_the_force_on_the_row_fit_adjoint(size, monkeypatch):
     with monkeypatch.context() as patch:
         patch_whole_assembly(patch)
         whole = run('whole')
-    with monkeypatch.context() as patch:
-        patch_reassociated_whole(patch, own_water())
-        bar = run('bar')
     lines = []
+    tol = FIT_REALIZATION_FORCE_TOL
     for r in range(size):
-        new, old, ref = rows[r], whole[r], bar[r]
+        new, old = rows[r], whole[r]
         # the same run up to the assembly
         assert new['energy'] == old['energy'] and new['root'] == old['root']
         assert len(new['inputs']) == len(old['inputs']) == 3
         for a, b in zip(new['inputs'], old['inputs']):
             assert bitwise(a, b), f'rank {r}: the kernels moved'
         for key in ('force', 'drpa_force'):
-            k, dist, anchor = ratio(new[key], old[key], ref[key])
+            dist = float(np.abs(np.asarray(new[key])
+                                - np.asarray(old[key])).max())
             if r == 0:
-                lines.append(f'{key}: bar {anchor:.2e}, new {dist:.2e} '
-                             f'({k:.2f} x)')
-            assert k <= FIT_REASSOCIATION_K, (r, key, k, dist, anchor)
+                lines.append(f'{key}: {dist:.2e} = {dist / tol:.3f} of '
+                             f'{tol:.0e} Ha/Bohr')
+            assert dist <= tol, (r, key, dist)
             assert bitwise([new[key]], [rows[0][key]]), f'rank {r} != 0'
-        # each branch against what the reordered fit moves the fit branch
-        for i, (a, b, c) in enumerate(zip(new['branches'], old['branches'],
-                                          ref['branches'])):
-            anchor = np.linalg.norm(c[2] - b[2])
+        # each branch of each assembly, the same estimator's two fits
+        for i, (a, b) in enumerate(zip(new['branches'], old['branches'])):
             for j, name in enumerate(('orbital', 'collocation', 'fit')):
-                dist = np.linalg.norm(a[j] - b[j])
+                dist = float(np.abs(a[j] - b[j]).max())
                 if r == 0:
-                    lines.append(f'assembly {i} {name} {dist:.2e} '
-                                 f'({dist / anchor:.2f} x {anchor:.2e})')
-                assert dist <= FIT_REASSOCIATION_K * anchor, (r, i, name)
+                    lines.append(f'assembly {i} {name} {dist:.2e}')
+                assert dist <= tol, (r, i, name, dist)
         if size > 1:
             assert new['forces_scanned'] == [2, 1], new['forces_scanned']
             assert all(s == ([], []) for s in new['scans']), (
@@ -354,10 +274,14 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     own energy, beside the whole assembly of the same estimator and that of
     the screened-Gram estimator, which misses it."""
     mol = molecule(ETHYLENE)
+    near = mol.atom_coords()
+    near[0, 2] += CROSSING_SHIFT
+    mol.set_geom_(near, unit='Bohr')
+    mol.build(False, False)
     with distributed(None):
         chain = RPAGroundStateChain(mol, chain_scf, **row_kw())
         grad = chain.total_gradient()[0]
-        fd = []
+        fd, crossed = [], []
         for ia, x in FD_COMPONENTS:
             values = []
             for k in (-2, -1, 1, 2):
@@ -366,23 +290,26 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
                 shift[ia, x] = k * FD_STEP
                 m.set_geom_(mol.atom_coords() + shift, unit='Bohr')
                 m.build(False, False)
-                # the row fit screens here; the adjoint reads the frozen set
+                # the screen here, which the row fit must not follow
                 columns = separable_ri.test_set_layout(m, chain.coords(m))
-                assert bitwise(columns, chain.layout)
+                if not bitwise(columns, chain.layout):
+                    crossed.append((ia, x, k))
                 values.append(chain.energy(m)[0])
             fd.append((values[0] - 8 * values[1] + 8 * values[2] - values[3])
                       / (12 * FD_STEP))
+        # the case is only a test if the stencil crosses a change of screen
+        assert crossed == [(0, 2, 1), (0, 2, 2)], crossed
         others = {}
-        for name, gram in (('whole', True), ('retired', False)):
+        for name, gram in (('whole', True), ('screened', False)):
             with monkeypatch.context() as patch:
                 patch_whole_assembly(patch, gram=gram)
                 others[name] = chain.total_gradient()[0]
     pick = lambda g: np.array([g[ia, x] for ia, x in FD_COMPONENTS])
     err = np.abs(pick(grad) - fd).max()
     whole = np.abs(pick(others['whole']) - fd).max()
-    wrong = np.abs(pick(others['retired']) - fd).max()
+    wrong = np.abs(pick(others['screened']) - fd).max()
     print(f'\nethylene dRPA on the row fit: |analytic - fd| {err:.2e}, the '
-          f'whole assembly {whole:.2e}, the retired estimator {wrong:.2e} '
+          f'whole assembly {whole:.2e}, the screened-Gram estimator {wrong:.2e} '
           'Ha/Bohr')
     assert err < ISDF_GRADIENT_FLOOR
     assert whole < ISDF_GRADIENT_FLOOR

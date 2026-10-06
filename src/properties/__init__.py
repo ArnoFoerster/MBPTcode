@@ -24,6 +24,9 @@ through `FiniteDifferenceGradient` instead of being excluded.
                 electronic coupling as an argument
     spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors -- the coupling
                 `rates` was written to receive
+    mode_hessian
+                force constants along chosen normal modes by differencing the
+                analytic gradient: excited-state frequencies of local modes
     nonadiabatic
                 <Psi_I|d/dR Psi_J> from overlaps of those same vectors at
                 displaced geometries -- the other coupling `rates` needs, and

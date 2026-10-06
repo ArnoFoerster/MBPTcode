@@ -19,7 +19,11 @@ minima a soft emitter has; `spin_orbit` and `nonadiabatic` the two couplings a
 `rates` Marcus-Levich-Jortner or golden-rule rate needs; `characters` labels a
 BSE root by its charge-transfer weight; `hessian` the nuclear Hessian by
 central differences of the analytic gradient, for a route pyscf's own
-analytic Hessian cannot serve. See
+analytic Hessian cannot serve (on an interpolated mean field it asks for a
+fine enough interpolation grid and refuses a coarse one, whose surface is
+too rough for a finite difference); `mode_hessian` the force constants
+along a few chosen normal modes only, which gives the frequency of one local
+vibration on an excited state for a handful of gradients. See
 `examples/15_excited_state_geometry_optimization.py` for the one entry point,
 `calc_adiabatic_excitation`, driving an excited-state relaxation end to end,
 and `examples/17_spin_orbit_coupling.py` for `spin_orbit` read at the two

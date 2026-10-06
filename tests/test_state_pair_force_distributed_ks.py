@@ -12,11 +12,11 @@ mismatch.
 Gated, water/cc-pVDZ, PBE0 and LRC-wPBEh, at 2 and 3 simulated ranks: the
 record completes, the mean field's serial ISDFJK is never built on any rank
 (the orbital response runs on the distributed SCF's handle), every rank's
-force is rank 0's bitwise, and the force lies within the anchored bar of the
-serial record's: `COMPOSED_GRAD_K` times what the serial force moves when the
-whole record runs again with BLAS held to one thread (`one_thread`: its SCF
-converges to a mean field a round-off apart, as the distributed SCF's does,
-and every threaded GEMM reassociates), floored at `COMPOSED_GRAD_FLOOR`.
+force is rank 0's bitwise, and the force lies within CONVERGED_SCF_FORCE_TOL
+of the serial record's: the distributed SCF converges to a mean field its
+convergence tolerance away from the serial one, and the rest of the record
+re-associates its reductions over the ranks, which moves a force by far
+less (RANK_SPLIT_FORCE_TOL).
 """
 import os
 import sys
@@ -29,7 +29,8 @@ from pyscf import dft, gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (COMPOSED_GRAD_K, SCF_DIFFERENTIABLE_CONV_TOL,
+from src.Base.constants import (CONVERGED_SCF_FORCE_TOL,
+                                SCF_DIFFERENTIABLE_CONV_TOL,
                                 SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.isdf_jk import isdf_jk
@@ -37,7 +38,6 @@ from src.Base.separable_ri import resolve_isdf_grid
 from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
 from src.properties import excitations
 from src.properties.excitations import SurfaceSpec, calc_vertical_excitation
-from tests.test_mpi_routes import COMPOSED_GRAD_FLOOR, one_thread
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
 BASIS = 'cc-pvdz'
@@ -104,15 +104,12 @@ def forces(monkeypatch):
 
 @pytest.mark.parametrize('xc', FUNCTIONALS)
 def test_record_over_ranks_is_the_serial_one(xc, forces):
-    """At 2 and 3 ranks: completes, one force on every rank, within the
-    anchored bar of serial."""
+    """At 2 and 3 ranks: completes, one force on every rank, within
+    CONVERGED_SCF_FORCE_TOL of serial."""
     with distributed(None):
         omega, ref, _ = record(xc, forces)
-    again = one_thread(lambda: record(xc, forces)[1])
-    scatter = 0.0 if again is None else float(np.abs(again - ref).max())
-    bar = max(COMPOSED_GRAD_FLOOR, COMPOSED_GRAD_K * scatter)
-    lines = [f'serial omega {omega:.8f} eV, one-thread scatter '
-             f'{scatter:.2e}, bar {bar:.2e} Ha/Bohr']
+    bar = CONVERGED_SCF_FORCE_TOL
+    lines = [f'serial omega {omega:.8f} eV, tolerance {bar:.0e} Ha/Bohr']
     for size in SIZES:
         out = run_simulated(lambda comm: record(xc, forces), size)
         # the orbital response ran on the distributed SCF's handle
@@ -122,8 +119,8 @@ def test_record_over_ranks_is_the_serial_one(xc, forces):
             assert np.array_equal(force, out[0][1])
         d = float(np.abs(out[0][1] - ref).max())
         lines.append(f'{size} ranks: omega {out[0][0]:.8f} eV, |d| {d:.2e} '
-                     f'= {d / bar:.2f} of the bar')
-        assert d < bar, lines
+                     f'= {d / bar:.4f} of CONVERGED_SCF_FORCE_TOL')
+        assert d <= bar, lines
     assert np.abs(ref).max() > 1e-3
     print(f'\n{xc}: ' + '; '.join(lines))
 

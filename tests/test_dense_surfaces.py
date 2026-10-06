@@ -136,7 +136,7 @@ def test_a_hartree_fock_reference_is_not_read_as_a_kohn_sham_one():
     surface = DenseBSESurface(mol, scf=rhf)
     shift = np.max(np.abs(np.asarray(surface.xc_shift(rhf(mol)))))
     assert 0.0 < shift < XC_SHIFT_GRADIENT_TOL, (
-        f'this molecule no longer exercises the defect: the Hartree-Fock '
+        f'this molecule does not exercise the defect: the Hartree-Fock '
         f'shift is {shift:.3e} Ha, which is not round-off below the '
         f'{XC_SHIFT_GRADIENT_TOL:.0e} Ha threshold the guard asks against')
     g, e, info = surface.total_gradient(mol)
@@ -287,8 +287,8 @@ def test_the_excitation_is_reachable_on_a_kohn_sham_reference():
     assert abs(e0 - e0_hf) < 0.05, (
         f'E_0 moved {abs(e0 - e0_hf) * 1e3:.1f} mHa with the starting point')
     assert abs(uncorrected - e0_hf) > 0.3, (
-        'this molecule no longer shows the double counting the correction '
-        'removes, so the test has stopped testing it')
+        'this molecule does not show the double counting the correction '
+        'removes, so the test does not test it')
     with pytest.raises(NotImplementedError, match='Sigma_x - v_xc'):
         surface.total_gradient(mol, mf)
 
@@ -508,8 +508,45 @@ def test_the_refusal_spares_everything_that_carries_no_correlation_energy():
     pcm, _ = solvated_pair(mol)
     tda = QuasiparticleSurface(mol, rhf, screening='tda')
     assert np.isfinite(tda.total_energy(mol, pcm))
-    omega = DenseBSESurface(mol, scf=rhf).excitation_gradient(mol, pcm)[1]
-    assert np.isfinite(omega)
+    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation_energy(mol,
+                                                                       pcm))
+
+
+def test_a_solvated_mean_field_is_refused_wherever_a_force_is_reported():
+    """The dense Lagrangian has no reaction-field response, so no dense force
+    on a mean field carrying a continuum is the derivative of anything.
+
+    The orbital multipliers solve against the gas-phase Fock response and the
+    skeleton reads the bare one-electron Hamiltonian, so a PCM-relaxed mean
+    field loses the cavity's answer to the moving density and nuclei, and an
+    attached environment is ignored altogether. That holds for every
+    screening: the Tamm-Dancoff surfaces carry no E_c^dRPA, which is why their
+    ENERGIES pass the guard above, but their forces are as blind as the rest.
+    """
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
+    for solvated in solvated_pair(mol):
+        reporters = (
+            lambda: DenseBSESurface(mol, scf=rhf).excitation_gradient(
+                mol, solvated),
+            lambda: DenseBSESurface(mol, variant='BSE@GWtda',
+                                    scf=rhf).total_gradient(mol, solvated),
+            lambda: QuasiparticleSurface(mol, rhf, screening='tda'
+                                         ).total_gradient(mol, solvated),
+            lambda: QuasiparticleSurface(mol, rhf).total_gradient(mol,
+                                                                  solvated),
+        )
+        for report in reporters:
+            with pytest.raises(ValueError, match='reaction-field response'):
+                report()
+
+
+def test_the_excitation_energy_is_the_one_the_gradient_reports():
+    """`excitation_energy` reads Omega without a force, and it is the same
+    Omega `excitation_gradient` returns, bit for bit."""
+    mol = h2()
+    surface = DenseBSESurface(mol, scf=rhf)
+    assert (surface.excitation_energy(mol)
+            == surface.excitation_gradient(mol)[1])
 
 
 def test_a_triplet_surface_is_its_own_derivative_and_is_not_the_singlet():

@@ -83,7 +83,7 @@ from src.Base.constants import ISDF_TILE_GB
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (agreement, allgather_rows,
                                      contiguous_block, current_comm,
-                                     exchange_rows, partition,
+                                     exchange_rows, ordered_sum, partition,
                                      reduce_scatter_rows, reduce_sum)
 from src.SingleReference.base import get_occ_virt_indices
 
@@ -647,8 +647,6 @@ def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
     of a tau split holds all of that, which `chi0_frequency_rows` does not.
     """
     X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
-    npts = X_o.shape[0]
-
     if not stream:
         Pi_tau = polarizability_imaginary_time(X_o, X_v, e_o, e_v,
                                                grid.tau_points)
@@ -657,17 +655,30 @@ def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
 
     naux = D.shape[1]
     chi0 = np.zeros((grid.nfreq, naux, naux))
+    for _, term in chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid, tau_indices,
+                                  tile_memory_gb):
+        chi0 += term
+    return chi0
+
+
+def chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid, tau_indices=None,
+                   tile_memory_gb=ISDF_TILE_GB):
+    """(k, cosft_wt[:, k] proj(tau_k)) for the tau points `tau_indices`
+    (every point by default), in order: the addends of
+    `chi0_imaginary_frequency`'s sum over tau, one (nfreq, naux, naux)
+    each."""
+    naux = D.shape[1]
     # One projected point and the two Green's-function tiles, allocated once
     # for the whole sweep and handed to the kernel every time.
     proj = np.empty((naux, naux))
-    work = polarizability_work(npts, tile_memory_gb)
-    which = range(grid.ntau) if tau_indices is None else np.atleast_1d(tau_indices)
+    work = polarizability_work(X_o.shape[0], tile_memory_gb)
+    which = (range(grid.ntau) if tau_indices is None
+             else np.atleast_1d(tau_indices))
     for k in which:
         polarizability_projected_tau(X_o, X_v, e_o, e_v, D, grid.tau_points[k],
                                      tile_memory_gb=tile_memory_gb, out=proj,
                                      work=work)
-        chi0 += grid.cosft_wt[:, k, None, None] * proj
-    return chi0
+        yield int(k), grid.cosft_wt[:, k, None, None] * proj
 
 
 def polarizability_rows_sweep(X_o, X_v, e_o, e_v, D, tau_points, comm=None,
@@ -1010,7 +1021,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     if nranks > 1:
         reduce_sum(proj_tau, comm)            # the others' slots are zero
     eye = np.eye(proj_tau.shape[-1])
-    e_c = 0.0
+    terms = []
     for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb,
                                           nu_mine):
         for m, k in enumerate(ks):
@@ -1022,9 +1033,10 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
             one_minus_g = 0.0 if n_mat is None else 1.0 - g[k]
             c = c0 if n_mat is None else c0 - one_minus_g * (n_mat @ c0)
             _, logdet = np.linalg.slogdet(eye - c)
-            e_c += grid.omega_weights[k] * (logdet + linear)
-    if nranks > 1:
-        e_c = float(reduce_sum(np.array([e_c]), comm)[0])
+            terms.append((k, np.array(grid.omega_weights[k]
+                                      * (logdet + linear))))
+    # every frequency's term added in frequency order: the one-rank bits
+    e_c = float(ordered_sum(terms, comm, onto=np.zeros(())))
     e_c /= 2.0 * np.pi
     if nranks > 1:
         agreement((e_c, proj_tau), comm, audit_only=True,

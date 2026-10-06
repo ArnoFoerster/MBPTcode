@@ -543,9 +543,8 @@ def baseline(tmp_path_factory):
 def test_the_roots_are_bitwise_the_parents(systems, baseline, name, probe,
                                            size, monkeypatch):
     """The probe moved behind the Davidson and onto its action and reaches no
-    root: serially no bit of a root or a vector moves, and the converged
-    probe, from 1/d on the action alone, returns the baseline's value bit for
-    bit at every size.
+    root: serially no bit of a root, a vector or the converged probe (from
+    1/d on the action alone) moves.
 
     Over ranks the roots are NOT pinned bitwise: the Davidson's trial space
     is cut by pair rows there (`trial_space.real_eig_rows`), and its sums over
@@ -553,10 +552,16 @@ def test_the_roots_are_bitwise_the_parents(systems, baseline, name, probe,
     the ranks' tiles, which re-associates them with the rank count. On
     SPLIT_TILE tiles, which give every rank here pair rows of its own, the
     roots are held to the Davidson's resolution of the one-rank roots and
-    the vectors to VECTOR_TOL of them.
+    the vectors to VECTOR_TOL of them. The probe's value, a Ritz value of
+    (A - B) certified to the same residual floor, is held to that
+    resolution of the one-rank value: with the trial space's joins and the
+    static screening summed in a fixed order it sat 1.8e-13 (water) and
+    1.9e-14 (ethylene) relative from it at 2, 3 and 8 ranks, against
+    resolutions of order 1e-11, and a few ulp from the parent's bits at
+    each size, which the block action's rank sums still decide.
 
     The solves ask for preconditioner='bare': the baseline's Davidson divided
-    by d, and the default preconditioner is now the screened diagonal, which
+    by d, and the default preconditioner is the screened diagonal, which
     takes another iteration path to the same roots: screened, the vectors
     sat up to 7.4e-7 and the roots 1.3e-11 relative from the baseline's, both
     within the solve's convergence to CONV_TOL but outside these gates."""
@@ -579,8 +584,12 @@ def test_the_roots_are_bitwise_the_parents(systems, baseline, name, probe,
                              sign_fixed(baseline['X_' + one],
                                         baseline['Y_' + one])):
             assert np.abs(got - want).max() <= VECTOR_TOL
-    if probe is True:
+    if probe is True and size == 1:
         assert bitwise(np.float64(info['min_eig_amb']), baseline['amb_' + key])
+    elif probe is True:
+        amb_one = baseline['amb_' + one]
+        assert relative(info['min_eig_amb'], amb_one) <= roots_resolution(
+            info['eps'], s['nocc'], np.atleast_1d(amb_one))
 
 
 @pytest.mark.parametrize('size', SIZES)

@@ -33,15 +33,18 @@ displaced mean field:
       pyscf's own gradient of the locked mean field differs between ranks;
   (b) on the shape-sensitive BLAS and the free memory (subprocess): the same
       three numbers of each layout rank 0's on every rank, the sliced layout
-      bitwise the whole one, and the row fit's numbers within
-      `FIT_REASSOCIATION_K` times the distance the whole-fit sliced numbers
-      move when the fit's three-centre sum is cut per shell and accumulated
-      in reverse (`per_shell_reversed`);
+      bitwise the whole one, and the row fit's forces and energy within
+      FIT_REALIZATION_FORCE_TOL and FIT_REALIZATION_ENERGY_TOL of the
+      whole-fit sliced layout's, two realizations of the one fit;
   (c) on all three stand-ins at once (subprocess): every number of (b) rank
       0's on every rank.
 
 The layouts are not compared with each other under the race: each runs its
 own pyscf K builds and mean-field force, which a racing pyscf does not repeat.
+On the stand-in, which repeats its bits, the row fit sits 7.6e-9 Ha/Bohr from
+the whole fit in the composed force (0.076 of FIT_REALIZATION_FORCE_TOL),
+7.6e-11 in the dRPA force and 9.1e-13 Ha in the energy (0.009 of
+FIT_REALIZATION_ENERGY_TOL).
 """
 import ast
 import builtins
@@ -54,7 +57,6 @@ import subprocess
 import sys
 import threading
 import zlib
-from contextlib import contextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -64,7 +66,8 @@ from pyscf import dft, gto, scf
 from pyscf.df.grad import rhf as pyscf_df_grad
 from pyscf.lib import numpy_helper
 
-from src.Base.constants import FIT_REASSOCIATION_K
+from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                FIT_REALIZATION_FORCE_TOL)
 from src.Base.utils.mpi_grid import (current_comm, lockstep_mean_field,
                                      run_simulated)
 from src.gradients.dense_surfaces import DenseRPASurface
@@ -304,13 +307,6 @@ def import_src_on_the_shape_sensitive_blas():
         del sys.modules[name]
 
 
-def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
-    """`separable_ri.ao_blocks` with every shell its own block, last first:
-    the whole fit's three-centre sum F D^T reassociated once, the anchor of
-    the row fit (tests/test_chain_row_fit.py)."""
-    return [(s, s + 1) for s in reversed(range(mol.nbas))]
-
-
 def layout_numbers(surface_class, mol, mf, here, mf_here, **kw):
     """(composed force, energy, dRPA force) of one layout at `here` on the
     given mean fields."""
@@ -414,14 +410,12 @@ def test_layouts_on_the_shape_sensitive_blas(size):
     assert got['perturbed'] > 0, 'the shape-sensitive BLAS scaled nothing'
     assert not got['not rank 0s'], got['not rank 0s']
     assert got['sliced is whole'] == [True] * len(NUMBERS), got
-    for name, (dist, anchor, scale) in got['row fit'].items():
-        # the stand-in moves one GEMM's result by up to SHAPE_SKEW_CLASSES
-        # ulp, so no bar is finer than that on the number's own scale: the
-        # energy, whose fit response lies below it
-        bar = max(anchor, SHAPE_SKEW_CLASSES * ULP * scale)
-        assert dist <= FIT_REASSOCIATION_K * bar, (
-            f'{size} ranks, row-fit {name}: |d| {dist:.2e} = '
-            f'{dist / bar:.2f} x the reassociation {bar:.2e}')
+    for name, dist in got['row fit'].items():
+        bar = (FIT_REALIZATION_ENERGY_TOL if name == 'energy'
+               else FIT_REALIZATION_FORCE_TOL)
+        print(f'[info] {size} ranks, row-fit {name}: |d| {dist:.2e} = '
+              f'{dist / bar:.4f} of {bar:.0e}')
+        assert dist <= bar, (size, name, dist, bar)
 
 
 @pytest.mark.parametrize('size', ALL_SIZES)
@@ -431,31 +425,11 @@ def test_every_rank_holds_rank_0s_numbers_on_all_three(size):
     assert not got['not rank 0s'], got['not rank 0s']
 
 
-@contextmanager
-def swapped(comm, module, name, value):
-    """`module.<name>` is `value` inside the block. The thread-ranks share
-    the module: rank 0 swaps it once every rank is done with the original
-    and restores it once every rank is done with `value`."""
-    comm.allgather(None)
-    if comm.Get_rank() == 0:
-        original = getattr(module, name)
-        setattr(module, name, value)
-    comm.allgather(None)
-    try:
-        yield
-    finally:
-        comm.allgather(None)
-        if comm.Get_rank() == 0:
-            setattr(module, name, original)
-        comm.allgather(None)
-
-
 def shape_main(mode, size):
     """(b) or (c) here: src imported afresh on the shape-sensitive BLAS, the
     free memory rank-dependent and, for 'all', pyscf racing."""
     import_src_on_the_shape_sensitive_blas()
     fresh_grid = importlib.import_module('src.Base.utils.mpi_grid')
-    fresh_ri = importlib.import_module('src.Base.separable_ri')
     surface_class = importlib.import_module(
         'src.gradients.rpa_bse_surface').RPABSESurface
     pyscf_df_grad.lib = RankMemoryLib(pyscf_df_grad.lib,
@@ -466,12 +440,6 @@ def shape_main(mode, size):
     def rank(comm):
         out, fields = layouts_on_one_mean_field(surface_class, LAYOUTS)
         out['raw'] = np.asarray(fields[3].Gradients().kernel())
-        if mode == 'shape':
-            # the anchor, on the same mean fields: the whole-fit sliced
-            # layout with its fit's three-centre sum reordered
-            with swapped(comm, fresh_ri, 'ao_blocks', per_shell_reversed):
-                out['anchor'] = layout_numbers(surface_class, *fields,
-                                               **LAYOUTS['sliced'])
         return out
 
     res = fresh_grid.run_simulated(rank, size)
@@ -483,11 +451,9 @@ def shape_main(mode, size):
     verdict['sliced is whole'] = [
         all(np.array_equal(r['sliced'][i], r['whole'][i]) for r in res)
         for i in range(len(NUMBERS))]
-    sliced, rows, anchor = (res[0][k] for k in ('sliced', 'rows', 'anchor'))
+    sliced, rows = res[0]['sliced'], res[0]['rows']
     verdict['row fit'] = {
-        name: (float(np.linalg.norm(rows[i] - sliced[i])),
-               float(np.linalg.norm(anchor[i] - sliced[i])),
-               float(np.linalg.norm(sliced[i])))
+        name: float(np.abs(np.asarray(rows[i]) - np.asarray(sliced[i])).max())
         for i, name in enumerate(NUMBERS)}
     return verdict
 

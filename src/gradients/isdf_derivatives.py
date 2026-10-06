@@ -1645,7 +1645,7 @@ def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False):
     eps_bar: the adjoint on the orbital energies, gamma = diag(eps_bar), or a
         full symmetric MO Fock partial gamma_pq = dE/dF_pq.
     """
-    # circular import: grad_engine also imports from isdf_derivatives
+    # cycle: grad_engine imports this module at module level.
     from src.gradients.grad_engine import one_electron_skeleton
     C = mf.mo_coeff
     eps_bar = np.asarray(eps_bar, float)

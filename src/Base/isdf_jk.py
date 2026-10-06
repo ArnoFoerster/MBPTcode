@@ -70,7 +70,7 @@ from pyscf import df, dft, gto, lib, scf
 from pyscf.lib import logger
 from pyscf.scf.dispersion import parse_disp
 
-from src.Base.constants import ISDF_RADII_MATCH_TOL
+from src.Base.constants import ISDF_DEFAULT_COUNTS, ISDF_RADII_MATCH_TOL
 from src.Base.pcm_derivatives import solvation_gradient
 from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    _ao_l_labels, atomic_grid, build_D_F,
@@ -80,10 +80,6 @@ from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
                                    shipped_radii_lookup, default_auxbasis)
 from src.Base.utils import memory
 from src.Base.utils.mpi_grid import current_comm
-
-#: `space_time.separable_factors`' grid, so a J/K built here and a GW run share
-#: one factorization when the caller wants that. 148 points per atom.
-DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 
 #: Hartree-Fock minus its own exchange, for `exchange_free_reference`: the
 #: empty functional, so a pure Hartree-Fock mean field keeps none of it.
@@ -142,7 +138,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                             refused, and the row's `origin` is honoured (it
                             places one extra point at the nucleus: 307 points
                             for a Duchemin-Blase carbon row, not 306).
-      nothing               `DEFAULT_COUNTS`, sized for double zeta.
+      nothing               `ISDF_DEFAULT_COUNTS`, sized for double zeta.
 
     Shells are rotated into covariant atomic frames so the grid rotates with
     the molecule.
@@ -176,7 +172,7 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                 f'would be of a functional nobody requested.')
         counts = level_counts
     named_counts = counts is not None
-    counts = counts or DEFAULT_COUNTS
+    counts = counts or ISDF_DEFAULT_COUNTS
 
     if radii is None:
         radii, origins = {}, {}
@@ -429,7 +425,7 @@ class ISDFJK(df.df.DF):
         # output turns on the factorization's too, which can run for minutes
         # to hours.
         self.progress = (mol.verbose > 0) if progress is None else progress
-        self.counts = counts or DEFAULT_COUNTS
+        self.counts = counts or ISDF_DEFAULT_COUNTS
         # Whether the caller named counts. `isdf_grid` refuses explicit radii
         # that contradict the table row at named counts, so passing the default
         # on would refuse a caller who gave radii alone, for whom the radii are

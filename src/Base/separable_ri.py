@@ -134,7 +134,8 @@ from src.Base.basis.ri_fallback import element_auxbasis, missing_row_hint
 from src.Base.constants import (AUX_METRIC_INDEFINITE_TOL,
                                 AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
                                 FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
-                                ISDF_GRID_ACCURACY, ISDF_GRID_N_START,
+                                ISDF_DEFAULT_COUNTS, ISDF_GRID_ACCURACY,
+                                ISDF_GRID_N_START,
                                 THREE_CENTER_BLOCK_BYTES)
 from src.Base.sliced_factors import GridTileRows
 from src.Base.utils.mpi_grid import (agreement, allgather_ranges, broadcast,
@@ -184,18 +185,21 @@ class RowFit:
         `contiguous_block` of the grid, rows [ext[0], ext[1]).
     held: {array: most bytes of it this rank held at once during the fit},
         read off the arrays.
+    kept: the pair columns F D^T kept, a mask over mu * n2 + (position of nu
+        among the l <= l_max_second functions), the same on every rank.
 
     Nothing in it is whole. The factor rows are read from it in the same
     fixed tiles the fit ran in, so they are bitwise the one-rank rows at
     every rank count.
     """
 
-    def __init__(self, npts, block, comm, mt, X, ext, held):
+    def __init__(self, npts, block, comm, mt, X, ext, held, kept=None):
         self.npts, self.block, self.comm = int(npts), int(block), comm
         size = 1 if comm is None else comm.Get_size()
         rank = 0 if comm is None else comm.Get_rank()
         self.rows = contiguous_block(self.npts, rank, size)
         self.mt, self.X, self.ext, self.held = mt, X, tuple(ext), held
+        self.kept = kept
 
     def ao_rows(self):
         """X_ao[k, mu] = chi_mu(r_k) on this rank's rows, verbatim."""
@@ -320,44 +324,56 @@ class FitTiles:
 
     `fit_rows(tiles=)` reads them in place of fitting where they are the fit
     it was asked for (`row_fit`): a row fit is a function of these inputs
-    and its tiles are the same bits at every rank count, so the rows are the
-    ones a second fit would make. The distributed ISDF-K SCF
-    hands its own out (`DistributedISDFJK.fit_tiles`), and the gradient
-    chain and the energy route's factor stage read the SCF's fit instead of
-    repeating it.
+    and of the pair columns it kept (`kept`), and its tiles are the same bits
+    at every rank count, so the rows are the ones a second fit would make.
+    The distributed ISDF-K SCF hands its own out
+    (`DistributedISDFJK.fit_tiles`), and the gradient chain and the energy
+    route's factor stage read the SCF's fit instead of repeating it.
     """
 
     def __init__(self, mol, auxmol, coords, block, mt, comm, held,
-                 l_max_second, pair_tol, regularization, block_memory_gb):
+                 l_max_second, pair_tol, regularization, block_memory_gb,
+                 kept=None):
         self.keys = (_content_key(mol), _content_key(auxmol))
+        self.kept = None if kept is None else _read_only(kept)
         self.coords = _read_only(coords)
         self.block = int(block)
         self.mt = {int(t): _read_only(a) for t, a in mt.items()}
-        self.layout = ((1, 0) if comm is None
-                       else (comm.Get_size(), comm.Get_rank()))
+        self.ranks = ((1, 0) if comm is None
+                      else (comm.Get_size(), comm.Get_rank()))
         self.held = dict(held)
         self.settings = (int(l_max_second), float(pair_tol),
                          float(regularization), float(block_memory_gb))
 
-    def row_fit(self, mol, auxmol, coords, block, comm, settings):
+    def row_fit(self, mol, auxmol, coords, block, comm, settings,
+                layout=None):
         """The `RowFit` `fit_rows` would return for this call, read from
         these tiles, or None where the call asks for another fit: another
-        molecule, basis, point, tile edge, setting or rank layout.
+        molecule, basis, point, tile edge, setting or rank layout, or a
+        frozen pair `layout` other than the columns these tiles kept.
 
         The collocation over this rank's contiguous rows is evaluated tile
         by tile, the calls the fit's own Gram pass makes for it, and the
         memory record is the fit's with `reused_MT_tiles`, the bytes read here.
         """
-        layout = (1, 0) if comm is None else (comm.Get_size(), comm.Get_rank())
+        ranks = (1, 0) if comm is None else (comm.Get_size(), comm.Get_rank())
         l_max, tol, reg, gb = settings
-        if (layout != self.layout or int(block) != self.block
+        if (ranks != self.ranks or int(block) != self.block
                 or (int(l_max), float(tol), float(reg), float(gb))
                 != self.settings
                 or (_content_key(mol), _content_key(auxmol)) != self.keys
                 or not np.array_equal(coords, self.coords)):
             return None
+        if layout is not None:
+            l_ao = _ao_l_labels(mol)
+            second = np.where(l_ao <= int(l_max))[0]
+            w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
+            if self.kept is None or not np.array_equal(
+                    _frozen_columns(layout, second, w, mol.nao_nr()),
+                    self.kept):
+                return None
         nk = len(coords)
-        r0, r1 = contiguous_block(nk, layout[1], layout[0])
+        r0, r1 = contiguous_block(nk, ranks[1], ranks[0])
         e0 = e1 = r0
         if r1 > r0:
             e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
@@ -367,7 +383,8 @@ class FitTiles:
             X_ext[k0 - e0:k1 - e0] = _tile_collocation(mol, coords[k0:k1])
         held = dict(self.held, X_ext=int(X_ext.nbytes),
                     reused_MT_tiles=_total_bytes(self.mt.values()))
-        return RowFit(nk, block, comm, dict(self.mt), X_ext, (e0, e1), held)
+        return RowFit(nk, block, comm, dict(self.mt), X_ext, (e0, e1), held,
+                      kept=self.kept)
 
 
 class KeptIntegrals:
@@ -1123,9 +1140,9 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     layout gives the screened fit's bits; None screens here.
     tiles: a `FitTiles` another stage holds, read in place of fitting where
     it is this fit (`FitTiles.row_fit`: the same molecule, auxiliary
-    basis, points, tile edge, settings and ranks, screened here, layout
-    None), and ignored otherwise; the RowFit's `held` then carries
-    `reused_MT_tiles`.
+    basis, points, tile edge, settings and ranks, and the same pair columns,
+    `layout`'s or with layout None the screen here), and ignored otherwise;
+    the RowFit's `held` then carries `reused_MT_tiles`.
     timings: the keys of `fit_M_streaming`. `fit_collocation` is the metric's
     LU and the test-set labels; the collocation streams through `fit_gram`,
     which includes the balancing; `fit_integrals` is the whole pass and
@@ -1143,11 +1160,11 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     block = FIT_CHOLESKY_BLOCK if block is None else int(block)
     if block < 1:
         raise ValueError(f'block={block}: a tile holds at least one point')
-    if tiles is not None and layout is None:
+    if tiles is not None:
         _t = time.time()
         handed = tiles.row_fit(mol, auxmol, coords, block, comm,
                                (l_max_second, pair_tol, regularization,
-                                block_memory_gb))
+                                block_memory_gb), layout=layout)
         if handed is not None:
             if timings is not None:
                 timings['fit_collocation'] = time.time() - _t
@@ -1216,6 +1233,8 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     frozen = None if layout is None else _frozen_columns(layout, second, w,
                                                           nao)
     blocks = ao_blocks(mol, nk, n2, naux, block_memory_gb)
+    kept_mask = (frozen if frozen is not None
+                 else np.zeros(nao * n2, dtype=bool))
     width = [ao_loc[s1] - ao_loc[s0] for s0, s1 in blocks]
     # Largest first, so a round's blocks cost alike; the order is fixed by the
     # molecule alone and is the order every point accumulates in.
@@ -1246,6 +1265,8 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
             offsets = np.cumsum([0] + [len(k) for k in keeps])
             keeps = [col_max[offsets[p]:offsets[p + 1]] > pair_tol * screen_ref
                      for p in range(len(batch))]
+            for (a0, a1), keep in zip(spans, keeps):
+                kept_mask[a0 * n2:a1 * n2] = keep
         F_own = None
         if rank < len(batch):
             n_mine += 1
@@ -1371,7 +1392,7 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
         timings['fit_cholesky'] = time.time() - _t - t_solve
         timings['fit_solve'] = t_solve
     _say('row-distributed fit done')
-    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held)
+    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held, kept=kept_mask)
 
 
 def fit_rows_adjoint(mol, auxmol, coords, d_bar, layout, x_bar=None,
@@ -2792,8 +2813,6 @@ def fit_error_coulomb(mol, auxmol, coords, M=None, l_max_second=2,
 # The only variables are the number of radii per shell (fixed by the caller,
 # since it sets the grid size) and their lengths (optimized here).
 
-_DEFAULT_COUNTS = {'A1': 8, 'A2': 6, 'A3': 4, 'B1': 2}
-
 
 #: Order of the sub-shells in the flat optimization vector. One spelling: a
 #: gradient concatenated in a different order is silently a different variable.
@@ -3148,7 +3167,7 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         every existing cached and shipped grid keeps its key.
     """
 
-    counts = counts or _DEFAULT_COUNTS
+    counts = counts or ISDF_DEFAULT_COUNTS
 
     # Cache on disk: besides saving the recomputation, the result is not
     # reproducible across thread counts. The objective is evaluated with

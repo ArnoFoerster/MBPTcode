@@ -12,10 +12,8 @@ Water/cc-pVDZ Hartree-Fock, 8 tau points, 24 frequencies, naux 84, at 1, 2,
   * the frequency pass makes ceil(24 / P) exchanges forward and as many in
     the fold, not one per frequency;
   * `qp_set_gradient` on the pole-model and Laplace routes, adjoints in grid
-    tiles: wc, the roots and Z are the serial bits on every rank; eps_bar
-    and the X_bar / D_bar tiles, sums over the ranks added in rank order,
-    sit within REDUCED_REL of the serial ones relative to their largest
-    element (at most 6.5e-16);
+    tiles: wc, the roots, Z, eps_bar and the X_bar / D_bar tiles are the
+    serial bits on every rank;
   * planted, a frequency skipped, a frequency factorized twice, or a round's
     rows sent to the wrong owner each fails the gate.
 """
@@ -46,8 +44,6 @@ TILES = {'one': 1 * 3 * 84 ** 2 * 8 / 1e9, 'five': 5 * 3 * 84 ** 2 * 8 / 1e9,
          'all': ISDF_TILE_GB}
 ROWS_BLOCK = 16
 LAPLACE_TOL_OF_THE_GRID = 1e-2
-#: Relative bound on the adjoints a sum over the ranks reassociates.
-REDUCED_REL = 1e-14
 
 
 @pytest.fixture(scope='module')
@@ -138,23 +134,13 @@ def qp_outputs(w, tile, comm=None, forward=False):
 
 
 def moved(w, tile, size, forward=False):
-    """(name, rank) of every output a rank holds that is not serial's: the
-    forward outputs bit for bit, the adjoints (summed over the ranks) within
-    REDUCED_REL of their largest element; and whether the ranks hold every
-    output serial does between them."""
+    """(name, rank) of every output a rank holds that is not serial's bits,
+    and whether the ranks hold every output serial does between them."""
     serial = qp_outputs(w, tile, forward=forward)
     ranks = run_simulated(lambda comm: qp_outputs(w, tile, comm,
                                                   forward=forward), size)
-
-    def same(name, a):
-        ref = serial[name]
-        if not any(k in name for k in ('eps_bar', 'X_bar', 'D_bar')):
-            return a.tobytes() == ref.tobytes()
-        scale = max(1.0, float(np.abs(ref).max()))
-        return float(np.abs(a - ref).max()) <= REDUCED_REL * scale
-
     out = [(name, rank) for rank, got in enumerate(ranks)
-           for name, a in got.items() if not same(name, a)]
+           for name, a in got.items() if a.tobytes() != serial[name].tobytes()]
     held = sorted(set(name for got in ranks for name in got))
     return out, held == sorted(serial)
 

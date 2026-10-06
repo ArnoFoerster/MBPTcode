@@ -33,9 +33,9 @@ solved on every rank (locked to rank 0's); for the exchange the tiles of L
 stream in tile order from their owners, each rank accumulating the rows of T
 and Kt of its own tiles. Pass 2 is each tile's (natm, 3) addend: its AO-slab
 contractions, its auxiliary centres and its rows of the two-centre
-derivative. A rank adds its tiles' addends in tile order and one `reduce_sum`
-of (natm, 3) joins the ranks, so the addends are the same bits at every rank
-count and the reduction is the only re-association.
+derivative. Every tile's (natm, 3) addend reaches every rank and is added in
+tile order (`ordered_sum`), so the skeleton is the one-rank bits at every
+rank count.
 
 Interpolated exchange. E = -(p/4) sum_w w sum_PQ Z^w_PQ W1_PQ W2_PQ with
 Z^w = M^T V_w M and W = X dm X^T. Every channel shares M, so the adjoints
@@ -98,8 +98,8 @@ from src.Base.separable_ri import (DEFAULT_REGULARIZATION, AdjointSeeds,
                                    _two_centre_rows_adjoint, fit_rows,
                                    fit_rows_adjoint)
 from src.Base.utils.mpi_grid import (allgather_ranges, broadcast_rows,
-                                     current_comm, lockstep, partition,
-                                     reduce_sum)
+                                     current_comm, lockstep, ordered_sum,
+                                     partition)
 
 
 class FittedFockSkeleton:
@@ -334,8 +334,9 @@ def ao_slabs(mol, per_ao_bytes, max_bytes):
 def fitted_fock_skeleton(mol, auxmol, g_ao, dm, occ=None, coulomb=True,
                          exchange=0.0, comm=None, tile=None):
     """(natm, 3) fitted skeleton of Tr[g F] (Coulomb half, full-range exchange
-    at weight `exchange`), rank 0's on every rank: a `FittedFockSkeleton`
-    over this rank's tiles, one reduction."""
+    at weight `exchange`), the same bits on every rank and at every rank
+    count: a `FittedFockSkeleton` over this rank's tiles, its addends added
+    in tile order (`ordered_sum`)."""
     comm = current_comm() if comm is None else comm
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))
@@ -348,10 +349,9 @@ def fitted_fock_skeleton(mol, auxmol, g_ao, dm, occ=None, coulomb=True,
                                   tile=tile)
     mine = [int(t) for t in partition(len(skeleton.tiles), rank, size)]
     skeleton.prepare(mine, comm)
-    partial = np.zeros((mol.natm, 3))
-    for t in mine:
-        partial += skeleton.addend(t)
-    return reduce_sum(partial, comm)
+    # every tile's (natm, 3) addend, added in tile order: the one-rank bits
+    return ordered_sum([(t, skeleton.addend(t)) for t in mine], comm,
+                       onto=np.zeros((mol.natm, 3)))
 
 
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,

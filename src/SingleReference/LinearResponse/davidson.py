@@ -80,7 +80,7 @@ from src.Base.utils.memory import allocation_max_memory_mb
 from src.Base.utils.mpi_grid import (allgather_blocks, broadcast,
                                      contiguous_block, current_comm,
                                      grid_comm, lockstep, lockstep_stats,
-                                     partition, reduce_scatter_rows,
+                                     ordered_chain_sum, reduce_scatter_rows,
                                      reduce_sum, replicate)
 from src.Base.utils.threads import openmp_threads, row_map
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
@@ -98,8 +98,9 @@ from src.SingleReference.GW.space_time import (DEFAULT_NTAU, _unpack_factors,
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
+from src.SingleReference.LinearResponse.isdf_bse_adjoint import GridTiles
 from src.SingleReference.LinearResponse.space_time import (
-    chi0_imaginary_frequency, spin_summed)
+    chi0_imaginary_frequency, chi0_tau_terms, spin_summed, split_branches)
 from src.SingleReference.LinearResponse.trial_space import (SUBSPACE_PIECES,
                                                             PairRows,
                                                             real_eig_rows)
@@ -1292,24 +1293,32 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
     `mpi_grid.replicate` at the entry point, which `isdf_bse_factors` does
     before it sizes the grid. Tau is the compute axis (every point is an M^2
     sweep) and there is one frequency, so the whole result is a single
-    (naux, naux) accumulator to all-reduce, the best compute-per-byte sweep in
-    the chain. The inversion afterwards is replicated. Exact up to summation
-    order: chi0 accumulates as its tau points arrive, so a partition
-    re-associates that sum and the serial path alone is bitwise.
+    (naux, naux) accumulator, the best compute-per-byte sweep in the chain.
+    The inversion afterwards is replicated. Each rank computes its
+    consecutive tau points' addends and the running sum visits the ranks in
+    tau order (`ordered_chain_sum`), so chi0 is the one-rank bits at every
+    rank count. A rank holds its own tau addends of (naux, naux) each beside
+    the running sum and one copy in flight, and the sum crosses once per rank
+    that owns a point.
 
-    X may be `SlicedFactors` over `comm` (`chi0_imaginary_frequency` gathers
-    its branches); D is then the whole, gathered array.
+    X may be `SlicedFactors` over `comm` (`split_branches` gathers its
+    branches); D is then the whole, gathered array.
     """
     comm = current_comm() if comm is None else comm
     grid = static_screening_grid(eps, nocc) if grid is None else grid
     rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
                     else (0, 1))
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
-    chi0 = chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=mu,
-                                    tau_indices=tau_mine)
-    if nranks > 1:
-        reduce_sum(chi0, comm)
-    chi0 = chi0[0]
+    # consecutive tau points per rank, so the running sum crosses once per rank
+    owners = [r for r in range(nranks)
+              for _ in range(*contiguous_block(grid.ntau, r, nranks))]
+    t0, t1 = contiguous_block(grid.ntau, rank, nranks)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
+    terms = dict(chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid,
+                                range(t0, t1)))
+    naux = D.shape[1]
+    # chi0's tau addends in tau order (`ordered_chain_sum`): the one-rank bits
+    chi0 = ordered_chain_sum(terms, owners, comm,
+                             np.zeros((grid.nfreq, naux, naux)))[0]
     return np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
 
 
@@ -1592,15 +1601,6 @@ def _screened_rows(D_mine, D, W_aux, comm=None):
     if comm is not None and comm.Get_size() > 1:
         return (D_mine @ W_aux) @ D.T
     return D_mine @ (W_aux @ D.T)
-
-
-def diagonal_tiles(r0, r1, tile):
-    """The grid-row tiles [p0, p1) of rows [r0, r1): the grid's fixed tiles
-    of `tile` rows (DAVIDSON_DIAGONAL_TILE), cut only where the rows begin and
-    end."""
-    cut = [(max(t0, r0), min(t0 + tile, r1))
-           for t0 in range(r0 - r0 % tile, r1, tile)]
-    return [(p0, p1) for p0, p1 in cut if p0 < p1]
 
 
 def self_pair_densities(D_rows, X_o_rows, X_v_rows, tiles, first=0):
@@ -1958,18 +1958,27 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         return Az, Bz
 
     def screened_diagonal():
-        """d - (ii|W|aa) on every pair, (n_occ, n_vir), rank 0's bits on every
-        rank; d alone for RPA. The fitted squares are a sum over the grid
-        rows, so a rank forms its own rows' partial tile by tile
-        (`self_pair_densities`) and one reduction of (naux, n_occ + n_vir)
-        completes them; the kernel's contraction is replicated."""
+        """d - (ii|W|aa) on every pair, (n_occ, n_vir), the one-rank bits on
+        every rank; d alone for RPA. The fitted squares are a sum over the
+        grid's fixed tiles (`self_pair_densities` per tile), each tile's
+        addend formed whole by one rank and added in tile order
+        (`ordered_chain_sum`); the kernel's contraction is replicated. The
+        addends are (naux, n_occ + n_vir) each, and a rank moves in up to a
+        tile's rows of D, X_o and X_v."""
         if not lBSE:
             return diag_d
-        B = self_pair_densities(D_mine, X_o_mine, X_v_mine,
-                                diagonal_tiles(r0, r1, DAVIDSON_DIAGONAL_TILE),
-                                first=r0)
-        if nranks > 1:
-            reduce_sum(B, comm)
+        # whole fixed tiles, each on the rank holding its first row (the rows
+        # past the block moved in once), added in tile order on the chain
+        tiles = GridTiles(npts, DAVIDSON_DIAGONAL_TILE, comm)
+        parts = [tiles.tile_rows(np.ascontiguousarray(a))
+                 for a in (D_mine, X_o_mine, X_v_mine)]
+        terms = {t: self_pair_densities(parts[0][t], parts[1][t],
+                                        parts[2][t], [(0, len(parts[0][t]))])
+                 for t in tiles.mine}
+        parts = None
+        width = no + X_v_mine.shape[1]
+        B = ordered_chain_sum(terms, tiles.owner, comm,
+                              np.zeros((D_mine.shape[1], width)))
         dressed = diag_d - screened_direct_diagonal(B[:, :no], B[:, no:],
                                                     W_aux)
         if nranks > 1:

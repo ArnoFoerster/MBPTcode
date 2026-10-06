@@ -17,7 +17,9 @@ its own Mole:
       one-cycle optimizer step sit within `FIT_REASSOCIATION_K` times the
       distance the whole-fit chain itself moves when its fit's three-centre
       sum is cut per shell and accumulated in reverse (a bar measured on
-      the run);
+      the run); for the two total energies the bar is at least
+      FIT_REALIZATION_ENERGY_TOL, since the reassociation can leave a total
+      energy within an ulp while the row fit sits a few ulp away;
   (c) the memory scan: at every evaluation the walk asks for, before it and
       right after each factor build inside it, no array reachable from the
       surface has the whole grid on one axis and a factor's or the fit's
@@ -62,7 +64,8 @@ from pyscf import df as pyscf_df, gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (FIT_REASSOCIATION_K, HARTREE_TO_EV,
+from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                FIT_REASSOCIATION_K, HARTREE_TO_EV,
                                 ISDF_GRADIENT_FLOOR)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
@@ -473,12 +476,20 @@ def patch_whole_assembly(patch, gram=True):
     patch.setattr(factor_chain, 'orbital_rotation_rows', gathered_rotation)
 
 
-def anchored(ref, bar, got, keys):
+#: The total energies, whose bar is floored at FIT_REALIZATION_ENERGY_TOL.
+ENERGY_KEYS = ('energy', 'walk_energy')
+
+
+def anchored(ref, bar, got, keys, floored=()):
     """(lines, {key: ratio}): each key's distance from `ref` in units of the
-    bar's."""
+    bar's; the bar of a key in `floored` at least FIT_REALIZATION_ENERGY_TOL
+    over FIT_REASSOCIATION_K."""
     lines, ratios = [], {}
     for key in keys:
         anchor = relative(bar[key], ref[key])
+        if key in floored:
+            anchor = max(anchor, FIT_REALIZATION_ENERGY_TOL
+                         / (FIT_REASSOCIATION_K * abs(float(ref[key]))))
         dist = relative(got[key], ref[key])
         ratios[key] = (dist / anchor if anchor
                        else (0.0 if dist == 0 else np.inf))
@@ -538,7 +549,8 @@ def test_state_pair_on_the_row_fit(size, monkeypatch):
         patch.setattr(separable_ri, 'ao_blocks', per_shell_reversed)
         bar = run('whole')
     for r in range(size):
-        lines, ratios = anchored(whole[r], bar[r], rows[r], GATED)
+        lines, ratios = anchored(whole[r], bar[r], rows[r], GATED,
+                                 floored=ENERGY_KEYS)
         if r == 0:
             print(f'\n{size} ranks: ' + '; '.join(lines))
         assert max(ratios.values()) <= FIT_REASSOCIATION_K, (r, lines)
@@ -669,7 +681,8 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
     print('\nethylene, 2 ranks, the row fit against the one estimator: '
           + '; '.join(own)
           + '\n  the replicated fit against the same: ' + '; '.join(same)
-          + '\n  the retired estimator against the same: ' + '; '.join(other)
+          + '\n  the screened-Gram estimator against the same: '
+          + '; '.join(other)
           + '\n  on the bare d, the row fit: ' + '; '.join(bare_own)
           + ', the replicated fit: ' + '; '.join(bare_same)
           + f"\n  max |d force| row fit - replicated "

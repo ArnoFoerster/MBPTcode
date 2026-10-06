@@ -25,13 +25,12 @@ omega transform runs in that direction only.
 """
 import numpy as np
 
-from src.Base.sliced_factors import SlicedFactors
+from src.Base.sliced_factors import SlicedFactors, whole_factor
 from src.Base.utils.mpi_grid import agreement, current_comm, lockstep
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.reaction_field import projected_quasiparticle_shift
 from src.SingleReference.LinearResponse.davidson import (
     static_screening_grid, static_screening_matrix)
-from src.Base.sliced_factors import whole_factor
 from src.gradients.space_time_adjoint import chi0_backward
 
 

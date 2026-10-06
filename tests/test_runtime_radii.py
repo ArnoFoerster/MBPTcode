@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 import src.Base.separable_ri as sri
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
+from src.Base.constants import ISDF_DEFAULT_COUNTS
 
 UNTABULATED = {'A1': 3, 'A2': 2, 'A3': 1, 'A4': 1}
 
@@ -51,12 +51,12 @@ def _with_recorder(fn):
 
 
 def test_tabulated_row_is_returned_silently():
-    if sri.shipped_radii_lookup('H', 'cc-pvdz', 'cc-pvdz-ri', DEFAULT_COUNTS) is None:
+    if sri.shipped_radii_lookup('H', 'cc-pvdz', 'cc-pvdz-ri', ISDF_DEFAULT_COUNTS) is None:
         pytest.skip('no tabulated H/cc-pvdz row at the default counts')
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         hit, recorder = _with_recorder(lambda: sri.runtime_atomic_radii(
-            'H', 'cc-pvdz', 'cc-pvdz-ri', DEFAULT_COUNTS))
+            'H', 'cc-pvdz', 'cc-pvdz-ri', ISDF_DEFAULT_COUNTS))
     assert recorder.calls == [], 'a tabulated row must not trigger a search'
     assert hit[0], 'the row comes back'
 
@@ -73,10 +73,10 @@ def test_missing_row_warns_and_uses_the_element_box(element, box):
 def test_lookup_is_case_insensitive():
     """pyscf's basis names are case-insensitive, so the table's must be too:
     'cc-pVDZ' must not miss every row and fall through to a run-time search."""
-    lower = sri.shipped_radii_lookup('H', 'cc-pvdz', 'cc-pvdz-ri', DEFAULT_COUNTS)
+    lower = sri.shipped_radii_lookup('H', 'cc-pvdz', 'cc-pvdz-ri', ISDF_DEFAULT_COUNTS)
     if lower is None:
         pytest.skip('no tabulated H/cc-pvdz row at the default counts')
-    mixed = sri.shipped_radii_lookup('H', 'cc-pVDZ', 'cc-pVDZ-RI', DEFAULT_COUNTS)
+    mixed = sri.shipped_radii_lookup('H', 'cc-pVDZ', 'cc-pVDZ-RI', ISDF_DEFAULT_COUNTS)
     assert mixed is not None
     assert all(np.array_equal(lower[0][k], mixed[0][k]) for k in lower[0])
 
@@ -101,7 +101,7 @@ def test_per_element_basis_runs_end_to_end():
     basis = {'Li': 'cc-pvdz', 'H': 'cc-pvdz'}
     for el in ('Li', 'H'):
         if sri.shipped_radii_lookup(el, basis, sri.default_auxbasis(basis),
-                                    DEFAULT_COUNTS) is None:
+                                    ISDF_DEFAULT_COUNTS) is None:
             pytest.skip(f'no tabulated {el}/cc-pvdz row at the default counts')
     mol = gto.M(atom='Li 0 0 0; H 0 0 1.6', basis=basis, verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis=sri.default_auxbasis(basis)).run()

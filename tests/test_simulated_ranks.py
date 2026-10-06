@@ -43,11 +43,9 @@ Gates, all against the serial call in the same process:
     relabelling the grid points moves them, floored at the root finder's
     `QP_BISECTION_TOL`; one rank's pair-built Sigma against the AO-built one
     on the same relabelling anchor; every rank rank 0's, bitwise;
-  * the BSE@GW surface end to end (`ExcitedStateChain`), both forces at the
-    routes test's anchored bar, `COMPOSED_GRAD_K` times what re-associating
-    the serial force's sums on one BLAS thread moves it, floored at
-    `COMPOSED_GRAD_FLOOR` for the excitation force and at the ISDF gradient
-    reproducibility floor for the quasiparticle force;
+  * the BSE@GW surface end to end (`ExcitedStateChain`), both forces against
+    serial at RANK_SPLIT_FORCE_TOL, every rank's SCF the serial one bit for
+    bit with pyscf's OpenMP on one thread;
   * that the ranks hold one calculation and follow one iteration:
     `replicate`, and the BSE run with rank 1 handed a perturbed spectrum and
     perturbed factors, which must come back as rank 0's roots, bitwise, with
@@ -88,11 +86,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto, lib, scf
 
 from src.Base import separable_ri
-from src.Base.constants import (COMPOSED_GRAD_K, ISDF_GRADIENT_FLOOR,
-                                QP_BISECTION_TOL, TRANSFORM_FIT_RCOND)
+from src.Base.constants import (COMPOSED_GRAD_K, QP_BISECTION_TOL,
+                                RANK_SPLIT_FORCE_TOL, TRANSFORM_FIT_RCOND)
 from src.Base.utils import time_frequency
 from src.Base.utils.grids import gauss_legendre_grid
 from src.Base.utils.mpi_grid import (contiguous_block, distributed,
@@ -131,11 +129,9 @@ from src.gradients.space_time_adjoint import (polarizability_tau,
                                               selfenergy_diag_backward,
                                               sigma_transforms)
 from tests.reduction_bounds import reduced_sum_verdict
-from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, ROW_NTAU,
-                                   ROW_PERMUTATIONS, ROW_TILE_GB,
+from tests.test_mpi_routes import (ROW_NTAU, ROW_PERMUTATIONS, ROW_TILE_GB,
                                    RecordedSimulatedComm, branch_pair_addends,
-                                   grid_row_axes, one_thread,
-                                   one_thread_scatter, proj_tile_addends,
+                                   grid_row_axes, proj_tile_addends,
                                    sweep_owners)
 
 NTAU, NFREQ = 8, 24
@@ -163,6 +159,20 @@ H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: two ranks, at 32 and 64 every point over three to six, most ranks owning
 #: none of a given point.
 ROW_SIZES = [2, 3, 8, 32, 64]
+
+
+@pytest.fixture
+def pyscf_one_thread():
+    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
+    order, so every rank-thread's SCF is the serial one bit for bit."""
+    threads = lib.num_threads()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(1)
+    yield
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(threads)
 
 
 @pytest.fixture(scope='module')
@@ -785,30 +795,18 @@ def own_chain():
 
 
 @pytest.mark.parametrize('size', SIZES)
-def test_excited_state_chain_gradients(size):
-    """Both of the surface's forces, end to end, within their anchored bars.
+def test_excited_state_chain_gradients(size, pyscf_one_thread):
+    """Both of the surface's forces, end to end, at RANK_SPLIT_FORCE_TOL.
 
     Everything the chain distributes meets here at once: the static W of the
     BSE kernel, the quasiparticle set's gradient, the single-state
-    quasiparticle gradient, and the Casida solve on top of them. A partition
-    re-associates their sums, the orbital response amplifies the last bits of
-    any re-association, and every rank converges its own SCF, so each bar is
-    measured here as the routes test measures it: `COMPOSED_GRAD_K` times
-    what the serial force moves on one BLAS thread, `COMPOSED_GRAD_FLOOR` at
-    the least for the excitation force and `ISDF_GRADIENT_FLOOR` for the
-    quasiparticle force, whose chain carries no Casida step.
+    quasiparticle gradient, and the Casida solve on top of them. Every rank
+    converges its own SCF, the serial one bit for bit with pyscf's OpenMP on
+    one thread, so the partition's re-associated sums are all that differs.
     """
-    chain = own_chain()
-    ref_ex = chain.excitation_gradient()[0]
-    qp_chain = own_chain()
-    ref_qp = qp_chain.quasiparticle_gradient(0)[0]
-    scatter = one_thread_scatter(chain.mol0, chain.mf0, ref_ex)
-    bar = max(COMPOSED_GRAD_FLOOR, COMPOSED_GRAD_K * scatter)
-    again_qp = one_thread(lambda: ExcitedStateChain(
-        qp_chain.mol0, chain_scf, mf=qp_chain.mf0).quasiparticle_gradient(0)[0])
-    scatter_qp = (0.0 if again_qp is None
-                  else float(np.abs(again_qp - ref_qp).max()))
-    bar_qp = max(ISDF_GRADIENT_FLOOR, COMPOSED_GRAD_K * scatter_qp)
+    ref_ex = own_chain().excitation_gradient()[0]
+    ref_qp = own_chain().quasiparticle_gradient(0)[0]
+    tol = RANK_SPLIT_FORCE_TOL
 
     def one_rank(comm):
         return (own_chain().excitation_gradient()[0],
@@ -818,14 +816,9 @@ def test_excited_state_chain_gradients(size):
     d_ex = max(np.abs(g_ex - ref_ex).max() for g_ex, _ in out)
     d_qp = max(np.abs(g_qp - ref_qp).max() for _, g_qp in out)
     print(f'[info] {size} ranks: excitation force |d| {d_ex:.2e} = '
-          f'{d_ex / bar:.3f} of the anchored bar {bar:.2e} = max('
-          f'{COMPOSED_GRAD_FLOOR:.1e}, {COMPOSED_GRAD_K} x {scatter:.2e}) '
-          f'Ha/Bohr; quasiparticle force |d| {d_qp:.2e} = '
-          f'{d_qp / bar_qp:.3f} of {bar_qp:.2e} = max('
-          f'{ISDF_GRADIENT_FLOOR:.1e}, {COMPOSED_GRAD_K} x {scatter_qp:.2e})')
-    for g_ex, g_qp in out:
-        assert np.abs(g_ex - ref_ex).max() < bar
-        assert np.abs(g_qp - ref_qp).max() < bar_qp
+          f'{d_ex / tol:.4f}, quasiparticle force |d| {d_qp:.2e} = '
+          f'{d_qp / tol:.4f} of RANK_SPLIT_FORCE_TOL {tol:.0e} Ha/Bohr')
+    assert d_ex <= tol and d_qp <= tol
     for g_ex, g_qp in out[1:]:                  # one surface on every rank
         assert np.array_equal(g_ex, out[0][0])
         assert np.array_equal(g_qp, out[0][1])

@@ -14,13 +14,15 @@ energy, force and diagnostics on the way out. Six gates:
       order and cannot meet them.
   (b) Under `run_simulated` (2 and 3 ranks) the composed and single-chain
       surfaces reproduce the same surface evaluated serially, and every rank
-      returns the same bits. Each rank converges its own SCF, so the bar is
-      anchored: `COMPOSED_GRAD_K` times what the serial energy and force move
-      when evaluated again on one BLAS thread (`one_thread`), at least a
-      floor: 1e-12 Ha for the energy, the ISDF gradient reproducibility floor
-      for one chain's force, and `COMPOSED_GRAD_FLOOR`
-      (tests/test_mpi_routes.py) for RPABSESurface, which combines two
-      chains' distributed sweeps.
+      returns the same bits. Each rank converges its own SCF, the serial one
+      bit for bit with pyscf's OpenMP on one thread, so the partition's
+      re-associated reductions are all that differs: the force at
+      RANK_SPLIT_FORCE_TOL, the energy at RANK_SPLIT_ENERGY_TOL. Measured
+      (max abs force in Ha/Bohr, then the energy in Ha):
+                           size=2               size=3
+          RPAGroundStateChain  1.6e-13, 0       1.1e-13, 0
+          RPABSESurface        1.9e-12, 1.4e-14 2.5e-12, 1.4e-14
+          RPAQPSurface         8.8e-13, 0       1.2e-12, 0
   (c) `potential_energy_surface` inside the context builds the same surface
       a direct constructor does, bitwise, and refuses a `comm=` keyword by
       name: a communicator handed to a surface would be a second route to
@@ -37,9 +39,9 @@ energy, force and diagnostics on the way out. Six gates:
       collocation and fit branch a chain forms from the kernels' adjoints are
       serial code on every rank, so `nuclear_gradient` ends in one lockstep.
       Rank 1's orbital branch is moved by 1e-12 Ha/Bohr and every rank
-      returns rank 0's gradient bitwise, within the anchored bar of the
-      serial one (`one_thread_scatter`, at least `COMPOSED_GRAD_FLOOR`, since
-      the partition reassociates the sums the orbital response amplifies).
+      returns rank 0's gradient bitwise, within RANK_SPLIT_FORCE_TOL of the
+      serial one, since the partition re-associates the sums the orbital
+      response carries.
   (f) The mean field a chain or surface accepts: one each rank converged
       alone differs in its last bits and its orbital gauge, so every entry
       that takes one locks it to rank 0's (a chain's `mf=`, the one
@@ -57,14 +59,15 @@ import json
 import os
 import pathlib
 import sys
+import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto, lib, scf
 
-from src.Base.constants import COMPOSED_GRAD_K, ISDF_GRADIENT_FLOOR
+from src.Base.constants import RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL
 from src.Base.declaration import Excitation, GroundState
 from src.Base.utils.mpi_grid import (current_comm, distributed, lockstep_stats,
                                      run_simulated)
@@ -76,8 +79,6 @@ from src.properties.optimize import MeanFieldSurface
 from src.properties.surface import evaluate
 from src.properties.surfaces import (potential_energy_surface,
                                      reference_mean_field)
-from tests.test_mpi_routes import (COMPOSED_GRAD_FLOOR, one_thread,
-                                   one_thread_scatter)
 
 BASELINE_PATH = pathlib.Path(__file__).resolve().parent / 'baseline_3f09ac0.json'
 #: (a)'s pinned energies and gradients.
@@ -92,14 +93,25 @@ H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: factory, fits and differentiates at a geometry of its own.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'
 SIZES = [2, 3]
-#: The least of the energy bar (Ha); E_c^dRPA's frequency-loop reduction is
-#: exact to 1e-11 relative (test_simulated_ranks.py).
-ENERGY_FLOOR = 1e-12
 #: The coordinate (atom, axis) rank 1 moves by one ulp in (d).
 PERTURBED = (1, 1)
 #: What (e) adds to rank 1's orbital branch, in Ha/Bohr: four orders below
 #: the reproducibility floor, far above the last bits ranks differ by.
 BRANCH_OFFSET = 1e-12
+
+
+@pytest.fixture
+def pyscf_one_thread():
+    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
+    order, so every rank-thread's SCF is the serial one bit for bit."""
+    threads = lib.num_threads()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(1)
+    yield
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(threads)
 
 
 def chain_scf(mol):
@@ -206,31 +218,23 @@ def test_serially_every_surface_is_the_baseline(baseline, baseline_water,
 
 # --------------------------------------------------------------------- (b)
 @pytest.mark.parametrize('size', SIZES)
-@pytest.mark.parametrize('own,floor',
-                         [(own_ground, ISDF_GRADIENT_FLOOR),
-                          (own_bse, COMPOSED_GRAD_FLOOR),
-                          (own_qp, ISDF_GRADIENT_FLOOR)],
+@pytest.mark.parametrize('own', [own_ground, own_bse, own_qp],
                          ids=['RPAGroundStateChain', 'RPABSESurface',
                               'RPAQPSurface'])
-def test_every_rank_evaluates_the_serial_surface(own, floor, size):
-    """Every rank's energy and force the serial surface's within the anchored
-    bar, since each converged its own SCF; every rank rank 0's, bitwise."""
+def test_every_rank_evaluates_the_serial_surface(own, size, pyscf_one_thread):
+    """Every rank's energy and force the serial surface's within
+    RANK_SPLIT_ENERGY_TOL and RANK_SPLIT_FORCE_TOL, each rank's SCF the
+    serial one's bits; every rank rank 0's, bitwise."""
     ref_e, ref_g = at_reference(own())
-    again = one_thread(lambda: at_reference(own()))
-    rep_e, rep_g = ((0.0, 0.0) if again is None else
-                    (abs(again[0] - ref_e), np.abs(again[1] - ref_g).max()))
-    bar_e = max(ENERGY_FLOOR, COMPOSED_GRAD_K * rep_e)
-    bar_g = max(floor, COMPOSED_GRAD_K * rep_g)
     results = run_simulated(lambda comm: at_reference(own()), size)
     d_e = max(abs(e - ref_e) for e, _ in results)
     d_g = max(np.abs(g - ref_g).max() for _, g in results)
-    print(f'[info] {size} ranks: force |d| {d_g:.2e} = {d_g / bar_g:.3f} of '
-          f'the anchored bar {bar_g:.2e} = max({floor:.1e}, {COMPOSED_GRAD_K} '
-          f'x {rep_g:.2e}) Ha/Bohr; energy |d| {d_e:.2e} of {bar_e:.2e} = '
-          f'max({ENERGY_FLOOR:.0e}, {COMPOSED_GRAD_K} x {rep_e:.2e}) Ha')
-    for e, g in results:
-        assert abs(e - ref_e) < bar_e
-        assert np.abs(g - ref_g).max() < bar_g
+    print(f'[info] {size} ranks: force |d| {d_g:.2e} = '
+          f'{d_g / RANK_SPLIT_FORCE_TOL:.4f} of {RANK_SPLIT_FORCE_TOL:.0e} '
+          f'Ha/Bohr; energy |d| {d_e:.2e} = '
+          f'{d_e / RANK_SPLIT_ENERGY_TOL:.4f} of {RANK_SPLIT_ENERGY_TOL:.0e} '
+          'Ha')
+    assert d_e <= RANK_SPLIT_ENERGY_TOL and d_g <= RANK_SPLIT_FORCE_TOL
     for e, g in results[1:]:
         assert e == results[0][0]
         assert np.array_equal(g, results[0][1])
@@ -264,7 +268,7 @@ def test_the_entry_point_builds_the_direct_surface_inside_the_context():
     serial = one_rank(None)
     for e_dispatch, e_direct in run_simulated(one_rank, 2):
         assert e_dispatch == e_direct
-        assert abs(e_dispatch - serial[0]) < ENERGY_FLOOR
+        assert abs(e_dispatch - serial[0]) <= RANK_SPLIT_ENERGY_TOL
 
 
 @pytest.mark.parametrize('chi0,factorization', [('space-time', 'isdf'),
@@ -330,7 +334,8 @@ def test_the_geometry_lockstep_repairs_a_one_ulp_rank(build, size):
 
 
 # --------------------------------------------------------------------- (e)
-def test_the_chains_own_share_of_the_gradient_is_rank_zeros(monkeypatch):
+def test_the_chains_own_share_of_the_gradient_is_rank_zeros(
+        monkeypatch, pyscf_one_thread):
     real = factor_chain.eps_chain_gradient
 
     def drifted(*args, **kw):
@@ -349,16 +354,14 @@ def test_the_chains_own_share_of_the_gradient_is_rank_zeros(monkeypatch):
 
     serial = ExcitedStateChain(own_water(), chain_scf)
     clean = serial.excitation_gradient()[0]
-    scatter = one_thread_scatter(serial.mol0, serial.mf0, clean)
-    bar = max(COMPOSED_GRAD_FLOOR, COMPOSED_GRAD_K * scatter)
     out = run_simulated(one_rank, 2)
     for g in out:
         assert np.array_equal(g, out[0])
     d = np.abs(out[0] - clean).max()
-    print(f'[info] excitation force |d| {d:.2e} = {d / bar:.3f} of the '
-          f'anchored bar {bar:.2e} = max({COMPOSED_GRAD_FLOOR:.1e}, '
-          f'{COMPOSED_GRAD_K} x {scatter:.2e}) Ha/Bohr')
-    assert d < bar
+    print(f'[info] excitation force |d| {d:.2e} = '
+          f'{d / RANK_SPLIT_FORCE_TOL:.4f} of RANK_SPLIT_FORCE_TOL '
+          f'{RANK_SPLIT_FORCE_TOL:.0e} Ha/Bohr')
+    assert d <= RANK_SPLIT_FORCE_TOL
 
 
 

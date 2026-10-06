@@ -52,7 +52,8 @@ from src.Base.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                 QP_POLE_OFFSET, SOP_N_POLES)
 from src.Base.utils.mpi_grid import (agreement, allgather_rows,
                                      contiguous_block, current_comm, lockstep,
-                                     mpi_map, partition, reduce_sum)
+                                     mpi_map, ordered_chain_sum, ordered_sum,
+                                     partition, reduce_sum)
 # cd_screening_contraction is re-exported, not used here: the routes below
 # call the multi-state form, which is what it is a one-state wrapper for.
 from src.SingleReference.GW.contour_deformation import (  # noqa: F401
@@ -780,30 +781,36 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                                      rs=rs, route=route))
 
     # Pass 2: the integral term's reverse pass, frequency outside, over the
-    # frequencies this rank owns. Partial over frequencies: reduced once.
+    # frequencies this rank owns. Each frequency's addends reach every rank
+    # and are added in frequency order (`ordered_sum`): the one-rank bits.
     Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
     eps_bar_part = np.zeros_like(eps)
     if active:
+        bp_terms = {a['si']: {} for a in active}
+        eps_terms = []
         proj_bar = proj_tau.zeros_like()
         for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
             for m, k in enumerate(fb.ks):
                 lu = scipy.linalg.lu_factor(eye - fb.chi0[m])
                 chi0_bar = np.zeros((naux, naux))
-                for a in active:
+                for j, a in enumerate(active):
                     WtB = scipy.linalg.lu_solve(lu, a['Bp'])
                     bb, cb, e_k = integral_term_reverse(a, WtB, k)
-                    Bp_bars[a['si']] += bb
+                    bp_terms[a['si']][k] = bb
                     chi0_bar += cb
-                    eps_bar_part += e_k
+                    eps_terms.append(((k, j), e_k))
                 fb.chi0[m] = chi0_bar
             proj_bar.fold(grid.cosft_wt, fb)
         fb = lu = chi0_bar = None
-        if nranks > 1:
-            reduce_sum(eps_bar_part, comm)
-            stacked = reduce_sum(np.stack([Bp_bars[a['si']] for a in active]),
-                                 comm)
-            for a, bar in zip(active, stacked):
-                Bp_bars[a['si']] = bar
+        eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
+        # B_p_bar is (naux, nmo) a frequency, too large to gather every
+        # frequency's, so the running sum visits the frequencies'
+        # round-robin owners in order
+        owners = [k % nranks for k in range(len(nu_points))]
+        for a in active:
+            Bp_bars[a['si']] = ordered_chain_sum(bp_terms[a['si']], owners,
+                                                 comm, Bp_bars[a['si']])
+        bp_terms = eps_terms = None
     eps_bar += eps_bar_part
 
     # Pass 3: per state, the direct term, the residues, the slice adjoint.

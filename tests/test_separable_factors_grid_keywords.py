@@ -29,11 +29,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import ISDF_GRID_ACCURACY, ISDF_RADII_MATCH_TOL
+from src.Base.constants import (ISDF_DEFAULT_COUNTS, ISDF_GRID_ACCURACY,
+                                ISDF_RADII_MATCH_TOL)
 from src.Base.separable_ri import (PUBLISHED_COUNTS, _SHELL_ORDER, atomic_grid,
                                    shipped_radii_lookup)
 from src.Base import separable_ri
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS, separable_factors
+from src.SingleReference.GW.space_time import separable_factors
 
 BASIS = 'cc-pvtz'
 AUXBASIS = BASIS + '-ri'
@@ -43,7 +44,7 @@ ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
 # sweep exercises the lookup and never the run-time optimizer.
 G2_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
 G3_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
-SWEEP = (DEFAULT_COUNTS, G2_COUNTS, G3_COUNTS)
+SWEEP = (ISDF_DEFAULT_COUNTS, G2_COUNTS, G3_COUNTS)
 # The published carbon grid is the one row that carries `origin`, and its
 # counts appear nowhere else in the table.
 CARBON_PUBLISHED_COUNTS = dict(zip(_SHELL_ORDER, PUBLISHED_COUNTS['C']))
@@ -72,7 +73,7 @@ def untabulated_counts(elements):
     Derived rather than spelled out so the control cannot quietly become a
     tabulated row when the table grows.
     """
-    counts = dict(DEFAULT_COUNTS)
+    counts = dict(ISDF_DEFAULT_COUNTS)
     while any(shipped_radii_lookup(el, BASIS, AUXBASIS, counts) is not None
               for el in elements):
         counts['A1'] += 1
@@ -113,12 +114,12 @@ def test_a_counts_sweep_moves_the_grid(ethylene):
 
 
 def test_nothing_asked_for_is_the_default_counts_lookup(ethylene):
-    """A caller with no opinion gets `DEFAULT_COUNTS`, and gets it through the
+    """A caller with no opinion gets `ISDF_DEFAULT_COUNTS`, and gets it through the
     same path as a caller who names them. This is the bitwise anchor for every
     existing consumer of the bare call."""
     mol, mf = ethylene
     bare = separable_factors(mf, mol)
-    named = separable_factors(mf, mol, counts=DEFAULT_COUNTS)
+    named = separable_factors(mf, mol, counts=ISDF_DEFAULT_COUNTS)
     for a, b in zip(bare, named):
         assert np.array_equal(a, b)
 

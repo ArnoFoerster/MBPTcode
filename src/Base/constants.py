@@ -31,6 +31,10 @@ AUX_METRIC_ROOT_FLOOR = 1e-12
 # truncation to be dropped.
 AUX_METRIC_INDEFINITE_TOL = 1e-10
 
+# Lebedev shell counts per atom of the default separable-RI / ISDF grid,
+# 148 points per atom.
+ISDF_DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
+
 # Validated ISDF interpolation grids: {basis: {level: (A1, A2, A3, B1)}}, the
 # Lebedev sub-shell replica counts measured to reach an accuracy; the only
 # place a validated count is written down.
@@ -212,6 +216,64 @@ WHOLE_FIT_ADJOINT_MAX_GB = 256.0
 # alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8
 # (tests/test_fit_adjoint_stability.py).
 FIT_ADJOINT_ULP_RESPONSE_MAX = 1e-10
+
+# How far, in Ha/Bohr and Ha, a composed force and its energy over ranks may
+# sit from the same calculation serially on the same mean field. A rank split
+# re-associates the reductions -- chi0(0) behind the static W, the tau and
+# frequency sweeps, the Davidson's products -- which moves their results by a
+# few ulp; the chain carries an ulp change of what reaches its fold to at most
+# FIT_ADJOINT_ULP_RESPONSE_MAX (water/cc-pVDZ: 8e-13 to 1.5e-12 Ha/Bohr at 2
+# and 3 ranks), and a total energy of ~100 Ha by a few of its ulp (1.4e-14).
+# It assumes the factors themselves are not re-associated: the fit's
+# three-centre sum is one block on the molecules gated here, and where a rank
+# split cuts it, its last bits reach the force through the fit's Gram matrix
+# (cond ~ 2e8) at ~1e-8, as a one-BLAS-thread repeat does (FIT_REALIZATION_
+# FORCE_TOL).
+RANK_SPLIT_FORCE_TOL = 1e-10
+RANK_SPLIT_ENERGY_TOL = 1e-12
+
+# How far a force may move between two mean fields each converged to
+# SCF_DIFFERENTIABLE_GRAD_TOL (two SCF runs, or the SCF divided over ranks
+# against the serial one). Their orbitals differ by at most ~that / gap,
+# 4e-11 for gaps above 0.25 Ha; the factors D depend on the geometry alone and
+# do not move; the force is linear in the orbital difference with
+# coefficients the size of the one-electron derivative integrals, below
+# 10 Ha/Bohr per unit density on these molecules: 4e-10, with headroom.
+CONVERGED_SCF_FORCE_TOL = 1e-9
+
+# How far a force may move between two realizations of the one ISDF fit
+# (the replicated fit_M_stable and the tiled row fit, or the fit with its
+# arithmetic re-associated). Both solve the Gram matrix of cond ~ 2e8, so
+# they agree in D only to cond(G) u ~ 3e-8 relative, in its near-null space;
+# a force reads D through branches below 1 Ha/Bohr here, so it moves by at
+# most ~3e-8 (water/cc-pVDZ: 1.5e-8 row fit against whole, 7.9e-9 under a
+# one-BLAS-thread repeat). A different estimator -- the Gram matrix over the
+# screened pairs alone -- moves it by 1e-3.
+FIT_REALIZATION_FORCE_TOL = 1e-7
+# The same for a total energy, in Ha. An energy reads D through the products
+# the fit reproduces (Z = D D^T contracted with densities), which the Gram
+# matrix's near-null space does not reach to first order: the two
+# realizations' 3e-8 relative in D moves a ~100 Ha energy by ~1e-12 (water/
+# cc-pVDZ: 9.1e-13 row fit against whole on a shape-skewed BLAS).
+FIT_REALIZATION_ENERGY_TOL = 1e-10
+# The same, relative to its norm, for D itself and for the fit branch
+# contracted with RANDOM adjoints, both of which reach the Gram matrix's
+# near-null space, where the two blockings agree only to cond(G) u ~ 3e-8 per
+# solve; the branch applies the solve on both sides of G_bar: 6e-8, here
+# with headroom for the denser grids' cond(G) (water/cc-pVDZ: D 2.4e-8, the
+# branch 2.5e-8). A different estimator moves either by ~1e-3.
+FIT_REALIZATION_REL_TOL = 1e-6
+# The same, relative, for what reads D through the products the fit
+# reproduces -- W(0), the quasiparticle and the BSE energies: second order in
+# the near-null-space difference, plus their solvers' own convergence
+# (W(0) 1.5e-13, the BSE roots 4.8e-11 on ethylene/cc-pVDZ).
+FIT_REALIZATION_OBSERVABLE_REL_TOL = 1e-9
+
+# How far a sum of well-conditioned terms (one sign or a few orders apart),
+# re-associated over grid tiles, may move relative to its result: N u for
+# N ~ 1e3 grid points, ~1e-13; 1e-12 with headroom (1e-14 measured on the
+# collocation adjoint and X_mo^T X_bar).
+REASSOCIATED_SUM_REL_TOL = 1e-12
 
 # How many times the replicated fit's own reassociation response a different
 # realization of the same fit may sit from it. The response is measured on the
@@ -530,6 +592,7 @@ SOLVENT_PLASMON_EV = {
     'water':            {'fit': 21.0, 'f_sum': 32.5},
     'toluene':          {'fit': None, 'f_sum': 26.6},
     'carbon disulfide': {'fit': None, 'f_sum': 29.0},
+    'dichloromethane':  {'fit': None, 'f_sum': 32.8},
 }
 
 # ---------------------------------------------------------------------------
@@ -566,15 +629,34 @@ FC_UNDERFLOW_EXPONENT = -748.0
 
 # Largest |H_ixjy - H_jyix| a finite-difference Hessian (src/properties/
 # hessian.py) may carry before it is refused, relative to its own largest
-# element. A central difference of an analytic force makes the two halves
-# differ only through the force's noise divided by the step, so this is a
-# measurement of that noise and nothing else. Measured on formaldehyde/
-# cc-pVDZ/B3LYP at NUCLEAR_FD_STEP: 2.9e-07 with density-fitted exchange,
-# 5.5e-03 with the interpolation. The first falls as h^2 and the second as
-# h^1, and the second puts a 1421 cm^-1 mode at 2012 -- so this threshold
-# separates a finite difference limited by its own truncation from one whose
-# forces do not belong to a single smooth surface.
+# element. The two halves of a central difference of an exact force differ by
+# the force noise over h plus the O(h^2) truncation, so a large value means
+# the step is outside the surface's Taylor radius or the forces are noisy.
+# Formaldehyde/cc-pVDZ/B3LYP at NUCLEAR_FD_STEP: 4.0e-07 density-fitted,
+# 7.6e-02 on the 148-point interpolation grid.
 HESSIAN_FD_ASYMMETRY_TOL = 1e-3
+
+# Relative asymmetry below which a finite-difference Hessian is at its force
+# noise floor and its step scaling is not tested: an ISDF force reproduces to
+# ~1e-8 Ha/Bohr, which over h = 1e-3 is ~1e-5 of a force constant.
+HESSIAN_FD_NOISE_REL = 1e-5
+
+# Range the asymmetry ratio between steps 2h and h must fall in above the
+# noise floor: h^2 truncation gives 4 (3.85 on formaldehyde's G3 ISDF grid). A
+# surface still rough on the step's scale gives less (2.38 on its 148-point
+# grid).
+HESSIAN_FD_STEP_RATIO = (2.5, 6.0)
+
+# Lowest level of ISDF_GRID_ACCURACY a finite-difference Hessian of an ISDF-K
+# mean field is built on. The ISDF energy depends on the orientation of each
+# atom's interpolation cloud (1e-5 to 1e-4 Ha within a few degrees on
+# formaldehyde), and the covariant atomic frames turn the clouds at 1-20 rad
+# per Bohr of nuclear motion, so on coarse grids the surface is rough on a
+# 1e-3 Bohr scale and its force constants are wrong even in the h -> 0 limit
+# although the force is exact. Formaldehyde/cc-pVDZ/B3LYP against density
+# fitting, largest frequency error: 1362 cm^-1 at 148 points per atom, 405 at
+# G2, 11 at G3 (35 on Hartree-Fock).
+ISDF_HESSIAN_MIN_GRID = 'G3'
 
 # Minimum share of sum (X+Y)^2 in a BSE root's winning Gamma_i (x) Gamma_a
 # channel for the root's point-group irrep label (src/properties/
@@ -1019,10 +1101,10 @@ DAVIDSON_PRECONDITIONERS = ('bare', 'screened')
 
 # Grid rows per tile of the screened preconditioner's fitted densities
 # D^T (X_o o X_o) and D^T (X_v o X_v) (`LinearResponse.davidson`): tile t is
-# rows [4096 t, 4096 (t + 1)) of the grid, cut only where a rank's rows begin
-# or end, and a rank adds its tiles' (naux, n_occ + n_vir) addends in tile
-# order before one reduction. Fixed by the grid, never by the rank count; a
-# tile's squares are 4096 (n_occ + n_vir) doubles beside the
+# rows [4096 t, 4096 (t + 1)) of the grid, formed whole by the rank holding
+# its first row, and every tile's (naux, n_occ + n_vir) addend is added in
+# tile order (`ordered_chain_sum`). Fixed by the grid, never by the rank
+# count; a tile's squares are 4096 (n_occ + n_vir) doubles beside the
 # (naux, n_occ + n_vir) sum.
 DAVIDSON_DIAGONAL_TILE = 4096
 

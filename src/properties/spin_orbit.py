@@ -210,9 +210,9 @@ def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
                 f"two_electron=None.")
         h1 = np.zeros((3, mol.nao_nr(), mol.nao_nr()))
         for ia in range(mol.natm):
-            mol.set_rinv_origin(mol.atom_coord(ia))
-            h1 -= koseki_charge(mol.atom_charge(ia)) * \
-                mol.intor_asymmetric('int1e_prinvxp', 3)
+            with mol.with_rinv_origin(mol.atom_coord(ia)):
+                h1 -= koseki_charge(mol.atom_charge(ia)) * \
+                    mol.intor_asymmetric('int1e_prinvxp', 3)
         return h1 * SOC_PREFACTOR
 
     if one_electron == 'x2c':

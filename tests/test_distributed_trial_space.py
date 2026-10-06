@@ -16,10 +16,10 @@ batch and the result are gathered whole. Gated here:
   * the OUTPUT PARTITIONS -- Ritz vectors, residuals, the preconditioner step,
     the Gram-Schmidt projection and combination, the gathered batch -- are
     the same bits at 1 to 64 simulated ranks for the same coefficients;
-  * every REDUCED SUM -- the projected blocks, the residual norms, the
-    correction norms, the Gram-Schmidt overlaps and Gram matrices -- passes
-    `reduced_sum_verdict` on every rank, and a partial added out of tile
-    order, or one missing a tile, fails it;
+  * every JOINED SUM -- the projected blocks, the residual norms, the
+    correction norms, the Gram-Schmidt overlaps and Gram matrices -- is the
+    one-rank sum bitwise on every rank (`ordered_sum`), and a rank handing
+    its tiles out of order, or one short, is not;
   * every rank's DECISIONS -- batch sizes, directions kept, converged flags,
     residual norms, restarts, the cycle count -- are rank 0's, gathered from
     every rank, at rank counts where ranks own no tile;
@@ -37,7 +37,6 @@ batch and the result are gathered whole. Gated here:
 """
 import os
 import sys
-import copy
 import warnings
 
 import numpy as np
@@ -47,9 +46,9 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.Base.constants import DAVIDSON_PAIR_TILE
-from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
-                                     distributed, lockstep_stats,
-                                     run_simulated, simulated_world)
+from src.Base.utils.mpi_grid import (current_comm, distributed,
+                                     lockstep_stats, run_simulated,
+                                     simulated_world)
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import davidson, trial_space
 from src.SingleReference.LinearResponse.davidson import (bse_pair_diagonal,
@@ -59,7 +58,6 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from src.SingleReference.LinearResponse.trial_space import (
     SUBSPACE_PIECES, PairRows, combine_rows, gram_addend, overlap_addend,
     project_rows, projection_addend, ritz_rows)
-from tests.reduction_bounds import reduced_sum_verdict
 from tests.test_distributed_fit_mpi import relative, roots_resolution
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -107,7 +105,7 @@ def model_problem(seed=11):
         return diag[None] * z + v, v
 
     # RPA's screened diagonal is d itself, as the production actions return
-    # it; the default preconditioner is now the screened diagonal, which a
+    # it; the default preconditioner is the screened diagonal, which a
     # block action without one refuses.
     apply_AB.screened_diagonal = lambda: diag
 
@@ -339,58 +337,30 @@ def reduced_sums(comm, g, tile):
     return {name: (a, rows.join(a, shapes[name])) for name, a in addends.items()}
 
 
-def recorded_partials(monkeypatch):
-    """Patch the module's reduce_sum to record what each rank hands it."""
-    seen = {}
-    real = trial_space.reduce_sum
-
-    def recording(a, comm):
-        rank = comm.Get_rank() if comm is not None else 0
-        seen.setdefault(rank, []).append(np.array(a, copy=True))
-        return real(a, comm)
-
-    monkeypatch.setattr(trial_space, 'reduce_sum', recording)
-    return seen
-
-
-def verdicts(size, g, seen, one_rank):
-    """Every rank's `reduced_sum_verdict` of every reduced sum at `size`."""
-    seen.clear()
+def joins_at(size, g):
+    """Every rank's {sum: joined value} at `size` simulated ranks."""
     out = run_simulated(reduced_sums, size, g, TILE_GATE)
-    n_tiles = -(-N_GATE // TILE_GATE)
-    owners = [list(range(*contiguous_block(n_tiles, r, size)))
-              for r in range(size)]
-    result = []
-    for rank, sums in enumerate(out):
-        for i, name in enumerate(one_rank):
-            addends, whole = one_rank[name]
-            result.append((name, rank, reduced_sum_verdict(
-                whole, addends, owners, rank, seen[rank][i], sums[name][1])))
-    return result
+    return [{name: sums[name][1] for name in sums} for sums in out]
 
 
-def test_every_reduced_sum_is_within_its_join_bound(monkeypatch):
-    """Each rank hands the reduction its own tiles' addends in tile order,
-    and the reduced value lies within the join bound of the partials' exact
-    sum, for every sum the loop reduces, at 2 to 64 ranks."""
+def test_every_join_is_the_one_rank_sum():
+    """Every sum the loop joins -- projected blocks, residual and correction
+    norms, Gram-Schmidt overlaps and Gram matrices -- is the one-rank sum
+    bitwise on every rank at 2 to 64 ranks: every tile's addend added in tile
+    order (`ordered_sum`)."""
     g = gate_arrays()
     one_rank = reduced_sums(None, g, TILE_GATE)
-    seen = recorded_partials(monkeypatch)
-    worst = {}
     for size in GATE_SIZES[1:]:
-        for name, rank, v in verdicts(size, g, seen, one_rank):
-            assert v.serial and v.partial, (size, name, rank)
-            assert v.ratio <= 1.0, (size, name, rank, v.ratio)
-            worst[name] = max(worst.get(name, 0.0), v.ratio)
-    assert set(worst) == set(one_rank)
+        for rank, sums in enumerate(joins_at(size, g)):
+            for name, (_, whole) in one_rank.items():
+                assert np.array_equal(sums[name], whole), (size, name, rank)
 
 
-def test_a_misordered_or_short_partial_fails_the_verdict(monkeypatch):
-    """The verdict is a gate: a rank adding its tiles in reverse fails the
-    partial part, and a rank leaving out its last tile fails the bound."""
+def test_a_misordered_or_short_join_is_not_the_one_rank_sum(monkeypatch):
+    """The gate can fail: a rank handing its tiles in reverse, or leaving out
+    its last tile, and the joined sums are not the one-rank ones."""
     g = gate_arrays()
     one_rank = reduced_sums(None, g, TILE_GATE)
-    seen = recorded_partials(monkeypatch)
     real = PairRows.join
 
     def reversed_join(self, addends, shape):
@@ -399,15 +369,12 @@ def test_a_misordered_or_short_partial_fails_the_verdict(monkeypatch):
     def short_join(self, addends, shape):
         return real(self, addends[:-1] if self.rank == 1 else addends, shape)
 
-    for plant, part in ((reversed_join, 'partial'), (short_join, 'ratio')):
+    for plant in (reversed_join, short_join):
         monkeypatch.setattr(PairRows, 'join', plant)
-        failed = set()
-        for name, rank, v in verdicts(3, g, seen, one_rank):
-            if part == 'partial' and not v.partial:
-                failed.add(name)
-            if part == 'ratio' and v.ratio > 1.0:
-                failed.add(name)
-        assert failed == set(one_rank), (part, failed)
+        out = joins_at(3, g)
+        same = {name for name, (_, whole) in one_rank.items()
+                if all(np.array_equal(r[name], whole) for r in out)}
+        assert not same, (plant.__name__, same)
     monkeypatch.setattr(PairRows, 'join', real)
 
 
