@@ -47,6 +47,7 @@ from scipy.sparse.linalg import LinearOperator, minres
 from src.Base.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_TOL_GRAD,
                                 FRAGMENT_PM_POLISH_MAX,
                                 LOCALIZED_ASSIGNMENT_FLOOR)
+from src.Base.pyscf_interface import fock_mo
 from src.Base.utils.krylov import root_driven_solve
 
 POPULATION_SCHEMES = ('lowdin', 'iao')
@@ -295,13 +296,16 @@ class FragmentOrbitals:
         else:
             pops_o = population_tensor(mol, fragments, scheme, s=s)
             pops_v = pops_o
-        # built before anything can refuse: a distributed mean field builds
-        # the Fock matrix collectively, on every rank
-        fock = mf.get_fock() if reference is None else None
+        # built before anything can refuse, on every rank: a distributed mean
+        # field answers it collectively, inside `distributed_fock` (`fock_mo`)
+        f_mo = fock_mo(mf) if reference is None else None
+        blocks = {'occ': slice(None, nocc), 'vir': slice(nocc, None)}
 
         def localize(_):
-            spaces = {tag: _localize_space(mol, tag, c, pops, reference,
-                                           conv_tol, floor, fock)
+            spaces = {tag: _localize_space(
+                          mol, tag, c, pops, reference, conv_tol, floor,
+                          None if f_mo is None
+                          else f_mo[blocks[tag], blocks[tag]])
                       for tag, c, pops in (('occ', c_o, pops_o),
                                            ('vir', c_v, pops_v))}
             return mo, spaces
@@ -319,8 +323,8 @@ class FragmentOrbitals:
 def _localize_space(mol, tag, c, pops, reference, conv_tol, floor, fock):
     """(u, labels, weights, stationarity gradient) of one space, `tag` 'occ'
     or 'vir': localized, refused below `floor`, ordered and signed as
-    `FragmentOrbitals.from_mf` documents; `fock` (AO) orders it when there is
-    no reference."""
+    `FragmentOrbitals.from_mf` documents; `fock`, the space's block of
+    C^T F C, orders it when there is no reference."""
     start = None
     if reference is not None:
         ref_c = reference.c_occ if tag == 'occ' else reference.c_vir
@@ -351,7 +355,7 @@ def _localize_space(mol, tag, c, pops, reference, conv_tol, floor, fock):
     else:
         # fragment-contiguous, by orbital energy inside a fragment;
         # sign: the largest AO coefficient is positive
-        energies = np.einsum('pi,pq,qi->i', cl, fock, cl)
+        energies = np.einsum('pi,pq,qi->i', u, fock, u)
         order = np.lexsort((energies, labels))
         big = cl[np.abs(cl).argmax(axis=0), np.arange(cl.shape[1])]
         signs = np.where(big < 0, -1.0, 1.0)[order]
