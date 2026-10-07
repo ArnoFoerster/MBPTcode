@@ -78,7 +78,8 @@ from src.Base.constants import (FIT_CHOLESKY_BLOCK, KAPPA,
 from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                 BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
                                 BSE_FORCE_RESIDUAL_TOL,
-                                BSE_DENSE_MAX_NOV, CD_NFREQ, HARTREE_TO_EV,
+                                BSE_DENSE_MAX_NOV, CASIDA_PHASE_TIE_TOL,
+                                CD_NFREQ, HARTREE_TO_EV,
                                 OUTSIDE_TREATMENTS, SOP_N_POLES)
 from src.Base.declaration import Excitation, SurfacePhysics
 from src.Base.environment import attached_environment, environment_label
@@ -461,13 +462,21 @@ class ExcitedStateChain(FactorChain):
 
     def _freeze_newton_branch(self, route_out, eps, xc_correction, states):
         """Keep the guard band, the root and the pole set each quasiparticle
-        solve resolved to, once. True when a calibrated shift was added and
-        the solve has to be repeated to read it.
+        solve resolved to, once. True when the solve has to be repeated: a
+        root was frozen here for the first time, or a calibrated shift was
+        added and is read by the next solve.
 
         The first solve is the reference geometry's in every path that then
         displaces it, so `setdefault` freezes that one: a displaced geometry
         reports what it used, starts from the reference root, evaluates the
         pole model on the reference poles and changes none of them.
+
+        THE REFERENCE ROOT IS THE ONE ITS FROZEN SEED REACHES. The first
+        solve starts at eps_p pushed by the guard; every later one at this
+        geometry starts at the root it froze, and a Newton started elsewhere
+        lands an ulp away. Repeating the freezing solve from its own seed,
+        guard and poles makes every evaluation at the reference geometry the
+        same arithmetic, forward and reverse.
 
         eps, xc_correction, states: what the solve read, xc_correction per
         state of `states` (or one scalar), so the calibrated shift is taken
@@ -482,12 +491,13 @@ class ExcitedStateChain(FactorChain):
         for p, off in route_out.get('pole_offsets', {}).items():
             self.pole_offsets.setdefault(int(p), float(off))
         roots = route_out.get('roots', {})
+        froze = any(int(p) not in self.qp_seeds for p in roots)
         for p, w in roots.items():
             self.qp_seeds.setdefault(int(p), float(w))
         for p, poles in route_out.get('sop_poles', {}).items():
             self.sop_poles.setdefault(int(p), np.array(poles, float))
         if self.scissor != 'calibrate':
-            return False
+            return froze
         # Tier the states the route sent to the real axis. A second reading of
         # Eq. (27) would test the root where the route tested the start, and
         # disagree on the marginal states.
@@ -499,7 +509,7 @@ class ExcitedStateChain(FactorChain):
                 continue
             self.scissor_map[p] = float(roots[p]) - float(eps[p] + static[p])
             grew = True
-        return grew
+        return grew or froze
 
     @staticmethod
     def _routes_taken(route_out):
@@ -533,11 +543,13 @@ class ExcitedStateChain(FactorChain):
                                   route_out=route_out, tape=tape,
                                   rows_block=rows_block, **self._qp_kw())
             tape = route_out.get('tape', tape)
-            # A calibrated shift is read by the solve after the one that
-            # measured it, so the map triggers one repeat.
+            # A root frozen here, or a calibrated shift, is read by the solve
+            # after the one that froze it, so either triggers one repeat.
             if not self._freeze_newton_branch(
                     route_out, eps, xc_correction, states):
                 break
+        if route_out.get('tape') is not None:
+            route_out['tape'].drop_residues()
         # What the last solve took, state by state, for the record: the route
         # and the pole strength Z, which the route does not keep on the chain.
         # A solve that reports no Z (a stand-in route) records None for it.
@@ -777,7 +789,7 @@ class ExcitedStateChain(FactorChain):
         if self.solver_used(n_ov) == 'dense':
             a, b, cache = bse_blocks(x_mo, d, eps_qp, w_aux, self.nocc,
                                      spin=self.spin, bse_tda=self.bse_tda)
-            om, xn, yn = bse_solve(a, b)
+            om, xn, yn = casida_phase(*bse_solve(a, b))
             return om, xn, yn, (cache if self.bse_adjoint == 'explicit'
                                 else {})
         if self.nroots <= self.state:
@@ -804,7 +816,8 @@ class ExcitedStateChain(FactorChain):
             read_roots=None if self.track is not None else self.state + 1,
             read_tol=max(self.bse_conv_tol, BSE_FORCE_RESIDUAL_TOL))
         order = np.argsort(om)
-        return om[order], xn[:, order], yn[:, order], {}
+        om, xn, yn = casida_phase(om[order], xn[:, order], yn[:, order])
+        return om, xn, yn, {}
 
     def _forward(self, mol, mf):
         return self._casida_forward(self._shared_forward(mol, mf))
@@ -1225,16 +1238,18 @@ class ExcitedStateChain(FactorChain):
         # Hartree-Fock it is zero.
         d_sigma = d if d_bare is None else d_bare
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
-        qp_out = {}
-        with self.phase('t_qp'):
-            out = qp_gradient_space_time(x_mo, d_sigma,
-                                         eps, self.nocc, self.gw_grid,
-                                         self.nu, self.wt, orb, mu=mu,
-                                         want_grad=False,
-                                         xc_correction=xc_orb,
-                                         route_out=qp_out,
-                                         **self._qp_kw())
-        self._freeze_newton_branch(qp_out, eps, xc_orb, [orb])
+        while True:
+            qp_out = {}
+            with self.phase('t_qp'):
+                out = qp_gradient_space_time(x_mo, d_sigma,
+                                             eps, self.nocc, self.gw_grid,
+                                             self.nu, self.wt, orb, mu=mu,
+                                             want_grad=False,
+                                             xc_correction=xc_orb,
+                                             route_out=qp_out,
+                                             **self._qp_kw())
+            if not self._freeze_newton_branch(qp_out, eps, xc_orb, [orb]):
+                break
         return float(out[0])
 
     def quasiparticle_gradient(self, offset=0, mol=None, mf=None):
@@ -1251,14 +1266,16 @@ class ExcitedStateChain(FactorChain):
         orb = self.nocc - 1 + offset
         d_sigma = d if d_bare is None else d_bare
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
-        qp_out = {}
-        with self.phase('t_qp_backward'):
-            w_star, z_fac, eps_bar, x_bar, d_bar = qp_gradient_space_time(
-                x_mo, d_sigma, eps, self.nocc,
-                self.gw_grid, self.nu, self.wt, orb,
-                mu=mu, want_grad=True, xc_correction=xc_orb,
-                route_out=qp_out, **self._qp_kw())
-        self._freeze_newton_branch(qp_out, eps, xc_orb, [orb])
+        while True:
+            qp_out = {}
+            with self.phase('t_qp_backward'):
+                w_star, z_fac, eps_bar, x_bar, d_bar = qp_gradient_space_time(
+                    x_mo, d_sigma, eps, self.nocc,
+                    self.gw_grid, self.nu, self.wt, orb,
+                    mu=mu, want_grad=True, xc_correction=xc_orb,
+                    route_out=qp_out, **self._qp_kw())
+            if not self._freeze_newton_branch(qp_out, eps, xc_orb, [orb]):
+                break
         # The correction carries Z, not 1: the Newton condition is
         # w = eps_p + Delta_p + Sigma_c(w), so every term on the right,
         # Delta_p included, is renormalized by Z = [1 - dSigma_c/dw]^-1 on its
@@ -1445,6 +1462,30 @@ class ExcitedStateChain(FactorChain):
             kernel += '(mean-field eps)'
         return (f'{kernel} {self.spin} state {self.state} / {self.basis} / '
                 f'outside {self.outside} / {self.environment!r}')
+
+
+def casida_phase(om, xn, yn):
+    """(Omega, X, Y) with each root's sign fixed by its largest |X| element,
+    made positive; elements within CASIDA_PHASE_TIE_TOL of it are a tie,
+    broken by the lowest index.
+
+    An eigensolver returns each root with whatever sign its last Rayleigh-Ritz
+    step produced, and a Davidson's path follows the last bits of its input:
+    on water/cc-pVDZ Hartree-Fock, 34 of 48 one-ulp moves of a single eps_QP
+    flip at least one of four roots. Energies and state gradients do not see
+    it; a coupling between two roots, d<m|H|n>/dR and the derivative
+    coupling, and a spin-orbit element and its derivative change sign with
+    it, so the sign is a convention of the vector alone.
+    """
+    xn, yn = np.array(xn, copy=True), np.array(yn, copy=True)
+    for k in range(xn.shape[1]):
+        mag = np.abs(xn[:, k])
+        lead = int(np.flatnonzero(mag >= (1.0 - CASIDA_PHASE_TIE_TOL)
+                                  * mag.max())[0])
+        if xn[lead, k] < 0.0:
+            xn[:, k] = -xn[:, k]
+            yn[:, k] = -yn[:, k]
+    return om, xn, yn
 
 
 def replayed_first_point(surface, mol):

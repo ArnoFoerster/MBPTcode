@@ -42,6 +42,7 @@ optional third-party one.
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks` |
 | analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
+| couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
 | the SCF record and its optional warm start and Newton finish; a relaxation's quasi-Newton Hessian | `test_scf_convergence`, `test_relax_hessian` |
 | the quasiparticle energy on the BSE diagonal: the pole model's frozen verdict, the scissors' static terms, the force against its own energy | `test_pole_model_route_frozen`, `test_inside_scissor_static_term`, `test_solvated_outside_scissor`, `test_qp_energy_assembly` (slow) |

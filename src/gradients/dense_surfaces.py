@@ -24,13 +24,14 @@ value itself.
 """
 import numpy as np
 from pyscf import gto, scf
+from pyscf.df.addons import make_auxmol
 
 from src.Base.constants import HARTREE_TO_EV, QP_ORDER_SEARCH
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
 from src.Base.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
 from src.Base.environment import environment_of
-from src.Base.isdf_jk import mean_field_skeleton_force
+from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
 from src.Base.utils.mpi_grid import lockstep
 from src.Base.utils.threads import blas_single_threaded
 from src.SingleReference.GW.qp_states import valence_qp_states
@@ -181,6 +182,64 @@ def refuse_a_solvated_mean_field(mf, surface, force=False):
         f'RPAQPSurface composed on it, which carry the environment through '
         f'the auxiliary metric. Excitation energies and quasiparticle levels '
         f'are differences and are unaffected.')
+
+
+def mean_field_integrals(mf, mol):
+    """How the mean field's two-electron integrals are represented: ('exact',
+    None), ('df', its auxiliary molecule at `mol`) for a pyscf density-fitted
+    SCF, or ('isdf', None) for an ISDF-K one (DF Coulomb, interpolated
+    exchange), which no dense post-SCF step reproduces."""
+    with_df = getattr(mf, 'with_df', None)
+    if isinstance(with_df, ISDFJK):
+        return 'isdf', None
+    if with_df is not None:
+        return 'df', make_auxmol(mol, with_df.auxbasis)
+    return 'exact', None
+
+
+def refuse_mismatched_integrals(mf, mol, auxmol, surface):
+    """Refuse a force whose mean field and post-SCF step use different (pq|rs).
+
+    The gradient engine (`correlation_gradients`) folds the Fock matrix's
+    dependence on the orbitals, and solves the orbital multipliers, with the
+    post-SCF integrals `eri_mo`, while the mean field's own force comes from
+    the mean field. Both are the derivative of one energy only when the mean
+    field was converged with those same integrals: exact on exact, or
+    density-fitted in the auxiliary basis the post-SCF step fits in. A
+    DF-RHF reference under exact post-SCF integrals, or an exact one under
+    `auxbasis=`, returns a force 6e-5 Ha/Bohr off its own energy on water/
+    cc-pVDZ. The energy is a well-defined functional either way (the RI step
+    of the dense-vs-cubic decomposition is an exact reference with an
+    `auxbasis`), so only the force is refused.
+
+    auxmol: the post-SCF auxiliary molecule, None for exact integrals.
+    """
+    kind, mf_aux = mean_field_integrals(mf, mol)
+    fitted_in = (getattr(getattr(mf, 'with_df', None), 'auxbasis', None)
+                 or "pyscf's default JK-fitting set")
+    if kind == 'isdf':
+        why = ('the mean field is ISDF-K (interpolated exchange), which no '
+               'dense post-SCF integral reproduces')
+    elif kind == 'df' and auxmol is None:
+        why = (f'the mean field is density-fitted in '
+               f'{fitted_in} '
+               f'and the post-SCF integrals are exact (auxbasis=None)')
+    elif kind == 'exact' and auxmol is not None:
+        why = (f'the mean field is unfitted and the post-SCF integrals are '
+               f'fitted in {auxmol.basis!r}')
+    elif kind == 'df' and mf_aux._basis != auxmol._basis:
+        why = (f'the mean field is density-fitted in '
+               f'{fitted_in} '
+               f'and the post-SCF integrals in {auxmol.basis!r}')
+    else:
+        return
+    raise ValueError(
+        f'{surface} differentiates its post-SCF step with the mean field\'s '
+        f'orbital response built from the post-SCF integrals, but {why}: the '
+        f'force would not be the derivative of the energy this surface '
+        f'reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean '
+        f'field with auxbasis=None, or a density-fitted one with auxbasis= '
+        f'its own auxiliary basis. The energies are not refused by this.')
 
 
 class DenseRPASurface:
@@ -629,6 +688,8 @@ class DenseBSESurface:
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
         refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
+        refuse_mismatched_integrals(mf, mol, self._auxmol(mol),
+                                    'DenseBSESurface')
         b, eri, nocc, norb, _ = self._solve(mol, mf)
         gF, G4, tg = b.partials(self.state)
         if self.screening == 'rpa':
@@ -659,6 +720,8 @@ class DenseBSESurface:
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
         refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
+        refuse_mismatched_integrals(mf, mol, self._auxmol(mol),
+                                    'DenseBSESurface')
         b, eri, nocc, norb, e0 = self._solve(mol, mf)
         gF, G4, tg = b.partials(self.state)
         if self.screening == 'rpa':

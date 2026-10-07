@@ -496,6 +496,11 @@ BSE_DAVIDSON_CONV_TOL = 1e-8
 # moves by 7e-3 |r| Ha/Bohr down to the fit's floor, 3e-9 at |r| = 1e-7; a
 # spectrum ten times denser keeps 1e-7 under ISDF_GRADIENT_FLOOR.
 BSE_FORCE_RESIDUAL_TOL = 1e-7
+# A Casida eigenvector's sign is fixed by its largest |X| element, positive;
+# elements within this relative distance of the largest are a tie, broken by
+# the lowest index, so that a symmetry-equal pair whose magnitudes differ only
+# by rounding does not decide the sign by its last bits.
+CASIDA_PHASE_TIE_TOL = 1e-8
 
 # Coulomb-metric fit error at which an ISDF atomic grid has stopped being a
 # coarse grid and become a failed fit; see `separable_ri.optimize_atomic_radii`.

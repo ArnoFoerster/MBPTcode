@@ -534,7 +534,8 @@ class QPSetTape:
     bits reads proj and Bps from here, and wcs as well when the frequency
     axis is also the same -- the same arrays, so the same bits. `release`
     drops the arrays once no later call is to read them, and a released tape
-    applies to nothing.
+    applies to nothing. C_ov, the explicit residues' three-index block, is
+    kept only while the solve that built it repeats (`drop_residues`).
     """
 
     X: object
@@ -548,10 +549,16 @@ class QPSetTape:
     proj_tau: ProjRows
     Bps: list
     wcs: list
+    C_ov: object = None
 
     def release(self):
         """Drop what the tape holds."""
         self.X = self.D = self.proj_tau = self.Bps = self.wcs = None
+        self.C_ov = None
+
+    def drop_residues(self):
+        """Drop C_ov once the solve that built it has stopped repeating."""
+        self.C_ov = None
 
     def reads(self, X, D, eps, mu, tile_gb, states, grid):
         """(proj and Bps apply, wcs apply as well) for a call on these."""
@@ -734,7 +741,10 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         elif route == 'explicit':
             if C_ov is None:
                 require_explicit_fits(naux, nocc, len(eps) - nocc, p)
-                C_ov = three_index_ov(*factors(), eps, nocc, tile_gb=tile_gb)
+                C_ov = (tape.C_ov if same and tape.C_ov is not None else
+                        three_index_ov(*factors(), eps, nocc, tile_gb=tile_gb))
+                if route_out is not None:
+                    route_out['tape'].C_ov = C_ov
             rs = ExplicitRealScreening(C_ov, eps, nocc)
         else:
             rs = None

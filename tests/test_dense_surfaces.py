@@ -31,6 +31,7 @@ from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
                                SCF_ENERGY_CONV_TOL,
                                SCF_ENERGY_GRAD_TOL,
                                XC_SHIFT_GRADIENT_TOL)
+from src.gradients import dense_surfaces
 from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                                 QuasiparticleSurface,
                                                 kohn_sham_gradient_correction,
@@ -588,3 +589,65 @@ def test_an_unknown_multiplicity_is_refused():
     """KAPPA has two entries; anything else is a typo, not a third spin state."""
     with pytest.raises(ValueError, match='spin'):
         DenseBSESurface(water(), scf=rhf, spin='quintet')
+
+
+def df_rhf(auxbasis):
+    """`rhf` density-fitted in `auxbasis`."""
+    def factory(mol):
+        mf = scf.RHF(mol).density_fit(auxbasis=auxbasis)
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+        mf.kernel()
+        return mf
+    return factory
+
+
+#: (mean field, the surface's auxbasis) whose two-electron integrals differ:
+#: a force on them is off its own energy (water/cc-pVDZ, along one random
+#: direction: 3.7e-6 and 5.2e-5 Ha/Bohr; matched pairs 2e-9, the step's
+#: truncation)
+MISMATCHED = {'df/exact': (df_rhf('cc-pvdz-jkfit'), None),
+              'exact/ri': (rhf, 'cc-pvdz-ri'),
+              'df/other-ri': (df_rhf('cc-pvdz-jkfit'), 'cc-pvdz-ri')}
+
+
+@pytest.mark.parametrize('case', list(MISMATCHED))
+def test_a_force_on_mismatched_integrals_is_refused(case):
+    """The gradient engine builds the mean field's orbital response from the
+    post-SCF integrals; a mean field converged on other integrals gives a
+    force that is no energy's derivative, so both forces refuse it. The
+    energy, a well-defined functional, is still reported."""
+    factory, aux = MISMATCHED[case]
+    mol = water()
+    surface = DenseBSESurface(mol, scf=factory, auxbasis=aux)
+    for force in (surface.total_gradient, surface.excitation_gradient):
+        with pytest.raises(ValueError, match='not be the derivative'):
+            force(mol)
+    assert np.isfinite(surface.total_energy(mol))
+
+
+def test_matched_integrals_keep_their_force(monkeypatch):
+    """A density-fitted mean field under the same auxiliary basis is a
+    derivative of its energy (one central difference along a fixed
+    direction), and an exact pair's force is bit for bit the one without
+    the guard."""
+    mol = water()
+    surface = DenseBSESurface(mol, scf=df_rhf('cc-pvdz-ri'),
+                              auxbasis='cc-pvdz-ri')
+    g, _, _ = surface.total_gradient(mol)
+    rng = np.random.default_rng(3)
+    d = rng.standard_normal((mol.natm, 3))
+    d /= np.linalg.norm(d)
+    h, x0 = 2e-4, mol.atom_coords()
+
+    def energy(sign):
+        return surface.total_energy(mol.set_geom_(x0 + sign * h * d,
+                                                  unit='Bohr', inplace=False))
+
+    fd = (energy(+1) - energy(-1)) / (2 * h)
+    assert abs(float(np.sum(g * d)) - fd) < 1e-7
+
+    exact = DenseBSESurface(mol, scf=rhf)
+    guarded = exact.total_gradient(mol)[0]
+    monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
+                        lambda *a: None)
+    assert np.array_equal(guarded, exact.total_gradient(mol)[0])

@@ -269,7 +269,7 @@
   },
   "formaldehyde-singlet": {
    "R0": {
-    "total_energy": -113.71031421813636,
+    "total_energy": -113.71031421813638,
     "gradient_energy": -113.71031421813638,
     "gradient": [
      [
@@ -323,7 +323,7 @@
   },
   "formaldehyde-triplet": {
    "R0": {
-    "total_energy": -113.7394296899857,
+    "total_energy": -113.73942968998568,
     "gradient_energy": -113.73942968998568,
     "gradient": [
      [

@@ -187,13 +187,22 @@ def test_calibration_tiers_what_the_route_excluded_not_what_reach_rereads(
     surface = _stub_surface('calibrate', excluded=())
     calls = _stub_solve(monkeypatch, surface, excluded=())
     surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
-    assert len(calls) == 1, 'nothing to calibrate, so nothing to repeat'
+    assert len(calls) == 2, 'the solve that froze the roots repeats from them'
     assert surface.scissor_map == {}
+    del calls[:]
+    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    assert len(calls) == 1, 'nothing to calibrate or freeze, so no repeat'
 
 
-def test_an_uncalibrated_surface_never_repeats_the_solve(monkeypatch):
+def test_an_uncalibrated_surface_repeats_only_the_freezing_solve(
+        monkeypatch):
+    """No shift to read: the one repeat is the solve that froze the roots,
+    started again from them; a solve with every root on file runs once."""
     surface = _stub_surface(None)
     calls = _stub_solve(monkeypatch, surface)
     surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert surface.scissor_map == {}
+    del calls[:]
+    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    assert len(calls) == 1
