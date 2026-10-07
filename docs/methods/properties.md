@@ -32,6 +32,56 @@ than assumed) plus the Herzberg-Teller dV/dq scan over `vibronic`'s
 ground-state modes that `rates.spin_vibronic_rate` needs for an
 El-Sayed-forbidden pair, where the Condon term alone is not the whole story.
 
+**Spin-vibronic coupling** — intersystem crossing between a singlet and a
+triplet of the same orbital character (both n -> pi*, or both pi -> pi*) is
+nearly forbidden by El-Sayed's rule: their spin-orbit coupling is close to
+zero at a fixed geometry. A vibration can still switch it on, by mixing a
+nearby second triplet (or singlet) of a different character into the pair.
+`spin_vibronic_coupling` gives how fast the coupling between S1 and T1
+changes along each nuclear motion, through those higher states, from one
+excited-state calculation and without displaced geometries. This matters when
+the direct coupling is small and T2 lies close to T1: forward intersystem
+crossing of El-Sayed-forbidden pairs, and reverse intersystem crossing in
+TADF emitters, where T2 a few k_B T above T1 often carries the process. The
+derivative, projected on normal modes, is the Herzberg-Teller input of
+`rates.spin_vibronic_rate`, and `rates.photoluminescence` takes the T2 rates
+and the T1-T2 gap to weight a thermally populated T2.
+
+```python
+import numpy as np
+from pyscf import gto, scf
+
+from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.state_manifold import StateManifold
+from src.properties.spin_orbit import soc_operator_mo
+from src.properties.spin_vibronic import spin_vibronic_coupling
+
+
+def rhf(mol):
+    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.kernel()
+    return mf
+
+
+# twisted formaldehyde with a stretched C=O: T2 lies close above T1
+mol = gto.M(atom='C 0 0 0; O 0.05 -0.03 1.45; H 0.12 0.943 -0.588; '
+                 'H -0.20 -0.943 -0.588', basis='cc-pvdz')
+chain = ExcitedStateChain(mol, rhf, mf=rhf(mol), solver='davidson',
+                          bse_adjoint='grid', nroots=3)
+S1, S2, T1, T2 = ('singlet', 0), ('singlet', 1), ('triplet', 0), ('triplet', 1)
+ev = StateManifold(chain, states=(S1, S2, T1, T2)).evaluate(
+    couplings=((S2, S1), (T2, T1)))
+out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol), S1, T1,
+                             singlet_paths=(S2,), triplet_paths=(T2,))
+print('|<S1|H_SO|T1>| =', out['v0'], 'Hartree')
+print('|dV/dR| =', np.linalg.norm(out['dv_cart']), 'Hartree/Bohr')
+```
+
+`out['dv_cart']` holds the derivative for every atom and direction; pass
+`modes`, `masses` and `omega` from `vibronic.normal_modes` at a minimum to get
+it per normal mode as well.
+
 **Vibronic band shapes** — `band_shape(s_k, omega_k, e00, temperature,
 energies, *, gaussian_fwhm, lorentzian_fwhm)` gives the normalized absorption
 (E x FC) and emission (E^3 x FC) spectra of the displaced-oscillator model
