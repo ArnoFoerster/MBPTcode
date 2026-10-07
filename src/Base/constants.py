@@ -661,6 +661,36 @@ ROOT_FOLLOW_MARGIN_MIN = 0.2
 # reference geometry.
 OUTSIDE_TREATMENTS = ('scissor', 'mean-field')
 
+# The adaptive explicit set (`GW.qp_selection`): an analytic-continuation GW at
+# the reference geometry selects which admitted orbitals are solved, and the
+# rest of the window borrows a solved orbital's shift. Its first-order error
+# in each target excitation, B = sum_p |n_p| (|delta_p| + u_p), is held below
+# this many meV per target state, well under the ISDF grid's own error.
+ADAPTIVE_QP_TOL_MEV = 1.0
+# The fraction of that budget the selection aims for before the explicit roots
+# exist, so that the check on the production eigenvectors rarely has to add a
+# state (each addition costs a second Casida at the reference geometry).
+ADAPTIVE_SELECT_MARGIN = 0.5
+# Largest residual AC minus explicit shift on the frontier pair, eV, above
+# which the continuation is unfit to select and the whole window is solved.
+ADAPTIVE_AC_CALIBRATION_MAX_EV = 0.1
+# Largest |AC shift| the continuation is trusted to judge, eV; beyond it the
+# state is solved explicitly. Explicit shifts seen on HF and range-separated
+# references stay below 1.6 eV.
+ADAPTIVE_AC_SHIFT_MAX_EV = 3.0
+# Roots within this many eV of a target, on the selection spectrum, become
+# targets too: along a walk they can mix with or swap onto the followed state.
+ADAPTIVE_ROOT_MIX_EV = 0.1
+# Largest |delta_p| + u_p of a hole, eV, whatever its weight in the targets: a
+# hole further from its own root than this is solved. A single excitation has
+# sum_p |n_p| ~ 2, so every root, targeted or not, then sits within twice this
+# of its whole-window energy, i.e. within ADAPTIVE_ROOT_MIX_EV: a root too far
+# from a target at R0 to be one cannot be pushed onto it by the scissors.
+ADAPTIVE_HOLE_MAX_EV = 0.5 * ADAPTIVE_ROOT_MIX_EV
+# Rounds of additions after the reference-geometry check on the production
+# eigenvectors before the whole window is solved instead.
+ADAPTIVE_MAX_ROUNDS = 2
+
 # Single-pole energy Omega_p (eV) of a solvent's electronic response. Duchemin,
 # Amblard and Blase, J. Chem. Theory Comput. 20, 9072 (2024) write
 # eps_opt(w)^-1 = 1 + (eps_inf^-1 - 1) f(w; Omega_p) and show that the spatial

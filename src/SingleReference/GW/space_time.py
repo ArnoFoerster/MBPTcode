@@ -441,7 +441,7 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
                   tau_points, freq_points, pade_freq, p_state, want_static,
                   extras, ntau, comm, transform, solver_mode, dm_correction,
                   greedy, timings, screen_r_cut, sigma_x, eps_anchor,
-                  sigma_x_matrix, tile_gb):
+                  sigma_x_matrix, tile_gb, xc_diagonal=None, with_z=False):
     """The in-core route over more than one rank, split over grid rows as
     well as tau points, so that it divides past ntau ranks and no rank holds a
     whole (M, M) block, a whole stack of (naux, naux) slices or the AO
@@ -509,7 +509,8 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
                       nocc, p_state, mu, pade_freq, mf, mol,
                       solver_mode, dm_correction, greedy, timings, sigma_x,
                       reaction_field=reaction_field, comm=comm,
-                      sigma_x_matrix=sigma_x_matrix)
+                      sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,
+                      with_z=with_z)
 
 
 def _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points, freq_points,
@@ -570,7 +571,8 @@ def _root_quasiparticles(out, comm, extras=None):
 
 def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
                solver_mode, dm_correction, greedy, timings, sigma_x='mf',
-               reaction_field=None, comm=None, sigma_x_matrix=None, spin=None):
+               reaction_field=None, comm=None, sigma_x_matrix=None, spin=None,
+               xc_diagonal=None, with_z=False):
     """Sigma_c on the imaginary axis -> quasiparticle energy, one per state.
 
     reaction_field is the continuum's Eq. (18) shift when the route built W,
@@ -599,6 +601,10 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     divide it where the mean field carries the slices a distributed SCF left
     on it, and a mean field converged one rank at a time builds it
     replicated.
+
+    xc_diagonal: <p|Sigma_x - v_xc (+ Sigma^env)|p> on the states from the
+    caller; it replaces the build, reaction field included. with_z: return
+    (roots, Z) of the continuation.
     """
     states = np.atleast_1d(p_state)
     scalar = np.ndim(p_state) == 0
@@ -609,12 +615,15 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     _t = _time.time()
     # One exchange build for the whole window: <Sigma_x - v_xc> carries no state
     # index until it is indexed.
-    xc_diag = static_exchange_diagonal(mf, mol, states,
-                                       dm_correction=dm_correction,
-                                       exchange=sigma_x,
-                                       reaction_field=reaction_field,
-                                       sigma_x_matrix=sigma_x_matrix,
-                                       comm=comm, spin=spin)
+    if xc_diagonal is not None:
+        xc_diag = np.atleast_1d(np.asarray(xc_diagonal, float))
+    else:
+        xc_diag = static_exchange_diagonal(mf, mol, states,
+                                           dm_correction=dm_correction,
+                                           exchange=sigma_x,
+                                           reaction_field=reaction_field,
+                                           sigma_x_matrix=sigma_x_matrix,
+                                           comm=comm, spin=spin)
     if nranks > 1:
         xc_diag = lockstep(np.ascontiguousarray(xc_diag, dtype=float), comm)
     if timings is not None:
@@ -630,9 +639,21 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
         z_fit, _ = imaginary_axis_sample_points(pade_freq, nocc, p, mu)
         # Occupied states sit on the negative branch, where Sigma(-i w) = conj.
         s_p = np.conj(sig[i]) if p < nocc else sig[i]
-        out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
-                                              z_fit, s_p, greedy=greedy,
-                                              solver_mode=solver_mode)
+        if not with_z:
+            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
+                                                  z_fit, s_p, greedy=greedy,
+                                                  solver_mode=solver_mode)
+            continue
+        # A caller that asks for Z judges each root itself, so a state whose
+        # continuation or root search fails is reported, not raised.
+        try:
+            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
+                                                  z_fit, s_p, greedy=greedy,
+                                                  solver_mode=solver_mode,
+                                                  with_z=True)
+        except (ArithmeticError, ValueError, RuntimeError,
+                np.linalg.LinAlgError):
+            out[i] = (np.nan, np.nan)
     if nranks > 1:
         for chunk in comm.allgather([(i, out[i]) for i in mine]):
             for i, root in chunk:
@@ -640,6 +661,10 @@ def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
     if timings is not None:
         timings['t_qp_states'] = _time.time() - _t_states
         timings['t_qp'] = _time.time() - _t
+    if with_z:
+        roots = np.array([r for r, _ in out], float)
+        z = np.array([zz for _, zz in out], float)
+        return (roots[0], z[0]) if scalar else (roots, z)
     return out[0] if scalar else np.asarray(out)
 
 
@@ -653,7 +678,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                                tau_target=DEFAULT_TAU_TARGET, extras=None,
                                screen_r_cut=None, sigma_x='mf',
                                eps_anchor=None, sigma_x_matrix=None,
-                               tile_gb=ISDF_TILE_GB, spin_channel='alpha'):
+                               tile_gb=ISDF_TILE_GB, spin_channel='alpha',
+                               xc_diagonal=None, with_z=False):
     """GW@RPA quasiparticle energy by the space-time route; DF only.
 
     Same quantity as `calc_qp_energy(selfenergy='GW', polarizability='RPA')`.
@@ -732,6 +758,12 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
     spin_channel: 'alpha' or 'beta' on an unrestricted reference, nocc then
                  (nalpha, nbeta); see `_space_time_unrestricted`. Ignored on a
                  restricted one.
+    xc_diagonal: <p|Sigma_x - v_xc (+ Sigma^env)|p> on `p_state` from the
+                 caller; it replaces the static build and the Eq. (18) term,
+                 so the roots differ from the caller's by the correlation part
+                 alone. Restricted reference only.
+    with_z:      return (energies, Z), Z = 1/(1 - dRe Sigma_c/dw) of the
+                 continued fraction at each root. Restricted reference only.
     """
     comm = current_comm() if comm is None else comm
     if distribute is None:
@@ -745,6 +777,9 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
             (mf.mo_energy, mf.mo_coeff, mf.mo_occ, eps_anchor), mpi_comm)
     require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_space_time', mol=mol)
     if isinstance(mf, pyscf_scf.uhf.UHF):
+        if xc_diagonal is not None or with_z:
+            raise ValueError("xc_diagonal and with_z take a restricted "
+                             "reference")
         return _space_time_unrestricted(
             mf, mol, nocc, p_state, spin_index(spin_channel), ntau, nfreq,
             npade, w0, auxbasis, radii, factors, greedy, solver_mode,
@@ -832,7 +867,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                         ntau, (mpi_comm, rank, nranks), freq_block,
                         scratch_dir, solver_mode, dm_correction, greedy,
                         timings, X_ao, coords, screen_r_cut, sigma_x,
-                        eps_anchor, transform, sigma_x_matrix, tile_gb),
+                        eps_anchor, transform, sigma_x_matrix, tile_gb,
+                        xc_diagonal, with_z),
             mpi_comm if nranks > 1 else None, extras)
     if nranks > 1:
         return _root_quasiparticles(
@@ -841,7 +877,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                           want_static, extras, ntau, mpi_comm, transform,
                           solver_mode, dm_correction, greedy, timings,
                           screen_r_cut, sigma_x, eps_anchor, sigma_x_matrix,
-                          tile_gb),
+                          tile_gb, xc_diagonal, with_z),
             mpi_comm, extras)
 
     _t = _time.time()
@@ -889,7 +925,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state,
                       nocc, p_state, mu, pade_freq, mf, mol,
                       solver_mode, dm_correction, greedy, timings, sigma_x,
                       reaction_field=reaction_field,
-                      sigma_x_matrix=sigma_x_matrix)
+                      sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,
+                      with_z=with_z)
 
 
 def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
@@ -1065,7 +1102,7 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                 freq_block, scratch_dir, solver_mode, dm_correction, greedy,
                 timings, X_ao, coords, screen_r_cut, sigma_x='mf',
                 eps_anchor=None, transform=None, sigma_x_matrix=None,
-                tile_gb=ISDF_TILE_GB):
+                tile_gb=ISDF_TILE_GB, xc_diagonal=None, with_z=False):
     """Low-memory branch: chi0 is never formed.
 
     Frequencies are built, inverted and folded into Wt(i.tau) a block at a time,
@@ -1138,7 +1175,8 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                      solver_mode, dm_correction, greedy, timings, sigma_x,
                      reaction_field=reaction_field,
                      comm=mpi_comm if nranks > 1 else None,
-                     sigma_x_matrix=sigma_x_matrix)
+                     sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,
+                     with_z=with_z)
     del Wt_tau, sigma
     if wt_path and os.path.exists(wt_path):
         os.remove(wt_path)

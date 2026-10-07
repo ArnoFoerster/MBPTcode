@@ -432,6 +432,16 @@ class StateManifold:
         shared = self.driven._shared_forward(mol, mf)
         try:
             solved = self._solve_spins(shared, wanted, ev)
+            # An adaptive explicit set is checked on these eigenvectors at the
+            # reference geometry; one that grows is solved and checked again,
+            # and the spin views taken on the old set are dropped.
+            verify = getattr(self.driven, 'verify_selection', None)
+            while verify is not None and verify(shared, solved):
+                shared.release()
+                self._solvers.clear()
+                self._views.clear()
+                shared = self.driven._shared_forward(mol, mf)
+                solved = self._solve_spins(shared, wanted, ev)
             for k in wanted:
                 ev.target[k] = self._target(k)
                 om, pieces = solved[ev.target[k][0]]

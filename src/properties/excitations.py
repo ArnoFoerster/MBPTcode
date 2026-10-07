@@ -446,8 +446,37 @@ def qp_bookkeeping(surface, mol):
                           'route': d['route'],
                           'root_eV': d['root'] * HARTREE_TO_EV}
                  for p, d in sorted(getattr(chain, 'qp_demoted',
-                                            {}).items())})
+                                            {}).items())},
+        # kind='adaptive': how the explicit set was selected out of the
+        # admitted candidates, and what that costs each target state
+        adaptive=(chain.selection_record()
+                  if getattr(chain, 'qp_partition', None) is not None
+                  else None))
     return record
+
+
+def adaptive_check(surface, mol, mf=None):
+    """The adaptive explicit set's check at the end of a walk, or None for
+    another set.
+
+    One forward at `mol` on the surface that walked, then one analytic-
+    continuation GW there (`ExcitedStateChain.posteriori_check`): the
+    first-order budget of the followed state with the partition frozen at
+    the reference geometry, its probes' shifts at `mol` and the exact weights
+    there. It warns when the budget is exceeded and records it; it neither
+    reselects nor reruns the walk.
+    """
+    chain = driven_chain(surface)
+    if getattr(chain, 'qp_partition', None) is None:
+        return None
+    mol, mf = chain.mean_field(mol, mf)
+    om, pieces = chain._forward(mol, mf)
+    root = (int(chain.follow_log[-1]['index'])
+            if chain.track is not None and chain.follow_log
+            else int(chain.state))
+    return chain.posteriori_check(
+        mol, mf, {chain.spin: (om, pieces[10], pieces[11])},
+        ((chain.spin, root),))
 
 
 def spectrum_of(surface, mol, mf):
@@ -705,6 +734,11 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
                           **optimizer, **given)
     e_0 = ground_state_at(ground, relaxed['mol'])
     e_n = float(relaxed['e_total'])
+    # the adaptive set frozen at R0, judged where the walk ended
+    check = adaptive_check(excited, relaxed['mol'], relaxed['mf'])
+    adaptive = (record.get('qp_bookkeeping') or {}).get('adaptive')
+    if check is not None and adaptive is not None:
+        adaptive['posteriori'] = check
     record.update(
         emission_eV=(e_n - e_0.total) * HARTREE_TO_EV,
         relaxation_depth_eV=(record['en_hartree'] - e_n) * HARTREE_TO_EV,

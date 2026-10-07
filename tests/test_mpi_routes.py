@@ -120,6 +120,10 @@ Checks (path; standard):
     converges the reference, every displaced mean field on every rank fits
     on rank 0's reference pair layout (bitwise), each displacement is solved
     once, and every rank holds one Hessian (bitwise)
+  * the adaptive explicit set, `ExcitedStateChain(qp_select=QPStates(
+    'adaptive'))` in the region (context): the partition (explicit set and
+    tier map) every rank selects is rank 0's serial one (exact), and S1 and
+    T1 on it against rank 0's serial ones (stated, RANK_SPLIT_ENERGY_TOL)
   * the BSE@GW chain, `ExcitedStateChain` in the region (context): one grid on
     every rank (bitwise hashes), the excitation and the quasiparticle force
     against rank 0's serial ones (stated, RANK_SPLIT_FORCE_TOL)
@@ -206,6 +210,7 @@ from src.Base.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
                                 HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
                                 QP_BISECTION_TOL,
                                 RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL)
+from src.Base.declaration import QPStates
 from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
 from src.Base.distributed_isdf_jk import scf_pair_layout
 from src.Base.isdf_jk import isdf_jk
@@ -224,6 +229,7 @@ from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screening_frequency_grid,
                                                    self_energy_branch_sums,
                                                    self_energy_fit_ranges)
+from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import (DEFAULT_NPADE, _dyson_owned,
                                                separable_factors,
                                                solve_qp_energy_space_time)
@@ -2149,6 +2155,51 @@ def hessian_layout_routes(gate):
                f'the Hessian over {gate.size} ranks is one on every rank')
 
 
+def adaptive_chain_routes(gate, mol):
+    """The adaptive explicit set over the region's ranks against rank 0's
+    serial selection: the same partition, the same S1 and T1."""
+    gate.section('the adaptive explicit set')
+
+    def selected(mf, window):
+        chain = ExcitedStateChain(
+            mol, chain_scf, mf=mf, qp_window=window, residue_route='sop',
+            scissor='calibrate', outside='scissor',
+            qp_select=QPStates('adaptive', targets=(('singlet', 0),
+                                                    ('triplet', 0))))
+        om_s = chain.excitation(mol, mf)
+        om_t = chain.spin_view('triplet').excitation(mol, mf)
+        part = chain.qp_partition
+        return (part.explicit, part.tier_of), np.array([om_s, om_t])
+
+    with distributed(None):
+        mf = chain_scf(mol)
+        eps = np.asarray(mf.mo_energy, float)
+        window = list(resolve_qp_states(QPStates('adaptive'), eps,
+                                        mol.nelectron // 2,
+                                        degeneracy_tol=1e-4).explicit)
+        if gate.comm is not None:
+            window = broadcast(window, gate.comm)
+        ref_part, ref_om = selected(mf, window)
+    gate.info(f'serial partition: explicit {list(ref_part[0])} of '
+              f'{len(window)} candidates, holes {sorted(ref_part[1])}; S1 '
+              f'{ref_om[0] * HARTREE_TO_EV:.9f} T1 '
+              f'{ref_om[1] * HARTREE_TO_EV:.9f} eV')
+    gate.check(len(ref_part[1]) > 0, 'the serial partition has holes')
+    if gate.size == 1:
+        return
+    ref_part = broadcast(ref_part, gate.comm)
+    ref_om = broadcast(ref_om, gate.comm)
+    part, om = selected(mf, window)
+    parts = gate.everyone(part)
+    gate.check(all(p == ref_part for p in parts),
+               f'adaptive partition [context] over {gate.size} ranks == '
+               f"rank 0's serial one", f'{len(set(map(repr, parts)))} '
+               f'distinct')
+    d = np.abs(om - ref_om).max()
+    gate.check(d <= RANK_SPLIT_ENERGY_TOL,
+               f'adaptive S1, T1 [context] over {gate.size} ranks == serial',
+               f'|d| = {d:.2e} Ha = {d / RANK_SPLIT_ENERGY_TOL:.4f} of '
+               f'RANK_SPLIT_ENERGY_TOL {RANK_SPLIT_ENERGY_TOL:.0e} Ha')
 def main(comm):
     """Every check on this rank of `comm` (None serially); 0 when every rank
     passed."""
@@ -2190,6 +2241,7 @@ def main(comm):
         lockstep_counters(gate, lockstep_stats(reset=True))
         audited_forward(gate, mol)
         hessian_layout_routes(gate)
+        adaptive_chain_routes(gate, mol)
     return gate.finish()
 
 

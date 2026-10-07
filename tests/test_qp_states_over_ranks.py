@@ -1,53 +1,42 @@
 """The quasiparticle states of one self-energy are solved a block per rank.
 
-`t_qp` -- everything `solve_qp_energy_space_time` spends after Sigma_c is on
-the imaginary axis -- is two costs. <Sigma_x - v_xc> is ONE exchange build for
-the whole window, state-independent, and it stays replicated. The Pade fit of
+`t_qp` (everything `solve_qp_energy_space_time` spends after Sigma_c is on
+the imaginary axis) is two costs. <Sigma_x - v_xc> is one exchange build for
+the whole window, state-independent, and stays replicated. The Pade fit of
 Sigma_pp(i.omega) and the root search on w = eps_p + <Sigma_x - v_xc>_pp +
-Re Sigma_c(w) are per state and share nothing at all, and on a quasiparticle
-SET -- the whole BSE diagonal, which `solve_bse_isdf` asks for -- that loop is
-the larger of the two: 24 states of water/cc-pVDZ are 0.59 s of a 0.59 s
-`t_qp`, ~25 ms each, and the cost per state barely follows the system size
-(150 evaluations of a 16-node continued fraction, whatever the molecule).
+Re Sigma_c(w) are per state and share nothing; on a quasiparticle set (the
+whole BSE diagonal) that loop is the larger of the two.
 
-The split is therefore over the STATES, with no reduction: rank r takes states
-r, r + nranks, ... and the roots are all-gathered back into state order. Sigma
+The split is over the states, with no reduction: rank r takes states r,
+r + nranks, ... and the roots are all-gathered back into state order. Sigma
 arrives all-reduced and identical on every rank and the static term is
 replicated from rank 0, so each root is the same scalar iteration on the same
-numbers wherever it runs, and the gates here are BITWISE -- per state, not on a
-norm. Ranks beyond the state count own an empty block and only serve the
-gather.
+numbers wherever it runs, and the gates here are bitwise per state. Ranks
+beyond the state count own an empty block and only serve the gather.
 
-The BSE's block action is gated here too, because the same row split now
-carries its HARTREE term (`isdf_block_action`): its last contraction is a sum
-over the grid rows, it was the one piece of the action a rank count did not
-divide (7.7% of a serial action at the anthracene/cc-pVTZ shapes, 19% of a
-four-rank one), and it rides the exchange terms' single reduction. That one is
-NOT bitwise against serial and cannot be: a sum over rows split between ranks
-is re-associated. It is gated at 1e-13 relative, and measures 1.3e-16.
+The BSE's block action is gated here too, because the same row split carries
+its Hartree term (`isdf_block_action`) on the exchange terms' single
+reduction. A sum over rows split between ranks is re-associated, so that gate
+is 1e-13 relative, not bitwise.
 
-EVERY GATE HERE WAS SHOWN TO FAIL, on a backup of the file, restored and
-`cmp`-verified afterwards:
+What each gate catches:
 
   perturbation                           gates that then fail
-  a rank solves the state next to its    all nine state gates -- the window
-  own (`states[(i + 1) % n]` under a     (bitwise and blocked), the
+  a rank solves the state next to its    all nine state gates (the window,
+  own (`states[(i + 1) % n]` under a     bitwise and blocked, the
   partition; serial untouched)           oversubscribed one and the whole
-                                         diagonal -- 7.0e-2 Ha out on the
-                                         first state, and the BSE through its
-                                         OWN refusal: min eig(A-B) comes back
-                                         -21.3 Ha and the driver reports an
-                                         unstable reference, the defect
-                                         wearing the mask of physics
+                                         diagonal), and the BSE through its
+                                         own refusal of an unstable reference
   the allgather made a no-op (the        the same nine, with the unowned
-  collective still called, its result    states arriving as None -- an object
-  discarded, so the ranks stay in step)  array where a float one is compared
-  the Hartree term reduced UNSPLIT       test_block_action_row_split, 1.3e-2
-  (the full row range on every rank,     to 7.5e-2 relative, and the BSE roots
-  then all-reduced, so the term is       4.7e-2 to 7.9e-2. The three TRIPLET
-  counted nranks times)                  cases still pass, which is what says
-                                         the slot carries the kappa = 2 term
-                                         and nothing else
+  collective still called, its result    states arriving as None
+  discarded, so the ranks stay in step)
+  the Hartree term reduced unsplit       test_block_action_row_split, and the
+  (the full row range on every rank,     BSE roots. The three triplet cases
+  then all-reduced, so the term is       still pass: the slot carries the
+  counted nranks times)                  kappa = 2 term and nothing else
+
+The adaptive explicit set over 2 and 3 simulated ranks selects the serial
+partition, with its explicit roots bitwise across ranks.
 """
 import os
 import sys
@@ -57,9 +46,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto, lib, scf
 
+from src.Base.declaration import QPStates
 from src.Base.utils.mpi_grid import run_simulated
+from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
@@ -68,6 +59,7 @@ from src.SingleReference.LinearResponse.davidson import (isdf_block_action,
                                                          solve_bse_isdf)
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
+from src.gradients.excited_state import ExcitedStateChain
 
 SIZES = [2, 3]
 #: More ranks than states: the surplus ranks own an empty block.
@@ -78,6 +70,10 @@ ROW_SPLIT_REL = 1e-13
 #: A Davidson stops at conv_tol=1e-5, and a last-bit change in its action moves
 #: the converged root by more than the action itself moved.
 ROOT_REL = 1e-11
+#: The explicit roots of an adaptive set over ranks against serial, Ha: the
+#: tau sweep's reduction re-associates, the roots' Newton does not.
+ADAPTIVE_ROOT_TOL = 1e-10
+WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module')
@@ -204,8 +200,8 @@ def test_bse_diagonal_and_roots(water, size):
 def test_block_action_row_split(water, size, mode, spin):
     """A/B from the row-split action, against the serial one.
 
-    Both exchange terms and now the Hartree term are sums over the grid rows,
-    and all three ride ONE reduction of the batch. RPA is the case with no
+    Both exchange terms and the Hartree term are sums over the grid rows,
+    and all three ride one reduction of the batch. RPA is the case with no
     exchange at all, where that reduction exists for the Hartree term alone;
     the triplet is the case with no Hartree term, where it does not exist for
     it. The ranks must also agree with EACH OTHER bitwise -- they reduce, so
@@ -235,6 +231,53 @@ def test_block_action_row_split(water, size, mode, spin):
         assert relative(A, A0) < ROW_SPLIT_REL
         assert relative(B, B0) < ROW_SPLIT_REL
         assert np.array_equal(A, out[0][0]) and np.array_equal(B, out[0][1])
+
+
+def adaptive_scf(mol):
+    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.kernel()
+    return mf
+
+
+def adaptive_partition():
+    """(explicit, tier_of, explicit roots) of an adaptive set selected on
+    this rank's own Mole and mean field."""
+    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
+    mf = adaptive_scf(mol)
+    eps = np.asarray(mf.mo_energy, float)
+    window = resolve_qp_states(QPStates('adaptive'), eps, mol.nelectron // 2,
+                               degeneracy_tol=1e-4).explicit
+    chain = ExcitedStateChain(
+        mol, adaptive_scf, qp_window=list(window), residue_route='sop',
+        scissor='calibrate', outside='scissor', solver='dense', mf=mf,
+        qp_select=QPStates('adaptive', targets=(('singlet', 0),
+                                                ('triplet', 0))))
+    chain.energy(mol, mf)
+    part = chain.qp_partition
+    return part.explicit, part.tier_of, np.array(
+        [chain.qp_seeds[p] for p in part.explicit])
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_adaptive_partition_over_ranks(size):
+    """The continuation over ranks re-associates its sums, and the partition
+    it selects does not move: the same explicit set and tier map on every
+    rank and at every rank count, the explicit roots bitwise across ranks."""
+    threads = lib.num_threads()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(1)
+        try:
+            explicit0, tiers0, roots0 = adaptive_partition()
+            out = run_simulated(lambda comm: adaptive_partition(), size)
+        finally:
+            lib.num_threads(threads)
+    assert tiers0, 'the gate needs holes'
+    for explicit, tiers, roots in out:
+        assert explicit == explicit0 and tiers == tiers0
+        assert np.abs(roots - roots0).max() < ADAPTIVE_ROOT_TOL
+        assert np.array_equal(roots, out[0][2])
 
 
 if __name__ == '__main__':

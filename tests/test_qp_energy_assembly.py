@@ -10,8 +10,9 @@ orbital gets an energy freezes a piece of such a root at the reference
 geometry R0 and spends it at every geometry R:
 
     inside scissor   eps_p(R) + xc_p(R) + [w_p - eps_p - xc_p](R0)
-    outside scissor  eps_p(R) + [w_q - eps_q - Sigma^env_qq](R0) + Sigma^env_pp(R),
-    and demoted      q the explicit orbital nearest p in eps at R0
+    outside, window  eps_p(R) + [w_q - eps_q - Sigma^env_qq](R0) + Sigma^env_pp(R),
+    edge, demoted    q the explicit orbital nearest p in eps at R0
+    adaptive hole    the same with the mean over the hole's frozen probe block
 
 so a frozen shift carries the GW correction alone: Sigma_x - v_xc once (the
 orbital's own inside the set, the probe's outside it), Sigma^env once (always
@@ -37,12 +38,14 @@ and PCM(toluene), at R0 and at a displaced geometry, and checks:
 
 The mechanisms: the pole model ('sop'), the contour deformation with
 Laplace or explicit residues, the inside scissor (scissor='calibrate'), the
-outside scissor of a window, a root rejected at R0 (demoted to the outside
+outside scissor of a window, an adaptive set's holes (a partition handed in
+frozen, since on the Kohn-Sham references the selection often solves the
+whole window) and window edges, a root rejected at R0 (demoted to the outside
 scissor; forced here by handing the settle step a pole strength outside
 (0, 1]), and a state whose pole-model verdict was frozen at R0 although its
 own root lies past the Eq. (27) limit.
 
-Slow (every column builds five chains; the force cells take 16 energies
+Slow (every column builds seven chains; the force cells take 16 energies
 each). Run: python tests/test_qp_energy_assembly.py   (or pytest)
 """
 import os
@@ -59,7 +62,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 from src.Base.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
                                 SCF_DIFFERENTIABLE_CONV_TOL,
                                 SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.declaration import QPStates  # noqa: E402
 from src.Base.solvent_screening import SolventScreening  # noqa: E402
+from src.SingleReference.GW.qp_selection import AdaptivePartition  # noqa: E402
+from src.SingleReference.GW.qp_states import resolve_qp_states  # noqa: E402
 from src.SingleReference.GW.sum_over_poles import compressible  # noqa: E402
 from src.gradients import excited_state  # noqa: E402
 from src.gradients.dense_surfaces import QuasiparticleSurface  # noqa: E402
@@ -99,6 +105,9 @@ DENSE_EV = 0.05
 CD_STATES = (-3, -2, 1, 2)
 #: The orbital whose R0 root is rejected in the demotion column: LUMO+2.
 DEMOTE_ABOVE_HOMO = 3
+TARGETS = (('singlet', 0), ('triplet', 0))
+#: A budget loose enough that every column's adaptive set leaves holes.
+ADAPTIVE_TOL_MEV = 20.0
 #: The finite-difference gate: 4-point stencil, absolute.
 FD_STEP = 4e-4
 FD_TOL = 1e-6
@@ -206,12 +215,35 @@ def build(kind, mol, factory, mf, env, window):
         return ExcitedStateChain(mol, factory, qp_window=window,
                                  residue_route='auto', outside='scissor',
                                  **common)
+    if kind in ('adaptive', 'partition'):
+        eps = np.asarray(mf.mo_energy, float)
+        cands = list(resolve_qp_states(QPStates('adaptive'), eps,
+                                       mol.nelectron // 2,
+                                       degeneracy_tol=1e-4).explicit)
+        select = QPStates('adaptive', tol_meV=ADAPTIVE_TOL_MEV,
+                          targets=TARGETS)
+        if kind == 'adaptive':
+            return ExcitedStateChain(
+                mol, factory, qp_window=cands, residue_route='sop',
+                scissor='calibrate', outside='scissor', qp_select=select,
+                **common)
+        # handed in frozen: the deepest candidate borrows its neighbour's
+        # shift, the highest the mean of the two below it
+        holes = {cands[0]: (cands[1],), cands[-1]: tuple(cands[-3:-1])}
+        part = AdaptivePartition(
+            explicit=[p for p in cands if p not in holes], tier_of=holes,
+            candidates=cands, targets=TARGETS, tol_meV=ADAPTIVE_TOL_MEV)
+        return ExcitedStateChain(
+            mol, factory, qp_window=cands, residue_route='sop',
+            scissor='calibrate', outside='scissor', qp_partition=part,
+            **common)
     return ExcitedStateChain(mol, factory, qp_window=2,
                              residue_route='explicit', outside='scissor',
                              **common)
 
 
-CHAINS = ('window', 'plain', 'demoted', 'cd', 'explicit')
+CHAINS = ('window', 'plain', 'demoted', 'adaptive', 'partition', 'cd',
+          'explicit')
 
 
 def build_column(name, reference, env_name):
@@ -258,7 +290,17 @@ def mechanism(chain, s0, p):
         return 'explicit' if route == 'explicit' else 'cd'
     if p in chain.qp_demoted:
         return 'demoted'
+    part = chain.qp_partition
+    if part is not None:
+        return 'hole' if p in part.tier_of else 'edge'
     return 'outside'
+
+
+def lent(s0, probes):
+    """The GW correction a probe block lends at R0: the mean over the block
+    of w_q - eps_q - Sigma^env_qq."""
+    return float(np.mean([s0['eps_qp'][q] - s0['eps'][q] - s0['env'][q]
+                          for q in probes]))
 
 
 def expected(chain, s0, s, p, kind):
@@ -268,9 +310,12 @@ def expected(chain, s0, s, p, kind):
         return (s['eps'][p] + s['xc'][p] - s0['eps'][p] - s0['xc'][p]
                 + chain.qp_seeds[p])
     explicit = sorted(int(q) for q in chain.qp_set)
-    q = min(explicit, key=lambda r: abs(s0['eps'][r] - s0['eps'][p]))
-    lent = s0['eps_qp'][q] - s0['eps'][q] - s0['env'][q]
-    return s['eps'][p] + lent + s['env'][p]
+    if kind == 'hole':
+        probes = np.atleast_1d(chain.qp_partition.tier_of[p]).astype(int)
+    else:
+        probes = [min(explicit,
+                      key=lambda q: abs(s0['eps'][q] - s0['eps'][p]))]
+    return s['eps'][p] + lent(s0, probes) + s['env'][p]
 
 
 def assembly_errors(col):
@@ -287,7 +332,7 @@ def assembly_errors(col):
                 for s in (s0, s1):
                     worst = max(worst, abs(s['xc'][p] - s['sxv'][p]
                                            - s['env'][p]))
-            if mech in ('inside', 'outside', 'demoted'):
+            if mech in ('inside', 'outside', 'edge', 'demoted', 'hole'):
                 for s in (s0, s1):
                     worst = max(worst, abs(s['eps_qp'][p]
                                            - expected(chain, s0, s, p, mech)))
@@ -301,14 +346,24 @@ def test_every_mechanism_assembles_its_formula(column):
     """(a) and (b): every orbital of every chain, at R0 and at R."""
     errors = assembly_errors(column)
     seen = {mech for _, mech in errors}
-    assert {'inside', 'outside', 'demoted', 'sop', 'explicit'} <= seen, seen
+    assert {'inside', 'outside', 'edge', 'hole', 'demoted', 'sop',
+            'explicit'} <= seen, seen
     bad = {}
     for (kind, mech), (worst, n) in errors.items():
-        tol = (EXACT_HA if mech in ('inside', 'outside', 'demoted')
-               else STATIC_HA)
+        tol = (EXACT_HA if mech in ('inside', 'outside', 'edge', 'demoted',
+                                    'hole') else STATIC_HA)
         if worst > tol:
             bad[(kind, mech)] = (worst * HARTREE_TO_EV, n)
     assert not bad, f'eV off the formula, orbitals checked: {bad}'
+
+
+def test_the_adaptive_selection_freezes_a_partition(column):
+    """The selected set's holes, where its budget leaves any (on the
+    Kohn-Sham references it often solves the whole window), are checked
+    like the handed-in partition's."""
+    chain = column['adaptive'][0]
+    assert chain.qp_partition is not None
+    assert set(chain.qp_partition.candidates) >= {int(p) for p in chain.qp_set}
 
 
 def test_an_inside_scissor_state_sits_on_the_untiered_root(column):

@@ -79,7 +79,7 @@ GRID_NUMERICS = frozenset({'basis', 'auxbasis', 'counts', 'radii', 'n_start',
 EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
                               'sop_stride', 'bse_conv_tol', 'degeneracy_tol',
                               'dense_max_nov', 'nroots', 'e_min_below_gap',
-                              'tile_gb', 'bse_adjoint'})
+                              'tile_gb', 'bse_adjoint', 'qp_partition'})
 
 #: How a BSE state is followed from geometry to geometry: `track` absent (or
 #: None) follows the root INDEX, 'overlap' the state, by the overlap of its
@@ -197,6 +197,7 @@ class Setup:
     qp_explicit: Optional[Tuple[int, ...]]
     solver: Optional[str]
     residues: Optional[str]
+    qp_states: Optional[QPStates] = None
 
 
 @functools.lru_cache(maxsize=1)
@@ -319,6 +320,9 @@ def excited_kwargs(setup, row):
     if row.qp_keyword is not None:
         kw['qp_window'] = setup.qp_explicit
         kw['scissor'] = 'calibrate'
+    if setup.qp_states is not None and setup.qp_states.kind == 'adaptive':
+        # qp_window is then the candidates; the chain selects among them
+        kw['qp_select'] = setup.qp_states
     if row.outside_treatment == 'scissor':
         kw['outside'] = 'scissor'
     for name in sorted(EXCITED_NUMERICS | TRACK_NUMERICS):
@@ -715,6 +719,12 @@ def resolve_states(qp_states, row, mol, mf, numerics, excitation):
         if isinstance(excitation, ChargedExcitation):
             return None, (int(excitation.orbital),)
         return None, None
+    if qp_states.kind == 'adaptive' and row.qp_keyword != 'qp_window':
+        raise ValueError(
+            f"QPStates(kind='adaptive') selects the explicit set by an "
+            f'analytic continuation on the cubic chain; {row.cls.__name__} '
+            f'({row.key()}) is a reference route, and the reference solves '
+            f'every state of its set explicitly.')
     eps = np.asarray(mf.mo_energy, float)
     nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
     resolved = resolve_qp_states(qp_states, eps, nocc, mol=mol,
@@ -870,7 +880,8 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     counts, n_start, grid = (resolve_grid(mol, numerics) if row.isdf_grid
                              else (None, None, None))
     setup = Setup(mol, scf_factory, mf, environment, excitation, numerics,
-                  counts, n_start, explicit, used_solver, used_residues)
+                  counts, n_start, explicit, used_solver, used_residues,
+                  qp_states=spec)
     surface, resolved = row.build(row, setup)
     declare_physics(surface, physics)
     surface.realization = Realization(

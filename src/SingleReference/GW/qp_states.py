@@ -6,7 +6,7 @@ for every orbital is neither affordable nor meaningful: the deep states have no
 compressible self-energy, and a root that has walked past a neighbouring
 orbital energy is a satellite as often as a quasiparticle. So a surface names a
 SET. Inside it every orbital is solved; outside it every orbital keeps its
-mean-field eigenvalue plus a frozen scissor. Four declarations of that set are
+mean-field eigenvalue plus a frozen scissor. Five declarations of that set are
 in use:
 
     admitted   the orbitals Eq. (27) admits: |omega_p - eps_q| < Om_1 for every
@@ -28,8 +28,12 @@ in use:
                optionally filtered on pole strength Z > QP_WINDOW_Z_MIN. The
                core is read off the molecule, so the window is chemical rather
                than a count of orbitals.
-    all        every orbital, which is the reference the other three are
+    all        every orbital, which is the reference the others are
                approximations to.
+    adaptive   the admitted orbitals as CANDIDATES, of which the surface
+               solves the subset an analytic-continuation GW at the reference
+               geometry selects (`qp_selection`); the rest of the window
+               carries per-orbital scissor tiers (`calibrate_scissor_tiers`).
 
 THE SET IS DECIDED ONCE, AT THE REFERENCE GEOMETRY, AND FROZEN. Membership is
 a discrete function of the mean-field spectrum, so a set re-decided at each
@@ -191,7 +195,7 @@ def resolve_qp_states(spec: QPStates, eps, nocc, *, degeneracy_tol,
     norb = len(eps)
     nocc = int(nocc)
     reach: Dict[int, float] = {}
-    if spec.kind == 'admitted':
+    if spec.kind in ('admitted', 'adaptive'):
         if spec.threshold == 'gap':
             tested = [compressible(float(eps[p]), eps, nocc)
                       for p in range(norb)]
@@ -225,9 +229,14 @@ def resolve_qp_states(spec: QPStates, eps, nocc, *, degeneracy_tol,
         name = 'all'
     explicit = tuple(sorted(int(p) for p in explicit))
     outside = tuple(p for p in range(norb) if p not in set(explicit))
+    label = f'{name}: {len(explicit)} of {norb} orbitals explicit'
+    if spec.kind == 'adaptive':
+        # The admitted window is the OUTER bound: the selection solves a
+        # subset of it and never an orbital outside it.
+        label = f'adaptive({name}) candidates: {len(explicit)} of {norb}'
     return ResolvedQPStates(
         explicit=explicit, outside=outside, spec=spec, reach=reach,
-        label=f'{name}: {len(explicit)} of {norb} orbitals explicit')
+        label=label)
 
 
 def frozen_scissor(scissor, p):
@@ -292,4 +301,23 @@ def calibrate_scissor(eps, nocc, roots, excluded):
     for p in excluded:
         near = min(probes, key=lambda q: abs(eps[q] - eps[int(p)]))
         out[int(p)] = deltas[near]
+    return out
+
+
+def calibrate_scissor_tiers(eps, roots, tier_of):
+    """Frozen shifts for the holes of an adaptive set, each from its own probe.
+
+    tier_of maps a hole to the explicit orbital, or the degenerate block of
+    explicit orbitals, whose shift it borrows; a block lends the MEAN of its
+    members' shifts, which does not depend on the rotation inside it. The map
+    is frozen at the reference geometry and the values are this geometry's
+    explicit roots minus eps, so the scissor is a number like
+    `calibrate_scissor`'s.
+    """
+    eps = np.asarray(eps, float)
+    out = {}
+    for p, probe in tier_of.items():
+        block = np.atleast_1d(probe).astype(int)
+        out[int(p)] = float(np.mean([float(roots[int(q)]) - eps[int(q)]
+                                     for q in block]))
     return out
