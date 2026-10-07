@@ -46,7 +46,10 @@ import warnings
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL, SOP_CLEARANCE_MIN, SOP_FIT_RCOND, SOP_FIT_STRIDE, SOP_N_POLES)
+from src.Base.constants import (QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL,
+                                SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                SOP_FIT_STRIDE, SOP_N_POLES,
+                                SOP_POLE_MERGE_TOL)
 from src.SingleReference.GW.contour_deformation import residue_set
 from src.SingleReference.GW.real_screening import ov_energies
 
@@ -116,8 +119,32 @@ def _vector_fit_lstsq(block, rhs):
     raise failed
 
 
+def merge_poles(poles, tol=SOP_POLE_MERGE_TOL):
+    """The poles, sorted, with every run of neighbours closer than `tol`
+    relative merged into one at the run's mean u = Om^2.
+
+    A run is chained: each pole within tol of the previous one joins it.
+    Poles the relocation clips onto a bound, or that come out of a complex
+    pair's real part, are identical, and duplicate columns make the pole
+    basis singular (SOP_POLE_MERGE_TOL); tol=None returns them sorted.
+    """
+    om = np.sort(np.asarray(poles, float))
+    if tol is None or om.size < 2:
+        return om
+    runs, run = [], [om[0]]
+    for w in om[1:]:
+        if w - run[-1] <= tol * run[-1]:
+            run.append(w)
+        else:
+            runs.append(run)
+            run = [w]
+    runs.append(run)
+    return np.array([r[0] if len(r) == 1 else np.sqrt(np.mean(np.square(r)))
+                     for r in runs])
+
+
 def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
-              state=None):
+              state=None, merge_tol=SOP_POLE_MERGE_TOL):
     """Relocate the poles by vector fitting, in the variable u = z^2.
 
     Gustavsen-Semlyen: solve the linear problem for the amplitudes of f and of
@@ -131,10 +158,17 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
     matches M = 16 log-spaced, and M = 12 is within 0.012 meV of the CD value),
     and it is done ONCE, because the poles are then frozen for the gradient.
 
+    Coalesced poles are merged (`merge_poles`) before every pass and after
+    the last, so the set returned may hold fewer than len(poles): a pole the
+    clip or a complex pair puts on top of another is a duplicate column of
+    the least squares, whose rank deficiency would hand the next relocation
+    to rounding.
+
     stride: fit every stride-th column of wc. The poles are common to all
             orbitals, so they need only enough columns to be determined, and
             the least-squares problem grows linearly in the number kept.
     state:  the orbital whose self-energy wc is, named by a refusal.
+    merge_tol: `merge_poles`'s tolerance; None keeps every pole.
     """
     wc = np.asarray(wc, float)
     if not np.isfinite(wc).all():
@@ -145,13 +179,15 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
             f'{bad[:10].tolist()}{" ..." if bad.size > 10 else ""} of '
             f'{wc.shape[1]}; no pole model is fitted to it')
     om = np.asarray(poles, float).copy()
-    n_poles = om.size
     lo, hi = bounds if bounds is not None else (om[0], om[-1])
     u_s = -np.asarray(nu_points, float) ** 2
     cols = range(0, wc.shape[1], max(int(stride), 1))
     f_cols = [wc[:, q] for q in cols]
     n_col = len(f_cols)
     for _ in range(int(n_iter)):
+        if merge_tol is not None:
+            om = merge_poles(om, merge_tol)
+        n_poles = om.size
         kern = 1.0 / (u_s[:, None] - (om ** 2)[None, :])
         block = np.zeros((len(u_s) * n_col, n_col * n_poles + n_poles))
         rhs = np.concatenate(f_cols)
@@ -163,7 +199,7 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
         zeros = np.linalg.eigvals(np.diag(om ** 2)
                                   - np.ones((n_poles, 1)) @ x[-n_poles:][None, :])
         om = np.sqrt(np.sort(np.clip(np.real(zeros), lo ** 2, hi ** 2)))
-    return om
+    return om if merge_tol is None else merge_poles(om, merge_tol)
 
 
 def denominators(omega, poles, eps, nocc):

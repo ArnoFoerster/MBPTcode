@@ -409,6 +409,26 @@ SOP_CLEARANCE_MIN = 0.05
 # is ill-conditioned by construction once the poles crowd; the cutoff is what
 # keeps the amplitudes of a near-degenerate pair finite.
 SOP_FIT_RCOND = 1e-12
+# Relative distance below which the vector fit's poles are merged into one
+# (`sum_over_poles.merge_poles`), before every relocation pass and after the
+# last. Zeros of the fit's weight that fall below the particle-hole gap are
+# clipped onto it, and a complex pair keeps its real part, so poles pile onto
+# one position and the pole basis F gets duplicate columns (cond ~1e16 on
+# water/cc-pVDZ at CD_NFREQ_SOP points): the least squares is rank-deficient,
+# the next relocation is decided by rounding, and a one-ulp change of W_c can
+# move a pole by 43%. Merged, F has cond <= 1.4e6 and the same change moves a
+# pole by at most 1.3e-8 (100 draws on each of four states).
+# Two poles a relative delta apart have kernel columns a relative delta apart,
+# so the data cannot tell them apart below ~delta; one pole at their mean
+# u = Om^2 changes the model by O(delta^2) of their amplitude, 1e-6 at 1e-3,
+# below the 32-point model's own error. At 32 points S1 and T1 sit within
+# 0.006 meV of 512 (formaldehyde, acrolein; LRC-wPBEh/cc-pVDZ, admitted
+# window); without the merge formaldehyde is 3.1 and 16.9 meV off, a branch of
+# the fit. The merged set keeps fewer poles (8-12 of 12) and is not refilled
+# to M: thioformaldehyde's HOMO-1 quasiparticle sits 0.038 meV from the
+# contour at 64 points.
+SOP_POLE_MERGE_TOL = 1e-3
+
 # Auxiliary poles by default, set by the gradient rather than the energy: the
 # energy is converged at 8 and the derivative needs 12.
 SOP_N_POLES = 12

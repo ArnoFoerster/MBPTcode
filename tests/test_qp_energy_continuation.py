@@ -92,6 +92,13 @@ SOP_SEED_TOL_EV = 1e-12
 #: homo-1) and 2.1e-11 in Z.
 SOP_FACTORIZATION_MOVE_EV = 2e-9
 SOP_FACTORIZATION_MOVE_Z = 1e-10
+#: How far merging coalesced poles (SOP_POLE_MERGE_TOL) puts the sop rows
+#: from the record: at most 3.8e-5 eV and 2.8e-5 in Z (thioformaldehyde
+#: HOMO-1, whose fit keeps 8 of 12 poles; 1.5e-6 eV on water's HOMO). Against
+#: the contour route on the same grid the rows sit within 0.0012 meV, that
+#: HOMO-1 at 0.038 meV.
+SOP_POLE_MERGE_MOVE_EV = 5e-5
+SOP_POLE_MERGE_MOVE_Z = 5e-5
 
 #: What the two residue backends of one contour may differ by, in eV and in Z.
 #: They solve the same equation; only the rows that sweep a residue differ.
@@ -334,13 +341,15 @@ def test_laplace_refuses_a_residue_the_tau_grid_cannot_carry():
 def test_sop_reproduces_the_baseline(name):
     """The pole model, energy and Z bitwise against the pins; the record
     within the one fit's move, one ulp of the root beyond it (the Newton
-    seed, see the module docstring) and the factorization's move.
+    seed, see the module docstring), the factorization's move and the pole
+    merge's.
     """
     records, energies, z = contour_run(name, 'sop')
     for rec, energy, pole_strength in zip(records, energies, z):
         assert_pinned(name, rec, 'sop', energy, pole_strength,
-                      slack=SOP_SEED_TOL_EV + SOP_FACTORIZATION_MOVE_EV,
-                      z_slack=SOP_FACTORIZATION_MOVE_Z)
+                      slack=(SOP_SEED_TOL_EV + SOP_FACTORIZATION_MOVE_EV
+                             + SOP_POLE_MERGE_MOVE_EV),
+                      z_slack=SOP_FACTORIZATION_MOVE_Z + SOP_POLE_MERGE_MOVE_Z)
 
 
 def test_sop_refuses_a_state_eq27_excludes():

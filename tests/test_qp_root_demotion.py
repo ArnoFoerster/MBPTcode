@@ -28,8 +28,15 @@ reason. Here:
 
 That a rejected root is demoted on the one fixed grid is gated in
 tests/test_cd_grid_sizing.py.
+
+The production fit merges coalesced poles (`SOP_POLE_MERGE_TOL`): the six
+clipped poles are one, and the same case places orbital 17's root at its
+quasiparticle with nothing demoted (`test_merged_poles_place_no_spurious_root`).
+The demotion gates run on the fit that keeps coalesced poles
+(`fit_poles(merge_tol=None)`), the case that exercises the safety net.
 """
 import copy
+import functools
 import os
 import sys
 
@@ -39,10 +46,12 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CD_NFREQ, SCF_DIFFERENTIABLE_CONV_TOL,
+from src.Base.constants import (CD_NFREQ, HARTREE_TO_EV,
+                                SCF_DIFFERENTIABLE_CONV_TOL,
                                 SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.utils.mpi_grid import run_simulated
+from src.SingleReference.GW import sum_over_poles
 from src.SingleReference.GW.qp_states import (is_quasiparticle_root,
                                               resolve_qp_states)
 from src.gradients.excited_state import ExcitedStateChain
@@ -65,6 +74,10 @@ NFREQ_CD = CD_NFREQ
 #: shift it takes once outside: the nearest explicit orbital in energy.
 DEMOTED = 17
 PROBE = 16
+#: Orbital 17's quasiparticle on the explicit-residue route, in eV, and how
+#: far the merged pole model may put it (the spurious root is 1.6 eV away).
+QP_17_EV = 17.652
+QP_17_TOL_EV = 0.01
 
 
 def factory(mol):
@@ -75,10 +88,9 @@ def factory(mol):
     return mf
 
 
-@pytest.fixture(scope='module')
-def ethylene():
-    """(mol, surface, chain) of the admitted-set SOP S1 at M = 24, evaluated
-    once at the reference geometry."""
+def ethylene_case():
+    """(mol, surface, chain) of the admitted-set SOP S1 at M = 24, not yet
+    evaluated."""
     mol = gto.M(atom=ETHYLENE, unit='Bohr', basis='cc-pvdz', verbose=0,
                 max_memory=4000)
     spec = SurfaceSpec(GroundState('rpa', 'hf'), chi0='space-time',
@@ -87,10 +99,32 @@ def ethylene():
                        numerics={'grid_accuracy': 'G3', 'n_poles': N_POLES,
                                  'nfreq_cd': NFREQ_CD})
     surface = surface_of(spec, Excitation('singlet', root=1), mol, factory)
-    chain = driven_chain(surface)
-    with pytest.warns(RuntimeWarning, match='outside \\(0, 1\\]'):
-        chain.excitation(mol, chain.mf0)
-    return mol, surface, chain
+    return mol, surface, driven_chain(surface)
+
+
+@pytest.fixture(scope='module')
+def ethylene():
+    """The case evaluated once at the reference geometry on the fit that
+    keeps coalesced poles, the fit that places the spurious root."""
+    keep = functools.partial(sum_over_poles.fit_poles, merge_tol=None)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(sum_over_poles, 'fit_poles', keep)
+        mol, surface, chain = ethylene_case()
+        with pytest.warns(RuntimeWarning, match='outside \\(0, 1\\]'):
+            chain.excitation(mol, chain.mf0)
+        yield mol, surface, chain
+
+
+def test_merged_poles_place_no_spurious_root():
+    """The production fit, coalesced poles merged: orbital 17 stays explicit
+    with its quasiparticle root, and nothing is demoted."""
+    mol, _, chain = ethylene_case()
+    chain.excitation(mol, chain.mf0)
+    z = chain.qp_diagnostics['z']
+    assert DEMOTED in chain.qp_set and not chain.qp_demoted
+    assert all(is_quasiparticle_root(v) for v in z.values()), z
+    root = chain.qp_seeds[DEMOTED] * HARTREE_TO_EV
+    assert abs(root - QP_17_EV) < QP_17_TOL_EV, root
 
 
 def test_the_bounds_are_the_definition():

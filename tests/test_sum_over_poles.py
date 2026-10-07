@@ -18,7 +18,8 @@ import numpy as np
 import pytest
 import scipy.linalg
 
-from src.Base.constants import HARTREE_TO_EV, SOP_CLEARANCE_MIN, SOP_FIT_RCOND
+from src.Base.constants import (HARTREE_TO_EV, SOP_CLEARANCE_MIN,
+                                SOP_FIT_RCOND, SOP_POLE_MERGE_TOL)
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW.contour_deformation import residue_set, sigma_cd
 from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
@@ -338,3 +339,32 @@ def test_a_nonfinite_wc_is_refused_with_its_orbital():
     wc[7, 2] = np.nan
     with pytest.raises(FloatingPointError, match='orbital 38.*columns \\[2\\]'):
         sop_from_wc(wc, nu, EPS, NOCC, n_poles=3, state=38)
+
+
+def test_coalesced_poles_are_merged():
+    """Two true poles below the clip bound: the relocation clips six of its
+    twelve poles onto the bound, duplicate columns of the pole basis (cond
+    5.6e19 here). Merged, no two poles are closer than SOP_POLE_MERGE_TOL,
+    the basis is well conditioned, and the model fits the data as well as
+    the twelve do."""
+    nu, _ = gauss_legendre_grid(32, gap_scaled_w0(EPS, NOCC))
+    wc = model_wc(nu, poles=np.array([0.12, 0.2, 1.90, 4.20]),
+                  weights=np.array([0.05, 0.05, 0.08, 0.12]))
+    start = initial_poles(12, 0.3, 6.0)
+
+    def cond_and_residual(poles):
+        basis = pole_basis(nu, poles)
+        sv = np.linalg.svd(basis, compute_uv=False)
+        fit = basis @ pole_amplitudes(wc, poles, nu)
+        return sv[0] / sv[-1], np.linalg.norm(fit - wc) / np.linalg.norm(wc)
+
+    kept = fit_poles(wc, nu, start, bounds=(0.3, 6.0), merge_tol=None)
+    merged = fit_poles(wc, nu, start, bounds=(0.3, 6.0))
+    cond_kept, res_kept = cond_and_residual(kept)
+    cond_merged, res_merged = cond_and_residual(merged)
+    # the case exercises the defect: poles on top of each other
+    assert np.sum(kept == 0.3) > 1 and cond_kept > 1e12
+    assert merged.size < kept.size
+    assert np.all(np.diff(merged) > SOP_POLE_MERGE_TOL * merged[:-1])
+    assert cond_merged < 1e8
+    assert res_merged <= res_kept * (1 + 1e-6)
