@@ -30,6 +30,11 @@ What pins what:
    independent spin-orbital CCD; the singlet/triplet recoupling of t2 against
    the first-order channels; restricted against spin-orbital through W; and
    v -> lam v, under which CCD-Faddeev-ADC(3) - ADC(3) must go as lam^4.
+7. eh_kernel='drpa' (both eh channels by direct RPA): the triplet equals the
+   non-interacting 'off' pair, the phonon and Riccati routes agree, the
+   result is exact through second order only (Faddeev - ADC(3) ~ lam^3, the
+   exchange part of the first-order vertex being dropped), and it exists on
+   the triplet-unstable stretched H2 where TDHF is refused.
 
 Run: python tests/test_faddeev_adc3.py, or under pytest.
 """
@@ -363,6 +368,35 @@ def check_solver_api(mf, nocc):
     return ok
 
 
+def check_drpa(mf, sr, nocc, scaling=False):
+    ok = True
+    eps, B = mf.mo_energy, sr.B_aa
+    for route in ('riccati', 'phonon'):
+        a = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'drpa')
+        b = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'off')
+        d = max(np.abs(a[k] - b[k]).max() for k in ('T', 'dH', 'dN'))
+        ok &= check(d < 1e-12, f"dRPA triplet == non-interacting 'off' pair ({route})",
+                    f'{d:.1e}')
+    H = {r: FR.build_supermatrix(sr, nocc, channels=FR.pair_channels(
+        eps, nocc, B, route=r, eh_kernel='drpa')) for r in ('phonon', 'riccati')}
+    d = np.abs(H['phonon'] - H['riccati']).max()
+    ok &= check(d < 1e-9, 'dRPA: phonon route == Riccati route', f'{d:.1e}')
+    if scaling:
+        diffs = []
+        for lam in (0.1, 0.05):
+            Bl = np.sqrt(lam) * B
+            s = ADCSolverRestricted.from_arrays(eps, None, B_aa=Bl, nocc=nocc)
+            Hf = FR.build_supermatrix(s, nocc, channels=FR.pair_channels(
+                eps, nocc, Bl, route='riccati', eh_kernel='drpa'))
+            diffs.append(abs(homo_root(Hf, nocc - 1)[0]
+                             - homo_root(s.build_supermatrix(nocc), nocc - 1)[0]))
+        slope = np.log(diffs[0] / diffs[1]) / np.log(2.0)
+        ok &= check(abs(slope - 3.0) < 0.2,
+                    'Faddeev-dRPA - ADC(3) ~ lam^3 (exact through second order)',
+                    f'slope {slope:.2f}')
+    return ok
+
+
 def check_unstable_reference_is_refused():
     """Stretched H2 (2.5 A) is RHF triplet-unstable: the triplet TDHF channel
     has an imaginary phonon, the Faddeev pair channel does not exist, and
@@ -380,6 +414,11 @@ def check_unstable_reference_is_refused():
             ok &= check('triplet' in str(exc) and 'unstable' in str(exc),
                         f'unstable triplet channel refused ({route})',
                         str(exc).split(';')[0])
+    ch = FR.pair_channels(mf.mo_energy, 1, B_aa=B_aa, route='riccati', eh_kernel='drpa')
+    s = ADCSolverRestricted.from_arrays(mf.mo_energy, None, B_aa=B_aa, nocc=1)
+    ip = homo_root(FR.build_supermatrix(s, 1, channels=ch), 0)[0] * 27.211386245988
+    ok &= check(np.isfinite(ip) and ip > 0, 'dRPA channels exist on the unstable reference',
+                f'HOMO IP {ip:.3f} eV')
     return ok
 
 
@@ -405,6 +444,8 @@ def run():
         print('-- the CCD pair route')
         all_ok &= check_ccd_route(mf, sr, so, nocc, W,
                                   scaling=(basis == 'sto-3g'))
+        print('-- the direct-RPA eh kernel')
+        all_ok &= check_drpa(mf, sr, nocc, scaling=(basis == 'sto-3g'))
     print('\n-- public API (H2O/6-31G)')
     all_ok &= check_solver_api(mf, nocc)
     print('\n-- an unstable reference')

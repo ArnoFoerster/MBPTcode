@@ -58,6 +58,7 @@ from src.SingleReference.LinearResponse.riccati import (
     require_stable_channel, ring_channel)
 
 EH_TRIPLET = ('rpa', 'first_order', 'off')
+EH_KERNELS = ('tdhf', 'drpa')
 PAIR_ROUTES = ('phonon', 'riccati', 'ccd')
 SPINS = ('singlet', 'triplet')
 _S16, _S12, _S32 = np.sqrt(1.0 / 6.0), np.sqrt(0.5), np.sqrt(1.5)
@@ -80,6 +81,12 @@ def _eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
     treatment='off': a non-interacting pair -- no vertex, no amplitudes
         (T = 0, dN = 0, dH = D - A cancels the TDA vertex K + C carries), the
         singlet-only construction of the PSD self-energies.
+    treatment='drpa': direct RPA, the pair scattering without exchange
+        (A_d = D + 2(ia|jb), B_d = 2(ia|jb) for the singlet, a vanishing
+        kernel for the triplet, which makes it 'off'); dH = dH_d + A_d - A
+        replaces the TDHF vertex K + C carries. Stable for any reference;
+        drops the exchange part of the first-order vertex, so the
+        Faddeev-ADC(3) built on it is exact through second order only.
 
     route='phonon' also returns the pair's phonons 'omega', 'X', 'Y', the
     solutions of (A + dH) X = (1 + dN) X omega with Y = T X: the TDHF phonons
@@ -100,6 +107,17 @@ def _eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
             return {'T': T, 'dH': dH, 'dN': dN, 'omega': omega, 'X': X, 'Y': Y}
         T, dH, dN = ring_channel(A, B)
         return {'T': T, 'dH': dH, 'dN': dN}
+    if treatment == 'drpa':
+        Ad, Bd = LinearResponseSolver(
+            eps, coeff_df=B_aa, eri_chemist=eri_chemist).build_casida_matrices(
+                nocc, lBSE=False, triplet=(spin == 'triplet'))
+        if route == 'phonon':
+            omega, X, Y = CasidaSolver(Ad, Bd).solve()
+            T, dH, dN = channel_corrections_from_phonons(Ad, omega, X, Y)
+            return {'T': T, 'dH': dH + Ad - A, 'dN': dN,
+                    'omega': omega, 'X': X, 'Y': Y}
+        T, dH, dN = ring_channel(Ad, Bd)
+        return {'T': T, 'dH': dH + Ad - A, 'dN': dN}
     if treatment == 'first_order':
         T = -B / (D[:, None] + D[None, :])       # B + A T + T A = 0 to first order
         ch = {'T': T, 'dH': np.zeros((n, n)), 'dN': np.zeros((n, n))}
@@ -113,11 +131,12 @@ def _eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
         if route == 'phonon':
             ch.update(omega=D.copy(), X=np.eye(n), Y=np.zeros((n, n)))
         return ch
-    raise ValueError(f"treatment={treatment!r}; expected one of {EH_TRIPLET}")
+    raise ValueError(f"treatment={treatment!r}; expected one of "
+                     f"{EH_TRIPLET + ('drpa',)}")
 
 
 def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
-                  verbose=0, eh_triplet='rpa', t2=None):
+                  verbose=0, eh_triplet='rpa', t2=None, eh_kernel='tdhf'):
     """The pair channels of the Faddeev-ADC(3).
 
     eh: {'singlet', 'triplet'} -> {'T', 'dH', 'dN'}, TDHF on the (i, a)
@@ -139,6 +158,10 @@ def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
 
     route='ccd': every channel from the alpha-beta CCD amplitude t2[i,j,a,b]
         (required), see ccd_channels.
+
+    eh_kernel='drpa': both eh spin channels by direct RPA (_eh_channel
+        treatment 'drpa'; the triplet is then non-interacting and eh_triplet
+        must stay 'rpa'); pp/hh unchanged.
     """
     if route not in PAIR_ROUTES:
         raise ValueError(f"route={route!r}; expected one of {PAIR_ROUTES}")
@@ -146,13 +169,19 @@ def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
         raise ValueError(f"eh_triplet={eh_triplet!r}; expected one of {EH_TRIPLET}")
     if (route == 'ccd') != (t2 is not None):
         raise ValueError("t2 is the amplitude of route 'ccd' and only of it")
+    if eh_kernel not in EH_KERNELS:
+        raise ValueError(f"eh_kernel={eh_kernel!r}; expected one of {EH_KERNELS}")
+    if eh_kernel == 'drpa' and (route == 'ccd' or eh_triplet != 'rpa'):
+        raise ValueError("eh_kernel='drpa' sets both eh channels; it takes no "
+                         "eh_triplet treatment and no CCD route")
     if route == 'ccd':
         return ccd_channels(eps, nocc, t2, B_aa, eri_chemist,
                             eh_triplet=eh_triplet)
+    singlet, triplet = ('drpa', 'drpa') if eh_kernel == 'drpa' else ('rpa', eh_triplet)
     out = {'eh': {'singlet': _eh_channel(eps, nocc, 'singlet', B_aa, eri_chemist,
-                                         route),
+                                         route, singlet),
                   'triplet': _eh_channel(eps, nocc, 'triplet', B_aa, eri_chemist,
-                                         route, eh_triplet)},
+                                         route, triplet)},
            'pp': {}, 'hh': {}}
     if route == 'riccati':
         out['pp'], out['hh'] = ladder_channels(eps, nocc, B_aa, eri_chemist,
@@ -309,7 +338,8 @@ def first_order_channels(eps, nocc, B_aa=None, eri_chemist=None):
     return out
 
 
-def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa'):
+def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa',
+                 phonons=False):
     """Every pair channel from one CCD amplitude t2[i,j,a,b] (alpha-beta,
     pyscf layout): the cross-channel coupling of CCD inside each pair.
 
@@ -323,7 +353,12 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa'):
         equation holds for t2).
 
     With t2 the first-order doubles this is first_order_channels' U and
-    nonzero (dH, dN) of second order in the amplitude."""
+    nonzero (dH, dN) of second order in the amplitude.
+
+    phonons=True also returns the eh channels' phonons 'omega', 'X', 'Y', the
+    solutions of (A + dH) X = (1 + dN) X omega with Y = T X, as _eh_channel's
+    route 'phonon' does (for the FLEX eh term); 1 + dN = 1 - T^2 must be
+    positive definite."""
     eps = np.asarray(eps)
     norb = len(eps)
     O, V = nocc, norb - nocc
@@ -339,7 +374,8 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa'):
     for spin in SPINS:
         if spin == 'triplet' and eh_triplet != 'rpa':
             out['eh'][spin] = _eh_channel(eps, nocc, spin, B_aa, eri_chemist,
-                                          'riccati', eh_triplet)
+                                          'phonon' if phonons else 'riccati',
+                                          eh_triplet)
             continue
         A, B = LinearResponseSolver(
             eps, coeff_df=B_aa, eri_chemist=eri_chemist).build_casida_matrices(
@@ -347,6 +383,9 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa'):
         T = 0.5 * (T_eh[spin] + T_eh[spin].T)
         dH, dN = channel_corrections_from_amplitudes(B, A, T)
         out['eh'][spin] = {'T': T, 'dH': dH, 'dN': dN}
+        if phonons:
+            omega, X = la.eigh(A + dH, np.eye(len(A)) + dN)
+            out['eh'][spin].update(omega=omega, X=X, Y=T @ X)
     o, v = slice(0, O), slice(O, norb)
     eo, ev = eps[o], eps[v]
     TA = _ladder_TA(_vvvv_ladder(B_aa, eri_chemist, O, norb)(t2), ev, t2)

@@ -25,6 +25,13 @@ the channel treatments 'rpa', 'first_order' and 'off' carry over; Sigma(2) is
 ADC.second_order. There is no Hermitian upfolded form
 (-2 Sigma(2) has negative residues), so quasiparticles come from the
 diagonal QP equation.
+
+With a CCD amplitude (t2=) every channel comes from it instead
+(adc_r_faddeev.ccd_channels): the eh phonons solve (A + dH) X = (1 + dN) X
+omega with Y = T X. The pp/hh term is evaluated either by Lanczos on the
+Faddeev operator with only that pair on, or in closed form (pp_term='poles'):
+that operator is block-diagonal in the spectator, so one pair
+diagonalization per spin gives all its poles and residues.
 """
 import numpy as np
 import scipy.linalg as la
@@ -34,6 +41,9 @@ from src.SingleReference.ADC.second_order import sigma2_poles
 from src.SingleReference.ADC.solve import _LanczosState, _lanczos_extend
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse.pp_rpa import (
+    build_pprpa_matrices_restricted, pair_indices, singlet_pair_indices)
+from src.SingleReference.LinearResponse.riccati import channel_corrections_from_amplitudes
 
 LANCZOS_BLOCK = 20          # steps added per extension of a resolvent Lanczos
 LANCZOS_MAX_STEPS = 2000
@@ -103,6 +113,60 @@ class _Resolvent:
             self._extend(LANCZOS_BLOCK)
 
 
+def spin_adapted_ladder_amplitudes(t, nocc, nv):
+    """{'singlet', 'triplet'} -> T (n_oo, n_vv) of the spin-adapted ppRPA
+    from the ordered alpha-beta ladder amplitude t[k,l,c,d]; the inverse of
+    adc_r_faddeev._alpha_beta_ladder (pair orders of
+    build_pprpa_matrices_restricted)."""
+    ks, ls = singlet_pair_indices(nocc)
+    cs, ds = singlet_pair_indices(nv)
+    sym = t + t.transpose(1, 0, 2, 3)
+    TS = (sym[ks[:, None], ls[:, None], cs[None, :], ds[None, :]]
+          / (np.sqrt(1.0 + (ks == ls))[:, None] * np.sqrt(1.0 + (cs == ds))[None, :]))
+    kt, lt = pair_indices(nocc)
+    ct, dt = pair_indices(nv)
+    asym = t - t.transpose(1, 0, 2, 3)
+    return {'singlet': TS, 'triplet': asym[kt[:, None], lt[:, None], ct[None, :], dt[None, :]]}
+
+
+def ladder_pair_phonons(eps, nocc, t, B_aa):
+    """Phonons of the dressed pp and hh pairs per spin: (A_pp + dH) X =
+    (1 + dN) X Omega and (-C_pp + dH_hh) X = (1 + dN_hh) X lambda, with
+    (dH, dN) from the ladder amplitude t (the Riccati or the CCD amplitude;
+    riccati.channel_corrections_from_amplitudes) and X^T (1 + dN) X = 1."""
+    nv = len(eps) - nocc
+    out = {}
+    for spin, T in spin_adapted_ladder_amplitudes(t, nocc, nv).items():
+        A, Bm, C = build_pprpa_matrices_restricted(eps, nocc, spin, B_aa)
+        # hh first: it needs the bare A; the pp pair (the large one, n_vv
+        # squared) is then assembled in place to keep one n_vv^2 copy per matrix
+        dHh, dNh = channel_corrections_from_amplitudes(-Bm.T, -A, T.T)
+        dNh[np.diag_indices_from(dNh)] += 1.0
+        wh, Xh = la.eigh(-C + dHh, dNh)
+        dH, dN = channel_corrections_from_amplitudes(Bm, C, T)
+        A += dH
+        del dH
+        dN[np.diag_indices_from(dN)] += 1.0
+        out[spin] = {'pp': _eigh_pencil(A, dN), 'hh': (wh, Xh)}
+        del A, dN
+    return out
+
+
+def _eigh_pencil(A, S):
+    """A X = S X w with X^T S X = 1, for S positive definite, by Cholesky
+    reduction and the MRRR driver. Overwrites A and S. The divide-and-conquer
+    generalized driver (dsygvd) needs a 2 n^2 workspace that overflows the
+    32-bit LAPACK integer above n ~ 32800, a size the pp pair space of a
+    quadruple-zeta basis reaches (about 260 virtuals)."""
+    L = la.cholesky(S, lower=True, overwrite_a=True, check_finite=False)
+    A = la.solve_triangular(L, A, lower=True, overwrite_b=True, check_finite=False)
+    A = la.solve_triangular(L, A.T, lower=True, overwrite_b=True, check_finite=False)
+    w, V = la.eigh(A, overwrite_a=True, driver='evr', check_finite=False)
+    del A
+    return w, la.solve_triangular(L, V, lower=True, trans='T', overwrite_b=True,
+                                  check_finite=False)
+
+
 def _pole_sum(residues, poles, w):
     """(sum r / (w - P), its w-derivative) of a flat pole list."""
     d = 1.0 / (w - poles)
@@ -126,9 +190,20 @@ class FlexSelfEnergy:
     ladders=False skips the pp/hh ladder channels (the costly part of the
     set-up): only the eh term and Sigma(2) are then available, e.g. for PSD2
     (= the eh term on TDHF phonons) with the triplet channel at first order.
+    t2: an alpha-beta CCD amplitude t2[i,j,a,b]; every channel (the eh
+    phonons and the pp/hh ladders) is then built from it
+    (adc_r_faddeev.ccd_channels), and eh_triplet 'rpa' means CCD's own triplet
+    channel.
+    pp_term: the pp/hh ladder term as the resolvent of the Faddeev operator
+    with only that pair on, by Lanczos ('lanczos'), or in closed form
+    ('poles'): with the eh pairs off the operator is block-diagonal in the
+    spectator, so one pair diagonalization per spin (ladder_pair_phonons)
+    gives every pole (Omega - eps_i for 2p1h, lambda - eps_a for 2h1p) and its
+    residue (X^T U e_p)^2.
     """
 
-    def __init__(self, s, nocc, eh_triplets=('rpa',), tda=False, ladders=True):
+    def __init__(self, s, nocc, eh_triplets=('rpa',), tda=False, ladders=True,
+                 t2=None, pp_term='lanczos'):
         if s.B_aa is None:
             raise ValueError("FlexSelfEnergy needs the DF factor B_aa")
         self.s, self.nocc, self.B = s, nocc, s.B_aa
@@ -138,6 +213,29 @@ class FlexSelfEnergy:
         eps, B = self.eps, self.B
         self.tda = tda
         self.se = SelfEnergySolver(eps, df_coeff=B, eta=0.0)
+        self._ops = {}
+        self._resolvents = {}
+        self._poles = {}            # per-orbital (residues, poles) of the eh and Sigma(2) terms
+        if pp_term not in ('lanczos', 'poles'):
+            raise ValueError(f"pp_term={pp_term!r}; expected 'lanczos' or 'poles'")
+        self.pp_term = pp_term
+        self._pp_pieces = self._pp_phonons = None
+        if t2 is not None:
+            if tda:
+                raise ValueError("t2 (CCD channels) and tda are exclusive")
+            ccd = FR.ccd_channels(eps, O, t2, B, phonons=True)
+            self.eh = {('singlet', 'rpa'): ccd['eh']['singlet']}
+            for treat in dict.fromkeys(eh_triplets):
+                self.eh[('triplet', treat)] = (
+                    ccd['eh']['triplet'] if treat == 'rpa' else
+                    FR._eh_channel(eps, O, 'triplet', B, None, 'phonon', treat))
+            self._pp_channels = None
+            if ladders:
+                self._pp_channels = {
+                    'eh': {spin: FR._eh_channel(eps, O, spin, B, None, 'riccati', 'off')
+                           for spin in ('singlet', 'triplet')},
+                    'pp': ccd['pp'], 'hh': ccd['hh']}
+            return
         # eh channels: the singlet (always RPA) and the triplet in each
         # treatment asked for, with their phonons; only those are built, so
         # an unstable TDHF triplet refuses 'rpa' alone
@@ -155,9 +253,6 @@ class FlexSelfEnergy:
             else:
                 ch = FR._eh_channel(eps, O, spin, B, None, 'phonon', treat)
             self.eh[(spin, treat)] = ch
-        self._ops = {}
-        self._resolvents = {}
-        self._poles = {}            # per-orbital (residues, poles) of the eh and Sigma(2) terms
         self._pp_channels = None
         if not ladders:
             return
@@ -246,10 +341,47 @@ class FlexSelfEnergy:
                 lambda x: aop(np.concatenate([zero, x]))[norb:], u)
         return self._resolvents[rkey](w)
 
+    def ladder_poles(self, p):
+        """(residues, poles) of the pp/hh term's Sigma_pp in closed form,
+        cached per orbital (pp_term='poles')."""
+        key = ('ladder', p)
+        if key not in self._poles:
+            if self._pp_channels is None:
+                raise ValueError("built with ladders=False: no pp/hh ladder channels")
+            if self._pp_phonons is None:
+                self._pp_pieces = FR._Pieces(self.s, self.nocc, None, 'riccati',
+                                             self._pp_channels)
+                self._pp_phonons = ladder_pair_phonons(
+                    self.eps, self.nocc, self._pp_channels['pp']['t'], self.B)
+            P, O = self._pp_pieces, self.nocc
+            e = np.zeros(self.norb)
+            e[p] = 1.0
+            (xI, xII, xIII), (xIp, xIIp, xIIIp) = P.split(P.U_forward(e))
+            eo, ev = self.eps[:O], self.eps[O:]
+            res, pol = [], []
+            for spin, z2, z1 in (('singlet', np.concatenate([xIp, xIIIp], axis=1),
+                                  np.concatenate([xI, xIII], axis=0)),
+                                 ('triplet', xIIp, xII)):
+                w, X = self._pp_phonons[spin]['pp']
+                R = z2 @ X                                   # (spectator i, phonon)
+                res.append((R ** 2).ravel())
+                pol.append((w[None, :] - eo[:, None]).ravel())
+                wh, Xh = self._pp_phonons[spin]['hh']
+                Rh = Xh.T @ z1                               # (phonon, spectator a)
+                res.append((Rh ** 2).ravel())
+                pol.append((wh[:, None] - ev[None, :]).ravel())
+            self._poles[key] = (np.concatenate(res), np.concatenate(pol))
+        return self._poles[key]
+
+    def _sigma_ladder(self, p, w):
+        if self.pp_term == 'poles':
+            return _pole_sum(*self.ladder_poles(p), w)
+        return self.sigma_operator('pp', p, w)
+
     def sigma_flex(self, p, w, eh_triplet='rpa'):
         """(Sigma_FLEX_pp(w), dSigma/dw)."""
         se, dse = self.sigma_eh(p, w, eh_triplet)
-        sp, dsp = self.sigma_operator('pp', p, w)
+        sp, dsp = self._sigma_ladder(p, w)
         s2, ds2 = self._sigma2(p, w)
         return se + sp - 2 * s2, dse + dsp - 2 * ds2
 
@@ -263,6 +395,9 @@ class FlexSelfEnergy:
             key = 'pp'
             re, pe = self.eh_poles(p, eh_triplet)
             r2, p2 = self.sigma2_poles(p)
+            if self.pp_term == 'poles':
+                wt, th = self.ladder_poles(p)
+                return np.concatenate([re, wt, -2 * r2]), np.concatenate([pe, th, p2])
         else:
             key = ('faddeev', eh_triplet)
         self.sigma_operator(key, p, self.eps[p])

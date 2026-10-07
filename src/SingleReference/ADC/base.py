@@ -512,7 +512,7 @@ class ADCSolverRestricted:
 
     def __init__(self, mf=None, mol=None, level='adc3', df=False,
                  matrix_free=True, en_dress=None, screening=None, nocc=None,
-                 pair_route=None, eh_triplet=None):
+                 pair_route=None, eh_triplet=None, eh_kernel=None):
         """mf=None is internal -- from_arrays supplies the arrays instead.
 
         level='faddeev_adc3' is the own-channel, no-overlap Faddeev-ADC(3)
@@ -523,7 +523,9 @@ class ADCSolverRestricted:
         alpha-beta t2[i,j,a,b]); eh_triplet the treatment of the
         particle-hole triplet channel, 'rpa' (default, full
         TDHF), 'first_order' (ADC(3) level) or 'off' (singlet eh pairs only,
-        as in the PSD self-energies)."""
+        as in the PSD self-energies); eh_kernel 'tdhf' (default) or 'drpa'
+        (both eh channels by direct RPA: stable for any reference, exact
+        through second order only)."""
         # ---- flat guard block: every inapplicable option RAISES, never ignored
         if level not in self.LEVELS:
             raise ValueError(f"level={level!r}; expected one of {self.LEVELS}")
@@ -539,8 +541,12 @@ class ADCSolverRestricted:
             if en_dress is not None or screening is not None:
                 raise ValueError("faddeev_adc3 takes no en_dress or screening: "
                                  "its pair channels replace both")
-        elif pair_route is not None or eh_triplet is not None:
-            raise ValueError("pair_route and eh_triplet are faddeev_adc3 options")
+            eh_kernel = 'tdhf' if eh_kernel is None else eh_kernel
+            if eh_kernel not in adc_r_faddeev.EH_KERNELS:
+                raise ValueError(f"eh_kernel={eh_kernel!r}; expected one of "
+                                 f"{adc_r_faddeev.EH_KERNELS}")
+        elif pair_route is not None or eh_triplet is not None or eh_kernel is not None:
+            raise ValueError("pair_route, eh_triplet and eh_kernel are faddeev_adc3 options")
         en_dress = validate_en_dress(en_dress)
         W_chemist = W_aux = None
         screen_coupling = False
@@ -579,6 +585,7 @@ class ADCSolverRestricted:
         self._is_adc2x = (level == 'adc2x')
         self.pair_route = pair_route
         self.eh_triplet = eh_triplet
+        self.eh_kernel = eh_kernel
         self.ccd_t2 = None
         self.last_result = {}
 
@@ -720,7 +727,7 @@ class ADCSolverRestricted:
             t2 = self._faddeev_ccd_t2() if self.pair_route == 'ccd' else None
             cache[nocc] = adc_r_faddeev.pair_channels(
                 self.eps, nocc, self.B_aa, eri, route=self.pair_route,
-                eh_triplet=self.eh_triplet, t2=t2)
+                eh_triplet=self.eh_triplet, t2=t2, eh_kernel=self.eh_kernel)
         return cache[nocc]
 
     def _faddeev_ccd_t2(self):
