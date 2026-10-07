@@ -10,9 +10,10 @@ Static kernel in closed form,
 with no t dependence: the screening is the mean-field response, and the
 amplitudes only enter through the quasiparticle energies on the BSE diagonal.
 Those come from the diagonal quasi-boson EOM solve of
-`GW.quasi_boson.QPqb`, filtered on pole strength (Hartree-Fock fallback for a
-state whose root is a satellite), while the screening keeps mean-field
-energies: the standard G0W0-BSE split.
+`GW.quasi_boson.QPqb` -- the nearest root by Newton, or the root of largest
+pole strength (`qp_root`) -- unless filtered on pole strength (Hartree-Fock
+fallback for a state whose root is a satellite), while the screening keeps
+mean-field energies: the standard G0W0-BSE split.
 
 kappa weights the bare exchange (ia|jb) in A and in B and nothing else -- 2 for
 a singlet, 0 for a triplet. W, the quasiparticle energies and every quasi-boson
@@ -26,7 +27,11 @@ import numpy as np
 
 from src.Base.constants import KAPPA, QP_WINDOW_Z_MIN
 from src.Base.eri_blocks import as_blocks
+from src.Base.utils.threads import openmp_threads, row_map
 from src.SingleReference.GW.quasi_boson import QPqb
+
+#: The rules for which root of the quasiparticle equation reaches the diagonal.
+QP_ROOT_RULES = ('newton', 'weight')
 
 
 class BSEqb:
@@ -39,7 +44,7 @@ class BSEqb:
 
     def __init__(self, mf, eri_mo, nocc, screening='rpa', bse_tda=False,
                  qp_orbs='all', seeds=None, pinned=False, delta=None,
-                 spin='singlet'):
+                 spin='singlet', qp_root='newton'):
         """delta: the static <p|Sigma_x - v_xc|p> shift; see `QPqb`. It reaches
         the BSE through `eps_qp` alone, which is where the quasiparticle
         energies enter the kernel.
@@ -50,9 +55,21 @@ class BSEqb:
         spin-independent. The gradient needs no separate treatment because the
         one place kappa appears there, on Gamma4[o,v,o,v], is the derivative of
         those two terms and carries the same factor.
+
+        qp_root: which root of each listed orbital's quasiparticle equation
+        the diagonal carries. 'newton' is `QPqb.solve_diag` from eps_p or the
+        seed, the nearest root, a satellite where one lies closer than the
+        quasiparticle; 'weight' is `QPqb.quasiparticle_root`, the root with
+        the largest Z, decided afresh at every geometry and so taking no seed.
         """
         if spin not in KAPPA:
             raise ValueError(f"spin {spin!r}: one of {', '.join(sorted(KAPPA))}")
+        if qp_root not in QP_ROOT_RULES:
+            raise ValueError(f'qp_root {qp_root!r}: one of {QP_ROOT_RULES}')
+        if qp_root == 'weight' and seeds:
+            raise ValueError("qp_root='weight' decides each root from the "
+                             "poles at this geometry and follows no seed")
+        self.qp_root = qp_root
         self.spin = spin
         self.kappa = KAPPA[spin]
         eps = np.asarray(mf.mo_energy, float)
@@ -75,12 +92,17 @@ class BSEqb:
         # pole-strength filter makes the PES discontinuous at filter flips.
         self.eps_qp = eps.copy()
         self.qp_roots = {}
+        self.qp_z = {}
+        solved = (largest_weight_roots(self.qp, self.qp_orbs)
+                  if qp_root == 'weight' else
+                  {p: self.qp.solve_diag(p, w0=seeds.get(p) if seeds else None)
+                   for p in self.qp_orbs})
         for p in self.qp_orbs:
-            w0 = seeds.get(p) if seeds else None
-            w, Z = self.qp.solve_diag(p, w0=w0)
+            w, Z = solved[p]
             if pinned or Z > QP_WINDOW_Z_MIN:
                 self.eps_qp[p] = w
                 self.qp_roots[p] = w
+                self.qp_z[p] = Z
 
         # screening resolvent P^-1 at mean-field energies
         qb = self.qp.qb
@@ -129,3 +151,21 @@ class BSEqb:
             XmY = np.linalg.solve(L.T, Zv) * np.sqrt(self.Omega)[None, :]
             self.X = 0.5 * (XpY + XmY)
             self.Y = 0.5 * (XpY - XmY)
+
+
+def largest_weight_roots(qp, orbitals):
+    """{p: (w*, Z)} of `QPqb.quasiparticle_root` over `orbitals`, on the
+    process's threads.
+
+    Each orbital's search is element-wise numpy over its own poles, so the
+    orbitals are split over threads (`row_map`) and every root is the bits the
+    serial search makes. The order is dealt round-robin, which spreads the
+    continuum virtuals, the slowest searches, over the threads.
+    """
+    threads = max(1, min(openmp_threads(), len(orbitals)))
+    dealt = [orbitals[i] for t in range(threads)
+             for i in range(t, len(orbitals), threads)]
+    parts = row_map(lambda r0, r1: [(p, qp.quasiparticle_root(p))
+                                    for p in dealt[r0:r1]],
+                    len(dealt), threads)
+    return dict(pair for part in parts for pair in part)

@@ -361,8 +361,10 @@ def test_kohn_sham_roots_agree_with_the_dense_route(column):
     # charge_change -1 removes the HOMO electron, +1 adds one to the LUMO
     for change, p in ((-1, chain.nocc - 1), (+1, chain.nocc)):
         surface = QuasiparticleSurface(mol, factory, charge_change=change)
-        info = surface.total_gradient(mol, surface.scf_factory(mol))[2]
-        off = info['qp_energy_eV'] - s0['eps_qp'][p] * HARTREE_TO_EV
+        # the energy alone: a force on this density-fitted mean field is
+        # refused, the dense route's (pq|rs) being exact
+        w = surface.quasiparticle_energy(mol, surface.scf_factory(mol))
+        off = (w - s0['eps_qp'][p]) * HARTREE_TO_EV
         assert abs(off) < DENSE_EV, (p, off)
 
 

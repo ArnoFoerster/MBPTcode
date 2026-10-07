@@ -28,9 +28,10 @@ displaced mean field:
   (a) under the race and the free memory: the composed state-pair force at a
       displaced geometry, its energy and the dRPA force of each layout, the
       optimizer's mean-field force (`mean_field_force`), the dense dRPA
-      force and energy, and the Hartree-Fock mirror energy of a PBE0
-      reference (`reference_energy`) are rank 0's bits on every rank, while
-      pyscf's own gradient of the locked mean field differs between ranks;
+      force and energy on an unfitted reference, and the Hartree-Fock
+      mirror energy of a PBE0 reference (`reference_energy`) are rank 0's
+      bits on every rank, while pyscf's own gradient of the locked mean field
+      differs between ranks;
   (b) on the shape-sensitive BLAS and the free memory (subprocess): the same
       three numbers of each layout rank 0's on every rank, the sliced layout
       bitwise the whole one, and the row fit's forces and energy within
@@ -184,6 +185,15 @@ def chain_scf(m):
     return out
 
 
+def exact_scf(m):
+    """`chain_scf` without the density fit, for the dense route's exact
+    (pq|rs)."""
+    out = scf.RHF(m)
+    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.kernel()
+    return out
+
+
 def pbe0_scf(m):
     """A PBE0 mean field, whose E_0 needs the Hartree-Fock mirror."""
     out = dft.RKS(m, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
@@ -298,7 +308,8 @@ def shape_mdot(obj, *args, **kw):
 
 
 def import_src_on_the_shape_sensitive_blas():
-    """Drop every imported src module and import src rewritten from now on."""
+    """Drop every imported src module, so every later import of src is
+    rewritten."""
     builtins.__shape_mm__ = shape_mm
     builtins.__shape_np__ = shape_np
     builtins.__shape_mdot__ = shape_mdot
@@ -362,9 +373,10 @@ def race_rank(comm):
     ks = lockstep_mean_field(pbe0_scf(here))
     out['reference_energy'] = np.array([reference_energy(ks, here)
                                         for _ in range(MIRROR_REPEATS)])
-    # density-fitted, so its mean-field force is the gradient the stand-ins
-    # reach; the dense route itself runs pyscf's integral-direct C kernels
-    g, e, _ = DenseRPASurface(mol, chain_scf).total_gradient(here)
+    # unfitted, the integrals of the dense route's exact (pq|rs): its force
+    # is refused on a density-fitted mean field (the orbital response would
+    # be built from other integrals than the SCF's)
+    g, e, _ = DenseRPASurface(mol, exact_scf).total_gradient(here)
     out['dense dRPA force'] = np.asarray(g)
     out['dense dRPA energy'] = np.atleast_1d(e)
     return out

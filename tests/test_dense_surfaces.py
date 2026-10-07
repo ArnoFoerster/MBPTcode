@@ -46,27 +46,58 @@ from src.properties.surface import (FiniteDifferenceGradient,
 #: at ONE step size cannot tell a correct gradient from one that is wrong by
 #: less than that error. Measured here on H2/cc-pVDZ the difference falls by
 #: exactly 4.00 per halving from 1e-4 at h = 0.02 to 3.9e-7 at h = 0.00125 --
-#: no noise floor in sight -- so the pair below is Richardson-extrapolated and
-#: the residual gated at the round-off level instead.
-FD_STEPS = (5e-3, 2.5e-3)
+#: no noise floor in sight -- so the two finest steps below are
+#: Richardson-extrapolated and the residual gated at the round-off level
+#: instead. The coarsest step only measures the order.
+FD_STEPS = (1e-2, 5e-3, 2.5e-3)
 FD_TOL = 1e-8
-#: Successive halvings must divide the error by four. A constant error would
-#: give one, and that is what a MISSING TERM looks like: it survives h -> 0.
+#: The extrapolation is only right where the error is c h^2: the change of the
+#: difference over one halving, G(2h) - G(h) = 3 c h^2, must be four times the
+#: next one, G(h) - G(h/2) = 3 c h^2 / 4. An error linear in h (a kink, a root
+#: switching branch inside the stencil) gives two, round-off noise anything.
+#: A term missing from the analytic gradient is an offset these differences
+#: cancel; FD_TOL against the extrapolated value is what catches it.
 FD_ORDER_TOL = 0.15
 
 
-def richardson(surface, steps=FD_STEPS):
-    """(gradient extrapolated to h -> 0, the ratio between the two errors).
+def order_ratio(coarsest, coarse, fine):
+    """max |G(2h) - G(h)| / max |G(h) - G(h/2)| over three halving steps: 4
+    when the finite-difference error is c h^2, 2 when it is linear in h.
 
-    G(h) = G + c h^2, so (4 G(h/2) - G(h)) / 3 cancels the leading error and
-    the ratio of the two residuals says whether the error really was O(h^2).
+    It is measured on three steps, not read off an extrapolation of two: the
+    residuals of (4 G(h/2) - G(h)) / 3 are 4 (G(h) - G(h/2)) / 3 and
+    (G(h) - G(h/2)) / 3, whose ratio is 4 whatever the data."""
+    return (np.max(np.abs(coarsest - coarse))
+            / max(np.max(np.abs(coarse - fine)), 1e-300))
+
+
+def richardson(surface, steps=FD_STEPS):
+    """(gradient extrapolated to h -> 0, the order ratio of `order_ratio`).
+
+    G(h) = G + c h^2, so (4 G(h/2) - G(h)) / 3 on the two finest steps cancels
+    the leading error; the third, coarser step says whether the error really
+    was O(h^2) there.
     """
-    coarse, fine = (FiniteDifferenceGradient(surface, h=h).total_gradient()[0]
-                    for h in steps)
+    coarsest, coarse, fine = (
+        FiniteDifferenceGradient(surface, h=h).total_gradient()[0]
+        for h in steps)
     extrapolated = (4.0 * fine - coarse) / 3.0
-    ratio = (np.max(np.abs(coarse - extrapolated))
-             / max(np.max(np.abs(fine - extrapolated)), 1e-300))
-    return extrapolated, ratio
+    return extrapolated, order_ratio(coarsest, coarse, fine)
+
+
+def test_the_order_ratio_tells_h_squared_from_h():
+    """The order gate can fail: a synthetic gradient whose error is c h^2
+    passes it, one whose error is linear in h does not, and a constant offset
+    on top (a missing analytic term) leaves the ratio alone."""
+    exact, c = np.array([0.3, -0.1]), np.array([2.0, -5.0])
+    h = np.array(FD_STEPS)
+    quadratic = [exact + c * x ** 2 for x in h]
+    linear = [exact + c * x for x in h]
+    offset = [g + 1e-3 for g in quadratic]
+    assert abs(order_ratio(*quadratic) - 4.0) < 1e-9
+    assert abs(order_ratio(*linear) - 2.0) < 1e-9
+    assert abs(order_ratio(*linear) - 4.0) > FD_ORDER_TOL * 4.0
+    assert abs(order_ratio(*offset) - 4.0) < 1e-9
 
 
 def rhf(mol):
@@ -254,11 +285,11 @@ def test_the_two_legs_of_an_ionization_share_one_ground_state(screening, neutral
 
 def test_the_excitation_is_reachable_on_a_kohn_sham_reference():
     """The letter's second starting point is BHLYP and its transition energies
-    on it are single points, so an ENERGY must be reachable there. Two things
-    make that safe, and both are asserted: E_0 is repaired to the plasmon
-    formula's E_HF + E_c^dRPA rather than left as E_KS + E_c^dRPA, which would
-    count the correlation in E_xc twice; and the GRADIENT still refuses,
-    because the nuclear derivative of <Sigma_x - v_xc> is not assembled here.
+    on it are single points, so an ENERGY must be reachable there: E_0 is
+    repaired to the plasmon formula's E_HF + E_c^dRPA rather than left as
+    E_KS + E_c^dRPA, which would count the correlation in E_xc twice. The
+    (F, ERI, t) partials alone still refuse the shift; the surface assembles
+    its derivative (`test_a_kohn_sham_excited_state_is_its_own_derivative`).
     """
     def bhlyp(m):
         mf = dft.RKS(m)
@@ -291,7 +322,7 @@ def test_the_excitation_is_reachable_on_a_kohn_sham_reference():
         'this molecule does not show the double counting the correction '
         'removes, so the test does not test it')
     with pytest.raises(NotImplementedError, match='Sigma_x - v_xc'):
-        surface.total_gradient(mol, mf)
+        b.partials(0)
 
 
 def test_repairing_e0_leaves_a_hartree_fock_reference_bit_identical():
@@ -380,6 +411,43 @@ def test_a_kohn_sham_reference_is_differentiated_and_not_refused(build):
     assert np.max(np.abs(g_analytic - g_fd)) < FD_TOL, (
         f'{surface.label()}: analytic vs h -> 0 '
         f'{np.max(np.abs(g_analytic - g_fd)):.3e}')
+
+
+def lrc_wpbeh(mol):
+    """The range-separated hybrid the production runs relax on: a long-range
+    exchange channel the shift's derivative must carry beside the global
+    fraction."""
+    mf = dft.RKS(mol, xc='lrc-wpbeh')
+    mf.grids.level = 5
+    mf.conv_tol = 1e-14
+    mf.conv_tol_grad = 1e-10
+    mf.max_cycle = 200
+    mf.kernel()
+    return mf
+
+
+@pytest.mark.parametrize('spin', ('singlet', 'triplet'))
+@pytest.mark.parametrize('factory', (pbe0, lrc_wpbeh))
+def test_a_kohn_sham_excited_state_is_its_own_derivative(factory, spin):
+    """BSE@G0W0 on a Kohn-Sham reference, the force against the surface's
+    own energy.
+
+    Every solved orbital carries <p|Sigma_x - v_xc|p>, and Omega reads it
+    through the BSE diagonal at the root's quasiparticle weight: dropping that
+    term moves the force by 2.2-3.1e-2 Ha/Bohr here. E_0 = E_HF[rho] adds the
+    exact-exchange double counting; both come off
+    `kohn_sham_gradient_correction`.
+    """
+    surface = DenseBSESurface(h2(), scf=factory, spin=spin)
+    g_analytic, _, _ = surface.total_gradient()
+    g_fd, ratio = richardson(surface)
+    assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, (
+        f'{factory.__name__} {spin}: the finite-difference error fell by '
+        f'{ratio:.2f} per halving, not 4')
+    assert np.max(np.abs(g_analytic - g_fd)) < FD_TOL, (
+        f'{factory.__name__} {spin}: analytic vs h -> 0 '
+        f'{np.max(np.abs(g_analytic - g_fd)):.3e}')
+    assert np.max(np.abs(g_analytic.sum(axis=0))) < FD_TOL
 
 
 def test_the_kohn_sham_correction_is_zero_on_hartree_fock_and_not_on_a_hybrid():
@@ -649,5 +717,33 @@ def test_matched_integrals_keep_their_force(monkeypatch):
     exact = DenseBSESurface(mol, scf=rhf)
     guarded = exact.total_gradient(mol)[0]
     monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
-                        lambda *a: None)
+                        lambda *a, **k: None)
+    assert np.array_equal(guarded, exact.total_gradient(mol)[0])
+
+
+@pytest.mark.parametrize('cls', ['rpa', 'qp'])
+def test_the_exact_tensor_surfaces_refuse_a_fitted_mean_field(cls,
+                                                               monkeypatch):
+    """`DenseRPASurface` and `QuasiparticleSurface` transform the exact
+    (pq|rs): on a density-fitted mean field their force is refused, the
+    energy (and the quasiparticle energy) still reported; on an unfitted
+    one the force is bit for bit the one without the guard."""
+    mol = water()
+
+    def build(factory):
+        if cls == 'rpa':
+            return DenseRPASurface(mol, factory)
+        return QuasiparticleSurface(mol, factory, charge_change=-1)
+
+    fitted = build(df_rhf('cc-pvdz-jkfit'))
+    with pytest.raises(ValueError, match='not be the derivative'):
+        fitted.total_gradient(mol)
+    assert np.isfinite(fitted.total_energy(mol))
+    if cls == 'qp':
+        assert np.isfinite(fitted.quasiparticle_energy(mol))
+
+    exact = build(rhf)
+    guarded = exact.total_gradient(mol)[0]
+    monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
+                        lambda *a, **k: None)
     assert np.array_equal(guarded, exact.total_gradient(mol)[0])

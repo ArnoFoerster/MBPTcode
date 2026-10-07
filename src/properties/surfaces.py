@@ -418,7 +418,10 @@ def build_dense_bse(row, setup):
 
     `filter_z=False` keeps the set this entry point resolved: the
     surface's own Z > 0.5 filter would re-decide it and the two routes would
-    then be compared on two different quasiparticle sets.
+    then be compared on two different quasiparticle sets. qp_root='weight':
+    every orbital of it carries the root of largest pole strength, decided at
+    each geometry, never a satellite nearer the mean-field level and never
+    the mean-field level itself.
     """
     variant = 'BSEtda@GW' if setup.excitation.kernel == 'bse-tda' else 'BSE@GW'
     kw = {} if 'eri_blocks' not in setup.numerics else {
@@ -427,7 +430,8 @@ def build_dense_bse(row, setup):
         kw['auxbasis'] = setup.numerics['auxbasis']
     surface = row.cls(setup.mol, variant, setup.excitation.root - 1,
                       qp_orbs=setup.qp_explicit, filter_z=False,
-                      scf=setup.scf_factory, spin=setup.excitation.spin, **kw)
+                      scf=setup.scf_factory, spin=setup.excitation.spin,
+                      qp_root='weight', **kw)
     return surface, {}
 
 

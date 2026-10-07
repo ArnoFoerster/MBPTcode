@@ -126,21 +126,35 @@ class BSEqbAdjoint(BSEqb):
     quasiparticle = QPqbAdjoint
 
     def partials(self, n):
-        """(gammaF, Gamma4, t_grad) of Omega_n. t_grad None for TDA screening."""
+        """(gammaF, Gamma4, t_grad) of Omega_n. t_grad None for TDA screening.
+
+        A Kohn-Sham shift <p|Sigma_x - v_xc|p> is REFUSED here: it is no
+        function of (F, ERI), so a force built from these three alone would
+        miss d(shift)/dR. `partials_with_shift` returns its weights.
+        """
         shift = float(np.abs(self.qp.delta).max())
         # By MAGNITUDE, not by nonzeroness: Sigma_x - v_xc is zero on a
         # Hartree-Fock reference analytically and round-off numerically, so
-        # `delta.any()` refuses the one reference this route exists to
-        # differentiate.
+        # `delta.any()` refuses the one reference these three describe whole.
         if shift > XC_SHIFT_GRADIENT_TOL:
             raise NotImplementedError(
-                f'the dense route differentiates a Hartree-Fock reference '
-                f'only: the static <p|Sigma_x - v_xc|p> shift reaches '
-                f'{shift:.3e} Ha here, and while it enters the energy its '
-                f'nuclear derivative is not assembled on this route. '
-                f'Energies on a Kohn-Sham starting point are fine; a '
-                f'gradient there needs the differentiated xc correction of '
-                f'the cubic chain.')
+                f'the static <p|Sigma_x - v_xc|p> shift reaches {shift:.3e} '
+                f'Ha here, and its nuclear derivative is a term of its own: '
+                f'`qp_xc_correction_Y` and `qp_xc_correction_skeleton` at the '
+                f'weights `partials_with_shift` returns. A force built from '
+                f'these three alone would be missing it; DenseBSESurface '
+                f'assembles it.')
+        return self.partials_with_shift(n)[:3]
+
+    def partials_with_shift(self, n):
+        """(gammaF, Gamma4, t_grad, shift_weights) of Omega_n.
+
+        shift_weights[p] = dOmega_n / d delta_p. The shift sits beside eps_p
+        in the (p, p) element of the upfolded matrix, so it reaches the root
+        with the root's quasiparticle weight rp^2, and Omega_n through the
+        BSE diagonal's coefficient of eps^QP_p; an orbital outside the solved
+        set keeps its mean-field eigenvalue and carries no shift.
+        """
         nocc, nvirt, norb = self.nocc, self.nvirt, self.norb
         occ, virt = slice(0, nocc), slice(nocc, norb)
         X = self.X[:, n]
@@ -158,7 +172,7 @@ class BSEqbAdjoint(BSEqb):
         c = np.zeros(norb)
         c[nocc:] = dCA.sum(axis=0)
         c[:nocc] = -dCA.sum(axis=1)
-        self._qp_chain(c, gammaF, Gamma4, t_grad)
+        shift_weights = self._qp_chain(c, gammaF, Gamma4, t_grad)
 
         # (ii) bare exchange kappa (ia|jb) in A (CA) and B (CB); absent for a
         # triplet, where kappa = 0
@@ -193,10 +207,11 @@ class BSEqbAdjoint(BSEqb):
             XP2 = -self.Pinv @ (0.5 * (SP2 + SP2.T)) @ self.Pinv
             self._chain_P(XP2, gammaF, Gamma4)
 
-        return gammaF, Gamma4, t_grad
+        return gammaF, Gamma4, t_grad, shift_weights
 
     def _qp_chain(self, c, gammaF, Gamma4, t_grad):
-        """Accumulate sum_p c_p d eps^QP_p / d(F, ERI, t) in ONE pass.
+        """Accumulate sum_p c_p d eps^QP_p / d(F, ERI, t) in ONE pass; return
+        c_p d eps^QP_p / d delta_p per orbital.
 
         Everything downstream of the two per-state carriers is LINEAR in them:
         T_p (the Abar adjoint) enters through abar_AB_adjoint/abar_t_gradient
@@ -217,6 +232,7 @@ class BSEqbAdjoint(BSEqb):
         Knu = np.zeros((nb, nb))
         UtE = U.T @ qb.exp_t                          # (nu, I), for the couplings
         Vb = qp.Vbare
+        shift_weights = np.zeros(norb)
         for p in range(norb):
             if abs(c[p]) < 1e-15:
                 continue
@@ -225,6 +241,8 @@ class BSEqbAdjoint(BSEqb):
                 continue
             rp, Rh, Rp = qp.eigvec_diag(p, self.qp_roots[p])   # (j,nu), (b,nu)
             gammaF[p, p] += c[p] * rp ** 2
+            # delta_p enters the upfolded matrix beside eps_p
+            shift_weights[p] = c[p] * rp ** 2
             gammaF[:nocc, :nocc] += c[p] * (Rh @ Rh.T)
             gammaF[nocc:, nocc:] += c[p] * (Rp @ Rp.T)
             Tnu += c[p] * (Rp.T @ Rp - Rh.T @ Rh)
@@ -243,6 +261,7 @@ class BSEqbAdjoint(BSEqb):
         if t_grad is not None:
             t_grad += qb.abar_t_gradient(T)
             t_grad += qb.linear_expt_t_gradient(Knu @ U.T)
+        return shift_weights
 
     def _chain_P(self, XP, gammaF, Gamma4):
         """Chain an adjoint on P (= A+B or A at mean-field) into (F, ERI)."""

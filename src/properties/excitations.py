@@ -393,7 +393,9 @@ def qp_bookkeeping(surface, mol):
     reason, the route and the rejected root and Z.
 
     Shifts and roots are in eV; `z` is the pole strength per explicit state,
-    None until the chain keeps it.
+    None until the chain keeps it; `qp_root` (dense only) which root of the
+    quasiparticle equation each explicit state carries, the nearest by Newton
+    or the one of largest pole strength.
     """
     chain = driven_chain(surface)
     if not hasattr(chain, 'qp_set'):
@@ -411,7 +413,8 @@ def qp_bookkeeping(surface, mol):
     if not cubic:
         record.update(outside_treatment='mean-field', n_scissor=0,
                       scissor_tiers=[], route=None, inside_scissor_eV={},
-                      sop=None, z=None, demoted={})
+                      sop=None, demoted={}, qp_root=chain.qp_root,
+                      z={int(p): float(v) for p, v in chain.qp_z.items()})
         return record
     eps = np.asarray(chain.mf0.mo_energy, float)
     scissored = chain.outside == 'scissor'

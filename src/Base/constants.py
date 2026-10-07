@@ -445,6 +445,22 @@ SOP_FIT_STRIDE = 8
 # scissor.
 QP_WINDOW_Z_MIN = 0.5
 
+# Root tolerance (Ha) of `GW.quasi_boson.QPqb.quasiparticle_root`, the dense
+# route's largest-weight root of w = eps_p + Sigma_pp(w): the Newton step it
+# stops at, and the budget of couplings it may drop before bracketing. By
+# Weyl's inequality, removing couplings of total norm sqrt(sum W^2) from the
+# arrowhead supermatrix moves every root by at most that norm, so dropping the
+# weakest poles while the norm stays below this moves the answer by no more
+# than the solve itself resolves. What goes is the symmetry-forbidden poles,
+# |W| ~ 1e-17, whose roots sit closer to their pole than w can resolve. The
+# same 1e-12 as `QPqb.solve_diag`'s Newton, so both rules converge alike.
+QB_QP_ROOT_TOL = 1e-12
+
+# Bytes of one (intervals x poles) block of `quasi_boson.end_value_bounds`,
+# the pruning pass of the largest-weight root search: an orbital can hold
+# hundreds of thousands of poles, so a block is a few rows of them.
+QB_QP_END_BLOCK_BYTES = 64 << 20
+
 # The bare Laplace quadrature error a residue frequency must be carried to
 # before the cosh transform of proj(tau) may stand in for an explicit chi0(w')
 # (src/SingleReference/GW/real_screening.py::LaplaceRealScreening). It gates a
