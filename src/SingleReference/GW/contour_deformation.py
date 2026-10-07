@@ -58,6 +58,8 @@ cubic one exists only below the particle-hole gap and REFUSES above it rather
 than fall back, because a continuation that silently changes route returns a
 different functional under the name asked for.
 """
+import warnings
+
 import numpy as np
 import scipy.linalg
 
@@ -205,6 +207,26 @@ def screening_applied(chi0, Bp):
                                                        + Bp.shape))
 
 
+def screening_solver(eps_mat):
+    """x -> [1 - chi0(i.nu)]^-1 x, factorized once: Cholesky, else LU.
+
+    On the imaginary axis chi0(i.nu) = D^T chi0_grid(i.nu) D is negative
+    semidefinite for any real gauge D, bare or dressed, so 1 - chi0 >= 1 and
+    Cholesky (half the flops of LU, one triangle read) applies. A matrix it
+    refuses is solved by LU, with a warning.
+    """
+    try:
+        cho = scipy.linalg.cho_factor(eps_mat)
+    except np.linalg.LinAlgError:
+        warnings.warn('1 - chi0(i.nu) is not positive definite, which no '
+                      'real symmetric gauge of the imaginary-axis chi0 '
+                      'allows; solved by LU instead of Cholesky',
+                      RuntimeWarning, stacklevel=2)
+        lu = scipy.linalg.lu_factor(eps_mat)
+        return lambda b: scipy.linalg.lu_solve(lu, b)
+    return lambda b: scipy.linalg.cho_solve(cho, b)
+
+
 def screening_contraction(Bp, wbp):
     """wc[k, q] = sum_P Bp[P,q] [W(i.nu_k) Bp - Bp][P,q] -- NO omega in it.
 
@@ -227,10 +249,11 @@ def wc_explicit(Bp, C_ov, d, nu_points):
 def cd_screening_contraction(proj_tau, cosft_wt, Bp, tile_gb=ISDF_TILE_GB):
     """wc[k, q] = Bp[:,q]^T [W(i.nu_k) - I] Bp[:,q] from proj(tau), streamed.
 
-    chi0(i.nu) comes out of proj(tau) one frequency block at a time; one LU and
-    one norb-column solve per frequency, W never formed, no frequency outliving
-    its block. `cd_screening_contraction_multi` does the same for several bra
-    states at once and should be preferred when there is more than one.
+    chi0(i.nu) comes out of proj(tau) one frequency block at a time; one
+    factorization (`screening_solver`) and one norb-column solve per
+    frequency, W never formed, no frequency outliving its block.
+    `cd_screening_contraction_multi` does the same for several bra states at
+    once and should be preferred when there is more than one.
     """
     return cd_screening_contraction_multi(proj_tau, cosft_wt, [Bp],tile_gb=tile_gb)[0]
 
@@ -242,14 +265,15 @@ def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
     The matrix [1 - chi0(i.nu)] depends on the frequency alone, not on which
     state is being screened, so rebuilding chi0 and factorizing it once per
     state is pure waste. Frequency runs OUTSIDE and states inside: one
-    tensordot and one LU per frequency serve every state, each of which then
-    costs only a triangular solve. For a BSE quasiparticle set of n states that
-    is n times fewer factorizations and n times fewer chi0 rebuilds.
+    tensordot and one Cholesky per frequency serve every state, each of which
+    then costs only a triangular solve. For a BSE quasiparticle set of n
+    states that is n times fewer factorizations and n times fewer chi0
+    rebuilds.
 
     freq_indices: the frequencies this rank computes; every other row of each
     wc stays zero, so the sum over ranks is the whole. A frequency's result is
-    its own row and the LU is the cost, which makes this the reduction-free
-    axis to split (nfreq x norb per state to gather).
+    its own row and the factorization is the cost, which makes this the
+    reduction-free axis to split (nfreq x norb per state to gather).
     The chi0 rows are the serial block's rows on any BLAS
     (`owned_frequency_blocks`), so the sum over ranks, which adds exact
     zeros, is the serial wc bitwise. Serial (None) is bitwise unchanged.
@@ -260,9 +284,9 @@ def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
     for ks, blk in owned_frequency_blocks(proj_tau, cosft_wt, tile_gb,
                                           freq_indices):
         for m, k in enumerate(ks):
-            lu = scipy.linalg.lu_factor(eye - blk[m])
+            solve = screening_solver(eye - blk[m])
             for B, wc in zip(Bps, out):
-                WtB = scipy.linalg.lu_solve(lu, B)
+                WtB = solve(B)
                 wc[k] = np.einsum('Pq,Pq->q', B, WtB - B)
     return out
 

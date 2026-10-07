@@ -388,6 +388,10 @@ def qp_bookkeeping(surface, mol):
     `explicit` and `outside` partition the orbitals. None for a surface with
     no quasiparticle set.
 
+    `demoted`: the orbitals the declaration made explicit whose reference
+    root had a pole strength outside (0, 1], outside the set, with the
+    reason, the route and the rejected root and Z.
+
     Shifts and roots are in eV; `z` is the pole strength per explicit state,
     None until the chain keeps it.
     """
@@ -407,7 +411,7 @@ def qp_bookkeeping(surface, mol):
     if not cubic:
         record.update(outside_treatment='mean-field', n_scissor=0,
                       scissor_tiers=[], route=None, inside_scissor_eV={},
-                      sop=None, z=None)
+                      sop=None, z=None, demoted={})
         return record
     eps = np.asarray(chain.mf0.mo_energy, float)
     scissored = chain.outside == 'scissor'
@@ -432,7 +436,14 @@ def qp_bookkeeping(surface, mol):
         inside_scissor_eV={int(p): float(s) * HARTREE_TO_EV
                            for p, s in sorted(chain.scissor_map.items())},
         eps_mean_field_eV={p: float(eps[p]) * HARTREE_TO_EV for p in explicit},
-        sop=sop, z=diagnostics.get('z'))
+        sop=sop, z=diagnostics.get('z'),
+        # declared explicit, but the reference root was no quasiparticle
+        # (`_settle_qp_set`): outside the set, with why and the root rejected
+        demoted={int(p): {'reason': d['reason'], 'z': d['z'],
+                          'route': d['route'],
+                          'root_eV': d['root'] * HARTREE_TO_EV}
+                 for p, d in sorted(getattr(chain, 'qp_demoted',
+                                            {}).items())})
     return record
 
 

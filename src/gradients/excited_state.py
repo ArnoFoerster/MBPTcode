@@ -79,18 +79,19 @@ from src.Base.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                 BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
                                 BSE_FORCE_RESIDUAL_TOL,
                                 BSE_DENSE_MAX_NOV, CASIDA_PHASE_TIE_TOL,
-                                CD_NFREQ, HARTREE_TO_EV,
+                                CD_NFREQ, CD_NFREQ_SOP, HARTREE_TO_EV,
                                 OUTSIDE_TREATMENTS, SOP_N_POLES)
 from src.Base.declaration import Excitation, SurfacePhysics
 from src.Base.environment import attached_environment, environment_label
-from src.Base.utils.mpi_grid import current_comm
+from src.Base.utils.mpi_grid import current_comm, lockstep
 from src.Base.utils.time_frequency import (TimeFrequencyGrid,
                                            minimax_points_for_accuracy)
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
-                                              frozen_scissor)
+                                              frozen_scissor,
+                                              is_quasiparticle_root)
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
@@ -112,7 +113,8 @@ from src.gradients.isdf_derivatives import (GaugeAdjoint, qp_xc_correction,
                                             xc_hybrid_coeff)
 from src.properties.nonadiabatic import (follow_state, mo_overlap,
                                          state_overlap)
-from src.gradients.qp_space_time import (qp_gradient_space_time,
+from src.gradients.qp_space_time import (carried_analytically,
+                                         qp_gradient_space_time,
                                          qp_set_gradient, static_term)
 from src.gradients.space_time_adjoint import (chi0_backward,
                                               chi0_backward_rows)
@@ -241,7 +243,7 @@ class ExcitedStateChain(FactorChain):
                  track=None,
                  basis=None, auxbasis=None, counts=None, n_start=1,
                  qp_window=2, degeneracy_tol=1e-4, ntau_gw=24, ntau_w=None,
-                 nfreq_cd=CD_NFREQ, e_min_below_gap=None, frames='frozen',
+                 nfreq_cd=None, e_min_below_gap=None, frames='frozen',
                  residue_route='explicit', tile_gb=None, at_mean_field=False,
                  scissor=None, outside='mean-field', n_poles=SOP_N_POLES,
                  sop_stride=None,
@@ -318,14 +320,19 @@ class ExcitedStateChain(FactorChain):
         # surface a different one, and its energy incomparable with this one's.
         self.qp_window = qp_window
         self.degeneracy_tol, self.e_min_below_gap = degeneracy_tol, e_min_below_gap
-        self.ntau_gw, self.nfreq_cd = ntau_gw, nfreq_cd
+        self.ntau_gw = ntau_gw
+        # None: a set with a state on the quadrature takes CD_NFREQ and a
+        # pole-model set CD_NFREQ_SOP (`_fix_cd_grid`); a size asked for is a
+        # floor under both
+        self._nfreq_cd_floor = 0 if nfreq_cd is None else int(nfreq_cd)
+        self.nfreq_cd = CD_NFREQ if nfreq_cd is None else int(nfreq_cd)
 
         eps = np.asarray(self.mf0.mo_energy, float)
         occ, virt = get_occ_virt_indices(eps, self.nocc)
         gap = eps[virt].min() - eps[occ].max()
         e_max = eps[virt].max() - eps[occ].min()
         self.gap = gap
-        self._build_cd_grid(nfreq_cd, eps)
+        self._build_cd_grid(self.nfreq_cd, eps)
         self.ntau_w = (minimax_points_for_accuracy(gap, e_max,
                                                    target=DEFAULT_TAU_TARGET)[0]
                        if ntau_w is None else int(ntau_w))
@@ -333,6 +340,12 @@ class ExcitedStateChain(FactorChain):
             self.ntau_w, gap, e_max, [0.0], [1.0],
             with_sine=False, with_inverse=False)
         self.qp_set = self._qp_set(eps, self.nocc, qp_window, degeneracy_tol)
+        # The orbitals the declared set named whose reference-geometry root
+        # was no quasiparticle (`_settle_qp_set`), each with why and what the
+        # rejected root was; they carry the outside treatment instead. The
+        # set is settled by the first solve of it and frozen from then on.
+        self.qp_demoted = {}
+        self.qp_set_settled = False
         # The Newton's pole guard per orbital, filled by the first
         # quasiparticle solve and held from then on. A root inside the guard
         # makes the iteration shrink it, and an offset decided per geometry is
@@ -349,6 +362,10 @@ class ExcitedStateChain(FactorChain):
         # fixed poles, so a set re-fitted per geometry puts the poles' motion
         # into the energy and not into the force.
         self.sop_poles = {}
+        # Whether the contour-deformation quadrature has been fixed for the
+        # set (`_fix_cd_grid`); that happens on the first quasiparticle solve
+        # and is then frozen with everything else.
+        self.cd_sized = False
 
     # ------------------------------------------------------------ declaration
     @property
@@ -422,6 +439,32 @@ class ExcitedStateChain(FactorChain):
         self.nu, self.wt, self.gw_grid, self.w0_cd = cd_frequency_grid(
             eps, self.nocc, ntau=self.ntau_gw, nfreq_cd=self.nfreq_cd,
             e_min_below_gap=self.e_min_below_gap)
+
+    def _fix_cd_grid(self, states, eps):
+        """Fix the contour-deformation grid for the set, once: `CD_NFREQ_SOP`
+        points when the pole model carries it whole, `CD_NFREQ` otherwise,
+        never below an `nfreq_cd` the caller asked for (a refrozen chain does
+        not step back).
+
+        The grid is never resized against the roots: the Lorentzian a pole of
+        G puts on the imaginary-frequency integrand at omega = eps_q is
+        integrated in closed form (`contour_deformation.cd_integral_weights`),
+        so a root beside an orbital energy asks nothing more of the
+        quadrature than any other. A set the pole model carries whole has a
+        Sigma analytic in omega, and its grid only feeds the fits, which
+        converge at fewer points.
+        """
+        if self.cd_sized:
+            return
+        kw = self._qp_kw()
+        analytic = carried_analytically(
+            states, eps, self.nocc, kw['residue_route'], kw['scissor'],
+            kw['w0'], kw['pole_offset'], kw['sop_poles'])
+        nfreq = max(CD_NFREQ_SOP if analytic else CD_NFREQ,
+                    self._nfreq_cd_floor)
+        if self.nfreq_cd != nfreq:
+            self._build_cd_grid(nfreq, eps)
+        self.cd_sized = True
 
     @staticmethod
     def _qp_set(eps, nocc, window, tol):
@@ -511,6 +554,62 @@ class ExcitedStateChain(FactorChain):
             grew = True
         return grew or froze
 
+    def _settle_qp_set(self, route_out, states):
+        """Reject the roots of the set that are no quasiparticle: the mask of
+        the states kept if any was rejected, else None.
+
+        A declaration resolves to orbital indices before anything is solved,
+        so the pole strength Z of each root is first known here. A root with Z
+        outside (0, 1] (`is_quasiparticle_root`) sits on a branch only a
+        negative weight makes (the pole model reaches one through a fitted
+        amplitude), and a BSE built on it has the energy and the force of a
+        state that does not exist. Its orbital leaves the set and carries the
+        outside treatment (the frozen scissor, calibrated on the roots that
+        remain), and `qp_demoted` records the orbital, the reason, the route
+        and the rejected root and Z.
+
+        Decided on the first solve of the set, which is the reference
+        geometry's, and then frozen with the rest of the Newton branch: a
+        displaced geometry that demoted would move an orbital between two
+        treatments along the walk and step the surface, so a rejected root
+        there is refused instead. The pole strengths are rank 0's on every
+        rank (`lockstep`), so every rank keeps the same set. The singular part
+        of the contour deformation is integrated in closed form
+        (`cd_integral_weights`), so the slope, and Z, is the self-energy's own
+        on the plain grid.
+        """
+        z_of = route_out.get('z')
+        if z_of is None:
+            return None
+        z_of = lockstep(np.array(z_of, float))
+        rejected = {int(p): float(z) for p, z in zip(states, z_of)
+                    if not is_quasiparticle_root(z)}
+        roots = route_out.get('roots', {})
+        if not rejected:
+            return None
+        if self.qp_set_settled:
+            at = {p: roots.get(p) for p in rejected}
+            raise RuntimeError(
+                f'quasiparticle roots with a pole strength outside (0, 1] at '
+                f'a displaced geometry, orbital: Z {rejected}, roots (Ha) '
+                f'{at}. The set was '
+                f'settled at the reference geometry and is frozen, so the '
+                f'orbital cannot be moved to the scissor here; refreeze the '
+                f'surface at this geometry to settle the set again.')
+        routes = self._routes_taken(route_out)
+        for p, z in rejected.items():
+            self.qp_demoted[p] = {'reason': 'pole strength Z outside (0, 1]',
+                                  'z': z, 'root': float(roots[p]),
+                                  'route': routes.get(p)}
+        keep = np.array([int(p) not in rejected for p in states])
+        self.qp_set = np.asarray(states)[keep]
+        warnings.warn(
+            f'quasiparticle roots with a pole strength outside (0, 1], '
+            f'orbital: Z {rejected}. Those orbitals leave the explicit set '
+            f'and carry the {self.outside} treatment instead.',
+            RuntimeWarning, stacklevel=3)
+        return keep
+
     @staticmethod
     def _routes_taken(route_out):
         """{orbital: route} from either route_out shape.
@@ -526,15 +625,25 @@ class ExcitedStateChain(FactorChain):
 
     def _qp_set_solve(self, x_mo, d_sigma, eps, mu, xc_correction, weights,
                       states=None, tape=None, rows_block=None):
-        """((eps^QP values, adjoints), route_out) for a quasiparticle set.
+        """((eps^QP values, adjoints), route_out) for a quasiparticle set, on
+        the contour-deformation grid fixed for it before the first pass
+        (`_fix_cd_grid`).
 
         tape: an earlier solve's `QPSetTape` on the same factors, and each
         repeat reads the one before it, so proj(tau) and the slices are
         swept once however often the solve repeats (`QPSetTape.reads`).
         rows_block: the adjoints in grid tiles over the ranks
         (`qp_set_gradient`).
+
+        A solve of the whole set (states=None) settles it
+        (`_settle_qp_set`): an orbital whose root is no quasiparticle leaves
+        the set and the solve is repeated without it. Its weight and static
+        correction leave with it; route_out['xc_correction'] is the correction
+        the returned roots were solved with.
         """
-        states = self.qp_set if states is None else states
+        whole_set = states is None
+        states = self.qp_set if whole_set else states
+        self._fix_cd_grid(states, eps)
         while True:
             route_out = {}
             out = qp_set_gradient(x_mo, d_sigma, eps, self.nocc, self.gw_grid,
@@ -543,13 +652,26 @@ class ExcitedStateChain(FactorChain):
                                   route_out=route_out, tape=tape,
                                   rows_block=rows_block, **self._qp_kw())
             tape = route_out.get('tape', tape)
+            if whole_set:
+                keep = self._settle_qp_set(route_out, states)
+                if keep is not None:
+                    states = self.qp_set
+                    if tape is not None:
+                        tape = tape.restricted(keep)
+                    weights = np.asarray(weights)[keep]
+                    if np.ndim(xc_correction):
+                        xc_correction = np.asarray(xc_correction)[keep]
+                    continue
             # A root frozen here, or a calibrated shift, is read by the solve
             # after the one that froze it, so either triggers one repeat.
             if not self._freeze_newton_branch(
                     route_out, eps, xc_correction, states):
                 break
+        if whole_set:
+            self.qp_set_settled = True
         if route_out.get('tape') is not None:
             route_out['tape'].drop_residues()
+        route_out['xc_correction'] = xc_correction
         # What the last solve took, state by state, for the record: the route
         # and the pole strength Z, which the route does not keep on the chain.
         # A solve that reports no Z (a stand-in route) records None for it.
@@ -873,6 +995,8 @@ class ExcitedStateChain(FactorChain):
                 xc = self._xc_correction(mf, self.qp_set, shift)
                 out, route_out = self._qp_set_solve(
                     x_mo, d_sigma, eps, mu, xc, np.zeros(len(self.qp_set)))
+                # the set the roots belong to: settling may have shrunk it
+                xc = route_out['xc_correction']
             ws, qp_tape = out[0], route_out.get('tape')
             eps_qp = eps.copy()
             eps_qp[self.qp_set] = ws
@@ -1237,6 +1361,9 @@ class ExcitedStateChain(FactorChain):
         # finite-difference check shows as a small gradient error. On
         # Hartree-Fock it is zero.
         d_sigma = d if d_bare is None else d_bare
+        # the grid is the set's, widened by the orbital asked for, so a chain
+        # reaches the same quadrature through a BSE excitation or one state
+        self._fix_cd_grid(np.union1d(self.qp_set, [orb]), eps)
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         while True:
             qp_out = {}
@@ -1265,6 +1392,9 @@ class ExcitedStateChain(FactorChain):
         shift, screening = self._reaction_field(x_mo, d, d_bare, eps)
         orb = self.nocc - 1 + offset
         d_sigma = d if d_bare is None else d_bare
+        # the grid is the set's, widened by the orbital asked for, so a chain
+        # reaches the same quadrature through a BSE excitation or one state
+        self._fix_cd_grid(np.union1d(self.qp_set, [orb]), eps)
         xc_orb = float(self._xc_correction(mf, [orb], shift)[0])
         while True:
             qp_out = {}
@@ -1415,10 +1545,9 @@ class ExcitedStateChain(FactorChain):
         `mol` and its own mean field, as are atomic radii (element-only).
         Every setting that is a choice travels verbatim, explicit radii and
         the resolved tau count included, so only the geometry differs. The
-        contour-deformation grid starts from the size this chain grew to, so
-        refreezing never returns to a quadrature found too coarse; the new
-        geometry may grow it further. The environment is the same object and
-        rebuilds itself around the atoms.
+        contour-deformation grid this chain was fixed at is a floor for the
+        new one. The environment is the same object and rebuilds itself
+        around the atoms.
         """
         # The tracked index, not the constructor's. A refrozen chain starts a
         # fresh overlap history, so it has to be told which root is the state

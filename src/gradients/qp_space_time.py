@@ -21,7 +21,7 @@ Peak memory is this rank's rows of proj(tau) and projbar(tau) (`ProjRows`),
 one frequency's chi0 on the rank that factorizes it, one tau slice on the
 rank that sweeps it, and the M-row tiles, all governed by one `tile_gb` and
 independent of the number of CD frequencies. Rebuilding W Bp in the reverse
-pass costs one more LU per frequency (naux^3, against the sweep's
+pass costs one more factorization per frequency (naux^3, against the sweep's
 M^2 (norb + naux) per tau) and removes the (nfreq, naux, norb) array.
 
 Residues (states whose root has crossed a neighbouring orbital energy, which
@@ -45,7 +45,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
-import scipy.linalg
 
 from src.Base.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                 LAPLACE_SCREENING_TOL, QP_CD_NEWTON_TOL,
@@ -58,7 +57,7 @@ from src.Base.utils.mpi_grid import (agreement, allgather_rows,
 # call the multi-state form, which is what it is a one-state wrapper for.
 from src.SingleReference.GW.contour_deformation import (  # noqa: F401
     cd_screening_contraction, cd_screening_contraction_multi,
-    residue_route_auto)
+    residue_route_auto, screening_solver)
 # calibrate_scissor and frozen_scissor are re-exported, not used here: a
 # surface reaches the frozen shift through this module.
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
@@ -80,6 +79,10 @@ from src.gradients.space_time_adjoint import (
     polarizability_backward_rows, three_index_ov, three_index_ov_backward,
     three_index_slice, three_index_slice_backward,
     three_index_slice_backward_rows)
+
+# The routes whose Sigma is analytic in omega: the pole model and the frozen
+# scissor integrate nothing on the contour-deformation quadrature.
+ANALYTIC_ROUTES = frozenset({'sop', 'scissor'})
 
 
 def frozen_newton_seed(w0, p, eps, nocc, offset):
@@ -126,12 +129,39 @@ def frozen_on_pole_model(p, w0, sop_poles):
     return None
 
 
-def pole_model_admitted(p, start, eps, nocc, w0, sop_poles):
-    """Eq. (27)'s verdict on orbital p: the frozen one once the reference
-    solve has decided it (`frozen_on_pole_model`), else `compressible` at the
-    Newton start."""
-    frozen = frozen_on_pole_model(p, w0, sop_poles)
-    return compressible(start, eps, nocc)[0] if frozen is None else frozen
+def pole_model_route(residue_route, scissor, p, eps, nocc, w0, pole_offset,
+                     sop_poles=None):
+    """(route, shift, start) of orbital p before 'auto' is resolved.
+
+    'sop' asks for the pole model; a state with a frozen scissor takes the
+    shift instead, and one Eq. (27) does not admit falls back to 'auto'. The
+    verdict is the reference solve's once it has frozen the root and the
+    poles (`frozen_on_pole_model`), else `compressible` at the Newton start.
+    Every other residue_route is taken as asked. Read off eps and the frozen
+    start alone, never the grid, so a caller can tell before solving whether
+    a set integrates anything on the quadrature.
+    """
+    offset, _ = frozen_pole_offset(pole_offset, p)
+    start = frozen_newton_seed(w0, p, eps, nocc, offset)
+    route, shift = residue_route, None
+    if route == 'sop':
+        route, shift = scissor_route(scissor, p, eps, nocc, start)
+        frozen = frozen_on_pole_model(p, w0, sop_poles)
+        admitted = (compressible(start, eps, nocc)[0] if frozen is None
+                    else frozen)
+        if route == 'sop' and not admitted:
+            route = 'auto'
+    return route, shift, start
+
+
+def carried_analytically(states, eps, nocc, residue_route, scissor, w0,
+                         pole_offset, sop_poles=None):
+    """Whether every state of the set takes the pole model or a frozen
+    scissor (`ANALYTIC_ROUTES`), so nothing of the set is integrated on the
+    contour-deformation quadrature and the grid only feeds the pole fits."""
+    return all(pole_model_route(residue_route, scissor, int(p), eps, nocc, w0,
+                                pole_offset, sop_poles)[0] in ANALYTIC_ROUTES
+               for p in np.atleast_1d(states))
 
 
 def _stride_kw(sop_stride):
@@ -204,6 +234,18 @@ def slices_over_ranks(X, D, states, tile_gb, comm=None):
     return list(out)
 
 
+def pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
+                     pole_offset, sop_poles):
+    """The positions in `states` of the pole-model states with no frozen
+    poles: the fits pass 1 makes, in state order."""
+    if residue_route != 'sop':
+        return []
+    return [si for si, p in enumerate(states)
+            if (sop_poles is None or sop_poles.get(int(p)) is None)
+            and pole_model_route(residue_route, scissor, int(p), eps, nocc,
+                                 w0, pole_offset, sop_poles)[0] == 'sop']
+
+
 def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
                          scissor, w0, pole_offset, sop_poles, n_poles,
                          sop_stride, comm=None):
@@ -216,21 +258,10 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     serial poles bitwise; `sop_model` then reads them as frozen poles, and
     the amplitudes are the call `sop_from_wc` would have made. The states
     fitted are those pass 1 sends to the pole model (route, scissor tier,
-    Eq. (27)'s verdict, `pole_model_admitted`) and has no frozen poles for.
+    Eq. (27)'s verdict, `pole_model_route`) and has no frozen poles for.
     """
-    if residue_route != 'sop':
-        return sop_poles
-    need = []
-    for si, p in enumerate(states):
-        p = int(p)
-        if sop_poles is not None and sop_poles.get(p) is not None:
-            continue
-        offset, _ = frozen_pole_offset(pole_offset, p)
-        start = frozen_newton_seed(w0, p, eps, nocc, offset)
-        route, _ = scissor_route(scissor, p, eps, nocc, start)
-        if route == 'sop' and pole_model_admitted(p, start, eps, nocc, w0,
-                                                  sop_poles):
-            need.append(si)
+    need = pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
+                            pole_offset, sop_poles)
     if not need:
         return sop_poles
 
@@ -397,14 +428,8 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
         reduce_sum(wc, comm)                  # the others' rows are zero
 
     offset, relax = frozen_pole_offset(pole_offset, p)
-    start = frozen_newton_seed(w0, p, eps, nocc, offset)
-    route = residue_route
-    shift = None
-    if route == 'sop':
-        route, shift = scissor_route(scissor, p, eps, nocc, start)
-        if route == 'sop' and not pole_model_admitted(p, start, eps, nocc, w0,
-                                                      sop_poles):
-            route = 'auto'
+    route, shift, start = pole_model_route(residue_route, scissor, p, eps,
+                                           nocc, w0, pole_offset, sop_poles)
     if route == 'auto':
         route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
     poles = amp = None
@@ -471,9 +496,8 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     eps_bar_part = np.zeros_like(eps)
     for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
         for m, k in enumerate(fb.ks):
-            # one state, so a plain solve; `qp_set_gradient` takes the LU and
-            # shares it over the states
-            WtB = np.linalg.solve(eye - fb.chi0[m], Bp)
+            # one state, so the factorization is used once
+            WtB = screening_solver(eye - fb.chi0[m])(Bp)
             bb, fb.chi0[m], e_k = integral_term_reverse(state, WtB, k)
             Bp_bar += bb
             eps_bar_part += e_k
@@ -559,6 +583,20 @@ class QPSetTape:
     def drop_residues(self):
         """Drop C_ov once the solve that built it has stopped repeating."""
         self.C_ov = None
+
+    def restricted(self, keep):
+        """This tape for the states `keep` (a mask over `states`) selects.
+
+        The same proj(tau) and the kept states' own slices and contractions,
+        so a set that loses a member is solved again without a second sweep.
+        """
+        keep = np.asarray(keep, bool)
+        return QPSetTape(self.X, self.D, self.eps, self.mu, self.tile_gb,
+                         self.states[keep], self.tau_points, self.cosft_wt,
+                         self.proj_tau,
+                         [b for b, k in zip(self.Bps, keep) if k],
+                         [w for w, k in zip(self.wcs, keep) if k],
+                         self.C_ov)
 
     def reads(self, X, D, eps, mu, tile_gb, states, grid):
         """(proj and Bps apply, wcs apply as well) for a call on these."""
@@ -722,18 +760,13 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         # is zero.
         xc_p = static_term(xc_correction, si)
         offset, relax = frozen_pole_offset(pole_offset, p)
-        start = frozen_newton_seed(w0, p, eps, nocc, offset)
-        route = residue_route
         # A state Eq. (27) does not admit cannot be carried by the pole model
         # at any M, so it takes the residue route and the record says so. The
         # verdict is the reference solve's once it has frozen the root and the
         # poles (`frozen_on_pole_model`).
-        shift = None
-        if route == 'sop':
-            route, shift = scissor_route(scissor, p, eps, nocc, start)
-            if route == 'sop' and not pole_model_admitted(
-                    p, start, eps, nocc, w0, sop_poles):
-                route = 'auto'
+        route, shift, start = pole_model_route(residue_route, scissor, p, eps,
+                                               nocc, w0, pole_offset,
+                                               sop_poles)
         if route == 'auto':
             route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
         if route == 'laplace':
@@ -801,17 +834,17 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
         proj_bar = proj_tau.zeros_like()
         for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
             for m, k in enumerate(fb.ks):
-                lu = scipy.linalg.lu_factor(eye - fb.chi0[m])
+                solve = screening_solver(eye - fb.chi0[m])
                 chi0_bar = np.zeros((naux, naux))
                 for j, a in enumerate(active):
-                    WtB = scipy.linalg.lu_solve(lu, a['Bp'])
+                    WtB = solve(a['Bp'])
                     bb, cb, e_k = integral_term_reverse(a, WtB, k)
                     bp_terms[a['si']][k] = bb
                     chi0_bar += cb
                     eps_terms.append(((k, j), e_k))
                 fb.chi0[m] = chi0_bar
             proj_bar.fold(grid.cosft_wt, fb)
-        fb = lu = chi0_bar = None
+        fb = solve = chi0_bar = None
         eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
         # B_p_bar is (naux, nmo) a frequency, too large to gather every
         # frequency's, so the running sum visits the frequencies'

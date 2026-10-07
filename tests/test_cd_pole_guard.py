@@ -22,10 +22,11 @@ import warnings
 import numpy as np
 import pytest
 
-from src.Base.constants import (QP_POLE_OFFSET, QP_POLE_OFFSET_MIN,
-                                QP_POLE_STRENGTH_MIN)
+from src.Base.constants import (QP_CD_NEWTON_TOL, QP_POLE_OFFSET,
+                                QP_POLE_OFFSET_MIN, QP_POLE_STRENGTH_MIN)
 from src.SingleReference.GW.contour_deformation import qp_energy_cd
-from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
+from src.Solvers.qp_equation import (PoleGuardRefusal,
+                                     solve_qp_equation_newton_guarded)
 
 #: A flat imaginary-axis screening scales the quasiparticle shift, which is how
 #: the root is placed relative to the guard: -4e-3 puts it 5.1e-4 from the
@@ -168,3 +169,68 @@ def test_a_pinned_iterate_is_not_accepted_as_converged():
         assert gaps.min() > floor, (
             f'floor {floor:.0e}: returned w={w:.8f}, {gaps.min():.2e} from '
             f'orbital {int(np.argmin(gaps))} -- that is the guard, not a root')
+
+
+# A root inside the guard band of its own orbital, reached across eps_p: the
+# root sits 3.5e-4 Ha above eps_p with dSigma/dw = -0.074, and a slope that
+# misleads near eps_p sends the Newton across the pole. The guard pushes it out
+# on the other side, the step from there lands outside the band, and the next
+# step falls back in: pushes at -band, +band, -band, ... that never repeat
+# consecutively. The model is that step map: f(x) = x - Sigma is
+# 1.074 (x - x*) everywhere, and only the slope misleads, where it does.
+OWN_EPS = np.array([-0.69, -0.65, -0.5358, -0.4407, 0.1197, 0.1472])
+OWN_NOCC, OWN_P, OWN_ROOT = 4, 2, 3.5e-4
+
+
+def own_pole_cycle():
+    """(sigma, slope) whose Newton cycles across eps_p at the default guard."""
+    def f_and_slope(w):
+        x = w - OWN_EPS[OWN_P]
+        f = 1.074 * (x - OWN_ROOT)
+        if 4e-4 < x <= 1.5e-3:
+            fp = f / (1.1 * x)               # lands at -x/10: across eps_p
+        elif x < 0.0:
+            fp = f / (x - 2e-3)              # lands at +2e-3: outside the band
+        else:
+            fp = 1.074                       # resolved: lands on the root
+        return f, fp
+
+    def sigma(w):
+        return w - OWN_EPS[OWN_P] - f_and_slope(w)[0]
+
+    def slope(w):
+        return 1.0 - f_and_slope(w)[1]
+    return sigma, slope
+
+
+def test_a_cycle_across_the_own_pole_still_relaxes_the_guard():
+    """A pushed value that recurs within one band is the deadlock, not only
+    the same one twice in a row. With the two-cycle tell alone: 100 steps,
+    band never shrunk, refused."""
+    sigma, slope = own_pole_cycle()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        w, z = solve_qp_equation_newton_guarded(sigma, slope, OWN_EPS, OWN_P,
+                                                OWN_NOCC)
+    assert abs(w - OWN_EPS[OWN_P] - OWN_ROOT) < QP_CD_NEWTON_TOL
+    assert abs(z - 1.0 / 1.074) < QP_CD_NEWTON_TOL, z
+    assert any('relaxed to' in str(c.message) for c in caught)
+
+
+def test_a_refusal_above_the_floor_does_not_claim_the_floor():
+    """A band above the floor says so rather than claiming a root within the
+    floor, and the refusal carries the orbital, the blocker and the band."""
+    sigma, slope = own_pole_cycle()
+    with pytest.raises(PoleGuardRefusal) as exc:
+        solve_qp_equation_newton_guarded(sigma, slope, OWN_EPS, OWN_P,
+                                         OWN_NOCC, max_iter=6)
+    refusal = exc.value
+    assert refusal.orbital == OWN_P and refusal.blocker == OWN_P
+    assert refusal.band > QP_POLE_OFFSET_MIN
+    message = str(refusal)
+    assert 'within' not in message and 'floor' in message, message
+    # at the floor, the floor is the statement
+    with pytest.raises(PoleGuardRefusal, match='cannot be resolved by this') \
+            as exc:
+        solve(0.0)
+    assert exc.value.band == QP_POLE_OFFSET_MIN

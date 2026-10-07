@@ -285,6 +285,7 @@ def test_the_cd_grid_is_never_resized(water):
     """
     gas = RPABSESurface(water, ks_factory)
     gas.total_energy(water)
+    assert gas.excited.cd_sized
     assert gas.excited.nfreq_cd == CD_NFREQ
 
     env = SolventScreening(water, eps=1.78, eps_static=78.39)

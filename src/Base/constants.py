@@ -49,6 +49,8 @@ ISDF_DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 # A missing level is a refusal, not a fallback: nobody measured it, so a
 # neighbouring level, a larger count and another basis are all equally
 # unlicensed.
+# The target each level is validated to, in eV: G1 < 8, G2 < 4, G3 < 2 meV.
+ISDF_GRID_ACCURACY_TARGET_EV = {'G1': 8e-3, 'G2': 4e-3, 'G3': 2e-3}
 ISDF_GRID_ACCURACY = {
     'cc-pvdz':     {'G1': (16, 10, 6, 2), 'G2': (16, 10, 6, 2),
                     'G3': (32, 20, 12, 4)},
@@ -364,8 +366,20 @@ RESIDUE_FREQ_MARGIN = 0.1
 # correlation energy in the space-time route; converged to 1e-8 Ha at 40.
 RPA_ENERGY_NFREQ = 40
 # Gauss-Legendre points on the imaginary-frequency half of a contour
-# deformation.
+# deformation, for a quasiparticle set with a state on the quadrature routes.
+# The grid is never resized: the Lorentzian a pole of G puts at nu = 0 is
+# integrated in closed form.
 CD_NFREQ = 64
+# Contour-deformation points for a quasiparticle set the pole model carries
+# whole (every state on the sum-over-poles route or a frozen scissor): that
+# Sigma is analytic in omega, so the grid only feeds the fit. Against 512
+# points (formaldehyde, acrolein and DMABN, gas and toluene, at
+# LRC-wPBEh/cc-pVDZ; ethylene HF with 24 poles; admitted window): from 32
+# points up every S1 and T1 is within 0.034 meV and the frontier
+# quasiparticle within 0.009 meV; at 24, acrolein T1 is 0.12 meV off. The
+# deepest explicit state (the occupied scissor probe) converges slower, 44 meV
+# off at 32 and 15 meV at 64.
+CD_NFREQ_SOP = 32
 # Imaginary-time points behind the contour-deformation grid. The cosine
 # transform onto the imaginary-frequency quadrature would be converged at 18;
 # a residue asks the same grid for the cosh transform at a real frequency w',

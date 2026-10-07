@@ -151,9 +151,10 @@ def _reference_newton(p, Bp, eps, nocc, nu_points, nu_weights, wc,
         if abs(step) < tol and not was_pinned:
             break
     else:
+        # the words follow production's: w here is the last iterate
         where = ('' if blocker is None else
                  f' The iterate was pinned against orbital {blocker} at '
-                 f'eps={eps[blocker]:.6f} Ha with the root near {w:.6f} Ha, '
+                 f'eps={eps[blocker]:.6f} Ha and ended at {w:.6f} Ha, '
                  f'{abs(w - eps[blocker]):.1e} Ha away'
                  + (' -- the same orbital.' if blocker == p else
                     f', not p={p} (eps={eps[p]:.6f}).'))

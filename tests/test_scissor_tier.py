@@ -141,6 +141,8 @@ def _stub_surface(scissor, excluded=(1,)):
     surface.sop_stride = None
     surface.tile_gb = None
     surface.mf0 = types.SimpleNamespace(mo_energy=EPS)
+    # the contour-deformation grid is already fixed
+    surface.cd_sized = True
     return surface
 
 

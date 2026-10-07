@@ -47,6 +47,14 @@ calibrated at the reference geometry on the explicitly solved roots
 nothing to the force beyond moving the diagonal -- which is what makes it safe
 for the deep states, whose leverage on a frontier quasiparticle is 0.05 meV per
 20 eV for the core and 3.6-10 meV per eV for the inner valence.
+
+A ROOT THAT IS NO QUASIPARTICLE LEAVES THE SET. A declaration names the
+orbitals before anything is solved, so it cannot know that the root the solve
+converges on has a pole strength outside (0, 1] (`is_quasiparticle_root`).
+The surface that solves the set rejects such a root at the reference geometry
+and moves its orbital to the scissor, with the reason recorded; the set is
+then frozen like everything else, and a rejected root at a displaced geometry
+is refused rather than demoted.
 """
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -95,6 +103,23 @@ def admitted_by_pole_condition(eps, nocc, p, limit):
     swept = residue_set(eps, nocc, omega)
     reach = max((abs(eps[q] - omega) for q, _ in swept), default=0.0) / float(limit)
     return bool(reach < 1.0), float(reach)
+
+
+def is_quasiparticle_root(z):
+    """Whether a converged root's pole strength Z = [1 - dSigma/dw]^-1 is a
+    quasiparticle's: 0 < Z <= 1.
+
+    A self-energy with positive spectral weights has dSigma/dw <= 0 wherever
+    it is finite, so every root of w = eps_p + Sigma(w) has Z in (0, 1]. A
+    root outside it sits on a branch only a negative weight can make: the
+    pole model's amplitudes are a least-squares fit, not spectral weights, and
+    a pole clipped onto the fit's lower bound E_g can carry one, which puts a
+    falling flank of Sigma next to an orbital at reach close to 1.
+
+    No tolerance: the bounds are those of the definition.
+    """
+    z = float(z)
+    return bool(0.0 < z <= 1.0)
 
 
 def particle_hole_gap(eps, nocc):

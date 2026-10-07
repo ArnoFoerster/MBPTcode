@@ -11,7 +11,7 @@ geometry R0 and spends it at every geometry R:
 
     inside scissor   eps_p(R) + xc_p(R) + [w_p - eps_p - xc_p](R0)
     outside scissor  eps_p(R) + [w_q - eps_q - Sigma^env_qq](R0) + Sigma^env_pp(R),
-                     q the explicit orbital nearest p in eps at R0
+    and demoted      q the explicit orbital nearest p in eps at R0
 
 so a frozen shift carries the GW correction alone: Sigma_x - v_xc once (the
 orbital's own inside the set, the probe's outside it), Sigma^env once (always
@@ -37,10 +37,12 @@ and PCM(toluene), at R0 and at a displaced geometry, and checks:
 
 The mechanisms: the pole model ('sop'), the contour deformation with
 Laplace or explicit residues, the inside scissor (scissor='calibrate'), the
-outside scissor of a window, and a state whose pole-model verdict was frozen
-at R0 although its own root lies past the Eq. (27) limit.
+outside scissor of a window, a root rejected at R0 (demoted to the outside
+scissor; forced here by handing the settle step a pole strength outside
+(0, 1]), and a state whose pole-model verdict was frozen at R0 although its
+own root lies past the Eq. (27) limit.
 
-Slow (every column builds four chains; the force cells take 16 energies
+Slow (every column builds five chains; the force cells take 16 energies
 each). Run: python tests/test_qp_energy_assembly.py   (or pytest)
 """
 import os
@@ -95,6 +97,8 @@ DENSE_EV = 0.05
 #: in from the frontier, whose residues at the start lie above the gap where
 #: the Laplace backend carries them.
 CD_STATES = (-3, -2, 1, 2)
+#: The orbital whose R0 root is rejected in the demotion column: LUMO+2.
+DEMOTE_ABOVE_HOMO = 3
 #: The finite-difference gate: 4-point stencil, absolute.
 FD_STEP = 4e-4
 FD_TOL = 1e-6
@@ -153,6 +157,24 @@ class RecordRoutes:
         return out
 
 
+class DemoteOne:
+    """`qp_set_gradient` whose settle step reads a pole strength outside
+    (0, 1] for one orbital, as a root on a negative-weight branch has: the
+    orbital is demoted at R0 exactly as such a root would be."""
+
+    def __init__(self, orbital, inner):
+        self.orbital, self.inner = int(orbital), inner
+
+    def __call__(self, *args, **kw):
+        out = self.inner(*args, **kw)
+        states = [int(p) for p in np.atleast_1d(args[7])]
+        route_out = kw.get('route_out')
+        if self.orbital in states and route_out and 'z' in route_out:
+            route_out['z'] = np.array(route_out['z'], float)
+            route_out['z'][states.index(self.orbital)] = -0.01
+        return out
+
+
 def snapshot(chain, mol, mf, recorder):
     """What one forward at `mol` assembled, orbital by orbital."""
     pieces = chain.kernel_pieces(mol, mf)
@@ -171,7 +193,7 @@ def snapshot(chain, mol, mf, recorder):
 def build(kind, mol, factory, mf, env, window):
     """One chain of the matrix, by the mechanism it exercises."""
     common = dict(mf=mf, environment=env, solver='dense')
-    if kind in ('window', 'plain'):
+    if kind in ('window', 'plain', 'demoted'):
         return ExcitedStateChain(
             mol, factory, qp_window=list(window), residue_route='sop',
             scissor=None if kind == 'plain' else 'calibrate',
@@ -189,7 +211,7 @@ def build(kind, mol, factory, mf, env, window):
                              **common)
 
 
-CHAINS = ('window', 'plain', 'cd', 'explicit')
+CHAINS = ('window', 'plain', 'demoted', 'cd', 'explicit')
 
 
 def build_column(name, reference, env_name):
@@ -204,7 +226,11 @@ def build_column(name, reference, env_name):
     for kind in CHAINS:
         recorder = RecordRoutes()
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(excited_state, 'qp_set_gradient', recorder)
+            solve = recorder
+            if kind == 'demoted':
+                solve = DemoteOne(mol.nelectron // 2 - 1 + DEMOTE_ABOVE_HOMO,
+                                  recorder)
+            mp.setattr(excited_state, 'qp_set_gradient', solve)
             chain = build(kind, mol, factory, mf, env, WINDOWS[name])
             chain.excitation()
             at_r0 = snapshot(chain, chain.mol0, chain.mf0, recorder)
@@ -230,6 +256,8 @@ def mechanism(chain, s0, p):
                                     chain.nocc)[0]
             return 'route-frozen' if past else 'sop'
         return 'explicit' if route == 'explicit' else 'cd'
+    if p in chain.qp_demoted:
+        return 'demoted'
     return 'outside'
 
 
@@ -259,7 +287,7 @@ def assembly_errors(col):
                 for s in (s0, s1):
                     worst = max(worst, abs(s['xc'][p] - s['sxv'][p]
                                            - s['env'][p]))
-            if mech in ('inside', 'outside'):
+            if mech in ('inside', 'outside', 'demoted'):
                 for s in (s0, s1):
                     worst = max(worst, abs(s['eps_qp'][p]
                                            - expected(chain, s0, s, p, mech)))
@@ -273,10 +301,11 @@ def test_every_mechanism_assembles_its_formula(column):
     """(a) and (b): every orbital of every chain, at R0 and at R."""
     errors = assembly_errors(column)
     seen = {mech for _, mech in errors}
-    assert {'inside', 'outside', 'sop', 'explicit'} <= seen, seen
+    assert {'inside', 'outside', 'demoted', 'sop', 'explicit'} <= seen, seen
     bad = {}
     for (kind, mech), (worst, n) in errors.items():
-        tol = EXACT_HA if mech in ('inside', 'outside') else STATIC_HA
+        tol = (EXACT_HA if mech in ('inside', 'outside', 'demoted')
+               else STATIC_HA)
         if worst > tol:
             bad[(kind, mech)] = (worst * HARTREE_TO_EV, n)
     assert not bad, f'eV off the formula, orbitals checked: {bad}'

@@ -86,6 +86,12 @@ W_GRID_MOVE_EV = {'water': 5e-4, 'formaldehyde': 2.6e-4,
 #: route differs from the record only in the Newton seed, whose last-step
 #: rounding is worth one ulp of the root.
 SOP_SEED_TOL_EV = 1e-12
+#: How far the record's sop rows sit from the pins beyond the one fit's move:
+#: the frequency pass factorizes 1 - chi0(i.nu) by Cholesky where the record
+#: took an LU, and the pole fit amplifies that rounding to 8.0e-10 eV (water
+#: homo-1) and 2.1e-11 in Z.
+SOP_FACTORIZATION_MOVE_EV = 2e-9
+SOP_FACTORIZATION_MOVE_Z = 1e-10
 
 #: What the two residue backends of one contour may differ by, in eV and in Z.
 #: They solve the same equation; only the rows that sweep a residue differ.
@@ -152,9 +158,11 @@ def contour_run(name, continuation):
     return records, energies, z
 
 
-def assert_pinned(name, rec, route, energy, pole_strength=None, slack=0.0):
+def assert_pinned(name, rec, route, energy, pole_strength=None, slack=0.0,
+                  z_slack=0.0):
     """`energy` (and Z) bitwise the one-fit pin of `route` for `rec`, and
-    the record within the one fit's move of it (plus `slack` eV)."""
+    the record within the one fit's move of it (plus `slack` eV and
+    `z_slack` in Z)."""
     where = (name, rec['orbital_label'], route)
     pin = PINS[name][rec['orbital_label']][route]
     row = rec['routes'][route]
@@ -165,7 +173,7 @@ def assert_pinned(name, rec, route, energy, pole_strength=None, slack=0.0):
     if pole_strength is not None:
         assert pole_strength == pin['z'], (where, pole_strength - pin['z'])
         moved = abs(pole_strength - row['z'])
-        assert moved <= RECORD_MOVE_Z[name], (where, moved)
+        assert moved <= RECORD_MOVE_Z[name] + z_slack, (where, moved)
 
 
 @pytest.mark.parametrize('name', MOLECULES)
@@ -325,13 +333,14 @@ def test_laplace_refuses_a_residue_the_tau_grid_cannot_carry():
 @pytest.mark.parametrize('name', MOLECULES)
 def test_sop_reproduces_the_baseline(name):
     """The pole model, energy and Z bitwise against the pins; the record
-    within the one fit's move and one ulp of the root beyond it (the Newton
-    seed, see the module docstring).
+    within the one fit's move, one ulp of the root beyond it (the Newton
+    seed, see the module docstring) and the factorization's move.
     """
     records, energies, z = contour_run(name, 'sop')
     for rec, energy, pole_strength in zip(records, energies, z):
         assert_pinned(name, rec, 'sop', energy, pole_strength,
-                      slack=SOP_SEED_TOL_EV)
+                      slack=SOP_SEED_TOL_EV + SOP_FACTORIZATION_MOVE_EV,
+                      z_slack=SOP_FACTORIZATION_MOVE_Z)
 
 
 def test_sop_refuses_a_state_eq27_excludes():

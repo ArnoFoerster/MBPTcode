@@ -37,7 +37,8 @@ from src.Base.declaration import QPStates  # noqa: E402
 from src.SingleReference.GW.qp_states import resolve_qp_states  # noqa: E402
 from src.SingleReference.GW.sum_over_poles import compressible  # noqa: E402
 from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.gradients.qp_space_time import frozen_on_pole_model  # noqa: E402
+from src.gradients.qp_space_time import (  # noqa: E402
+    frozen_on_pole_model, pole_model_route)
 
 H2CO = 'C 0 0 -0.5296; O 0 0 0.6763; H 0 0.9339 -1.1088; H 0 -0.9339 -1.1088'
 #: The states whose Eq. (27) verdict differs between eps_p and the root.
@@ -118,6 +119,11 @@ def test_the_frozen_verdict_rule():
     assert frozen_on_pole_model(0, None, None) is None
     # an orbital the mappings do not name has nothing frozen
     assert frozen_on_pole_model(1, {0: past}, poles) is None
+    route = lambda w0, sop_poles: pole_model_route(
+        'sop', None, 0, eps, nocc, w0, None, sop_poles)[0]
+    assert route({0: past}, poles) == 'sop'
+    assert route({0: -0.9}, {}) == 'auto'
+    assert route(None, None) == 'sop'
 
 
 if __name__ == '__main__':
