@@ -51,7 +51,6 @@ from src.Base.separable_ri import (DEFAULT_PAIR_TOL, aux_metric_sqrt,
                                    shipped_radii_lookup)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.grids import (gauss_legendre_grid, minimax_time_grid,
-                                  minimax_frequency_grid,
                                   minimax_supported_sizes)
 from src.Base.utils.mpi_grid import (agreement, broadcast_rows,
                                      current_comm, grid_comm, lockstep,
@@ -65,7 +64,8 @@ from src.SingleReference.GW.imaginary_time import (
     sigma_ao_to_mo_diagonal, self_energy_fit_ranges, screening_frequency_grid,
     screened_interaction_rows, screened_interaction_tau_blocked,
     minimax_points_for_gw, minimax_points_for_gw_unrestricted,
-    unrestricted_fit_ranges, DEFAULT_TAU_TARGET)
+    unrestricted_fit_ranges, unrestricted_screening_frequency_grid,
+    DEFAULT_TAU_TARGET)
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              solve_qp_from_imaginary_axis,
                                              imaginary_axis_sample_points)
@@ -903,12 +903,15 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
     collocation X_mo,s = X_ao C_s off the one factorization, and then the
     restricted self-energy sweep in the channel's orbitals: Sigma_s = -G_s W
     carries no spin factor, so the restricted kernel on (X_mo,s, eps_s,
-    nocc_s) is it. The time and frequency grids span both spins' transitions,
-    which both build the W they carry, and the self-energy's fit ranges span
-    both channels (`unrestricted_fit_ranges`). Each channel samples Sigma on
-    the line through its own mid-gap and carries its own static exchange and
-    its own Eq. (18) shift, contracted against the one W. A closed shell run
-    unrestricted therefore reads every grid the restricted route reads.
+    nocc_s) is it. Both spins build W, so every grid spans both: chi0's time
+    grid covers both spins' transitions, W's frequency grid covers the range
+    its transform back to tau is fitted over
+    (`unrestricted_screening_frequency_grid`), and the self-energy's fit
+    ranges cover both channels (`unrestricted_fit_ranges`). Each channel
+    samples Sigma on the line through its own mid-gap and carries its own
+    static exchange and its own Eq. (18) shift, contracted against the one W.
+    A closed shell run unrestricted therefore reads every grid the
+    restricted route reads.
 
     eps_anchor, when given, is the (2, nmo) mean-field spectrum of the evGW
     loop; the channel's row anchors the equation.
@@ -971,7 +974,8 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
                 f"nfreq='auto' needs a tabulated minimax frequency grid at "
                 f'ntau = {ntau}; GreenX has {minimax_supported_sizes()}. Pass an '
                 'explicit nfreq.')
-        freq_points, freq_weights = minimax_frequency_grid(ntau, e_min, e_max)
+        freq_points, freq_weights = unrestricted_screening_frequency_grid(
+            ntau, spectra, noccs)
     else:
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     pade_freq = gauss_legendre_grid(npade, w0=w0)[0]

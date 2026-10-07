@@ -11,7 +11,8 @@ with the point count, while on the rW-built grid it falls to 2.5e-7 at 34.
 
 The first test gates the residual on the production axes at that range, the
 second that the driver samples W there (its fit is handed the minimax grid of
-the fit's own range).
+the fit's own range), the third that an unrestricted reference samples W over
+both spins' range, which for a closed shell is the restricted grid.
 """
 import os
 import sys
@@ -27,8 +28,9 @@ from pyscf import gto, scf
 from src.Base.utils.grids import minimax_frequency_grid, minimax_time_grid
 from src.Base.utils.time_frequency import COSINE_WT, minimax_transform_weights
 from src.SingleReference.GW import imaginary_time, space_time
-from src.SingleReference.GW.imaginary_time import (self_energy_fit_ranges,
-                                                   screening_frequency_grid)
+from src.SingleReference.GW.imaginary_time import (
+    self_energy_fit_ranges, screening_frequency_grid, unrestricted_fit_ranges,
+    unrestricted_screening_frequency_grid)
 
 SIZES = list(range(22, 35, 2))
 #: bare e_max/e_min of the chlorophyllide dimer, whose rW ratio is 3.4e3
@@ -105,6 +107,59 @@ def test_the_route_samples_w_on_the_range_its_fit_runs_over():
     assert np.array_equal(omega, minimax_frequency_grid(ntau, lo, hi)[0])
     assert np.array_equal(omega,
                           screening_frequency_grid(ntau, eps, nocc, mu=mu)[0])
+
+
+def _recorded_w_axes(mf, mol, nocc, ntau, **kw):
+    """[(omega, lo, hi)] handed to every omega -> tau fit of W - I."""
+    seen = []
+
+    def recording(kind, tau, omega, e_min, e_max, **kw):
+        if kind == COSINE_WT:
+            seen.append((np.array(omega), e_min, e_max))
+        return minimax_transform_weights(kind, tau, omega, e_min, e_max, **kw)
+
+    saved = imaginary_time.minimax_transform_weights
+    imaginary_time.minimax_transform_weights = recording
+    try:
+        space_time.solve_qp_energy_space_time(mf, mol, nocc, 0, ntau=ntau,
+                                              distribute=False, **kw)
+    finally:
+        imaginary_time.minimax_transform_weights = saved
+    return seen
+
+
+def test_an_unrestricted_closed_shell_samples_w_on_the_restricted_grid():
+    """W of an unrestricted reference is built from both spins, so its
+    frequencies are the minimax grid of both channels' rW; a closed shell
+    carried unrestricted reads the restricted grid bit for bit, in the
+    helper and in the route, in either channel."""
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvdz', verbose=0)
+    rhf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    rhf.conv_tol = 1e-10
+    rhf.kernel()
+    uhf = scf.UHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    uhf.mo_coeff = np.array([rhf.mo_coeff, rhf.mo_coeff])
+    uhf.mo_energy = np.array([rhf.mo_energy, rhf.mo_energy])
+    uhf.mo_occ = np.array([rhf.mo_occ / 2, rhf.mo_occ / 2])
+    uhf.e_tot, uhf.converged = rhf.e_tot, True
+    nocc = mol.nelectron // 2
+    eps = np.asarray(rhf.mo_energy, float)
+    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
+    ntau = 22
+    restricted = screening_frequency_grid(ntau, eps, nocc, mu=mu)
+    unrestricted = unrestricted_screening_frequency_grid(ntau, (eps, eps),
+                                                         (nocc, nocc))
+    for got, want in zip(unrestricted, restricted):
+        assert np.array_equal(got, want)
+    rW = unrestricted_fit_ranges((eps, eps), (nocc, nocc))[0]
+    [(omega_r, lo_r, hi_r)] = _recorded_w_axes(rhf, mol, nocc, ntau)
+    assert (lo_r, hi_r) == rW
+    for channel in ('alpha', 'beta'):
+        [(omega, lo, hi)] = _recorded_w_axes(uhf, mol, uhf.nelec, ntau,
+                                             spin_channel=channel)
+        assert (lo, hi) == rW
+        assert np.array_equal(omega, omega_r)
+        assert np.array_equal(omega, restricted[0])
 
 
 if __name__ == '__main__':

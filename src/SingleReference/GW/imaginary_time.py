@@ -223,6 +223,14 @@ def unrestricted_fit_ranges(spectra, noccs):
             (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
 
 
+def unrestricted_screening_frequency_grid(ntau, spectra, noccs):
+    """`screening_frequency_grid` of an unrestricted reference: W is built
+    from both spins' transitions, so its frequencies span the rW of
+    `unrestricted_fit_ranges`. A closed shell gets the restricted grid."""
+    rW, _ = unrestricted_fit_ranges(spectra, noccs)
+    return minimax_frequency_grid(ntau, *rW)
+
+
 def minimax_points_for_gw_unrestricted(spectra, noccs,
                                        target=DEFAULT_TAU_TARGET,
                                        npoints_max=34):
