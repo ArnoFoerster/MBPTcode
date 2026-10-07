@@ -30,11 +30,14 @@ import warnings
 import numpy as np
 from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
 
+from src.Base.body_frame import aligned_displacement
 from src.Base.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV,
                                 GEOMETRIC_START_TOL, HARTREE_TO_EV)
 from src.Base.declaration import SurfacePhysics
+from src.Base.distributed_isdf_jk import scf_pair_layout
 from src.Base.environment import environment_label, resolve_environment
-from src.Base.isdf_jk import mean_field_skeleton_force
+from src.Base.isdf_jk import (ISDFJK, frozen_pair_layout,
+                              mean_field_skeleton_force)
 from src.Base.utils.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
 from src.properties.surface import evaluate, lockstep_geometry
@@ -173,7 +176,10 @@ def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
         and marks the record `refreeze: 'not measured'`, so a null
         `refreeze_shift` can only have come from an explicit 0; 1 measures it:
         `info['refreeze_shift']` is how far the geometry moved, the error bar
-        on the minimum.
+        on the minimum: the largest atomic move once the refrozen minimum is
+        superposed on the first (`body_frame.aligned_displacement`), since
+        the surface is invariant to rigid motion; `refreeze_rigid_shift` is
+        the raw Cartesian move.
 
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
     residual the convergence test was applied to -- not the driving force at
@@ -296,15 +302,16 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
                                          max_cycle, trust, trust_max,
                                          trust_min, hess, conv, refreeze - 1,
                                          verbose)
-        shift = float(np.abs(mol2.atom_coords() - m_cur.atom_coords()).max())
-        info.update(refreeze_shift=shift,
+        shift = aligned_displacement(m_cur.atom_coords(), mol2.atom_coords())
+        rigid = float(np.abs(mol2.atom_coords() - m_cur.atom_coords()).max())
+        info.update(refreeze_shift=shift, refreeze_rigid_shift=rigid,
                     refreeze_denergy=float(info2['energy'] - info['energy']),
                     refreeze_info=info2, energy=info2['energy'],
                     omega=info2['omega'], refreeze='measured',
                     hessian=info2['hessian'])
         if verbose:
-            print(f'  [refreeze] geometry moved {shift:.2e} Bohr, energy by '
-                  f'{info2["energy"] - e:+.2e} Ha')
+            print(f'  [refreeze] geometry moved {shift:.2e} Bohr superposed '
+                  f'({rigid:.2e} raw), energy by {info2["energy"] - e:+.2e} Ha')
         return mol2, info
     # A null shift says why it is null, so it is not read as a refreeze that
     # ran and found nothing; a run that never converged had no minimum to
@@ -350,9 +357,9 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
 
     refreeze: after convergence, rebuild the frozen conventions at the new
         geometry (`surface.refreeze`) and optimize again, up to this many
-        times, as `optimize` does. 0 marks the record
-        `refreeze: 'not measured'`, so a null `refreeze_shift` can only have
-        come from an explicit 0.
+        times, as `optimize` does, the shift measured on superposed
+        geometries. 0 marks the record `refreeze: 'not measured'`, so a null
+        `refreeze_shift` can only have come from an explicit 0.
 
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
     residual, and not the driving force at R0 that `grad_max` means elsewhere;
@@ -468,14 +475,18 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
                                       maxiter, converge, coordsys,
                                       refreeze - 1, verbose, workdir,
                                       hess_init)
-        shift = float(np.abs(mol2.atom_coords() - mol_opt.atom_coords()).max())
-        info.update(refreeze_shift=shift,
+        shift = aligned_displacement(mol_opt.atom_coords(),
+                                     mol2.atom_coords())
+        rigid = float(np.abs(mol2.atom_coords()
+                             - mol_opt.atom_coords()).max())
+        info.update(refreeze_shift=shift, refreeze_rigid_shift=rigid,
                     refreeze_denergy=float(info2['energy'] - info['energy']),
                     refreeze_info=info2, energy=info2['energy'],
                     omega=info2['omega'], refreeze='measured',
                     hessian=info2['hessian'])
         if verbose:
-            print(f'  [refreeze] geometry moved {shift:.2e} Bohr, energy by '
+            print(f'  [refreeze] geometry moved {shift:.2e} Bohr superposed '
+                  f'({rigid:.2e} raw), energy by '
                   f'{info["refreeze_denergy"]:+.2e} Ha')
         return mol2, info
     info.update(refreeze_shift=None, refreeze='not measured')
@@ -567,17 +578,47 @@ class MeanFieldSurface:
         self._mf0 = mf
         self.environment = resolve_environment(environment, None)
         self._own = bool(own) and mf is not None
+        # The ISDF-K pair layout of the factory's mean field at mol0, which
+        # the mean field at every geometry of this surface fits on: [] until
+        # read, then [layout], None for a mean field without an ISDF-K fit.
+        self._layout = []
 
     def _mean_field(self, mol):
         """The factory's mean field at `mol` in this surface's environment,
-        converged over the ranks if it was not already, and rank 0's on every
-        rank."""
+        converged over the ranks if it was not already, rank 0's on every
+        rank, its ISDF-K fit on the pair layout of mol0's (`pair_layout`)."""
+        at_reference = np.array_equal(mol.atom_coords(),
+                                      self.mol0.atom_coords())
+        layout = (None if at_reference and not self._layout
+                  else self.pair_layout())
+        with frozen_pair_layout(layout):
+            mf = self._converged(mol)
+        if not self._layout:
+            self._layout.append(scf_pair_layout(mf))
+        return mf
+
+    def _converged(self, mol):
+        """The factory's mean field at `mol` in this environment, converged
+        over the ranks, rank 0's on every rank."""
         # cycle: src.gradients -> src.properties.__init__ -> this module
         from src.gradients.factor_chain import converged_factory
 
         return lockstep_mean_field(
             self.environment.for_geometry(mol).mean_field(
                 mol, converged_factory(self._scf)))
+
+    def pair_layout(self):
+        """The AO-pair columns the ISDF-K fit of the mean field at mol0
+        kept, which every geometry of this surface fits on, so that its
+        energy is one function of the nuclei and the force its derivative;
+        a surface asked elsewhere first converges mol0's for it. None for a
+        mean field without an ISDF-K fit. `refreeze` takes it again at the
+        new reference."""
+        if not self._layout:
+            mf = (self._mf0 if self._own else
+                  self._converged(self.mol0))
+            self._layout.append(scf_pair_layout(mf))
+        return self._layout[0]
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the mean field this surface evaluates on: the factory's
@@ -633,6 +674,10 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
     Huang-Rhys factor from 1.278 to 0.896).
     """
     mf = scf_factory(mol)
+    # pyscf's scanner resets this mean field at each geometry, and its ISDF-K
+    # fit then keeps the start's pair layout (`ISDFJK.reset`)
+    if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+        mf.with_df.pair_layout = scf_pair_layout(mf)
     tried = []
     for name, mod in (('geometric', 'geometric_solver'),
                       ('pyberny', 'berny_solver')):

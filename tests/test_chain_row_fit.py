@@ -453,11 +453,13 @@ def whole_assembly(gram=True):
         g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                      self.pts_local, self.owner,
                                      frames=self.frames,
-                                     with_frames=self.with_frames)
+                                     with_frames=self.with_frames,
+                                     body=self.body)
         g_fit = dfactor_adjoint_gauges(
             mol, auxmol, crd, [(d_bar, None)], self.layout, self.pts_local,
             self.owner, frames=self.frames, with_frames=self.with_frames,
-            gram_layout=product_pairs(mol) if gram else self.layout)
+            gram_layout=product_pairs(mol) if gram else self.layout,
+            body=self.body)
         return g_coll, g_fit, None
     return branches
 

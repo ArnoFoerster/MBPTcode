@@ -29,7 +29,12 @@ turning with the environment. All three are needed to gate below 1e-4.
 
 An axis of a frame carries a pure gauge sign, and no sign convention is
 continuous everywhere, so `continued_frames` carries the convention over from
-a reference and differentiates that.
+a reference and differentiates that. Frozen frames turn with the whole
+molecule instead: F_i = F0_i Q, with Q the Kabsch rotation of the geometry
+onto the reference (`body_frame.BodyFrame`), so a rigid rotation does not move
+the molecule against its own interpolation clouds. The point chain carries
+dE/dQ = sum_i F0_i^T dE/dF_i through the rotation's derivative, so the force
+is the derivative of the energy and carries no net torque.
 
 Derivative-integral signs are measured, not transcribed: pyscf's int2c2e_ip1,
 int3c2e_ip1 and int3c2e_ip2 are all +(grad .), so every nuclear derivative
@@ -117,14 +122,16 @@ class FitKey:
 class PointChain:
     """How a point adjoint P[g] = dE/dr_g reaches the nuclei for one grid:
     r_g = p_g F_i + R_i over the clouds `pts_local` and their owners, the
-    frames F_i turning with the geometry or not (`with_frames`)."""
+    frames F_i turning with the geometry (`with_frames`), or frozen and
+    turned with the whole molecule by a `body` frame (`point_chain`)."""
 
     def __init__(self, pts_local, owner, frames, with_frames,
-                 decay=_FRAME_DECAY):
+                 decay=_FRAME_DECAY, body=None):
         self.pts_local = [np.asarray(p) for p in pts_local]
         self.owner = np.asarray(owner)
         self.frames = None if frames is None else np.asarray(frames)
         self.with_frames, self.decay = bool(with_frames), float(decay)
+        self.body = None if self.with_frames else body
 
     def same(self, other):
         """Whether `other` takes a point adjoint to the same force."""
@@ -134,16 +141,17 @@ class PointChain:
                 or not all(np.array_equal(a, b) for a, b in
                            zip(self.pts_local, other.pts_local))):
             return False
-        if not self.with_frames:
-            return True
+        if not self.with_frames and self.body is None:
+            return other.body is None
         if self.frames is None or other.frames is None:
             return self.frames is None and other.frames is None
-        return np.array_equal(self.frames, other.frames)
+        return (np.array_equal(self.frames, other.frames)
+                and (self.body is None or self.body.same(other.body)))
 
     def __call__(self, mol, P):
         return point_chain(mol, P, self.pts_local, self.owner,
                            frames=self.frames, decay=self.decay,
-                           with_frames=self.with_frames)
+                           with_frames=self.with_frames, body=self.body)
 
 
 class PendingFitAdjoint:
@@ -379,25 +387,33 @@ def basis_centre_forces(basis_mol, coords, bar):
 
 
 def point_chain(mol, P, pts_local, atom_of_point, frames=None,
-                decay=_FRAME_DECAY, with_frames=True):
+                decay=_FRAME_DECAY, with_frames=True, body=None):
     """(natm, 3) from an adjoint P[g] = dE/dr_g on the interpolation points.
 
     The points translate with the atom that owns them and turn with that atom's
     frame: r_g = p_g F_i + R_i, so dE/dF_i[a,b] = sum_{g in i} p_g[a] P[g,b].
+    Continued frames turn with each atom's environment (`frame_adjoint`);
+    frozen ones, F_i = F0_i Q, with the body frame Q of the whole molecule
+    (`body_frame.BodyFrame`), so dE/dQ = sum_i F0_i^T dE/dF_i.
     """
     grad = np.zeros((mol.natm, 3))
     for ia in range(mol.natm):
         grad[ia] += P[atom_of_point == ia].sum(axis=0)
-    if with_frames:
+    if with_frames or body is not None:
         W = np.zeros((mol.natm, 3, 3))
         for ia in range(mol.natm):
             W[ia] = pts_local[ia].T @ P[atom_of_point == ia]
+    if with_frames:
         grad += frame_adjoint(mol, W, decay=decay, frames=frames)
+    elif body is not None:
+        q_bar = np.einsum('iak,iab->kb', np.asarray(frames), W)
+        grad += body.rotation_adjoint(mol.atom_coords(), q_bar)
     return grad
 
 
 def collocation_adjoint(mol, coords, Xao_bar, pts_local, atom_of_point,
-                        frames=None, decay=_FRAME_DECAY, with_frames=True):
+                        frames=None, decay=_FRAME_DECAY, with_frames=True,
+                        body=None):
     """(natm, 3) gradient of sum_{g,mu} Xao_bar[g,mu] chi_mu(r_g).
 
     The orbital-basis case: AO centres plus the shared point chain.
@@ -406,7 +422,8 @@ def collocation_adjoint(mol, coords, Xao_bar, pts_local, atom_of_point,
     """
     centre, P = basis_centre_forces(mol, coords, Xao_bar)
     return centre + point_chain(mol, P, pts_local, atom_of_point, frames=frames,
-                                decay=decay, with_frames=with_frames)
+                                decay=decay, with_frames=with_frames,
+                                body=body)
 
 
 # ---------------------------------------------------------------------------
@@ -714,13 +731,13 @@ class GaugeAdjoint:
 def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
                     atom_of_point, frames=None, decay=_FRAME_DECAY,
                     regularization=DEFAULT_REGULARIZATION, with_frames=True,
-                    environment=None):
+                    environment=None, body=None):
     """(natm, 3) gradient of sum_{gP} D_bar[g,P] D[g,P], D = M^T V_env^(1/2)."""
     return dfactor_adjoint_gauges(mol, auxmol, coords,
                                   [(D_bar, environment)], layout, pts_local,
                                   atom_of_point, frames=frames, decay=decay,
                                   regularization=regularization,
-                                  with_frames=with_frames)
+                                  with_frames=with_frames, body=body)
 
 
 def product_pairs(mol, l_max_second=2):
@@ -772,7 +789,7 @@ def require_whole_fit_adjoint(nao, naux, npoint, ngram, what):
 def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
                            atom_of_point, frames=None, decay=_FRAME_DECAY,
                            regularization=DEFAULT_REGULARIZATION,
-                           with_frames=True, gram_layout=None):
+                           with_frames=True, gram_layout=None, body=None):
     """(natm, 3) gradient of sum over `gauges` of sum_{gP} D_bar[g,P] D[g,P].
 
     The whole D branch. Split D into the fit and the metric root, run the fit's
@@ -890,13 +907,13 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     c_aux, P_aux = basis_centre_forces(auxmol, coords, aux_bar)
     grad += c_ao + c_aux
     grad += point_chain(mol, P + P_aux, pts_local, atom_of_point, frames=frames,
-                        decay=decay, with_frames=with_frames)
+                        decay=decay, with_frames=with_frames, body=body)
     return grad
 
 
 def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                     pts_local, atom_of_point, frames=None, decay=_FRAME_DECAY,
-                    with_frames=True, block=None, pending=None):
+                    with_frames=True, block=None, pending=None, body=None):
     """(g_collocation, g_fit, held): the collocation branch of X_bar and the
     fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
     the frozen `layout` (its Gram matrix over every product pair).
@@ -915,7 +932,8 @@ def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
     """
     key = FitKey(mol, auxmol, coords, layout,
                  FIT_CHOLESKY_BLOCK if block is None else block)
-    chain = PointChain(pts_local, atom_of_point, frames, with_frames, decay)
+    chain = PointChain(pts_local, atom_of_point, frames, with_frames, decay,
+                       body=body)
     seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff)
     adjoint = (key.contract([seeds])[0] if pending is None
                else pending.contract(key, seeds, chain))
@@ -1318,7 +1336,10 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     ngram = len(gmu)
     require_whole_fit_adjoint(nao, naux, len(crd), ngram,
                               "isdf_exchange_skeleton(fit='replicated')")
-    layout = test_set_layout(mol, crd, l_max_second=with_df.l_max_second)
+    # the pair columns the SCF's fit kept: a walk's frozen layout, else the
+    # screen at these points
+    layout = (with_df.pair_layout if with_df.pair_layout is not None else
+              test_set_layout(mol, crd, l_max_second=with_df.l_max_second))
     mu, nu, wc = layout
     cols = pair_positions(layout, gram, nao)
     D_test = test_set_D(mol, auxmol, crd, gram)
@@ -1397,7 +1418,8 @@ def _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels):
     distributed SCF left its ISDFJK unbuilt, from the same `isdf_grid` call
     that SCF's handle placed its points with; the handle's M^T and
     collocation tiles are reused rather than refitted. The pair layout is
-    the row fit's own screen at these points.
+    the one the SCF's fit kept: a walk's frozen layout (`ISDFJK.pair_layout`),
+    else the row fit's own screen at these points.
 
     Inside a force's `one_fit_adjoint` window the fit adjoint is not run
     here: the seeds go to the window and this returns the attenuated
@@ -1453,8 +1475,9 @@ def _exchange_rows_fit(mf):
             "field's grid, so its fit is not the one the energy used")
     auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
     block = handle.tile if handle is not None else FIT_CHOLESKY_BLOCK
-    layout = screened_layout(mol, coords, l_max_second=with_df.l_max_second,
-                             block=block)
+    layout = (with_df.pair_layout if with_df.pair_layout is not None else
+              screened_layout(mol, coords, l_max_second=with_df.l_max_second,
+                              block=block))
     key = FitKey(mol, auxmol, coords, layout, block,
                  l_max_second=with_df.l_max_second,
                  regularization=with_df.regularization,

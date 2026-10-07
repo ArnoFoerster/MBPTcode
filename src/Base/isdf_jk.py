@@ -62,6 +62,7 @@ coefficients reproduce RI-V fitting coefficients rather than the orbital
 products themselves, which is what keeps the per-molecule step cubic.
 """
 import contextlib
+import threading
 import warnings
 
 import numpy as np
@@ -91,6 +92,9 @@ _NO_FUNCTIONAL = '0*LDA'
 #: the square root real without discarding anything that carries weight.
 _METRIC_EIG_TOL = 1e-12
 
+#: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on.
+_FROZEN = threading.local()
+
 
 @contextlib.contextmanager
 def range_coulomb(mol, auxmol, omega):
@@ -116,6 +120,24 @@ def range_coulomb(mol, auxmol, omega):
         mol.omega = saved[0]
         if auxmol is not None:
             auxmol.omega = saved[1]
+
+
+@contextlib.contextmanager
+def frozen_pair_layout(layout):
+    """Every ISDFJK built inside fits on `layout`, a reference geometry's
+    `test_set_layout` (mu, nu, weight), in place of the screen at its own
+    points, and keeps it (`ISDFJK.pair_layout`); None leaves each its own.
+
+    The screen is a discrete choice: re-taken at every geometry of a walk,
+    the energy steps wherever a pair crosses `pair_tol`, while the force
+    differentiates one fixed column set and cannot see the step.
+    """
+    previous = getattr(_FROZEN, 'layout', None)
+    _FROZEN.layout = layout
+    try:
+        yield
+    finally:
+        _FROZEN.layout = previous
 
 
 def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
@@ -461,6 +483,9 @@ class ISDFJK(df.df.DF):
         # never in the test set). Raising it enlarges the test set and the fit.
         self.l_max_second = l_max_second
         self.regularization = regularization
+        # The AO-pair columns the fit keeps, frozen at a reference geometry
+        # (`frozen_pair_layout`); None screens at this geometry's own points.
+        self.pair_layout = None
 
         self.coords = None
         self.X = None            # (nk, nao)
@@ -509,7 +534,8 @@ class ISDFJK(df.df.DF):
                                  l_max_second=self.l_max_second,
                                  regularization=self.regularization,
                                  block_memory_gb=self.block_memory_gb,
-                                 progress=self.progress)
+                                 progress=self.progress,
+                                 layout=self.fit_layout())
         log.timer('ISDF factorization (M = %d points, nao = %d, naux = %d)'
                   % (self.nk, mol.nao_nr(), self.auxmol.nao_nr()), *t0)
         if self.j_route == 'isdf':
@@ -525,6 +551,14 @@ class ISDFJK(df.df.DF):
                      "method; use j_route='df-direct' to compute with.")
         self._built = True
         return self
+
+    def fit_layout(self):
+        """The pair layout the fit keeps: this handle's frozen one, else the
+        one a `frozen_pair_layout` block holds now, which it then keeps; None
+        screens at its own points."""
+        if self.pair_layout is None:
+            self.pair_layout = getattr(_FROZEN, 'layout', None)
+        return self.pair_layout
 
     def _resolve_z_mode(self):
         if self.z_mode != 'auto':
@@ -739,6 +773,8 @@ class ISDFJK(df.df.DF):
 
     def reset(self, mol=None):
         super().reset(mol)
+        # `pair_layout` survives: a frozen layout is a choice of the walk, like
+        # the counts and radii, and a scanner's next geometry fits on it too
         if mol is not None:
             self.coords = None
             self.X = self.M = None

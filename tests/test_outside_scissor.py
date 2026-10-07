@@ -76,6 +76,11 @@ PINS = json.loads(
 #: How far the record may sit from the pins, (energy Ha, gradient Ha/Bohr);
 #: looser for formaldehyde, whose pair screen drops pairs.
 RECORD_MOVE = {'water': (1e-12, 5e-8), 'formaldehyde': (1e-8, 5e-7)}
+#: The same at the displaced geometry, where the frozen frames turn with the
+#: molecule's Kabsch rotation onto R0 (`body_frame`) and the record's lab-fixed
+#: frames do not: the record sits 6.0e-6 (water) and 6.9e-8 Ha (formaldehyde)
+#: from the pins in energy, 3.8e-5 and 1.9e-4 Ha/Bohr in the gradient.
+RECORD_MOVE_DISPLACED = {'water': (1e-5, 5e-5), 'formaldehyde': (1e-7, 3e-4)}
 
 
 def scf_factory(mol):
@@ -127,9 +132,10 @@ def test_the_default_outside_is_bitwise_the_baseline(name, spin):
 
     At both of the record's geometries the energies and gradients are bitwise
     the pins (`PINS`, tests/one_fit_pins.json), the record within
-    `RECORD_MOVE` of them, and the SCF energy the record's bits. The reference
-    geometry is evaluated first: the frozen conventions are decided there and
-    the displaced geometry reuses them.
+    `RECORD_MOVE` of them (`RECORD_MOVE_DISPLACED` at the displaced
+    geometry), and the SCF energy the record's bits. The reference geometry
+    is evaluated first: the frozen conventions are decided there and the
+    displaced geometry reuses them.
     """
     recorded = RECORD['surfaces'][name][f'ExcitedStateChain[{spin}]']
     assert recorded['status'] == 'ok'
@@ -141,6 +147,8 @@ def test_the_default_outside_is_bitwise_the_baseline(name, spin):
     for label, entry in recorded['geometries'].items():
         pin = pins[label]
         at = mol if label == 'R0' else at_coords(mol, entry['atom_coords_bohr'])
+        if label != 'R0':
+            bar_e, bar_g = RECORD_MOVE_DISPLACED[name]
         assert at.atom_coords().tolist() == entry['atom_coords_bohr'], label
         _, mf = chain.mean_field(at)
         assert float(mf.e_tot) == entry['e_scf'], label

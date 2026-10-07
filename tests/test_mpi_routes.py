@@ -115,6 +115,11 @@ Checks (path; standard):
   * `static_screening` (explicit) (reduced); `screened_interaction_tau`,
     `selfenergy_diag` and its backward pass (context), `selfenergy_block` and
     its backward pass (explicit) (reduced, `SIGMA_REL`)
+  * the finite-difference Hessian of an ISDF-K force, `numerical_hessian`
+    with its displaced SCFs striped by `mpi_map` (explicit): one rank
+    converges the reference, every displaced mean field on every rank fits
+    on rank 0's reference pair layout (bitwise), each displacement is solved
+    once, and every rank holds one Hessian (bitwise)
   * the BSE@GW chain, `ExcitedStateChain` in the region (context): one grid on
     every rank (bitwise hashes), the excitation and the quasiparticle force
     against rank 0's serial ones (stated, RANK_SPLIT_FORCE_TOL)
@@ -183,6 +188,7 @@ Checks (path; standard):
     drift the locksteps absorbed
 """
 import copy
+import functools
 import hashlib
 import inspect
 import os
@@ -197,13 +203,17 @@ import numpy as np
 from pyscf import dft, gto, lib, scf
 
 from src.Base.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
-                                HARTREE_TO_EV, QP_BISECTION_TOL,
+                                HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
+                                QP_BISECTION_TOL,
                                 RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL)
 from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
+from src.Base.distributed_isdf_jk import scf_pair_layout
+from src.Base.isdf_jk import isdf_jk
 from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
 from src.Base.utils.mpi_grid import (SimulatedComm, broadcast,
                                      contiguous_block, distributed,
-                                     grid_comm, lockstep_stats, partition)
+                                     grid_comm, lockstep_stats, mpi_map,
+                                     partition)
 from src.Base import separable_ri
 from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
                                      whole_factor)
@@ -246,6 +256,7 @@ from src.gradients.space_time_adjoint import (polarizability_tau,
                                               selfenergy_diag,
                                               selfenergy_diag_backward,
                                               sigma_transforms)
+from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
 
 warnings.simplefilter('ignore')
@@ -1545,11 +1556,12 @@ def whole_row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar, **extra):
     g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                  self.pts_local, self.owner,
                                  frames=self.frames,
-                                 with_frames=self.with_frames)
+                                 with_frames=self.with_frames,
+                                 body=self.body)
     g_fit = dfactor_adjoint_gauges(
         mol, auxmol, crd, [(d_bar, None)], self.layout, self.pts_local,
         self.owner, frames=self.frames, with_frames=self.with_frames,
-        gram_layout=product_pairs(mol))
+        gram_layout=product_pairs(mol), body=self.body)
     return g_coll, g_fit, None
 
 
@@ -2097,6 +2109,46 @@ def audited_forward(gate, mol):
                f'{worst} disagreements' + (f', first at {first}' if first else ''))
 
 
+def hessian_layout_routes(gate):
+    """`numerical_hessian` of an ISDF-K Hartree-Fock force on the Hessian's
+    grid, its displaced SCFs striped over the ranks by `mpi_map`: one
+    reference pair layout on every rank."""
+    gate.section('finite-difference ISDF-K Hessian, displaced SCFs striped '
+                 'by mpi_map')
+    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
+    counts, n_start = separable_ri.resolve_isdf_grid(
+        ISDF_HESSIAN_MIN_GRID, 'cc-pvdz', ['H', 'O'], auxbasis='cc-pvdz-ri')
+    layouts = []
+
+    def factory(m):
+        mf = isdf_jk(scf.RHF(m), auxbasis='cc-pvdz-ri', counts=counts,
+                     n_start=n_start)
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
+        mf.kernel()
+        layouts.append(mf.with_df.pair_layout)
+        return mf
+
+    with distributed(None):
+        own = scf_pair_layout(factory(mol))
+    reference = own if gate.comm is None else broadcast(own, gate.comm)
+    layouts.clear()
+    hess = numerical_hessian(mol, factory,
+                             map_fn=functools.partial(mpi_map, comm=gate.comm))
+    displaced = [lay for lay in layouts if lay is not None]
+    want = digest(*reference)
+    gate.check(all(digest(*lay) == want for lay in displaced),
+               f'every displaced mean field [explicit] over {gate.size} ranks '
+               f"fits on rank 0's reference pair layout",
+               f'{len(displaced)} on this rank, {len(reference[0])} pairs')
+    counted = gate.everyone((len(layouts) - len(displaced), len(displaced)))
+    gate.check(sum(c[0] for c in counted) == 1
+               and sum(c[1] for c in counted) == 6 * mol.natm,
+               'one reference SCF and each displacement once over the ranks',
+               f'{counted}')
+    gate.check(gate.distinct(hess) == 1,
+               f'the Hessian over {gate.size} ranks is one on every rank')
+
+
 def main(comm):
     """Every check on this rank of `comm` (None serially); 0 when every rank
     passed."""
@@ -2137,6 +2189,7 @@ def main(comm):
 
         lockstep_counters(gate, lockstep_stats(reset=True))
         audited_forward(gate, mol)
+        hessian_layout_routes(gate)
     return gate.finish()
 
 

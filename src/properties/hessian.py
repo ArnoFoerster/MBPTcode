@@ -35,6 +35,15 @@ with h, and even the h -> 0 force constants are wrong (formaldehyde at 148
 points per atom: a 1421 cm^-1 mode at 2646). Below `ISDF_HESSIAN_MIN_GRID` the
 Hessian is refused; at it formaldehyde's frequencies sit within 11 cm^-1 of
 the density-fitted route's, and the asymmetry falls as h^2.
+
+EVERY DISPLACED MEAN FIELD FITS ON THE REFERENCE GEOMETRY'S PAIR LAYOUT. The
+ISDF-K fit screens its AO pairs against `pair_tol`, a discrete choice. If
+each displaced SCF screened its own pairs, a pair crossing the threshold
+between R0 - h and R0 + h would make the two forces of one central difference
+forces of two different energies, and their difference over 2h an O(1/h)
+error in that column of the Hessian. `numerical_hessian` therefore takes the
+layout of the factory's mean field at R0 (`reference_pair_layout`) and builds
+every displaced mean field inside `frozen_pair_layout`, the way a walk does.
 """
 import numpy as np
 
@@ -45,9 +54,14 @@ from src.Base.constants import (BOHR_TO_ANGSTROM,
                                 ISDF_GRID_ACCURACY,
                                 ISDF_HESSIAN_MIN_GRID,
                                 NUCLEAR_FD_STEP)
-from src.Base.isdf_jk import ISDFJK
+from src.Base.distributed_isdf_jk import scf_pair_layout
+from src.Base.isdf_jk import ISDFJK, frozen_pair_layout
 from src.Base.separable_ri import _SHELL_ORDER
 from src.properties.optimize import mean_field_force
+
+#: `numerical_hessian`'s default `pair_layout`: the layout of the factory's
+#: mean field at the reference geometry (`reference_pair_layout`).
+REFERENCE_LAYOUT = 'reference'
 
 #: Why a finite-difference Hessian of an ISDF-K mean field has a grid floor.
 ROUGH_GRID = ('the ISDF energy depends on the orientation of each atom\'s '
@@ -143,6 +157,25 @@ def gradient_at(mol, scf_factory, ia, x, sign, step=NUCLEAR_FD_STEP):
     return np.asarray(mean_field_force(mf))
 
 
+def reference_pair_layout(mol, scf_factory, map_fn=None):
+    """The AO-pair columns (mu, nu, weight) the ISDF-K fit of
+    `scf_factory`'s mean field at `mol` keeps (`scf_pair_layout`), which every
+    displaced mean field of a finite-difference Hessian about `mol` fits on;
+    None for a mean field without an ISDF-K fit.
+
+    One SCF, run as the single item of `map_fn`: under `mpi_map` one rank
+    converges it, inside `distributed(None)` like every displaced one, and
+    every rank receives that rank's arrays, so all ranks difference forces on
+    one layout.
+    """
+    runner = map if map_fn is None else map_fn
+
+    def one(_):
+        return scf_pair_layout(scf_factory(mol))
+
+    return list(runner(one, [0]))[0]
+
+
 def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
     """(natm, natm, 3, 3) from {(ia, x, sign): gradient}, pyscf's layout.
 
@@ -198,12 +231,20 @@ def translation_residual(h):
 
 def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
                       verbose=False, info=None,
-                      asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL):
+                      asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL,
+                      pair_layout=REFERENCE_LAYOUT):
     """(natm, natm, 3, 3) Hessian by central differences of analytic forces.
 
     map_fn: anything with `map`'s signature, so the 6N independent displaced
         solves can be handed to a process pool. The default runs them in
         order, which is correct and slow.
+    pair_layout: the ISDF-K pair layout every displaced mean field fits on
+        (`frozen_pair_layout`). By default the one of the factory's mean field
+        at `mol` (`reference_pair_layout`, one more SCF); a caller holding
+        that mean field passes `scf_pair_layout(mf)` instead. None lets each
+        displaced mean field screen its own pairs, which puts an O(1/h) error
+        into every column across which a pair crosses `pair_tol`. Recorded in
+        `info` as `frozen_pairs` (None where no ISDF-K fit was frozen).
 
     The step is the property layer's `NUCLEAR_FD_STEP`. Differencing a GRADIENT
     rather than an energy is what makes 1e-3 Bohr comfortable here: the noise
@@ -219,13 +260,18 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
     """
     natm = mol.natm
     runner = map if map_fn is None else map_fn
+    if isinstance(pair_layout, str) and pair_layout == REFERENCE_LAYOUT:
+        pair_layout = reference_pair_layout(mol, scf_factory, map_fn)
 
     def forces_at(h):
         jobs = displacement_list(natm, h)
 
         def one(item):
             k, (ia, x, sign) = item
-            g = gradient_at(mol, scf_factory, ia, x, sign, h)
+            # inside the job, so the block holds on whichever thread or rank
+            # runs it
+            with frozen_pair_layout(pair_layout):
+                g = gradient_at(mol, scf_factory, ia, x, sign, h)
             if verbose:
                 print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
                       f'{"xyz"[x]} {"+" if sign > 0 else "-"}'
@@ -240,6 +286,8 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
     h = hessian_from_gradients(gradients, natm, step, info=seen)
     seen['step'] = step
     seen['gradients'] = len(gradients)
+    seen['frozen_pairs'] = (None if pair_layout is None
+                            else int(len(pair_layout[0])))
     check_hessian_noise(h, seen, tol=asymmetry_tol)
     if seen['asymmetry_rel'] > HESSIAN_FD_NOISE_REL:
         twice = {}

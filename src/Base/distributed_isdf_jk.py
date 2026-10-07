@@ -75,9 +75,11 @@ from src.Base.constants import (FIT_CHOLESKY_BLOCK,
                                 ISDF_SCF_KERNEL_MEMORY_FRACTION,
                                 ISDF_SCF_METRIC_SLAB)
 from src.Base.distributed_df import (_counted, _lockstep_density,
-                                     _reduce_parts, _spent)
+                                     _reduce_parts, _spent,
+                                     distributed_handles)
 from src.Base.isdf_jk import ISDFJK, isdf_grid, range_coulomb
-from src.Base.separable_ri import DEFAULT_PAIR_TOL, FitTiles, fit_M_streaming
+from src.Base.separable_ri import (DEFAULT_PAIR_TOL, FitTiles,
+                                   fit_M_streaming, screened_layout)
 from src.Base.utils import memory
 from src.Base.utils.mpi_grid import (allgather_ranges, broadcast,
                                      broadcast_rows, contiguous_block,
@@ -302,7 +304,8 @@ class DistributedISDFJK(df.df.DF):
                                   regularization=source.regularization,
                                   block_memory_gb=source.block_memory_gb,
                                   progress=source.progress, comm=comm,
-                                  fit='rows', block=self.tile)
+                                  fit='rows', block=self.tile,
+                                  layout=source.fit_layout())
             _spent(self.timings, 'scf_isdf_fit', t_fit)
         _ran_on(self.timings, 'scf_isdf_blas_fit', pool)
         self.MT = fit.mt
@@ -765,3 +768,32 @@ def distributed_isdf_storage(mf, comm=None):
                 held_now=dist.held_bytes(), held_peak=dict(dist.held),
                 fit_held=dict(dist.fit_held),
                 whole=dict(X=nk * nao * 8, MT=nk * naux * 8, Z=nk * nk * 8))
+
+
+def scf_pair_layout(mf):
+    """The AO-pair columns (mu, nu, weight) the ISDF-K fit of `mf` kept: the
+    layout it was frozen to, else the screen at its own points, the bits
+    either fit realization screens; None where `mf` built no ISDF-K fit (a
+    fitted mean field, or a pure functional's, which never asks for K).
+
+    A walk freezes this at its reference geometry (`frozen_pair_layout`).
+    """
+    with_df = getattr(mf, 'with_df', None)
+    handle = with_df if isinstance(with_df, DistributedISDFJK) else None
+    if handle is None:
+        handles = distributed_handles(mf)
+        if handles is not None and isinstance(handles[0], DistributedISDFJK):
+            handle = handles[0]
+    source = with_df if handle is None else handle.source
+    if not isinstance(source, ISDFJK):
+        return None
+    if source.pair_layout is not None:
+        return source.pair_layout
+    if handle is not None and handle.coords is not None:
+        return screened_layout(source.mol, handle.coords,
+                               l_max_second=source.l_max_second,
+                               comm=handle.comm, block=handle.tile)
+    if not source._built:
+        return None
+    return screened_layout(source.mol, source.coords,
+                           l_max_second=source.l_max_second)

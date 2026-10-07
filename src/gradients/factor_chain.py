@@ -77,11 +77,14 @@ from contextlib import contextmanager
 import numpy as np
 from pyscf import df as pyscf_df
 
-from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
+from src.Base.body_frame import BodyFrame
+from src.Base.isdf_jk import (ISDFJK, frozen_pair_layout,
+                              mean_field_skeleton_force)
 from src.Base.constants import (ENVIRONMENT_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                 FIT_REALIZATIONS, ISDF_DEFAULT_COUNTS,
                                 ISDF_FIT_ERROR_FAILED, SCF_GRAD_TOL)
 from src.Base.distributed_df import distributed_fock, distributed_mean_field
+from src.Base.distributed_isdf_jk import scf_pair_layout
 from src.Base.environment import dresses_interaction, resolve_environment
 from src.Base.separable_ri import (atomic_frames, aux_metric_sqrt,
                                    default_auxbasis, fit_M_streaming,
@@ -241,6 +244,11 @@ class FrozenFactorization:
                                   *point_layout(mol, radii),
                                   atomic_frames(mol)[0]))
         self.seconds['points'] = time.perf_counter() - t0
+        # Frozen frames are frozen in the molecule: they turn with the Kabsch
+        # rotation of each geometry onto this one, so a rigid motion moves
+        # the points with the atoms and the energy cannot see it.
+        self.body = (None if self.with_frames
+                     else BodyFrame(lockstep(np.array(mol.atom_coords()))))
         if self.radii_tag is None:
             failed = {el: e for el, e in self.fit_errors.items()
                       if e >= ISDF_FIT_ERROR_FAILED}
@@ -332,12 +340,18 @@ class FrozenFactorization:
     def coords(self, mol):
         """Interpolation points r_g = p_g F_i + R_i on frozen or continued frames.
 
+        Frozen frames are the reference's turned by the body frame, F0_i Q
+        (`BodyFrame`), and are the reference's own bits at the reference.
+
         Rank 0's points on every rank: the grid is part of the functional.
         Continued frames are re-derived at every geometry through an `eigh`,
         which is where a rank's own bits enter.
         """
-        fr = continued_frames(mol, self.frames) if self.with_frames \
-            else self.frames
+        if self.with_frames:
+            fr = continued_frames(mol, self.frames)
+        else:
+            q = self.body.rotation(mol.atom_coords())
+            fr = self.frames if q is None else self.frames @ q
         return lockstep(np.vstack([self.pts_local[ia] @ fr[ia]
                                    + mol.atom_coord(ia)
                                    for ia in range(mol.natm)]))
@@ -544,8 +558,12 @@ class FactorChain:
         self.radii = factorization.radii
         self.pts_local, self.owner = factorization.pts_local, factorization.owner
         self.frames = factorization.frames
+        self.body = factorization.body
         self.M, self.naux = factorization.M, factorization.naux
         self.layout = factorization.layout
+        # the reference mean field's ISDF-K pair layout, read on the first
+        # displaced geometry and shared by every shallow copy (`scf_layout`)
+        self._scf_layout = {}
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the reference pair, or a fresh SCF at another geometry,
@@ -561,7 +579,7 @@ class FactorChain:
                 # `response_kernel`), and numpy-sized garbage never wakes the
                 # cyclic collector
                 gc.collect()
-                with self.phase('t_scf'):
+                with self.phase('t_scf'), frozen_pair_layout(self.scf_layout()):
                     mf = self.environment.mean_field(
                         mol, converged_factory(self.scf_factory))
         # Rank 0's orbitals on every rank: the chain forms X_mo = X_ao C and
@@ -572,6 +590,16 @@ class FactorChain:
         # one each rank converged alone does not.
         lockstep_mean_field(mf)
         return mol, mf
+
+    def scf_layout(self):
+        """The AO-pair columns the reference mean field's ISDF-K fit kept,
+        which the mean field at every other geometry of this chain fits on,
+        so that E_0 and its force stay one function along a walk; None for a
+        mean field without an ISDF-K fit. A `refreeze` takes its own at the
+        new reference, as it does every other convention."""
+        if 'layout' not in self._scf_layout:
+            self._scf_layout['layout'] = scf_pair_layout(self.mf0)
+        return self._scf_layout['layout']
 
     @contextmanager
     def phase(self, key):
@@ -681,7 +709,8 @@ class FactorChain:
         return self.factorization.auxmol(mol)
 
     def coords(self, mol):
-        """Interpolation points r_g = p_g F_i + R_i on frozen or continued frames."""
+        """Interpolation points r_g = p_g F_i + R_i on frozen or continued frames,
+        frozen ones turned with the molecule (`FrozenFactorization.coords`)."""
         return self.factorization.coords(mol)
 
     def factors(self, mol, auxmol, crd):
@@ -918,7 +947,8 @@ class FactorChain:
             g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                          self.pts_local, self.owner,
                                          frames=self.frames,
-                                         with_frames=self.with_frames)
+                                         with_frames=self.with_frames,
+                                         body=self.body)
         with self.phase('t_fit'):
             # Both gauges of one fit in one pass: the dressed factor the kernel
             # uses and the bare one the self-energy screens with share the test
@@ -933,7 +963,8 @@ class FactorChain:
                                            self.layout, self.pts_local,
                                            self.owner, frames=self.frames,
                                            with_frames=self.with_frames,
-                                           gram_layout=product_pairs(mol))
+                                           gram_layout=product_pairs(mol),
+                                           body=self.body)
         return g_coll, g_fit
 
     def row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar,
@@ -961,6 +992,7 @@ class FactorChain:
                                       mf.mo_coeff, self.layout, self.pts_local,
                                       self.owner, frames=self.frames,
                                       with_frames=self.with_frames,
+                                      body=self.body,
                                       block=self.fit_block,
                                       pending=pending_fit_adjoint(mf))
         return adjoint

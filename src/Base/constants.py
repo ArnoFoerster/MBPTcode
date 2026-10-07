@@ -793,6 +793,14 @@ GEOM_OPT_CONV['grad_max'] = GEOM_OPT_CONV['opt_grad_max']
 # which is what lets a surface's first point (`FirstPoint`) answer it.
 GEOMETRIC_START_TOL = 1e-8
 
+# The body frame (`body_frame.BodyFrame`): a frozen convention that carries a
+# direction turns with the Kabsch rotation of the geometry onto the one it was
+# frozen at. That rotation is undetermined where the atoms lie on a line: a
+# reference whose second principal spread is below this fraction of the first
+# keeps its conventions in the lab frame, and a geometry whose superposition
+# Sylvester denominators fall below it has no rotation derivative.
+BODY_FRAME_MIN_SPREAD = 1e-6
+
 # Conformer search over the soft torsions of a twisted emitter.
 # A bond is drawn when the internuclear distance is within this factor of the
 # sum of the two covalent radii.

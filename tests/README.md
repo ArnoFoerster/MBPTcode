@@ -42,10 +42,11 @@ optional third-party one.
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks` |
 | analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
+| a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
 | the SCF record and its optional warm start and Newton finish; a relaxation's quasi-Newton Hessian | `test_scf_convergence`, `test_relax_hessian` |
 | the quasiparticle energy on the BSE diagonal: the pole model's frozen verdict, the scissors' static terms, the force against its own energy | `test_pole_model_route_frozen`, `test_inside_scissor_static_term`, `test_solvated_outside_scissor`, `test_qp_energy_assembly` (slow) |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
-| force constants by differencing the analytic gradient | `test_numerical_hessian`, `test_mode_hessian` |
+| force constants by differencing the analytic gradient | `test_numerical_hessian`, `test_mode_hessian`, `test_hessian_frozen_pair_layout` |
 | fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
 | an environment from a charged structure file, and the diabatic gradient in it | `test_protein_environment` (unit tests in seconds; the gradient gate about 10 minutes) |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
