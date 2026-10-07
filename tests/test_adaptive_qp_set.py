@@ -8,8 +8,12 @@ admitted window (11 candidates) and a 1 meV budget per target (S1 and T1):
   * the adaptive Omega sits within its recorded budget of the admitted one,
     and tol 0 is the admitted surface bit for bit;
   * the force is the derivative of the energy on a partition with holes;
-  * the partition is frozen over a walk, shared by spin views and carried
-    by `refreeze`, and a JSON round trip of it rebuilds the same surface;
+  * the partition is frozen over a walk and shared by spin views, `refreeze`
+    selects it again at its geometry, grow-only (a state explicit on the
+    surface it refreezes stays explicit, even where a fresh selection drops
+    it, the record names what each pass carried and added, and a set grown
+    to the whole window is the admitted surface bit for bit), and a JSON
+    round trip of it rebuilds the same surface;
   * THE GRADIENT NEVER READS AC: no continuation runs once the partition is
     frozen (a raising stand-in changes no bit), AC shifts offset by 0.05 eV
     give the same bits, and the reverse chain's modules do not import the
@@ -41,8 +45,11 @@ TARGETS = (('singlet', 0), ('triplet', 0))
 #: the finite-difference gate of tests/test_outside_scissor.py, at a step
 #: above the energy's noise floor: on the 32-point pole-model grid the worst
 #: relative difference goes as 1/h, 3.4e-6 / 1.5e-6 / 9.4e-7 / 4.2e-7 at
-#: h = 5e-5 / 1e-4 / 2e-4 / 4e-4 Bohr (64 points: 1.3e-6 / - / 5.3e-7 / -)
-FD_STEP = 4e-4
+#: h = 5e-5 / 1e-4 / 2e-4 / 4e-4 Bohr (64 points: 1.3e-6 / - / 5.3e-7 / -).
+#: With the frozen frames turning with the molecule (`body_frame`) it is
+#: 1.2e-6 / 1.1e-6 / 5.4e-7 at h = 2e-4 / 4e-4 / 8e-4, so the step is 8e-4,
+#: at the 5e-7 the in-plane forces miss by at every h.
+FD_STEP = 8e-4
 FD_TOL = 1e-6
 #: Below this many meV adaptive minus admitted is rounding, not the hole's
 #: first-order error: under the hole cap formaldehyde's holes carry no target
@@ -283,8 +290,12 @@ def test_ac_values_never_reach_the_surface(system, selected, monkeypatch):
             assert np.array_equal(got.gradient[k], ref.gradient[k])
 
 
-def test_partition_is_frozen_over_the_walk_and_carried_by_refreeze(
+def test_partition_is_frozen_over_the_walk_and_selected_again_by_refreeze(
         system, monkeypatch):
+    """Within a walk the partition is frozen; `refreeze` selects it again by
+    its own continuation at the new geometry, so the hole cap and the budget
+    hold where the conventions were rebuilt. A partition handed in without a
+    selection travels through `refreeze` as it is."""
     ch = chain(system, adaptive())
     ch.energy(system['mol'], system['mf'])
     part, shift0 = ch.qp_partition, dict(ch.outside_shift)
@@ -294,12 +305,121 @@ def test_partition_is_frozen_over_the_walk_and_carried_by_refreeze(
     calls = counting(monkeypatch)
     fresh = ch.refreeze(m)
     fresh.energy(m)
-    assert not calls
-    assert fresh.qp_partition is part
-    assert tuple(int(p) for p in fresh.qp_set) == part.explicit
+    assert calls, 'refreeze carried the partition instead of selecting'
+    again = fresh.qp_partition
+    assert again is not part and again.candidates == part.candidates
+    record = fresh.selection_record()
+    assert record['verified']
+    for p, d in record['holes_detail'].items():
+        assert abs(d['delta_eV']) + d['u_eV'] <= ADAPTIVE_HOLE_MAX_EV, (p, d)
+    assert tuple(int(p) for p in fresh.qp_set) == again.explicit
     assert fresh.outside_shift_before == shift0
-    assert set(fresh.outside_shift) == set(shift0)
-    assert fresh.outside_shift != shift0          # recalibrated on its roots
+    calls.clear()
+    carried = chain(system, partition=part).refreeze(m)
+    carried.energy(m)
+    assert not calls and carried.qp_partition is part
+
+
+def with_extra(part, extra):
+    """`part` with the holes `extra` made explicit (their tiers dropped)."""
+    extra = set(int(p) for p in extra)
+    return AdaptivePartition(
+        explicit=tuple(part.explicit) + tuple(sorted(extra)),
+        tier_of={h: b for h, b in part.tier_of.items() if h not in extra},
+        candidates=part.candidates, targets=part.targets,
+        tol_meV=part.tol_meV)
+
+
+def test_refreeze_is_grow_only(system, selected):
+    """A refreeze pass may add states to the explicit set, never drop them.
+    A hole of a fresh selection at the displaced geometry, made explicit on
+    the surface refrozen there, stays explicit; so does everything explicit at the next pass; and the record
+    names what each pass carried and added. Negative control: with the
+    floor removed from `_select_qp_set` the carried hole is dropped."""
+    m = system['displaced']
+    part = selected[0].driven.qp_partition
+    fresh = chain(system, adaptive()).refreeze(m)
+    assert fresh.qp_floor is None, 'nothing was selected to carry'
+    fresh.energy(m)
+    dropped = [p for p in fresh.qp_partition.holes if p not in part.explicit]
+    assert dropped, 'the gate needs a state a fresh selection drops'
+    x = dropped[0]
+    floor = with_extra(part, [x])
+    first = chain(system, adaptive(), partition=floor).refreeze(m)
+    assert first.qp_floor == floor.explicit
+    first.energy(m)
+    explicit1 = first.qp_partition.explicit
+    assert set(floor.explicit) <= set(explicit1) and x in explicit1
+    growth = first.qp_growth
+    assert growth == {'carried': list(floor.explicit),
+                      'added': sorted(set(explicit1) - set(floor.explicit)),
+                      'not_explicit': []}
+    record = first.selection_record()
+    assert record['refreeze_growth'] == growth
+    assert record['why'][x] == 'carried'
+    assert record['verified']
+    second = first.refreeze(system['mol'])
+    assert second.qp_floor == explicit1
+    second.energy(system['mol'])
+    assert set(explicit1) <= set(second.qp_partition.explicit)
+    assert second.qp_growth['carried'] == list(explicit1)
+
+
+class DemoteOne:
+    """`qp_set_gradient` reading a pole strength outside (0, 1] for one
+    orbital, so its root is rejected (`qp_demoted`), as a LUMO+3 at Z
+    1.04-1.05 is along a formaldehyde T1 walk."""
+
+    def __init__(self, orbital):
+        self.orbital, self.real = int(orbital), excited_state.qp_set_gradient
+
+    def __call__(self, *args, **kw):
+        out = self.real(*args, **kw)
+        states = [int(p) for p in np.atleast_1d(args[7])]
+        route_out = kw.get('route_out')
+        if self.orbital in states and route_out and 'z' in route_out:
+            route_out['z'] = np.array(route_out['z'], float)
+            route_out['z'][states.index(self.orbital)] = -0.01
+        return out
+
+
+@pytest.mark.parametrize('demote', [None, 1], ids=['none', 'lumo+1'])
+def test_a_set_grown_to_the_window_is_the_admitted_surface(system, demote,
+                                                           monkeypatch):
+    """The admitted window is the outer bound: a refreeze that carries the
+    whole window solves the admitted set, and the surface is the admitted
+    one refrozen at the same geometry, bit for bit, energy and force. Also
+    where a root is rejected: the admitted window gives that orbital the
+    shift of the explicit orbital nearest in energy, and so does the
+    adaptive set (an AC-matched probe would put it 0.58 meV apart on
+    formaldehyde T1)."""
+    m = system['displaced']
+    cands = tuple(system['window'])
+    if demote is not None:
+        orbital = system['mol'].nelectron // 2 + demote
+        monkeypatch.setattr(excited_state, 'qp_set_gradient',
+                            DemoteOne(orbital))
+    whole = AdaptivePartition(explicit=cands, tier_of={}, candidates=cands,
+                              targets=TARGETS, tol_meV=ADAPTIVE_QP_TOL_MEV)
+    grown = chain(system, adaptive(), partition=whole).refreeze(m)
+    man = StateManifold(grown, states=TARGETS)
+    ev = man.evaluate(m, gradients=TARGETS)
+    ref_man = StateManifold(chain(system).refreeze(m), states=TARGETS)
+    ref = ref_man.evaluate(m, gradients=TARGETS)
+    assert tuple(man.driven.qp_set) == tuple(ref_man.driven.qp_set)
+    assert man.driven.qp_growth['added'] == []
+    if demote is None:
+        assert man.driven.qp_partition.tier_of == {}
+    else:
+        assert sorted(man.driven.qp_demoted) == [orbital]
+        assert man.driven.qp_growth['not_explicit'] == [orbital]
+        assert list(man.driven.qp_partition.tier_of) == [orbital]
+        assert (man.driven.outside_shift[orbital]
+                == ref_man.driven.outside_shift[orbital])
+    for k in TARGETS:
+        assert ev.omega[k] == ref.omega[k]
+        assert ev.energy[k] == ref.energy[k]
+        assert np.array_equal(ev.gradient[k], ref.gradient[k])
 
 
 def test_spin_views_share_one_partition(selected):

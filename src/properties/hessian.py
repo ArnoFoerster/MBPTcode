@@ -58,6 +58,7 @@ from src.Base.distributed_isdf_jk import scf_pair_layout
 from src.Base.isdf_jk import ISDFJK, frozen_pair_layout
 from src.Base.separable_ri import _SHELL_ORDER
 from src.properties.optimize import mean_field_force
+from src.properties.surface import evaluate
 
 #: `numerical_hessian`'s default `pair_layout`: the layout of the factory's
 #: mean field at the reference geometry (`reference_pair_layout`).
@@ -296,6 +297,33 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
         seen['asymmetry_2h'] = twice['asymmetry']
         seen['gradients'] += 6 * natm
         check_step_scaling(seen)
+    return h
+
+
+def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
+                    info=None, asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL):
+    """(natm, natm, 3, 3) Hessian of a surface's total energy at `mol` by
+    central differences of its force, on the conventions the surface froze.
+
+    The 6N displaced forces go through `evaluate`, one after another, each
+    over every rank of the region it runs in. `info` takes the asymmetry
+    and the sum rule (`hessian_from_gradients`), refused above
+    `asymmetry_tol` (`check_hessian_noise`).
+    """
+    jobs = displacement_list(mol.natm, step)
+    gradients = {}
+    for k, (ia, x, sign) in enumerate(jobs):
+        g, _, _ = evaluate(surface, displaced(mol, ia, x, sign, step))
+        gradients[(ia, x, sign)] = np.asarray(g)
+        if verbose:
+            print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
+                  f'{"xyz"[x]} {"+" if sign > 0 else "-"} |g|max '
+                  f'{np.abs(g).max():.3e}', flush=True)
+    seen = {} if info is None else info
+    h = hessian_from_gradients(gradients, mol.natm, step, info=seen)
+    seen['step'] = step
+    seen['gradients'] = len(gradients)
+    check_hessian_noise(h, seen, tol=asymmetry_tol)
     return h
 
 

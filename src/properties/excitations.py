@@ -54,8 +54,10 @@ from src.Base.utils.mpi_grid import lockstep
 from src.SingleReference.LinearResponse.rpa_energy import (ground_state_energy,
                                                            reference_energy)
 from src.properties import characters
-from src.properties.surface import (driven_chain, evaluate, lockstep_geometry,
-                                    surface_mean_field)
+from src.properties.hessian import surface_hessian
+from src.properties.optimize import escape_saddle
+from src.properties.surface import (driven_chain, evaluate, followed_root,
+                                    lockstep_geometry, surface_mean_field)
 from src.properties.surfaces import (compare_surfaces, environment_label,
                                      find_row, potential_energy_surface,
                                      reference_mean_field, resolve_grid)
@@ -471,8 +473,7 @@ def adaptive_check(surface, mol, mf=None):
         return None
     mol, mf = chain.mean_field(mol, mf)
     om, pieces = chain._forward(mol, mf)
-    root = (int(chain.follow_log[-1]['index'])
-            if chain.track is not None and chain.follow_log
+    root = (followed_root(chain, mol) if chain.track is not None
             else int(chain.state))
     return chain.posteriori_check(
         mol, mf, {chain.spin: (om, pieces[10], pieces[11])},
@@ -601,20 +602,54 @@ def relaxation_fields(info, prefix=''):
     The refreeze shift is reported as how far the geometry moved when the
     frozen conventions were rebuilt (Bohr) and how much energy that motion was
     worth (meV). Either is None only when the outer loop did not run, and
-    `refreeze` then says why.
+    `refreeze` then says why. Both are the first pass's; `refreeze_jumps_meV`
+    lists every pass and `refreeze_converged` says whether the last met
+    `refreeze_passes`' rule, which makes the energies read on the last
+    surface converged in its conventions to `refreeze_tol_meV`, the
+    walk-resolved tolerance of each pass, flagged (`refreeze_tol_flag`) above
+    REFREEZE_TOL_FLAG_MEV.
+
+    `converged`, `cycles`, `status` and `opt_grad_max` are the walk whose
+    geometry the record reports (after a refreeze the last walk's), so
+    `converged` False means that geometry is not a minimum, whatever the
+    walks before it did. A relaxed number needs both `converged` and, where
+    the loop ran, `refreeze_converged`.
     """
     residual = info.get('opt_grad_max')
     shift = info.get('refreeze_shift')
     moved = info.get('refreeze_denergy')
+    jumps = info.get('refreeze_jumps')
     return {prefix + 'opt_grad_max': None if residual is None else float(residual),
             prefix + 'refreeze_shift_bohr': None if shift is None else float(shift),
             prefix + 'refreeze_shift_meV': (None if moved is None
                                             else float(moved) * HARTREE_TO_MEV),
+            prefix + 'refreeze_jumps_meV': (None if jumps is None else
+                                            [float(j) * HARTREE_TO_MEV
+                                             for j in jumps]),
+            prefix + 'refreeze_converged': info.get('refreeze_converged'),
+            # the walk-resolved tolerance of each pass (`refreeze_passes`)
+            prefix + 'refreeze_walk_de_meV': info.get('refreeze_walk_de_meV'),
+            prefix + 'refreeze_tol_meV': info.get('refreeze_tol_meV'),
+            prefix + 'refreeze_walk_decided': info.get(
+                'refreeze_walk_decided'),
+            prefix + 'refreeze_tol_flag': info.get('refreeze_tol_flag'),
             prefix + 'refreeze': info.get('refreeze'),
+            # the symmetry-breaking start (`optimize.start_nudge`)
+            prefix + 'start_nudge': nudge_record(info.get('start_nudge')),
             prefix + 'optimizer': info.get('optimizer'),
             prefix + 'converged': bool(info.get('converged')),
             prefix + 'cycles': int(info.get('cycles', 0)),
             prefix + 'status': info.get('status')}
+
+
+def nudge_record(nudge):
+    """A walk's `start_nudge` record with its displacement as nested lists
+    (Bohr), or None for a walk that kept none."""
+    if nudge is None:
+        return None
+    d = nudge.get('displacement_bohr')
+    return dict(nudge, displacement_bohr=(None if d is None
+                                          else np.asarray(d).tolist()))
 
 
 def driving_force(info):
@@ -702,7 +737,10 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
                                      else float(residual)),
             'davidson_solves': None if solves is None else list(solves),
             'opt_grad_max': None, 'refreeze_shift_bohr': None,
-            'refreeze_shift_meV': None, 'refreeze': NOT_RELAXED,
+            'refreeze_shift_meV': None, 'refreeze_jumps_meV': None,
+            'refreeze_converged': None, 'refreeze_walk_de_meV': None,
+            'refreeze_tol_meV': None, 'refreeze_walk_decided': None,
+            'refreeze_tol_flag': None, 'refreeze': NOT_RELAXED,
             'optimizer': None, 'converged': None, 'cycles': 0,
             'status': NOT_RELAXED,
             'qp_z': z, 'residue_route_taken': route,
@@ -714,28 +752,86 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
             'mol_reference': mol}
 
 
+def saddle_checked_state(relaxed, engine='auto', **walk_kw):
+    """(the relaxed state, the saddle check's record) for a `relax_state`
+    record `relaxed`: the state's Hessian at the walk's minimum on the
+    surface the walk ended on (`surface_hessian`, 6N forces), and at a
+    saddle a step along its negative mode and a second walk (`escape_saddle`).
+
+    The second walk is `relax_state` with the first one's `engine` and
+    `walk_kw`, so it has the same refreeze passes and the same nudge. Where
+    it escaped, its record replaces the first. A second saddle, or an escape
+    walk that does not converge, is refused (RuntimeError naming the
+    status): neither geometry is a minimum.
+
+    The record (`saddle_check`): 'first' and 'second' (`saddle_test`),
+    'status', 'hessian_asymmetry'. After an escape it also
+    has 'step_bohr', 'direction', 'energies', 'energy_at_saddle',
+    'energy_drop' (Hartree) and 'saddle_walk', which holds the first walk's
+    `relaxation_fields` with its 'converged' and 'cycles'.
+    """
+    walked = {}
+
+    def walk(surface, start):
+        state = relax_state(surface, start, engine=engine, **walk_kw)
+        walked['state'] = state
+        return state['mol'], dict(state['info'],
+                                  final_surface=state['surface'])
+
+    hess_info = {}
+    hess = surface_hessian(relaxed['surface'], relaxed['mol'], info=hess_info)
+    _, again, _, record = escape_saddle(
+        relaxed['surface'], relaxed['mol'], hess, walk,
+        lambda surface, at: surface_hessian(surface, at))
+    record['hessian_asymmetry'] = hess_info.get('asymmetry')
+    if again is None:
+        return relaxed, record
+    first = relaxed['info']
+    record['saddle_walk'] = dict(relaxation_fields(first),
+                                 converged=first.get('converged'),
+                                 cycles=first.get('cycles'))
+    if record['status'] != 'escaped':
+        raise RuntimeError(
+            f"{record['status']} (saddle check): lowest internal curvature "
+            f"{record['first']['lowest_curvature']:.3e} Ha/Bohr^2 at the "
+            f"first minimum")
+    return walked['state'], record
+
+
 def emission_block(excited, ground, mol, refreeze, engine, optimizer,
-                   hess_init=None):
+                   hess_init=None, saddle_check=False):
     """(the vertical record extended to the relaxed state, the relaxation record).
 
     E_0 is taken at the excited state's minimum, not at R0: the emission
-    energy is the vertical gap at the relaxed geometry. Both energies come off
-    the reference geometry's frozen conventions, so their difference is one
-    surface pair evaluated twice.
+    energy is the vertical gap at the relaxed geometry. Both energies at the
+    minimum come off one pair of conventions, the ones the walk ended on:
+    after a refreeze the excited surface's were rebuilt at the minimum
+    (`relax_state`), and E_0 is taken on the ground surface rebuilt there too.
+    The vertical block at R0 is the pair frozen at R0, so
+    `relaxation_depth_eV` is the difference of the route's own energies at
+    the two geometries.
 
     hess_init: the excited relaxation's starting Cartesian Hessian (another
     state's `hessian_at_excited_minimum`, say), or None for the optimizer's
     own guess; the record's `hessian_at_excited_minimum` is the one the
     relaxation ended with, None where the optimizer reports none.
+
+    saddle_check: test the excited minimum's Hessian and leave a saddle
+    (`saddle_checked_state`). The record carries `saddle_check`, and
+    everything at the minimum is read at the minimum the check returned.
     """
     record = vertical_block(excited, ground, mol)
     given = {} if hess_init is None else {'hess_init': hess_init}
     relaxed = relax_state(excited, mol, engine=engine, refreeze=refreeze,
                           **optimizer, **given)
-    e_0 = ground_state_at(ground, relaxed['mol'])
+    if saddle_check:
+        relaxed, record['saddle_check'] = saddle_checked_state(
+            relaxed, engine=engine, refreeze=refreeze, **optimizer)
+    e_0 = ground_state_at(ground_at_minimum(ground, excited, relaxed),
+                          relaxed['mol'])
     e_n = float(relaxed['e_total'])
-    # the adaptive set frozen at R0, judged where the walk ended
-    check = adaptive_check(excited, relaxed['mol'], relaxed['mf'])
+    # the adaptive set the last walk ran on, judged where it ended
+    check = adaptive_check(relaxed['surface'], relaxed['mol'], relaxed['mf'])
     adaptive = (record.get('qp_bookkeeping') or {}).get('adaptive')
     if check is not None and adaptive is not None:
         adaptive['posteriori'] = check
@@ -751,6 +847,15 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
     return record, relaxed
 
 
+def ground_at_minimum(ground, excited, relaxed):
+    """The ground surface E_0 is read on at an excited minimum: `ground`
+    itself where the walk ended on `excited`, else `ground` rebuilt at the
+    minimum, as the excited surface was (`relax_state`)."""
+    if relaxed['surface'] is excited:
+        return ground
+    return ground.refreeze(relaxed['mol'])
+
+
 def refuse_incomparable(physics_a, physics_b):
     """Refuse two declarations whose difference would be of two functionals."""
     if not physics_a.comparable_with(physics_b):
@@ -758,7 +863,8 @@ def refuse_incomparable(physics_a, physics_b):
 
 
 def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
-                     engine='auto', hess_init=None, **optimizer):
+                     engine='auto', hess_init=None, saddle_check=False,
+                     **optimizer):
     """E_n(R*_n) - E_0(R*_0) for two surfaces already built, with the refusal.
 
     The two-surface form of `calc_adiabatic_excitation`, for a pair somebody
@@ -770,15 +876,17 @@ def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
     `ground_realization_differs` is reported rather than refused: E_0 has no
     residue backend, eigensolver or quasiparticle set, so the two halves are
     realized differently by construction; the list names those fields.
-    `hess_init` starts the excited relaxation alone (`emission_block`).
+    `hess_init` starts the excited relaxation alone, and `saddle_check` tests
+    the excited minimum alone (`emission_block`).
     """
     report = compare_surfaces(surface_excited, surface_ground)
     started = time.perf_counter()
     record, _ = emission_block(surface_excited, surface_ground, mol, refreeze,
-                               engine, optimizer, hess_init=hess_init)
+                               engine, optimizer, hess_init=hess_init,
+                               saddle_check=saddle_check)
     relaxed = relax_state(surface_ground, mol, engine=engine,
                           refreeze=refreeze, **optimizer)
-    e_0 = ground_state_at(surface_ground, relaxed['mol'],
+    e_0 = ground_state_at(relaxed['surface'], relaxed['mol'],
                           total=relaxed['e_total'])
     record.update(
         adiabatic_eV=((record['en_hartree_at_excited_minimum'] - e_0.total)
@@ -925,7 +1033,8 @@ def calc_emission_energy(spec, excitation, mol, scf_factory, refreeze=1,
 
 
 def calc_adiabatic_excitation(spec, excitation, mol, scf_factory, refreeze=1,
-                              engine='auto', hess_init=None, **optimizer):
+                              engine='auto', hess_init=None,
+                              saddle_check=False, **optimizer):
     """E_n(R*_n) - E_0(R*_0) in eV: both states at their own minima.
 
     The two minima are on two surfaces, so E_0 does not cancel and every term
@@ -937,12 +1046,16 @@ def calc_adiabatic_excitation(spec, excitation, mol, scf_factory, refreeze=1,
     state's `hessian_at_excited_minimum`, the singlet's for the triplet
     started at the singlet minimum), or None for the optimizer's own guess;
     the ground relaxation keeps its own guess.
+
+    saddle_check: the excited minimum's Hessian is tested and a saddle left
+    (`saddle_checked_state`), recorded as `saddle_check`.
     """
     started = time.perf_counter()
     excited = surface_of(spec, excitation, mol, scf_factory)
     ground = ground_surface_of(spec, excited, mol, scf_factory)
     record = adiabatic_energy(excited, ground, mol, refreeze=refreeze,
-                              engine=engine, hess_init=hess_init, **optimizer)
+                              engine=engine, hess_init=hess_init,
+                              saddle_check=saddle_check, **optimizer)
     record['provenance'] = provenance(time.perf_counter() - started)
     return record
 

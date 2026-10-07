@@ -149,8 +149,9 @@ def dense_record(mol):
     so its measured drift is a true zero rather than an unmeasured one, and
     telling those two apart is exactly what the marker is for.
     """
+    # nudge=0: the dissociative S1 holds its shoulder only from the exact start
     return calc_adiabatic_excitation(DENSE, SINGLET, mol, rhf, refreeze=1,
-                                     max_cycle=40, **LOOSE)
+                                     max_cycle=40, nudge=0, **LOOSE)
 
 
 @pytest.fixture(scope='module')

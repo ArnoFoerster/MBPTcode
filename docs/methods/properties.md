@@ -1,9 +1,9 @@
 # Potential-energy surfaces and properties
 
-**Potential-energy surfaces** — `src/properties/` computes FROM a surface
-rather than BY one. `potential_energy_surface(mol, scf_factory, *,
+**Potential-energy surfaces** — `src/properties/` computes from a surface
+rather than by one. `potential_energy_surface(mol, scf_factory, *,
 ground_state, excitation=None, environment=None, ...)` dispatches on the
-DECLARED physics (`src.Base.declaration`:
+declared physics (`src.Base.declaration`:
 `GroundState`, `Excitation`, `ChargedExcitation`, `QPStates`) to the gradient
 chain that realizes it and records the realization; `compare_surfaces` refuses
 to difference two surfaces that do not share a ground-state functional and
@@ -13,8 +13,13 @@ difference from one `SurfaceSpec`, so the functional under an excited state
 and under its ground state cannot silently be two different functionals.
 `optimize`/`relax` walk Cartesian RFO/BFGS with the rigid-body directions
 projected out, or [geomeTRIC](https://github.com/leeping/geomeTRIC) when it is
-installed; `vibronic` gives normal modes and Huang-Rhys factors by two
-independent routes; `conformers` the Boltzmann-weighted average over torsional
+installed. A surface keeps a few choices fixed while it is walked (which
+orbitals get a full quasiparticle solve, for one); after the walk converges
+they can be chosen again at the minimum and the walk repeated until the
+energy stops moving (`refreeze`). An excited-state walk starts from a tiny
+fixed random displacement of the input geometry, so a symmetric start can
+still reach a minimum of lower symmetry. `vibronic` gives normal modes and
+Huang-Rhys factors by two independent routes; `conformers` the Boltzmann-weighted average over torsional
 minima a soft emitter has; `spin_orbit` and `nonadiabatic` the two couplings a
 `rates` Marcus-Levich-Jortner or golden-rule rate needs; `characters` labels a
 BSE root by its charge-transfer weight; `hessian` the nuclear Hessian by

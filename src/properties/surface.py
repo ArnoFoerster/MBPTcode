@@ -241,6 +241,31 @@ def driven_chain(surface):
     return half
 
 
+def followed_root(surface, mol):
+    """The root `surface` followed at `mol`: the newest root-following entry
+    evaluated nearest to `mol`, the constructor's `state` with none.
+
+    An optimizer evaluates the steps it rejects too, so the LAST entry after a
+    trust radius collapsed, or a geomeTRIC step it took back, is the root of a
+    geometry the walk did not stay at. The walk returns a geometry it
+    evaluated (geomeTRIC's up to the Angstrom round trip), so the nearest
+    entry is that geometry's own. A surface that keeps no coordinates beside
+    its log (`follow_coords`) is read at its last entry.
+    """
+    log = getattr(surface, 'follow_log', None) or []
+    if not log:
+        return int(surface.state)
+    at = getattr(surface, 'follow_coords', None) or []
+    if len(at) != len(log):
+        return int(log[-1]['index'])
+    here = np.asarray(mol.atom_coords(), float)
+    far = [float(np.abs(np.asarray(c) - here).max()) for c in at]
+    # the newest of the nearest: an entry evaluated twice at one geometry
+    # keeps the later one
+    k = len(far) - 1 - int(np.argmin(far[::-1]))
+    return int(log[k]['index'])
+
+
 def surface_mean_field(surface, mol):
     """The mean field `surface` itself evaluates at `mol`, through `mean_field`.
 

@@ -23,6 +23,7 @@ therefore taken on every rank from the same numbers, and the result is locked
 to rank 0's once more at the end (`rank_zero_walk`). Outside a distributed
 region every lockstep is a no-op and the walk is bit for bit the serial one.
 """
+import itertools
 import os
 import tempfile
 import warnings
@@ -32,7 +33,11 @@ from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
 
 from src.Base.body_frame import aligned_displacement
 from src.Base.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV,
-                                GEOMETRIC_START_TOL, HARTREE_TO_EV)
+                                GEOMETRIC_START_TOL, HARTREE_TO_EV,
+                                HARTREE_TO_MEV, REFREEZE_TOL_FLAG_MEV,
+                                REFREEZE_TOL_MEV, SADDLE_CURVATURE_TOL,
+                                SADDLE_ESCAPE_STEP_BOHR, START_NUDGE_BOHR,
+                                START_NUDGE_SEED)
 from src.Base.declaration import SurfacePhysics
 from src.Base.distributed_isdf_jk import scf_pair_layout
 from src.Base.environment import environment_label, resolve_environment
@@ -40,7 +45,8 @@ from src.Base.isdf_jk import (ISDFJK, frozen_pair_layout,
                               mean_field_skeleton_force)
 from src.Base.utils.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
-from src.properties.surface import evaluate, lockstep_geometry
+from src.properties.surface import (driven_chain, evaluate,
+                                    lockstep_geometry)
 
 
 def translation_rotation_basis(coords, masses=None):
@@ -96,6 +102,67 @@ def _rfo_step(hess, grad, trust, proj):
     return proj @ step
 
 
+def cartesian_hessian(hess, natm):
+    """A Hessian as (3N, 3N) in Ha/Bohr^2, from that shape or pyscf's
+    (natm, natm, 3, 3)."""
+    h = np.asarray(hess, float)
+    if h.ndim == 4:
+        h = h.transpose(0, 2, 1, 3)
+    return h.reshape(3 * natm, 3 * natm)
+
+
+def internal_modes(hess, coords):
+    """(curvatures ascending, Ha/Bohr^2; their unit Cartesian modes as
+    columns) of a Cartesian Hessian in the internal space at `coords`, the
+    rigid-body directions projected out."""
+    coords = np.asarray(coords, float).reshape(-1, 3)
+    n3 = 3 * len(coords)
+    h = cartesian_hessian(hess, len(coords))
+    tr = translation_rotation_basis(coords)
+    w, v = np.linalg.eigh(np.eye(n3) - tr.T @ tr)
+    q = v[:, w > 0.5]
+    lam, u = np.linalg.eigh(q.T @ (0.5 * (h + h.T)) @ q)
+    return lam, q @ u
+
+
+def walk_resolution(grad, hess, coords):
+    """How much energy a walk leaves undetermined where it stopped.
+
+    dE_walk = 1/2 g^T H^-1 g: the energy between the walk's last point and
+    the minimum of its own quadratic model, from its last gradient g (Ha/Bohr)
+    and the approximate Hessian H it ended with (Ha/Bohr^2), both Cartesian,
+    taken in the internal space (the rigid-body directions projected out).
+    A refreeze pass that moves the energy by less than this has not measured
+    the conventions; it has measured where the optimizer stopped.
+
+    Only the positive-definite part of H is a quadratic model. Where H has a
+    non-positive internal mode the estimate is the safe bound 1/2 |g|^2 /
+    lambda_min, every gradient component at the softest positive curvature,
+    and `bound` says so; with no positive curvature at all there is no
+    estimate (`de_meV` None).
+
+    Returns {'de_meV', 'bound', 'nonpositive_modes', 'softest_curvature'}
+    ('quadratic' or 'safe bound', the count of internal modes with curvature
+    <= 0, the smallest positive one in Ha/Bohr^2), or None without a Hessian.
+    """
+    if hess is None or grad is None:
+        return None
+    lam, modes = internal_modes(hess, coords)
+    c = modes.T @ np.asarray(grad, float).ravel()
+    positive = lam > 1e-12 * max(1.0, float(np.abs(lam).max()))
+    nonpositive = int((~positive).sum())
+    if not positive.any():
+        return {'de_meV': None, 'bound': 'no positive curvature',
+                'nonpositive_modes': nonpositive, 'softest_curvature': None}
+    softest = float(lam[positive].min())
+    if nonpositive:
+        de, bound = 0.5 * float(c @ c) / softest, 'safe bound'
+    else:
+        de, bound = 0.5 * float((c ** 2 / lam).sum()), 'quadratic'
+    return {'de_meV': de * HARTREE_TO_MEV, 'bound': bound,
+            'nonpositive_modes': nonpositive, 'softest_curvature': softest}
+
+
 def resolved_conv(conv):
     """GEOM_OPT_CONV with a caller's overrides, either spelling of the force.
 
@@ -144,10 +211,144 @@ def rank_zero_walk(mol_opt, info):
     return lockstep_geometry(mol_opt), lockstep(info)
 
 
+def with_final_surface(surface, mol_opt, info):
+    """`rank_zero_walk`'s (geometry, record) with `info['final_surface']`, the
+    surface the walk ended on: `surface` itself, or the last refrozen one.
+
+    Every rank built its own copy of that surface in lockstep, so it is kept
+    beside the record and not broadcast with it.
+    """
+    final = info.pop('final_surface', surface)
+    mol_opt, info = rank_zero_walk(mol_opt, info)
+    info['final_surface'] = final
+    return mol_opt, info
+
+
+def excited_surface(surface):
+    """Whether `surface` is an excited state's: it reports an excitation
+    energy beside its total."""
+    return hasattr(surface, 'excitation') or hasattr(surface,
+                                                     'excitation_energy')
+
+
+def nudge_vector(coords, amplitude=START_NUDGE_BOHR, seed=START_NUDGE_SEED):
+    """(natm, 3) Bohr: a seeded random displacement with rigid motion
+    projected out, its largest atomic displacement `amplitude`; zero where
+    the geometry has no internal coordinate.
+
+    Rank 0's bits on every rank, so every rank starts its walk at one
+    geometry.
+    """
+    coords = np.asarray(coords, float).reshape(-1, 3)
+    raw = np.random.default_rng(seed).standard_normal(coords.size)
+    tr = translation_rotation_basis(coords)
+    d = (raw - tr.T @ (tr @ raw)).reshape(-1, 3)
+    largest = float(np.linalg.norm(d, axis=1).max())
+    if amplitude == 0.0 or largest <= 1e-8 * np.sqrt(coords.size):
+        return np.zeros_like(coords)
+    return lockstep(d * (amplitude / largest))
+
+
+def start_nudge(surface, mol, nudge=None):
+    """(the geometry a walk starts at, the record of how it was moved).
+
+    An exactly rotation-invariant surface keeps the point group of the walk's
+    start, so a walk from a symmetric geometry can only reach the symmetric
+    stationary point, a saddle where the state breaks the symmetry. An
+    excited-state walk therefore starts `nudge_vector` away from `mol`.
+
+    nudge: the largest atomic displacement in Bohr; None is
+        START_NUDGE_BOHR on an excited-state surface (`excited_surface`) and
+        0 on a ground-state one, 0 starts exactly at `mol`.
+
+    The record keeps the amplitude, the seed, the displacement (natm, 3) in
+    Bohr and its root-mean-square atomic displacement.
+    """
+    amplitude = (float(nudge) if nudge is not None
+                 else START_NUDGE_BOHR if excited_surface(surface) else 0.0)
+    d = nudge_vector(mol.atom_coords(), amplitude)
+    record = {'amplitude_bohr': amplitude, 'seed': START_NUDGE_SEED,
+              'norm': 'largest atomic displacement',
+              'displacement_bohr': d,
+              'rms_bohr': float(np.sqrt((d ** 2).sum(axis=1).mean()))}
+    if not d.any():
+        record.update(amplitude_bohr=0.0, seed=None, displacement_bohr=None)
+        return mol, record
+    return at_geometry(mol, mol.atom_coords() + d), record
+
+
+def saddle_test(hessian, coords, tol=SADDLE_CURVATURE_TOL):
+    """Whether a minimum's Hessian marks a saddle: its lowest internal
+    curvature (Ha/Bohr^2, rigid motion projected out) below `tol`.
+
+    Returns {'saddle', 'lowest_curvature', 'negative_modes' (curvatures
+    below `tol`), 'tolerance', 'mode' (natm, 3), the unit Cartesian mode of
+    the lowest curvature}.
+    """
+    coords = np.asarray(coords, float).reshape(-1, 3)
+    lam, modes = internal_modes(hessian, coords)
+    return {'saddle': bool(lam[0] < tol),
+            'lowest_curvature': float(lam[0]),
+            'negative_modes': int((lam < tol).sum()), 'tolerance': float(tol),
+            'mode': modes[:, 0].reshape(coords.shape)}
+
+
+def escape_saddle(surface, mol, hessian, walk, hessian_at,
+                  step=SADDLE_ESCAPE_STEP_BOHR, tol=SADDLE_CURVATURE_TOL):
+    """(minimum, the re-walk's record or None, its Hessian, the check's
+    record) after the saddle test of a walk's minimum `mol` on `surface`.
+
+    A minimum whose Hessian passes `saddle_test` is returned as it is. A
+    saddle is left along its lowest mode by `step` Bohr: both directions are
+    evaluated (at a stationary point the cubic term decides which is
+    downhill), `walk(surface, start) -> (mol, info)` relaxes from the lower,
+    on `info['final_surface']` where the walk names one, and
+    `hessian_at(surface, mol)` is the Hessian at the new minimum, which is
+    tested again. A second saddle is reported and not left: the check stops.
+
+    The record: 'first' and 'second' (`saddle_test` of each Hessian), 'status'
+    ('minimum', 'escaped', 'escape walk failed: ...' or 'second saddle:
+    stopped'), and after an escape 'step_bohr', the 'direction' taken (+1 or
+    -1 along the first mode), 'energies' at both displaced starts and the
+    re-walk's 'energy_drop' (Hartree, saddle minus new minimum).
+    """
+    first = saddle_test(hessian, mol.atom_coords(), tol)
+    record = {'first': first, 'second': None, 'status': 'minimum'}
+    if not first['saddle']:
+        return mol, None, hessian, record
+    x = mol.atom_coords()
+    starts = [at_geometry(mol, x + sign * step * first['mode'])
+              for sign in (+1, -1)]
+    energies = [float(lockstep(surface.total_energy(lockstep_geometry(m))))
+                for m in starts]
+    k = int(np.argmin(energies))
+    at_saddle = float(lockstep(surface.total_energy(lockstep_geometry(mol))))
+    moved, info = walk(surface, starts[k])
+    record.update(step_bohr=float(step), direction=(+1, -1)[k],
+                  energies=energies, energy_at_saddle=at_saddle)
+    if not info.get('converged'):
+        record['status'] = f'escape walk failed: {info.get("status")}'
+        return moved, info, None, record
+    record['energy_drop'] = at_saddle - float(info['energy'])
+    final = info.get('final_surface', surface)
+    hess = hessian_at(final, moved)
+    second = saddle_test(hess, moved.atom_coords(), tol)
+    record['second'] = second
+    record['status'] = ('second saddle: stopped' if second['saddle']
+                        else 'escaped')
+    return moved, info, hess, record
+
+
 def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
              trust_min=2e-3, hess_init=None, conv=None, refreeze=0,
-             verbose=True):
+             verbose=True, nudge=None):
     """Relax `surface`'s state. Returns (mol, info).
+
+    nudge: the walk starts `start_nudge(surface, mol, nudge)` away from
+        `mol`: by default START_NUDGE_BOHR on an excited-state surface, so a
+        symmetric start can reach a symmetry-broken minimum; 0 starts
+        exactly at `mol`. `info['start_nudge']` records it. The refreeze
+        passes start at the previous minimum and are not nudged.
 
     A trust-region quasi-Newton method: RFO step, BFGS Hessian, translations
     and rotations projected out; steps that turn out badly, or fail to
@@ -172,14 +373,18 @@ def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
     Ha/Bohr^2, the refrozen walk's after a refreeze.
     refreeze: after convergence, rebuild the frozen conventions at the new
         geometry (`surface.refreeze`) and optimize again, up to this many
-        times. 0 reports the single-surface minimum with the drift unmeasured
+        times, until the energy has converged in them (`refreeze_passes`).
+        0 reports the single-surface minimum with the drift unmeasured
         and marks the record `refreeze: 'not measured'`, so a null
         `refreeze_shift` can only have come from an explicit 0; 1 measures it:
         `info['refreeze_shift']` is how far the geometry moved, the error bar
         on the minimum: the largest atomic move once the refrozen minimum is
         superposed on the first (`body_frame.aligned_displacement`), since
-        the surface is invariant to rigid motion; `refreeze_rigid_shift` is
-        the raw Cartesian move.
+        the surface is invariant to rigid motion; `refreeze_rigid_shifts`
+        keeps the raw Cartesian moves. `info['final_surface']` is the surface the
+        last walk ran on, where the reported energy belongs, and `converged`,
+        `status`, `cycles` and `opt_grad_max` are that walk's
+        (`refreeze_passes`).
 
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
     residual the convergence test was applied to -- not the driving force at
@@ -200,9 +405,12 @@ def optimize(surface, mol=None, max_cycle=50, trust=0.1, trust_max=0.5,
     and record.
     """
     mol = surface.mol0 if mol is None else mol
-    return rank_zero_walk(*_trust_region_walk(
-        surface, mol, max_cycle, trust, trust_max, trust_min, hess_init, conv,
-        refreeze, verbose))
+    start, nudged = start_nudge(surface, mol, nudge)
+    mol_opt, info = with_final_surface(surface, *_trust_region_walk(
+        surface, start, max_cycle, trust, trust_max, trust_min, hess_init,
+        conv, refreeze, verbose))
+    info['start_nudge'] = nudged
+    return mol_opt, info
 
 
 def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
@@ -295,24 +503,16 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
             'energy': e, 'omega': diags.get('omega'),
             'grad_max': residual, 'opt_grad_max': residual,
             'rejected': rejected, 'status': status, 'optimizer': 'internal',
-            'hessian': hess.copy()}
+            'hessian': hess.copy(),
+            'walk_resolution': (walk_resolution(g, hess, m_cur.atom_coords())
+                                if converged else None)}
 
     if refreeze and converged:
-        mol2, info2 = _trust_region_walk(surface.refreeze(m_cur), m_cur,
-                                         max_cycle, trust, trust_max,
-                                         trust_min, hess, conv, refreeze - 1,
-                                         verbose)
-        shift = aligned_displacement(m_cur.atom_coords(), mol2.atom_coords())
-        rigid = float(np.abs(mol2.atom_coords() - m_cur.atom_coords()).max())
-        info.update(refreeze_shift=shift, refreeze_rigid_shift=rigid,
-                    refreeze_denergy=float(info2['energy'] - info['energy']),
-                    refreeze_info=info2, energy=info2['energy'],
-                    omega=info2['omega'], refreeze='measured',
-                    hessian=info2['hessian'])
-        if verbose:
-            print(f'  [refreeze] geometry moved {shift:.2e} Bohr superposed '
-                  f'({rigid:.2e} raw), energy by {info2["energy"] - e:+.2e} Ha')
-        return mol2, info
+        return refreeze_passes(
+            lambda s, m, h: _trust_region_walk(s, m, max_cycle, trust,
+                                               trust_max, trust_min, h, conv,
+                                               0, verbose),
+            surface, m_cur, info, refreeze, verbose)
     # A null shift says why it is null, so it is not read as a refreeze that
     # ran and found nothing; a run that never converged had no minimum to
     # refreeze at.
@@ -328,8 +528,10 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max,
 
 def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
                        coordsys='tric', refreeze=0, verbose=True,
-                       workdir=None, hess_init=None):
+                       workdir=None, hess_init=None, nudge=None):
     """Relax `surface`'s state through geomeTRIC. Returns (mol, info).
+
+    nudge: the symmetry-breaking start, as in `optimize` (`start_nudge`).
 
     Preferred over `optimize` beyond a handful of atoms: the Cartesian
     optimizer's step count grows with the system because Cartesians couple
@@ -357,9 +559,10 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
 
     refreeze: after convergence, rebuild the frozen conventions at the new
         geometry (`surface.refreeze`) and optimize again, up to this many
-        times, as `optimize` does, the shift measured on superposed
-        geometries. 0 marks the record `refreeze: 'not measured'`, so a null
-        `refreeze_shift` can only have come from an explicit 0.
+        times until the energy has converged in them, as `optimize` does, the
+        shift measured on superposed geometries. 0 marks the record
+        `refreeze: 'not measured'`, so a null `refreeze_shift` can only have
+        come from an explicit 0.
 
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
     residual, and not the driving force at R0 that `grad_max` means elsewhere;
@@ -369,8 +572,19 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
         `hess_data`, transformed to its internal coordinates), or None for
         geomeTRIC's own guess; another walk's `info['hessian']` is one.
         `info['hessian']` is the approximate Cartesian Hessian geomeTRIC
-        ends with (`write_cart_hess`), the refrozen walk's after a refreeze;
-        a refrozen walk starts from `hess_init` as the first did.
+        ends with (`write_cart_hess`), the refrozen walk's after a refreeze,
+        and None after a walk that did not converge (geomeTRIC writes none
+        then); a refrozen walk starts from the Hessian the walk before it
+        ended with, as the Cartesian optimizer's does.
+
+    A walk that does not converge is a record, not an exception, as in
+    `optimize`: geomeTRIC's iteration cap (`GeomOptNotConvergedError`) comes
+    back as `converged` False with status 'maxiter (N) reached without
+    convergence', and any other failure of the driver or of an evaluation as
+    `converged` False with its message. The geometry and energy are then the
+    last ones evaluated, which is not a minimum, and no refreeze follows.
+    Each walk (the first and every refrozen pass) writes its files under its
+    own prefix in `workdir` (a fresh temporary directory when None).
 
     Under ranks every rank runs geomeTRIC on evaluations locked to rank 0's
     (`surface.evaluate`, in the engine's `calc_new` callback), and every rank
@@ -382,14 +596,18 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     # geometry is evaluated rather than partway through.
     geometric_engine()
     mol = surface.mol0 if mol is None else mol
-    return rank_zero_walk(*_geometric_walk(surface, mol, maxiter, converge,
-                                           coordsys, refreeze, verbose,
-                                           workdir, hess_init))
+    start, nudged = start_nudge(surface, mol, nudge)
+    mol_opt, info = with_final_surface(surface, *_geometric_walk(
+        surface, start, maxiter, converge, coordsys, refreeze, verbose,
+        workdir, hess_init))
+    info['start_nudge'] = nudged
+    return mol_opt, info
 
 
 def geometric_engine():
-    """geomeTRIC's engine base, molecule and driver, or a refusal naming the
-    dependency-free alternative.
+    """geomeTRIC's engine base, molecule, driver and the error its driver
+    raises at the iteration cap, or a refusal naming the dependency-free
+    alternative.
 
     An optional dependency, absent from the environment by default: importing
     it at module level would make every property routine need it.
@@ -397,6 +615,7 @@ def geometric_engine():
     try:
         # optional dependency, absent from the environment by default
         from geometric.engine import Engine
+        from geometric.errors import GeomOptNotConvergedError
         from geometric.molecule import Molecule as GeoMolecule
         from geometric.optimize import run_optimizer
     except ImportError as exc:
@@ -404,13 +623,14 @@ def geometric_engine():
             'geomeTRIC is not importable; use `optimize` for the '
             'dependency-free Cartesian optimizer, or install geomeTRIC as in '
             '`optimize_geometric`\'s docstring.') from exc
-    return Engine, GeoMolecule, run_optimizer
+    return Engine, GeoMolecule, run_optimizer, GeomOptNotConvergedError
 
 
 def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
-                    verbose, workdir, hess_init=None):
-    """The engine `optimize_geometric` documents."""
-    Engine, GeoMolecule, run_optimizer = geometric_engine()
+                    verbose, workdir, hess_init=None, tag='es'):
+    """The engine `optimize_geometric` documents; `tag` prefixes this walk's
+    files in `workdir`."""
+    Engine, GeoMolecule, run_optimizer, NotConverged = geometric_engine()
 
     gm = GeoMolecule()
     gm.elem = [mol.atom_pure_symbol(i) for i in range(mol.natm)]
@@ -418,6 +638,11 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
     gm.build_topology()
 
     trace = []
+    # the molecules `trace` was evaluated at: where a walk that did
+    # not converge stopped
+    visited = []
+    # the gradient of the last evaluation, which is the converged geometry's
+    last_gradient = []
 
     start = np.asarray(mol.atom_coords(), float).ravel()
 
@@ -429,6 +654,8 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
             m = at_geometry(mol, coords)
             g, e, d = evaluate(surface, m)
             omega = d.get('omega')
+            visited.append(m)
+            last_gradient[:] = [np.asarray(g, float).ravel()]
             trace.append({'e': float(e),
                           'omega': None if omega is None else float(omega),
                           'grad_max': float(np.abs(g).max())})
@@ -445,58 +672,207 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
     # `run_simulated` share, and a chdir on one would move the others' files.
     tmp = workdir or tempfile.mkdtemp(prefix='esopt_')
     # the approximate Cartesian Hessian geomeTRIC ends with, written here
-    hess_out = os.path.join(tmp, 'es_final_hessian.txt')
+    hess_out = os.path.join(tmp, f'{tag}_final_hessian.txt')
     # geomeTRIC tests `hess_data` for truth, which an array refuses; a nested
     # list in Ha/Bohr^2 is its documented form, and the frequency analysis it
     # would run on a given Hessian is not wanted
     given = ({} if hess_init is None else
              {'hess_data': np.asarray(hess_init, float).tolist(),
               'frequency': False})
-    out = run_optimizer(customengine=engine, coordsys=coordsys,
-                        maxiter=maxiter, convergence_set=converge,
-                        input='es', prefix=os.path.join(tmp, 'es'), check=0,
-                        write_cart_hess=hess_out, **given)
+    try:
+        out = run_optimizer(customengine=engine, coordsys=coordsys,
+                            maxiter=maxiter, convergence_set=converge,
+                            input=tag, prefix=os.path.join(tmp, tag), check=0,
+                            write_cart_hess=hess_out, **given)
+    except NotConverged:
+        # geomeTRIC raises at its iteration cap rather than returning; the
+        # walk up to there is still the output, as `optimize`'s is
+        converged = False
+        status = f'maxiter ({maxiter}) reached without convergence'
+    except Exception as exc:
+        # a step that failed to evaluate, or the driver itself: reported as
+        # `optimize` reports a start that fails to evaluate
+        converged = False
+        status = f'{type(exc).__name__}: {exc}'
+    else:
+        converged, status = True, 'ok'
 
-    xyz = np.asarray(out.xyzs[-1]) / BOHR_TO_ANGSTROM
-    mol_opt = mol.copy()
-    mol_opt.set_geom_(xyz, unit='Bohr')
-    mol_opt.build(False, False)
+    if not trace:
+        return mol, {'converged': False, 'cycles': 0, 'history': [],
+                     'status': status, 'engine': 'geometric',
+                     'optimizer': 'geometric', 'coordsys': coordsys,
+                     'hessian': None, 'refreeze_shift': None,
+                     'refreeze': ('not measured' if not refreeze else
+                                  'not measured: the first pass did not '
+                                  'converge')}
+    if converged:
+        mol_opt = at_geometry(mol, np.asarray(out.xyzs[-1]) / BOHR_TO_ANGSTROM)
+    else:
+        mol_opt = visited[-1]
     residual = trace[-1]['grad_max']
-    info = {'converged': True, 'cycles': len(trace), 'history': trace,
+    hessian = (np.loadtxt(hess_out)
+               if converged and os.path.exists(hess_out) else None)
+    info = {'converged': converged, 'cycles': len(trace), 'history': trace,
             'energy': trace[-1]['e'], 'omega': trace[-1]['omega'],
-            'grad_max': residual, 'opt_grad_max': residual, 'status': 'ok',
+            'grad_max': residual, 'opt_grad_max': residual, 'status': status,
             'engine': 'geometric', 'optimizer': 'geometric',
-            'coordsys': coordsys,
-            'hessian': (np.loadtxt(hess_out) if os.path.exists(hess_out)
-                        else None)}
+            'coordsys': coordsys, 'hessian': hessian,
+            'walk_resolution': (walk_resolution(
+                last_gradient[0], hessian, visited[-1].atom_coords())
+                if converged and hessian is not None else None)}
 
-    if refreeze:
-        mol2, info2 = _geometric_walk(surface.refreeze(mol_opt), mol_opt,
-                                      maxiter, converge, coordsys,
-                                      refreeze - 1, verbose, workdir,
-                                      hess_init)
-        shift = aligned_displacement(mol_opt.atom_coords(),
-                                     mol2.atom_coords())
-        rigid = float(np.abs(mol2.atom_coords()
-                             - mol_opt.atom_coords()).max())
-        info.update(refreeze_shift=shift, refreeze_rigid_shift=rigid,
-                    refreeze_denergy=float(info2['energy'] - info['energy']),
-                    refreeze_info=info2, energy=info2['energy'],
-                    omega=info2['omega'], refreeze='measured',
-                    hessian=info2['hessian'])
-        if verbose:
-            print(f'  [refreeze] geometry moved {shift:.2e} Bohr superposed '
-                  f'({rigid:.2e} raw), energy by '
-                  f'{info["refreeze_denergy"]:+.2e} Ha')
-        return mol2, info
-    info.update(refreeze_shift=None, refreeze='not measured')
+    if refreeze and converged:
+        passes = itertools.count(1)
+        return refreeze_passes(
+            lambda s, m, h: _geometric_walk(
+                s, m, maxiter, converge, coordsys, 0, verbose, tmp, h,
+                tag=f'{tag}_refreeze{next(passes)}'),
+            surface, mol_opt, info, refreeze, verbose)
+    info.update(refreeze_shift=None,
+                refreeze=('not measured' if not refreeze else
+                          'not measured: the first pass did not converge'))
     return mol_opt, info
+
+
+#: What a single walk's record says about that walk alone: after a refreeze
+#: these are the last walk's, the one whose geometry is returned.
+WALK_FLAGS = ('converged', 'status', 'cycles', 'opt_grad_max', 'grad_max',
+              'rejected', 'walk_resolution')
+
+
+def refreeze_growth(surface):
+    """What the refreeze that built `surface` did to an adaptive explicit
+    set (the chain's `qp_growth`: the states carried from the surface before
+    and the states added), or None for a surface without one."""
+    half = driven_chain(getattr(surface, 'driven', surface))
+    return getattr(half, 'qp_growth', None)
+
+
+def resolved_de(info):
+    """A walk record's dE_walk in meV (`walk_resolution`), or None."""
+    res = info.get('walk_resolution')
+    return None if res is None else res.get('de_meV')
+
+
+def refreeze_passes(walk, surface, mol, info, passes, verbose):
+    """(geometry, record) after rebuilding the frozen conventions at the
+    minimum and relaxing again, until the energy has converged in them.
+
+    A pass refreezes the last surface at the last minimum and walks
+    (`walk(surface, mol, hessian)`, no refreeze of its own). The loop stops
+    when the energy moved by no more than the pass's tolerance from the
+    surface before, when the walk did not move (a surface rebuilt where it
+    was built is the same surface; GEOMETRIC_START_TOL), when a walk did not
+    converge, or after `passes`.
+
+    The tolerance is what the walks resolve: max(REFREEZE_TOL_MEV, the
+    larger dE_walk of the pass's walk and the walk before it), dE_walk = 1/2 g^T H^-1 g on the walk's own last gradient and
+    Hessian (`walk_resolution`). Per pass the record keeps
+    `refreeze_walk_de_meV` (the pass's walk; the first walk's is
+    `first_walk_de_meV`), `refreeze_walk_bound` ('quadratic', 'safe bound'
+    where the Hessian has a non-positive mode, None without one),
+    `refreeze_tol_meV` and `refreeze_walk_decided` (the energy rule was met
+    only through dE_walk). A converged loop whose last tolerance exceeds
+    REFREEZE_TOL_FLAG_MEV sets `refreeze_tol_flag` and warns.
+
+    `refreeze_shift` and `refreeze_denergy` are the first pass's: how far the
+    conventions frozen at the start were from those at the minimum, in Bohr
+    and Hartree. A shift is the largest atomic move once the walk's minimum is
+    superposed on its start (`body_frame.aligned_displacement`): the surface
+    is invariant to rigid motion, which an internal-coordinate walk is free
+    to make, so a rigid move is not a move, and the stop on a walk that did
+    not move reads the same number; `refreeze_rigid_shifts` keeps the raw
+    Cartesian moves. `refreeze_shifts` and `refreeze_jumps` list every pass,
+    and `refreeze_converged` says whether the loop met the stopping rule on a
+    walk that converged. `energy`, `omega` and the returned geometry are the
+    last surface's, which is `final_surface`: every energy a relaxation
+    reports is read there.
+
+    The record describes the walk whose geometry it returns. `converged`,
+    `status`, `cycles`, `opt_grad_max` (and `grad_max`, `rejected`) are the
+    last walk's, so `converged` False means the geometry returned is not a
+    minimum of the surface it stands on; the first walk's are kept as
+    `first_walk_converged`, `first_walk_status`, ... Two separate verdicts,
+    then: `converged`, whether the last walk reached a minimum, and
+    `refreeze_converged`, whether the conventions stopped moving there.
+    `history` stays the first walk's, the one that starts at the input
+    geometry; the last walk's is in `refreeze_info`.
+
+    An adaptive explicit set grows only (`ExcitedStateChain.refreeze`), and
+    `refreeze_qp_growth` lists, per pass, the states it carried and added
+    (`refreeze_growth`; None for a surface without one).
+    """
+    shifts, rigid, jumps, growth = [], [], [], []
+    walk_de, bounds, tols, decided = [], [], [], []
+    first_de = resolved_de(info)
+    last, current, done = info, surface, False
+    for _ in range(int(passes)):
+        current = current.refreeze(mol)
+        moved, walked = walk(current, mol, last['hessian'])
+        shifts.append(aligned_displacement(mol.atom_coords(),
+                                           moved.atom_coords()))
+        rigid.append(float(np.abs(moved.atom_coords()
+                                  - mol.atom_coords()).max()))
+        jumps.append(float(walked['energy'] - last['energy']))
+        growth.append(refreeze_growth(current))
+        before, now = (resolved_de(last), resolved_de(walked))
+        res = walked.get('walk_resolution')
+        walk_de.append(now)
+        bounds.append(None if res is None else res['bound'])
+        resolved = max((d for d in (before, now) if d is not None),
+                       default=None)
+        tols.append(max(REFREEZE_TOL_MEV, resolved or 0.0))
+        jump = abs(jumps[-1]) * HARTREE_TO_MEV
+        on_floor = jump < REFREEZE_TOL_MEV
+        decided.append(bool(not on_floor and resolved is not None
+                            and jump <= resolved))
+        last, mol = walked, moved
+        if verbose:
+            added = ('' if growth[-1] is None else
+                     f', explicit states added {growth[-1]["added"]}')
+            de_txt = ('' if now is None else
+                      f', dE_walk {now:.3f} meV, tolerance {tols[-1]:.3f} meV')
+            print(f'  [refreeze {len(jumps)}] geometry moved {shifts[-1]:.2e} '
+                  f'Bohr superposed ({rigid[-1]:.2e} raw), energy by '
+                  f'{jumps[-1]:+.2e} Ha{de_txt}{added}', flush=True)
+        # a walk that stayed within GEOMETRIC_START_TOL of where its surface
+        # was rebuilt stands where the next one would be rebuilt
+        done = (on_floor or decided[-1]
+                or shifts[-1] <= GEOMETRIC_START_TOL)
+        if done or not last['converged']:
+            break
+    converged = bool(done and last['converged'])
+    flagged = bool(converged and tols[-1] > REFREEZE_TOL_FLAG_MEV)
+    if flagged:
+        warnings.warn(
+            f'the refreeze passes converged only to {tols[-1]:.3f} meV, what '
+            f'the walks resolve (dE_walk), above REFREEZE_TOL_FLAG_MEV = '
+            f'{REFREEZE_TOL_FLAG_MEV} meV: an energy at this minimum is no '
+            f'better than that', RuntimeWarning, stacklevel=2)
+    flags = [key for key in WALK_FLAGS if key in last]
+    info.update({f'first_walk_{key}': info.get(key) for key in flags})
+    info.update({key: last[key] for key in flags})
+    info.update(refreeze_shift=shifts[0], refreeze_denergy=jumps[0],
+                refreeze_shifts=shifts, refreeze_rigid_shifts=rigid,
+                refreeze_jumps=jumps,
+                refreeze_qp_growth=growth,
+                first_walk_de_meV=first_de,
+                refreeze_walk_de_meV=walk_de, refreeze_walk_bound=bounds,
+                refreeze_tol_meV=tols, refreeze_walk_decided=decided,
+                refreeze_tol_flag=flagged,
+                refreeze_converged=converged,
+                refreeze_info=last, energy=last['energy'],
+                omega=last['omega'], refreeze='measured',
+                hessian=last['hessian'], final_surface=current)
+    return mol, info
 
 
 def relax(surface, mol=None, engine='auto', **kw):
     """Relax a state, preferring internal coordinates when available.
 
     engine: 'geometric', 'cartesian', or 'auto' (geomeTRIC if importable).
+    Either starts an excited-state walk nudged off `mol` unless `nudge=0`
+    (`start_nudge`).
 
     `refreeze` reaches either optimizer: both measure the drift of the frozen
     conventions the same way, so which engine ran does not change what the
@@ -663,7 +1039,7 @@ class MeanFieldSurface:
 
 
 def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
-                       verbose=False, converge=None):
+                       verbose=False, converge=None, environment=None):
     """Relax the mean-field ground state. Returns (mol, mf).
 
     The vibronic quantities are defined about this geometry, not the input
@@ -672,7 +1048,34 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
     energy from a non-stationary reference includes the ground state's own
     relaxation (on formaldehyde/cc-pVDZ the unrelaxed input moves the total
     Huang-Rhys factor from 1.278 to 0.896).
+
+    environment: what the ground state stands in, None for the gas phase. The
+    gas phase relaxes the factory's own mean field, through pyscf's geomopt
+    drivers where they are installed. An environment relaxes the mean field
+    `MeanFieldSurface` builds in it (PCM at eps_static for a continuum)
+    through this package's optimizers, since pyscf's drivers step on the
+    factory's bare SCF: geomeTRIC's internal coordinates when it is
+    importable and `engine` is not 'cartesian', else the Cartesian trust
+    region. The mean field returned is that surface's own at the minimum.
     """
+    if environment is not None:
+        surface = MeanFieldSurface(mol, scf_factory, environment=environment)
+        opt, info = None, None
+        if engine != 'cartesian':
+            try:
+                opt, info = optimize_geometric(
+                    surface, mol, maxiter=maxsteps,
+                    converge='GAU' if converge is None else converge,
+                    verbose=verbose)
+            except ImportError as exc:
+                if verbose:
+                    print(f'{exc}; using the Cartesian trust-region optimizer')
+        if info is None:
+            opt, info = optimize(surface, mol, max_cycle=maxsteps, trust=0.3,
+                                 verbose=verbose)
+        warn_unrelaxed(info)
+        final = info.get('final_surface', surface)
+        return opt, final.mean_field(opt)[1]
     mf = scf_factory(mol)
     # pyscf's scanner resets this mean field at each geometry, and its ISDF-K
     # fit then keeps the start's pair layout (`ISDFJK.reset`)
@@ -700,14 +1103,20 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
               f'Cartesian trust-region optimizer')
     opt, info = optimize(MeanFieldSurface(mol, scf_factory), mol,
                          max_cycle=maxsteps, trust=0.3, verbose=verbose)
+    warn_unrelaxed(info)
+    return opt, scf_factory(opt)
+
+
+def warn_unrelaxed(info):
+    """Warn that a ground-state relaxation's record says it did not converge."""
     if not info.get('converged'):
+        residual = info.get('grad_max')
         warnings.warn(
             f'the ground-state relaxation stopped after {info.get("cycles")} '
-            f'cycles without converging (max |dE/dR| = '
-            f'{info.get("grad_max", float("nan")):.2e}); every vibronic '
-            f'quantity is defined about a STATIONARY point, so treat what '
-            f'follows as provisional.', RuntimeWarning, stacklevel=2)
-    return opt, scf_factory(opt)
+            f'cycles without converging ({info.get("status")}; max |dE/dR| = '
+            f'{float("nan") if residual is None else residual:.2e}); every '
+            f'vibronic quantity is defined about a STATIONARY point, so treat '
+            f'what follows as provisional.', RuntimeWarning, stacklevel=3)
 
 
 def ground_state_residual_force(mf, mol=None):

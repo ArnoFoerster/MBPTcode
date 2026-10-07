@@ -314,6 +314,7 @@ class StateManifold:
         half = (self.driven.spin_view(spin, state=root) if view is None
                 else copy.copy(view))
         half.follow_log = list(half.follow_log)
+        half.follow_coords = list(getattr(half, 'follow_coords', []))
         half.davidson_solves = list(half.davidson_solves)
         if self.driven is self.chain:
             return half

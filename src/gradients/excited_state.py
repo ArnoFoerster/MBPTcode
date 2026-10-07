@@ -69,7 +69,11 @@ explicit shift of the solved orbital its frozen tier map names. The
 continuation only selects: the energy and the force read the explicit roots
 and the frozen map, never an AC number, so the force is the adjoint of the
 explicit set as for any other set. The partition is checked against the
-production eigenvectors at the reference geometry and frozen for the walk.
+production eigenvectors at the reference geometry and frozen for the walk
+(`qp_partition`). `refreeze` selects it again at the new geometry, starting
+from the set the last surface solved (`qp_floor`), so a refreeze pass may add
+states to the explicit set and never drops one (`qp_growth` names what each
+pass carried and added).
 
 Everything computed from this surface (geometry optimization, normal modes,
 Huang-Rhys factors, adiabatic gaps, reorganization energies, rates) lives in
@@ -144,6 +148,7 @@ from src.gradients.isdf_derivatives import (GaugeAdjoint, qp_xc_correction,
                                             xc_hybrid_coeff)
 from src.properties.nonadiabatic import (follow_state, mo_overlap,
                                          state_overlap)
+from src.properties.surface import followed_root
 from src.gradients.qp_space_time import (carried_analytically,
                                          qp_gradient_space_time,
                                          qp_set_gradient, static_term)
@@ -300,6 +305,8 @@ class ExcitedStateChain(FactorChain):
         self._followed = None          # (mol, mo_coeff, X, Y) of the last step
         self._anchor = None            # ... and of the first, for drift
         self.follow_log = []
+        # where each entry of `follow_log` was evaluated (`followed_root`)
+        self.follow_coords = []
         self.at_mean_field = at_mean_field
         self.residue_route, self.tile_gb = residue_route, tile_gb
         # Frozen quasiparticle shifts for the states Eq. (27) excludes, so the
@@ -408,6 +415,10 @@ class ExcitedStateChain(FactorChain):
         # refines the selection it shares and a freed chain's identity, reused
         # by another object, cannot claim it.
         self._selection_owner = object()
+        # Grow-only refreeze: the explicit set of the surface this one was
+        # refrozen from (`refreeze`), which the selection here starts from,
+        # so a refreeze adds states and never drops one; None otherwise.
+        self.qp_floor = None
         self._init_adaptive(qp_select, qp_partition)
 
     def __copy__(self):
@@ -1169,6 +1180,7 @@ class ExcitedStateChain(FactorChain):
         view.track = self.track if track is None else track
         view._followed = view._anchor = None
         view.follow_log = []
+        view.follow_coords = []
         view.davidson_solves = []
         return view
 
@@ -1214,6 +1226,7 @@ class ExcitedStateChain(FactorChain):
             self._anchor = self._followed
             self.follow_log.append(dict(index=self.state, weight=1.0,
                                         margin=1.0, anchor=1.0))
+            self.follow_coords.append(np.array(mol.atom_coords(), float))
             return self.state
         mol0, mo0, x0, y0 = self._followed
         t = mo_overlap(mol0, mo0, mol, here[1])
@@ -1240,6 +1253,7 @@ class ExcitedStateChain(FactorChain):
         self.follow_log.append(dict(index=int(index), weight=weight,
                                     margin=margin, anchor=anchor,
                                     omega=float(om[index])))
+        self.follow_coords.append(np.array(mol.atom_coords(), float))
         return int(index)
 
     def _casida_args(self, pieces):
@@ -1655,7 +1669,7 @@ class ExcitedStateChain(FactorChain):
         """E_ex = E_0 + Omega_state in Hartree: the surface, not the excitation."""
         return self.energy(mol, mf)[0]
 
-    def refreeze(self, mol, factorization=None):
+    def refreeze(self, mol, factorization=None, qp_floor=None):
         """The same surface with every frozen convention rebuilt at `mol`.
 
         The pair layout, frames, quasiparticle set, Newton branch, pole-model
@@ -1666,14 +1680,35 @@ class ExcitedStateChain(FactorChain):
         contour-deformation grid this chain was fixed at is a floor for the
         new one. The environment is the same object and rebuilds itself
         around the atoms.
+
+        An adaptive set is selected again at `mol`, grow-only: the selection
+        starts from this surface's explicit set (and the floor it itself
+        started from), so every state explicit here is explicit there too,
+        and the passes of a walk stand on one set once it stops growing.
+        qp_floor: more states to carry, the explicit set of a surface this
+        chain was not refrozen from (a T1 walk may carry the S1 minimum's).
+        The admitted window stays the outer bound: a set grown to all of it
+        is the admitted surface.
         """
         # The tracked index, not the constructor's. A refrozen chain starts a
         # fresh overlap history, so it has to be told which root is the state
         # at this geometry: following moved off `self.state` precisely when a
         # crossing was passed, and rebuilding on the old index would hand the
         # outer loop the state that was crossed rather than the one followed.
-        state = self.state if not self.follow_log \
-            else int(self.follow_log[-1]['index'])
+        state = followed_root(self, mol)
+        # An adaptive set is selected again here, by its own continuation at
+        # `mol`: which orbitals are solved and which probe each hole borrows
+        # is a convention frozen where it was chosen, and a hole within
+        # ADAPTIVE_HOLE_MAX_EV there need not be at a minimum. Within a walk
+        # the partition stays frozen; one handed in without a selection
+        # travels as it is. Grow-only: what was explicit here stays explicit
+        # there, so the set cannot change back and forth between passes.
+        reselect = self.qp_select is not None
+        floor = set(int(p) for p in (qp_floor or ()))
+        if self.qp_partition is not None:
+            floor |= set(self.qp_partition.explicit)
+        if self.qp_floor is not None:
+            floor |= set(self.qp_floor)
         chain = type(self)(
             mol, self.scf_factory, spin=self.spin, state=state,
             track=self.track,
@@ -1696,14 +1731,14 @@ class ExcitedStateChain(FactorChain):
             environment=self.environment, factorization=factorization,
             sliced=self.sliced, fit=self.fit, fit_block=self.fit_block,
             bse_adjoint=self.bse_adjoint, qp_select=self.qp_select,
-            qp_partition=self.qp_partition)
-        chain.qp_selection = self.selection_record()
-        # The adaptive set's partition IS carried: which orbitals are solved
-        # and which probe each hole borrows is frozen for the relaxation, and
-        # no continuation runs here. The probes' shifts are this geometry's.
-        # The shifts themselves are not carried: this geometry calibrates its
-        # own, on its own explicit roots. The old ones ride along only so the
-        # record can say how far the frozen convention moved.
+            qp_partition=None if reselect else self.qp_partition)
+        if not reselect:
+            chain.qp_selection = self.selection_record()
+        elif floor:
+            chain.qp_floor = tuple(sorted(floor))
+        # The shifts are not carried: this geometry calibrates its own, on its
+        # own explicit roots. The old ones ride along only so the record can
+        # say how far the frozen convention moved.
         chain.outside_shift_before = self.outside_shift
         return chain
 
@@ -1761,6 +1796,29 @@ class ExcitedStateChain(FactorChain):
                 weights[(spin, k)] = full
         return weights, omegas, unstable
 
+    def _floor_in(self, cands):
+        """The carried states (`qp_floor`) among the candidates, sorted."""
+        if self.qp_floor is None:
+            return []
+        cands = set(int(p) for p in cands)
+        return sorted(int(p) for p in self.qp_floor if int(p) in cands)
+
+    @property
+    def qp_growth(self):
+        """What a grow-only refreeze did to the explicit set, once this
+        surface's selection is frozen: {'carried': the explicit set of the
+        surface it was refrozen from, 'added': the states explicit here and
+        not there, 'not_explicit': carried states that are holes here, which
+        only a root rejected at this geometry (`qp_demoted`) makes}. None on
+        a surface that was not refrozen from a selected one."""
+        if self.qp_floor is None or self.qp_partition is None:
+            return None
+        floor = [int(p) for p in self.qp_floor]
+        explicit = set(int(p) for p in self.qp_partition.explicit)
+        return {'carried': floor,
+                'added': sorted(explicit - set(floor)),
+                'not_explicit': sorted(set(floor) - explicit)}
+
     def _select_qp_set(self, mol, mf, x_mo, d, d_sigma, eps, w_aux, shift):
         """Choose the explicit set out of the candidates, before any root.
 
@@ -1785,6 +1843,9 @@ class ExcitedStateChain(FactorChain):
         bad = ac_unjudgeable(a, z, ADAPTIVE_AC_SHIFT_MAX_EV)
         why = mandatory_members(eps, self.nocc, cands, self.degeneracy_tol,
                                 unjudgeable=bad)
+        # grow-only: the surface this one was refrozen from solved these
+        for p in self._floor_in(cands):
+            why.setdefault(p, 'carried')
         targets = self._target_states()
         with self.phase('qp_select.bse'):
             eps_ac = np.array(eps, float)
@@ -1807,6 +1868,9 @@ class ExcitedStateChain(FactorChain):
                                    'term_meV': term * HARTREE_TO_MEV})
         for p, w in capped_why(first.capped).items():
             why.setdefault(p, w)
+        # a carried state's degenerate partners, if its block widened here
+        for p in first.explicit:
+            why.setdefault(int(p), 'carried')
         self._selecting = {
             'owner': self._selection_owner, 'candidates': tuple(int(p) for p in cands),
             'ac': a, 'z': z, 'ac_free': free, 'unjudgeable': bad, 'why': why,
@@ -1866,6 +1930,14 @@ class ExcitedStateChain(FactorChain):
             return True
         blocks = degenerate_blocks(eps, cands, self.degeneracy_tol)
         tier_of = {p: b for p, b in selection.tier_of.items()}
+        # A rejected root carries what the admitted window gives it: the shift
+        # of the explicit orbital nearest it in energy (`calibrate_scissor`),
+        # not an AC-matched probe, so a set grown to the whole window is the
+        # admitted surface bit for bit even where a root was rejected.
+        eps_mf = np.asarray(eps, float)
+        for p in sorted(demoted & set(tier_of)):
+            tier_of[p] = (min(sorted(explicit), key=lambda q: abs(
+                eps_mf[q] - eps_mf[p])),)
         sel.update(calibration=calibration, s_free=s_free, blocks=blocks,
                    tier_of=tier_of, verify_pending=True,
                    budget_meV={t: b * HARTREE_TO_MEV
@@ -1885,8 +1957,8 @@ class ExcitedStateChain(FactorChain):
         unmet = {}
         for t, terms in (error_terms(sel['weights'], sel['calibration'].a_tilde,
                                      sel['calibration'].u, sel['s_free'],
-                                     selection.tier_of, sel['blocks'])[2]
-                         .items() if selection.tier_of else ()):
+                                     sel['tier_of'], sel['blocks'])[2]
+                         .items() if sel['tier_of'] else ()):
             for b, term in terms.items():
                 if set(b) & demoted and term * HARTREE_TO_MEV > tol:
                     unmet[f'{t[0]} {t[1]}'] = {'demoted': list(b),
@@ -2091,6 +2163,8 @@ class ExcitedStateChain(FactorChain):
                      'budget_meV': check['budget'][t] * mev})
             record['other_roots'] = other
         record['verified'] = check is not None
+        # grow-only refreeze: what this pass carried and what it added
+        record['refreeze_growth'] = self.qp_growth
         return record
 
     def adopt_partition(self, partition):

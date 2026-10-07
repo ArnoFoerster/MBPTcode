@@ -195,27 +195,35 @@ def relax_state(surface, mol=None, engine='auto', **kw):
     The record is built on the surface's OWN mean field: the optimizer stepped
     on that one, and `scf_factory`'s carries no environment, so a solvated
     record would report the bare energy of a geometry relaxed in the continuum.
+
+    The energies are the last surface's. After a refreeze the walk ended on a
+    surface whose conventions were rebuilt at the minimum (`final_surface`),
+    and the energy there is the route's own at that geometry; the surface
+    frozen at the start is another surface, and off a walk that moved far its
+    energy at the minimum carries the drift of its conventions. `surface` in
+    the record is the one the energies were read on.
     """
     mol_opt, info = relax(surface, mol, engine=engine, **kw)
-    mf = surface_mean_field(surface, mol_opt)
+    final = info.pop('final_surface', surface)
+    mf = surface_mean_field(final, mol_opt)
     # An excited surface carries its excitation energy alongside the total,
     # both off ONE forward pass: its `energy` is (E_0 + Omega, ..., Omega). A
     # ground-state one has none, and reporting a zero there would read as a
     # degeneracy.
-    excited = hasattr(surface, 'excitation')
-    energies = surface.energy(mol_opt, mf) if excited else None
+    excited = hasattr(final, 'excitation')
+    energies = final.energy(mol_opt, mf) if excited else None
     record = {'mol': mol_opt, 'mf': mf,
               'e_total': (energies[0] if excited
-                          else surface.total_energy(mol_opt, mf)),
-              'e_scf': float(mf.e_tot), 'info': info}
+                          else final.total_energy(mol_opt, mf)),
+              'e_scf': float(mf.e_tot), 'info': info, 'surface': final}
     if excited:
         record['omega'] = energies[-1]
     # WHAT WAS RELAXED, carried with the number. A surface built through
     # `potential_energy_surface` knows which functional its E_0 is and which
     # realization computed it; one built by hand does not, and None is how the
     # record says so rather than implying a default nobody declared.
-    record['physics'] = getattr(surface, 'physics', None)
-    record['realization'] = getattr(surface, 'realization', None)
+    record['physics'] = getattr(final, 'physics', None)
+    record['realization'] = getattr(final, 'realization', None)
     return record
 
 
@@ -372,18 +380,27 @@ def vibronic_analysis(surface, state, mol_gs, mf_gs, hess=None, top=8,
     which is exactly the approximation the effective-mode TADF treatments make.
     Their ratio is therefore not a bug report; it is the measurement of how good
     that approximation is for this molecule.
+
+    One mean field per surface. The Franck-Condon gradient and the vertical
+    energy are `surface`'s own at `mol_gs` (`evaluate`, on the mean field the
+    surface itself builds, `surface_mean_field`), the one `relax_state` read
+    `state['e_total']` on; in a continuum the caller's `mf_gs` is another mean
+    field, and on water/STO-3G in PCM(water) lambda_relaxation taken across
+    the two is their 0.16 eV solvation difference. `mf_gs` and `hess` define
+    the ground state's modes alone.
     """
     omega, modes, masses, hess = normal_modes(mf_gs, mol_gs, hess=hess)
     # Through the boundary every property routine hands a geometry across, so
-    # the Franck-Condon force is rank 0's on every rank of a distributed run.
-    g_fc, _, _ = evaluate(surface, mol_gs, mf_gs)
+    # the Franck-Condon force is rank 0's on every rank of a distributed run;
+    # on the surface's own mean field, the one `relax_state` read
+    # `state['e_total']` on.
+    g_fc, e_vert, _ = evaluate(surface, mol_gs)
     s_grad, gk = huang_rhys_from_gradient(g_fc, omega, modes, masses)
     aligned = align_to(mol_gs, state['mol'])
     s_disp, dqk = huang_rhys_from_displacement(mol_gs, aligned, omega, modes,
                                                masses)
     lam_g = reorganization_from_huang_rhys(s_grad, omega)
     lam_d = reorganization_from_huang_rhys(s_disp, omega)
-    e_vert = surface.total_energy(mol_gs, mf_gs)
     lam_relax = e_vert - state['e_total']
 
     out = {'omega_cm': omega * HARTREE_TO_CM, 's_gradient': s_grad,

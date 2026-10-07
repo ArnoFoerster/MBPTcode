@@ -221,13 +221,16 @@ def ground_walk(factory, **kw):
 
 def same_record(a, b):
     """Two walk records hold the same entries, bit for bit: arrays by
-    `np.array_equal`, containers entry by entry, everything else by `==`."""
+    `np.array_equal`, containers entry by entry, everything else by `==`.
+    `final_surface` is each rank's own surface object, built in lockstep and
+    compared through the energies the record holds, so it is not compared."""
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         return (np.shape(a) == np.shape(b)
                 and np.array_equal(np.asarray(a), np.asarray(b)))
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(same_record(a[k], b[k])
-                                             for k in a)
+                                             for k in a
+                                             if k != 'final_surface')
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         return (type(a) is type(b) and len(a) == len(b)
                 and all(same_record(x, y) for x, y in zip(a, b)))
@@ -411,8 +414,8 @@ def test_the_same_defect_on_rank_zero_moves_the_answer():
     moved = [np.abs(rank['coords'] - reference['coords']).max()
              for rank in results]
     assert min(moved) > 100 * GEOMETRY_FLOOR
-    # Still ONE answer: every rank returns the geometry rank 0 walked to,
-    # wrong though it now is, rather than each returning its own.
+    # Still one answer: every rank returns the geometry rank 0 walked to,
+    # wrong though it is, rather than each returning its own.
     assert np.array_equal(results[0]['coords'], results[1]['coords'])
 
 
@@ -434,7 +437,7 @@ def test_the_geometric_walk_is_the_serial_walk(monkeypatch):
     real = OPTIMIZER.geometric_engine
 
     def drifted_engine():
-        Engine, GeoMolecule, run_optimizer = real()
+        Engine, GeoMolecule, run_optimizer, not_converged = real()
 
         def run(**kw):
             out = run_optimizer(**kw)
@@ -442,7 +445,7 @@ def test_the_geometric_walk_is_the_serial_walk(monkeypatch):
             if comm is not None and comm.Get_rank() == 1:
                 out.xyzs[-1] = np.asarray(out.xyzs[-1]) * (1.0 + 1e-12)
             return out
-        return Engine, GeoMolecule, run
+        return Engine, GeoMolecule, run, not_converged
 
     reference, bar = serial_walk(lambda: geometric_walk(converged))
     monkeypatch.setattr(OPTIMIZER, 'geometric_engine', drifted_engine)

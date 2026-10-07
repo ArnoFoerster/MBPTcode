@@ -886,6 +886,36 @@ GEOMETRIC_START_TOL = 1e-8
 # Sylvester denominators fall below it has no rotation derivative.
 BODY_FRAME_MIN_SPREAD = 1e-6
 
+# The refreeze loop of both optimizers. After a walk converges, its frozen
+# conventions are rebuilt at the minimum and the state relaxed again, until
+# the energy moves by less than REFREEZE_TOL_MEV between two successive
+# surfaces or the refrozen walk does not move (a surface rebuilt where it was
+# built is the same surface), at most REFREEZE_MAX_PASSES times. Every energy
+# a relaxation reports is the last surface's.
+REFREEZE_TOL_MEV = 0.1
+REFREEZE_MAX_PASSES = 4
+# The walk-resolved tolerance. A walk stops at a residual gradient g, and on
+# its own approximate Hessian H that leaves the energy undetermined by
+# dE_walk = 1/2 g^T H^-1 g (`optimize.walk_resolution`): a jump between two
+# passes below that is not a measurement of the conventions. Two passes count
+# as converged when |jump| <= max(REFREEZE_TOL_MEV, the larger dE_walk of the
+# two walks); where the walks resolve better than REFREEZE_TOL_MEV the floor
+# decides. A converged result whose tolerance exceeds REFREEZE_TOL_FLAG_MEV is
+# flagged in the record and warned about.
+REFREEZE_TOL_FLAG_MEV = 1.0
+
+# The start of every excited-state walk (`optimize.start_nudge`). A surface
+# invariant to rigid motion keeps the point group of the geometry a walk
+# starts at, so a walk from a symmetric geometry stops at the symmetric
+# stationary point even where it is a saddle. The start is moved by a fixed
+# random internal displacement (rigid motion projected out), scaled so that
+# its largest atomic displacement is START_NUDGE_BOHR: a tenth of the first
+# trust radius, worth ~1e-4 Ha on a stiff mode, and above what a walk
+# converges to (GEOM_OPT_CONV's step_max 1.8e-3 Bohr). START_NUDGE_SEED makes
+# it the same vector at every launch for a given geometry.
+START_NUDGE_BOHR = 0.02
+START_NUDGE_SEED = 1729
+
 # Conformer search over the soft torsions of a twisted emitter.
 # A bond is drawn when the internuclear distance is within this factor of the
 # sum of the two covalent radii.
@@ -940,6 +970,19 @@ SURFACE_GRID_ACCURACY = 'G2'
 # refreeze drift a relaxation record reports in meV and the excitation energy
 # it reports in eV can never be two different conversions.
 HARTREE_TO_MEV = 1000.0 * HARTREE_TO_EV
+
+# The saddle test of a minimum's Hessian (`optimize.escape_saddle`). A walk's
+# end is a saddle when the lowest curvature of the internal Cartesian Hessian
+# (rigid motion projected out, Ha/Bohr^2) is below SADDLE_CURVATURE_TOL; it is
+# then left along that mode by SADDLE_ESCAPE_STEP_BOHR (the first trust radius
+# of `optimize`) and walked again. The tolerance is the curvature whose
+# energy gain over that step, |k| s^2 / 2, is REFREEZE_TOL_MEV, the
+# resolution every relaxed energy is quoted to: a softer negative mode moves
+# no energy the record could see. It sits about five times above the noise of
+# a central-difference Hessian of an excited-state force at NUCLEAR_FD_STEP.
+SADDLE_ESCAPE_STEP_BOHR = 0.1
+SADDLE_CURVATURE_TOL = (-2.0 * REFREEZE_TOL_MEV / HARTREE_TO_MEV
+                        / SADDLE_ESCAPE_STEP_BOHR ** 2)
 
 # Seconds `properties.excitations` waits for git to name the commit a record
 # was produced on. Provenance is not worth blocking a calculation for: the
