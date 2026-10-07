@@ -61,6 +61,19 @@ purpose, in the two ways two nodes do:
     on rank 1, and the resolvent -- replicated, on rank 0's stopping mask --
     must have run there with its loose tolerance.
 
+`--isdf-scf` runs instead the production chain row (`potential_energy_surface`:
+LRC-wPBEh on an ISDF-K mean field, full BSE, SOP residues, the admitted
+quasiparticle set, grid G1, sliced factors, row fit, grid adjoint) on the same
+dimer, its mean field converged over the ranks: J/K answered from each rank's
+tiles of the fit, and refused outside `distributed_fock`. The localization,
+the partition and the element gradients run on that mean field; the checks
+are that it is distributed on every rank (`distributed_handles`, the
+ISDFJK's distributed twin), that every rank applied the BSE action the same
+number of times, and that the partition and the gradients are one set of
+bits on every rank and match rank 0's serial run, whose ISDF-K SCF is
+converged serially: two SCFs, hence `ISDF_PARTITION_BAR` (Ha),
+`ISDF_DSIGMA_BAR` (dSigma/dOmega, dimensionless) and the gradient bar.
+
 `--tda-only` runs the Tamm-Dancoff kernel alone; `--watchdog SECONDS` sets
 the wall time after which a hung run is aborted (default three hours).
 
@@ -75,6 +88,7 @@ import sys
 
 SKEW = '--skew' in sys.argv
 TDA_ONLY = '--tda-only' in sys.argv
+ISDF_SCF = '--isdf-scf' in sys.argv
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -86,21 +100,38 @@ import time
 import warnings
 
 import numpy as np
-from pyscf import gto, lib
+from pyscf import dft, gto, lib
 
 from src.Base import fragment_localization
-from src.Base.utils.mpi_grid import (broadcast, distributed, grid_comm,
-                                     lockstep_mean_field, lockstep_stats)
+from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.declaration import Excitation, GroundState, QPStates
+from src.Base.distributed_df import distributed_handles
+from src.Base.isdf_jk import isdf_jk
+from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.utils.mpi_grid import (broadcast, current_comm, distributed,
+                                     grid_comm, lockstep_mean_field,
+                                     lockstep_stats)
 from src.gradients import fragment_diabatic
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.fragment_diabatic import DiabaticGradient
 from src.properties import fragment_bse
+from src.properties.surfaces import potential_energy_surface
 from tests.test_fragment_diabatic import (AUX, BASIS, DIMER, FRAGMENTS, SITES,
                                           factory)
 
 #: The `reduced` bars (module docstring).
 PARTITION_BAR = 1e-10
 GRADIENT_BAR = 1e-8
+#: `--isdf-scf`: the reference's ISDF-K SCF is converged serially and the
+#: distributed one over the ranks, so the partition carries two SCFs'
+#: convergence on top of the reduction order.
+ISDF_PARTITION_BAR = 1e-9
+#: dSigma/dOmega is dimensionless, -y^T S y of the resolvent vectors, whose
+#: conjugate-gradient tolerance carries the two SCFs' difference into it at a
+#: larger multiple than into Sigma itself.
+ISDF_DSIGMA_BAR = 1e-8
+ISDF_XC = 'lrc-wpbeh'
 #: Serial grid against serial explicit adjoint: the fold carries the last
 #: bits of its seeds through the fit adjoint (Gram condition ~1e8), see
 #: tests/test_mpi_routes.py `grid_adjoint_routes`.
@@ -325,7 +356,44 @@ def evaluate(mol, mf, tda, adjoint, sliced):
     """The partition and the ELEMENTS' gradients of one run."""
     chain = ExcitedStateChain(mol, factory, bse_tda=tda, auxbasis=AUX, mf=mf,
                               sliced=sliced, bse_adjoint=adjoint)
-    g = DiabaticGradient(chain, FRAGMENTS, SITES, mf=mf, route='isdf')
+    return measure(DiabaticGradient(chain, FRAGMENTS, SITES, mf=mf,
+                                    route='isdf'))
+
+
+def isdf_factory(mol):
+    """An LRC-wPBEh ISDF-K mean field at grid G1: converged here serially,
+    built and handed to the chain unconverged under ranks, which converges it
+    over them (`factor_chain.converged_factory`)."""
+    mf = dft.RKS(mol, xc=ISDF_XC)
+    elements = sorted({mol.atom_symbol(i) for i in range(mol.natm)})
+    counts, n_start = resolve_isdf_grid('G1', str(mol.basis), elements,
+                                        auxbasis=AUX)
+    mf = isdf_jk(mf, auxbasis=AUX, counts=counts, n_start=n_start)
+    mf.conv_tol, mf.conv_tol_grad = (SCF_DIFFERENTIABLE_CONV_TOL,
+                                     SCF_DIFFERENTIABLE_GRAD_TOL)
+    mf.max_cycle, mf.verbose = 200, 0
+    comm = current_comm()
+    if comm is not None and comm.Get_size() > 1:
+        return mf
+    return mf.run()
+
+
+def isdf_evaluate(mol):
+    """`evaluate` on the production chain row over an ISDF-K mean field, the
+    chain's own; with the gradient object, whose mean field is inspected."""
+    chain = potential_energy_surface(
+        mol, isdf_factory, ground_state=GroundState('dft', ISDF_XC),
+        excitation=Excitation('singlet', root=1, kernel='bse'),
+        chi0='space-time', residues='sop', solver='davidson',
+        factorization='isdf', qp_states=QPStates('admitted'),
+        grid_accuracy='G1', nroots=5, sliced=True, fit='rows',
+        bse_adjoint='grid')
+    g = DiabaticGradient(chain, FRAGMENTS, SITES, route='isdf')
+    return measure(g), g
+
+
+def measure(g):
+    """The partition and the ELEMENTS' gradients of a `DiabaticGradient`."""
     part = g.partition
     out = dict(a_eff=np.array(part.a_eff), sigma=np.array(part.sigma),
                dsigma=np.array(part.dsigma), q_lowest=float(part.q_lowest),
@@ -437,6 +505,58 @@ def run_kernel(gate, comm, mol, mf, tda):
     return reached
 
 
+def run_isdf(gate, comm, mol):
+    """`--isdf-scf`: the module on an ISDF-K mean field converged over the
+    ranks, against rank 0's serial run."""
+    gate.say(f'\n-- ISDF-K mean field over {gate.size} rank(s), full BSE')
+    t0 = time.perf_counter()
+    with distributed(None):
+        ref = isdf_evaluate(mol)[0]
+    ref = broadcast(ref, comm)
+    t1 = time.perf_counter()
+    with ActionCounter() as actions, distributed(comm):
+        out, g = isdf_evaluate(mol)
+    t2 = time.perf_counter()
+    gate.info(f'serial reference {t1 - t0:.0f} s, distributed run '
+              f'{t2 - t1:.0f} s; labels {out["labels"]}')
+
+    flags = gate.everyone((
+        distributed_handles(g.mf, comm) is not None,
+        bool(getattr(getattr(g.mf, 'with_df', None), '_distributed_twin',
+                     False))))
+    gate.check(gate.size == 1 or all(h and t for h, t in flags),
+               'the mean field is converged over the ranks on every rank: '
+               'its distributed handles, and an ISDFJK that refuses a whole '
+               'build', f'(handles, distributed twin) per rank {flags}')
+    widths = gate.everyone(tuple(actions.widths))
+    gate.check(len(set(widths)) == 1,
+               'every rank applied the collective BSE action the same number '
+               'of times in the same widths',
+               f'actions per rank {[len(w) for w in widths]}, columns per rank '
+               f'{[sum(w) for w in widths]}')
+
+    n = gate.distinct(*partition_arrays(out))
+    each = {k: largest([ref[k]], [out[k]])
+            for k in ('a_eff', 'sigma', 'q_lowest', 'dsigma')}
+    gate.check(n == 1 and max(each['a_eff'], each['sigma'], each['q_lowest'])
+               < ISDF_PARTITION_BAR and each['dsigma'] < ISDF_DSIGMA_BAR,
+               'partition (A_eff, Sigma, dSigma, guard) the same bits on every '
+               "rank, == rank 0's serial run",
+               f'{n} distinct, |d| A_eff {each["a_eff"]:.1e}, Sigma '
+               f'{each["sigma"]:.1e}, guard {each["q_lowest"]:.1e} Ha (bar '
+               f'{ISDF_PARTITION_BAR:.0e}); dSigma/dOmega {each["dsigma"]:.1e} '
+               f'(bar {ISDF_DSIGMA_BAR:.0e})')
+    for ab in ELEMENTS:
+        label = '/'.join(ref['labels'][k] for k in ab)
+        n = gate.distinct(out[ab])
+        d = float(np.abs(out[ab] - ref[ab]).max())
+        gate.check(n == 1 and d < GRADIENT_BAR,
+                   f'dE[{label}]/dR the same bits on every rank, == rank 0\'s '
+                   'serial run',
+                   f'{n} distinct, |d| {d:.2e} Ha/Bohr, |g| '
+                   f'{np.abs(ref[ab]).max():.2e}, bar {GRADIENT_BAR:.0e}')
+
+
 def main(comm, kernels=None):
     """Every check on this rank of `comm`; 0 when every rank passed."""
     if kernels is None:
@@ -450,6 +570,9 @@ def main(comm, kernels=None):
              f'{lib.num_threads()} OpenMP thread(s) per rank'
              + (', a mean field per rank' if SKEW else ''))
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
+    if ISDF_SCF:
+        run_isdf(gate, comm, mol)
+        return gate.finish()
     with distributed(None):
         mf0 = factory(mol)
     with distributed(comm):
