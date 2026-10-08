@@ -832,6 +832,13 @@ FRAGMENT_DAVIDSON_MIN_SPACE = 80
 # positive eigenvalue on Q. It sharpens the reported value only, not the
 # guard's verdict.
 FRAGMENT_GUARD_NEWTON_TOL = 1e-6
+# Residual norm and cycle budget of the pole guard's Davidson on Q. The guard
+# decides a sign against FRAGMENT_POLE_MARGIN, and a Ritz value's error goes
+# as |r|^2 over the gap to the next eigenvalue, so 1e-5 decides it with
+# orders of magnitude to spare. Q holds every pair but the diabats' and a dense
+# cluster of states at its low end, where one root converges slowly.
+FRAGMENT_GUARD_TOL = 1e-5
+FRAGMENT_GUARD_MAX_CYCLE = 1000
 # Seed of the two generic AO vectors a, b that fix each diabat's sign: the
 # sign of a^T T b, T its AO transition density (`fragment_bse.diabat_phase`).
 FRAGMENT_PHASE_SEED = 20261006
