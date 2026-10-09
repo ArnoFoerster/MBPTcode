@@ -10,6 +10,9 @@ Two independent oracles, both required:
     Eq. 58). This is the non-negotiable periodic-code oracle; the q=0 check
     alone cannot catch a finite-q momentum error.
 
+The folding runs on a 2- and a 3-point mesh: on 2 points every q equals -q,
+which hides any screened integral taken in a momentum-violating order.
+
 Also checks A, B Hermitian and A-B positive definite (Kresse structural
 requirements) at every q.
 """
@@ -31,6 +34,7 @@ def bse_spectrum(cell, kmesh):
     kpts = cell.make_kpts(kmesh)
     nk = len(kpts)
     mf = scf.KRHF(cell, kpts).density_fit()
+    mf.conv_tol = 1e-11
     mf.kernel()
     dfints = PBCDFIntegrals.from_scf(cell, mf)
     e = np.asarray(mf.mo_energy)
@@ -107,6 +111,27 @@ if __name__ == '__main__':
     print(f"2. full BSE supercell folding (1x1x2 union-q vs 2x-supercell Gamma): "
           f"maxerr={dfold:.2e} {'OK' if ok else 'FAIL'}")
     all_ok &= ok
+
+    # ---- 2b. the same on a 3-point mesh, where q != -q ----
+    # On a 2-point mesh every q equals -q, and the screened integrals can be
+    # taken in an order that violates momentum by 2(ki - kj) without any effect.
+    sup3 = gto.Cell()
+    sup3.atom = 'H 0 0 0; H 0 0 1.2; H 0 0 2.4; H 0 0 3.6; H 0 0 4.8; H 0 0 6.0'
+    sup3.basis = 'gth-szv'
+    sup3.pseudo = 'gth-pade'
+    sup3.a = np.diag([3.0, 3.0, 7.2])
+    sup3.verbose = 0
+    sup3.build()
+    sp_p3, herm_p3, pd_p3 = bse_spectrum(prim, [1, 1, 3])
+    sp_s3, herm_s3, pd_s3 = bse_spectrum(sup3, [1, 1, 1])
+    n = min(len(sp_p3), len(sp_s3))
+    dfold3 = np.abs(sp_p3[:n] - sp_s3[:n]).max()
+    ok = dfold3 < 1e-8
+    print(f"2b. full BSE supercell folding (1x1x3 union-q vs 3x-supercell Gamma): "
+          f"maxerr={dfold3:.2e} {'OK' if ok else 'FAIL'}")
+    all_ok &= ok
+    herm_p = max(herm_p, herm_p3)
+    pd_p = pd_p and pd_p3
 
     # ---- 3. structural: A,B Hermitian, A-B PD ----
     ok = max(herm_p, herm_s) < 1e-10 and pd_p and pd_s

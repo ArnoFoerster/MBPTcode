@@ -30,6 +30,7 @@ import numpy as np
 from pyscf.pbc import gto, scf
 
 from src.SingleReference.Periodic.pbc_integrals import PBCDFIntegrals
+from src.SingleReference.Periodic import pbc_casida as pc
 from src.SingleReference.Periodic import pbc_self_energy as pse
 
 
@@ -48,6 +49,29 @@ def sigma_table(cell, kmesh):
         for n in range(dfints.nmo):
             w = e[kn][n].real
             s = float(pse.sigma_c_diag(dfints, eig, kn, n, w, mo_energy=e))
+            rows.append((w, s))
+    rows.sort(key=lambda r: r[0])
+    return np.array(rows)
+
+
+def vertex_table(cell, kmesh):
+    """(eps, Sigma_c^GWGammaInf(eps)) for every (k, orbital), sorted by orbital
+    energy: BSE excitons, chi_a and the W-dressed chi_b."""
+    kpts = cell.make_kpts(kmesh)
+    mf = scf.KRHF(cell, kpts).density_fit()
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    dfints = PBCDFIntegrals.from_scf(cell, mf)
+    e = np.asarray(mf.mo_energy)
+    W_all = pc.build_static_W_all_Q(dfints, mo_energy=e)
+    eig = pse.solve_bse_all_q(dfints, W_all, mo_energy=e)
+
+    rows = []
+    for kn in range(dfints.nkpts):
+        for n in range(dfints.nmo):
+            w = e[kn][n].real
+            s = float(pse.sigma_vertex_diag(dfints, eig, W_all, kn, n, w,
+                                            vertex_mode='GWGammaInf', mo_energy=e))
             rows.append((w, s))
     rows.sort(key=lambda r: r[0])
     return np.array(rows)
@@ -97,6 +121,25 @@ if __name__ == '__main__':
         ratio = tp[:n, 1] / np.where(np.abs(ts[:n, 1]) > 1e-12, ts[:n, 1], np.nan)
         print(f"   primitive/supercell ratio: mean={np.nanmean(ratio):.4f} "
               f"(a clean constant would point at an nkpts power)")
+
+    # The vertex self-energy on a 3-point mesh, where q != -q: the BSE's
+    # screened integrals and chi_b's W-dressed ones must conserve momentum,
+    # which a 2-point mesh cannot check.
+    sup3 = gto.Cell()
+    sup3.atom = 'H 0 0 0; H 0 0 1.2; H 0 0 2.4; H 0 0 3.6; H 0 0 4.8; H 0 0 6.0'
+    sup3.basis = 'gth-szv'
+    sup3.pseudo = 'gth-pade'
+    sup3.a = np.diag([3.0, 3.0, 7.2])
+    sup3.verbose = 0
+    sup3.build()
+    vp = vertex_table(prim, [1, 1, 3])
+    vs = vertex_table(sup3, [1, 1, 1])
+    n = min(len(vp), len(vs))
+    d_vtx = np.abs(vp[:n, 1] - vs[:n, 1]).max()
+    ok_vtx = np.abs(vp[:n, 0] - vs[:n, 0]).max() < 1e-6 and d_vtx < 1e-6
+    print(f"3. GWGammaInf Sigma folds (1x1x3 primitive vs 3x supercell Gamma): "
+          f"maxerr={d_vtx:.2e} {'OK' if ok_vtx else 'FAIL'}")
+    all_ok &= ok_vtx
 
     print()
     print("ALL PASSED" if all_ok else "SOME FAILED")
