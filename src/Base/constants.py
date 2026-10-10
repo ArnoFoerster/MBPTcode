@@ -1305,3 +1305,14 @@ ISDF_RADII_MATCH_TOL = 1e-10
 # which the row-distributed transform keeps, so it is fixed by naux alone and
 # never by the rank count.
 SCREENED_CHUNK_BYTES = 2 << 30
+
+# Working set, in GB, of one occupied tile of the density-fitted folded
+# ADC(2) operator (`eeADC.ee_ri_fold`): the tile holds a handful of
+# (n_tile nvir, nocc nvir) doubles-shaped blocks, and its size moves only the
+# memory and the GEMM shapes, never a number beyond the summation order.
+EE_RI_TILE_GB = 8.0
+
+# Auxiliary functions per chunk while the occupied/virtual factors of the
+# folded ADC(2) operator are transformed from the AO three-index tensor; the
+# chunk holds (n_aux_chunk, nao, nao) doubles.
+EE_RI_AUX_CHUNK = 128

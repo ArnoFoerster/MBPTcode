@@ -79,6 +79,9 @@ def doubles_sb_to_flat(W, no, nv):
 
 
 def _check_level(pieces):
+    if pieces.get('operator') is not None:
+        # an operator (ee_ri_fold) carries its own spin channel and levels
+        return
     if pieces['level'] not in FOLD_LEVELS:
         raise ValueError(f"the fold needs a bare-diagonal doubles block; level="
                          f"{pieces['level']!r} is not one of {FOLD_LEVELS}")
@@ -132,6 +135,8 @@ def folded_operator(pieces, omega, spin=None):
         Channel basis -> full singles vector and back; identities for spin=None.
     """
     _check_level(pieces)
+    if pieces.get('operator') is not None:
+        return _operator_folded(pieces, omega, spin)
     no, nv, be = pieces['no'], pieces['nv'], pieces['be']
     M, V, Vt, D = pieces['M'], pieces['V'], pieces['Vt'], pieces['D']
     dnorm2 = pieces.get('dnorm2')
@@ -180,6 +185,38 @@ def folded_operator(pieces, omega, spin=None):
         return float(Yf @ Yf)
 
     return matvec, dmatvec, diag_s, embed, restrict
+
+
+def _operator_folded(pieces, omega, spin):
+    """folded_operator for pieces carrying an operator (ee_ri_fold.RIFoldADC2):
+    it acts on its own spin channel, whose basis is the alpha block of the
+    flip pairs (ee_driver._channel_basis at level 'adc1'), so embed and
+    restrict are those of that basis and the matvec has a block form."""
+    from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+    from src.SingleReference.ADC.eeADC.ee_ri_fold import FoldedMatvec
+    op = pieces['operator']
+    if spin != op.spin:
+        raise ValueError(f"the operator solves the {op.spin} channel; spin="
+                         f"{spin!r} asked")
+    no, nv = pieces['no'], pieces['nv']
+    embed, restrict, _ = _channel_basis(2 * no * nv, no, nv, 'adc1',
+                                        _CHANNEL[spin])
+    mv = FoldedMatvec(op, omega)
+
+    def dmatvec(u):
+        if omega is None:
+            return 0.0
+        u = _check_vector(u, op.n)
+        return float(op.doubles_dot(u, omega, u, omega))
+
+    return mv, dmatvec, op.diag.copy(), embed, restrict
+
+
+def _d_min(pieces):
+    """The lowest doubles energy min_K D_K."""
+    if pieces.get('operator') is not None:
+        return float(pieces['d_min'])
+    return float(np.min(pieces['D']))
 
 
 def dense_effective(matvec, n):
@@ -249,6 +286,9 @@ def _levels(e, tol=_DEGENERATE):
 
 def _doubles_dot(pieces, Ya, Yb):
     """sum_K Ya_K Yb_K over SB doubles, in the metric of the full eigenvector."""
+    if pieces.get('operator') is not None:
+        # images of an operator's pieces are kept as (u, omega), never formed
+        return float(pieces['operator'].doubles_dot(Ya[0], Ya[1], Yb[0], Yb[1]))
     dnorm2 = pieces.get('dnorm2')
     if dnorm2 is not None:
         # polarisation: <a, b> = (|a + b|² - |a - b|²) / 4
@@ -260,6 +300,10 @@ def _doubles_dot(pieces, Ya, Yb):
 
 def _doubles_image(pieces, u, omega, embed):
     """Ỹ_K = sum_jb V_K,jb u_jb / (ω - D_K) of a channel vector u, SB doubles."""
+    if pieces.get('operator') is not None:
+        # the image itself is doubles-sized: keep (u, omega), from which
+        # the operator rebuilds the overlap of two images tile by tile
+        return (np.asarray(u, float).ravel(), float(omega))
     no, nv, be = pieces['no'], pieces['nv'], pieces['be']
     y1 = singles_flat_to_sb(embed(u), no, nv)
     return be.divide(pieces['V'](y1), omega - pieces['D'])
@@ -828,7 +872,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     # A level spreads by up to _DEGENERATE and is solved at its mean, so the
     # window holds that spread too
     tol = max(2.0 * tol_omega, _DEGENERATE)
-    d_min = float(np.min(pieces['D']))
+    d_min = _d_min(pieces)
     for rnd in range(_COUNT_ROUNDS + 1):
         L = live()
         found = np.array([omega[r] for r in L])

@@ -493,6 +493,23 @@ class SolventScreening:
                                             axes=(0, 1)).transpose(1, 0, 2)
         return out
 
+    def ov_grid_potential(self, mol, mo_occ, mo_vir, budget_gb=ISDF_TILE_GB):
+        """v_k[phi_i phi_a], shape (nocc, nvir, ngrids): the surface potential
+        of the occupied-virtual pair densities alone, which is all a
+        transition density needs (mo_grid_potential holds every pair).
+        Transformed grid block by grid block like mo_grid_potential."""
+        mo_occ = np.asarray(mo_occ, float)
+        mo_vir = np.asarray(mo_vir, float)
+        no, nv = mo_occ.shape[1], mo_vir.shape[1]
+        out = np.empty((no, nv, self.ngrids))
+        for k0, k1 in self.grid_blocks(mo_occ.shape[0], live=2,
+                                       budget_gb=budget_gb):
+            v_ao = self.ao_grid_potential(mol, grids=slice(k0, k1))
+            half = np.tensordot(mo_occ, v_ao, axes=(0, 0))      # (i, nu, k)
+            out[:, :, k0:k1] = np.tensordot(half, mo_vir, axes=(1, 0)
+                                            ).transpose(0, 2, 1)
+        return out
+
     def aux_grid_potential(self, auxmol):
         """v_k[chi_P] for auxiliary basis functions, shape (naux, ngrids): the
         paper's ingredient for its Eq. (16) vtilde_{beta beta'}."""
