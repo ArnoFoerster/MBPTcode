@@ -28,8 +28,45 @@ V[p,q,r,s], for a closed-shell reference:
     abba = baab = -V(pqsr)
 """
 import itertools
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+
+_EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
+_POOLS = {}             # thread count -> pool, built on first use
+
+
+def _threads():
+    """The thread pin, OMP_NUM_THREADS, else the cores this process may run on."""
+    pin = os.environ.get('OMP_NUM_THREADS', '')
+    if pin.isdigit() and int(pin) > 0:
+        return int(pin)
+    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') \
+        else (os.cpu_count() or 1)
+
+
+def _ew(op, a, b, out=None):
+    """op(a, b) for a NumPy ufunc op, a an array and b a scalar or an array of a's
+    shape, split over the leading axis across the thread pin. A ufunc releases
+    the GIL, so the slabs run in parallel; each element sees the same operation,
+    so the result equals op(a, b) bit for bit. out may be a, never a view of b
+    under another axis order."""
+    a = np.asarray(a)
+    nt = min(_threads(), a.shape[0] if a.ndim else 1)
+    if nt < 2 or a.size < _EW_MIN or (np.ndim(b) and np.shape(b) != a.shape):
+        return op(a, b) if out is None else op(a, b, out=out)
+    if out is None:
+        out = np.empty(a.shape, np.result_type(a, b))
+    pool = _POOLS.get(nt) or _POOLS.setdefault(nt, ThreadPoolExecutor(nt))
+    cuts = np.linspace(0, a.shape[0], nt + 1).astype(int)
+
+    def slab(k):
+        s = slice(cuts[k], cuts[k + 1])
+        op(a[s], b[s] if np.ndim(b) else b, out=out[s])
+
+    list(pool.map(slab, range(nt)))
+    return out
 
 
 class SB:
@@ -82,21 +119,21 @@ class SB:
                 if k[0] != 'a':
                     continue
                 if k not in half:
-                    half[k] = sign * v
+                    half[k] = _ew(np.multiply, v, sign)
                 elif sign > 0:
-                    half[k] = half[k] + v
+                    half[k] = _ew(np.add, half[k], v)
                 else:
-                    half[k] = half[k] - v
+                    half[k] = _ew(np.subtract, half[k], v)
             return SB(_with_flip(half, self.parity), parity=self.parity)
         out = dict(self.blocks)
         for k, v in other.blocks.items():
             # one pass over the block: sign * v would be a second full temporary
             if k not in out:
-                out[k] = sign * v
+                out[k] = _ew(np.multiply, v, sign)
             elif sign > 0:
-                out[k] = out[k] + v
+                out[k] = _ew(np.add, out[k], v)
             else:
-                out[k] = out[k] - v
+                out[k] = _ew(np.subtract, out[k], v)
         return SB(out)
 
     def __add__(self, other):
@@ -106,10 +143,10 @@ class SB:
         return self._combine(other, -1.0)
 
     def __neg__(self):
-        return self._map(lambda v: -v)
+        return self._map(lambda v: _ew(np.multiply, v, -1.0))
 
     def __mul__(self, c):
-        return self._map(lambda v: c * v)
+        return self._map(lambda v: _ew(np.multiply, v, c))
 
     __rmul__ = __mul__
 
@@ -127,16 +164,16 @@ class SB:
         denominator, whose value differs between same- and opposite-spin
         configurations)."""
         if isinstance(arr, SB):
-            return SB({k: v * arr.get(k) for k, v in self.blocks.items()
-                       if arr.get(k) is not None})
-        return self._map(lambda v: v * arr)
+            return SB({k: _ew(np.multiply, v, arr.get(k))
+                       for k, v in self.blocks.items() if arr.get(k) is not None})
+        return self._map(lambda v: _ew(np.multiply, v, arr))
 
     def divide(self, arr):
         """scale() by the reciprocal, without forming 1/arr for the whole SB."""
         if isinstance(arr, SB):
-            return SB({k: v / arr.get(k) for k, v in self.blocks.items()
-                       if arr.get(k) is not None})
-        return self._map(lambda v: v / arr)
+            return SB({k: _ew(np.true_divide, v, arr.get(k))
+                       for k, v in self.blocks.items() if arr.get(k) is not None})
+        return self._map(lambda v: _ew(np.true_divide, v, arr))
 
     def spin_flip(self):
         """The closed-shell involution alpha <-> beta."""
@@ -238,8 +275,10 @@ def ovvv_ia(S, X):
     out = {}
     spins = (('aa', ('aaaa', 'abba', 'abab')), ('bb', ('bbbb', 'baab', 'baba')))
     for s, (same, with_v, with_neg) in (spins if X.parity is None else spins[:1]):
-        Z = (X.get(same) - X.get(same).transpose(0, 1, 3, 2) + X.get(with_v)
-             - X.get(with_neg).transpose(0, 1, 3, 2))
+        # Z = X^same - X^same_ijcb + X^v - X^neg_ijcb, left to right, in place
+        Z = _ew(np.subtract, X.get(same), X.get(same).transpose(0, 1, 3, 2))
+        _ew(np.add, Z, X.get(with_v), out=Z)
+        _ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
         out[s] = Z.reshape(Z.shape[0], -1) @ Sm.T
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
@@ -268,16 +307,23 @@ def ovvv_ijab(S, x):
         return (xs @ Sm).reshape(no, no, nv, nv).transpose(1, 0, 2, 3)
 
     swap = (0, 1, 3, 2)
+
+    def anti(T):
+        return _ew(np.subtract, T, T.transpose(swap))       # T_ijab - T_ijba
+
+    def neg_swap(T):
+        return _ew(np.multiply, T.transpose(swap), -1.0)    # -T_ijba
+
     if x.parity is not None:
         Ta = t(x.get('aa'))
-        Tb = Ta if x.parity > 0 else -Ta
-        return SB(_with_flip({'aaaa': Ta - Ta.transpose(swap), 'abab': Tb,
-                              'abba': -Tb.transpose(swap)}, x.parity),
+        Tb = Ta if x.parity > 0 else _ew(np.multiply, Ta, -1.0)
+        return SB(_with_flip({'aaaa': anti(Ta), 'abab': Tb,
+                              'abba': neg_swap(Tb)}, x.parity),
                   parity=x.parity)
     Ta, Tb = t(x.get('aa')), t(x.get('bb'))
-    return SB({'aaaa': Ta - Ta.transpose(swap), 'bbbb': Tb - Tb.transpose(swap),
+    return SB({'aaaa': anti(Ta), 'bbbb': anti(Tb),
                'baba': Ta, 'abab': Tb,
-               'baab': -Ta.transpose(swap), 'abba': -Tb.transpose(swap)})
+               'baab': neg_swap(Ta), 'abba': neg_swap(Tb)})
 
 
 def g_blocks_sb(V, nocc_spatial, norb_spatial):

@@ -29,7 +29,7 @@ import numpy as np
 from src.Base.eri_blocks import MOEriBlocks
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
+from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew
 from src.SingleReference.GW.quasi_boson import QPqb
 
 
@@ -143,15 +143,21 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
     # D_kcm = Ω_m + ε_c - ε_k
     D = omega[None, None, :] + ev[None, :, None] - eo[:, None, None]
 
+    nm = omega.size
+    # matmuls on views of W: the slices keep (c, m) and (k, m) contiguous, so no
+    # call copies W, the largest array
+
     def couple(y):
         # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic
-        return (np.einsum('acm,ka->kcm', Wvv, y, optimize=True)
-                - np.einsum('ikm,ic->kcm', Woo, y, optimize=True))
+        Y = (y @ Wvv.reshape(nv, nv * nm)).reshape(no, nv, nm)
+        # sum_i W^m_ik y_ic as the batch over k of sum_i y^T_ci W^m_ik
+        return _ew(np.subtract, Y, np.matmul(y.T, Woo.transpose(1, 0, 2)), out=Y)
 
     def couple_t(Y):
         # w_ia = sum_cm W^m_ac Y_icm - sum_km W^m_ik Y_kam
-        return (np.einsum('acm,icm->ia', Wvv, Y, optimize=True)
-                - np.einsum('ikm,kam->ia', Woo, Y, optimize=True))
+        w = Y.reshape(no, nv * nm) @ Wvv.reshape(nv, nv * nm).T
+        # sum_km W^m_ik Y_kam as sum over k of the batch sum_m W^m_ik Y^T_kma
+        return w - np.matmul(Woo.transpose(1, 0, 2), Y.transpose(0, 2, 1)).sum(axis=0)
 
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})

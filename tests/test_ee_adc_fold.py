@@ -90,6 +90,10 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       its elapsed time and matvec count, the closing count equals the matvecs
       solve_symmetric received, a zero heartbeat interval prints heartbeats, and no
       trace outlives a call, one that raises included.
+  26. ee_spin_blocks._ew, the elementwise pass split over the thread pin, equals the
+      plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
+      difference with an (a, b)-transposed operand, an in-place sum, a scalar
+      product, a quotient, and a broadcast shape it leaves to NumPy.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1418,6 +1422,37 @@ def check_trace(eps, B, no):
     return ok
 
 
+def check_threaded_elementwise():
+    """_ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
+    array above the size where the pass is split."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    rng = np.random.default_rng(3)
+    a = rng.standard_normal((64, 32, 32, 32))
+    b = rng.standard_normal(a.shape)
+    d = 1.0 + rng.random(a.shape)
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '4'
+    try:
+        split = a.size >= sb._EW_MIN and sb._threads() == 4
+        z = sb._ew(np.subtract, a, b.transpose(0, 1, 3, 2))
+        s = a.copy()
+        sb._ew(np.add, s, b, out=s)
+        cases = {'difference, transposed operand': (z, a - b.transpose(0, 1, 3, 2)),
+                 'in-place sum': (s, a + b),
+                 'scalar product': (sb._ew(np.multiply, a, -1.0), -a),
+                 'quotient': (sb._ew(np.true_divide, a, d), a / d),
+                 'broadcast, left to NumPy': (sb._ew(np.multiply, a, d[0]), a * d[0])}
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    bad = [k for k, (x, y) in cases.items() if not np.array_equal(x, y)]
+    return check(split and not bad,
+                 'the threaded elementwise pass equals the plain ufunc bit for bit',
+                 f'split {split}, differing {bad}')
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1461,6 +1496,7 @@ def main():
     all_ok &= check_refusals()
     all_ok &= check_degenerate_hidden()
     all_ok &= check_trace(eps, B, no)
+    all_ok &= check_threaded_elementwise()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
