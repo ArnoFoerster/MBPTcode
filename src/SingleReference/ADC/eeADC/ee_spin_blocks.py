@@ -471,18 +471,22 @@ def ovvv_ijab_pij_slab(S, x, j0, j1):
 
         aaaa = C^a - C^a_ijba,   baba = U,   baab = -U_ijba,
 
-    and alpha <-> beta for bbbb, abab (U'), abba (-U'_ijba). The slabs together
-    form T twice, where ovvv_ijab forms it once."""
+    and alpha <-> beta for bbbb, abab (U'), abba (-U'_ijba). Several slabs together
+    form T twice, where ovvv_ijab forms it once; one slab over every j takes B^s
+    as A^s with i and j swapped and forms it once."""
     if x.parity is not None:
         raise NotImplementedError('ovvv_ijab_pij_slab takes x without a flip parity')
     nv, no = S.shape[0], S.shape[1]
     nj = j1 - j0
-    Sm, Sj = S.reshape(nv, -1), S[:, j0:j1].reshape(nv, -1)
     swap = (0, 1, 3, 2)
     # A^s at [i, j] for j in the slab, and B^s at [i, j], both (i, j, a, b)
-    Aa, Ab = ((x.get(s)[j0:j1] @ Sm).reshape(nj, no, nv, nv).transpose(1, 0, 2, 3)
-              for s in ('aa', 'bb'))
-    Ba, Bb = ((x.get(s) @ Sj).reshape(no, nj, nv, nv) for s in ('aa', 'bb'))
+    Aa, Ab = ((x.get(s)[j0:j1] @ S.reshape(nv, -1)).reshape(nj, no, nv, nv)
+              .transpose(1, 0, 2, 3) for s in ('aa', 'bb'))
+    if nj == no:
+        Ba, Bb = Aa.transpose(1, 0, 2, 3), Ab.transpose(1, 0, 2, 3)
+    else:
+        Sj = S[:, j0:j1].reshape(nv, -1)
+        Ba, Bb = ((x.get(s) @ Sj).reshape(no, nj, nv, nv) for s in ('aa', 'bb'))
     Ca, Cb = _ew(np.subtract, Aa, Ba), _ew(np.subtract, Ab, Bb)
     U = _ew(np.add, Aa, Bb.transpose(swap))
     Up = _ew(np.add, Ab, Ba.transpose(swap))

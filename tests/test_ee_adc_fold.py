@@ -1638,6 +1638,20 @@ def check_slab_contractions():
                 f'{d_ovvv:.1e} relative')
     ok &= check(d_ooov < 1e-13, 'ooov_ia_slab summed over the slabs equals ooov_ia',
                 f'{d_ooov:.1e} relative')
+
+    class Counted(np.ndarray):
+        """S that counts the products taken against it."""
+        products = 0
+
+        def __rmatmul__(self, other):
+            Counted.products += 1
+            return np.matmul(other, self.view(np.ndarray))
+
+    X = sb.ovvv_ijab_pij_slab(S.view(Counted), x, 0, no)
+    d_one = max(rel(np.asarray(X.get(k)), full.get(k)) for k in keys)
+    ok &= check(d_one < 1e-13 and Counted.products == 2,
+                'one slab over every j forms T once per spin, as ovvv_ijab does',
+                f'{Counted.products} products against S, {d_one:.1e} relative')
     import threading
     calls = {'main': [], 'pool': []}
 
