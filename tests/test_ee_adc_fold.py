@@ -87,9 +87,10 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
   25. the progress trace (water singlets, nroots 3, Davidson): verbose 1 returns
       the roots of verbose 0 to 1e-10 Ha, verbose 0 prints nothing; at verbose 1 the
       start, seeds, count round, check and closing lines appear, every line ends on
-      its elapsed time and matvec count, the closing count equals the matvecs
-      solve_symmetric received, a zero heartbeat interval prints heartbeats, and no
-      trace outlives a call, one that raises included.
+      its elapsed time and matvec count, the closing count equals every
+      application of the operator (with solver='newton' the matvecs
+      solve_symmetric received), a zero heartbeat interval prints heartbeats, and
+      no trace outlives a call, one that raises included.
   26. ee_spin_blocks._ew, the elementwise pass split over the thread pin, equals the
       plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
       difference with an (a, b)-transposed operand, an in-place sum, a scalar
@@ -111,6 +112,20 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       the model converges, its roots lie within 1e-3 Ha of the Newton roots, and
       the per-root Newton polish from them, at most three steps a root, returns
       the Newton roots to 1e-7 Ha.
+  31. solver='davidson' is the default of solve_folded: on water singlets, nroots
+      3, its roots equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop
+      reads 'davidson', solver='bogus' raises ValueError; on CH4 / 6-31G
+      triplets, nroots 1 (check 13's reordered case), it returns Newton's T2
+      triple without an index solve and closes on fewer matvecs.
+  32. the default's polish and duplicate check: a model root one polish step
+      cannot fix (strong coupling, the centre held at M's root) comes back
+      converged False with a warning; a root the Davidson hands over twice is
+      reported, the copy dropped, the displaced root solved by index.
+
+The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
+level split in A_eff, the count's repairs, a cut past min D) is checked through
+solver='newton' in checks 4, 5, 8, 12, 13, 18, 21 and 23, where the default meets
+the same inputs without it, as their added lines check.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -264,6 +279,7 @@ def check_solve_folded(mf, eps, B, no):
         e_full, Z = solve_ee_adc(mf, level='adc2', nroots=3, df=True, spin=spin,
                                  conv_tol=1e-10)
         res = ee_fold.solve_folded(P, 3, spin=spin)
+        res_n = ee_fold.solve_folded(P, 3, spin=spin, solver='newton')
         for r in range(3):
             d = abs(res.omega[r] - e_full[r]) * ev
             ok &= check(d < 1e-5, f'{spin} root {r}: folded equals full ADC(2)',
@@ -273,15 +289,21 @@ def check_solve_folded(mf, eps, B, no):
             t1_full = float(z[:n_s] @ z[:n_s]) / float(z @ z)
             ok &= check(abs(res.t1[r] - t1_full) < 1e-4, f'{spin} root {r}: T1',
                         f'{res.t1[r]:.5f} vs {t1_full:.5f}')
-            newton = (res.converged[r] and res.steps[r] <= 8
-                      and res.loop[r] == 'newton')
+            newton = (res_n.converged[r] and res_n.steps[r] <= 8
+                      and res_n.loop[r] == 'newton')
             ok &= check(newton, f'{spin} root {r}: Newton under eight steps',
-                        f'{res.steps[r]} steps, loop {res.loop[r]}')
-        # the fixed-point loop reaches the same roots
-        res_fp = ee_fold.solve_folded(P, 3, spin=spin, t_min=1.0)
+                        f'{res_n.steps[r]} steps, loop {res_n.loop[r]}')
+        # the fixed-point loop reaches the same roots, from the seeds and as the
+        # default's polish
+        res_fp = ee_fold.solve_folded(P, 3, spin=spin, t_min=1.0, solver='newton')
         d = float(np.max(np.abs(res_fp.omega - e_full[:3]))) * ev
         ok &= check(d < 1e-5 and all(lp == 'fixed' for lp in res_fp.loop),
                     f'{spin}: fixed-point loop reaches the same roots',
+                    f'|d| {d:.1e} eV')
+        res_fp = ee_fold.solve_folded(P, 3, spin=spin, t_min=1.0)
+        d = float(np.max(np.abs(res_fp.omega - e_full[:3]))) * ev
+        ok &= check(d < 1e-5 and bool(res_fp.converged.all()),
+                    f"{spin}: the default's polish in the fixed-point loop too",
                     f'|d| {d:.1e} eV')
     # short channel: H2/STO-3G has one triplet single
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
@@ -385,7 +407,7 @@ def check_degenerate_set():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             short = ee_fold.solve_folded(P, 3, spin='singlet', max_newton=1,
-                                         dense_limit=dense_limit)
+                                         dense_limit=dense_limit, solver='newton')
         lv = any('level' in str(x.message) and 'not converged' in str(x.message)
                  for x in caught)
         ok &= check(lv and not short.converged[:3].any(),
@@ -493,7 +515,8 @@ def check_boundaries(mf, eps, B, no):
     D0, M0 = P['D'].copy(), P['M'].get('aaaa').copy()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        res = ee_fold.solve_folded(P, 1, spin='singlet', max_newton=1)
+        res = ee_fold.solve_folded(P, 1, spin='singlet', max_newton=1,
+                                   solver='newton')
     budget = any('not converged' in str(w.message) for w in caught)
     ok &= check(not res.converged[0] and budget,
                 'an exhausted step budget reports converged False and warns',
@@ -786,7 +809,8 @@ def check_collapsing_pair():
     P = _synthetic_pieces(m, C, D)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12)
+        res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12,
+                                   solver='newton')
     dup = any('landed on one root' in str(x.message) for x in caught)
     ok &= check(dup and res.omega.size == 2 and bool(res.converged.all()),
                 'the collapse is reported: a warning, the copy dropped',
@@ -804,12 +828,22 @@ def check_collapsing_pair():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12,
-                                   dense_limit=0)
+                                   dense_limit=0, solver='newton')
     dup = any('landed on one root' in str(x.message) for x in caught)
     d = np.abs(res.omega - pair).max() if res.omega.size == 2 else np.inf
     ok &= check(dup and d < 1e-8,
                 'Davidson, tol_omega 1e-12 at tol_residual 1e-6: the collapse is '
                 'caught and both roots come back', f'max |dw| {d:.1e} Ha')
+    for dl in (2000, 0):
+        # the root-wise Davidson follows both branches: no seed collapses
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12,
+                                       dense_limit=dl)
+        d = np.abs(res.omega - pair).max() if res.omega.size == 2 else np.inf
+        ok &= check(d < 1e-8 and not caught,
+                    f'dense_limit {dl}: the default finds both roots of the pair, '
+                    'no warning', f'max |dw| {d:.1e} Ha, {len(caught)} warning(s)')
     return ok
 
 
@@ -828,7 +862,8 @@ def check_split_level():
     P = _synthetic_pieces(m, C, D)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12)
+        res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12,
+                                   solver='newton')
     split = any('not degenerate' in str(x.message) for x in caught)
     ok &= check(split and pair.size == 2,
                 'a level split in A_eff warns and is re-solved per root',
@@ -844,6 +879,16 @@ def check_split_level():
     ok &= check(res.steps.size >= 2 and int(res.steps[:2].min()) > 2,
                 "the split roots' steps include the joint solve's",
                 f'steps {res.steps.tolist()}')
+    # the default: two roots of the model, never one level
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12)
+    d = np.abs(np.sort(res.omega)[:2] - pair) if res.omega.size >= 2 else [np.inf]
+    lv = res.level[:2].tolist()
+    ok &= check(float(np.max(d)) < 1e-10 and len(lv) == 2 and lv[0] != lv[1]
+                and not caught,
+                'the default: both roots, levels of their own, no warning',
+                f'max |dw| {np.max(d):.1e} Ha, level {lv}, {len(caught)} warning(s)')
     return ok
 
 
@@ -1170,7 +1215,8 @@ def check_warning_paths(eps, B, no):
     def run(P, nroots, **kw):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            res = ee_fold.solve_folded(P, nroots, spin='singlet', **kw)
+            res = ee_fold.solve_folded(P, nroots, spin='singlet', solver='newton',
+                                       **kw)
         return res, [str(x.message) for x in caught]
 
     def pair(eps_m):
@@ -1309,10 +1355,16 @@ def check_cut_above_doubles():
     C = np.array([[0.0, 0.0, 0.0, np.sqrt((1.0 - om) * (0.8 - om))]])
     for dl in (2000, 0):
         got, d, msgs = _fold_run(np.array([0.5, 0.6, 0.9, 1.0]), C, np.array([0.8]),
-                                 3, dense_limit=dl)
+                                 3, dense_limit=dl, solver='newton')
         ok &= check(d < 1e-8 and not msgs,
                     f'dense_limit {dl}: nroots 3 past min D returns 0.5, 0.55, 0.6',
                     f'got {np.round(got, 9).tolist()}, {len(msgs)} warning(s)')
+        # the default never finds 0.9: its polish stops at |lambda - w| < 1e-6
+        got, d, msgs = _fold_run(np.array([0.5, 0.6, 0.9, 1.0]), C, np.array([0.8]),
+                                 3, dense_limit=dl)
+        ok &= check(d < 1e-7 and not msgs,
+                    f'dense_limit {dl}: the default returns 0.5, 0.55, 0.6',
+                    f'max |dw| {d:.1e} Ha, {len(msgs)} warning(s)')
     return ok
 
 
@@ -1347,7 +1399,8 @@ def check_refusals():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
-                                   t_min=0.999, max_newton=1, max_fixed=1)
+                                   t_min=0.999, max_newton=1, max_fixed=1,
+                                   solver='newton')
     msgs = [str(x.message) for x in caught]
     d = abs(res.omega[0] - np.sort(_synthetic_exact(m, C, D)[0])[0])
     ok &= check(any('(fixed)' in x for x in msgs) and res.loop == ['index']
@@ -1384,8 +1437,9 @@ def check_degenerate_hidden():
 def check_trace(eps, B, no):
     """verbose 1 against verbose 0 on water singlets, nroots 3: the same roots bit
     for bit, the phase lines with their stamps, the closing matvec count against
-    the matvecs solve_symmetric received, heartbeats at a zero interval, and the
-    trace reset after every call, one that raises included."""
+    every application of the operator (the Davidson's images included) and, with
+    solver='newton', against the matvecs solve_symmetric received, heartbeats at a
+    zero interval, and the trace reset after every call, one that raises included."""
     import contextlib
     import io
     import re
@@ -1395,19 +1449,38 @@ def check_trace(eps, B, no):
     with contextlib.redirect_stdout(out0):
         res0 = ee_fold.solve_folded(P, 3, spin='singlet')
     calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold._HEARTBEAT
+    apps, fop = [0], ee_fold.folded_operator
 
     def counted(matvec, diag, **k):
         def mv(u):
             calls[0] += 1
             return matvec(u)
         return solve(mv, diag, **k)
+
+    def applied(pieces, omega, spin=None):
+        # every matvec and every vector dmatvec, inside solve_symmetric or not
+        matvec, dmatvec, diag_s, embed, restrict = fop(pieces, omega, spin)
+
+        def mv(u):
+            apps[0] += 1
+            return matvec(u)
+
+        def dmv(u, vector=False):
+            apps[0] += bool(vector)
+            return dmatvec(u, vector=vector)
+        return mv, dmv, diag_s, embed, restrict
     ee_fold.solve_symmetric, ee_fold._HEARTBEAT = counted, 0.0
-    out1 = io.StringIO()
+    ee_fold.folded_operator = applied
+    out1, outn = io.StringIO(), io.StringIO()
     try:
         with contextlib.redirect_stdout(out1):
             res1 = ee_fold.solve_folded(P, 3, spin='singlet', verbose=1)
+        n_calls, n_apps, calls[0] = calls[0], apps[0], 0
+        with contextlib.redirect_stdout(outn):
+            ee_fold.solve_folded(P, 3, spin='singlet', verbose=1, solver='newton')
     finally:
         ee_fold.solve_symmetric, ee_fold._HEARTBEAT = solve, beat
+        ee_fold.folded_operator = fop
     lines = out1.getvalue().splitlines()
     stamp = re.compile(r'\[t = \d+\.\d s, mv = (\d+)\]$')
     d = float(np.abs(res0.omega - res1.omega).max()) \
@@ -1426,8 +1499,15 @@ def check_trace(eps, B, no):
                 f'{len(lines)} lines, missing {[t for t in tags if not seen[t]]}, '
                 f'{len(unstamped)} unstamped')
     ok &= check(last is not None and 'returns' in lines[-1]
-                and int(last.group(1)) == calls[0],
-                'the closing line counts the matvecs solve_symmetric received',
+                and int(last.group(1)) == n_apps and n_calls < n_apps,
+                'the closing line counts every application, the Davidson images '
+                'beside the matvecs solve_symmetric received',
+                f'closing {last.group(1) if last else None}, applications {n_apps}, '
+                f'received {n_calls}')
+    last = stamp.search(outn.getvalue().splitlines()[-1])
+    ok &= check(last is not None and int(last.group(1)) == calls[0],
+                "solver='newton': the closing line counts the matvecs "
+                'solve_symmetric received',
                 f'closing {last.group(1) if last else None}, received {calls[0]}')
     try:
         ee_fold.solve_folded(P, 3, spin='quintet', verbose=1)
@@ -1627,6 +1707,117 @@ def check_davidson_omega(eps, B, no):
     return ok
 
 
+def _closing_mv(P, nroots, spin, **kw):
+    """(FoldResult, closing mv) of solve_folded at verbose 1, its stdout captured."""
+    import contextlib
+    import io
+    import re
+    from src.SingleReference.ADC.eeADC import ee_fold
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        res = ee_fold.solve_folded(P, nroots, spin=spin, verbose=1, **kw)
+    last = re.search(r'mv = (\d+)\]$', out.getvalue().splitlines()[-1])
+    return res, int(last.group(1)) if last else -1
+
+
+def check_solver_default(eps, B, no):
+    """solver='davidson' is the default: on water adc2 singlets, nroots 3, its roots
+    equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop reads 'davidson'
+    for every root, solver='bogus' raises ValueError; on CH4 / 6-31G triplets,
+    nroots 1, where the fold puts M's lowest state above the T2 triple (check 13),
+    the default returns Newton's triple without the count's index solve and closes
+    on fewer matvecs."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    dav = ee_fold.solve_folded(P, 3, spin='singlet')
+    new = ee_fold.solve_folded(P, 3, spin='singlet', solver='newton')
+    same = dav.omega.shape == new.omega.shape
+    d = float(np.max(np.abs(dav.omega - new.omega))) if same else np.inf
+    dt = float(np.max(np.abs(dav.t1 - new.t1))) if same else np.inf
+    ok = check(d < 1e-8 and dt < 1e-6 and dav.converged.all(),
+               "solver 'davidson' and 'newton' give the same roots and T1",
+               f'|dw| {d:.1e} Ha, |dT1| {dt:.1e}')
+    ok &= check(dav.loop == ['davidson'] * dav.omega.size
+                and 'davidson' not in new.loop,
+                "loop reads 'davidson' for every root of the default",
+                f'{dav.loop}, {new.loop}')
+    try:
+        ee_fold.solve_folded(P, 3, spin='singlet', solver='bogus')
+        raised = False
+    except ValueError:
+        raised = True
+    ok &= check(raised, "solver='bogus' raises ValueError")
+    mol = gto.M(atom=CH4, basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    e4 = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
+    B4 = DFIntegrals.from_scf(mol, mf).B_aa
+    P4 = ee_r_sigma_df.build_operator(e4, B4, mol.nelectron // 2, level='adc2',
+                                      pieces=True)[3]
+    r_dav, mv_dav = _closing_mv(P4, 1, 'triplet')
+    r_new, mv_new = _closing_mv(P4, 1, 'triplet', solver='newton')
+    same = r_dav.omega.shape == r_new.omega.shape == (3,)
+    d = float(np.max(np.abs(r_dav.omega - r_new.omega))) if same else np.inf
+    ok &= check(same and d < 1e-8 and 'index' in r_new.loop
+                and r_dav.loop == ['davidson'] * 3,
+                'CH4 / 6-31G triplets, nroots 1: the default finds the T2 triple '
+                'that Newton reaches by index', f'|dw| {d:.1e} Ha, {r_new.loop}')
+    ok &= check(0 < mv_dav < mv_new,
+                'there the default closes on fewer matvecs than Newton',
+                f'{mv_dav} against {mv_new}')
+    return ok
+
+
+def check_default_polish():
+    """The default's exact polish and its duplicate check: a model root far from
+    its exact root (strong coupling, the centre never moved: _RECENTRE 10 Ha) with
+    one polish step comes back converged False with the solve's warning, never at
+    the model's value as converged; two roots the Davidson hands over as copies of
+    one are reported, the copy dropped, and the root it displaced solved by index."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    ok = True
+    m, C, D = np.array([0.5, 0.9]), np.array([[0.25, 0.0]]), np.array([0.8])
+    w = np.sort(_synthetic_exact(m, C, D)[0])
+    keep = ee_fold._RECENTRE
+    ee_fold._RECENTRE = 10.0
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
+                                       dense_limit=0, max_newton=1, t_min=0.0)
+    finally:
+        ee_fold._RECENTRE = keep
+    warned = any('not converged' in str(x.message) for x in caught)
+    off = abs(float(res.omega[0]) - w[0])
+    ok &= check(warned and not res.converged[0] and off > 1e-6,
+                'a model root one polish step cannot fix: converged False, warned',
+                f'|w - exact| {off:.1e} Ha, converged {res.converged.tolist()}')
+    m, C, D = np.array([0.5, 0.6, 0.9]), np.array([[0.1, 0.1, 0.0]]), np.array([1.2])
+    w = np.sort(_synthetic_exact(m, C, D)[0])[:2]
+    orig = ee_fold._davidson_omega
+
+    def twice(*a):
+        # the lowest root handed over twice, 1e-6 Ha apart, one vector
+        oms, X, conv, cycles = orig(*a)
+        return (np.array([oms[0], oms[0] + 1e-6]), X[:, [0, 0]], conv[[0, 0]],
+                cycles)
+    ee_fold._davidson_omega = twice
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 2, spin='singlet',
+                                       dense_limit=0)
+    finally:
+        ee_fold._davidson_omega = orig
+    dup = any('landed on one root' in str(x.message) for x in caught)
+    d = float(np.max(np.abs(res.omega - w))) if res.omega.size == 2 else np.inf
+    ok &= check(dup and d < 1e-8 and res.loop == ['davidson', 'index'],
+                'a copy from the Davidson is dropped and the displaced root solved '
+                'by index', f'max |dw| {d:.1e} Ha, loop {res.loop}')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1675,6 +1866,8 @@ def main():
     all_ok &= check_kernel_hook(eps, B, no)
     all_ok &= check_model_roots()
     all_ok &= check_davidson_omega(eps, B, no)
+    all_ok &= check_solver_default(eps, B, no)
+    all_ok &= check_default_polish()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

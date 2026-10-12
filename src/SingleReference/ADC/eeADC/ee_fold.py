@@ -50,7 +50,8 @@ import numpy as np
 
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
-from src.Solvers.davidson import diagonal_seeds, overlap_pick, solve_symmetric
+from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
+                                  overlap_pick, solve_symmetric)
 
 FOLD_LEVELS = ('adc2', 'gf2', 'gw')
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
@@ -62,6 +63,7 @@ _DUPLICATE = 0.5        # full-vector overlap above which two roots are one
 _COUNT_ROUNDS = 3       # rounds of the count check before it warns
 _HEARTBEAT = 600.0      # seconds: an eigensolve reports at most this often meanwhile
 _RECENTRE = 0.01        # Hartree: a root this far from the centre rebuilds the images
+_FOLLOW = 2             # roots past nroots the Davidson may follow and seeds whole
 # the progress record of the solve_folded call in flight at verbose >= 1, else None
 _TRACE = contextvars.ContextVar('ee_fold_trace', default=None)
 
@@ -281,8 +283,8 @@ class FoldResult:
         degenerate level share its index and its omega, and a seed level that
         A_eff splits gives each of its roots a level of its own
     steps : ndarray, shape (nout,), outer iterations used
-    loop : list of str, 'newton', 'fixed' or 'index' (solved by branch index) per
-        root
+    loop : list of str, 'newton', 'fixed', 'index' (solved by branch index) or
+        'davidson' (found by the root-wise Davidson, then polished) per root
     converged : ndarray, shape (nout,), bool
     embed : callable, channel vector -> full flat singles vector
 
@@ -493,22 +495,25 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     The subspace Q holds the images S0 = A_eff(om0) Q and S1 = A'(om0) Q at one
     centre om0, so the model H(ω) = Q^T A_eff(om0) Q + (ω - om0) Q^T A'(om0) Q is
     exact to first order in ω - om0, and _model_roots solves it for every root at
-    its own ω. The roots followed are the model's levels (_levels) that start below
-    nroots, so a level cut by nroots is followed whole; each adds its
-    preconditioned model residual to Q, and the vectors of a level come from one
-    eigh at its mean ω, orthonormal. When the median root lies farther than
-    _RECENTRE from om0 the centre moves there and every image is rebuilt; Q
-    collapses onto the roots' vectors when it would pass max_subspace.
-    Convergence is the model residual below tol_residual and the roots moving less
-    than tol_omega between cycles; a root away from om0 keeps the model's
-    second-order error, so the caller polishes each root exactly. Every
-    application of A_eff, A' and M counts against the traced call, which prints
-    one line per cycle.
+    its own ω. The roots followed are the nroots lowest, the rest of a level they
+    cut, and each of the next _FOLLOW whose residual bound overlaps the nroots-th
+    root's, so a level cut by nroots is followed whole while the model splits it.
+    Each adds its model residual to Q through the Jacobi-Davidson correction on
+    M's diagonal, and the vectors of a level (_levels) come from one eigh at its
+    mean ω, orthonormal. When the median root lies farther than _RECENTRE from
+    om0 the centre moves there and every image is rebuilt; Q collapses onto the
+    roots' vectors when it would pass max_subspace. Convergence is the model
+    residual below tol_residual and the roots moving less than tol_omega between
+    cycles; a root away from om0 keeps the model's second-order error, so the
+    caller polishes each root exactly. Every application of A_eff, A' and M counts
+    against the traced call, which prints one line per cycle.
 
-    X0 : ndarray, shape (n, m0), start vectors (the seeds of M)
+    X0 : ndarray, shape (n, m0), start vectors (the seeds of M); _guess's fixed
+        random vector joins them
     d_min : float, the lowest doubles energy; model roots at or above it are dropped
     Returns oms (r,) ascending, X (n, r) unit vectors, conv (r,) bool and the
-    cycles used; r < nroots when the model has fewer roots below d_min.
+    cycles used: the levels that start below nroots, r < nroots when the model
+    has fewer roots below d_min.
     """
     n = X0.shape[0]
     tr = _TRACE.get()
@@ -521,14 +526,22 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
         if tr is not None:
             tr.say(text, label)
 
-    Q, _ = _orth_append(np.empty((n, 0)), X0)
+    m0, _, diag_s, _, _ = folded_operator(pieces, None, spin)
+    # the start and one fixed random vector: residuals keep a level's symmetry,
+    # so a partner the start lacks would never enter Q
+    Q = _guess(X0, diag_s, X0.shape[1] + 1)
     # first centre: the lowest Ritz value of M on the start
-    m0 = folded_operator(pieces, None, spin)[0]
     MQ = np.column_stack([m0(Q[:, k]) for k in range(Q.shape[1])])
     counted(Q.shape[1])
     om0 = float(np.linalg.eigvalsh(0.5 * (Q.T @ MQ + MQ.T @ Q))[0])
     S0 = S1 = np.empty((n, 0))
     oms_prev = None
+
+    def below(oms, X, conv, cycle):
+        # the levels that start below nroots; a root followed past them is distinct
+        k = max(b for a, b in _levels(oms) if a < nroots)
+        return oms[:k], X[:, :k], conv[:k], cycle
+
     for cycle in range(1, max_cycle + 1):
         matvec, dmatvec, diag_s, _, _ = folded_operator(pieces, om0, spin)
         # images of the columns not yet imaged at this centre
@@ -538,14 +551,27 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
             counted(2)
         H0, H1 = Q.T @ S0, Q.T @ S1
         H0, H1 = 0.5 * (H0 + H0.T), 0.5 * (H1 + H1.T)
-        oms, C = _model_roots(H0, H1, om0, Q.shape[1], d_min, 0.1 * tol_omega)
+        # roots to a tenth of the level width, so _levels can tell a level apart
+        oms, C = _model_roots(H0, H1, om0, Q.shape[1], d_min,
+                              0.1 * min(tol_omega, _DEGENERATE))
         if oms.size == 0:
             note(f'cycle {cycle}: {Q.shape[1]} vectors, centre {om0:.6f}, no model '
                  'root below the lowest doubles energy')
             return oms, np.empty((n, 0)), np.zeros(0, bool), cycle
-        runs = [(a, b) for a, b in _levels(oms) if a < nroots]
-        oms, C = oms[:runs[-1][1]], C[:, :runs[-1][1]]
-        for a, b in runs:
+        # model residual norms |S0 c_r + (ω_r - om0) S1 c_r - ω_r Q c_r|
+        rn = np.linalg.norm(S0 @ C + S1 @ (C * (oms - om0)) - (Q @ C) * oms, axis=0)
+        # the nroots lowest roots, the rest of a level they cut, and each of the
+        # next _FOLLOW whose root may be degenerate with the cut root: distance
+        # within the sum of the two residual norms, each bounding its root's error.
+        # A partner the start held only through the random vector converges last
+        # and is followed until it joins the level or leaves the window
+        c = min(nroots, oms.size) - 1
+        r = c + 1
+        while r < oms.size and (oms[r] - oms[r - 1] <= _DEGENERATE or (
+                r <= c + _FOLLOW and oms[r] - oms[c] <= rn[r] + rn[c] + _DEGENERATE)):
+            r += 1
+        oms, C = oms[:r], C[:, :r]
+        for a, b in _levels(oms):
             if b - a > 1:
                 # one orthonormal set per level: branches a..b-1 at the mean root
                 w_l = oms[a:b].mean()
@@ -562,13 +588,11 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
              + ', |r| ' + ' '.join(f'{r:.1e}' for r in rn))
         oms_prev = oms
         if conv.all():
-            return oms, X, conv, cycle
-        new = []
-        for r in np.flatnonzero(~conv):
-            # Jacobi preconditioner on M's diagonal at the root's frequency
-            den = diag_s - oms[r]
-            den = np.where(np.abs(den) < 1e-4, np.copysign(1e-4, den), den)
-            new.append(R[:, r] / den)
+            return below(oms, X, conv, cycle)
+        # M's diagonal at each root's own ω, its component along the root removed
+        # (the tree's Davidson correction, which keeps a converging root moving)
+        precond = jacobi_davidson_precond(diag_s)
+        new = [precond(R[:, r], oms[r], X[:, r]) for r in np.flatnonzero(~conv)]
         if Q.shape[1] + len(new) > max_subspace:
             # collapse onto the roots' vectors; their images are rebuilt
             Q, _ = _orth_append(np.empty((n, 0)), X)
@@ -579,8 +603,8 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
             # the roots moved away: a new centre, every image rebuilt
             om0, S0, S1 = centre, np.empty((n, 0)), np.empty((n, 0))
         elif added == 0:
-            return oms, X, conv, cycle
-    return oms, X, conv, max_cycle
+            return below(oms, X, conv, cycle)
+    return below(oms, X, conv, max_cycle)
 
 
 def _eig_level(pieces, omega, spin, Y, dense, tol_residual, label):
@@ -829,8 +853,17 @@ def _index_solve(pieces, spin, a, b, om, lo, hi, X, dense, tol_residual, tol_ome
 
 def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
                  t_min=0.3, max_newton=12, max_fixed=30, dense_limit=None,
-                 verbose=0):
+                 verbose=0, solver='davidson'):
     """The nroots lowest folded roots, each level at its own frequency.
+
+    solver 'davidson' (the default): from the seeds below, one Davidson in the
+    singles space whose roots carry their own ω (a first-order model of A_eff about
+    a moving centre, _davidson_omega) finds the levels that start below nroots;
+    each is then polished exactly as the seeds are below, per root or per level,
+    with loop 'davidson', and the count check verifies the roots found and solves
+    by index any branch the Davidson skipped. With no model root below min_K D_K
+    the seeds are solved as by solver 'newton', which solves each seed level by its
+    own Newton loop.
 
     Seeds: the lowest eigenpairs of the bare singles block M on the channel (eigh
     for n ≤ dense_limit, else Davidson to residual 1e-9), grouped into levels whose
@@ -903,9 +936,12 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         eigh'd; None takes pieces['dense_limit'], 0 (Davidson at every size) when
         the pieces set none.
     verbose : int, 1 prints one line per outer step, per eigensolve outside the
-        steps (seeds, count, check) and per count round, each stamped with the
-        call's elapsed time and matvec count, and inside a long eigensolve a line
-        at most every _HEARTBEAT (600) s.
+        steps (seeds, count, check), per count round and per Davidson cycle, each
+        stamped with the call's elapsed time and matvec count (every application of
+        the operator, A_eff' included), and inside a long eigensolve a line at most
+        every _HEARTBEAT (600) s.
+    solver : {'davidson', 'newton'}, the root-wise Davidson or the per-level
+        Newton loops from the seeds.
 
     Returns
     -------
@@ -915,15 +951,17 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     token = _TRACE.set(_Trace(f'ee-ADC fold ({spin or "both"})') if verbose else None)
     try:
         return _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min,
-                             max_newton, max_fixed, dense_limit, verbose)
+                             max_newton, max_fixed, dense_limit, verbose, solver)
     finally:
         _TRACE.reset(token)
 
 
 def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newton,
-                  max_fixed, dense_limit, verbose):
+                  max_fixed, dense_limit, verbose, solver):
     """solve_folded inside its trace; the arguments are solve_folded's."""
     _check_level(pieces)
+    if solver not in ('davidson', 'newton'):
+        raise ValueError(f"solver={solver!r}; expected 'davidson' or 'newton'")
     m0, _, diag_s, embed, _ = folded_operator(pieces, None, spin)
     n = diag_s.size
     if dense_limit is None:
@@ -950,7 +988,10 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
 
     note(f'start: {n} singles, nroots {nroots}, {"dense" if dense else "Davidson"}, '
          f'tol_omega {tol_omega:g}, tol_residual {tol_residual:g}')
-    e0, X0, runs = _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label)
+    # the Davidson starts from whole levels as far as it may follow past nroots:
+    # residuals keep a level's symmetry, so a partner the start lacks enters late
+    e0, X0, runs = _seed_levels(m0, diag_s, n, nroots + (solver == 'davidson')
+                                * _FOLLOW, dense, tol_residual, label)
     # per root, appended as levels are solved; copy marks a duplicate's copy
     omega, y_out, t1_out, level, steps, loop, converged, copy = ([] for _ in range(8))
     kw = dict(tol_omega=tol_omega, t_min=t_min, max_newton=max_newton,
@@ -971,14 +1012,15 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                           (lam, yk, t1, lv, k + k0, mode, conv, False)):
             out.append(v)
 
-    def solve_seeds(e, X, runs):
-        """Solve the levels runs, (start, stop) into the seeds e (m,), X (n, m)."""
+    def solve_seeds(e, X, runs, k0=0):
+        """Solve the levels runs, (start, stop) into the seeds e (m,), X (n, m);
+        k0 steps already spent count in each root's."""
         nonlocal nlev
         for a, b in runs:
             lv, nlev = nlev, nlev + 1
             if b - a == 1:
                 # λ(ω) = ω on the root's own followed vector
-                solve_root(float(e[a]), X[:, a], lv)
+                solve_root(float(e[a]), X[:, a], lv, k0)
                 continue
             # λ̄(ω) = ω, λ̄ the mean of the b - a eigenvalues of largest projection
             # onto the span of the level's seeds X[:, a:b]
@@ -995,7 +1037,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                 for j in range(b - a):
                     if j:
                         lv, nlev = nlev, nlev + 1
-                    solve_root(float(lam[j]), Z[:, j], lv, k0=k)
+                    solve_root(float(lam[j]), Z[:, j], lv, k0=k0 + k)
                 continue
             if not conv:
                 warnings.warn(f'{label}: level {lv} at omega = {lbar:.8f} Ha not '
@@ -1004,7 +1046,8 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
             for j in range(b - a):
                 for out, v in zip((omega, y_out, t1_out, level, steps, loop,
                                    converged, copy),
-                                  (lbar, ZR[:, j], t1[j], lv, k, mode, conv, False)):
+                                  (lbar, ZR[:, j], t1[j], lv, k0 + k, mode, conv,
+                                   False)):
                     out.append(v)
 
     def mark_copies():
@@ -1078,7 +1121,22 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                                conv, False)):
                 out.append(v)
 
-    solve_seeds(e0, X0, runs)
+    if solver == 'newton':
+        solve_seeds(e0, X0, runs)
+    else:
+        oms, X, conv_d, cycles = _davidson_omega(
+            pieces, spin, X0, nroots, float(np.min(pieces['D'])), tol_residual,
+            tol_omega, max(8 * nroots, 24), max_newton * 50, label + ' davidson')
+        note(f'davidson: {oms.size} root(s) in {cycles} cycle(s), '
+             f'{int(np.count_nonzero(conv_d))} converged in the model')
+        if oms.size == 0:
+            solve_seeds(e0, X0, [(a, b) for a, b in runs if a < nroots])
+        else:
+            # exact polish from the model roots: λ(ω) = ω per root, or per level
+            # on its partners' span
+            first = len(omega)
+            solve_seeds(oms, X, _levels(oms), k0=cycles)
+            loop[first:] = ['davidson'] * (len(loop) - first)
     mark_copies()
     # the count check: below min_K D_K the folded roots at or below ω number the
     # eigenvalues λ_j(ω) ≤ ω of A_eff(ω), and the j-th lowest root is the root
