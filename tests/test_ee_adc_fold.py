@@ -1365,6 +1365,15 @@ def check_cut_above_doubles():
         ok &= check(d < 1e-7 and not msgs,
                     f'dense_limit {dl}: the default returns 0.5, 0.55, 0.6',
                     f'max |dw| {d:.1e} Ha, {len(msgs)} warning(s)')
+        # nroots 4 reaches past min D, where the model holds three roots: the
+        # default returns the seeds' 0.9 and its one warning, never a lambda at a
+        # closed index bracket
+        got, d, msgs = _fold_run(np.array([0.5, 0.6, 0.9, 1.0]), C, np.array([0.8]),
+                                 4, dense_limit=dl)
+        ok &= check(d < 1e-7 and len(msgs) == 1 and 'not checked' in msgs[0],
+                    f'dense_limit {dl}: nroots 4, the default returns 0.5, 0.55, '
+                    '0.6, 0.9 and warns once', f'got {np.round(got, 9).tolist()}, '
+                    f'{len(msgs)} warning(s)')
     return ok
 
 
@@ -1815,6 +1824,50 @@ def check_default_polish():
     ok &= check(dup and d < 1e-8 and res.loop == ['davidson', 'index'],
                 'a copy from the Davidson is dropped and the displaced root solved '
                 'by index', f'max |dw| {d:.1e} Ha, loop {res.loop}')
+    # k copies of a coupled block, each with its own double: every level k-fold,
+    # M's seeds no eigenvectors of A_eff; spin=None doubles it again
+    rng = np.random.default_rng(17)
+    A = rng.standard_normal((3, 3)) * 0.03
+    Bk = np.diag([0.50, 0.58, 0.70]) + 0.5 * (A + A.T)
+    for k, spin in ((4, 'singlet'), (5, 'singlet'), (2, None)):
+        m = np.zeros((3 * k + 3, 3 * k + 3))
+        C = np.zeros((k, 3 * k + 3))
+        for i in range(k):
+            m[3 * i:3 * i + 3, 3 * i:3 * i + 3] = Bk
+            C[i, 3 * i:3 * i + 3] = [0.15, -0.10, 0.08]
+        m[3 * k:, 3 * k:] = np.diag([0.9, 1.1, 1.3])
+        w0 = np.sort(_synthetic_exact(m, C, np.ones(k))[0])[0]
+        g = k * (2 if spin is None else 1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(_synthetic_pieces(m, C, np.ones(k)), 1,
+                                       spin=spin, dense_limit=0)
+        got = int(np.count_nonzero(np.abs(res.omega - w0) < 1e-7))
+        ok &= check(got == g and not caught,
+                    f'a {g}-fold level cut by nroots 1 comes back whole, spin {spin}',
+                    f'{got} of {g} partners, {len(caught)} warning(s)')
+    # the dense branch seeds M in full; the Davidson takes the levels it follows
+    n = 200
+    C = np.zeros((2, n))
+    C[0, :3], C[1, 3:6] = 0.1, 0.1
+    P = _synthetic_pieces(0.5 + 0.5 * np.arange(n) / n, C, np.array([1.2, 1.4]))
+    sizes, orig = [], ee_fold._model_roots
+
+    def sized(H0, *a):
+        sizes.append(H0.shape[0])
+        return orig(H0, *a)
+    ee_fold._model_roots = sized
+    try:
+        res = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=2000)
+    finally:
+        ee_fold._model_roots = orig
+    ref = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=2000,
+                               solver='newton')
+    d = float(np.max(np.abs(res.omega - ref.omega))) \
+        if res.omega.shape == ref.omega.shape else np.inf
+    ok &= check(max(sizes) <= 30 and d < 1e-8,
+                'dense branch, n 200: the Davidson models at most 30 vectors',
+                f'largest model {max(sizes)}, |dw| {d:.1e} Ha against Newton')
     return ok
 
 

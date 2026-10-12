@@ -444,9 +444,10 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     slope c_j^T H1 c_j is ≤ 0, so g(ω) = λ_j(ω) - ω falls with slope ≤ -1, the
     root is unique and lies between ω and ω + g(ω) for every ω: Newton
     ω + g / (1 - c_j^T H1 c_j) inside the bracket so narrowed, bisection where a
-    step leaves it (a kink where two branches of H(ω) cross exactly). Returns oms
-    (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the
-    roots.
+    step leaves it (a kink where two branches of H(ω) cross exactly). λ_j ≤ λ_j+1
+    at every ω, so the roots rise with j: the first branch whose root reaches d_min
+    ends the search. Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the
+    subspace eigenvectors at the roots.
     """
     m = H0.shape[0]
     found = []
@@ -457,16 +458,19 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
             c = v[:, j]
             g = float(w[j]) - om
             if abs(g) < tol:
-                if om < d_min - tol:
-                    # a root within tol of d_min cannot be told from one at it
-                    found.append((om, c))
                 break
             # the root lies in [ω, ω + g] for g > 0, in [ω + g, ω] for g < 0
             lo, hi = (max(lo, min(om, om + g)), min(hi, max(om, om + g)))
             nxt = om + g / (1.0 - float(c @ H1 @ c))      # Newton on λ_j(ω) - ω
             om = nxt if lo < nxt < hi else 0.5 * (lo + hi)
+        if abs(g) >= tol:
+            continue
+        if om >= d_min - tol or len(found) == nroots:
+            # a root within tol of d_min cannot be told from one at it
+            break
+        found.append((om, c))
+    # partners of a level, each to tol, need not come out ascending
     found.sort(key=lambda t: t[0])
-    found = found[:nroots]
     if not found:
         return np.empty(0), np.empty((m, 0))
     return np.array([t[0] for t in found]), np.column_stack([t[1] for t in found])
@@ -508,8 +512,7 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     caller polishes each root exactly. Every application of A_eff, A' and M counts
     against the traced call, which prints one line per cycle.
 
-    X0 : ndarray, shape (n, m0), start vectors (the seeds of M); _guess's fixed
-        random vector joins them
+    X0 : ndarray, shape (n, m0), start vectors, whole levels of M's seeds
     d_min : float, the lowest doubles energy; model roots at or above it are dropped
     Returns oms (r,) ascending, X (n, r) unit vectors, conv (r,) bool and the
     cycles used: the levels that start below nroots, r < nroots when the model
@@ -526,10 +529,10 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
         if tr is not None:
             tr.say(text, label)
 
-    m0, _, diag_s, _, _ = folded_operator(pieces, None, spin)
-    # the start and one fixed random vector: residuals keep a level's symmetry,
-    # so a partner the start lacks would never enter Q
-    Q = _guess(X0, diag_s, X0.shape[1] + 1)
+    m0 = folded_operator(pieces, None, spin)[0]
+    # whole levels of M: residuals keep a level's symmetry, so a partner the start
+    # lacks enters late or never, and a random vector would split the level
+    Q, _ = _orth_append(np.empty((n, 0)), X0)
     # first centre: the lowest Ritz value of M on the start
     MQ = np.column_stack([m0(Q[:, k]) for k in range(Q.shape[1])])
     counted(Q.shape[1])
@@ -861,9 +864,9 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     a moving centre, _davidson_omega) finds the levels that start below nroots;
     each is then polished exactly as the seeds are below, per root or per level,
     with loop 'davidson', and the count check verifies the roots found and solves
-    by index any branch the Davidson skipped. With no model root below min_K D_K
-    the seeds are solved as by solver 'newton', which solves each seed level by its
-    own Newton loop.
+    by index any branch the Davidson skipped. With fewer model roots below min_K D_K
+    than nroots the seeds are solved as by solver 'newton', which solves each seed
+    level by its own Newton loop.
 
     Seeds: the lowest eigenpairs of the bare singles block M on the channel (eigh
     for n ≤ dense_limit, else Davidson to residual 1e-9), grouped into levels whose
@@ -1124,12 +1127,16 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
     if solver == 'newton':
         solve_seeds(e0, X0, runs)
     else:
+        # the seed levels it may follow, not every eigenvector the dense branch has
         oms, X, conv_d, cycles = _davidson_omega(
-            pieces, spin, X0, nroots, float(np.min(pieces['D'])), tol_residual,
-            tol_omega, max(8 * nroots, 24), max_newton * 50, label + ' davidson')
+            pieces, spin, X0[:, :runs[-1][1]], nroots, float(np.min(pieces['D'])),
+            tol_residual, tol_omega, max(8 * nroots, 24), max_newton * 50,
+            label + ' davidson')
         note(f'davidson: {oms.size} root(s) in {cycles} cycle(s), '
              f'{int(np.count_nonzero(conv_d))} converged in the model')
-        if oms.size == 0:
+        if oms.size < nroots:
+            # fewer model roots below min D than asked: the branches past them are
+            # not ordered there, so the seeds go as solver 'newton' takes them
             solve_seeds(e0, X0, [(a, b) for a, b in runs if a < nroots])
         else:
             # exact polish from the model roots: λ(ω) = ω per root, or per level
