@@ -25,7 +25,6 @@ E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 64, 66, 67, 70.
 S. J. Bintrim and T. C. Berkelbach, J. Chem. Phys. 156, 044114 (2022), eq 12.
 """
 import math
-import warnings
 
 import numpy as np
 
@@ -41,8 +40,9 @@ from src.SingleReference.GW.quasi_boson import RPA, QPqb
 # (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
 # check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
 _K_LIVE = 3
-# kernel_laplace's grid target: the Kaltak-Klimes-Kresse residual of the minimax fit
-# of 1/x on its range scaled to [1, R] (time_frequency.laplace_test_error)
+# kernel_laplace's grid target: max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled
+# to [1, R] (time_frequency.laplace_test_error, relative=True), the relative error of
+# every term; the absolute residual lets terms far above min D drift as R grows
 _LAPLACE_TARGET = 1e-9
 
 
@@ -211,6 +211,79 @@ def _df_couple_t(Boo, Bvv, T):
             - np.matmul(Boo, T).sum(axis=0))
 
 
+def kernel_df(eps, B, rho, omega, nocc):
+    """build_pieces_gw's fused kernel 'K' through the DF factors and the modes ρ_P,m,
+    exact at every ω and streamed over slabs of k: no (norb, norb, nm) array forms,
+    and a (k, c, m) array for the slab's k only.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (norb,), HF orbital energies, Hartree
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q)
+    rho : ndarray, shape (naux, nm), index order (P, m), gw_modes_df's ρ_P,m
+    omega : ndarray, shape (nm,), Ω_m
+    nocc : int
+
+    Returns
+    -------
+    callable K(y1, om, powers=(1,)) -> (ws, dn2), kernel_laplace's contract at every
+    om. Per spin and slab k0 ≤ k < k1, with Z_Q,kc = sum_b B_Q,bc y_kb - sum_j
+    B_Q,jk y_jc,
+
+        Y_kcm  = sqrt(2) sum_Q Z_Q,kc ρ_Q,m / (D_kcm - ω),
+        T_P,kc = sqrt(2) sum_m ρ_P,m Y_kcm / (D_kcm - ω)^(p-1),
+        w_ia  += sum_Pc B_P,ac T_P,ic (i in the slab) - sum_Pk B_P,ik T_P,ka,
+
+    and dn2 = sum_kcm Y_kcm², at 2 naux no nv nm per spin and call, naux / norb
+    times the W pieces' kernel.
+    """
+    no = nocc
+    nv = len(eps) - no
+    naux, nm = B.shape[0], omega.size
+    eo, ev = eps[:no], eps[no:]
+    Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
+
+    def K(y1, om, powers=(1,)):
+        if y1.parity is not None:
+            raise NotImplementedError('kernel_df takes y1 without a flip parity')
+        Z = {s: _df_couple(Boo, Bvv, y1.get(s)) for s in ('aa', 'bb')}
+        width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
+
+        def slab(k0, k1):
+            nk = k1 - k0
+            # D_kcm - ω on the slab's k, D summed in build_pieces_gw's order
+            den = omega[None, None, :] + ev[None, :, None] - eo[k0:k1, None, None]
+            _ew(np.subtract, den, om, out=den)
+            ws, dn2 = {p: {} for p in powers}, 0.0
+            for s in ('aa', 'bb'):
+                # Y_kcm / sqrt(2) = sum_Q Z_Q,kc ρ_Q,m / (D_kcm - ω)
+                Zs = Z[s][:, k0:k1].reshape(naux, nk * nv)
+                Y = (Zs.T @ rho).reshape(nk, nv, nm)
+                _ew(np.true_divide, Y, den, out=Y)
+                dn2 += 2.0 * float(np.vdot(Y, Y))
+                # each power in ascending order, Y divided in place on the way up
+                p0 = 1
+                for p in sorted(ws):
+                    for _ in range(p - p0):
+                        _ew(np.true_divide, Y, den, out=Y)
+                    p0 = max(p0, p)
+                    # T_P,kc = sqrt(2) sum_m ρ_P,m Y_kcm = 2 sum_m ρ_P,m (Y_kcm /
+                    # sqrt(2)), for the slab's k
+                    T = (rho @ Y.reshape(nk * nv, nm).T).reshape(naux, nk, nv)
+                    T *= 2.0
+                    # w_ia = sum_Pc B_P,ac T_P,ic on the rows i = k of the slab,
+                    # minus sum_Pk B_P,ik T_P,ka over its k
+                    w = -np.matmul(Boo[:, :, k0:k1], T).sum(axis=0)
+                    w[k0:k1] += np.matmul(T, Bvv.transpose(0, 2, 1)).sum(axis=0)
+                    ws[p][s] = w
+                del Y                       # before the next spin's Y is formed
+            return [SB(ws[p]) for p in powers], dn2
+
+        return _stream(slab, no, width, workers)
+
+    return K
+
+
 def kernel_laplace(eps, B, rho, omega, nocc):
     """build_pieces_gw's fused kernel 'K' by a Laplace quadrature of 1/(D - ω), from
     the DF factors and the modes ρ_P,m: no (k, c, m) or (norb, norb, nm) array forms.
@@ -226,20 +299,20 @@ def kernel_laplace(eps, B, rho, omega, nocc):
     Returns
     -------
     callable K(y1, om, powers=(1,)) -> (ws, dn2). y1 is an SB singles {'aa', 'bb'}
-    of (no, nv), index order (i, a), without a flip parity; om the fold's ω, below
-    min D; ws a list of SB singles of (no, nv), one per p in powers,
+    of (no, nv), index order (i, a), without a flip parity; om the fold's ω; ws a
+    list of SB singles of (no, nv), one per p in powers,
 
         ws[p]_ia = sum_kcm V_kcm,ia (V y1)_kcm / (D_kcm - ω)^p,
 
-    and dn2 = sum_kcm (V y1)_kcm² / (D_kcm - ω)², both spin blocks summed. K raises
-    ValueError at ω ≥ min D, where 1/(D - ω) has no Laplace transform, and warns
-    when its grid misses _LAPLACE_TARGET.
+    and dn2 = sum_kcm (V y1)_kcm² / (D_kcm - ω)², both spin blocks summed. At
+    ω ≥ min D, where 1/(D - ω) has no Laplace transform, and where no tabulated
+    grid reaches _LAPLACE_TARGET (ω close below min D), K is kernel_df's, exact.
 
     Notes
     -----
     On x = D_kcm - ω in [min D - ω, max D - ω], the minimax grid (τ_t, w_t) of
-    grids.minimax_time_grid, sized by minimax_points_for_accuracy at
-    _LAPLACE_TARGET, gives
+    grids.minimax_time_grid, sized by minimax_points_for_accuracy for relative
+    error _LAPLACE_TARGET, gives
 
         1 / x^p = sum_t c_p,t exp(-τ_t x),    c_p,t = w_t τ_t^(p-1) / (p-1)!,
 
@@ -279,20 +352,18 @@ def kernel_laplace(eps, B, rho, omega, nocc):
     d_max = float(omega.max() + ev.max() - eo.min())
     # ε_k - ε_c - Ω_min, (k, c): g^τ_kc's exponent over τ, less ω
     e_kc = eo[:, None] - ev[None, :] - om0
+    exact = kernel_df(eps, B, rho, omega, nocc)
 
     def K(y1, om, powers=(1,)):
         if y1.parity is not None:
             raise NotImplementedError('kernel_laplace takes y1 without a flip parity')
         if om >= d_min:
-            raise ValueError(f'omega = {om:.8f} Ha is at or above min D = '
-                             f'{d_min:.8f} Ha, where 1/(D - omega) has no Laplace '
-                             'transform')
+            return exact(y1, om, powers)
         lo, hi = d_min - om, d_max - om
-        ntau, err = minimax_points_for_accuracy(lo, hi, _LAPLACE_TARGET)
+        ntau, err = minimax_points_for_accuracy(lo, hi, _LAPLACE_TARGET,
+                                                relative=True)
         if err > _LAPLACE_TARGET:
-            warnings.warn(f'kernel_laplace: the {ntau}-point grid reaches {err:.1e} '
-                          f'on R = {hi / lo:.0f}, above the target '
-                          f'{_LAPLACE_TARGET:.0e}', RuntimeWarning)
+            return exact(y1, om, powers)
         tau, wt = minimax_time_grid(ntau, lo, hi)
         # Z_Q,kc of both spins, (Q, s, k, c)
         Z = np.stack([_df_couple(Boo, Bvv, y1.get(s)) for s in ('aa', 'bb')], axis=1)
@@ -318,7 +389,7 @@ def kernel_laplace(eps, B, rho, omega, nocc):
     return K
 
 
-def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
+def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False, df=False):
     """The pieces of ee_fold.folded_operator for eq 66.
 
     Parameters
@@ -328,9 +399,11 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
         (pq|rs) = sum_Q B[Q,p,q] B[Q,r,s]
     nocc : int, doubly occupied orbitals
     screening : {'tda', 'rpa'}
-    laplace : bool, False the modes as W (gw_modes) and the kernel streamed over
-        slabs of k; True the modes as ρ_P,m (gw_modes_df), V and Vt through B and
-        ρ, and kernel_laplace as 'K', so neither W nor (pq|ia) is formed
+    laplace : bool, True kernel_laplace as 'K', the Laplace quadrature of the
+        doubles' denominator on df's pieces (implies df)
+    df : bool, False the modes as W (gw_modes) and the kernel streamed over slabs
+        of k through W; True the modes as ρ_P,m (gw_modes_df), V and Vt through B
+        and ρ, and kernel_df as 'K', exact, so neither W nor (pq|ia) is formed
 
     Returns
     -------
@@ -343,10 +416,10 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
         blocks; 'K' the fused kernel of ee_fold.folded_operator, K(y1, omega,
         powers) -> (ws, dn2), Vt (D - ω)^-p V y1 for each p and dnorm2 of
         (D - ω)^-1 V y1, streamed over slabs of k so no (no, nv, nm) array is
-        formed, or kernel_laplace's for laplace=True, at omega below min D only;
-        'level' 'gw'; 'no', 'nv', 'be'; 'dense_limit' 40, solve_folded's default;
-        'omega' (nm,) and 'W' (norb, norb, nm) for inspection, None for
-        laplace=True.
+        formed, through W, through B and ρ (kernel_df) for df=True, or by
+        kernel_laplace for laplace=True; 'level' 'gw'; 'no', 'nv', 'be';
+        'dense_limit' 40, solve_folded's default; 'omega' (nm,) and 'W' (norb,
+        norb, nm) for inspection, None for df=True.
     """
     if screening not in ('tda', 'rpa'):
         raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
@@ -355,7 +428,8 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
     nv = len(eps) - no
     # A^HF alone: the gf2 builder's other pieces hold its doubles blocks
     M_hf = ee_r_sigma_df.build_operator(eps, B, no, level='gf2', pieces=True)[3]['M']
-    if laplace:
+    df = df or laplace
+    if df:
         # Ω_m and ρ_P,m = sum_jb B_P,jb (X+Y)_jb,m; W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m
         omega, rho = gw_modes_df(eps, B, no, screening)
         W, Abar = None, static_term_df(eps, B, rho, omega, no)
@@ -369,7 +443,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
     D = omega[None, None, :] + ev[None, :, None] - eo[:, None, None]
 
     nm = omega.size
-    if laplace:
+    if df:
         naux = B.shape[0]
         Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
 
@@ -383,8 +457,12 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
             T = np.sqrt(2.0) * (rho @ Y.reshape(no * nv, nm).T)
             return _df_couple_t(Boo, Bvv, T.reshape(naux, no, nv))
 
-        # ws_ia = sum_kcm V_kcm,ia (V y1)_kcm sum_t c_p,t exp(-τ_t (D_kcm - ω))
-        kernel = kernel_laplace(eps, B, rho, omega, no)
+        if laplace:
+            # ws_ia = sum_kcm V_kcm,ia (V y1)_kcm sum_t c_p,t exp(-τ_t (D_kcm - ω))
+            kernel = kernel_laplace(eps, B, rho, omega, no)
+        else:
+            # ws_ia = sum_kcm V_kcm,ia (V y1)_kcm / (D_kcm - ω)^p, slabs of k
+            kernel = kernel_df(eps, B, rho, omega, no)
     else:
         Woo, Wvv = W[:no, :no, :], W[no:, no:, :]          # W^m_ik, W^m_ac
         # matmuls on views of W: the slices keep (c, m) and (k, m) contiguous, so
