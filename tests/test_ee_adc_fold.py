@@ -104,7 +104,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       forms, bitwise, called once per application with powers (1,), () and (2,).
   29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
       H1 = 0 its roots are the eigenvalues of H0, with H1 = -I they are
-      (w_j + w0) / 2, and a root at or above min D is dropped.
+      (w_j + w0) / 2, a root at or above min D is dropped, and an exact crossing
+      of two branches (check 20's pieces at w0 = 0.5) gives no false root.
   30. _davidson_omega, one Davidson whose roots carry their own w (water adc2
       singlets and triplets, nroots 3, from the seeds of M, max_subspace 40 and 4):
       the model converges, its roots lie within 1e-3 Ha of the Newton roots, and
@@ -1572,6 +1573,21 @@ def check_model_roots():
                 'H1 = -I: roots (w_j + om0) / 2', f'{oms - 0.5 * (w + om0)}')
     oms, _ = ee_fold._model_roots(H0, np.zeros((6, 6)), om0, 6, float(w[2]), 1e-12)
     ok &= check(oms.size == 2, 'roots at or above d_min are dropped', f'{oms.size}')
+    # check 20's pieces imaged at w0 = 0.5: the last diagonal 0.625 - 1.25 (w - 0.5)
+    # crosses 0.6 and 0.5 exactly, a kink in branch 1, whose root is 5 / 9; a
+    # Newton step that jumps the kink cycles between 0.5 and 0.6
+    c2 = (1.0 - 0.55) * (0.8 - 0.55)
+    P = _synthetic_pieces(np.array([0.5, 0.6, 0.9, 1.0]), np.array([[0, 0, 0, c2]])
+                          ** 0.5, np.array([0.8]))
+    mv, dmv, diag_s, _, _ = ee_fold.folded_operator(P, 0.5, 'singlet')
+    Q = np.eye(diag_s.size)
+    H0 = Q.T @ np.column_stack([mv(q) for q in Q.T])
+    H1 = Q.T @ np.column_stack([dmv(q, vector=True) for q in Q.T])
+    oms, _ = ee_fold._model_roots(H0, H1, 0.5, 4, 0.8, 1e-7)
+    ref = np.array([0.5, 5.0 / 9.0, 0.6])
+    ok &= check(oms.size == 3 and np.allclose(oms, ref, atol=1e-6),
+                'an exact branch crossing: one root per branch, none false',
+                f'{oms}')
     return ok
 
 

@@ -436,28 +436,33 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     om0 : float, the frequency the images were taken at
     d_min : float, the lowest doubles energy; a root at or above it, to tol, is
         dropped
-    tol : float, Newton stops when the step is below it
+    tol : float, a root is accepted where |λ_j(ω) - ω| < tol
 
-    Every branch λ_j(ω) of H(ω), j the sorted index, is followed by Newton from
-    om0: dλ_j/dω = c_j^T H1 c_j ≤ 0, so 1 - dλ_j/dω ≥ 1 and the step is stable.
-    Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the subspace
-    eigenvectors at the roots.
+    Every branch λ_j(ω) of H(ω), j the sorted index, is followed from om0. Its
+    slope c_j^T H1 c_j is ≤ 0, so g(ω) = λ_j(ω) - ω falls with slope ≤ -1, the
+    root is unique and lies between ω and ω + g(ω) for every ω: Newton
+    ω + g / (1 - c_j^T H1 c_j) inside the bracket so narrowed, bisection where a
+    step leaves it (a kink where two branches of H(ω) cross exactly). Returns oms
+    (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the
+    roots.
     """
     m = H0.shape[0]
     found = []
     for j in range(m):
-        om = om0
-        for _ in range(100):
+        om, lo, hi = om0, -np.inf, np.inf
+        for _ in range(200):
             w, v = np.linalg.eigh(H0 + (om - om0) * H1)
-            lam, c = float(w[j]), v[:, j]
-            # Newton on λ_j(ω) - ω with dλ_j/dω = c^T H1 c
-            step = (lam - om) / (1.0 - float(c @ H1 @ c))
-            om += step
-            if abs(step) < tol:
+            c = v[:, j]
+            g = float(w[j]) - om
+            if abs(g) < tol:
+                if om < d_min - tol:
+                    # a root within tol of d_min cannot be told from one at it
+                    found.append((om, c))
                 break
-        # a root within tol of d_min cannot be told from one at it
-        if om < d_min - tol and abs(lam - om) < 100.0 * tol:
-            found.append((om, c))
+            # the root lies in [ω, ω + g] for g > 0, in [ω + g, ω] for g < 0
+            lo, hi = (max(lo, min(om, om + g)), min(hi, max(om, om + g)))
+            nxt = om + g / (1.0 - float(c @ H1 @ c))      # Newton on λ_j(ω) - ω
+            om = nxt if lo < nxt < hi else 0.5 * (lo + hi)
     found.sort(key=lambda t: t[0])
     found = found[:nroots]
     if not found:
