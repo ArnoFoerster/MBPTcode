@@ -3,7 +3,7 @@
 Checks, water (RHF, DF factors), basis per check:
 
   1. build_pieces_gw: M is the gf2 builder's A^HF plus eq 70 on the aaaa and bbbb
-     blocks only; D has shape (no, nv, nm); Vt is V's transpose.
+     blocks only; D has shape (no, nv, nm); W is C-contiguous; Vt is V's transpose.
   2. fold against unfolded (6-31G, TDA and RPA screening): every folded root, singlet,
      triplet and spin=None, is an eigenvalue of the dense spin-orbital supermatrix
      [[M, V^T], [V, D]] assembled from the same pieces, to 3e-10 Ha (1e-8 eV), and its
@@ -97,6 +97,10 @@ def check_pieces(eps, B, no):
     nm = P['omega'].size
     ok &= check(P['D'].shape == (no, nv, nm) and P['level'] == 'gw',
                 "D has shape (no, nv, nm); level 'gw'", str(P['D'].shape))
+    W = P['W']
+    ok &= check(W.flags.c_contiguous
+                and np.shares_memory(W[no:, no:, :].reshape(nv, nv * nm), W),
+                "W is C-contiguous, so the couplings reshape W's slices without a copy")
     H, ns = dense_supermatrix(P)
     rng = np.random.default_rng(7)
     Yr = SB({s: rng.standard_normal(P['D'].shape) for s in ('aa', 'bb')})

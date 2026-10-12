@@ -60,14 +60,15 @@ def gw_modes(eps, B, nocc, screening='tda'):
     Returns
     -------
     omega : ndarray, shape (nm,), Ω_m ascending, Hartree
-    W : ndarray, shape (norb, norb, nm), index order (p, q, m), W^m_pq =
+    W : ndarray, shape (norb, norb, nm), index order (p, q, m), C-contiguous, W^m_pq =
         sqrt(2) sum_jb (pq|jb) (X+Y)_jb,m. QPqb's Bogoliubov form has
         (X+Y)_Jm = sum_K (e^t)_JK U_Km and sum_J (X-Y)_Jm (X+Y)_Jn = δ_mn,
         QuAcK's normalisation of XpY; t = 0 for 'tda'.
     """
     qp = QPqb(np.asarray(eps, float), _eri_blocks(B, nocc), nocc,
               screening=screening)
-    return np.asarray(qp.omega, float), np.asarray(qp.Wnu, float)
+    # QPqb's einsum leaves m the slowest axis; every matvec reshapes slices of W
+    return np.asarray(qp.omega, float), np.ascontiguousarray(qp.Wnu, dtype=float)
 
 
 def static_term(eps, W, omega, nocc):
