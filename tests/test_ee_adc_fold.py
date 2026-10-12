@@ -84,6 +84,12 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
   24. an exactly degenerate pair the seeds miss, with M's seeds exact eigenvectors
       (spin=None on pieces without a cross-spin block, n 20 and 200, Davidson):
       the count's check finds both partners, no warning.
+  25. the progress trace (water singlets, nroots 3, Davidson): verbose 1 returns
+      the roots of verbose 0 to 1e-10 Ha, verbose 0 prints nothing; at verbose 1 the
+      start, seeds, count round, check and closing lines appear, every line ends on
+      its elapsed time and matvec count, the closing count equals the matvecs
+      solve_symmetric received, a zero heartbeat interval prints heartbeats, and no
+      trace outlives a call, one that raises included.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1354,6 +1360,64 @@ def check_degenerate_hidden():
     return ok
 
 
+def check_trace(eps, B, no):
+    """verbose 1 against verbose 0 on water singlets, nroots 3: the same roots bit
+    for bit, the phase lines with their stamps, the closing matvec count against
+    the matvecs solve_symmetric received, heartbeats at a zero interval, and the
+    trace reset after every call, one that raises included."""
+    import contextlib
+    import io
+    import re
+    from src.SingleReference.ADC.eeADC import ee_fold
+    P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    out0 = io.StringIO()
+    with contextlib.redirect_stdout(out0):
+        res0 = ee_fold.solve_folded(P, 3, spin='singlet')
+    calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold._HEARTBEAT
+
+    def counted(matvec, diag, **k):
+        def mv(u):
+            calls[0] += 1
+            return matvec(u)
+        return solve(mv, diag, **k)
+    ee_fold.solve_symmetric, ee_fold._HEARTBEAT = counted, 0.0
+    out1 = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out1):
+            res1 = ee_fold.solve_folded(P, 3, spin='singlet', verbose=1)
+    finally:
+        ee_fold.solve_symmetric, ee_fold._HEARTBEAT = solve, beat
+    lines = out1.getvalue().splitlines()
+    stamp = re.compile(r'\[t = \d+\.\d s, mv = (\d+)\]$')
+    d = float(np.abs(res0.omega - res1.omega).max()) \
+        if res0.omega.shape == res1.omega.shape else np.inf
+    ok = check(d < 1e-10 and not out0.getvalue(),
+               'verbose 1 returns the roots of verbose 0; verbose 0 prints nothing',
+               f'max |dw| {d:.1e} Ha, {len(out0.getvalue())} characters at verbose 0')
+    tags = ('start:', 'seeds:', 'count round 0', 'check:', 'step 1', 'running',
+            'returns')
+    seen = {t: any(t in s for s in lines) for t in tags}
+    unstamped = [s for s in lines if not stamp.search(s)]
+    last = stamp.search(lines[-1]) if lines else None
+    ok &= check(all(seen.values()) and lines and not unstamped,
+                'verbose 1: start, seeds, count round, check, step, heartbeat and '
+                'closing lines, each ending on its elapsed time and matvec count',
+                f'{len(lines)} lines, missing {[t for t in tags if not seen[t]]}, '
+                f'{len(unstamped)} unstamped')
+    ok &= check(last is not None and 'returns' in lines[-1]
+                and int(last.group(1)) == calls[0],
+                'the closing line counts the matvecs solve_symmetric received',
+                f'closing {last.group(1) if last else None}, received {calls[0]}')
+    try:
+        ee_fold.solve_folded(P, 3, spin='quintet', verbose=1)
+        raised = False
+    except ValueError:
+        raised = True
+    ok &= check(raised and ee_fold._TRACE.get() is None,
+                'no trace outlives a call, one that raises included')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1396,6 +1460,7 @@ def main():
     all_ok &= check_guess_start()
     all_ok &= check_refusals()
     all_ok &= check_degenerate_hidden()
+    all_ok &= check_trace(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

@@ -42,6 +42,8 @@ E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eq 53 (gf2), eq 66
 C. Hättig and F. Weigend, J. Chem. Phys. (2000), doi:10.1063/1.1290013 (the
 folded-doubles solver of RI-CC2).
 """
+import contextvars
+import time
 import warnings
 
 import numpy as np
@@ -58,6 +60,60 @@ _CHECK_SHIFT = 0.1      # Hartree: the count check's correction r / (d - e + shi
 _CHECK_RESIDUAL = 1e-4  # the count check decides μ against a window, no tighter
 _DUPLICATE = 0.5        # full-vector overlap above which two roots are one
 _COUNT_ROUNDS = 3       # rounds of the count check before it warns
+_HEARTBEAT = 600.0      # seconds: an eigensolve reports at most this often meanwhile
+# the progress record of the solve_folded call in flight at verbose >= 1, else None
+_TRACE = contextvars.ContextVar('ee_fold_trace', default=None)
+
+
+class _Trace:
+    """Elapsed time and matvec count of one solve_folded call, stamped on every line
+    it prints, so a run killed mid-solve shows its phase and how long that ran."""
+
+    def __init__(self, label):
+        self.label = label
+        self.t0 = self.beat = time.perf_counter()
+        self.nmv = 0
+
+    def say(self, text, label=None):
+        print(f'{label or self.label} {text}   [t = '
+              f'{time.perf_counter() - self.t0:.1f} s, mv = {self.nmv}]', flush=True)
+
+
+def _say(label, text):
+    """One progress line: stamped inside a traced call, plain otherwise."""
+    tr = _TRACE.get()
+    if tr is None:
+        print(f'{label} {text}', flush=True)
+    else:
+        tr.say(text, label)
+
+
+def _solve(matvec, diag, report=True, **kw):
+    """solve_symmetric, its matvecs counted against the traced call in flight: a
+    heartbeat every _HEARTBEAT s inside the solve, and with report one line when it
+    returns; untraced, solve_symmetric alone."""
+    tr = _TRACE.get()
+    if tr is None:
+        return solve_symmetric(matvec, diag, **kw)
+    lab = kw.get('label', '')
+    phase = lab[len(tr.label):].strip() if lab.startswith(tr.label) else lab
+    n0, t0 = tr.nmv, time.perf_counter()
+
+    def counted(u):
+        tr.nmv += 1
+        now = time.perf_counter()
+        if now - tr.beat >= _HEARTBEAT:
+            tr.beat = now
+            tr.say(f'{phase}: running, {tr.nmv - n0} matvecs, {now - t0:.1f} s')
+        return matvec(u)
+
+    e, X, conv = solve_symmetric(counted, diag, **kw)
+    if report:
+        w = np.asarray(e, float)
+        tr.say(f'{phase}: {w.size} root(s) from {w.min():.8f} to {w.max():.8f} Ha, '
+               f'{tr.nmv - n0} matvecs, {time.perf_counter() - t0:.1f} s, '
+               f'{int(np.count_nonzero(conv))} converged')
+    return e, X, conv
 
 
 def singles_flat_to_sb(u, no, nv):
@@ -315,9 +371,9 @@ def _eig_at(pieces, omega, spin, ref, dense, tol_residual, label):
         # sum_q A_pq x_q = λ x_p by Davidson on the matvec, A never built;
         # overlap_pick ranks Ritz vectors by |<ref|x>|; past the followed
         # root that ranking is noise and never converges, so follow one
-        e, X, conv = solve_symmetric(matvec, diag_s, nroots=1, x0=ref,
-                                     pick=overlap_pick(ref),
-                                     tol_residual=tol_residual, label=label)
+        e, X, conv = _solve(matvec, diag_s, report=False, nroots=1, x0=ref,
+                            pick=overlap_pick(ref),
+                            tol_residual=tol_residual, label=label)
         lam, y = float(e[0]), np.asarray(X[:, 0], float)
     y = y / np.linalg.norm(y)
     ov = abs(float(ref @ y))
@@ -362,9 +418,9 @@ def _eig_level(pieces, omega, spin, Y, dense, tol_residual, label):
         lam, Z = w[k], v[:, k]
     else:
         # sum_q A_pq x_qm = λ_m x_pm for the g Ritz vectors of largest projection
-        lam, Z, _ = solve_symmetric(matvec, diag_s, nroots=g, x0=Y,
-                                    pick=_subspace_pick(Y),
-                                    tol_residual=tol_residual, label=label)
+        lam, Z, _ = _solve(matvec, diag_s, report=False, nroots=g, x0=Y,
+                           pick=_subspace_pick(Y),
+                           tol_residual=tol_residual, label=label)
         lam, Z = np.asarray(lam, float), np.asarray(Z, float)
     # sum_p Z_pk Y_pc = sum_j U_kj s_j Wt_jc; the orthogonal R_kc = sum_j U_kj Wt_jc
     # minimises sum_pc (sum_k Z_pk R_kc - Y_pc)², and ZR_pc = sum_k Z_pk R_kc
@@ -390,8 +446,8 @@ def _iterate(step, om, tol_omega, t_min, max_newton, max_fixed, label, verbose):
         err = lam - om
         k += 1
         if verbose:
-            print(f'{label} step {k} ({mode}): omega = {om:.8f} '
-                  f'lambda = {lam:.8f} T1 = {t1:.4f}', flush=True)
+            _say(label, f'step {k} ({mode}): omega = {om:.8f} '
+                        f'lambda = {lam:.8f} T1 = {t1:.4f}')
         if abs(err) < tol_omega:
             return lam, t1, state, k, mode, True, abs(err)
         if mode == 'newton' and t1 < t_min:
@@ -448,9 +504,9 @@ def _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label):
     while True:
         ns = min(nroots + extra, n)
         # sum_q M_pq x_qr = e_r x_pr, the ns lowest by Davidson
-        e, X, _ = solve_symmetric(m0, diag_s, nroots=ns,
-                                  tol_residual=min(tol_residual, _SEED_RESIDUAL),
-                                  label=label + ' seeds')
+        e, X, _ = _solve(m0, diag_s, nroots=ns,
+                         tol_residual=min(tol_residual, _SEED_RESIDUAL),
+                         label=label + ' seeds')
         e, X = np.asarray(e, float), np.asarray(X, float)
         runs = [(a, b) for a, b in _levels(e) if a < nroots]
         if runs[-1][1] < ns or ns == n:
@@ -511,9 +567,9 @@ def _lowest_beside(matvec, diag_s, V, w0, top, tol_residual, label):
     r = np.random.default_rng(V.shape[1]).standard_normal(n)
     r -= V @ (V.T @ r)
     # sum_q A'_pq z_q = μ z_p, the lowest, by Davidson from r alone
-    mu, z, _ = solve_symmetric(lifted, diag, nroots=1, x0=r, precond=precond,
-                               tol_residual=max(tol_residual, _CHECK_RESIDUAL),
-                               label=label + ' check')
+    mu, z, _ = _solve(lifted, diag, nroots=1, x0=r, precond=precond,
+                      tol_residual=max(tol_residual, _CHECK_RESIDUAL),
+                      label=label + ' check')
     return float(mu[0]), np.asarray(z, float)[:, 0]
 
 
@@ -535,10 +591,10 @@ def _lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols, tol=Non
     else:
         while True:
             # sum_q A_pq x_qm = w_m x_pm, the k lowest by Davidson
-            w, v, _ = solve_symmetric(matvec, diag_s, nroots=k,
-                                      x0=_guess(cols, diag_s, 2 * k + 4),
-                                      tol_residual=tol_residual,
-                                      label=label + ' count')
+            w, v, _ = _solve(matvec, diag_s, nroots=k,
+                             x0=_guess(cols, diag_s, 2 * k + 4),
+                             tol_residual=tol_residual,
+                             label=label + ' count')
             w, v = np.asarray(w, float), np.asarray(v, float)
             if tol is None or k == n:
                 break
@@ -581,8 +637,8 @@ def _index_solve(pieces, spin, a, b, om, lo, hi, X, dense, tol_residual, tol_ome
         err = float(lam.mean()) - om
         k += 1
         if verbose:
-            print(f'{label} branch {a} step {k} (index): omega = {om:.8f} '
-                  f'lambda = {lam.mean():.8f} T1 = {t1.mean():.4f}', flush=True)
+            _say(label, f'branch {a} step {k} (index): omega = {om:.8f} '
+                        f'lambda = {lam.mean():.8f} T1 = {t1.mean():.4f}')
         if abs(err) < tol_omega or k >= max_steps:
             return lam, Z, t1, k, abs(err) < tol_omega, abs(err)
         lo, hi = (om, hi) if err > 0 else (lo, om)
@@ -667,12 +723,27 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     dense_limit : int or None, channel size at or below which A_eff is built and
         eigh'd; None takes pieces['dense_limit'], 0 (Davidson at every size) when
         the pieces set none.
-    verbose : int, 1 prints one line per outer step.
+    verbose : int, 1 prints one line per outer step, per eigensolve outside the
+        steps (seeds, count, check) and per count round, each stamped with the
+        call's elapsed time and matvec count, and inside a long eigensolve a line
+        at most every _HEARTBEAT (600) s.
 
     Returns
     -------
     FoldResult
     """
+    # one trace per call, reset however the call ends, so no later solve inherits it
+    token = _TRACE.set(_Trace(f'ee-ADC fold ({spin or "both"})') if verbose else None)
+    try:
+        return _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min,
+                             max_newton, max_fixed, dense_limit, verbose)
+    finally:
+        _TRACE.reset(token)
+
+
+def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newton,
+                  max_fixed, dense_limit, verbose):
+    """solve_folded inside its trace; the arguments are solve_folded's."""
     _check_level(pieces)
     m0, _, diag_s, embed, _ = folded_operator(pieces, None, spin)
     n = diag_s.size
@@ -689,9 +760,17 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     if n < nroots:
         warnings.warn(f'the {spin or "combined"} channel holds {n} states, fewer '
                       f'than nroots={nroots}; returning {n}', RuntimeWarning,
-                      stacklevel=2)
+                      stacklevel=3)
         nroots = n
     label = f'ee-ADC fold ({spin or "both"})'
+    tr = _TRACE.get()
+
+    def note(text):
+        if tr is not None:
+            tr.say(text)
+
+    note(f'start: {n} singles, nroots {nroots}, {"dense" if dense else "Davidson"}, '
+         f'tol_omega {tol_omega:g}, tol_residual {tol_residual:g}')
     e0, X0, runs = _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label)
     # per root, appended as levels are solved; copy marks a duplicate's copy
     omega, y_out, t1_out, level, steps, loop, converged, copy = ([] for _ in range(8))
@@ -708,7 +787,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             # caller's index
             warnings.warn(f'{label}: the root at omega = {lam:.8f} Ha not converged '
                           f'after {k} steps ({mode}), |lambda - omega| = {err:.2e} Ha',
-                          RuntimeWarning, stacklevel=4)
+                          RuntimeWarning, stacklevel=5)
         for out, v in zip((omega, y_out, t1_out, level, steps, loop, converged, copy),
                           (lam, yk, t1, lv, k + k0, mode, conv, False)):
             out.append(v)
@@ -731,7 +810,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
                 warnings.warn(f'{label}: level {lv} at omega = {lbar:.8f} Ha split '
                               f'by {lam.max() - lam.min():.1e} Ha in A_eff, not '
                               'degenerate; re-solved per root, each a level of its '
-                              'own', RuntimeWarning, stacklevel=3)
+                              'own', RuntimeWarning, stacklevel=4)
                 # λ_j(ω) = ω per root, each from the level's final eigenvector
                 # Z_pj; no partners, one level each, the joint steps counted too
                 for j in range(b - a):
@@ -742,7 +821,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             if not conv:
                 warnings.warn(f'{label}: level {lv} at omega = {lbar:.8f} Ha not '
                               f'converged after {k} steps ({mode}), |lambda - omega| '
-                              f'= {err:.2e} Ha', RuntimeWarning, stacklevel=3)
+                              f'= {err:.2e} Ha', RuntimeWarning, stacklevel=4)
             for j in range(b - a):
                 for out, v in zip((omega, y_out, t1_out, level, steps, loop,
                                    converged, copy),
@@ -769,7 +848,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             keep = r + s - drop
             warnings.warn(f'{label}: two roots landed on one root, at omega = '
                           f'{om[keep]:.8f} and {om[drop]:.8f} Ha; the copy at '
-                          f'{om[drop]:.8f} Ha dropped', RuntimeWarning, stacklevel=3)
+                          f'{om[drop]:.8f} Ha dropped', RuntimeWarning, stacklevel=4)
             converged[drop], copy[drop] = False, True
 
     def live():
@@ -801,7 +880,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         if conv and lam.max() - lam.min() > _DEGENERATE:
             warnings.warn(f'{label}: branches {a} to {b - 1} split by '
                           f'{lam.max() - lam.min():.1e} Ha in A_eff, not degenerate; '
-                          're-solved per branch', RuntimeWarning, stacklevel=3)
+                          're-solved per branch', RuntimeWarning, stacklevel=4)
             for j in range(a, b):
                 solve_index(j, j + 1, lam_c, X_c, dmv_c, cut)
             return
@@ -811,7 +890,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             warnings.warn(f'{label}: the root of branch {a} at omega = '
                           f'{lam.mean():.8f} Ha not converged after {k} steps '
                           f'(index), |lambda - omega| = {err:.2e} Ha{why}',
-                          RuntimeWarning, stacklevel=3)
+                          RuntimeWarning, stacklevel=4)
         lv, nlev = nlev, nlev + 1
         for j in range(b - a):
             for out, v in zip((omega, y_out, t1_out, level, steps, loop, converged,
@@ -829,6 +908,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     # window holds that spread too
     tol = max(2.0 * tol_omega, _DEGENERATE)
     d_min = float(np.min(pieces['D']))
+    note(f'{len(live())} root(s) from the seeds; lowest doubles energy {d_min:.8f} Ha')
     for rnd in range(_COUNT_ROUNDS + 1):
         L = live()
         found = np.array([omega[r] for r in L])
@@ -841,6 +921,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             # root found below it, which checks the branches up to that root
             below = found[found < d_min]
             if below.size == 0:
+                note('count skipped: no root found below the lowest doubles energy')
                 break
             cut, deficit = float(below[-1]), 0
             upto = None
@@ -853,11 +934,14 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         # and one the search finds there is solved and joins every later start
         nb_lo, nb, lam, X, dmv = count_below(cut, max(nroots, nf + 1), Yl,
                                              check=rnd == 0)
+        note(f'count round {rnd} at cut {cut:.8f} Ha: branches {nb_lo} below its '
+             f'window, {nb} at or below it; roots found {nf_lo} and {nf}; '
+             f'deficit {deficit}')
         if nf > nb:
             warnings.warn(f'{label}: {nf} roots found at or below omega = {cut:.8f} '
                           f'Ha where A_eff has {nb}: a copy inside the duplicate '
                           'window, or an unconverged root', RuntimeWarning,
-                          stacklevel=2)
+                          stacklevel=3)
         # a branch inside the cut's window is degenerate with the cut root to the
         # window's resolution: missing only when roots are short of nroots
         if nb_lo <= nf_lo and not deficit:
@@ -886,7 +970,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         if rnd == _COUNT_ROUNDS or not missing:
             warnings.warn(f'{label}: {len(missing) or nb_lo - nf_lo + deficit} of the '
                           f'{nroots} lowest roots not found after {rnd} round(s)',
-                          RuntimeWarning, stacklevel=2)
+                          RuntimeWarning, stacklevel=3)
             break
         # consecutive missing branches degenerate at the cut form one group, and
         # a group takes its degenerate partners past nroots too: a level whole
@@ -897,6 +981,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
             while groups[-1][1] < lam.size and groups[-1][1] not in covered and \
                     lam[groups[-1][1]] - lam[groups[-1][0]] <= _DEGENERATE:
                 groups[-1][1] += 1
+        note(f'count round {rnd}: branches {missing} missing, solved by index as '
+             f'groups {groups}')
         before = len(L)
         for a, b in groups:
             solve_index(a, b, lam, X, dmv, cut)
@@ -904,7 +990,7 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         if len(live()) == before:
             warnings.warn(f'{label}: the branches {missing} solved by index landed on '
                           'roots already found; stopped, their roots missing from the '
-                          'result', RuntimeWarning, stacklevel=2)
+                          'result', RuntimeWarning, stacklevel=3)
             break
     # the nroots lowest roots, copies left out, a level cut by nroots whole;
     # roots solved past the cut are dropped
@@ -915,8 +1001,10 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
                  else '')
         warnings.warn(f'{label}: omega = {top:.8f} Ha lies at or above the lowest '
                       f'doubles energy {d_min:.8f} Ha; the roots from there up are '
-                      f'not checked by the count{short}', RuntimeWarning, stacklevel=2)
+                      f'not checked by the count{short}', RuntimeWarning, stacklevel=3)
     sel = np.asarray([r for r in L if omega[r] <= top], int)
+    note(f'returns {sel.size} root(s), '
+         f'{int(np.count_nonzero(np.asarray(converged, bool)[sel]))} converged')
     return FoldResult(np.asarray(omega)[sel], np.column_stack(y_out)[:, sel],
                       np.asarray(t1_out)[sel], np.asarray(steps, int)[sel],
                       [loop[i] for i in sel], np.asarray(converged, bool)[sel],
