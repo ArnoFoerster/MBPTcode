@@ -169,7 +169,11 @@ def folded_operator(pieces, omega, spin=None):
         (k, c, m)), 'level', 'no', 'nv', 'be'; 'dnorm2' (optional: SB doubles
         -> float sum_K Y_K², for a doubles layout other than adc2's);
         'dense_limit' (optional int, default 0: solve_folded's dense_limit when
-        the caller passes None).
+        the caller passes None); 'K' (optional: the fused kernel
+        K(y1, omega, powers) -> (ws, dn2) with y1 an SB singles vector, ws[i]
+        the SB singles sum_K V_K,ia (V y1)_K / (D_K - ω)^powers[i] and dn2 the
+        float sum_K (V y1)_K² / (D_K - ω)², for a pieces set that streams the
+        doubles instead of forming V(y1); powers may be empty).
     omega : float or None
         Frequency in Hartree; None gives the bare singles block M.
     spin : {'singlet', 'triplet', None}
@@ -182,6 +186,9 @@ def folded_operator(pieces, omega, spin=None):
     dmatvec : callable
         u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float), so that
         dλ/dω = -dmatvec(y) for a unit eigenvector y; 0.0 when omega is None.
+        dmatvec(u, vector=True) -> dA_eff/dω u = -V^T (D - ω)^-2 V u (n,), so
+        that u @ dmatvec(u, vector=True) == -dmatvec(u); zeros when omega is
+        None.
     diag_s : ndarray, shape (n,)
         Diagonal of M on the channel's representative entries (preconditioner).
     embed, restrict : callables
@@ -211,6 +218,25 @@ def folded_operator(pieces, omega, spin=None):
                              np.einsum('iaia->ia', M.get('bbbb')).ravel()])
     diag_s = m_diag[reps]
     denom = None if omega is None else D - omega        # (D - ω), sign kept
+    kernel = pieces.get('K')
+
+    def apply(y1, powers):
+        # ws[i] = sum_K V_K,ia (V y1)_K / (D_K - ω)^p for p in powers, and
+        # dn2 = sum_K (V y1)_K² / (D_K - ω)²; a pieces['K'] does both in one pass
+        if kernel is not None:
+            return kernel(y1, omega, powers)
+        Y = be.divide(V(y1), denom)                       # (V y1)_K / (D_K - ω)
+        ws = []
+        for p in powers:
+            Yp = Y
+            for _ in range(p - 1):
+                Yp = be.divide(Yp, denom)                 # one more (D_K - ω)
+            ws.append(Vt(Yp))
+        if dnorm2 is not None:
+            # sum_K Y_K² in the pieces' own doubles layout
+            return ws, float(dnorm2(Y))
+        Yf = doubles_sb_to_flat(Y, no, nv)
+        return ws, float(Yf @ Yf)
 
     def matvec(u):
         u = _check_vector(u, n)
@@ -218,22 +244,20 @@ def folded_operator(pieces, omega, spin=None):
         w1 = be.ein('iajb,jb->ia', M, y1)                 # sum_jb M_ia,jb y_jb
         if denom is not None:
             # - sum_K V_K,ia (sum_jb V_K,jb y_jb) / (D_K - ω) : the folded doubles
-            Y = be.divide(V(y1), denom)
-            w1 = w1 - Vt(Y)
+            w1 = w1 - apply(y1, (1,))[0][0]
         return restrict(singles_sb_to_flat(w1, no, nv))
 
-    def dmatvec(u):
+    def dmatvec(u, vector=False):
         if denom is None:
-            return 0.0
+            return np.zeros(n) if vector else 0.0
         u = _check_vector(u, n)
         y1 = singles_flat_to_sb(embed(u), no, nv)
-        Yt = be.divide(V(y1), denom)
-        if dnorm2 is not None:
-            # sum_K Y_K² in the pieces' own doubles layout
-            return float(dnorm2(Yt))
-        # Y_K = sum_jb V_K,jb y_jb / (D_K - ω), flat; then sum_K Y_K²
-        Yf = doubles_sb_to_flat(Yt, no, nv)
-        return float(Yf @ Yf)
+        if vector:
+            # - sum_K V_K,ia (sum_jb V_K,jb y_jb) / (D_K - ω)² : dA_eff/dω applied to u
+            w2 = apply(y1, (2,))[0][0]
+            return -restrict(singles_sb_to_flat(w2, no, nv))
+        # sum_K (sum_jb V_K,jb y_jb)² / (D_K - ω)², no coupling back to the singles
+        return apply(y1, ())[1]
 
     return matvec, dmatvec, diag_s, embed, restrict
 

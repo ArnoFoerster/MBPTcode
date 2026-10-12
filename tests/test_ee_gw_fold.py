@@ -10,7 +10,9 @@ Checks, water (RHF, DF factors), basis per check:
      T1 is that eigenvector's singles weight to 1e-8.
   3. the fold and the builder leave D, W and the input vector untouched; an unknown
      screening raises ValueError, and so do gw pieces without dnorm2; the Davidson
-     branch equals the dense one (6-31G, TDA, 1e-10 Ha and 1e-8 on T1).
+     branch equals the dense one (6-31G, TDA, 1e-10 Ha and 1e-8 on T1); on the
+     (k, c, m) layout dmatvec(u, vector=True) is dA_eff/domega u (its quadratic
+     form -dmatvec(u) to 1e-12 relative, the central difference to 1e-6).
   4. eq 66 transcribed from QuAcK's loops (RGW_phBSE_upfolded_sym.f90 lines 86-216
      at QuAcK 2236bfc) on CasidaSolver's modes, both screenings: M per channel and
      the full spectrum to 1e-10 Ha; this pins sqrt(2), 1/2, the signs, the spin, and
@@ -156,7 +158,7 @@ def check_boundaries(eps, B, no):
     ok = True
     P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening='tda')
     D0, W0 = P['D'].copy(), P['W'].copy()
-    matvec, _, diag_s, _, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
+    matvec, dmv, diag_s, _, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
     u = np.linspace(-1.0, 1.0, diag_s.size)
     u0 = u.copy()
     matvec(u)
@@ -164,6 +166,15 @@ def check_boundaries(eps, B, no):
     ok &= check(np.array_equal(u, u0) and np.array_equal(P['D'], D0)
                 and np.array_equal(P['W'], W0),
                 'matvec and solve_folded leave u, D and W untouched')
+    # the (k, c, m) layout: the vector derivative's quadratic form is the dnorm2 scalar
+    h = 1e-4
+    g = dmv(u, vector=True)
+    fd = (ee_fold.folded_operator(P, 0.3 + h, spin='singlet')[0](u)
+          - ee_fold.folded_operator(P, 0.3 - h, spin='singlet')[0](u)) / (2 * h)
+    d1 = abs(float(u @ g) + dmv(u)) / abs(dmv(u))
+    d2 = float(np.max(np.abs(g - fd)) / np.max(np.abs(fd)))
+    ok &= check(d1 < 1e-12 and d2 < 1e-6,
+                'gw: dmatvec(u, vector=True) is dA_eff/domega u', f'{d1:.1e}, {d2:.1e}')
     try:
         ee_gw_pieces.build_pieces_gw(eps, B, no, screening='bogus')
         ok &= check(False, 'an unknown screening raises ValueError')

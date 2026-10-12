@@ -97,6 +97,11 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
   27. ee_spin_blocks.ooov_ia and ovvv_ia, their products summed over j-slabs on 4
       threads, equal the block-wise einsum on anti4's blocks for an X without a
       flip parity and with each one, to 1e-12 relative.
+  28. dmatvec(u, vector=True) is dA_eff/domega u: its quadratic form is -dmatvec(u)
+      to 1e-12 relative and it equals the central difference of matvec at
+      h = 1e-4 Ha to 1e-6 relative; at omega None it is zeros; an optional
+      pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
+      forms, bitwise, called once per application with powers (1,), () and (2,).
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1497,6 +1502,51 @@ def check_split_contractions():
                  f'{worst:.1e} relative, X {list(Xs)}')
 
 
+def check_kernel_hook(eps, B, no):
+    """dmatvec(u, vector=True) is dA_eff/domega applied to u: its quadratic form is
+    -dmatvec(u) to 1e-12 relative, the central difference of matvec at h = 1e-4 Ha
+    to 1e-6 relative, zeros at omega None; an optional pieces['K'] replaces the V,
+    divide, Vt path of matvec and of both dmatvec forms, bitwise, called once per
+    application with the powers (1,), () and (2,)."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    ok = True
+    nv = B.shape[1] - no
+    P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    om, h = 0.3, 1e-4
+    mv, dmv, diag_s, _, _ = ee_fold.folded_operator(P, om, spin='singlet')
+    mvp = ee_fold.folded_operator(P, om + h, spin='singlet')[0]
+    mvm = ee_fold.folded_operator(P, om - h, spin='singlet')[0]
+    u = np.random.default_rng(2).standard_normal(diag_s.size)
+    u /= np.linalg.norm(u)
+    g = dmv(u, vector=True)
+    fd = (mvp(u) - mvm(u)) / (2 * h)
+    d1 = abs(float(u @ g) + dmv(u)) / abs(dmv(u))
+    d2 = float(np.max(np.abs(g - fd)) / np.max(np.abs(fd)))
+    ok &= check(d1 < 1e-12 and d2 < 1e-6,
+                'dmatvec(u, vector=True) is dA_eff/domega u', f'{d1:.1e}, {d2:.1e}')
+    dmv0 = ee_fold.folded_operator(P, None, spin='singlet')[1]
+    ok &= check(dmv0(u) == 0.0
+                and np.array_equal(dmv0(u, vector=True), np.zeros(u.size)),
+                'omega None: dmatvec is 0.0 and its vector form zeros')
+    calls = []
+
+    def K(y1, omega, powers):
+        calls.append(tuple(powers))
+        denom = P['D'] - omega
+        Y = P['be'].divide(P['V'](y1), denom)
+        ws = [P['Vt'](Y if p == 1 else P['be'].divide(Y, denom)) for p in powers]
+        Yf = ee_fold.doubles_sb_to_flat(Y, no, nv)
+        return ws, float(Yf @ Yf)
+
+    mvk, dmvk, _, _, _ = ee_fold.folded_operator(dict(P, K=K), om, spin='singlet')
+    same = (np.array_equal(mvk(u), mv(u)) and dmvk(u) == dmv(u)
+            and np.array_equal(dmvk(u, vector=True), g))
+    ok &= check(same and calls == [(1,), (), (2,)],
+                "pieces['K'] is the kernel matvec and both dmatvec forms apply",
+                str(calls))
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1542,6 +1592,7 @@ def main():
     all_ok &= check_trace(eps, B, no)
     all_ok &= check_threaded_elementwise()
     all_ok &= check_split_contractions()
+    all_ok &= check_kernel_hook(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
