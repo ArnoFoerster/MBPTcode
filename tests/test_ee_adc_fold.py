@@ -102,6 +102,10 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       h = 1e-4 Ha to 1e-6 relative; at omega None it is zeros; an optional
       pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
       forms, bitwise, called once per application with powers (1,), () and (2,).
+  32. ee_spin_blocks._stream runs fn once per slab of an index range, the last
+      slab shorter than the width, with more workers than slabs, and sums the
+      outputs exactly; slabs that split their own _ew over as many threads as
+      there are workers return.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1547,6 +1551,42 @@ def check_kernel_hook(eps, B, no):
     return ok
 
 
+def check_stream():
+    """_stream sums fn over slabs exactly once each, with a last slab shorter than
+    the width and more workers than slabs; a slab whose own _ew pass splits over
+    as many threads as there are workers returns (on row_map's pool it hangs)."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    seen = []
+
+    def fn(j0, j1):
+        seen.append((j0, j1))
+        return [sb.SB({'aa': np.full((2, 2), float(j1 - j0))})], float(j1 - j0)
+
+    out, tot = sb._stream(fn, 5, 2, workers=24)
+    ok = check(sorted(seen) == [(0, 2), (2, 4), (4, 5)] and tot == 5.0
+               and np.array_equal(out[0].get('aa'), np.full((2, 2), 5.0)),
+               '_stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
+               f'{sorted(seen)}, {tot}')
+    a = np.ones((3, 1 << 19))
+
+    def fn_ew(j0, j1):
+        return [sb._ew(np.multiply, a, 2.0)], float(j1 - j0)
+
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '3'
+    try:
+        out, tot = sb._stream(fn_ew, 3, 1, workers=3)
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    ok &= check(tot == 3.0 and np.array_equal(out[0], np.full(a.shape, 6.0)),
+                '_stream: slabs that split their own _ew over 3 threads, 3 workers',
+                f'{tot}')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1593,6 +1633,7 @@ def main():
     all_ok &= check_threaded_elementwise()
     all_ok &= check_split_contractions()
     all_ok &= check_kernel_hook(eps, B, no)
+    all_ok &= check_stream()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

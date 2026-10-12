@@ -27,16 +27,23 @@ V[p,q,r,s], for a closed-shell reference:
     aaaa = bbbb = V - V(pqsr)     abab = baba = V
     abba = baab = -V(pqsr)
 """
+import contextlib
 import functools
 import itertools
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from src.Base.utils.threads import blas_single_threaded, row_map
+from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threaded,
+                                    row_map)
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
+_SLAB_ELEMS = 1 << 27   # elements of one slab block: 1 GB in float64
+_STREAM_POOLS = {}
+_STREAM_LOCK = threading.Lock()
 
 
 def _threads():
@@ -84,6 +91,56 @@ def _ksum(fn, n, size):
     with blas_single_threaded():
         parts = row_map(fn, n, nt)
     return functools.reduce(np.add, parts)
+
+
+def _stream_workers():
+    """Slabs in flight: one per eight threads of the pin, at least one."""
+    return max(1, _threads() // 8)
+
+
+def _add(a, b):
+    """a + b for a tuple of (list of addable, float), elementwise."""
+    return ([x + y for x, y in zip(a[0], b[0])], a[1] + b[1])
+
+
+def _stream_pool(workers):
+    """This process's executor of `workers` slab threads, made once. It is not one
+    of row_map's: a slab's own _ew passes run on those, and a slab waiting on a
+    pool it occupies would never return."""
+    key = (os.getpid(), workers)
+    with _STREAM_LOCK:
+        if key not in _STREAM_POOLS:
+            _STREAM_POOLS[key] = ThreadPoolExecutor(workers)
+        return _STREAM_POOLS[key]
+
+
+def _stream(fn, n, width, workers=None):
+    """fn(j0, j1) summed over the slabs [j0, j1) of width `width` tiling [0, n), the
+    last one shorter. `workers` slabs run at once (default _stream_workers()), each
+    worker taking a contiguous group of slabs in turn, with BLAS held at
+    _threads() // workers threads meanwhile, so every core is busy while only
+    `workers` slabs are alive. fn returns (list of SB or ndarray, float); the
+    partial sums are added in slab order within a group and the groups in order,
+    so the sum is reordered against fn(0, n), not random. The BLAS count is
+    process-global, so only the main thread with threadpoolctl loaded moves it."""
+    slabs = [(j0, min(j0 + width, n)) for j0 in range(0, n, width)]
+    workers = min(workers or _stream_workers(), len(slabs))
+
+    def group(g0, g1):
+        out = fn(*slabs[g0])
+        for s in range(g0 + 1, g1):
+            out = _add(out, fn(*slabs[s]))
+        return out
+
+    if workers < 2:
+        return group(0, len(slabs))
+    ns = len(slabs)
+    groups = [(p * ns // workers, (p + 1) * ns // workers) for p in range(workers)]
+    limit = (_BlasLimit(max(1, _threads() // workers)) if _pool_is_ours()
+             else contextlib.nullcontext())
+    with limit:
+        parts = list(_stream_pool(workers).map(lambda g: group(*g), groups))
+    return functools.reduce(_add, parts)
 
 
 class SB:
