@@ -27,6 +27,12 @@ Checks, water (RHF, DF factors), basis per check:
      nroots: the singlet's 3 and the triplet's 4 lowest roots equal the lowest
      eigenvalues of check 4's supermatrix below min D, on both branches, to 1e-9 Ha,
      without a warning.
+  8. build_pieces_gw's pieces['K'], the kernel streamed over slabs of the pair's
+     occupied index k (6-31G, TDA and RPA screening), equals the V, divide, Vt path
+     at 0.3 Ha for powers (1, 2) and () to 1e-12 relative, its norm dnorm2's, on one
+     slab, on three of width 2, and on those three with two in flight; the folded
+     singlets with and without it agree to 1e-9 Ha; a singles vector with a flip
+     parity raises NotImplementedError.
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -364,6 +370,68 @@ def check_seeding_gap():
     return ok
 
 
+def check_streamed_kernel(eps, B, no):
+    """pieces['K'], the eq 66 kernel streamed over slabs of k, against the V, divide,
+    Vt path at omega 0.3 Ha, powers (1, 2) and (), both screenings, to 1e-12
+    relative per block, its norm against dnorm2; on one slab, on three of width 2,
+    and on those three two at a time; the folded singlets with and without K to
+    1e-9 Ha; a y1 with a flip parity refused."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    ok = True
+    nv = len(eps) - no
+    om = 0.3
+    rng = np.random.default_rng(13)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    elems, keep = sb._SLAB_ELEMS, os.environ.get('OMP_NUM_THREADS')
+    for screening in ('tda', 'rpa'):
+        P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
+        be, nm = P['be'], P['omega'].size
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        n2_ref = P['dnorm2'](Yt)
+        runs = (('one slab', elems, keep), ('3 slabs', 2 * nv * nm, keep),
+                ('3 slabs, 2 workers', 2 * nv * nm, '16'))
+        for label, slab_elems, threads in runs:
+            sb._SLAB_ELEMS = slab_elems
+            if threads is None:
+                os.environ.pop('OMP_NUM_THREADS', None)
+            else:
+                os.environ['OMP_NUM_THREADS'] = threads
+            try:
+                ws, n2 = P['K'](y1, om, (1, 2))
+                ws0, n20 = P['K'](y1, om, ())
+            finally:
+                sb._SLAB_ELEMS = elems
+                if keep is None:
+                    os.environ.pop('OMP_NUM_THREADS', None)
+                else:
+                    os.environ['OMP_NUM_THREADS'] = keep
+            d = max(rel(w.get(s), r.get(s)) for w, r in zip(ws, ref)
+                    for s in ('aa', 'bb'))
+            dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+            ok &= check(len(ws) == 2 and ws0 == [] and d < 1e-12 and dn < 1e-12,
+                        f"{screening}, {label}: pieces['K'] equals V, divide, Vt",
+                        f'{d:.1e}, norm {dn:.1e} relative')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(dict(P, K=None), 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega)))
+        ok &= check(a.omega.size == 3 and dw < 1e-9,
+                    f"{screening}: the folded singlets with and without pieces['K']",
+                    f'max |dw| {dw:.1e} Ha')
+        try:
+            P['K'](SB(y1.blocks, parity=1.0), om, (1,))
+            ok &= check(False, f"{screening}: pieces['K'] refuses a flip parity")
+        except NotImplementedError as exc:
+            ok &= check('parity' in str(exc),
+                        f"{screening}: pieces['K'] refuses a flip parity",
+                        str(exc)[:60])
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -376,6 +444,7 @@ def main():
     all_ok &= check_quack_h2o()
     all_ok &= check_boundaries(eps, B, no)
     all_ok &= check_seeding_gap()
+    all_ok &= check_streamed_kernel(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

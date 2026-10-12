@@ -29,7 +29,8 @@ import numpy as np
 from src.Base.eri_blocks import MOEriBlocks
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum
+from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
+from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
 from src.SingleReference.GW.quasi_boson import QPqb
 
 
@@ -126,7 +127,10 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         (no, nv), index order (i, a) -> SB doubles {'aa', 'bb'} of (no, nv, nm),
         index order (k, c, m); 'Vt' the transpose; 'D' ndarray, shape (no, nv, nm),
         index order (k, c, m); 'dnorm2' SB doubles -> sum of the squares over both
-        blocks; 'level' 'gw'; 'no', 'nv', 'be'; 'dense_limit' 40, solve_folded's
+        blocks; 'K' the fused kernel of ee_fold.folded_operator, K(y1, omega,
+        powers) -> (ws, dn2), Vt (D - ω)^-p V y1 for each p and dnorm2 of
+        (D - ω)^-1 V y1, streamed over slabs of k so no (no, nv, nm) array is
+        formed; 'level' 'gw'; 'no', 'nv', 'be'; 'dense_limit' 40, solve_folded's
         default; 'omega' (nm,) and 'W' (norb, norb, nm) for inspection.
     """
     if screening not in ('tda', 'rpa'):
@@ -169,6 +173,52 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
 
         return _ksum(vv, nv, Y.size) - _ksum(oo, no, Y.size)
 
+    def kernel(y1, omega, powers=(1,)):
+        # sum_K V_K,ia (V y1)_K / (D_K - ω)^p for each p in powers, and
+        # sum_K (V y1)_K² / (D_K - ω)², streamed over slabs of k, the pair's
+        # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
+        if y1.parity is not None:
+            raise NotImplementedError('kernel takes y1 without a flip parity')
+        width = max(1, _sb._SLAB_ELEMS // (nv * nm))
+
+        def slab(k0, k1):
+            nk = k1 - k0
+            Wook = Woo[:, k0:k1]                                  # W^m_ik, (i, k, m)
+            den = _ew(np.subtract, D[k0:k1], omega)               # D_kcm - ω
+
+            def vt(Y):
+                # the slab's share of couple_t: w_ia = sum_cm W^m_ac Y_icm on the
+                # slab's rows i = k, minus sum_km W^m_ik Y_kam over the slab's k
+
+                def vv(c0, c1):
+                    return (Y[:, c0:c1].reshape(nk, -1)
+                            @ Wvv[:, c0:c1].reshape(nv, -1).T)
+
+                def oo(a0, a1):
+                    return np.matmul(Wook[:, a0:a1].transpose(1, 0, 2),
+                                     Y[a0:a1].transpose(0, 2, 1)).sum(axis=0)
+
+                w = np.zeros((no, nv))
+                w[k0:k1] = _ksum(vv, nv, Y.size)
+                return w - _ksum(oo, nk, Y.size)
+
+            ws, dn2 = [{} for _ in powers], 0.0
+            for s in ('aa', 'bb'):
+                y = y1.get(s)
+                # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic, k in the slab
+                Y = (y[k0:k1] @ Wvv.reshape(nv, nv * nm)).reshape(nk, nv, nm)
+                _ew(np.subtract, Y, np.matmul(y.T, Wook.transpose(1, 0, 2)), out=Y)
+                _ew(np.true_divide, Y, den, out=Y)
+                dn2 += float(np.vdot(Y, Y))
+                for w, p in zip(ws, powers):
+                    Yp = Y
+                    for _ in range(p - 1):
+                        Yp = _ew(np.true_divide, Yp, den)
+                    w[s] = vt(Yp)
+            return [SB(w) for w in ws], dn2
+
+        return _stream(slab, no, width)
+
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})
 
@@ -179,6 +229,6 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         return float(sum(np.vdot(Y.get(s), Y.get(s)) for s in ('aa', 'bb')))
 
     # a channel of up to 40 singles builds A_eff densely
-    return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'level': 'gw',
-            'no': no, 'nv': nv, 'be': _eq.SPIN_BLOCKED, 'dense_limit': 40,
-            'omega': omega, 'W': W}
+    return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'K': kernel,
+            'level': 'gw', 'no': no, 'nv': nv, 'be': _eq.SPIN_BLOCKED,
+            'dense_limit': 40, 'omega': omega, 'W': W}
