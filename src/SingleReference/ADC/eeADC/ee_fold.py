@@ -61,6 +61,7 @@ _CHECK_RESIDUAL = 1e-4  # the count check decides μ against a window, no tighte
 _DUPLICATE = 0.5        # full-vector overlap above which two roots are one
 _COUNT_ROUNDS = 3       # rounds of the count check before it warns
 _HEARTBEAT = 600.0      # seconds: an eigensolve reports at most this often meanwhile
+_RECENTRE = 0.01        # Hartree: a root this far from the centre rebuilds the images
 # the progress record of the solve_folded call in flight at verbose >= 1, else None
 _TRACE = contextvars.ContextVar('ee_fold_trace', default=None)
 
@@ -426,6 +427,42 @@ def _subspace_pick(Y):
         return w[order], v[:, order], order
 
     return pick
+
+
+def _model_roots(H0, H1, om0, nroots, d_min, tol):
+    """The nroots lowest roots of the subspace model H(ω) = H0 + (ω - om0) H1.
+
+    H0, H1 : ndarray, shape (m, m), symmetric: Q^T A_eff(om0) Q and Q^T A'(om0) Q
+    om0 : float, the frequency the images were taken at
+    d_min : float, the lowest doubles energy; a root at or above it, to tol, is
+        dropped
+    tol : float, Newton stops when the step is below it
+
+    Every branch λ_j(ω) of H(ω), j the sorted index, is followed by Newton from
+    om0: dλ_j/dω = c_j^T H1 c_j ≤ 0, so 1 - dλ_j/dω ≥ 1 and the step is stable.
+    Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the subspace
+    eigenvectors at the roots.
+    """
+    m = H0.shape[0]
+    found = []
+    for j in range(m):
+        om = om0
+        for _ in range(100):
+            w, v = np.linalg.eigh(H0 + (om - om0) * H1)
+            lam, c = float(w[j]), v[:, j]
+            # Newton on λ_j(ω) - ω with dλ_j/dω = c^T H1 c
+            step = (lam - om) / (1.0 - float(c @ H1 @ c))
+            om += step
+            if abs(step) < tol:
+                break
+        # a root within tol of d_min cannot be told from one at it
+        if om < d_min - tol and abs(lam - om) < 100.0 * tol:
+            found.append((om, c))
+    found.sort(key=lambda t: t[0])
+    found = found[:nroots]
+    if not found:
+        return np.empty(0), np.empty((m, 0))
+    return np.array([t[0] for t in found]), np.column_stack([t[1] for t in found])
 
 
 def _eig_level(pieces, omega, spin, Y, dense, tol_residual, label):

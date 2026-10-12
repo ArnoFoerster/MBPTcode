@@ -102,6 +102,9 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       h = 1e-4 Ha to 1e-6 relative; at omega None it is zeros; an optional
       pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
       forms, bitwise, called once per application with powers (1,), () and (2,).
+  29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
+      H1 = 0 its roots are the eigenvalues of H0, with H1 = -I they are
+      (w_j + w0) / 2, and a root at or above min D is dropped.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1547,6 +1550,26 @@ def check_kernel_hook(eps, B, no):
     return ok
 
 
+def check_model_roots():
+    """_model_roots on closed forms: H1 = 0 gives the eigenvalues of H0 below d_min;
+    H1 = -I gives lambda_j(omega) = w_j - (omega - om0), root (w_j + om0) / 2."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    rng = np.random.default_rng(11)
+    A = rng.standard_normal((6, 6))
+    H0 = 0.5 * (A + A.T)
+    w = np.linalg.eigvalsh(H0)
+    om0 = float(w[0]) - 0.3
+    oms, C = ee_fold._model_roots(H0, np.zeros((6, 6)), om0, 3, float(w[-1]), 1e-12)
+    ok = check(np.allclose(oms, w[:3], atol=1e-10) and C.shape == (6, 3),
+               'H1 = 0: the roots are the eigenvalues of H0', f'{oms - w[:3]}')
+    oms, C = ee_fold._model_roots(H0, -np.eye(6), om0, 6, 1e9, 1e-12)
+    ok &= check(np.allclose(oms, 0.5 * (w + om0), atol=1e-10),
+                'H1 = -I: roots (w_j + om0) / 2', f'{oms - 0.5 * (w + om0)}')
+    oms, _ = ee_fold._model_roots(H0, np.zeros((6, 6)), om0, 6, float(w[2]), 1e-12)
+    ok &= check(oms.size == 2, 'roots at or above d_min are dropped', f'{oms.size}')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1593,6 +1616,7 @@ def main():
     all_ok &= check_threaded_elementwise()
     all_ok &= check_split_contractions()
     all_ok &= check_kernel_hook(eps, B, no)
+    all_ok &= check_model_roots()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
