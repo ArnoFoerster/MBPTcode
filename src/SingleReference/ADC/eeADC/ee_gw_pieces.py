@@ -167,7 +167,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
             return np.matmul(Woo[:, k0:k1].transpose(1, 0, 2),
                              Y[k0:k1].transpose(0, 2, 1)).sum(axis=0)
 
-        return _ksum(vv, nv) - _ksum(oo, no)
+        return _ksum(vv, nv, Y.size) - _ksum(oo, no, Y.size)
 
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})

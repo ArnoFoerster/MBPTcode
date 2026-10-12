@@ -36,6 +36,7 @@ import numpy as np
 from src.Base.utils.threads import blas_single_threaded, row_map
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
+_KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
 
 
 def _threads():
@@ -68,15 +69,17 @@ def _ew(op, a, b, out=None):
     return out
 
 
-def _ksum(fn, n):
+def _ksum(fn, n, size):
     """sum of fn(r0, r1) over ranges tiling [0, n), one per thread of the pin, with
     BLAS held at one thread meanwhile. For a product whose output is small and
     whose summed axis is long, which BLAS splits over the output and so runs on a
     few cores; fn returns the product over its slab of that axis, and runs on a
-    pool thread, so it calls neither _ew nor _ksum. The partials are added in range
+    pool thread, so it calls neither _ew nor _ksum. size, the long operand's
+    element count, keeps a product below _KSUM_MIN whole, where the wrap and the
+    dispatch would cost more than the split wins. The partials are added in range
     order, so the sum is reordered against fn(0, n), not random."""
     nt = min(_threads(), n)
-    if nt < 2:
+    if nt < 2 or size < _KSUM_MIN:
         return fn(0, n)
     with blas_single_threaded():
         parts = row_map(fn, n, nt)
@@ -300,7 +303,7 @@ def ovvv_ia(S, X):
             return (Z[:, j0:j1].reshape(Z.shape[0], -1)
                     @ S[:, j0:j1].reshape(nv, -1).T)
 
-        out[s] = _ksum(part, Z.shape[1])
+        out[s] = _ksum(part, Z.shape[1], Z.size)
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)
@@ -344,7 +347,7 @@ def ooov_ia(G, X):
             j = slice(j0, j1)
             return pair(V[j], Xs[j] + Xv[j]) + pair(N[j], Xs[j] + Xn[j])
 
-        out[s] = _ksum(part, V.shape[0])
+        out[s] = _ksum(part, V.shape[0], Xs.size)
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)

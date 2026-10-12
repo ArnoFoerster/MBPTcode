@@ -1473,8 +1473,9 @@ def check_split_contractions():
     half = {k: v for k, v in X0.items() if k[0] == 'a'}
     Xs = {'none': X0} | {f'parity {p:+d}': sb.SB(sb._with_flip(half, p), parity=p)
                          for p in (1, -1)}
-    keep = os.environ.get('OMP_NUM_THREADS')
+    keep, floor = os.environ.get('OMP_NUM_THREADS'), sb._KSUM_MIN
     os.environ['OMP_NUM_THREADS'] = '4'
+    sb._KSUM_MIN = 0                        # these blocks sit below the split's floor
     ein = eq.SPIN_BLOCKED.ein
     try:
         worst = 0.0
@@ -1486,6 +1487,7 @@ def check_split_contractions():
                     worst = max(worst, float(np.max(np.abs(new.get(s) - r))
                                              / np.max(np.abs(r))))
     finally:
+        sb._KSUM_MIN = floor
         if keep is None:
             del os.environ['OMP_NUM_THREADS']
         else:
