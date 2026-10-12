@@ -35,6 +35,13 @@ Checks, water (RHF, DF factors), basis per check:
      a singles vector with a flip parity raises NotImplementedError; a slab holds
      at most _K_LIVE slab blocks per slab index (the slope of tracemalloc's peak
      from width 1 to 2, water cc-pVTZ, TDA).
+  9. build_pieces_gw(..., laplace=True) (6-31G, TDA and RPA screening): W is None;
+     M, and Vt (D - ω)^-1 V and its norm through the DF forms of V and Vt, equal the
+     W pieces' to 1e-12 relative; pieces['K'], kernel_laplace, equals the W pieces'
+     V, divide, Vt at 0.3 Ha for powers (1, 2) and its norm to 1e-8 relative, on
+     the grid minimax_points_for_accuracy gives for target _LAPLACE_TARGET (1e-9);
+     the folded singlets equal the W pieces' to 1e-6 eV; omega at min D raises
+     ValueError and a flip parity NotImplementedError.
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -467,6 +474,74 @@ def check_streamed_kernel(eps, B, no):
     return ok
 
 
+def check_laplace_kernel(eps, B, no):
+    """build_pieces_gw(..., laplace=True) against the W pieces, both screenings: W
+    None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3 Ha,
+    powers (1, 2) and (), to 1e-8 relative with its norm; the folded singlets to
+    1e-6 eV; omega at min D and a flip parity refused."""
+    from src.Base.utils.time_frequency import minimax_points_for_accuracy
+    ok = True
+    nv = len(eps) - no
+    om = 0.3
+    rng = np.random.default_rng(17)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    for screening in ('tda', 'rpa'):
+        P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
+        PL = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening,
+                                          laplace=True)
+        be = P['be']
+        dM = max(rel(PL['M'].get(k), P['M'].get(k)) for k in P['M'].blocks)
+        ok &= check(PL['W'] is None and dM < 1e-12,
+                    f'{screening}, laplace: W is None, M equals the W pieces\'',
+                    f'{dM:.1e} relative')
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        n2_ref = P['dnorm2'](Yt)
+        YL = be.divide(PL['V'](y1), PL['D'] - om)
+        d = max(rel(PL['Vt'](YL).get(s), ref[0].get(s)) for s in ('aa', 'bb'))
+        dn = abs(PL['dnorm2'](YL) - n2_ref) / n2_ref
+        ok &= check(d < 1e-12 and dn < 1e-12,
+                    f'{screening}, laplace: the DF V and Vt give the W pieces\' '
+                    'Vt (D - w)^-1 V', f'{d:.1e}, norm {dn:.1e} relative')
+        # PL's own min D: its modes come from another product of the same factors
+        d_min = float(np.min(PL['D']))
+        ntau, err = minimax_points_for_accuracy(
+            d_min - om, float(np.max(PL['D'])) - om, ee_gw_pieces._LAPLACE_TARGET)
+        ws, n2 = PL['K'](y1, om, (1, 2))
+        ws0, n20 = PL['K'](y1, om, ())
+        d = [max(rel(w.get(s), r.get(s)) for s in ('aa', 'bb'))
+             for w, r in zip(ws, ref)]
+        dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+        ok &= check(len(ws) == 2 and ws0 == [] and max(d) < 1e-8 and dn < 1e-8,
+                    f'{screening}: kernel_laplace equals V, divide, Vt',
+                    f'power 1 {d[0]:.1e}, power 2 {d[1]:.1e}, norm {dn:.1e} '
+                    f'relative, ntau {ntau} (grid error {err:.1e})')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(PL, 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega))) * HARTREE_TO_EV
+        ok &= check(b.omega.size == 3 and dw < 1e-6,
+                    f'{screening}: the folded singlets with and without laplace',
+                    f'max |dw| {dw:.1e} eV')
+        for label, call, exc_type, word in (
+                ('omega at min D', lambda: PL['K'](y1, d_min, (1,)),
+                 ValueError, 'min D'),
+                ('a flip parity', lambda: PL['K'](SB(y1.blocks, parity=1.0), om,
+                                                  (1,)),
+                 NotImplementedError, 'parity')):
+            try:
+                call()
+                ok &= check(False, f'{screening}: kernel_laplace refuses {label}')
+            except exc_type as exc:
+                ok &= check(word in str(exc),
+                            f'{screening}: kernel_laplace refuses {label}',
+                            str(exc)[:60])
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -480,6 +555,7 @@ def main():
     all_ok &= check_boundaries(eps, B, no)
     all_ok &= check_seeding_gap()
     all_ok &= check_streamed_kernel(eps, B, no)
+    all_ok &= check_laplace_kernel(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

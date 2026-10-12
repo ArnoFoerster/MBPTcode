@@ -24,18 +24,26 @@ References
 E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 64, 66, 67, 70.
 S. J. Bintrim and T. C. Berkelbach, J. Chem. Phys. 156, 044114 (2022), eq 12.
 """
+import math
+import warnings
+
 import numpy as np
 
 from src.Base.eri_blocks import MOEriBlocks
+from src.Base.utils.grids import minimax_time_grid
+from src.Base.utils.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
-from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.GW.quasi_boson import RPA, QPqb
 
 # (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
 # check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
 _K_LIVE = 3
+# kernel_laplace's grid target: the Kaltak-Klimes-Kresse residual of the minimax fit
+# of 1/x on its range scaled to [1, R] (time_frequency.laplace_test_error)
+_LAPLACE_TARGET = 1e-9
 
 
 def _eri_blocks(B, nocc):
@@ -112,7 +120,205 @@ def static_term(eps, W, omega, nocc):
             - np.einsum('ab,ij->iajb', np.eye(nv), Q + Q.T, optimize=True))
 
 
-def build_pieces_gw(eps, B, nocc, screening='tda'):
+def gw_modes_df(eps, B, nocc, screening='tda'):
+    """gw_modes' screening modes in the DF factors, without W or (pq|ia).
+
+    Parameters
+    ----------
+    eps : ndarray, shape (norb,), HF orbital energies, Hartree
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q)
+    nocc : int
+    screening : {'tda', 'rpa'}
+
+    Returns
+    -------
+    omega : ndarray, shape (nm,), Ω_m ascending, Hartree
+    rho : ndarray, shape (naux, nm), index order (P, m): ρ_P,m = sum_jb B_P,jb
+        (X+Y)_jb,m on gw_modes' (X+Y), so W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m is
+        gw_modes' W up to the sign and the rotation of degenerate modes, which no
+        eq 66 quantity sees.
+    """
+    if screening not in ('tda', 'rpa'):
+        raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
+    eps = np.asarray(eps, float)
+    no = nocc
+    Bov = B[:, :no, no:].reshape(B.shape[0], -1)          # B_P,jb, (P, jb)
+    # build_rpa_AB's singlet blocks: A_ia,jb = δ_ij δ_ab (ε_a - ε_i) + 2 (ia|jb),
+    # B_ia,jb = 2 (ia|jb) or 0 for TDA screening, (ia|jb) = sum_P B_P,ia B_P,jb
+    K2 = 2.0 * (Bov.T @ Bov)
+    A = np.diag((eps[no:][None, :] - eps[:no][:, None]).ravel()) + K2
+    qb = RPA(A, np.zeros_like(K2) if screening == 'tda' else K2)
+    omega, U = qb.eigAbar
+    # ρ_P,m = sum_I B_P,I (X+Y)_I,m, (X+Y)_I,m = sum_J (e^t)_IJ U_J,m as in QPqb
+    return np.asarray(omega, float), Bov @ (qb.exp_t @ U)
+
+
+def static_term_df(eps, B, rho, omega, nocc):
+    """static_term's Ā^GW of eq 70 from gw_modes_df's ρ_P,m.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (norb,), HF orbital energies
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q), B_P,pq = B_P,qp
+    rho : ndarray, shape (naux, nm), index order (P, m)
+    omega : ndarray, shape (nm,)
+    nocc : int
+
+    Returns
+    -------
+    ndarray, shape (no, nv, no, nv), index order (i, a, j, b): static_term's Ā,
+
+        P_ab = sum_km ρ^m_ka ρ^m_kb / D_kam,   Q_ij = - sum_cm ρ^m_ic ρ^m_jc / D_icm,
+
+    with ρ^m_kc = sum_P B_P,kc ρ_P,m (= ρ^m_ck) and D_kcm = Ω_m + ε_c - ε_k, formed
+    in slabs of m that _sb._slab_plan sizes, two (m, k, c) slab blocks each.
+    """
+    no = nocc
+    nv = len(eps) - no
+    eo, ev = eps[:no], eps[no:]
+    Bov = B[:, :no, no:].reshape(B.shape[0], no * nv)     # B_P,kc, (P, kc)
+
+    def slab(m0, m1):
+        # ρ^m_kc = sum_P ρ_P,m B_P,kc, (m, k, c)
+        R = (rho[:, m0:m1].T @ Bov).reshape(m1 - m0, no, nv)
+        # X_mkc = ρ^m_kc / D_kcm
+        X = omega[m0:m1, None, None] + ev[None, None, :] - eo[None, :, None]
+        np.divide(R, X, out=X)
+        # P_ab = sum_mk X_mka ρ^m_kb
+        P = X.reshape(-1, nv).T @ R.reshape(-1, nv)
+        # Q_ij = - sum_mc X_mic ρ^m_jc
+        Q = -np.matmul(X, R.transpose(0, 2, 1)).sum(axis=0)
+        return [P, Q], 0.0
+
+    width, workers = _sb._slab_plan(omega.size, no * nv, 2)
+    (P, Q), _ = _stream(slab, omega.size, width, workers)
+    return (np.einsum('ij,ab->iajb', np.eye(no), P + P.T, optimize=True)
+            - np.einsum('ab,ij->iajb', np.eye(nv), Q + Q.T, optimize=True))
+
+
+def _df_couple(Boo, Bvv, y):
+    """Z_Q,kc = sum_b B_Q,bc y_kb - sum_j B_Q,jk y_jc, shape (naux, no, nv), from
+    Boo (naux, no, no) and Bvv (naux, nv, nv), index order (Q, p, q), and y (no, nv):
+    V y in the DF factors, (V y)_kcm = sqrt(2) sum_Q ρ_Q,m Z_Q,kc."""
+    return np.matmul(y, Bvv) - np.matmul(Boo.transpose(0, 2, 1), y)
+
+
+def _df_couple_t(Boo, Bvv, T):
+    """w_ia = sum_Pc B_P,ac T_P,ic - sum_Pk B_P,ik T_P,ka, shape (no, nv), from T
+    (naux, no, nv), index order (P, k, c): Vt in the DF factors, with T_P,kc =
+    sqrt(2) sum_m ρ_P,m Y_kcm."""
+    return (np.matmul(T, Bvv.transpose(0, 2, 1)).sum(axis=0)
+            - np.matmul(Boo, T).sum(axis=0))
+
+
+def kernel_laplace(eps, B, rho, omega, nocc):
+    """build_pieces_gw's fused kernel 'K' by a Laplace quadrature of 1/(D - ω), from
+    the DF factors and the modes ρ_P,m: no (k, c, m) or (norb, norb, nm) array forms.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (norb,), HF orbital energies, Hartree
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q)
+    rho : ndarray, shape (naux, nm), index order (P, m), gw_modes_df's ρ_P,m
+    omega : ndarray, shape (nm,), Ω_m
+    nocc : int
+
+    Returns
+    -------
+    callable K(y1, om, powers=(1,)) -> (ws, dn2). y1 is an SB singles {'aa', 'bb'}
+    of (no, nv), index order (i, a), without a flip parity; om the fold's ω, below
+    min D; ws a list of SB singles of (no, nv), one per p in powers,
+
+        ws[p]_ia = sum_kcm V_kcm,ia (V y1)_kcm / (D_kcm - ω)^p,
+
+    and dn2 = sum_kcm (V y1)_kcm² / (D_kcm - ω)², both spin blocks summed. K raises
+    ValueError at ω ≥ min D, where 1/(D - ω) has no Laplace transform, and warns
+    when its grid misses _LAPLACE_TARGET.
+
+    Notes
+    -----
+    On x = D_kcm - ω in [min D - ω, max D - ω], the minimax grid (τ_t, w_t) of
+    grids.minimax_time_grid, sized by minimax_points_for_accuracy at
+    _LAPLACE_TARGET, gives
+
+        1 / x^p = sum_t c_p,t exp(-τ_t x),    c_p,t = w_t τ_t^(p-1) / (p-1)!,
+
+    p = 2 being the ω-derivative of p = 1. D_kcm = Ω_m + ε_c - ε_k factorises the
+    exponential, and with W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m the mode sum is the
+    screened interaction at imaginary time τ, (naux, naux) per τ,
+
+        Π^τ_PQ = sum_m exp(-τ Ω_m) ρ_P,m ρ_Q,m.
+
+    V_kcm,ia = δ_ik W^m_ac - δ_ac W^m_ik (eqs 64a, 64b) splits ws into four
+    terms, each a chain of DF contractions over one orbital index at a time; each
+    carries 2 sum_t c_p,t and the pair factor g^τ_kc = exp(τ (ω + ε_k - ε_c)):
+
+        vv-vv  w_ia: + g^τ_ic sum_Pc B_P,ac sum_Q Π^τ_PQ sum_b B_Q,bc y_ib
+        vv-oo  w_ia: - g^τ_ic sum_Pc B_P,ac sum_Q Π^τ_PQ sum_j B_Q,ji y_jc
+        oo-vv  w_ia: - g^τ_ka sum_Pk B_P,ik sum_Q Π^τ_PQ sum_b B_Q,ba y_kb
+        oo-oo  w_ia: + g^τ_ka sum_Pk B_P,ik sum_Q Π^τ_PQ sum_j B_Q,jk y_ja
+
+    The right-hand sums of each pair are one Z_Q,kc = sum_b B_Q,bc y_kb - sum_j
+    B_Q,jk y_jc, so per spin
+
+        T_P,kc = 2 sum_t c_p,t g^τ_kc sum_Q Π^τ_PQ Z_Q,kc,
+        w_ia   = sum_Pc B_P,ac T_P,ic - sum_Pk B_P,ik T_P,ka,
+        dn2    = 2 sum_t c_2,t sum_kc g^τ_kc sum_PQ Z_P,kc Π^τ_PQ Z_Q,kc,
+
+    at naux² nm for Π^τ and naux² no nv per spin for its product, per τ. Ω_min
+    moves from Π^τ into g^τ_kc, so both factors of exp(-τ (D_kcm - ω)) stay at or
+    below one.
+    """
+    no = nocc
+    naux = B.shape[0]
+    eo, ev = eps[:no], eps[no:]
+    Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
+    om0 = float(omega.min())
+    # min D and max D of D_kcm = Ω_m + ε_c - ε_k, summed in D's order
+    d_min = float(om0 + ev.min() - eo.max())
+    d_max = float(omega.max() + ev.max() - eo.min())
+    # ε_k - ε_c - Ω_min, (k, c): g^τ_kc's exponent over τ, less ω
+    e_kc = eo[:, None] - ev[None, :] - om0
+
+    def K(y1, om, powers=(1,)):
+        if y1.parity is not None:
+            raise NotImplementedError('kernel_laplace takes y1 without a flip parity')
+        if om >= d_min:
+            raise ValueError(f'omega = {om:.8f} Ha is at or above min D = '
+                             f'{d_min:.8f} Ha, where 1/(D - omega) has no Laplace '
+                             'transform')
+        lo, hi = d_min - om, d_max - om
+        ntau, err = minimax_points_for_accuracy(lo, hi, _LAPLACE_TARGET)
+        if err > _LAPLACE_TARGET:
+            warnings.warn(f'kernel_laplace: the {ntau}-point grid reaches {err:.1e} '
+                          f'on R = {hi / lo:.0f}, above the target '
+                          f'{_LAPLACE_TARGET:.0e}', RuntimeWarning)
+        tau, wt = minimax_time_grid(ntau, lo, hi)
+        # Z_Q,kc of both spins, (Q, s, k, c)
+        Z = np.stack([_df_couple(Boo, Bvv, y1.get(s)) for s in ('aa', 'bb')], axis=1)
+        T = {p: np.zeros_like(Z) for p in powers}
+        dn2 = 0.0
+        for t, w in zip(tau, wt):
+            # Π^τ_PQ = sum_m exp(-τ (Ω_m - Ω_min)) ρ_P,m ρ_Q,m
+            r = rho * np.exp(-0.5 * t * (omega - om0))
+            Pi = r @ r.T
+            del r
+            # H_P,skc = g^τ_kc sum_Q Π^τ_PQ Z_Q,skc
+            H = (Pi @ Z.reshape(naux, -1)).reshape(Z.shape)
+            H *= np.exp(t * (om + e_kc))
+            for p in powers:
+                # T_P,skc += 2 c_p,t H_P,skc
+                T[p] += (2.0 * w * t ** (p - 1) / math.factorial(p - 1)) * H
+            # dn2 += 2 c_2,t sum_Pskc Z_P,skc H_P,skc
+            dn2 += 2.0 * w * t * float(np.vdot(Z, H))
+        # w_ia = sum_Pc B_P,ac T_P,ic - sum_Pk B_P,ik T_P,ka, per spin
+        return ([SB({s: _df_couple_t(Boo, Bvv, T[p][:, n])
+                     for n, s in enumerate(('aa', 'bb'))}) for p in powers], dn2)
+
+    return K
+
+
+def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False):
     """The pieces of ee_fold.folded_operator for eq 66.
 
     Parameters
@@ -122,6 +328,9 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         (pq|rs) = sum_Q B[Q,p,q] B[Q,r,s]
     nocc : int, doubly occupied orbitals
     screening : {'tda', 'rpa'}
+    laplace : bool, False the modes as W (gw_modes) and the kernel streamed over
+        slabs of k; True the modes as ρ_P,m (gw_modes_df), V and Vt through B and
+        ρ, and kernel_laplace as 'K', so neither W nor (pq|ia) is formed
 
     Returns
     -------
@@ -134,8 +343,10 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         blocks; 'K' the fused kernel of ee_fold.folded_operator, K(y1, omega,
         powers) -> (ws, dn2), Vt (D - ω)^-p V y1 for each p and dnorm2 of
         (D - ω)^-1 V y1, streamed over slabs of k so no (no, nv, nm) array is
-        formed; 'level' 'gw'; 'no', 'nv', 'be'; 'dense_limit' 40, solve_folded's
-        default; 'omega' (nm,) and 'W' (norb, norb, nm) for inspection.
+        formed, or kernel_laplace's for laplace=True, at omega below min D only;
+        'level' 'gw'; 'no', 'nv', 'be'; 'dense_limit' 40, solve_folded's default;
+        'omega' (nm,) and 'W' (norb, norb, nm) for inspection, None for
+        laplace=True.
     """
     if screening not in ('tda', 'rpa'):
         raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
@@ -144,89 +355,112 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
     nv = len(eps) - no
     # A^HF alone: the gf2 builder's other pieces hold its doubles blocks
     M_hf = ee_r_sigma_df.build_operator(eps, B, no, level='gf2', pieces=True)[3]['M']
-    omega, W = gw_modes(eps, B, no, screening)
-    Abar = static_term(eps, W, omega, no)
+    if laplace:
+        # Ω_m and ρ_P,m = sum_jb B_P,jb (X+Y)_jb,m; W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m
+        omega, rho = gw_modes_df(eps, B, no, screening)
+        W, Abar = None, static_term_df(eps, B, rho, omega, no)
+    else:
+        # Ω_m and W^m_pq = sqrt(2) sum_jb (pq|jb) (X+Y)_jb,m
+        omega, W = gw_modes(eps, B, no, screening)
+        Abar = static_term(eps, W, omega, no)
     M = M_hf + SB({'aaaa': Abar, 'bbbb': Abar})
-    Woo, Wvv = W[:no, :no, :], W[no:, no:, :]              # W^m_ik, W^m_ac
     eo, ev = eps[:no], eps[no:]
     # D_kcm = Ω_m + ε_c - ε_k
     D = omega[None, None, :] + ev[None, :, None] - eo[:, None, None]
 
     nm = omega.size
-    # matmuls on views of W: the slices keep (c, m) and (k, m) contiguous, so no
-    # call copies W, the largest array
+    if laplace:
+        naux = B.shape[0]
+        Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
 
-    def couple(y):
-        # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic
-        Y = (y @ Wvv.reshape(nv, nv * nm)).reshape(no, nv, nm)
-        # sum_i W^m_ik y_ic as the batch over k of sum_i y^T_ci W^m_ik
-        return _ew(np.subtract, Y, np.matmul(y.T, Woo.transpose(1, 0, 2)), out=Y)
+        def couple(y):
+            # Y_kcm = sqrt(2) sum_Q Z_Q,kc ρ_Q,m
+            Z = _df_couple(Boo, Bvv, y).reshape(naux, no * nv)
+            return np.sqrt(2.0) * (Z.T @ rho).reshape(no, nv, nm)
 
-    def couple_t(Y):
-        # w_ia = sum_cm W^m_ac Y_icm - sum_km W^m_ik Y_kam, each summed over slabs
-        # of its orbital index by _ksum, since the (i, a) output is small
+        def couple_t(Y):
+            # T_P,kc = sqrt(2) sum_m ρ_P,m Y_kcm
+            T = np.sqrt(2.0) * (rho @ Y.reshape(no * nv, nm).T)
+            return _df_couple_t(Boo, Bvv, T.reshape(naux, no, nv))
 
-        def vv(c0, c1):
-            # sum_cm W^m_ac Y_icm over c0 <= c < c1, on views
-            return Y[:, c0:c1].reshape(no, -1) @ Wvv[:, c0:c1].reshape(nv, -1).T
+        # ws_ia = sum_kcm V_kcm,ia (V y1)_kcm sum_t c_p,t exp(-τ_t (D_kcm - ω))
+        kernel = kernel_laplace(eps, B, rho, omega, no)
+    else:
+        Woo, Wvv = W[:no, :no, :], W[no:, no:, :]          # W^m_ik, W^m_ac
+        # matmuls on views of W: the slices keep (c, m) and (k, m) contiguous, so
+        # no call copies W, the largest array
 
-        def oo(k0, k1):
-            # sum over k0 <= k < k1 of the batch sum_m W^m_ik Y^T_kma
-            return np.matmul(Woo[:, k0:k1].transpose(1, 0, 2),
-                             Y[k0:k1].transpose(0, 2, 1)).sum(axis=0)
+        def couple(y):
+            # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic
+            Y = (y @ Wvv.reshape(nv, nv * nm)).reshape(no, nv, nm)
+            # sum_i W^m_ik y_ic as the batch over k of sum_i y^T_ci W^m_ik
+            return _ew(np.subtract, Y, np.matmul(y.T, Woo.transpose(1, 0, 2)), out=Y)
 
-        return _ksum(vv, nv, Y.size) - _ksum(oo, no, Y.size)
+        def couple_t(Y):
+            # w_ia = sum_cm W^m_ac Y_icm - sum_km W^m_ik Y_kam, each summed over slabs
+            # of its orbital index by _ksum, since the (i, a) output is small
 
-    def kernel(y1, omega, powers=(1,)):
-        # sum_K V_K,ia (V y1)_K / (D_K - ω)^p for each p in powers, and
-        # sum_K (V y1)_K² / (D_K - ω)², streamed over slabs of k, the pair's
-        # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
-        if y1.parity is not None:
-            raise NotImplementedError('kernel takes y1 without a flip parity')
-        width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
+            def vv(c0, c1):
+                # sum_cm W^m_ac Y_icm over c0 <= c < c1, on views
+                return Y[:, c0:c1].reshape(no, -1) @ Wvv[:, c0:c1].reshape(nv, -1).T
 
-        def slab(k0, k1):
-            nk = k1 - k0
-            Wook = Woo[:, k0:k1]                                  # W^m_ik, (i, k, m)
-            den = _ew(np.subtract, D[k0:k1], omega)               # D_kcm - ω
+            def oo(k0, k1):
+                # sum over k0 <= k < k1 of the batch sum_m W^m_ik Y^T_kma
+                return np.matmul(Woo[:, k0:k1].transpose(1, 0, 2),
+                                 Y[k0:k1].transpose(0, 2, 1)).sum(axis=0)
 
-            def vt(Y):
-                # the slab's share of couple_t: w_ia = sum_cm W^m_ac Y_icm on the
-                # slab's rows i = k, minus sum_km W^m_ik Y_kam over the slab's k
+            return _ksum(vv, nv, Y.size) - _ksum(oo, no, Y.size)
 
-                def vv(c0, c1):
-                    return (Y[:, c0:c1].reshape(nk, -1)
-                            @ Wvv[:, c0:c1].reshape(nv, -1).T)
+        def kernel(y1, omega, powers=(1,)):
+            # sum_K V_K,ia (V y1)_K / (D_K - ω)^p for each p in powers, and
+            # sum_K (V y1)_K² / (D_K - ω)², streamed over slabs of k, the pair's
+            # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
+            if y1.parity is not None:
+                raise NotImplementedError('kernel takes y1 without a flip parity')
+            width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
 
-                def oo(a0, a1):
-                    return np.matmul(Wook[:, a0:a1].transpose(1, 0, 2),
-                                     Y[a0:a1].transpose(0, 2, 1)).sum(axis=0)
+            def slab(k0, k1):
+                nk = k1 - k0
+                Wook = Woo[:, k0:k1]                              # W^m_ik, (i, k, m)
+                den = _ew(np.subtract, D[k0:k1], omega)           # D_kcm - ω
 
-                w = np.zeros((no, nv))
-                w[k0:k1] = _ksum(vv, nv, Y.size)
-                return w - _ksum(oo, nk, Y.size)
+                def vt(Y):
+                    # the slab's share of couple_t: w_ia = sum_cm W^m_ac Y_icm on the
+                    # slab's rows i = k, minus sum_km W^m_ik Y_kam over the slab's k
 
-            ws, dn2 = {p: {} for p in powers}, 0.0
-            for s in ('aa', 'bb'):
-                y = y1.get(s)
-                # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic, k in the slab, the
-                # second term one k at a time so no second slab-sized array forms
-                Y = (y[k0:k1] @ Wvv.reshape(nv, nv * nm)).reshape(nk, nv, nm)
-                for kk in range(nk):
-                    _ew(np.subtract, Y[kk], y.T @ Wook[:, kk], out=Y[kk])
-                _ew(np.true_divide, Y, den, out=Y)
-                dn2 += float(np.vdot(Y, Y))
-                # each power in ascending order, Y divided in place on the way up
-                p0 = 1
-                for p in sorted(ws):
-                    for _ in range(p - p0):
-                        _ew(np.true_divide, Y, den, out=Y)
-                    p0 = max(p0, p)
-                    ws[p][s] = vt(Y)
-                del Y                       # before the next spin's Y is formed
-            return [SB(ws[p]) for p in powers], dn2
+                    def vv(c0, c1):
+                        return (Y[:, c0:c1].reshape(nk, -1)
+                                @ Wvv[:, c0:c1].reshape(nv, -1).T)
 
-        return _stream(slab, no, width, workers)
+                    def oo(a0, a1):
+                        return np.matmul(Wook[:, a0:a1].transpose(1, 0, 2),
+                                         Y[a0:a1].transpose(0, 2, 1)).sum(axis=0)
+
+                    w = np.zeros((no, nv))
+                    w[k0:k1] = _ksum(vv, nv, Y.size)
+                    return w - _ksum(oo, nk, Y.size)
+
+                ws, dn2 = {p: {} for p in powers}, 0.0
+                for s in ('aa', 'bb'):
+                    y = y1.get(s)
+                    # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic, k in the slab, the
+                    # second term one k at a time so no second slab-sized array forms
+                    Y = (y[k0:k1] @ Wvv.reshape(nv, nv * nm)).reshape(nk, nv, nm)
+                    for kk in range(nk):
+                        _ew(np.subtract, Y[kk], y.T @ Wook[:, kk], out=Y[kk])
+                    _ew(np.true_divide, Y, den, out=Y)
+                    dn2 += float(np.vdot(Y, Y))
+                    # each power in ascending order, Y divided in place on the way up
+                    p0 = 1
+                    for p in sorted(ws):
+                        for _ in range(p - p0):
+                            _ew(np.true_divide, Y, den, out=Y)
+                        p0 = max(p0, p)
+                        ws[p][s] = vt(Y)
+                    del Y                       # before the next spin's Y is formed
+                return [SB(ws[p]) for p in powers], dn2
+
+            return _stream(slab, no, width, workers)
 
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})
