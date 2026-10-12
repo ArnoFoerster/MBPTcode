@@ -386,6 +386,7 @@ def mu_cycle(mu, G, gamma, nocc, freq_points, freq_weights, sigma_mo, V, h_mo,
     # print(f'Trace before mu-cycle: {trace_old}')
 
     if abs(trace_old - nocc) < trace_tol:
+        print('mu-cycle already converged within trace tolerance')
         return mu, G, gamma, F
 
     # --- Phase 1: bracket the root ---
