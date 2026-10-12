@@ -257,8 +257,7 @@ def _dij(be, X_vv, eye_o):
 
 def sigma_s_from_d(be, gb, amps, zint, Y, order):
     """W^a_i(D) -- A41 (first order) and A42 (second)."""
-    w = (_ovvv_ia(be, gb, Y)
-         + be.ein('jkib,jkab->ia', gb['ooov'], Y))
+    w = _ovvv_ia(be, gb, Y) + _ooov_ia(be, gb, Y)
     if order < 2:
         return w
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
@@ -308,6 +307,14 @@ def _ovvv_ia(be, gb, X):
     if 'ovvv_ajbc' in gb:
         return _sb.ovvv_ia(gb['ovvv_ajbc'], X)
     return be.ein('jabc,ijbc->ia', gb['ovvv'], X)
+
+
+def _ooov_ia(be, gb, X):
+    """sum_jkb <jk||ib> X_jkab -> (i, a), routed as _ovvv_ia: the closed-shell DF
+    gb, whose 'ooov' is anti4's, takes ee_spin_blocks.ooov_ia."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ooov_ia(gb['ooov'], X)
+    return be.ein('jkib,jkab->ia', gb['ooov'], X)
 
 
 def _ovvv_ijab(be, gb, x):

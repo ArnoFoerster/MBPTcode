@@ -27,14 +27,15 @@ V[p,q,r,s], for a closed-shell reference:
     aaaa = bbbb = V - V(pqsr)     abab = baba = V
     abba = baab = -V(pqsr)
 """
+import functools
 import itertools
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from src.Base.utils.threads import blas_single_threaded, row_map
+
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
-_POOLS = {}             # thread count -> pool, built on first use
 
 
 def _threads():
@@ -58,15 +59,28 @@ def _ew(op, a, b, out=None):
         return op(a, b) if out is None else op(a, b, out=out)
     if out is None:
         out = np.empty(a.shape, np.result_type(a, b))
-    pool = _POOLS.get(nt) or _POOLS.setdefault(nt, ThreadPoolExecutor(nt))
-    cuts = np.linspace(0, a.shape[0], nt + 1).astype(int)
 
-    def slab(k):
-        s = slice(cuts[k], cuts[k + 1])
+    def slab(r0, r1):
+        s = slice(r0, r1)
         op(a[s], b[s] if np.ndim(b) else b, out=out[s])
 
-    list(pool.map(slab, range(nt)))
+    row_map(slab, a.shape[0], nt)
     return out
+
+
+def _ksum(fn, n):
+    """sum of fn(r0, r1) over ranges tiling [0, n), one per thread of the pin, with
+    BLAS held at one thread meanwhile. For a product whose output is small and
+    whose summed axis is long, which BLAS splits over the output and so runs on a
+    few cores; fn returns the product over its slab of that axis, and runs on a
+    pool thread, so it calls neither _ew nor _ksum. The partials are added in range
+    order, so the sum is reordered against fn(0, n), not random."""
+    nt = min(_threads(), n)
+    if nt < 2:
+        return fn(0, n)
+    with blas_single_threaded():
+        parts = row_map(fn, n, nt)
+    return functools.reduce(np.add, parts)
 
 
 class SB:
@@ -268,10 +282,11 @@ def ovvv_ia(S, X):
         sigma^a_ia = sum_jbc V_jabc (X^aaaa_ijbc - X^aaaa_ijcb
                                      + X^abba_ijbc - X^abab_ijcb),
 
-    and alpha <-> beta for 'bb': one matmul on a reshape view of S, where the
-    block-wise einsum reorders (copies) the o v^3 block once per spin block.
-    An X with a flip parity needs the 'aa' matmul alone."""
-    Sm = S.reshape(S.shape[0], -1)
+    and alpha <-> beta for 'bb': one matmul on reshape views of S, where the
+    block-wise einsum reorders (copies) the o v^3 block once per spin block,
+    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmul
+    alone."""
+    nv = S.shape[0]
     out = {}
     spins = (('aa', ('aaaa', 'abba', 'abab')), ('bb', ('bbbb', 'baab', 'baba')))
     for s, (same, with_v, with_neg) in (spins if X.parity is None else spins[:1]):
@@ -279,7 +294,57 @@ def ovvv_ia(S, X):
         Z = _ew(np.subtract, X.get(same), X.get(same).transpose(0, 1, 3, 2))
         _ew(np.add, Z, X.get(with_v), out=Z)
         _ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
-        out[s] = Z.reshape(Z.shape[0], -1) @ Sm.T
+
+        def part(j0, j1):
+            # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, on views
+            return (Z[:, j0:j1].reshape(Z.shape[0], -1)
+                    @ S[:, j0:j1].reshape(nv, -1).T)
+
+        out[s] = _ksum(part, Z.shape[1])
+    if X.parity is not None:
+        return SB(_with_flip(out, X.parity), parity=X.parity)
+    return SB(out)
+
+
+def ooov_ia(G, X):
+    """sum_jkb <jk||ib> X_jkab for a closed-shell reference, per output spin.
+
+    G : SB, anti4's six blocks of <jk||ib>, index order (j, k, i, b): 'abab' and
+        'baba' hold V_jkib = <jk|ib>, 'baab' and 'abba' -Vx with Vx_jkib =
+        <jk|bi>, 'aaaa' and 'bbbb' V - Vx
+    X : SB of the six doubles blocks, index order (j, k, a, b)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order
+    (i, a). With aaaa = abab + baab the three blocks of an output spin take two
+    contractions,
+
+        sigma^a_ia = sum_jkb V_jkib (X^aaaa + X^abab)_jkab
+                     - sum_jkb Vx_jkib (X^aaaa + X^baab)_jkab,
+
+    and alpha <-> beta for 'bb'. Each is a batch of (i, b) x (b, a) products
+    over (j, k), summed over j-slabs by _ksum, where the block-wise einsum
+    copies every doubles block to bring (j, k, b) together. An X with a flip
+    parity needs 'aa' alone."""
+
+    def pair(g, z):
+        # sum_kb g_jkib z_jkab over the slab's (j, k)
+        no, nv = g.shape[2], g.shape[3]
+        return np.matmul(g.reshape(-1, no, nv),
+                         z.reshape(-1, nv, nv).transpose(0, 2, 1)).sum(axis=0)
+
+    out = {}
+    spins = (('aa', 'abab', 'baab', ('aaaa', 'abab', 'baab')),
+             ('bb', 'baba', 'abba', ('bbbb', 'baba', 'abba')))
+    for s, kv, kn, (same, with_v, with_n) in (spins if X.parity is None
+                                              else spins[:1]):
+        V, N = G.get(kv), G.get(kn)
+        Xs, Xv, Xn = X.get(same), X.get(with_v), X.get(with_n)
+
+        def part(j0, j1):
+            j = slice(j0, j1)
+            return pair(V[j], Xs[j] + Xv[j]) + pair(N[j], Xs[j] + Xn[j])
+
+        out[s] = _ksum(part, V.shape[0])
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)

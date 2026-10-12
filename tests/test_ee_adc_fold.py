@@ -94,6 +94,9 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
       difference with an (a, b)-transposed operand, an in-place sum, a scalar
       product, a quotient, and a broadcast shape it leaves to NumPy.
+  27. ee_spin_blocks.ooov_ia and ovvv_ia, their products summed over j-slabs on 4
+      threads, equal the block-wise einsum on anti4's blocks for an X without a
+      flip parity and with each one, to 1e-12 relative.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1453,6 +1456,45 @@ def check_threaded_elementwise():
                  f'split {split}, differing {bad}')
 
 
+def check_split_contractions():
+    """ooov_ia and ovvv_ia, summed over j-slabs by _ksum with the pin at 4 threads,
+    against the block-wise einsum on anti4's blocks, for an X without a flip
+    parity and with each one, to 1e-12 relative."""
+    from src.SingleReference.ADC.eeADC import ee_equations as eq
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    rng = np.random.default_rng(5)
+    no, nv = 6, 9
+    G = sb.anti4(rng.standard_normal((no, no, no, nv)),
+                 rng.standard_normal((no, no, no, nv)))
+    S = rng.standard_normal((nv, no, nv, nv))
+    ovvv = sb.anti4(S.transpose(1, 0, 2, 3))
+    keys = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
+    X0 = sb.SB({k: rng.standard_normal((no, no, nv, nv)) for k in keys})
+    half = {k: v for k, v in X0.items() if k[0] == 'a'}
+    Xs = {'none': X0} | {f'parity {p:+d}': sb.SB(sb._with_flip(half, p), parity=p)
+                         for p in (1, -1)}
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '4'
+    ein = eq.SPIN_BLOCKED.ein
+    try:
+        worst = 0.0
+        for X in Xs.values():
+            for new, ref in ((sb.ooov_ia(G, X), ein('jkib,jkab->ia', G, X)),
+                             (sb.ovvv_ia(S, X), ein('jabc,ijbc->ia', ovvv, X))):
+                for s in ('aa', 'bb'):
+                    r = ref.get(s)
+                    worst = max(worst, float(np.max(np.abs(new.get(s) - r))
+                                             / np.max(np.abs(r))))
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    return check(worst < 1e-12,
+                 'ooov_ia and ovvv_ia over j-slabs equal the block-wise einsum',
+                 f'{worst:.1e} relative, X {list(Xs)}')
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1497,6 +1539,7 @@ def main():
     all_ok &= check_degenerate_hidden()
     all_ok &= check_trace(eps, B, no)
     all_ok &= check_threaded_elementwise()
+    all_ok &= check_split_contractions()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

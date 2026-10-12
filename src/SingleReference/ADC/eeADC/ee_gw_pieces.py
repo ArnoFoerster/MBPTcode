@@ -29,7 +29,7 @@ import numpy as np
 from src.Base.eri_blocks import MOEriBlocks
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew
+from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum
 from src.SingleReference.GW.quasi_boson import QPqb
 
 
@@ -155,10 +155,19 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         return _ew(np.subtract, Y, np.matmul(y.T, Woo.transpose(1, 0, 2)), out=Y)
 
     def couple_t(Y):
-        # w_ia = sum_cm W^m_ac Y_icm - sum_km W^m_ik Y_kam
-        w = Y.reshape(no, nv * nm) @ Wvv.reshape(nv, nv * nm).T
-        # sum_km W^m_ik Y_kam as sum over k of the batch sum_m W^m_ik Y^T_kma
-        return w - np.matmul(Woo.transpose(1, 0, 2), Y.transpose(0, 2, 1)).sum(axis=0)
+        # w_ia = sum_cm W^m_ac Y_icm - sum_km W^m_ik Y_kam, each summed over slabs
+        # of its orbital index by _ksum, since the (i, a) output is small
+
+        def vv(c0, c1):
+            # sum_cm W^m_ac Y_icm over c0 <= c < c1, on views
+            return Y[:, c0:c1].reshape(no, -1) @ Wvv[:, c0:c1].reshape(nv, -1).T
+
+        def oo(k0, k1):
+            # sum over k0 <= k < k1 of the batch sum_m W^m_ik Y^T_kma
+            return np.matmul(Woo[:, k0:k1].transpose(1, 0, 2),
+                             Y[k0:k1].transpose(0, 2, 1)).sum(axis=0)
+
+        return _ksum(vv, nv) - _ksum(oo, no)
 
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})
