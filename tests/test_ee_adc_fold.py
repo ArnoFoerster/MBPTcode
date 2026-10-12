@@ -106,6 +106,11 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       slab shorter than the width, with more workers than slabs, and sums the
       outputs exactly; slabs that split their own _ew over as many threads as
       there are workers return.
+  33. the slab forms ovvv_ijab_pij_slab, ovvv_ia_slab and ooov_ia_slab (no 5, nv 7,
+      slabs of width 2 over the second occupied index) equal (1 - P_ij) ovvv_ijab
+      restricted to the slab, ovvv_ia and ooov_ia summed over the slabs, to 1e-13
+      relative; _ksum splits a product on the main thread and keeps it whole off
+      it.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1587,6 +1592,69 @@ def check_stream():
     return ok
 
 
+def check_slab_contractions():
+    """The slab helpers against the full contractions restricted to the slab (no 5,
+    nv 7, width 2, so the last slab is shorter), to 1e-13 relative per block."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    rng = np.random.default_rng(11)
+    no, nv, width = 5, 7, 2
+    keys = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
+    S = rng.standard_normal((nv, no, nv, nv))
+    G = sb.anti4(rng.standard_normal((no, no, no, nv)),
+                 rng.standard_normal((no, no, no, nv)))
+    x = sb.SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+    Y = sb.SB({k: rng.standard_normal((no, no, nv, nv)) for k in keys})
+    full = sb.ovvv_ijab(S, x)
+    full = full - full.transpose(1, 0, 2, 3)
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    d_ijab, ia_ovvv, ia_ooov = 0.0, None, None
+    for j0 in range(0, no, width):
+        j1 = min(j0 + width, no)
+        X = sb.ovvv_ijab_pij_slab(S, x, j0, j1)
+        d_ijab = max([d_ijab] + [rel(X.get(k), full.get(k)[:, j0:j1]) for k in keys])
+        Ys = sb.SB({k: v[:, j0:j1] for k, v in Y.items()})
+        a, b = sb.ovvv_ia_slab(S, Ys, j0, j1), sb.ooov_ia_slab(G, Ys, j0, j1)
+        ia_ovvv = a if ia_ovvv is None else ia_ovvv + a
+        ia_ooov = b if ia_ooov is None else ia_ooov + b
+    ref_ovvv, ref_ooov = sb.ovvv_ia(S, Y), sb.ooov_ia(G, Y)
+    d_ovvv = max(rel(ia_ovvv.get(s), ref_ovvv.get(s)) for s in ('aa', 'bb'))
+    d_ooov = max(rel(ia_ooov.get(s), ref_ooov.get(s)) for s in ('aa', 'bb'))
+    ok = check(d_ijab < 1e-13 and sorted(X.keys()) == sorted(keys),
+               '(1 - P_ij) ovvv_ijab on slabs of j equals the full one restricted',
+               f'{d_ijab:.1e} relative')
+    ok &= check(d_ovvv < 1e-13, 'ovvv_ia_slab summed over the slabs equals ovvv_ia',
+                f'{d_ovvv:.1e} relative')
+    ok &= check(d_ooov < 1e-13, 'ooov_ia_slab summed over the slabs equals ooov_ia',
+                f'{d_ooov:.1e} relative')
+    import threading
+    calls = {'main': [], 'pool': []}
+
+    def part(r0, r1, who):
+        calls[who].append((r0, r1))
+        return np.zeros(1)
+
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '4'
+    try:
+        sb._ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
+        th = threading.Thread(
+            target=lambda: sb._ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
+        th.start()
+        th.join()
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    ok &= check(len(calls['main']) == 4 and calls['pool'] == [(0, 8)],
+                '_ksum splits on the main thread, keeps a product whole off it',
+                str(calls))
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1634,6 +1702,7 @@ def main():
     all_ok &= check_split_contractions()
     all_ok &= check_kernel_hook(eps, B, no)
     all_ok &= check_stream()
+    all_ok &= check_slab_contractions()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

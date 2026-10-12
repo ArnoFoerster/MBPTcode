@@ -84,9 +84,12 @@ def _ksum(fn, n, size):
     pool thread, so it calls neither _ew nor _ksum. size, the long operand's
     element count, keeps a product below _KSUM_MIN whole, where the wrap and the
     dispatch would cost more than the split wins. The partials are added in range
-    order, so the sum is reordered against fn(0, n), not random."""
+    order, so the sum is reordered against fn(0, n), not random. Off the main
+    thread, inside a _stream slab, the product stays whole: the slabs already
+    share the cores, and the BLAS count is not this call's to hold at one."""
     nt = min(_threads(), n)
-    if nt < 2 or size < _KSUM_MIN:
+    if (nt < 2 or size < _KSUM_MIN
+            or threading.current_thread() is not threading.main_thread()):
         return fn(0, n)
     with blas_single_threaded():
         parts = row_map(fn, n, nt)
@@ -449,6 +452,70 @@ def ovvv_ijab(S, x):
     return SB({'aaaa': anti(Ta), 'bbbb': anti(Tb),
                'baba': Ta, 'abab': Tb,
                'baab': neg_swap(Ta), 'abba': neg_swap(Tb)})
+
+
+def ovvv_ijab_pij_slab(S, x, j0, j1):
+    """(1 - P_ij) sum_c <ic||ab> x_jc on the slab j0 <= j < j1 of the second index.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (c, i, a, b), <ic|ab>, as in
+        ovvv_ia
+    x : SB with blocks 'aa' and 'bb', shape (no, nv), index order (j, c), without a
+        flip parity
+
+    Returns an SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index
+    order (i, j, a, b): X_ijab - X_jiab with X = ovvv_ijab(S, x). With T^s_ijab =
+    sum_c V_icab x^s_jc, A^s = T^s on the slab is x^s[j0:j1] @ S reordered and
+    B^s_ijab = T^s_jiab is x^s @ S[:, j0:j1] reordered. X_jiab under a spin string
+    is X's block of the string with its first two letters swapped, so with
+    C^s = A^s - B^s and U = A^a + B^b_ijba, U' = A^b + B^a_ijba,
+
+        aaaa = C^a - C^a_ijba,   baba = U,   baab = -U_ijba,
+
+    and alpha <-> beta for bbbb, abab (U'), abba (-U'_ijba). The slabs together
+    form T twice, where ovvv_ijab forms it once."""
+    if x.parity is not None:
+        raise NotImplementedError('ovvv_ijab_pij_slab takes x without a flip parity')
+    nv, no = S.shape[0], S.shape[1]
+    nj = j1 - j0
+    Sm, Sj = S.reshape(nv, -1), S[:, j0:j1].reshape(nv, -1)
+    swap = (0, 1, 3, 2)
+    # A^s at [i, j] for j in the slab, and B^s at [i, j], both (i, j, a, b)
+    Aa, Ab = ((x.get(s)[j0:j1] @ Sm).reshape(nj, no, nv, nv).transpose(1, 0, 2, 3)
+              for s in ('aa', 'bb'))
+    Ba, Bb = ((x.get(s) @ Sj).reshape(no, nj, nv, nv) for s in ('aa', 'bb'))
+    Ca, Cb = _ew(np.subtract, Aa, Ba), _ew(np.subtract, Ab, Bb)
+    U = _ew(np.add, Aa, Bb.transpose(swap))
+    Up = _ew(np.add, Ab, Ba.transpose(swap))
+    return SB({'aaaa': _ew(np.subtract, Ca, Ca.transpose(swap)),
+               'bbbb': _ew(np.subtract, Cb, Cb.transpose(swap)),
+               'baba': U, 'abab': Up,
+               'baab': _ew(np.multiply, U.transpose(swap), -1.0),
+               'abba': _ew(np.multiply, Up.transpose(swap), -1.0)})
+
+
+def ovvv_ia_slab(S, Y, j0, j1):
+    """ovvv_ia for Y the slab j0 <= j < j1 of the doubles' second index.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c), as in ovvv_ia
+    Y : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (i, j, b, c)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a):
+    the slab's share of ovvv_ia(S, Y_full), which is ovvv_ia on S[:, j0:j1]."""
+    return ovvv_ia(S[:, j0:j1], Y)
+
+
+def ooov_ia_slab(G, Y, j0, j1):
+    """ooov_ia for Y the slab j0 <= k < j1 of the doubles' second index.
+
+    G : SB, anti4's six blocks of <jk||ib>, shape (no, no, no, nv), index order
+        (j, k, i, b), as in ooov_ia
+    Y : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (j, k, a, b)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a):
+    the slab's share of ooov_ia(G, Y_full), which is ooov_ia on G[:, j0:j1]."""
+    return ooov_ia(SB({k: v[:, j0:j1] for k, v in G.items()}), Y)
 
 
 def g_blocks_sb(V, nocc_spatial, norb_spatial):
