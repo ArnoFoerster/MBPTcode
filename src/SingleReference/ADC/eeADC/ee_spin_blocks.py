@@ -41,7 +41,7 @@ from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threa
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
-_SLAB_ELEMS = 1 << 27   # elements of one slab block: 1 GB in float64
+_STREAM_GB = 16.0       # GB a streamed kernel's slabs in flight may hold together
 _STREAM_POOLS = {}
 _STREAM_LOCK = threading.Lock()
 
@@ -99,6 +99,21 @@ def _ksum(fn, n, size):
 def _stream_workers():
     """Slabs in flight: one per eight threads of the pin, at least one."""
     return max(1, _threads() // 8)
+
+
+def _slab_plan(n, per_index, live):
+    """(width, workers) for streaming the indices [0, n) in slabs, where one slab
+    index carries per_index elements of a slab block and a slab in flight holds
+    `live` such blocks at once. The slabs in flight hold workers * width * live *
+    per_index float64 together, at most _STREAM_GB, but never less than one index
+    of one slab; workers is at most _stream_workers(). A budget that holds every
+    index gives one slab on one worker."""
+    fit = max(1, int(_STREAM_GB * 1e9 // (8 * per_index * live)))
+    if fit >= n:
+        return n, 1
+    workers = min(_stream_workers(), fit)
+    width = fit // workers
+    return width, min(workers, -(-n // width))
 
 
 def _add(a, b):
@@ -345,9 +360,9 @@ def ovvv_ia(S, X):
         sigma^a_ia = sum_jbc V_jabc (X^aaaa_ijbc - X^aaaa_ijcb
                                      + X^abba_ijbc - X^abab_ijcb),
 
-    and alpha <-> beta for 'bb': one matmul on reshape views of S, where the
-    block-wise einsum reorders (copies) the o v^3 block once per spin block,
-    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmul
+    and alpha <-> beta for 'bb': matmuls on reshape views of S, one per j, where
+    the block-wise einsum reorders (copies) the o v^3 block once per spin block,
+    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmuls
     alone."""
     nv = S.shape[0]
     out = {}
@@ -359,11 +374,15 @@ def ovvv_ia(S, X):
         _ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
 
         def part(j0, j1):
-            # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, on views
-            return (Z[:, j0:j1].reshape(Z.shape[0], -1)
-                    @ S[:, j0:j1].reshape(nv, -1).T)
+            # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, one j at a time:
+            # S[:, j] is contiguous in (b, c), so no slice of S is copied
+            acc = Z[:, j0].reshape(Z.shape[0], -1) @ S[:, j0].reshape(nv, -1).T
+            for j in range(j0 + 1, j1):
+                acc += Z[:, j].reshape(Z.shape[0], -1) @ S[:, j].reshape(nv, -1).T
+            return acc
 
         out[s] = _ksum(part, Z.shape[1], Z.size)
+        del Z                               # before the next spin's Z is formed
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)
@@ -454,47 +473,61 @@ def ovvv_ijab(S, x):
                'baab': neg_swap(Ta), 'abba': neg_swap(Tb)})
 
 
-def ovvv_ijab_pij_slab(S, x, j0, j1):
-    """(1 - P_ij) sum_c <ic||ab> x_jc on the slab j0 <= j < j1 of the second index.
+def ovvv_ijab_pij_slab(S, x, j0, j1, out=None):
+    """(1 - P_ij) sum_c <ic||ab> x_jc on the slab j0 <= j < j1 of the second index,
+    added into `out`.
 
     S : ndarray, shape (nv, no, nv, nv), index order (c, i, a, b), <ic|ab>, as in
         ovvv_ia
     x : SB with blocks 'aa' and 'bb', shape (no, nv), index order (j, c), without a
         flip parity
+    out : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (i, j, a, b), arrays the caller owns, no two sharing memory; zeros if None
 
-    Returns an SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index
-    order (i, j, a, b): X_ijab - X_jiab with X = ovvv_ijab(S, x). With T^s_ijab =
-    sum_c V_icab x^s_jc, A^s = T^s on the slab is x^s[j0:j1] @ S reordered and
-    B^s_ijab = T^s_jiab is x^s @ S[:, j0:j1] reordered. X_jiab under a spin string
-    is X's block of the string with its first two letters swapped, so with
-    C^s = A^s - B^s and U = A^a + B^b_ijba, U' = A^b + B^a_ijba,
+    Returns out with X_ijab - X_jiab added in place, X = ovvv_ijab(S, x). With
+    T^s_ijab = sum_c V_icab x^s_jc, A^s = T^s on the slab is x^s[j0:j1] @ S
+    reordered, both spins in one product, and B^s_ijab = T^s_jiab is x^s @ S[:, j]
+    for each j of the slab, on views of S. X_jiab under a spin string is X's block
+    of the string with its first two letters swapped, so
 
-        aaaa = C^a - C^a_ijba,   baba = U,   baab = -U_ijba,
+        aaaa += A^a - A^a_ijba - B^a + B^a_ijba,
+        baba += A^a + B^b_ijba,        baab -= A^a_ijba + B^b,
 
-    and alpha <-> beta for bbbb, abab (U'), abba (-U'_ijba). Several slabs together
-    form T twice, where ovvv_ijab forms it once; one slab over every j takes B^s
-    as A^s with i and j swapped and forms it once."""
+    and alpha <-> beta for bbbb, abab, abba. Several slabs together form T twice,
+    where ovvv_ijab forms it once; one slab over every j takes B^s as A^s with i
+    and j swapped and forms it once."""
     if x.parity is not None:
         raise NotImplementedError('ovvv_ijab_pij_slab takes x without a flip parity')
     nv, no = S.shape[0], S.shape[1]
     nj = j1 - j0
     swap = (0, 1, 3, 2)
-    # A^s at [i, j] for j in the slab, and B^s at [i, j], both (i, j, a, b)
-    Aa, Ab = ((x.get(s)[j0:j1] @ S.reshape(nv, -1)).reshape(nj, no, nv, nv)
-              .transpose(1, 0, 2, 3) for s in ('aa', 'bb'))
+    if out is None:
+        out = SB({k: np.zeros((no, nj, nv, nv))
+                  for k in ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')})
+    x2 = np.stack([x.get('aa'), x.get('bb')])                 # (s, j, c)
+    # A[s] at [i, j] for j in the slab: (s, i, j, a, b)
+    A = ((x2[:, j0:j1].reshape(2 * nj, nv) @ S.reshape(nv, -1))
+         .reshape(2, nj, no, nv, nv).transpose(0, 2, 1, 3, 4))
     if nj == no:
-        Ba, Bb = Aa.transpose(1, 0, 2, 3), Ab.transpose(1, 0, 2, 3)
+        B = A.transpose(0, 2, 1, 3, 4)
     else:
-        Sj = S[:, j0:j1].reshape(nv, -1)
-        Ba, Bb = ((x.get(s) @ Sj).reshape(no, nj, nv, nv) for s in ('aa', 'bb'))
-    Ca, Cb = _ew(np.subtract, Aa, Ba), _ew(np.subtract, Ab, Bb)
-    U = _ew(np.add, Aa, Bb.transpose(swap))
-    Up = _ew(np.add, Ab, Ba.transpose(swap))
-    return SB({'aaaa': _ew(np.subtract, Ca, Ca.transpose(swap)),
-               'bbbb': _ew(np.subtract, Cb, Cb.transpose(swap)),
-               'baba': U, 'abab': Up,
-               'baab': _ew(np.multiply, U.transpose(swap), -1.0),
-               'abba': _ew(np.multiply, Up.transpose(swap), -1.0)})
+        # B[s] at [i, j], T^s_jiab = sum_c x^s_ic <jc|ab>, one j at a time
+        B = np.empty((2, no, nj, nv, nv))
+        for jj in range(nj):
+            B[:, :, jj] = (x2.reshape(2 * no, nv) @ S[:, j0 + jj].reshape(nv, -1)
+                           ).reshape(2, no, nv, nv)
+    for s, t, same, mix, mixneg in ((0, 1, 'aaaa', 'baba', 'baab'),
+                                    (1, 0, 'bbbb', 'abab', 'abba')):
+        a, bs, bt = A[s], B[s], B[t]
+        for key, terms in ((same, ((np.add, a), (np.subtract, a.transpose(swap)),
+                                   (np.subtract, bs), (np.add, bs.transpose(swap)))),
+                           (mix, ((np.add, a), (np.add, bt.transpose(swap)))),
+                           (mixneg, ((np.subtract, a.transpose(swap)),
+                                     (np.subtract, bt)))):
+            o = out.get(key)
+            for op, v in terms:
+                _ew(op, o, v, out=o)
+    return out
 
 
 def ovvv_ia_slab(S, Y, j0, j1):

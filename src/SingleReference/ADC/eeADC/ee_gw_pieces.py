@@ -33,6 +33,10 @@ from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
 from src.SingleReference.GW.quasi_boson import QPqb
 
+# (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
+# check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
+_K_LIVE = 3
+
 
 def _eri_blocks(B, nocc):
     """MOEriBlocks (ovov, oovv, pqov) from DF factors B, shape (naux, norb, norb),
@@ -179,7 +183,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
         # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
         if y1.parity is not None:
             raise NotImplementedError('kernel takes y1 without a flip parity')
-        width = max(1, _sb._SLAB_ELEMS // (nv * nm))
+        width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
 
         def slab(k0, k1):
             nk = k1 - k0
@@ -202,22 +206,27 @@ def build_pieces_gw(eps, B, nocc, screening='tda'):
                 w[k0:k1] = _ksum(vv, nv, Y.size)
                 return w - _ksum(oo, nk, Y.size)
 
-            ws, dn2 = [{} for _ in powers], 0.0
+            ws, dn2 = {p: {} for p in powers}, 0.0
             for s in ('aa', 'bb'):
                 y = y1.get(s)
-                # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic, k in the slab
+                # Y_kcm = sum_a W^m_ac y_ka - sum_i W^m_ik y_ic, k in the slab, the
+                # second term one k at a time so no second slab-sized array forms
                 Y = (y[k0:k1] @ Wvv.reshape(nv, nv * nm)).reshape(nk, nv, nm)
-                _ew(np.subtract, Y, np.matmul(y.T, Wook.transpose(1, 0, 2)), out=Y)
+                for kk in range(nk):
+                    _ew(np.subtract, Y[kk], y.T @ Wook[:, kk], out=Y[kk])
                 _ew(np.true_divide, Y, den, out=Y)
                 dn2 += float(np.vdot(Y, Y))
-                for w, p in zip(ws, powers):
-                    Yp = Y
-                    for _ in range(p - 1):
-                        Yp = _ew(np.true_divide, Yp, den)
-                    w[s] = vt(Yp)
-            return [SB(w) for w in ws], dn2
+                # each power in ascending order, Y divided in place on the way up
+                p0 = 1
+                for p in sorted(ws):
+                    for _ in range(p - p0):
+                        _ew(np.true_divide, Y, den, out=Y)
+                    p0 = max(p0, p)
+                    ws[p][s] = vt(Y)
+                del Y                       # before the next spin's Y is formed
+            return [SB(ws[p]) for p in powers], dn2
 
-        return _stream(slab, no, width)
+        return _stream(slab, no, width, workers)
 
     def V(y1):
         return SB({s: couple(y1.get(s)) for s in ('aa', 'bb')})

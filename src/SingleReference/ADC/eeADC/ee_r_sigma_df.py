@@ -33,6 +33,9 @@ from src.SingleReference.ADC.eeADC import ee_en as _en
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4
 
 LEVELS = _r.LEVELS
+# (no, nj, nv, nv) slab blocks one slab of coupling_kernel holds at once (traced
+# peak, check 34 of tests/test_ee_adc_fold.py), what _sb._slab_plan budgets with
+_K_LIVE = 11
 
 
 # ----------------------------------------------------------------------
@@ -299,21 +302,29 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         if y1.parity is not None:
             raise NotImplementedError('coupling_kernel takes y1 without a flip parity')
         S, G = gb['ovvv_ajbc'], gb['ooov']
-        width = max(1, _sb._SLAB_ELEMS // (no * nv * nv))
+        width, workers = _sb._slab_plan(no, no * nv * nv, _K_LIVE)
+
+        def divide(Y, den):
+            # Y_K / (D_K - ω) in place; sigma_d_from_s_slab's blocks share no memory
+            for v in Y.blocks.values():
+                _sb._ew(np.true_divide, v, den, out=v)
 
         def slab(j0, j1):
+            Y = _eq.sigma_d_from_s_slab(be, gb, y1, j0, j1)
             den = _sb._ew(np.subtract, d_ijab[:, j0:j1], omega)     # D_K - ω
-            Y = _eq.sigma_d_from_s_slab(be, gb, y1, j0, j1).divide(den)
-            ws = []
-            for p in powers:
-                Yp = Y
-                for _ in range(p - 1):
-                    Yp = Yp.divide(den)
-                ws.append(_sb.ovvv_ia_slab(S, Yp, j0, j1)
-                          + _sb.ooov_ia_slab(G, Yp, j0, j1))
-            return ws, _doubles_norm2(Y)
+            divide(Y, den)
+            dn2 = _doubles_norm2(Y)
+            # each power in ascending order, Y divided in place on the way up
+            ws, p0 = {}, 1
+            for p in sorted(set(powers)):
+                for _ in range(p - p0):
+                    divide(Y, den)
+                p0 = max(p0, p)
+                ws[p] = (_sb.ovvv_ia_slab(S, Y, j0, j1)
+                         + _sb.ooov_ia_slab(G, Y, j0, j1))
+            return [ws[p] for p in powers], dn2
 
-        return _sb._stream(slab, no, width)
+        return _sb._stream(slab, no, width, workers)
 
     parts = {'M': M, 'V': coupling_v, 'Vt': coupling_vt, 'D': d_ijab,
              'level': level, 'no': no, 'nv': nv, 'be': be}

@@ -30,9 +30,11 @@ Checks, water (RHF, DF factors), basis per check:
   8. build_pieces_gw's pieces['K'], the kernel streamed over slabs of the pair's
      occupied index k (6-31G, TDA and RPA screening), equals the V, divide, Vt path
      at 0.3 Ha for powers (1, 2) and () to 1e-12 relative, its norm dnorm2's, on one
-     slab, on three of width 2, and on those three with two in flight; the folded
-     singlets with and without it agree to 1e-9 Ha; a singles vector with a flip
-     parity raises NotImplementedError.
+     slab, on three of width 2 that the budget _STREAM_GB sets, and on those three
+     with two in flight; the folded singlets with and without it agree to 1e-9 Ha;
+     a singles vector with a flip parity raises NotImplementedError; a slab holds
+     at most _K_LIVE slab blocks per slab index (the slope of tracemalloc's peak
+     from width 1 to 2, water cc-pVTZ, TDA).
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -386,36 +388,48 @@ def check_streamed_kernel(eps, B, no):
     def rel(a, b):
         return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
 
-    elems, keep = sb._SLAB_ELEMS, os.environ.get('OMP_NUM_THREADS')
+    def traced_peak(fn):
+        # bytes tracemalloc saw allocated at once while fn() ran, above its start
+        import tracemalloc
+        tracemalloc.start()
+        base = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        try:
+            fn()
+            return tracemalloc.get_traced_memory()[1] - base
+        finally:
+            tracemalloc.stop()
+
+    live = ee_gw_pieces._K_LIVE
     for screening in ('tda', 'rpa'):
         P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
         be, nm = P['be'], P['omega'].size
         Yt = be.divide(P['V'](y1), P['D'] - om)
         ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
         n2_ref = P['dnorm2'](Yt)
-        runs = (('one slab', elems, keep), ('3 slabs', 2 * nv * nm, keep),
-                ('3 slabs, 2 workers', 2 * nv * nm, '16'))
-        for label, slab_elems, threads in runs:
-            sb._SLAB_ELEMS = slab_elems
-            if threads is None:
-                os.environ.pop('OMP_NUM_THREADS', None)
-            else:
-                os.environ['OMP_NUM_THREADS'] = threads
+        per = nv * nm
+
+        def budget(fit):
+            # the _STREAM_GB that holds `fit` indices k in flight
+            return (fit + 0.5) * 8 * per * live / 1e9
+
+        runs = (('one slab', sb._STREAM_GB, 1), ('3 slabs', budget(2), 1),
+                ('3 slabs, 2 workers', budget(4), 2))
+        for label, gb, workers in runs:
+            keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+            sb._STREAM_GB, sb._stream_workers = gb, (lambda w=workers: w)
             try:
+                plan = sb._slab_plan(no, per, live)
                 ws, n2 = P['K'](y1, om, (1, 2))
                 ws0, n20 = P['K'](y1, om, ())
             finally:
-                sb._SLAB_ELEMS = elems
-                if keep is None:
-                    os.environ.pop('OMP_NUM_THREADS', None)
-                else:
-                    os.environ['OMP_NUM_THREADS'] = keep
+                sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
             d = max(rel(w.get(s), r.get(s)) for w, r in zip(ws, ref)
                     for s in ('aa', 'bb'))
             dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
             ok &= check(len(ws) == 2 and ws0 == [] and d < 1e-12 and dn < 1e-12,
                         f"{screening}, {label}: pieces['K'] equals V, divide, Vt",
-                        f'{d:.1e}, norm {dn:.1e} relative')
+                        f'{d:.1e}, norm {dn:.1e} relative, (width, workers) {plan}')
         a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
         b = ee_fold.solve_folded(dict(P, K=None), 3, spin='singlet', dense_limit=0)
         dw = float(np.max(np.abs(a.omega - b.omega)))
@@ -429,6 +443,27 @@ def check_streamed_kernel(eps, B, no):
             ok &= check('parity' in str(exc),
                         f"{screening}: pieces['K'] refuses a flip parity",
                         str(exc)[:60])
+    # slab blocks alive per slab index: the slope of K's traced peak from width 1 to
+    # width 2 on water cc-pVTZ, where a block outgrows NumPy's ufunc buffers and the
+    # fixed overhead cancels
+    _, e3, B3, n3 = water('cc-pvtz')
+    P3 = ee_gw_pieces.build_pieces_gw(e3, B3, n3, screening='tda')
+    v3 = len(e3) - n3
+    per3 = v3 * P3['omega'].size
+    y3 = SB({s: rng.standard_normal((n3, v3)) for s in ('aa', 'bb')})
+    held = {}
+    for width in (1, 2):
+        keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+        sb._STREAM_GB = (width + 0.5) * 8 * per3 * live / 1e9
+        sb._stream_workers = lambda: 1
+        try:
+            held[width] = traced_peak(lambda: P3['K'](y3, om, (1, 2)))
+        finally:
+            sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+    slope = (held[2] - held[1]) / (8 * per3)
+    ok &= check(slope <= live,
+                f"a slab of pieces['K'] holds at most _K_LIVE = {live} slab blocks "
+                'per slab index', f'{slope:.2f}, water cc-pVTZ, tda')
     return ok
 
 
