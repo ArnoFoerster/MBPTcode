@@ -465,6 +465,119 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     return np.array([t[0] for t in found]), np.column_stack([t[1] for t in found])
 
 
+def _orth_append(Q, cols, drop=1e-8):
+    """Q (n, m) with the columns of cols (n, c) appended, each orthonormalised
+    against Q and the columns before it; a column that lies in the span to drop
+    relative is skipped. Returns (Q_new (n, m + added), added)."""
+    added = 0
+    for g in np.reshape(cols, (Q.shape[0], -1)).T:
+        # g_p - sum_j Q_pj (sum_q Q_qj g_q), twice; kept unless it lies in span Q
+        r = g - Q @ (Q.T @ g)
+        r -= Q @ (Q.T @ r)
+        if np.linalg.norm(r) > drop * max(np.linalg.norm(g), 1e-300):
+            Q = np.column_stack([Q, r / np.linalg.norm(r)])
+            added += 1
+    return Q, added
+
+
+def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
+                    max_subspace, max_cycle, label):
+    """The nroots lowest roots of λ(ω) = ω by one Davidson whose roots carry their
+    own frequencies.
+
+    The subspace Q holds the images S0 = A_eff(om0) Q and S1 = A'(om0) Q at one
+    centre om0, so the model H(ω) = Q^T A_eff(om0) Q + (ω - om0) Q^T A'(om0) Q is
+    exact to first order in ω - om0, and _model_roots solves it for every root at
+    its own ω. The roots followed are the model's levels (_levels) that start below
+    nroots, so a level cut by nroots is followed whole; each adds its
+    preconditioned model residual to Q, and the vectors of a level come from one
+    eigh at its mean ω, orthonormal. When the median root lies farther than
+    _RECENTRE from om0 the centre moves there and every image is rebuilt; Q
+    collapses onto the roots' vectors when it would pass max_subspace.
+    Convergence is the model residual below tol_residual and the roots moving less
+    than tol_omega between cycles; a root away from om0 keeps the model's
+    second-order error, so the caller polishes each root exactly. Every
+    application of A_eff, A' and M counts against the traced call, which prints
+    one line per cycle.
+
+    X0 : ndarray, shape (n, m0), start vectors (the seeds of M)
+    d_min : float, the lowest doubles energy; model roots at or above it are dropped
+    Returns oms (r,) ascending, X (n, r) unit vectors, conv (r,) bool and the
+    cycles used; r < nroots when the model has fewer roots below d_min.
+    """
+    n = X0.shape[0]
+    tr = _TRACE.get()
+
+    def counted(k):
+        if tr is not None:
+            tr.nmv += k
+
+    def note(text):
+        if tr is not None:
+            tr.say(text, label)
+
+    Q, _ = _orth_append(np.empty((n, 0)), X0)
+    # first centre: the lowest Ritz value of M on the start
+    m0 = folded_operator(pieces, None, spin)[0]
+    MQ = np.column_stack([m0(Q[:, k]) for k in range(Q.shape[1])])
+    counted(Q.shape[1])
+    om0 = float(np.linalg.eigvalsh(0.5 * (Q.T @ MQ + MQ.T @ Q))[0])
+    S0 = S1 = np.empty((n, 0))
+    oms_prev = None
+    for cycle in range(1, max_cycle + 1):
+        matvec, dmatvec, diag_s, _, _ = folded_operator(pieces, om0, spin)
+        # images of the columns not yet imaged at this centre
+        for k in range(S0.shape[1], Q.shape[1]):
+            S0 = np.column_stack([S0, matvec(Q[:, k])])
+            S1 = np.column_stack([S1, dmatvec(Q[:, k], vector=True)])
+            counted(2)
+        H0, H1 = Q.T @ S0, Q.T @ S1
+        H0, H1 = 0.5 * (H0 + H0.T), 0.5 * (H1 + H1.T)
+        oms, C = _model_roots(H0, H1, om0, Q.shape[1], d_min, 0.1 * tol_omega)
+        if oms.size == 0:
+            note(f'cycle {cycle}: {Q.shape[1]} vectors, centre {om0:.6f}, no model '
+                 'root below the lowest doubles energy')
+            return oms, np.empty((n, 0)), np.zeros(0, bool), cycle
+        runs = [(a, b) for a, b in _levels(oms) if a < nroots]
+        oms, C = oms[:runs[-1][1]], C[:, :runs[-1][1]]
+        for a, b in runs:
+            if b - a > 1:
+                # one orthonormal set per level: branches a..b-1 at the mean root
+                w_l = oms[a:b].mean()
+                C[:, a:b] = np.linalg.eigh(H0 + (w_l - om0) * H1)[1][:, a:b]
+        X = Q @ C
+        # model residual (H(ω_r) - ω_r) x_r = S0 c_r + (ω_r - om0) S1 c_r - ω_r x_r
+        R = S0 @ C + S1 @ (C * (oms - om0)) - X * oms
+        rn = np.linalg.norm(R, axis=0)
+        moved = (np.full(oms.size, np.inf) if oms_prev is None
+                 or oms_prev.size != oms.size else np.abs(oms - oms_prev))
+        conv = (rn < tol_residual) & (moved < tol_omega)
+        note(f'cycle {cycle}: {Q.shape[1]} vectors, centre {om0:.6f}, roots '
+             + ' '.join(f'{o:.8f}' for o in oms)
+             + ', |r| ' + ' '.join(f'{r:.1e}' for r in rn))
+        oms_prev = oms
+        if conv.all():
+            return oms, X, conv, cycle
+        new = []
+        for r in np.flatnonzero(~conv):
+            # Jacobi preconditioner on M's diagonal at the root's frequency
+            den = diag_s - oms[r]
+            den = np.where(np.abs(den) < 1e-4, np.copysign(1e-4, den), den)
+            new.append(R[:, r] / den)
+        if Q.shape[1] + len(new) > max_subspace:
+            # collapse onto the roots' vectors; their images are rebuilt
+            Q, _ = _orth_append(np.empty((n, 0)), X)
+            S0, S1 = np.empty((n, 0)), np.empty((n, 0))
+        Q, added = _orth_append(Q, np.column_stack(new))
+        centre = float(np.median(oms))
+        if abs(centre - om0) > _RECENTRE:
+            # the roots moved away: a new centre, every image rebuilt
+            om0, S0, S1 = centre, np.empty((n, 0)), np.empty((n, 0))
+        elif added == 0:
+            return oms, X, conv, cycle
+    return oms, X, conv, max_cycle
+
+
 def _eig_level(pieces, omega, spin, Y, dense, tol_residual, label):
     """The g eigenpairs of A_eff(ω) of largest projection onto span(Y), Y (n, g)
     orthonormal. Returns λ (g,), Z (n, g) the eigenvectors, ZR (n, g) = Z rotated

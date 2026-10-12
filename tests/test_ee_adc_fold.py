@@ -105,6 +105,11 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
   29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
       H1 = 0 its roots are the eigenvalues of H0, with H1 = -I they are
       (w_j + w0) / 2, and a root at or above min D is dropped.
+  30. _davidson_omega, one Davidson whose roots carry their own w (water adc2
+      singlets and triplets, nroots 3, from the seeds of M, max_subspace 40 and 4):
+      the model converges, its roots lie within 1e-3 Ha of the Newton roots, and
+      the per-root Newton polish from them, at most three steps a root, returns
+      the Newton roots to 1e-7 Ha.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -1570,6 +1575,42 @@ def check_model_roots():
     return ok
 
 
+def check_davidson_omega(eps, B, no):
+    """_davidson_omega on water adc2 singlets and triplets, nroots 3, from the seeds
+    of M, at max_subspace 40 and 4 (a collapse every cycle): the model converges,
+    its roots lie within 1e-3 Ha of the Newton roots (its first-order error away
+    from the centre), and the per-root Newton polish from them, at most three
+    steps a root, returns the Newton roots to 1e-7 Ha."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    d_min = float(np.min(P['D']))
+    ok = True
+    for spin in ('singlet', 'triplet'):
+        ref = ee_fold.solve_folded(P, 3, spin=spin, tol_omega=1e-9, tol_residual=1e-8)
+        m0, _, diag_s, _, _ = ee_fold.folded_operator(P, None, spin)
+        _, X0, _ = ee_fold._seed_levels(m0, diag_s, diag_s.size, 3, False, 1e-8, 't')
+        for cap in (40, 4):
+            oms, X, conv, cyc = ee_fold._davidson_omega(
+                P, spin, X0, 3, d_min, 1e-8, 1e-9, cap, 200, 'test')
+            dm = float(np.max(np.abs(oms - ref.omega))) if oms.size == 3 else np.inf
+            lams, steps = [], []
+            for r in range(oms.size):
+                # the solve's own per-root polish: Newton on λ(ω) = ω from the root
+                step = ee_fold._root_step(P, spin, X[:, r], False, 1e-8, 'test')
+                lam, _, _, k, _, c, _ = ee_fold._iterate(
+                    step, float(oms[r]), 1e-9, 0.3, 12, 30, 'test', 0)
+                lams.append(lam if c else np.inf)
+                steps.append(k)
+            d = float(np.max(np.abs(np.array(lams) - ref.omega))) \
+                if oms.size == 3 else np.inf
+            ok &= check(conv.all() and dm < 1e-3 and d < 1e-7 and max(steps) <= 3,
+                        f'{spin}, max_subspace {cap}: the Davidson roots, polished, '
+                        'equal the Newton roots',
+                        f'model |d| {dm:.1e} Ha, polished |d| {d:.1e} Ha, {cyc} '
+                        f'cycles, polish steps {steps}')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1617,6 +1658,7 @@ def main():
     all_ok &= check_split_contractions()
     all_ok &= check_kernel_hook(eps, B, no)
     all_ok &= check_model_roots()
+    all_ok &= check_davidson_omega(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
