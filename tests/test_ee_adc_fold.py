@@ -111,6 +111,13 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       restricted to the slab, ovvv_ia and ooov_ia summed over the slabs, to 1e-13
       relative; _ksum splits a product on the main thread and keeps it whole off
       it.
+  34. build_operator's pieces['K'] at adc2 and gf2, the kernel streamed over slabs of
+      the doubles' second occupied index, equals the V, divide, Vt path at 0.3 Ha
+      for powers (1, 2) and () to 1e-12 relative, its doubles norm the flat
+      layout's, on one slab, on three of width 2, and on those three with two in
+      flight; the folded singlets with and without it agree to 1e-9 Ha; a singles
+      vector with a flip parity raises NotImplementedError. Checks 10 and 28 take
+      dict(P, K=None), the generic path, as their baseline.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -678,6 +685,7 @@ def check_gw_hook(eps, B, no):
     nv = B.shape[1] - no
     ok &= check('gw' in ee_fold.FOLD_LEVELS, "'gw' is a fold level")
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
+    P = dict(P, K=None)                     # the generic path, not the streamed kernel
     _, dmv, diag_s, embed, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
     u = np.linspace(-1.0, 1.0, diag_s.size)
     u /= np.linalg.norm(u)
@@ -1521,6 +1529,7 @@ def check_kernel_hook(eps, B, no):
     ok = True
     nv = B.shape[1] - no
     P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    P = dict(P, K=None)                     # the generic path, not the streamed kernel
     om, h = 0.3, 1e-4
     mv, dmv, diag_s, _, _ = ee_fold.folded_operator(P, om, spin='singlet')
     mvp = ee_fold.folded_operator(P, om + h, spin='singlet')[0]
@@ -1655,6 +1664,72 @@ def check_slab_contractions():
     return ok
 
 
+def check_streamed_kernel(eps, B, no):
+    """pieces['K'] at adc2 and gf2 against the generic V, divide, Vt path at omega
+    0.3 Ha, powers (1, 2) and (), to 1e-12 relative per block, its doubles norm
+    against the flat layout's; on one slab, on three of width 2, and on those three
+    two at a time; the folded roots with and without K to 1e-9 Ha; a y1 with a flip
+    parity refused."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    ok = True
+    nv = B.shape[1] - no
+    om = 0.3
+    rng = np.random.default_rng(13)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    elems, keep = sb._SLAB_ELEMS, os.environ.get('OMP_NUM_THREADS')
+    runs = (('one slab', elems, keep), ('3 slabs', 2 * no * nv * nv, keep),
+            ('3 slabs, 2 workers', 2 * no * nv * nv, '16'))
+    for level in ('adc2', 'gf2'):
+        P = ee_r_sigma_df.build_operator(eps, B, no, level=level, pieces=True)[3]
+        be = P['be']
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        Yf = ee_fold.doubles_sb_to_flat(Yt, no, nv)
+        n2_ref = float(Yf @ Yf)
+        dn = abs(ee_r_sigma_df._doubles_norm2(Yt) - n2_ref) / n2_ref
+        ok &= check(dn < 1e-12, f'{level}: _doubles_norm2 is the flat-layout norm',
+                    f'{dn:.1e} relative')
+        for label, slab_elems, threads in runs:
+            sb._SLAB_ELEMS = slab_elems
+            if threads is None:
+                os.environ.pop('OMP_NUM_THREADS', None)
+            else:
+                os.environ['OMP_NUM_THREADS'] = threads
+            try:
+                ws, n2 = P['K'](y1, om, (1, 2))
+                ws0, n20 = P['K'](y1, om, ())
+            finally:
+                sb._SLAB_ELEMS = elems
+                if keep is None:
+                    os.environ.pop('OMP_NUM_THREADS', None)
+                else:
+                    os.environ['OMP_NUM_THREADS'] = keep
+            d = max(rel(w.get(s), r.get(s)) for w, r in zip(ws, ref)
+                    for s in ('aa', 'bb'))
+            dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+            ok &= check(len(ws) == 2 and ws0 == [] and d < 1e-12 and dn < 1e-12,
+                        f"{level}, {label}: pieces['K'] equals V, divide, Vt",
+                        f'{d:.1e}, norm {dn:.1e} relative')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(dict(P, K=None), 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega)))
+        ok &= check(a.omega.size == 3 and dw < 1e-9,
+                    f"{level}: the folded singlets with and without pieces['K']",
+                    f'max |dw| {dw:.1e} Ha')
+        try:
+            P['K'](SB(y1.blocks, parity=1.0), om, (1,))
+            ok &= check(False, f"{level}: pieces['K'] refuses a flip parity")
+        except NotImplementedError as exc:
+            ok &= check('parity' in str(exc),
+                        f"{level}: pieces['K'] refuses a flip parity", str(exc)[:60])
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -1703,6 +1778,7 @@ def main():
     all_ok &= check_kernel_hook(eps, B, no)
     all_ok &= check_stream()
     all_ok &= check_slab_contractions()
+    all_ok &= check_streamed_kernel(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

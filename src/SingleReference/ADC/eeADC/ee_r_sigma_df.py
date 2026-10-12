@@ -216,7 +216,11 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
     to an SB doubles vector (blocks (no, no, nv, nv), index order
     (i, j, a, b)), Vt its transpose W^a_i(D) the other way (no 'dense_limit'
     key: solve_folded runs Davidson on them at every size), D = d_ijab the
-    doubles diagonal, shape (no, no, nv, nv), index order (i, j, a, b). Only a
+    doubles diagonal, shape (no, no, nv, nv), index order (i, j, a, b), and, for
+    the closed-shell DF integrals, 'K' the fused kernel of ee_fold.folded_operator,
+    K(y1, omega, powers) -> (ws, dn2), Vt (D - ω)^-p V y1 for each p and the
+    adc2-layout norm of (D - ω)^-1 V y1, streamed over slabs of the doubles'
+    second occupied index so no doubles-sized array is formed. Only a
     level whose doubles block is that bare diagonal (o_dd = 0: adc2, gf2) is
     accepted, and only without `parity`: the fold takes its spin channel on the
     singles alone."""
@@ -288,9 +292,48 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         # W^a_i(D): the singles image of a doubles vector, eqs A41/A42
         return _eq.sigma_s_from_d(be, gb, amps, zint, Y, o_sd)
 
+    def coupling_kernel(y1, omega, powers=(1,)):
+        # sum_K V_K,ia (V y1)_K / (D_K - ω)^p for each p in powers, and
+        # sum_K (V y1)_K² / (D_K - ω)², streamed over slabs of the doubles' second
+        # occupied index (o_sd = 1 at both levels): no o² v² array is formed
+        if y1.parity is not None:
+            raise NotImplementedError('coupling_kernel takes y1 without a flip parity')
+        S, G = gb['ovvv_ajbc'], gb['ooov']
+        width = max(1, _sb._SLAB_ELEMS // (no * nv * nv))
+
+        def slab(j0, j1):
+            den = _sb._ew(np.subtract, d_ijab[:, j0:j1], omega)     # D_K - ω
+            Y = _eq.sigma_d_from_s_slab(be, gb, y1, j0, j1).divide(den)
+            ws = []
+            for p in powers:
+                Yp = Y
+                for _ in range(p - 1):
+                    Yp = Yp.divide(den)
+                ws.append(_sb.ovvv_ia_slab(S, Yp, j0, j1)
+                          + _sb.ooov_ia_slab(G, Yp, j0, j1))
+            return ws, _doubles_norm2(Y)
+
+        return _sb._stream(slab, no, width)
+
     parts = {'M': M, 'V': coupling_v, 'Vt': coupling_vt, 'D': d_ijab,
              'level': level, 'no': no, 'nv': nv, 'be': be}
+    if 'ovvv_ajbc' in gb:
+        parts['K'] = coupling_kernel
     return aop, diag, d, parts
+
+
+def _doubles_norm2(Y):
+    """sum_K Y_K² over the doubles of the adc2 layout (ee_r_sigma.from_blocks).
+
+    Y : SB of the doubles blocks 'aaaa', 'bbbb', 'abab', shape (no, nj, nv, nv),
+        index order (i, j, a, b), the same-spin ones antisymmetric in (i, j) and
+        in (a, b), as every image of V is
+
+    The layout keeps i < j, a < b of the same-spin blocks, a quarter of their full
+    sum, and all of 'abab', each scaled by SCALE. Over a slab of j it returns the
+    slab's share of the whole norm."""
+    sq = {k: float(np.vdot(Y.get(k), Y.get(k))) for k in ('aaaa', 'bbbb', 'abab')}
+    return _r.SCALE ** 2 * (0.25 * (sq['aaaa'] + sq['bbbb']) + sq['abab'])
 
 
 def _diagonal_df(eps, B, no, nv, M, o_dd):

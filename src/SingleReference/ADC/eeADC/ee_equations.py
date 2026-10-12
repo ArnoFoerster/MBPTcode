@@ -288,6 +288,25 @@ def sigma_d_from_s(be, gb, amps, zint, y1, order, keys=None):
                      + be.ein('jkab,ki->ijab', t1, w_oo), keys)
 
 
+def sigma_d_from_s_slab(be, gb, y1, j0, j1):
+    """W^ab_ij(S) of A54, first order, on the slab j0 <= j < j1 of the second
+    occupied index, for the closed-shell DF gb ('ovvv_ajbc' present).
+
+    y1 : SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a), without
+        a flip parity
+
+    Returns an SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index
+    order (i, j, a, b): sigma_d_from_s(be, gb, amps, zint, y1, 1) on the slab."""
+    if 'ovvv_ajbc' not in gb:
+        raise NotImplementedError('the slab coupling needs the closed-shell DF gb')
+    ym = -(0.5 * y1)
+    G = _sb.SB({k: v[:, j0:j1] for k, v in gb['ooov'].items()})
+    # -1/2 sum_k <ij||ka> y_kb antisymmetrised in (a, b), j in the slab
+    W = _p_ab(be.ein('ijka,kb->ijab', G, ym))
+    # -1/2 (1 - P_ij) sum_c <ic||ab> y_jc on the slab
+    return W + _sb.ovvv_ijab_pij_slab(gb['ovvv_ajbc'], ym, j0, j1)
+
+
 def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None, keys=None):
     """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order); `keys` as in
     sigma_d_from_s."""
