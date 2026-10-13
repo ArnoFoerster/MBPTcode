@@ -119,8 +119,9 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       triple without an index solve and closes on fewer matvecs.
   32. the default's polish and duplicate check: a model root one polish step
       cannot fix (strong coupling, the centre held at M's root) comes back
-      converged False with a warning; a root the Davidson hands over twice is
-      reported, the copy dropped, the displaced root solved by index.
+      converged False with a warning, and so does a 4-fold level, every partner;
+      a root the Davidson hands over twice is reported, the copy dropped, the
+      displaced root solved by index.
 
 The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
@@ -1782,8 +1783,9 @@ def check_default_polish():
     """The default's exact polish and its duplicate check: a model root far from
     its exact root (strong coupling, the centre never moved: _RECENTRE 10 Ha) with
     one polish step comes back converged False with the solve's warning, never at
-    the model's value as converged; two roots the Davidson hands over as copies of
-    one are reported, the copy dropped, and the root it displaced solved by index."""
+    the model's value as converged, and a 4-fold level so held comes back whole,
+    every partner unconverged; two roots the Davidson hands over as copies of one
+    are reported, the copy dropped, and the root it displaced solved by index."""
     from src.SingleReference.ADC.eeADC import ee_fold
     ok = True
     m, C, D = np.array([0.5, 0.9]), np.array([[0.25, 0.0]]), np.array([0.8])
@@ -1829,13 +1831,18 @@ def check_default_polish():
     rng = np.random.default_rng(17)
     A = rng.standard_normal((3, 3)) * 0.03
     Bk = np.diag([0.50, 0.58, 0.70]) + 0.5 * (A + A.T)
-    for k, spin in ((4, 'singlet'), (5, 'singlet'), (2, None)):
+
+    def kfold(k):
+        """(m, C) of k copies of the block Bk, each coupled to its own double."""
         m = np.zeros((3 * k + 3, 3 * k + 3))
         C = np.zeros((k, 3 * k + 3))
         for i in range(k):
             m[3 * i:3 * i + 3, 3 * i:3 * i + 3] = Bk
             C[i, 3 * i:3 * i + 3] = [0.15, -0.10, 0.08]
         m[3 * k:, 3 * k:] = np.diag([0.9, 1.1, 1.3])
+        return m, C
+    for k, spin in ((4, 'singlet'), (5, 'singlet'), (2, None)):
+        m, C = kfold(k)
         w0 = np.sort(_synthetic_exact(m, C, np.ones(k))[0])[0]
         g = k * (2 if spin is None else 1)
         with warnings.catch_warnings(record=True) as caught:
@@ -1846,6 +1853,25 @@ def check_default_polish():
         ok &= check(got == g and not caught,
                     f'a {g}-fold level cut by nroots 1 comes back whole, spin {spin}',
                     f'{got} of {g} partners, {len(caught)} warning(s)')
+    # the 4-fold level, its model root far from the exact one (the centre held at
+    # M's root), and one polish step: the level comes back whole and unconverged
+    m, C = kfold(4)
+    keep = ee_fold._RECENTRE
+    ee_fold._RECENTRE = 10.0
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(_synthetic_pieces(m, C, np.ones(4)), 1,
+                                       spin='singlet', dense_limit=0, max_newton=1,
+                                       t_min=0.0)
+    finally:
+        ee_fold._RECENTRE = keep
+    lv = any('level' in str(x.message) and 'not converged' in str(x.message)
+             for x in caught)
+    ok &= check(lv and res.omega.size == 4 and not res.converged.any(),
+                'a level one polish step cannot fix: every partner converged False, '
+                'the level warned', f'nout {res.omega.size}, converged '
+                f'{res.converged.tolist()}, loop {res.loop}')
     # the dense branch seeds M in full; the Davidson takes the levels it follows
     n = 200
     C = np.zeros((2, n))
