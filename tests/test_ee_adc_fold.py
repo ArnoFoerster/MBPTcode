@@ -114,7 +114,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       the Newton roots to 1e-7 Ha; two cycles leave it unconverged, warned.
   31. solver='davidson' is the default of solve_folded: on water singlets, nroots
       3, its roots equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop
-      reads 'davidson', solver='bogus' raises ValueError; on CH4 / 6-31G
+      reads 'davidson', steps counts the polish alone, solver='bogus' raises
+      ValueError; on CH4 / 6-31G
       triplets, nroots 1 (check 13's reordered case), it returns Newton's T2
       triple without an index solve and closes on fewer matvecs.
   32. the default's polish and duplicate check: a model root one polish step
@@ -1743,7 +1744,8 @@ def _closing_mv(P, nroots, spin, **kw):
 def check_solver_default(eps, B, no):
     """solver='davidson' is the default: on water adc2 singlets, nroots 3, its roots
     equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop reads 'davidson'
-    for every root, solver='bogus' raises ValueError; on CH4 / 6-31G triplets,
+    for every root, steps counts the polish alone, solver='bogus' raises
+    ValueError; on CH4 / 6-31G triplets,
     nroots 1, where the fold puts M's lowest state above the T2 triple (check 13),
     the default returns Newton's triple without the count's index solve and closes
     on fewer matvecs."""
@@ -1761,6 +1763,10 @@ def check_solver_default(eps, B, no):
                 and 'davidson' not in new.loop,
                 "loop reads 'davidson' for every root of the default",
                 f'{dav.loop}, {new.loop}')
+    # the polish from the model's roots takes at most three steps (check 30)
+    ok &= check(int(dav.steps.max()) <= 3,
+                "the default's steps count its polish, not the Davidson's cycles",
+                f'steps {dav.steps.tolist()}')
     try:
         ee_fold.solve_folded(P, 3, spin='singlet', solver='bogus')
         raised = False

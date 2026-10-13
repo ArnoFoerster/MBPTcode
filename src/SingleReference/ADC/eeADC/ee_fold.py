@@ -282,7 +282,8 @@ class FoldResult:
     level : ndarray, shape (nout,), int, the level of each root; the partners of a
         degenerate level share its index and its omega, and a seed level that
         A_eff splits gives each of its roots a level of its own
-    steps : ndarray, shape (nout,), outer iterations used
+    steps : ndarray, shape (nout,), outer iterations used; for a 'davidson' root
+        those of its exact polish, the Davidson's cycles printed by the trace
     loop : list of str, 'newton', 'fixed', 'index' (solved by branch index) or
         'davidson' (found by the root-wise Davidson, then polished) per root
     converged : ndarray, shape (nout,), bool
@@ -1026,15 +1027,14 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                           (lam, yk, t1, lv, k + k0, mode, conv, False)):
             out.append(v)
 
-    def solve_seeds(e, X, runs, k0=0):
-        """Solve the levels runs, (start, stop) into the seeds e (m,), X (n, m);
-        k0 steps already spent count in each root's."""
+    def solve_seeds(e, X, runs):
+        """Solve the levels runs, (start, stop) into the seeds e (m,), X (n, m)."""
         nonlocal nlev
         for a, b in runs:
             lv, nlev = nlev, nlev + 1
             if b - a == 1:
                 # λ(ω) = ω on the root's own followed vector
-                solve_root(float(e[a]), X[:, a], lv, k0)
+                solve_root(float(e[a]), X[:, a], lv)
                 continue
             # λ̄(ω) = ω, λ̄ the mean of the b - a eigenvalues of largest projection
             # onto the span of the level's seeds X[:, a:b]
@@ -1051,7 +1051,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                 for j in range(b - a):
                     if j:
                         lv, nlev = nlev, nlev + 1
-                    solve_root(float(lam[j]), Z[:, j], lv, k0=k0 + k)
+                    solve_root(float(lam[j]), Z[:, j], lv, k0=k)
                 continue
             if not conv:
                 warnings.warn(f'{label}: level {lv} at omega = {lbar:.8f} Ha not '
@@ -1060,8 +1060,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
             for j in range(b - a):
                 for out, v in zip((omega, y_out, t1_out, level, steps, loop,
                                    converged, copy),
-                                  (lbar, ZR[:, j], t1[j], lv, k0 + k, mode, conv,
-                                   False)):
+                                  (lbar, ZR[:, j], t1[j], lv, k, mode, conv, False)):
                     out.append(v)
 
     def mark_copies():
@@ -1153,7 +1152,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
             # exact polish from the model roots: λ(ω) = ω per root, or per level
             # on its partners' span
             first = len(omega)
-            solve_seeds(oms, X, _levels(oms), k0=cycles)
+            solve_seeds(oms, X, _levels(oms))
             loop[first:] = ['davidson'] * (len(loop) - first)
     mark_copies()
     # the count check: below min_K D_K the folded roots at or below ω number the
