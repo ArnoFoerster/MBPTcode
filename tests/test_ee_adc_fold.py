@@ -111,7 +111,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       singlets and triplets, nroots 3, from the seeds of M, max_subspace 40 and 4):
       the model converges, its roots lie within 1e-3 Ha of the Newton roots, and
       the per-root Newton polish from them, at most three steps a root, returns
-      the Newton roots to 1e-7 Ha; two cycles leave it unconverged, warned.
+      the Newton roots to 1e-7 Ha; a collapse at one centre images only the new
+      vectors; two cycles leave it unconverged, warned.
   31. solver='davidson' is the default of solve_folded: on water singlets, nroots
       3, its roots equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop
       reads 'davidson', steps counts the polish alone, solver='bogus' raises
@@ -1687,8 +1688,12 @@ def check_davidson_omega(eps, B, no):
     of M, at max_subspace 40 and 4 (a collapse every cycle): the model converges,
     its roots lie within 1e-3 Ha of the Newton roots (its first-order error away
     from the centre), and the per-root Newton polish from them, at most three
-    steps a root, returns the Newton roots to 1e-7 Ha; two cycles leave the model
-    unconverged, with a warning."""
+    steps a root, returns the Newton roots to 1e-7 Ha; a collapse at one centre
+    images only the new vectors; two cycles leave the model unconverged, with a
+    warning."""
+    import contextlib
+    import io
+    import re
     from src.SingleReference.ADC.eeADC import ee_fold
     P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
     d_min = float(np.min(P['D']))
@@ -1716,6 +1721,22 @@ def check_davidson_omega(eps, B, no):
                         'equal the Newton roots',
                         f'model |d| {dm:.1e} Ha, polished |d| {d:.1e} Ha, {cyc} '
                         f'cycles, polish steps {steps}')
+        # max_subspace 4, a collapse every cycle: at an unchanged centre a cycle
+        # images only its new vectors, the kept ones' images rotated
+        out = io.StringIO()
+        token = ee_fold._TRACE.set(ee_fold._Trace('t'))
+        try:
+            with contextlib.redirect_stdout(out):
+                ee_fold._davidson_omega(P, spin, X0, 3, d_min, 1e-8, 1e-9, 4, 200, 't')
+        finally:
+            ee_fold._TRACE.reset(token)
+        pat = r'cycle \d+: (\d+) vectors, centre ([0-9.]+),.*mv = (\d+)\]'
+        rows = [(int(a), b, int(c)) for a, b, c in re.findall(pat, out.getvalue())]
+        same = [(nv, mv - mv0) for (_, c0, mv0), (nv, c, mv) in zip(rows, rows[1:])
+                if c == c0]
+        ok &= check(same and all(d < 2 * nv for nv, d in same),
+                    f'{spin}, max_subspace 4: a collapse at one centre images only the '
+                    'new vectors', f'(vectors, mv) per cycle {same[:6]}')
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             _, _, conv, cyc = ee_fold._davidson_omega(

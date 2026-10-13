@@ -507,7 +507,8 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     M's diagonal, and the vectors of a level (_levels) come from one eigh at its
     mean ω, orthonormal. When the median root lies farther than _RECENTRE from
     om0 the centre moves there and every image is rebuilt; Q collapses onto the
-    roots' vectors when it would pass max_subspace. Convergence is the model
+    roots' vectors, their images rotated, when it would pass max_subspace, so the
+    roots and their new directions may pass it. Convergence is the model
     residual below tol_residual and the roots moving less than tol_omega between
     cycles; a root away from om0 keeps the model's second-order error, so the
     caller polishes each root exactly. An exit before convergence, the cycle budget
@@ -608,9 +609,11 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
         precond = jacobi_davidson_precond(diag_s)
         new = [precond(R[:, r], oms[r], X[:, r]) for r in np.flatnonzero(~conv)]
         if Q.shape[1] + len(new) > max_subspace:
-            # collapse onto the roots' vectors; their images are rebuilt
-            Q, _ = _orth_append(np.empty((n, 0)), X)
-            S0, S1 = np.empty((n, 0)), np.empty((n, 0))
+            # collapse onto the roots' vectors, Q_c = Q G in the old span; their
+            # images at this centre are the stored ones rotated, A Q_c = (A Q) G
+            Qc, _ = _orth_append(np.empty((n, 0)), X)
+            G = Q.T @ Qc
+            Q, S0, S1 = Qc, S0 @ G, S1 @ G
         Q, added = _orth_append(Q, np.column_stack(new))
         centre = float(np.median(oms))
         if abs(centre - om0) > _RECENTRE:
