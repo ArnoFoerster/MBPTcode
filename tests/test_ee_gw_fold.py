@@ -27,6 +27,26 @@ Checks, water (RHF, DF factors), basis per check:
      nroots: the singlet's 3 and the triplet's 4 lowest roots equal the lowest
      eigenvalues of check 4's supermatrix below min D, on both branches, to 1e-9 Ha,
      without a warning.
+  8. build_pieces_gw's pieces['K'], the kernel streamed over slabs of the pair's
+     occupied index k (6-31G, TDA and RPA screening), of the W pieces and of the
+     df=True pieces (kernel_df, through B and rho), equals the V, divide, Vt path
+     at 0.3 Ha for powers (1, 2) and () to 1e-12 relative, its norm dnorm2's, on one
+     slab, on three of width 2 that the budget _STREAM_GB sets, and on those three
+     with two in flight; the folded singlets with and without it agree to 1e-9 Ha;
+     a singles vector with a flip parity raises NotImplementedError; a slab holds
+     at most _K_LIVE slab blocks per slab index (the slope of tracemalloc's peak
+     from width 1 to 2, water cc-pVTZ, TDA).
+  9. build_pieces_gw(..., laplace=True) (6-31G, TDA and RPA screening): W is None;
+     M, and Vt (D - ω)^-1 V and its norm through the DF forms of V and Vt, equal the
+     W pieces' to 1e-12 relative; pieces['K'], kernel_laplace, equals the W pieces'
+     V, divide, Vt at 0.3 Ha for powers (1, 2) and its norm to 1e-8 relative, on
+     the grid minimax_points_for_accuracy gives for relative error _LAPLACE_TARGET
+     (1e-9);
+     the folded singlets equal the W pieces' to 1e-6 eV; 1e-7 Ha below min D, where
+     no tabulated grid reaches the target, and above min D, K is kernel_df's exact
+     kernel (1e-12 relative); a flip parity raises NotImplementedError;
+     gw_modes_df holds at most 6 (nm, nm) float64 arrays at once (traced peak,
+     water cc-pVTZ, both screenings).
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -364,6 +384,196 @@ def check_seeding_gap():
     return ok
 
 
+def traced_peak(fn):
+    """Bytes tracemalloc saw allocated at once while fn() ran, above its start."""
+    import tracemalloc
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1] - base
+    finally:
+        tracemalloc.stop()
+
+
+def check_streamed_kernel(eps, B, no):
+    """pieces['K'], the eq 66 kernel streamed over slabs of k, of the W pieces and of
+    the df pieces (kernel_df), against the same pieces' V, divide, Vt path at omega
+    0.3 Ha, powers (1, 2) and (), both screenings, to 1e-12 relative per block, its
+    norm against dnorm2; on one slab, on three of width 2, and on those three two at
+    a time; the folded singlets with and without K to 1e-9 Ha; a y1 with a flip
+    parity refused; at most _K_LIVE slab blocks per slab index."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    ok = True
+    nv = len(eps) - no
+    om = 0.3
+    rng = np.random.default_rng(13)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    live = ee_gw_pieces._K_LIVE
+    for screening, df in (('tda', False), ('rpa', False), ('tda', True),
+                          ('rpa', True)):
+        tag = f'{screening}, df' if df else screening
+        P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening, df=df)
+        be, nm = P['be'], P['omega'].size
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        n2_ref = P['dnorm2'](Yt)
+        per = nv * nm
+
+        def budget(fit):
+            # the _STREAM_GB that holds `fit` indices k in flight
+            return (fit + 0.5) * 8 * per * live / 1e9
+
+        runs = (('one slab', sb._STREAM_GB, 1), ('3 slabs', budget(2), 1),
+                ('3 slabs, 2 workers', budget(4), 2))
+        for label, gb, workers in runs:
+            keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+            sb._STREAM_GB, sb._stream_workers = gb, (lambda w=workers: w)
+            try:
+                plan = sb._slab_plan(no, per, live)
+                ws, n2 = P['K'](y1, om, (1, 2))
+                ws0, n20 = P['K'](y1, om, ())
+            finally:
+                sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+            d = max(rel(w.get(s), r.get(s)) for w, r in zip(ws, ref)
+                    for s in ('aa', 'bb'))
+            dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+            ok &= check(len(ws) == 2 and ws0 == [] and d < 1e-12 and dn < 1e-12,
+                        f"{tag}, {label}: pieces['K'] equals V, divide, Vt",
+                        f'{d:.1e}, norm {dn:.1e} relative, (width, workers) {plan}')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(dict(P, K=None), 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega)))
+        ok &= check(a.omega.size == 3 and dw < 1e-9,
+                    f"{tag}: the folded singlets with and without pieces['K']",
+                    f'max |dw| {dw:.1e} Ha')
+        try:
+            P['K'](SB(y1.blocks, parity=1.0), om, (1,))
+            ok &= check(False, f"{tag}: pieces['K'] refuses a flip parity")
+        except NotImplementedError as exc:
+            ok &= check('parity' in str(exc),
+                        f"{tag}: pieces['K'] refuses a flip parity",
+                        str(exc)[:60])
+    # slab blocks alive per slab index: the slope of K's traced peak from width 1 to
+    # width 2 on water cc-pVTZ, where a block outgrows NumPy's ufunc buffers and the
+    # fixed overhead cancels
+    _, e3, B3, n3 = water('cc-pvtz')
+    v3 = len(e3) - n3
+    y3 = SB({s: rng.standard_normal((n3, v3)) for s in ('aa', 'bb')})
+    for df in (False, True):
+        P3 = ee_gw_pieces.build_pieces_gw(e3, B3, n3, screening='tda', df=df)
+        per3 = v3 * P3['omega'].size
+        held = {}
+        for width in (1, 2):
+            keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+            sb._STREAM_GB = (width + 0.5) * 8 * per3 * live / 1e9
+            sb._stream_workers = lambda: 1
+            try:
+                held[width] = traced_peak(lambda: P3['K'](y3, om, (1, 2)))
+            finally:
+                sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+        slope = (held[2] - held[1]) / (8 * per3)
+        ok &= check(slope <= live,
+                    f"{'df: ' if df else ''}a slab of pieces['K'] holds at most "
+                    f'_K_LIVE = {live} slab blocks per slab index',
+                    f'{slope:.2f}, water cc-pVTZ, tda')
+    return ok
+
+
+def check_laplace_kernel(eps, B, no):
+    """build_pieces_gw(..., laplace=True) against the W pieces, both screenings: W
+    None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3 Ha,
+    powers (1, 2) and (), to 1e-8 relative with its norm; the folded singlets to
+    1e-6 eV; the exact kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
+    parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays."""
+    from src.Base.utils.time_frequency import minimax_points_for_accuracy
+    ok = True
+    nv = len(eps) - no
+    om = 0.3
+    rng = np.random.default_rng(17)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    for screening in ('tda', 'rpa'):
+        P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
+        PL = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening,
+                                          laplace=True)
+        be = P['be']
+        dM = max(rel(PL['M'].get(k), P['M'].get(k)) for k in P['M'].blocks)
+        ok &= check(PL['W'] is None and dM < 1e-12,
+                    f'{screening}, laplace: W is None, M equals the W pieces\'',
+                    f'{dM:.1e} relative')
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        n2_ref = P['dnorm2'](Yt)
+        YL = be.divide(PL['V'](y1), PL['D'] - om)
+        d = max(rel(PL['Vt'](YL).get(s), ref[0].get(s)) for s in ('aa', 'bb'))
+        dn = abs(PL['dnorm2'](YL) - n2_ref) / n2_ref
+        ok &= check(d < 1e-12 and dn < 1e-12,
+                    f'{screening}, laplace: the DF V and Vt give the W pieces\' '
+                    'Vt (D - w)^-1 V', f'{d:.1e}, norm {dn:.1e} relative')
+        # PL's own min D: its modes come from another product of the same factors
+        d_min = float(np.min(PL['D']))
+        ntau, err = minimax_points_for_accuracy(
+            d_min - om, float(np.max(PL['D'])) - om, ee_gw_pieces._LAPLACE_TARGET,
+            relative=True)
+        ws, n2 = PL['K'](y1, om, (1, 2))
+        ws0, n20 = PL['K'](y1, om, ())
+        d = [max(rel(w.get(s), r.get(s)) for s in ('aa', 'bb'))
+             for w, r in zip(ws, ref)]
+        dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+        ok &= check(len(ws) == 2 and ws0 == [] and max(d) < 1e-8 and dn < 1e-8,
+                    f'{screening}: kernel_laplace equals V, divide, Vt',
+                    f'power 1 {d[0]:.1e}, power 2 {d[1]:.1e}, norm {dn:.1e} '
+                    f'relative, ntau {ntau} (grid error {err:.1e})')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(PL, 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega))) * HARTREE_TO_EV
+        ok &= check(b.omega.size == 3 and dw < 1e-6,
+                    f'{screening}: the folded singlets with and without laplace',
+                    f'max |dw| {dw:.1e} eV')
+        # the exact fallback: 1e-7 Ha below min D, where no tabulated grid reaches
+        # the target, and above min D, mid-way across the widest gap of its 50
+        # lowest D_K
+        lowest = np.sort(PL['D'], axis=None)[:50]
+        g = int(np.argmax(np.diff(lowest)))
+        for label, w_at in (('1e-7 Ha below min D', d_min - 1e-7),
+                            ('above min D', 0.5 * (lowest[g] + lowest[g + 1]))):
+            # PL's own V, divide, Vt: a min D one ulp off would move 1/(D - w)
+            Yh = be.divide(PL['V'](y1), PL['D'] - w_at)
+            r1, n2h_ref = PL['Vt'](Yh), PL['dnorm2'](Yh)
+            wsh, n2h = PL['K'](y1, w_at, (1,))
+            d = max(rel(wsh[0].get(s), r1.get(s)) for s in ('aa', 'bb'))
+            dn = abs(n2h - n2h_ref) / n2h_ref
+            ok &= check(d < 1e-12 and dn < 1e-12,
+                        f'{screening}: kernel_laplace {label} is the exact kernel',
+                        f'{d:.1e}, norm {dn:.1e} relative, omega {w_at:.7f} Ha')
+        try:
+            PL['K'](SB(y1.blocks, parity=1.0), om, (1,))
+            ok &= check(False, f'{screening}: kernel_laplace refuses a flip parity')
+        except NotImplementedError as exc:
+            ok &= check('parity' in str(exc),
+                        f'{screening}: kernel_laplace refuses a flip parity',
+                        str(exc)[:60])
+    # the modes' memory in units of one (nm, nm) float64 array, water cc-pVTZ: the
+    # RPA class's dense matrix functions held about 20 of them at once
+    _, e3, B3, n3 = water('cc-pvtz')
+    unit = 8 * (n3 * (len(e3) - n3)) ** 2
+    for screening in ('tda', 'rpa'):
+        units = traced_peak(lambda: ee_gw_pieces.gw_modes_df(e3, B3, n3,
+                                                             screening)) / unit
+        ok &= check(units <= 6, f'{screening}: gw_modes_df holds at most 6 (nm, nm) '
+                    'arrays at once', f'{units:.1f}, water cc-pVTZ')
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -376,6 +586,8 @@ def main():
     all_ok &= check_quack_h2o()
     all_ok &= check_boundaries(eps, B, no)
     all_ok &= check_seeding_gap()
+    all_ok &= check_streamed_kernel(eps, B, no)
+    all_ok &= check_laplace_kernel(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 

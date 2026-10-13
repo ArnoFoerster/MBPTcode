@@ -27,16 +27,23 @@ V[p,q,r,s], for a closed-shell reference:
     aaaa = bbbb = V - V(pqsr)     abab = baba = V
     abba = baab = -V(pqsr)
 """
+import contextlib
 import functools
 import itertools
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from src.Base.utils.threads import blas_single_threaded, row_map
+from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threaded,
+                                    row_map)
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
+_STREAM_GB = 16.0       # GB a streamed kernel's slabs in flight may hold together
+_STREAM_POOLS = {}
+_STREAM_LOCK = threading.Lock()
 
 
 def _threads():
@@ -77,13 +84,81 @@ def _ksum(fn, n, size):
     pool thread, so it calls neither _ew nor _ksum. size, the long operand's
     element count, keeps a product below _KSUM_MIN whole, where the wrap and the
     dispatch would cost more than the split wins. The partials are added in range
-    order, so the sum is reordered against fn(0, n), not random."""
+    order, so the sum is reordered against fn(0, n), not random. Off the main
+    thread, inside a _stream slab, the product stays whole: the slabs already
+    share the cores, and the BLAS count is not this call's to hold at one."""
     nt = min(_threads(), n)
-    if nt < 2 or size < _KSUM_MIN:
+    if (nt < 2 or size < _KSUM_MIN
+            or threading.current_thread() is not threading.main_thread()):
         return fn(0, n)
     with blas_single_threaded():
         parts = row_map(fn, n, nt)
     return functools.reduce(np.add, parts)
+
+
+def _stream_workers():
+    """Slabs in flight: one per eight threads of the pin, at least one."""
+    return max(1, _threads() // 8)
+
+
+def _slab_plan(n, per_index, live):
+    """(width, workers) for streaming the indices [0, n) in slabs, where one slab
+    index carries per_index elements of a slab block and a slab in flight holds
+    `live` such blocks at once. The slabs in flight hold workers * width * live *
+    per_index float64 together, at most _STREAM_GB, but never less than one index
+    of one slab; workers is at most _stream_workers(). A budget that holds every
+    index gives one slab on one worker."""
+    fit = max(1, int(_STREAM_GB * 1e9 // (8 * per_index * live)))
+    if fit >= n:
+        return n, 1
+    workers = min(_stream_workers(), fit)
+    width = fit // workers
+    return width, min(workers, -(-n // width))
+
+
+def _add(a, b):
+    """a + b for a tuple of (list of addable, float), elementwise."""
+    return ([x + y for x, y in zip(a[0], b[0])], a[1] + b[1])
+
+
+def _stream_pool(workers):
+    """This process's executor of `workers` slab threads, made once. It is not one
+    of row_map's: a slab's own _ew passes run on those, and a slab waiting on a
+    pool it occupies would never return."""
+    key = (os.getpid(), workers)
+    with _STREAM_LOCK:
+        if key not in _STREAM_POOLS:
+            _STREAM_POOLS[key] = ThreadPoolExecutor(workers)
+        return _STREAM_POOLS[key]
+
+
+def _stream(fn, n, width, workers=None):
+    """fn(j0, j1) summed over the slabs [j0, j1) of width `width` tiling [0, n), the
+    last one shorter. `workers` slabs run at once (default _stream_workers()), each
+    worker taking a contiguous group of slabs in turn, with BLAS held at
+    _threads() // workers threads meanwhile, so every core is busy while only
+    `workers` slabs are alive. fn returns (list of SB or ndarray, float); the
+    partial sums are added in slab order within a group and the groups in order,
+    so the sum is reordered against fn(0, n), not random. The BLAS count is
+    process-global, so only the main thread with threadpoolctl loaded moves it."""
+    slabs = [(j0, min(j0 + width, n)) for j0 in range(0, n, width)]
+    workers = min(workers or _stream_workers(), len(slabs))
+
+    def group(g0, g1):
+        out = fn(*slabs[g0])
+        for s in range(g0 + 1, g1):
+            out = _add(out, fn(*slabs[s]))
+        return out
+
+    if workers < 2:
+        return group(0, len(slabs))
+    ns = len(slabs)
+    groups = [(p * ns // workers, (p + 1) * ns // workers) for p in range(workers)]
+    limit = (_BlasLimit(max(1, _threads() // workers)) if _pool_is_ours()
+             else contextlib.nullcontext())
+    with limit:
+        parts = list(_stream_pool(workers).map(lambda g: group(*g), groups))
+    return functools.reduce(_add, parts)
 
 
 class SB:
@@ -285,9 +360,9 @@ def ovvv_ia(S, X):
         sigma^a_ia = sum_jbc V_jabc (X^aaaa_ijbc - X^aaaa_ijcb
                                      + X^abba_ijbc - X^abab_ijcb),
 
-    and alpha <-> beta for 'bb': one matmul on reshape views of S, where the
-    block-wise einsum reorders (copies) the o v^3 block once per spin block,
-    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmul
+    and alpha <-> beta for 'bb': matmuls on reshape views of S, one per j, where
+    the block-wise einsum reorders (copies) the o v^3 block once per spin block,
+    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmuls
     alone."""
     nv = S.shape[0]
     out = {}
@@ -299,11 +374,15 @@ def ovvv_ia(S, X):
         _ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
 
         def part(j0, j1):
-            # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, on views
-            return (Z[:, j0:j1].reshape(Z.shape[0], -1)
-                    @ S[:, j0:j1].reshape(nv, -1).T)
+            # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, one j at a time:
+            # S[:, j] is contiguous in (b, c), so no slice of S is copied
+            acc = Z[:, j0].reshape(Z.shape[0], -1) @ S[:, j0].reshape(nv, -1).T
+            for j in range(j0 + 1, j1):
+                acc += Z[:, j].reshape(Z.shape[0], -1) @ S[:, j].reshape(nv, -1).T
+            return acc
 
         out[s] = _ksum(part, Z.shape[1], Z.size)
+        del Z                               # before the next spin's Z is formed
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)
@@ -392,6 +471,88 @@ def ovvv_ijab(S, x):
     return SB({'aaaa': anti(Ta), 'bbbb': anti(Tb),
                'baba': Ta, 'abab': Tb,
                'baab': neg_swap(Ta), 'abba': neg_swap(Tb)})
+
+
+def ovvv_ijab_pij_slab(S, x, j0, j1, out=None):
+    """(1 - P_ij) sum_c <ic||ab> x_jc on the slab j0 <= j < j1 of the second index,
+    added into `out`.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (c, i, a, b), <ic|ab>, as in
+        ovvv_ia
+    x : SB with blocks 'aa' and 'bb', shape (no, nv), index order (j, c), without a
+        flip parity
+    out : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (i, j, a, b), arrays the caller owns, no two sharing memory; zeros if None
+
+    Returns out with X_ijab - X_jiab added in place, X = ovvv_ijab(S, x). With
+    T^s_ijab = sum_c V_icab x^s_jc, A^s = T^s on the slab is x^s[j0:j1] @ S
+    reordered, both spins in one product, and B^s_ijab = T^s_jiab is x^s @ S[:, j]
+    for each j of the slab, on views of S. X_jiab under a spin string is X's block
+    of the string with its first two letters swapped, so
+
+        aaaa += A^a - A^a_ijba - B^a + B^a_ijba,
+        baba += A^a + B^b_ijba,        baab -= A^a_ijba + B^b,
+
+    and alpha <-> beta for bbbb, abab, abba. Several slabs together form T twice,
+    where ovvv_ijab forms it once; one slab over every j takes B^s as A^s with i
+    and j swapped and forms it once."""
+    if x.parity is not None:
+        raise NotImplementedError('ovvv_ijab_pij_slab takes x without a flip parity')
+    nv, no = S.shape[0], S.shape[1]
+    nj = j1 - j0
+    swap = (0, 1, 3, 2)
+    if out is None:
+        out = SB({k: np.zeros((no, nj, nv, nv))
+                  for k in ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')})
+    x2 = np.stack([x.get('aa'), x.get('bb')])                 # (s, j, c)
+    # A[s] at [i, j] for j in the slab: (s, i, j, a, b)
+    A = ((x2[:, j0:j1].reshape(2 * nj, nv) @ S.reshape(nv, -1))
+         .reshape(2, nj, no, nv, nv).transpose(0, 2, 1, 3, 4))
+    if nj == no:
+        B = A.transpose(0, 2, 1, 3, 4)
+    else:
+        # B[s] at [i, j], T^s_jiab = sum_c x^s_ic <jc|ab>, one j at a time
+        B = np.empty((2, no, nj, nv, nv))
+        for jj in range(nj):
+            B[:, :, jj] = (x2.reshape(2 * no, nv) @ S[:, j0 + jj].reshape(nv, -1)
+                           ).reshape(2, no, nv, nv)
+    for s, t, same, mix, mixneg in ((0, 1, 'aaaa', 'baba', 'baab'),
+                                    (1, 0, 'bbbb', 'abab', 'abba')):
+        a, bs, bt = A[s], B[s], B[t]
+        for key, terms in ((same, ((np.add, a), (np.subtract, a.transpose(swap)),
+                                   (np.subtract, bs), (np.add, bs.transpose(swap)))),
+                           (mix, ((np.add, a), (np.add, bt.transpose(swap)))),
+                           (mixneg, ((np.subtract, a.transpose(swap)),
+                                     (np.subtract, bt)))):
+            o = out.get(key)
+            for op, v in terms:
+                _ew(op, o, v, out=o)
+    return out
+
+
+def ovvv_ia_slab(S, Y, j0, j1):
+    """ovvv_ia for Y the slab j0 <= j < j1 of the doubles' second index.
+
+    S : ndarray, shape (nv, no, nv, nv), index order (a, j, b, c), as in ovvv_ia
+    Y : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (i, j, b, c)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a):
+    the slab's share of ovvv_ia(S, Y_full), which is ovvv_ia on S[:, j0:j1]."""
+    return ovvv_ia(S[:, j0:j1], Y)
+
+
+def ooov_ia_slab(G, Y, j0, j1):
+    """ooov_ia for Y the slab j0 <= k < j1 of the doubles' second index.
+
+    G : SB, anti4's six blocks of <jk||ib>, shape (no, no, no, nv), index order
+        (j, k, i, b), as in ooov_ia
+    Y : SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index order
+        (j, k, a, b)
+
+    Returns an SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a):
+    the slab's share of ooov_ia(G, Y_full), which is ooov_ia on G[:, j0:j1]."""
+    return ooov_ia(SB({k: v[:, j0:j1] for k, v in G.items()}), Y)
 
 
 def g_blocks_sb(V, nocc_spatial, norb_spatial):

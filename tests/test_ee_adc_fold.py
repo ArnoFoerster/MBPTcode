@@ -129,6 +129,26 @@ The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
 solver='newton' in checks 4, 5, 8, 12, 13, 18, 21 and 23, where the default meets
 the same inputs without it, as their added lines check.
+  33. ee_spin_blocks._stream runs fn once per slab of an index range, the last
+      slab shorter than the width, with more workers than slabs, and sums the
+      outputs exactly; slabs that split their own _ew over as many threads as
+      there are workers return; _slab_plan gives one slab when the budget holds
+      every index, else workers x width within it, never below one index.
+  34. the slab forms ovvv_ijab_pij_slab, ovvv_ia_slab and ooov_ia_slab (no 5, nv 7,
+      slabs of width 2 over the second occupied index) equal (1 - P_ij) ovvv_ijab
+      restricted to the slab, ovvv_ia and ooov_ia summed over the slabs, to 1e-13
+      relative; one slab over every j takes one product against <ic|ab>, both
+      spins at once; _ksum splits a product on the main thread and keeps it whole
+      off it.
+  35. build_operator's pieces['K'] at adc2 and gf2, the kernel streamed over slabs of
+      the doubles' second occupied index, equals the V, divide, Vt path at 0.3 Ha
+      for powers (1, 2) and () to 1e-12 relative, its doubles norm the flat
+      layout's, on one slab, on three of width 2 that the budget _STREAM_GB sets,
+      and on those three with two in flight; the folded singlets with and without
+      it agree to 1e-9 Ha; a singles vector with a flip parity raises
+      NotImplementedError; a slab holds at most _K_LIVE slab blocks per slab index
+      (the slope of tracemalloc's peak from width 1 to 2, water cc-pVTZ).
+      Checks 10 and 28 take dict(P, K=None), the generic path, as their baseline.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -704,6 +724,7 @@ def check_gw_hook(eps, B, no):
     nv = B.shape[1] - no
     ok &= check('gw' in ee_fold.FOLD_LEVELS, "'gw' is a fold level")
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
+    P = dict(P, K=None)                     # the generic path, not the streamed kernel
     _, dmv, diag_s, embed, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
     u = np.linspace(-1.0, 1.0, diag_s.size)
     u /= np.linalg.norm(u)
@@ -1613,6 +1634,7 @@ def check_kernel_hook(eps, B, no):
     ok = True
     nv = B.shape[1] - no
     P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    P = dict(P, K=None)                     # the generic path, not the streamed kernel
     om, h = 0.3, 1e-4
     mv, dmv, diag_s, _, _ = ee_fold.folded_operator(P, om, spin='singlet')
     mvp = ee_fold.folded_operator(P, om + h, spin='singlet')[0]
@@ -1961,6 +1983,231 @@ def check_default_polish():
     return ok
 
 
+def check_stream():
+    """_stream sums fn over slabs exactly once each, with a last slab shorter than
+    the width and more workers than slabs; a slab whose own _ew pass splits over
+    as many threads as there are workers returns (on row_map's pool it hangs)."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    seen = []
+
+    def fn(j0, j1):
+        seen.append((j0, j1))
+        return [sb.SB({'aa': np.full((2, 2), float(j1 - j0))})], float(j1 - j0)
+
+    out, tot = sb._stream(fn, 5, 2, workers=24)
+    ok = check(sorted(seen) == [(0, 2), (2, 4), (4, 5)] and tot == 5.0
+               and np.array_equal(out[0].get('aa'), np.full((2, 2), 5.0)),
+               '_stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
+               f'{sorted(seen)}, {tot}')
+    a = np.ones((3, 1 << 19))
+
+    def fn_ew(j0, j1):
+        return [sb._ew(np.multiply, a, 2.0)], float(j1 - j0)
+
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '3'
+    try:
+        out, tot = sb._stream(fn_ew, 3, 1, workers=3)
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    ok &= check(tot == 3.0 and np.array_equal(out[0], np.full(a.shape, 6.0)),
+                '_stream: slabs that split their own _ew over 3 threads, 3 workers',
+                f'{tot}')
+    # _slab_plan(44 indices, 1000 elements per index, 10 blocks per slab), 3 workers
+    keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+    sb._stream_workers = lambda: 3
+    try:
+        plans = {}
+        for fit in (12500, 10, 4, 0):
+            sb._STREAM_GB = (fit + 0.5) * 8 * 1000 * 10 / 1e9
+            plans[fit] = sb._slab_plan(44, 1000, 10)
+    finally:
+        sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+    ok &= check(plans == {12500: (44, 1), 10: (3, 3), 4: (1, 3), 0: (1, 1)},
+                '_slab_plan: one slab when the budget holds all, else workers x width '
+                'within it, never below one index', str(plans))
+    return ok
+
+
+def check_slab_contractions():
+    """The slab helpers against the full contractions restricted to the slab (no 5,
+    nv 7, width 2, so the last slab is shorter), to 1e-13 relative per block."""
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    rng = np.random.default_rng(11)
+    no, nv, width = 5, 7, 2
+    keys = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
+    S = rng.standard_normal((nv, no, nv, nv))
+    G = sb.anti4(rng.standard_normal((no, no, no, nv)),
+                 rng.standard_normal((no, no, no, nv)))
+    x = sb.SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+    Y = sb.SB({k: rng.standard_normal((no, no, nv, nv)) for k in keys})
+    full = sb.ovvv_ijab(S, x)
+    full = full - full.transpose(1, 0, 2, 3)
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    d_ijab, ia_ovvv, ia_ooov = 0.0, None, None
+    for j0 in range(0, no, width):
+        j1 = min(j0 + width, no)
+        X = sb.ovvv_ijab_pij_slab(S, x, j0, j1)
+        d_ijab = max([d_ijab] + [rel(X.get(k), full.get(k)[:, j0:j1]) for k in keys])
+        Ys = sb.SB({k: v[:, j0:j1] for k, v in Y.items()})
+        a, b = sb.ovvv_ia_slab(S, Ys, j0, j1), sb.ooov_ia_slab(G, Ys, j0, j1)
+        ia_ovvv = a if ia_ovvv is None else ia_ovvv + a
+        ia_ooov = b if ia_ooov is None else ia_ooov + b
+    ref_ovvv, ref_ooov = sb.ovvv_ia(S, Y), sb.ooov_ia(G, Y)
+    d_ovvv = max(rel(ia_ovvv.get(s), ref_ovvv.get(s)) for s in ('aa', 'bb'))
+    d_ooov = max(rel(ia_ooov.get(s), ref_ooov.get(s)) for s in ('aa', 'bb'))
+    ok = check(d_ijab < 1e-13 and sorted(X.keys()) == sorted(keys),
+               '(1 - P_ij) ovvv_ijab on slabs of j equals the full one restricted',
+               f'{d_ijab:.1e} relative')
+    ok &= check(d_ovvv < 1e-13, 'ovvv_ia_slab summed over the slabs equals ovvv_ia',
+                f'{d_ovvv:.1e} relative')
+    ok &= check(d_ooov < 1e-13, 'ooov_ia_slab summed over the slabs equals ooov_ia',
+                f'{d_ooov:.1e} relative')
+
+    class Counted(np.ndarray):
+        """S that counts the products taken against it."""
+        products = 0
+
+        def __rmatmul__(self, other):
+            Counted.products += 1
+            return np.matmul(other, self.view(np.ndarray))
+
+    X = sb.ovvv_ijab_pij_slab(S.view(Counted), x, 0, no)
+    d_one = max(rel(np.asarray(X.get(k)), full.get(k)) for k in keys)
+    ok &= check(d_one < 1e-13 and Counted.products == 1,
+                'one slab over every j forms T once, both spins in one product',
+                f'{Counted.products} products against S, {d_one:.1e} relative')
+    import threading
+    calls = {'main': [], 'pool': []}
+
+    def part(r0, r1, who):
+        calls[who].append((r0, r1))
+        return np.zeros(1)
+
+    keep = os.environ.get('OMP_NUM_THREADS')
+    os.environ['OMP_NUM_THREADS'] = '4'
+    try:
+        sb._ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
+        th = threading.Thread(
+            target=lambda: sb._ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
+        th.start()
+        th.join()
+    finally:
+        if keep is None:
+            del os.environ['OMP_NUM_THREADS']
+        else:
+            os.environ['OMP_NUM_THREADS'] = keep
+    ok &= check(len(calls['main']) == 4 and calls['pool'] == [(0, 8)],
+                '_ksum splits on the main thread, keeps a product whole off it',
+                str(calls))
+    return ok
+
+
+def traced_peak(fn):
+    """Bytes tracemalloc saw allocated at once while fn() ran, above its start."""
+    import tracemalloc
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1] - base
+    finally:
+        tracemalloc.stop()
+
+
+def check_streamed_kernel(eps, B, no):
+    """pieces['K'] at adc2 and gf2 against the generic V, divide, Vt path at omega
+    0.3 Ha, powers (1, 2) and (), to 1e-12 relative per block, its doubles norm
+    against the flat layout's; on one slab, on three of width 2 from the budget, and
+    on those three two at a time; the folded roots with and without K to 1e-9 Ha; a
+    y1 with a flip parity refused; at most _K_LIVE slab blocks per slab index."""
+    from src.SingleReference.ADC.eeADC import ee_fold
+    from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+    ok = True
+    nv = B.shape[1] - no
+    om = 0.3
+    rng = np.random.default_rng(13)
+    y1 = SB({s: rng.standard_normal((no, nv)) for s in ('aa', 'bb')})
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
+
+    per, live = no * nv * nv, ee_r_sigma_df._K_LIVE
+
+    def budget(fit):
+        # the _STREAM_GB that holds `fit` indices of the doubles in flight
+        return (fit + 0.5) * 8 * per * live / 1e9
+
+    runs = (('one slab', sb._STREAM_GB, 1), ('3 slabs', budget(2), 1),
+            ('3 slabs, 2 workers', budget(4), 2))
+    for level in ('adc2', 'gf2'):
+        P = ee_r_sigma_df.build_operator(eps, B, no, level=level, pieces=True)[3]
+        be = P['be']
+        Yt = be.divide(P['V'](y1), P['D'] - om)
+        ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
+        Yf = ee_fold.doubles_sb_to_flat(Yt, no, nv)
+        n2_ref = float(Yf @ Yf)
+        dn = abs(ee_r_sigma_df._doubles_norm2(Yt) - n2_ref) / n2_ref
+        ok &= check(dn < 1e-12, f'{level}: _doubles_norm2 is the flat-layout norm',
+                    f'{dn:.1e} relative')
+        for label, gb, workers in runs:
+            keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+            sb._STREAM_GB, sb._stream_workers = gb, (lambda w=workers: w)
+            try:
+                plan = sb._slab_plan(no, per, live)
+                ws, n2 = P['K'](y1, om, (1, 2))
+                ws0, n20 = P['K'](y1, om, ())
+            finally:
+                sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+            d = max(rel(w.get(s), r.get(s)) for w, r in zip(ws, ref)
+                    for s in ('aa', 'bb'))
+            dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+            ok &= check(len(ws) == 2 and ws0 == [] and d < 1e-12 and dn < 1e-12,
+                        f"{level}, {label}: pieces['K'] equals V, divide, Vt",
+                        f'{d:.1e}, norm {dn:.1e} relative, (width, workers) {plan}')
+        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
+        b = ee_fold.solve_folded(dict(P, K=None), 3, spin='singlet', dense_limit=0)
+        dw = float(np.max(np.abs(a.omega - b.omega)))
+        ok &= check(a.omega.size == 3 and dw < 1e-9,
+                    f"{level}: the folded singlets with and without pieces['K']",
+                    f'max |dw| {dw:.1e} Ha')
+        try:
+            P['K'](SB(y1.blocks, parity=1.0), om, (1,))
+            ok &= check(False, f"{level}: pieces['K'] refuses a flip parity")
+        except NotImplementedError as exc:
+            ok &= check('parity' in str(exc),
+                        f"{level}: pieces['K'] refuses a flip parity", str(exc)[:60])
+    # slab blocks alive per slab index: the slope of K's traced peak from width 1 to
+    # width 2 on water cc-pVTZ, where a block outgrows NumPy's ufunc buffers and the
+    # fixed overhead cancels
+    _, e3, B3, n3 = water_df('cc-pvtz')
+    P3 = ee_r_sigma_df.build_operator(e3, B3, n3, level='adc2', pieces=True)[3]
+    v3 = len(e3) - n3
+    per3 = n3 * v3 * v3
+    y3 = SB({s: rng.standard_normal((n3, v3)) for s in ('aa', 'bb')})
+    held = {}
+    for width in (1, 2):
+        keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+        sb._STREAM_GB = (width + 0.5) * 8 * per3 * live / 1e9
+        sb._stream_workers = lambda: 1
+        try:
+            held[width] = traced_peak(lambda: P3['K'](y3, om, (1, 2)))
+        finally:
+            sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+    slope = (held[2] - held[1]) / (8 * per3)
+    ok &= check(slope <= live,
+                f"adc2: a slab of pieces['K'] holds at most _K_LIVE = {live} slab "
+                'blocks per slab index', f'{slope:.2f}, water cc-pVTZ')
+    return ok
+
+
 def _spin_none_solve(m, C, D0):
     """solve_folded(nroots 4, spin=None, Davidson, tol_omega 1e-10, the precision the
     check asks of it) on _synthetic_pieces(m, C, D0)."""
@@ -2011,6 +2258,9 @@ def main():
     all_ok &= check_davidson_omega(eps, B, no)
     all_ok &= check_solver_default(eps, B, no)
     all_ok &= check_default_polish()
+    all_ok &= check_stream()
+    all_ok &= check_slab_contractions()
+    all_ok &= check_streamed_kernel(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
