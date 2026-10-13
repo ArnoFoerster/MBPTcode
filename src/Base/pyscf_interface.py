@@ -1,3 +1,6 @@
+"""pyscf adapters: MO-basis integrals (four-index and density-fitted, with an
+attached environment's dressing), spin-orbital embeddings, the orbital
+response kernel and checks on the reference."""
 import warnings
 import weakref
 
@@ -6,6 +9,7 @@ from pyscf import gto, scf, ao2mo, lib
 from pyscf.scf import stability as scf_stability
 
 from src.Base.constants import AUX_METRIC_LINDEP, UHF_SPIN_CONTAMINATION_WARN
+from src.Base.distributed_df import distributed_fock
 from src.Base.environment import environment_of
 
 #: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
@@ -15,65 +19,74 @@ _FOCK_MO_CACHE = weakref.WeakKeyDictionary()
 def response_kernel(mf, environment=True):
     """G(x) = dV_eff/dD . x for this mean field, cached on it.
 
-    pyscf's `gen_response` IS this operator and reduces to `vj - 0.5 vk` on
-    Hartree-Fock exactly, so using it everywhere keeps the HF route unchanged
-    and picks up f_xc and the hybrid scaling on a Kohn-Sham one, which is the
-    whole difference between the two references in a Lagrangian built on it.
+    pyscf's `gen_response` is this operator: `vj - 0.5 vk` on Hartree-Fock,
+    with f_xc and the hybrid scaling on a Kohn-Sham reference.
 
-    A CONTINUUM MUST RESPOND HERE, and pyscf gates that on
-    `equilibrium_solvation`, defaulting to False -- right for a vertical
-    excitation, where the solvent nuclei are too slow to follow the
-    first-order density, and wrong for an orbital response that answers
-    moving ATOMS, which the whole continuum follows. The flag is read inside
-    pyscf's closure at call time, so it is set on the mean field rather than
-    around the call.
+    A continuum must respond here, and pyscf gates that on
+    `equilibrium_solvation`, default False: right for a vertical excitation,
+    where the solvent nuclei are too slow to follow the first-order density,
+    wrong for an orbital response to moving atoms, which the whole continuum
+    follows. The flag is read inside pyscf's closure at call time, so it is
+    set on the mean field rather than around the call.
 
-    environment=False gives the SAME operator with no reaction field in it,
-    for a quantity that has none: `Sigma_x - v_xc` reads v_xc as
-    `get_veff - get_j`, and pyscf TAGS the reaction field onto get_veff rather
-    than adding it, so that operator is continuum-free and its response must
-    be too. The identity J - K/2 - G = d(Sigma_x - v_xc)/dD holds only for the
-    gas-phase G; handing it the solvated one puts a spurious term into the
-    quasiparticle chain while leaving the dRPA ground state exact.
+    environment=False gives the same operator with no reaction field, for a
+    quantity that has none: `Sigma_x - v_xc` reads v_xc as `get_veff - get_j`,
+    and pyscf tags the reaction field onto get_veff rather than adding it, so
+    that operator is continuum-free. The identity
+    J - K/2 - G = d(Sigma_x - v_xc)/dD holds only for the gas-phase G.
 
-    Cached because a Z-vector solve calls this inside its matvec: rebuilding
-    the numerical-integration machinery per iteration would dominate the
-    solve. A mean field is converged and immutable for the length of one
-    gradient, and a displaced geometry gets a new object, so the cache cannot
-    go stale.
+    Cached because a Z-vector solve calls this inside its matvec; a mean field
+    is immutable for one gradient and a displaced geometry gets a new object,
+    so the cache cannot go stale. pyscf's closure holds the mean field, so the
+    cache is a reference cycle: an abandoned mean field (its integrals, grids,
+    xc kernel and the fit cached weakly on its Mole) is freed only by the
+    cyclic collector, which `FactorChain.mean_field` runs before each new
+    geometry's SCF.
 
-    pyscf's closure holds the mean field, so the cache is a reference cycle:
-    an abandoned mean field -- its integrals, grids and xc kernel, and the fit
-    cached weakly on its Mole -- is freed by the cyclic collector alone, which
-    `FactorChain.mean_field` runs before each new geometry's SCF. No weak form
-    exists: whatever holds the closure holds the mean field.
+    Under ranks, on a mean field a distributed SCF left its handles on, the
+    operator is built and applied inside `distributed_fock`: J and K from
+    the SCF's tiles, f_xc on each rank's block of the grid, one reduction.
     """
     key = '_cached_response_kernel' + ('' if environment else '_gas')
-    fn = getattr(mf, key, None)
-    if fn is None:
-        if not hasattr(mf, 'with_solvent'):
-            fn = mf.gen_response(hermi=1)
-        elif environment:
-            mf.with_solvent.equilibrium_solvation = True
-            fn = mf.gen_response(hermi=1)
-        else:
-            fn = mf.undo_solvent().gen_response(hermi=1)
-        setattr(mf, key, fn)
-    return fn
+    with distributed_fock(mf, build=False) as handles:
+        # pyscf's closure holds the numint it was made with and that
+        # numint's f_xc on its grid: one made serially is not the ranks' own
+        ni, fn = getattr(mf, key, (None, None))
+        if fn is None or ni is not getattr(mf, '_numint', None):
+            if not hasattr(mf, 'with_solvent'):
+                fn = mf.gen_response(hermi=1)
+            elif environment:
+                mf.with_solvent.equilibrium_solvation = True
+                fn = mf.gen_response(hermi=1)
+            else:
+                fn = mf.undo_solvent().gen_response(hermi=1)
+            setattr(mf, key, (getattr(mf, '_numint', None), fn))
+    if handles is None:
+        return fn
+
+    def distributed_response(x):
+        """G(x) with J, K and f_xc from the distributed SCF's handles."""
+        with distributed_fock(mf, build=False):
+            return fn(x)
+    return distributed_response
 
 
 def fock_mo(mf):
-    """C^T F C of a CONVERGED mean field.
+    """C^T F C of a converged mean field.
 
     An orbital-response matvec reads this on every Krylov iteration, but it
     depends on the mean field alone and not on the density the matvec
-    carries, so it is cached rather than rebuilt on every iteration.
+    carries, so it is cached rather than rebuilt on every iteration. Under
+    ranks it is built from the distributed SCF's handles (`distributed_fock`).
     """
-    hit = _FOCK_MO_CACHE.get(mf)
-    if hit is None:
-        C = mf.mo_coeff
-        hit = C.T @ mf.get_fock() @ C
-        _FOCK_MO_CACHE[mf] = hit
+    with distributed_fock(mf, build=False) as handles:
+        # keyed by the distribution: the ranks' Fock is another summation
+        cache = _FOCK_MO_CACHE.setdefault(mf, {})
+        hit = cache.get(handles is not None)
+        if hit is None:
+            C = mf.mo_coeff
+            hit = C.T @ mf.get_fock() @ C
+            cache[handles is not None] = hit
     return hit
 
 
@@ -81,20 +94,14 @@ def aux_metric_inverse(V, lindep=AUX_METRIC_LINDEP):
     """Pseudo-inverse of an auxiliary metric, on its numerical range.
 
     The Coulomb metric is well conditioned and this is then an ordinary
-    inverse. The LONG-RANGE metric of a range-separated hybrid is not: it goes
-    singular to machine precision, so its null directions are projected out
-    rather than solved through. The dropped directions carry no density, which
-    is why the fit survives losing them.
+    inverse. The long-range metric of a range-separated hybrid goes singular
+    to machine precision, so eigen-directions below `lindep` times the largest
+    eigenvalue are projected out rather than solved through; they carry no
+    density, so the fit survives losing them. The cut is relative, so it does
+    not move with the overall scale of the basis.
 
-    TIKHONOV, NOT TRUNCATION, and the difference is the whole point here. A
-    truncated pseudo-inverse is not differentiable the way an adjoint assumes:
-    d(V^-1) = -V^-1 dV V^-1 holds for an inverse, and a rank-deficient
-    projection picks up an extra term from its moving null space. Shifting the
-    spectrum keeps the object a true inverse, so the same adjoint is exact for
-    the regularized fit that is actually evaluated.
-
-    The shift is RELATIVE to the largest eigenvalue, so it does not move with
-    the overall scale of the basis and the rank never changes as atoms move.
+    Caveat: d(V^-1) = -V^-1 dV V^-1 holds for an inverse; where directions are
+    dropped, a projection picks up an extra term from its moving null space.
     """
     V = 0.5 * (np.asarray(V, float) + np.asarray(V, float).T)
     w, u = np.linalg.eigh(V)
@@ -350,15 +357,13 @@ def get_coulomb_exchange_diagonals_df(B_block):
     return direct, exchange
 
 def _warn_df_fallback(exc):
-    """A DF read that fails degrades to an EXACT eigendecomposition of the
-    four-index tensor -- correct, but naux ~ norb^2 instead of ~3 norb, so
-    the cost and memory silently stop being those of a density-fitted run.
+    """Warn that a failed DF read falls back to an exact eigendecomposition
+    of the four-index tensor: correct, but naux ~ norb^2 instead of ~3 norb,
+    so the cost and memory are not those of a density-fitted run.
 
-    The common cause is an auxiliary basis that does not cover every element:
-    aug-cc-pVXZ-jkfit has no Be, for instance, so a Be-containing molecule
-    took the exact path while every log line still said DF. Warn rather than
-    raise -- the result is right, and the caller may not have a choice -- but
-    never let it pass unnoticed."""
+    The common cause is an auxiliary basis that does not cover every element
+    (aug-cc-pVXZ-jkfit has no Be). Warned rather than raised, since the result
+    is right and the caller may not have a choice."""
     warnings.warn(
         f'density fitting unavailable ({type(exc).__name__}: {exc}); falling '
         'back to an EXACT eigendecomposition with naux ~ norb^2. If this is '
@@ -373,15 +378,15 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
 
     `get_density_fitting_coefficients` returns the full (naux, norb, norb)
     tensor, and the imaginary-frequency GW route never uses more than two
-    slices of it -- B[:, occ, virt] for chi0 and B[:, p, :] for the
-    self-energy -- so only those are built.
+    slices of it (B[:, occ, virt] for chi0 and B[:, p, :] for the
+    self-energy), so only those are built.
 
     Returns (C_ov, C_rows): C_ov is (naux, nocc*nvirt), already flattened the
     way the RPA kernel wants it and index-compatible with
     `coeff[:, occ[:, None], virt].reshape(naux, -1)`; C_rows is
     (naux, len(rows), norb), or None when rows is None.
 
-    DF only -- without `with_df` there is no three-index object to slice, and
+    DF only: without `with_df` there is no three-index object to slice, and
     the caller should fall back to the full builder. `mo_coeff` names the
     orbitals, by default the mean field's: one spin's coefficients of an
     unrestricted reference, whose occupied and virtual indices are that spin's.
@@ -428,8 +433,8 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
     an attached environment substitutes v -> v + vtilde. In the whitened
     auxiliary basis that substitution is a single naux x naux congruence,
     B -> T B, so the screened factor is still a plain three-index object and
-    every DF consumer downstream is untouched -- see
-    SolventScreening.whitened_transform. The exact (no with_df) fallbacks
+    every DF consumer downstream is unaffected (see
+    SolventScreening.whitened_transform). The exact (no with_df) fallbacks
     instead decompose an already-screened four-index tensor.
     """
     is_uhf = isinstance(mf, scf.uhf.UHF)
@@ -467,16 +472,12 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
                 _warn_df_fallback(exc)
                 has_df = False
         if not has_df:
-            # Fallback: decompose the AO-basis (spin-independent) ERI ONCE,
-            # then transform by mo_a/mo_b separately -- mirrors the has_df
-            # branch's own ao_3c-then-per-spin-transform structure exactly.
+            # Fallback: decompose the AO-basis (spin-independent) ERI once,
+            # then transform by mo_a and mo_b, as the has_df branch does.
             # Decomposing eri_aa and eri_bb independently would give alpha
-            # and beta unrelated auxiliary bases: the aa/bb diagonal blocks
-            # come back exact either way, but the abab cross block is then
-            # unreproducible by construction (no shared Q to contract alpha
-            # against beta) -- caught by DFIntegrals.reconstruct_g's
-            # cross-check against get_antisymmetrized_spin_block_eri (~0.08 max
-            # abs error on a UHF water/cc-pVDZ test, vs ~3e-13 for aaaa/bbbb).
+            # and beta unrelated auxiliary bases, and the abab cross block
+            # (alpha against beta through a shared Q) could not be
+            # reproduced.
             eri_ao = mol.intor('int2e')
             kernel = environment.kernel_ao(mol)
             if kernel is not None:
@@ -498,10 +499,8 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             coeff_b = np.tensordot(transform, coeff_b, axes=(1, 0))
 
         if representation == 'spin':
-            # Same shared naux for both spin blocks (see fallback comment
-            # above for why alpha/beta must share one auxiliary index range,
-            # not get disjoint naux_a/naux_b slices) -- mirrors the RHF
-            # branch below's coeff_spin[:, 0::2/1::2, ...] = coeff pattern.
+            # One shared naux for both spin blocks (see the fallback comment
+            # above).
             naux = coeff_a.shape[0]
             coeff_spin = np.zeros((naux, 2*norb, 2*norb))
             coeff_spin[:, 0::2, 0::2] = coeff_a
@@ -611,20 +610,17 @@ def get_antisymmetrized_spin_block_eri(mol, mf, eri_chemist=None):
 
     g_aaaa/g_bbbb = <pq|rs> - <pq|sr> within one spin channel (same formula
     get_antisymmetrized_integrals applies in the restricted spin-orbital
-    case); g_abab = <p_a q_b|r_a s_b> with NO exchange term, since the
+    case); g_abab = <p_a q_b|r_a s_b> with no exchange term, since the
     exchange integral <p_a q_b|s_a r_b> vanishes by spin orthogonality
     whenever p,q have different spins (the same reason
     get_antisymmetrized_spin_eri's off-diagonal spin blocks come out zero
     before its final subtraction). Works for both RHF (all three blocks
     built from the one restricted physicist tensor) and UHF mf.
 
-    eri_chemist: RHF only. If the caller already has mf's own spatial
-    chemist-notation ERI in hand (e.g. for the static-correction contraction
-    downstream), pass it here to skip re-running the O(N^5) AO->MO
-    transform and holding a second, numerically identical norb^4 array --
-    get_two_electron_integrals_physicist's own internal chemist tensor is
-    just this same array transposed to physicist order. Ignored for UHF
-    (whose per-spin blocks aren't derivable from a single spatial tensor).
+    eri_chemist: RHF only; mf's own spatial chemist ERI where the caller
+    already holds it, to skip the O(N^5) AO->MO transform and a second
+    norb^4 array. Ignored for UHF, whose per-spin blocks are not derivable
+    from a single spatial tensor.
     """
     is_uhf = isinstance(mf, scf.uhf.UHF)
     if not is_uhf and eri_chemist is not None:
@@ -637,13 +633,10 @@ def get_antisymmetrized_spin_block_eri(mol, mf, eri_chemist=None):
         phys_aa = phys_bb = phys_ab = eri_phys
 
     g_aaaa = get_antisymmetrized_integrals(phys_aa)
-    # For RHF, alias g_bbbb = g_aaaa (same object) instead of building an
-    # independent, numerically identical norb^4 copy.
-    # This makes `self.g_aaaa is self.g_bbbb` true, activating
-    # MP3DensityMatrixSolverUnrestricted._is_restricted()'s symmetry-reduced
-    # fast-path in compute_t3_2/compute_t1_3/compute_gamma3_blocks, which
-    # reproduces the full (non-fast-path) UHF branch to ~1e-18
-    # (tests/test_mp3_density_matrix.py).
+    # For RHF, alias g_bbbb = g_aaaa (same object) rather than copy: `g_aaaa
+    # is g_bbbb` enables MP3DensityMatrixSolverUnrestricted._is_restricted()'s
+    # symmetry-reduced fast path, which reproduces the full UHF branch to
+    # ~1e-18 (tests/test_mp3_density_matrix.py).
     g_bbbb = g_aaaa if not is_uhf else get_antisymmetrized_integrals(phys_bb)
     g_abab = phys_ab
     return g_aaaa, g_bbbb, g_abab
@@ -666,8 +659,8 @@ def get_uhf_spin_orbital_arrays_blockstacked(mol, mf):
     Unlike get_orbital_energies(..., representation='spin')'s even/odd alpha/beta
     interleaving (which only yields a contiguous occ/virt split when
     nocc_a == nocc_b), this ordering gives a valid contiguous occ = arange(0,
-    nocc_spin) / virt = arange(nocc_spin, norb) split for ANY UHF occupation,
-    including genuine open-shell (nocc_a != nocc_b) -- required by any spin-orbital
+    nocc_spin) / virt = arange(nocc_spin, norb) split for any UHF occupation,
+    including genuine open-shell (nocc_a != nocc_b), as required by any spin-orbital
     consumer (e.g. ADCSolver) that slices strictly by position, not by spin label.
     Built from get_antisymmetrized_spin_block_eri's (g_aaaa, g_bbbb, g_abab):
     the alpha-beta exchange blocks <p_a q_b||r_b s_a> vanish via the direct term
@@ -696,7 +689,7 @@ def get_uhf_spin_orbital_arrays_blockstacked(mol, mf):
     return eps_spin, g_anti_spin, nocc_a + nocc_b
 
 def get_uhf_spin_orbital_df_factor_blockstacked(mol, mf, exact=False):
-    """UHF spin-orbital DF factor B_so (naux, nso, nso) in the SAME
+    """UHF spin-orbital DF factor B_so (naux, nso, nso) in the same
     block-stacked order as get_uhf_spin_orbital_arrays_blockstacked
     ([occ_alpha, occ_beta, virt_alpha, virt_beta]), built block-diagonal in
     spin from DFIntegrals.from_scf's separate B_aa/B_bb (naux, norb_a,norb_a)/
@@ -710,12 +703,10 @@ def get_uhf_spin_orbital_df_factor_blockstacked(mol, mf, exact=False):
     The cross-spin exchange term vanishes automatically from the
     block-diagonal structure (spin(p)!=spin(s) or spin(q)!=spin(r) forces one
     factor to zero), so unlike get_antisymmetrized_spin_block_eri this needs
-    no separate abab-transpose bookkeeping -- one formula covers aaaa/bbbb/
-    abab/abba/abba-exchange all at once, verified against the dense route in
-    tests before use.
+    no separate abab-transpose bookkeeping: one formula covers aaaa/bbbb/
+    abab/abba and the exchange blocks.
 
-    O(naux*nso^2) to store, vs O(nso^4) for the dense g_anti_spin -- see
-    [[open-shell-en-adc3-matrix-free]].
+    O(naux*nso^2) to store, vs O(nso^4) for the dense g_anti_spin.
     """
     nocc_a, nocc_b = mf.nelec
     df = DFIntegrals.from_scf(mol, mf, exact=exact)
@@ -737,7 +728,7 @@ def get_uhf_spin_orbital_df_factor_blockstacked(mol, mf, exact=False):
 
 def embed_spatial_eri_in_spin_orbitals(eri_physicist):
     """Spin-orbital (interleaved alpha/beta) <PQ|RS> from a spatial physicist <pq|rs>,
-    NOT antisymmetrized. Only the four spin-allowed blocks are nonzero; the exchange
+    not antisymmetrized. Only the four spin-allowed blocks are nonzero; the exchange
     integral <p_a q_b|s_a r_b> vanishes by spin orthogonality, so antisymmetrizing the
     result (get_antisymmetrized_integrals) gives the correct spin selection rules."""
     norb = eri_physicist.shape[0]
@@ -750,7 +741,7 @@ def embed_spatial_eri_in_spin_orbitals(eri_physicist):
     return phys_spin
 
 def get_spin_orbital_eri_physicist(eri_chemist):
-    """<PQ|RS> restricted-reference spin-orbital ERI (interleaved alpha/beta), NOT
+    """<PQ|RS> restricted-reference spin-orbital ERI (interleaved alpha/beta), not
     antisymmetrized, from a spatial chemist (pq|rs) tensor. Works for the bare ERI or
     for any tensor in the same layout (e.g. a screened W)."""
     return embed_spatial_eri_in_spin_orbitals(convert_chemist_to_physicist(eri_chemist))
@@ -784,9 +775,9 @@ def g_elem_df(B_spin, p, q, r, s):
 
         <pq||rs> = sum_Q B[Q,p,r] B[Q,q,s] - sum_Q B[Q,p,s] B[Q,q,r]
 
-    p,q,r,s must ALL be int/array (np.ix_ block gathers and per-config fancy indexing
-    both qualify); they broadcast together exactly as numpy advanced indexing on 4
-    contiguous axes does. NOT valid for patterns mixing a bare `:` slice with arrays,
+    p,q,r,s must all be int/array (np.ix_ block gathers and per-config fancy indexing
+    both qualify); they broadcast together as numpy advanced indexing on 4
+    contiguous axes does. Not valid for patterns mixing a bare `:` slice with arrays,
     e.g. g[a, :, i, j]."""
     p, q, r, s = np.broadcast_arrays(np.asarray(p), np.asarray(q), np.asarray(r), np.asarray(s))
     direct = np.einsum('q...,q...->...', B_spin[:, p, r], B_spin[:, q, s], optimize=True)

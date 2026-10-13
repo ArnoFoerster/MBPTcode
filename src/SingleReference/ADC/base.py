@@ -27,7 +27,7 @@ from src.SingleReference.ADC import adc_u_utils
 from src.SingleReference.ADC import adc_u_dense_full, adc_u_dense_df
 from src.SingleReference.ADC import adc_u_sigma_full, adc_u_sigma_df
 from src.SingleReference.ADC import adc_r_driver, adc_u_driver
-from src.SingleReference.ADC import adc_r_faddeev, adc_u_faddeev
+from src.SingleReference.ADC import adc_r_faddeev, adc_u_faddeev, cc_amplitudes
 from src.SingleReference.ADC import spin_adapt  # module import: it imports this file
 from src.SingleReference.ADC.solve import (diag_dense, lanczos_spectral,
                                            downfolded_seed_vectors,
@@ -94,6 +94,10 @@ class ADCSolverUnrestricted:
                 raise ValueError("faddeev_adc3 on the spin-orbital branch is the "
                                  "dense reference: matrix_free=False, df=False, "
                                  "no en_dress or screening")
+            if pair_route == 'ccd':
+                raise ValueError("pair_route='ccd' on the spin-orbital reference: "
+                                 "pass channels=adc_u_faddeev.ccd_channels(...) "
+                                 "to adc_u_faddeev.build_supermatrix")
         elif pair_route is not None:
             raise ValueError("pair_route is a faddeev_adc3 option")
         self.pair_route = pair_route
@@ -508,16 +512,20 @@ class ADCSolverRestricted:
 
     def __init__(self, mf=None, mol=None, level='adc3', df=False,
                  matrix_free=True, en_dress=None, screening=None, nocc=None,
-                 pair_route=None, eh_triplet=None):
+                 pair_route=None, eh_triplet=None, eh_kernel=None):
         """mf=None is internal -- from_arrays supplies the arrays instead.
 
         level='faddeev_adc3' is the own-channel, no-overlap Faddeev-ADC(3)
         (adc_r_faddeev); pair_route selects how its pair channels are built,
-        'phonon' (default, from the RPA eigenvectors) or 'riccati' (from the
-        ring/ladder amplitudes alone); eh_triplet the treatment of the
+        'phonon' (default, from the RPA eigenvectors), 'riccati' (from the
+        ring/ladder amplitudes alone) or 'ccd' (every channel from one
+        all-electron CCD T2: run on mf, or set solver.ccd_t2 to an
+        alpha-beta t2[i,j,a,b]); eh_triplet the treatment of the
         particle-hole triplet channel, 'rpa' (default, full
         TDHF), 'first_order' (ADC(3) level) or 'off' (singlet eh pairs only,
-        as in the PSD self-energies)."""
+        as in the PSD self-energies); eh_kernel 'tdhf' (default) or 'drpa'
+        (both eh channels by direct RPA: stable for any reference, exact
+        through second order only)."""
         # ---- flat guard block: every inapplicable option RAISES, never ignored
         if level not in self.LEVELS:
             raise ValueError(f"level={level!r}; expected one of {self.LEVELS}")
@@ -533,8 +541,12 @@ class ADCSolverRestricted:
             if en_dress is not None or screening is not None:
                 raise ValueError("faddeev_adc3 takes no en_dress or screening: "
                                  "its pair channels replace both")
-        elif pair_route is not None or eh_triplet is not None:
-            raise ValueError("pair_route and eh_triplet are faddeev_adc3 options")
+            eh_kernel = 'tdhf' if eh_kernel is None else eh_kernel
+            if eh_kernel not in adc_r_faddeev.EH_KERNELS:
+                raise ValueError(f"eh_kernel={eh_kernel!r}; expected one of "
+                                 f"{adc_r_faddeev.EH_KERNELS}")
+        elif pair_route is not None or eh_triplet is not None or eh_kernel is not None:
+            raise ValueError("pair_route, eh_triplet and eh_kernel are faddeev_adc3 options")
         en_dress = validate_en_dress(en_dress)
         W_chemist = W_aux = None
         screen_coupling = False
@@ -573,6 +585,8 @@ class ADCSolverRestricted:
         self._is_adc2x = (level == 'adc2x')
         self.pair_route = pair_route
         self.eh_triplet = eh_triplet
+        self.eh_kernel = eh_kernel
+        self.ccd_t2 = None
         self.last_result = {}
 
         if mf is None:
@@ -710,10 +724,22 @@ class ADCSolverRestricted:
         cache = self.__dict__.setdefault('_faddeev_channels', {})
         if nocc not in cache:
             eri = self.eri if self.B_aa is None else None
+            t2 = self._faddeev_ccd_t2() if self.pair_route == 'ccd' else None
             cache[nocc] = adc_r_faddeev.pair_channels(
                 self.eps, nocc, self.B_aa, eri, route=self.pair_route,
-                eh_triplet=self.eh_triplet)
+                eh_triplet=self.eh_triplet, t2=t2, eh_kernel=self.eh_kernel)
         return cache[nocc]
+
+    def _faddeev_ccd_t2(self):
+        """The CCD amplitude of pair_route='ccd': solver.ccd_t2 if set, else
+        an all-electron (DF-)CCD on the mean field, kept on the solver."""
+        if self.ccd_t2 is None:
+            if getattr(self, '_mf', None) is None:
+                raise ValueError("pair_route='ccd' needs a mean field or "
+                                 "solver.ccd_t2 (alpha-beta t2[i,j,a,b])")
+            self.ccd_t2 = cc_amplitudes.ccd_t2_restricted(
+                self._mf, conv_tol=1e-10, conv_tol_normt=1e-8)
+        return self.ccd_t2
 
     def solve_dense(self, nocc, static_correction=None, threshold=5000):
         """Dense diagonalization (mid-level); (eGF, Z, Reigv) sorted ascending."""

@@ -847,11 +847,13 @@ def build_ccsd_static_correction(mf, mol=None, ncore=0):
     return _static_correction_from_ao_density(mf, dm_cc_ao, g_anti_spin)
 
 
-def build_ccsd_static_correction_restricted(mf, mol=None, ncore=0):
+def build_ccsd_static_correction_restricted(mf, mol=None, ncore=0, B_aa=None):
     """Restricted (spatial-MO) counterpart of build_ccsd_static_correction, for
     ADCSolverRestricted/solve_ip_ea_restricted.
 
     ncore: number of frozen spatial core orbitals (e.g. 2 for C+O 1s).
+    B_aa: DF/RI factor (naux, norb, norb); contracts the density with it
+        instead of the dense four-index integrals.
     Returns the (nmo, nmo) restricted correction G[Delta_gamma], symmetric.
     """
 
@@ -859,11 +861,29 @@ def build_ccsd_static_correction_restricted(mf, mol=None, ncore=0):
         raise NotImplementedError("build_ccsd_static_correction_restricted is RHF-only.")
 
     mol = mol if mol is not None else mf.mol
-    eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-
     dm_cc_ao = compute_ccsd_density_matrix(mf, ncore=ncore)
     dgamma_spatial = _dgamma_spatial_from_ao_density(mf, dm_cc_ao)
+    if B_aa is not None:
+        return _static_correction_from_dgamma_restricted_df(B_aa, dgamma_spatial)
+    eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
     return _static_correction_from_dgamma_restricted(eri_chemist, dgamma_spatial)
+
+
+def build_density_static_correction_restricted(dm1, nocc, B_aa, fock=None):
+    """Static correction G[dm1 - dm_ref] of the restricted F block from a
+    correlated spin-summed 1-RDM dm1 given in the MO basis of the reference
+    determinant (dm_ref = diag(2,...,2,0,...,0)), contracted with the DF factor
+    B_aa of the same orbitals. For a reference that is not canonical HF, fock
+    is its Fock matrix in that basis: the part off its diagonal (the orbital
+    energies the solver takes) is added, so F + correction = h + G[dm1] in
+    either case.
+    Returns the (nmo, nmo) correction, symmetric."""
+    nmo = dm1.shape[0]
+    dgamma = dm1 - np.diag([2.0] * nocc + [0.0] * (nmo - nocc))
+    corr = _static_correction_from_dgamma_restricted_df(B_aa, 0.5 * (dgamma + dgamma.T))
+    if fock is not None:
+        corr = corr + fock - np.diag(np.diag(fock))
+    return corr
 
 
 def build_ccsdt_static_correction(mf, mol=None, **kwargs):
@@ -1097,7 +1117,7 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         doesn't support (kind other than mp2_unrelaxed/mp2_relaxed, ncore!=0,
         a restricted reference) raises immediately instead of silently
         computing something else. For spin='restricted', pass B_aa instead
-        (build_mp2/mp3_static_correction_restricted's existing DF hook).
+        (the DF hook of the restricted MP2/MP3/CCSD builders).
     cphf_level_shift/cphf_max_cycle/cphf_tol: forwarded to the UHF CPHF/
         Z-vector solve (relax=True only, dense or df); see
         solve_cphf_relaxation_uhf /."""
@@ -1143,7 +1163,8 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
                 mf, mol, nocc, relax=relax, ncore=ncore, B_aa=B_aa,
                 u2_denom_dress=en_dress)
         elif kind == 'ccsd':
-            base = build_ccsd_static_correction_restricted(mf, mol, ncore=ncore)
+            base = build_ccsd_static_correction_restricted(mf, mol, ncore=ncore,
+                                                          B_aa=B_aa)
         else:
             base = build_ccsdt_static_correction_restricted(mf, mol)
         base = _add_ks(base, build_ks_static_correction_restricted(mf, mol))

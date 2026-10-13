@@ -3,8 +3,8 @@
 A walk over geometries rebuilds the mean field at every step, and that stage
 is the one a chain does not divide: the sweeps it distributes -- the frequency
 loop, the tau partition, the Davidson -- leave the SCF replicated, so every
-rank converges the same one and its wall is what it was at a single rank
-(128 s of a rank's 227 s at pentacene/cc-pVTZ on four). `converged_factory`
+rank converges the same one and its wall is what it was at a single rank.
+`converged_factory`
 hands it to `distributed_mean_field` instead: a factory that hands back a mean
 field it has BUILT AND NOT RUN leaves the convergence to the chain, every rank
 runs pyscf's SCF driver against the reduced J/K and the reduced quadrature,
@@ -22,23 +22,16 @@ What that costs in agreement, and why none of it is a tuned tolerance:
     serial factory's own SCF at the displaced geometry: dE 2.8e-14 Ha and
     max |ddm| 1.1e-12 at two ranks, 5.7e-14 and 8.2e-13 at three, 2.8e-14
     and 6.7e-13 at eight, with the orbital energies 2.2e-13 Ha apart. Two
-    SCF runs are compared, and a threaded pyscf does not repeat one bit for
-    bit, so the bars are anchored: `COMPOSED_GRAD_K` times what running the
-    serial SCF again moves the energy (one ulp at the least) and the
-    density, at least 1e-10 Ha and 1e-8, which is where
-    tests/test_distributed_df.py and tests/test_mpi_routes.py put the same
-    comparison. The repeat moves neither here.
-  * the gradient at that geometry is then the Lagrangian's amplification of
-    whatever the mean field carries, and it is compared at `COMPOSED_GRAD_K`
-    times what the serial gradient moves when it is evaluated again on one
-    BLAS thread (tests/test_mpi_routes.py's `one_thread`), at least the ISDF
-    gradient reproducibility floor, 1e-8 Ha/Bohr, the number
-    tests/test_simulated_ranks.py gates one chain's distributed sweeps at.
-    MEASURED: 2.95e-09 Ha/Bohr at two ranks, 1.98e-09 at three and 2.38e-09
-    at eight, against a force of 2.21e-02 and a one-thread repeat of 2.17e-09
-    -- the same order, which is what says the SCF adds nothing the reverse
-    pass amplifies past a re-association. The energy the gradient reports is
-    4.3e-14 Ha from the serial one.
+    SCF runs are compared, so the bars are the convergence they were run to:
+    1e-10 Ha for the energy and 1e-8 for the density (`ENERGY_FLOOR`,
+    `DM_FLOOR`), where tests/test_distributed_df.py and
+    tests/test_mpi_routes.py put the same comparison.
+  * the gradient at that geometry is then what the Lagrangian carries of
+    the difference between two mean fields each converged to
+    SCF_DIFFERENTIABLE_GRAD_TOL, so it is compared at
+    CONVERGED_SCF_FORCE_TOL (src/Base/constants.py, which derives it from
+    that convergence). Measured: 2.4e-13 Ha/Bohr at two ranks and 3.1e-13
+    at three, against a force of 2.21e-02.
   * a build-only factory with NO communicator is `mf.kernel()`, the call the
     factory would have made itself: ONE run of it on the object the factory
     built, with no initial guess and no distributed handles left behind, and
@@ -70,10 +63,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import COMPOSED_GRAD_K, ISDF_GRADIENT_FLOOR
+from src.Base.constants import CONVERGED_SCF_FORCE_TOL
 from src.Base.utils.mpi_grid import run_simulated
 from src.gradients.rpa_ground_state import RPAGroundStateChain
-from tests.test_mpi_routes import one_thread, recorded
+from tests.test_mpi_routes import recorded
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -142,19 +135,12 @@ def test_displaced_mean_field_matches_the_serial_chain(size):
     iterates `mf.with_df.loop()` and must meet the whole tensor.
     """
     ref = scf_record(own_chain(converged))
-    again = scf_record(own_chain(converged))           # the same SCF, run again
-    bar_e = max(ENERGY_FLOOR, COMPOSED_GRAD_K * max(
-        abs(again['e'] - ref['e']), np.spacing(abs(ref['e']))))
-    bar_dm = max(DM_FLOOR, COMPOSED_GRAD_K * max(
-        np.abs(again['dm'] - ref['dm']).max(),
-        np.spacing(np.abs(ref['dm']).max())))
+    bar_e, bar_dm = ENERGY_FLOOR, DM_FLOOR
     out = run_simulated(lambda comm: scf_record(own_chain(built)), size)
     d_e = max(abs(rank['e'] - ref['e']) for rank in out)
     d_dm = max(np.abs(rank['dm'] - ref['dm']).max() for rank in out)
-    print(f'[info] {size} ranks: dE {d_e:.2e} of {bar_e:.2e} Ha, ddm '
-          f'{d_dm:.2e} of {bar_dm:.2e}; the SCF repeat moved them '
-          f"{abs(again['e'] - ref['e']):.2e} and "
-          f"{np.abs(again['dm'] - ref['dm']).max():.2e}")
+    print(f'[info] {size} ranks: dE {d_e:.2e} of {bar_e:.0e} Ha, ddm '
+          f'{d_dm:.2e} of {bar_dm:.0e}')
     for rank in out:
         assert rank['converged']
         assert rank['with_df'] == 'DF'
@@ -171,17 +157,11 @@ def test_gradient_at_the_displaced_geometry_matches_the_serial_chain(size):
     """The force on the mean field the ranks converged together.
 
     The energy gate above says the two SCFs agree; this one says the
-    Lagrangian does not amplify what is left of the difference past the
-    anchored bar a force across two SCF runs is compared at.
+    Lagrangian carries what is left of the difference no further than two
+    converged mean fields may move a force, CONVERGED_SCF_FORCE_TOL.
     """
     ref_g, ref_e, _ = own_chain(converged).total_gradient(own_displaced())
-    again = one_thread(
-        lambda: own_chain(converged).total_gradient(own_displaced()))
-    rep_g, rep_e = ((0.0, 0.0) if again is None else
-                    (np.abs(np.asarray(again[0]) - np.asarray(ref_g)).max(),
-                     abs(again[1] - ref_e)))
-    bar_g = max(ISDF_GRADIENT_FLOOR, COMPOSED_GRAD_K * rep_g)
-    bar_e = max(ENERGY_FLOOR, COMPOSED_GRAD_K * rep_e)
+    bar_g, bar_e = CONVERGED_SCF_FORCE_TOL, ENERGY_FLOOR
 
     def one_rank(comm):
         g, e, _ = own_chain(built).total_gradient(own_displaced())
@@ -189,9 +169,8 @@ def test_gradient_at_the_displaced_geometry_matches_the_serial_chain(size):
 
     out = run_simulated(one_rank, size)
     d_g = max(np.abs(np.asarray(g) - np.asarray(ref_g)).max() for _, g in out)
-    print(f'[info] {size} ranks: force |d| {d_g:.2e} = {d_g / bar_g:.3f} of '
-          f'the anchored bar {bar_g:.2e} = max({ISDF_GRADIENT_FLOOR:.1e}, '
-          f'{COMPOSED_GRAD_K} x {rep_g:.2e}) Ha/Bohr')
+    print(f'[info] {size} ranks: force |d| {d_g:.2e} = {d_g / bar_g:.4f} '
+          f'of CONVERGED_SCF_FORCE_TOL {bar_g:.0e} Ha/Bohr')
     for e, g in out:
         assert abs(e - ref_e) < bar_e
         assert np.abs(np.asarray(g) - np.asarray(ref_g)).max() < bar_g

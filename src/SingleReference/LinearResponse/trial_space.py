@@ -20,13 +20,14 @@ same small coefficients.
 
 THE SUMS. A sum over the pair index -- the projected blocks a, b, sigma and
 pi, the residual norms, the correction norms, the Gram-Schmidt overlaps -- is
-formed per tile, the tiles' addends added in tile order onto the first, and
-the ranks' partials joined by ONE `reduce_sum` of the small matrices. The
-joins re-associate with the rank count, and that is the one place the rank
-count enters the iteration's arithmetic.
+formed per tile, and every tile's addend reaches every rank to be added in
+tile order onto the first (`ordered_sum`): the one-rank sum at any rank
+count, so the rank count enters the iteration's arithmetic nowhere. The cost
+is the tiles' small matrices gathered: the number of pair tiles times the
+size of one projected block per join.
 
 WHAT CROSSES, per cycle: the new batch, gathered whole for the block action
-(`allgather_ranges`, k x 2N doubles); one reduction of the four (k, m1)
+(`allgather_ranges`, k x 2N doubles); one ordered sum of the four (k, m1)
 projected blocks, one of the residual norms, one or two of the correction
 norms, and two of the Gram-Schmidt overlaps, (2, m1, k') and (2, k', k'); and
 a checked `lockstep` of the subspace solution and of the Gram-Schmidt
@@ -58,7 +59,7 @@ from pyscf.tdscf._lr_eig import (TDDFT_subspace_eigen_solver, _asym_dot,
 
 from src.Base.constants import DAVIDSON_PAIR_TILE
 from src.Base.utils.mpi_grid import (allgather_ranges, contiguous_block,
-                                     lockstep, reduce_sum)
+                                     lockstep, ordered_sum)
 
 
 #: The owned loop's own time outside the block action, each piece timed
@@ -85,6 +86,7 @@ class PairRows:
                        if t1 > t0 else [] for t0, t1 in blocks]
         t0, t1 = blocks[self.rank]
         self.tiles = self.all_tiles[t0:t1]
+        self.first_tile = t0
         self.rows = (tuple(self.ranges[self.rank][0]) if self.ranges[self.rank]
                      else (0, 0))
         self.clock = dict.fromkeys(SUBSPACE_PIECES, 0.0)
@@ -111,20 +113,15 @@ class PairRows:
         return [a[..., p0 - r0:p1 - r0] for p0, p1 in self.tiles]
 
     def join(self, addends, shape):
-        """The sum over the whole pair index of per-tile addends: this rank's
-        added in tile order onto the first (zeros where it owns no tile), then
-        the ranks' partials all-reduced."""
-        t = time.time()
-        if addends:
-            partial = np.array(addends[0], dtype=float, order='C', copy=True)
-            for a in addends[1:]:
-                partial += a
-        else:
-            partial = np.zeros(shape)
-        t = self.lap('rows', t)
-        reduce_sum(partial, self.comm)
+        """The sum over the whole pair index of per-tile addends, every
+        tile's added in tile order onto the first (`ordered_sum`): the
+        one-rank bits at every rank count."""
+        t = self.lap('rows', time.time())
+        total = ordered_sum([(self.first_tile + i, a)
+                             for i, a in enumerate(addends)], self.comm,
+                            shape=shape)
         self.lap('reduce', t)
-        return partial
+        return total
 
     def norms(self, blocks, count):
         """2-norms of `count` vectors held as rows of this rank's tile blocks,

@@ -125,10 +125,11 @@ def test_numerical_hessian_accepts_the_map(size):
     original = H.gradient_at
     H.gradient_at = fake_gradient_at
     try:
-        serial = numerical_hessian(mol, None)
+        # the springs have no mean field, so no ISDF-K layout to freeze
+        serial = numerical_hessian(mol, None, pair_layout=None)
 
         def one_rank(comm):
-            return numerical_hessian(mol, None,
+            return numerical_hessian(mol, None, pair_layout=None,
                                      map_fn=functools.partial(mpi_map, comm=comm))
 
         for hess in run_simulated(one_rank, size):

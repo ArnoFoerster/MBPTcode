@@ -215,14 +215,17 @@ def build_static_W_all_Q(dfints, mo_energy=None):
 def _screened_block(dfints, W_all, k1, k2, k3, k4, s1, s2, s3, s4):
     """Screened 4-index MO block sum_{PP'} L^{k1,k2}_{P,pq} W^Q_{PP'}
     L^{k3,k4}_{P',rs} for orbital ranges s1..s4, with Q the momentum transfer
-    of the (k1,k2) pair. Reduces to eri_block when W^Q = I.
+    of the (k1,k2) pair and W^Q = conj(W_all[Q]): W_all is built from
+    Pi = M M^H with M the bra-conjugated L_ov, the transpose of the orientation
+    a left factor of transfer Q contracts with. Reduces to eri_block when
+    W^Q = I.
 
     Requires k1-k2+k3-k4 = 0 so the two L-blocks share aux momentum Q = k2-k1.
     """
     Q = dfints._pair_to_q(k1, k2)
     L12 = dfints.Lblock(k1, k2)[:, s1, s2]
     L34 = dfints.Lblock(k3, k4)[:, s3, s4]
-    return np.einsum('Ppq,PR,Rrs->pqrs', L12, W_all[Q], L34)
+    return np.einsum('Ppq,PR,Rrs->pqrs', L12, W_all[Q].conj(), L34)
 
 
 def build_bse_matrices(dfints, q, W_all, mo_energy=None):
@@ -234,9 +237,9 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
 
         A[K,J] = delta (e_a,ka - e_i,ki)
                  + (2/nk) (a_ka i_ki | j_kj b_kb)          [e-h exchange, v^q]
-                 - (1/nk) W_{ij,ab}                         [screened direct, Fig 2(c)]
+                 - (1/nk) (a_ka b_kb | W | j_kj i_ki)       [screened direct, Fig 2(c)]
         B[K,J] = (2/nk) (a_ka i_ki | j_kj b_kb)
-                 - (1/nk) W_{i b~, j~ a}                    [screened, Fig 2(d)]
+                 - (1/nk) (a_ka j~ | W | b~ i_ki)           [screened, Fig 2(d)]
 
     with K=(i,a,ki), J=(j,b,kj), ka=kconserv[ki], kb=kconserv[kj]. The exchange
     (Hartree) carries the BSE transfer q and is the SAME Hermitian block in A
@@ -245,11 +248,13 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
     momenta (Kresse Eq. 58: the Y/antiresonant component lives at -k-q), so its
     virtual b and occupied j are pulled from the conjugate k-points
     b~ = conj(kb), j~ = conj(kj); this is what makes B momentum-conserving AND
-    Hermitian at finite q (the naive kb,kj port carries 2q and is neither).
+    Hermitian at finite q (b and j taken at kb, kj carry 2q and give neither).
     Both screened terms carry 1/nk (bare part 1/nk, correlation 1/nk^2 via W's
-    own 1/nk), reducing to the molecular factors at nk=1. Validated at q=0
-    against the molecular LinearResponseSolver BSE and at finite q by supercell
-    folding (tests/test_pbc_bse.py).
+    own 1/nk), reducing to the molecular factors at nk=1. The order of the
+    indices inside each integral is fixed by momentum conservation; the
+    orders (i j|W|a b) and (i b~|W|j~ a) carry 2(ki - kj) and are right only on
+    a mesh where every q equals -q, so the folding check needs a 3-point mesh
+    (tests/test_pbc_bse.py).
 
     W_all: static W^Q for all Q from build_static_W_all_Q.
     """
@@ -282,18 +287,18 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
             kb = kconserv[kj]
             sl_j = slice(offsets[kj], offsets[kj + 1])
 
-            # A screened direct: W_{ij,ab}, aux momentum kj-ki, -> [i,a,j,b]
-            Wd = _screened_block(dfints, W_all, ki, kj, ka, kb,
-                                 occ(ki), occ(kj), vir(ka), vir(kb))
-            A_scr = Wd.transpose(0, 2, 1, 3)
+            # A screened direct: (a b|W|j i), aux momentum kb-ka = kj-ki, -> [i,a,j,b]
+            Wd = _screened_block(dfints, W_all, ka, kb, kj, ki,
+                                 vir(ka), vir(kb), occ(kj), occ(ki))
+            A_scr = Wd.transpose(3, 0, 2, 1)
             A[sl_i, sl_j] -= w * A_scr.reshape(A_scr.shape[0] * A_scr.shape[1], -1)
 
             # B screened (Fig 2d): antiresonant J at time-reversed momenta,
-            # W_{i b~ | j~ a} with b~=conj(kb), j~=conj(kj), -> [i,a,j,b]
+            # (a j~|W|b~ i) with b~=conj(kb), j~=conj(kj), -> [i,a,j,b]
             kbb, kjb = cmap[kb], cmap[kj]
-            Ws = _screened_block(dfints, W_all, ki, kbb, kjb, ka,
-                                 occ(ki), vir(kbb), occ(kjb), vir(ka))
-            B_scr = Ws.transpose(0, 3, 2, 1)
+            Ws = _screened_block(dfints, W_all, ka, kjb, kbb, ki,
+                                 vir(ka), occ(kjb), vir(kbb), occ(ki))
+            B_scr = Ws.transpose(3, 0, 1, 2)
             B[sl_i, sl_j] -= w * B_scr.reshape(B_scr.shape[0] * B_scr.shape[1], -1)
 
     return A, B

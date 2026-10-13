@@ -44,6 +44,7 @@ it the reference the cubic space-time route is checked against.
 """
 import numpy as np
 
+from src.Base.constants import QB_QP_END_BLOCK_BYTES, QB_QP_ROOT_TOL
 from src.Base.eri_blocks import as_blocks
 
 
@@ -219,6 +220,24 @@ class QPqb:
         Z = 1.0 / (1.0 - self.sigma_prime(p, w))
         return w, Z
 
+    def quasiparticle_root(self, p):
+        """(w*, Z) of the root of w = eps_p + Sigma_pp(w) carrying the largest Z.
+
+        Every root is an eigenvalue of the arrowhead `supermatrix_diag(p)` and
+        Z its weight on the bare orbital, so the weights sum to one and the
+        quasiparticle is decidable from the exact poles alone: no seed, no
+        starting point, the same root at every geometry the weights single it
+        out at. A Newton from eps_p reaches whichever root is nearest, a
+        satellite with Z ~ 1e-3 for formaldehyde/cc-pVDZ's virtuals above
+        38 eV. Where two roots share the weight the choice changes branch;
+        nothing in Sigma_pp distinguishes them there.
+        """
+        nh, ph, npp, pp = self._pole_arrays(p)
+        num = np.concatenate([nh.ravel(), npp.ravel()])
+        pol = np.concatenate([ph.ravel(), pp.ravel()])
+        return largest_weight_root(num, pol, self.eps[p] + self.delta[p],
+                                   label=f'orbital {p}')
+
     def eigvec_diag(self, p, w):
         """Closed-form normalized eigenvector (rp, R_h (j,nu), R_p (b,nu))."""
         nh, ph, npp, pp = self._pole_arrays(p)
@@ -256,6 +275,218 @@ class QPqb:
         w, V = np.linalg.eigh(H)
         k = np.argmax(V[0, :] ** 2)
         return w[k], V[0, k] ** 2
+
+
+# ---------------------------------------------------------------------------
+# the largest-weight root of the diagonal quasiparticle equation
+# ---------------------------------------------------------------------------
+
+def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL):
+    """(w*, Z) of f(w) = w - a - sum_i num_i/(w - pol_i) = 0 with the largest Z.
+
+    f rises from -inf to +inf between neighbouring poles, so each interval
+    holds one root, Z = 1/f'(w) there, and the weights of all roots sum to
+    one. Most intervals are excluded without a solve by `weight_bounds`, most
+    of the rest by `end_value_bounds`; the survivors are solved in decreasing
+    order of their bound until no bound exceeds the best Z found. Exact: no
+    bound under-estimates.
+
+    Couplings are dropped weakest first while their norm stays below `tol`,
+    which by Weyl's inequality moves no root by more than `tol`.
+    """
+    num = np.asarray(num, float).ravel()
+    pol = np.asarray(pol, float).ravel()
+    weakest = np.argsort(num, kind='stable')
+    keep = np.ones(num.size, bool)
+    keep[weakest[np.cumsum(num[weakest]) <= tol * tol]] = False
+    num, pol = num[keep], pol[keep]
+    order = np.argsort(pol, kind='stable')
+    num, pol = num[order], pol[order]
+    if num.size == 0:
+        return float(a), 1.0
+    best_w, best_z = None, -1.0
+    for m in (-1, num.size - 1):                       # the two outer roots
+        w, z = root_between(num, pol, a, m, tol)
+        if z > best_z:
+            best_w, best_z = w, z
+    bound = weight_bounds(num, pol, a)
+    order = np.argsort(-bound, kind='stable')
+    # In batches that double, so the best Z found rises before the costlier
+    # end-value pass reaches the long tail of weak intervals; an interval is
+    # passed over only when a bound puts it at or below a Z already found.
+    start, size = 0, 1
+    while start < order.size and bound[order[start]] > best_z:
+        batch = order[start:start + size]
+        batch = batch[bound[batch] > best_z]
+        tight = np.minimum(bound[batch], end_value_bounds(num, pol, a, batch))
+        for k in np.argsort(-tight, kind='stable'):
+            if tight[k] <= best_z:
+                break
+            w, z = root_between(num, pol, a, batch[k], tol)
+            if z > best_z:
+                best_w, best_z = w, z
+        start, size = start + size, 2 * size
+    if not (np.isfinite(best_w) and 0.0 < best_z <= 1.0):
+        raise RuntimeError(
+            f'quasiparticle root of {label or "the secular equation"} not '
+            f'found: w = {best_w!r}, Z = {best_z!r}. Every root of a positive-'
+            f'weight self-energy has 0 < Z <= 1, so this is a numerical '
+            f'failure, not a satellite to demote.')
+    return float(best_w), float(best_z)
+
+
+def secular(num, pol, a, w):
+    """(f, f') of the quasiparticle equation at w."""
+    r = num / (w - pol)
+    return w - a - r.sum(), 1.0 + (r / (w - pol)).sum()
+
+
+def root_between(num, pol, a, m, tol):
+    """(w, Z) of the one root between pol[m] and pol[m+1] (outer for m = -1, n-1).
+
+    Each step solves a model of f that keeps the bracketing poles exactly and
+    the rest of Sigma to first order about the iterate (`model_root`), so the
+    singular part costs no iterations; bisection on the sign of f safeguards
+    it. A root closer to a weak pole than w resolves is left with the bracket
+    one ulp wide and that pole still at its edge; its Z is then taken from
+    f = 0 itself, num/delta^2 = g^2/num with g = f without that pole, instead
+    of from a delta that is round-off.
+    """
+    n = num.size
+    lo = pol[m] if m >= 0 else -np.inf
+    hi = pol[m + 1] if m + 1 < n else np.inf
+    step = 1.0
+    while not np.isfinite(lo):
+        trial = hi - step
+        lo = trial if secular(num, pol, a, trial)[0] < 0 else -np.inf
+        step *= 2.0
+    step = 1.0
+    while not np.isfinite(hi):
+        trial = lo + step
+        hi = trial if secular(num, pol, a, trial)[0] > 0 else np.inf
+        step *= 2.0
+    edge = [j for j in (m, m + 1) if 0 <= j < n]
+    lo0, hi0 = lo, hi
+    w = 0.5 * (lo + hi)
+    width = hi - lo
+    while True:
+        r = num / (w - pol)
+        rd = r / (w - pol)
+        f = w - a - r.sum()
+        fp = 1.0 + rd.sum()
+        if f == 0.0:
+            return w, 1.0 / fp
+        if f > 0:
+            hi = w
+        else:
+            lo = w
+        dw = -f / fp
+        if abs(dw) < tol and lo < w + dw < hi:
+            w += dw
+            return w, 1.0 / secular(num, pol, a, w)[1]
+        mid = 0.5 * (lo + hi)
+        if not lo < mid < hi:
+            break                                      # bracket one ulp wide
+        far = r.sum() - r[edge].sum()
+        far_slope = rd[edge].sum() - rd.sum()
+        trial = model_root(num[edge], pol[edge], a + far - far_slope * w,
+                           1.0 - far_slope, lo, hi, tol)
+        # the model step only while it at least halves the bracket, so the
+        # loop ends within twice the bisection count that resolves w
+        take = lo < trial < hi and hi - lo <= 0.5 * width
+        width = hi - lo
+        w = trial if take else mid
+    j = m if (m >= 0 and lo == lo0) else m + 1 if (m + 1 < n and hi == hi0) \
+        else None
+    if j is None:
+        return w, 1.0 / secular(num, pol, a, w)[1]
+    d = w - pol
+    d[j] = 1.0
+    r = num / d
+    r[j] = 0.0
+    g = w - a - r.sum()
+    return w, 1.0 / (1.0 + (r / d).sum() + g * g / num[j])
+
+
+def model_root(num, pol, c, slope, lo, hi, tol):
+    """The root in (lo, hi) of slope*x - c - sum_j num_j/(x - pol_j), rising
+    there, by Newton safeguarded by bisection; the bracketing poles' share of
+    f with the rest linear in x."""
+    x = 0.5 * (lo + hi)
+    while True:
+        g, gp = slope * x - c, slope
+        for nj, pj in zip(num.tolist(), pol.tolist()):
+            g -= nj / (x - pj)
+            gp += nj / (x - pj) ** 2
+        if g > 0:
+            hi = x
+        else:
+            lo = x
+        dx = -g / gp
+        mid = 0.5 * (lo + hi)
+        if abs(dx) < tol or not lo < mid < hi:
+            return x + dx if lo < x + dx < hi else x
+        x = x + dx if lo < x + dx < hi else mid
+
+
+def end_value_bounds(num, pol, a, intervals):
+    """Upper bound on Z of the root in each of `intervals` (pol[m], pol[m+1]).
+
+    On interval m, g(w) = f(w) + num_m/(w - pol_m) + num_m+1/(w - pol_m+1) has
+    no pole and rises, so |g| >= G, its smaller end value when both ends share
+    a sign (0 otherwise). At the root g is the two bracketing terms, and
+    Cauchy-Schwarz on them gives 1/Z >= 1 + G^2/(num_m + num_m+1). Far from
+    a zero of g the root hugs a pole with a Z orders of magnitude below the
+    neighbour bound, which is most of a continuum orbital's intervals.
+    An end that coincides with an excluded pole bounds nothing.
+    """
+    ends = np.unique(np.concatenate([intervals, intervals + 1]))
+    value = np.empty(ends.size)
+    rows = max(1, QB_QP_END_BLOCK_BYTES // (8 * pol.size))
+    for r0 in range(0, ends.size, rows):
+        at = ends[r0:r0 + rows]
+        gap = pol[at][:, None] - pol[None, :]
+        gap[np.arange(at.size), at] = np.inf           # f without its own pole
+        with np.errstate(divide='ignore', invalid='ignore'):
+            value[r0:r0 + rows] = pol[at] - a - (num[None, :] / gap).sum(1)
+    reg = dict(zip(ends.tolist(), value.tolist()))
+    lo = np.array([reg[m] for m in intervals.tolist()])
+    hi = np.array([reg[m + 1] for m in intervals.tolist()])
+    width = pol[intervals + 1] - pol[intervals]
+    g_lo = lo - num[intervals + 1] / width              # g at pol[m]
+    g_hi = hi - num[intervals] / width                  # g at pol[m+1]
+    floor = np.where(g_lo > 0, g_lo, np.where(g_hi < 0, -g_hi, 0.0))
+    floor[~(np.isfinite(g_lo) & np.isfinite(g_hi))] = 0.0
+    return 1.0 / (1.0 + floor ** 2 / (num[intervals] + num[intervals + 1]))
+
+
+def weight_bounds(num, pol, a, neighbours=16):
+    """Upper bound on Z of the root in each interval (pol[m], pol[m+1]).
+
+    1/Z = 1 + sum_i num_i/(w - pol_i)^2 at the root, bounded below three ways:
+    the two bracketing poles at their joint minimum, (a^1/3 + b^1/3)^3/L^2;
+    `neighbours` more on each side at their farthest from the interval; and
+    Cauchy-Schwarz on f(w) = 0, (w - a)^2 <= sum(num) sum(num_i/(w - pol_i)^2),
+    which confines a large Z to near the bare level a.
+    """
+    n = num.size
+    width = np.diff(pol)
+    c = np.cbrt(num)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        s = (c[:-1] + c[1:]) ** 3 / width ** 2
+        idx = np.arange(n - 1)
+        for k in range(1, neighbours + 1):
+            left = idx - k
+            ok = left >= 0
+            s[ok] += num[left[ok]] / (pol[idx[ok] + 1] - pol[left[ok]]) ** 2
+            right = idx + 1 + k
+            ok = right < n
+            s[ok] += num[right[ok]] / (pol[right[ok]] - pol[idx[ok]]) ** 2
+        gap = np.maximum(np.maximum(pol[:-1] - a, a - pol[1:]), 0.0)
+        s = np.maximum(s, gap ** 2 / num.sum())
+        bound = 1.0 / (1.0 + s)
+    bound[~(width > 0)] = 0.0
+    return bound
 
 
 # ---------------------------------------------------------------------------

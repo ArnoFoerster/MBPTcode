@@ -194,12 +194,11 @@ def main():
         ok &= check(True, 'refuses a mean field that did not fit an ISDF')
 
     # A requested grid SIZE must reach the grid, and so must the DEFAULT one.
-    # cc-pVTZ used to be special: the published Duchemin-Blase tables (H/C/N/O,
-    # one size each) were substituted for a caller who named no `counts`, so
-    # this basis alone answered with ~320 points per atom while every other
-    # basis answered with the 148 of DEFAULT_COUNTS. Those grids are ordinary
-    # rows in the radii table now, at their own counts, so reaching them means
-    # asking for them -- which is what the third check below pins. H2 keeps this
+    # cc-pVTZ is not special: the published Duchemin-Blase tables (H/C/N/O,
+    # one size each) are ordinary rows in the radii table at their own
+    # counts, and a caller who names no `counts` gets the 148 points of
+    # ISDF_DEFAULT_COUNTS at every basis, so reaching them means asking for
+    # them -- which is what the third check below pins. H2 keeps this
     # cheap: hydrogen is in the published set.
     print('\n=== grid size at cc-pVTZ: asked for, defaulted, published ===')
     h2 = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvtz', verbose=0)
@@ -213,7 +212,7 @@ def main():
                 'explicit counts reach the grid at cc-pVTZ',
                 f'{m_small} and {m_large} points for 78 and 148 per atom')
     ok &= check(m_default == 2 * 148,
-                'omitting counts takes DEFAULT_COUNTS, not a per-basis special '
+                'omitting counts takes ISDF_DEFAULT_COUNTS, not a per-basis special '
                 'case', f'{m_default} points = 2 x 148')
     ok &= check(m_pub == 2 * 167,
                 'the published grid is reached by asking for its counts',

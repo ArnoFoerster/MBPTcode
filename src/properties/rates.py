@@ -9,13 +9,11 @@ states. Everything below is Fermi's golden rule with a different rho_FC:
 Marcus-Levich-Jortner treats ONE effective quantum mode explicitly and the rest
 of the bath classically, Marcus treats all of it classically.
 
-This is the expression the TADF work has to produce (Samanta, Kim, Coropceanu
-and Bredas, J. Am. Chem. Soc. 139, 4042 (2017); the quantum-mode form is
-Jortner, J. Chem. Phys. 64, 4860 (1976)). The surface layer supplies four of the
-five inputs -- the adiabatic gap from two relaxed minima, lambda by two
-independent routes, the Huang-Rhys spectrum and its first-moment effective mode
--- and V is an argument, so the rate is one call the day a spin-orbit element
-lands.
+The intersystem-crossing form follows Samanta, Kim, Coropceanu and Bredas,
+J. Am. Chem. Soc. 139, 4042 (2017); the quantum-mode form is Jortner, J. Chem.
+Phys. 64, 4860 (1976). The surface layer supplies the adiabatic gap from two
+relaxed minima, lambda, the Huang-Rhys spectrum and its first-moment effective
+mode; V is an argument.
 
 WHAT THE SCALE DEMANDS. Reverse intersystem crossing in a multiresonance emitter
 runs at 10^6 s^-1 on a gap of 0.02 eV and a coupling of a few tenths of a cm^-1.
@@ -35,10 +33,7 @@ from src.Base.constants import (ATOMIC_TIME_SECONDS,
                                 BOLTZMANN_HARTREE_PER_KELVIN,
                                 FC_UNDERFLOW_EXPONENT, SPEED_OF_LIGHT_AU)
 
-#: numpy 2.0 RENAMED `trapz` to `trapezoid` and removed the old spelling. The
-#: development environment here is numpy 1.23 and the cluster's is 2.x, so a
-#: bare `np.trapz` runs everywhere it is tested and raises everywhere it is
-#: used -- it took a five hour rate run to its last stage before failing.
+#: `np.trapezoid` on numpy >= 2.0, `np.trapz` below it.
 TRAPEZOID = getattr(np, 'trapezoid', None) or np.trapz
 
 
@@ -133,6 +128,7 @@ def marcus_rate(coupling, delta_e, lambda_total, temperature):
                      / (4.0 * lambda_total * kt))
               / np.sqrt(4.0 * np.pi * lambda_total * kt))
     return _golden_rule(coupling, rho_fc)
+
 
 def _bose(omega, kt):
     """n_bar(omega) = 1/(e^{omega/kT} - 1), elementwise."""
@@ -412,14 +408,17 @@ def spin_vibronic_rate(delta_e, v0, dv_dq, omega_promoting, rho_fc,
     rho is evaluated at the shifted gap.
 
     q_k are DIMENSIONLESS normal coordinates, in which <1|q|0> = 1/sqrt 2 and
-    the 1/2 above is that squared; `dv_dq` must be d|V|/dq in the same
-    convention (`vibronic_soc.py` produces it). Both v0 and dv_dq are Hartree.
+    the 1/2 above is that squared; `dv_dq` must be |dV/dq| in the same
+    convention, the norm over the three spin-orbit components of the
+    element's derivative (`spin_vibronic.spin_vibronic_coupling` gives it
+    analytically, through the higher states). Both v0 and dv_dq are Hartree.
+    The Condon and Herzberg-Teller channels add without interference, which is
+    exact when the promoting modes are not displaced between the two states.
 
     rho_fc: callable dE -> Hartree^-1. Pass `fc_weighted_dos` bound to the
     spectrum, or a Marcus/MLJ rho if that is the comparison being made.
 
-    Returns (k_total, k_condon, k_herzberg_teller) in s^-1, so the two can be
-    reported separately -- which is the whole point of computing the second.
+    Returns (k_total, k_condon, k_herzberg_teller) in s^-1.
     """
     kt = _thermal_energy(1.0, temperature)
     dv = np.atleast_1d(np.asarray(dv_dq, float))
@@ -489,9 +488,8 @@ def radiative_rate(delta_e, dipole):
         k_r = 4 omega^3 |mu|^2 / (3 c^3)
 
     the third electronic quantity, beside the spin-orbit element and the
-    derivative coupling. `solve_bse_isdf` and `solve_bse_df` already return
-    `transition_dipole` per root in the length gauge, so nothing new is
-    computed here -- what this adds is the rate.
+    derivative coupling. `solve_bse_isdf` and `solve_bse_df` return
+    `transition_dipole` per root in the length gauge.
 
     EVALUATE IT AT THE RELAXED EXCITED-STATE GEOMETRY, with the EMISSION
     energy. The oscillator strength a vertical spectrum reports belongs to
@@ -519,7 +517,25 @@ def radiative_rate(delta_e, dipole):
             / ATOMIC_TIME_SECONDS)
 
 
-def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0):
+def triplet_reservoir(delta_e_t2t1, temperature):
+    """(p_T1, p_T2), the Boltzmann populations of a T1/T2 pair in equilibrium.
+
+    p_T2 / p_T1 = exp(-Delta E_T2T1 / k_B T), Delta E_T2T1 = E(T2) - E(T1) the
+    adiabatic gap, Hartree. Both are threefold, so no degeneracy ratio enters,
+    and the two minima are taken with equal vibrational partition functions.
+    Internal conversion T2 -> T1 is assumed fast against every rate out of the
+    pair, which is the regime of Etherington, Gibson, Monkman and Penfold,
+    Nat. Commun. 7, 13680 (2016): there T2 is a thermal intermediate, not a
+    second reservoir.
+    """
+    kt = _thermal_energy(1.0, temperature)
+    k_eq = np.exp(-float(delta_e_t2t1) / kt)
+    return 1.0 / (1.0 + k_eq), k_eq / (1.0 + k_eq)
+
+
+def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0,
+                      delta_e_t2t1=None, temperature=None, k_risc_t2=0.0,
+                      k_isc_t2=0.0, k_nr_t2=0.0):
     """The observables a PL experiment actually reports, from the four rates.
 
     Two coupled levels, the singlet prepared by absorption and the triplet fed
@@ -546,12 +562,38 @@ def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0):
     A triplet that neither decays nor returns (k_nr_t = k_risc = 0) traps every
     molecule that crosses, and the delayed component vanishes rather than
     diverging -- the branch is handled, not assumed away.
+
+    THE T2 CHANNEL. With `delta_e_t2t1` (E(T2) - E(T1), adiabatic, Hartree) and
+    `temperature`, [T] is the T1/T2 pair in internal equilibrium
+    (`triplet_reservoir`), so the rates out of it are population-weighted:
+
+        k_risc,eff = p_T1 k_risc + p_T2 k_risc_t2
+        k_nr_t,eff = p_T1 k_nr_t + p_T2 k_nr_t2
+
+    and S1 -> T2 crossing, `k_isc_t2`, feeds the same reservoir. A RISC that
+    runs through T2 -- a multiresonance emitter with T2 a few k_B T above T1
+    and a large <S1|H_SO|T2> -- is invisible without it. The dict then also
+    carries `k_risc_eff`, `k_nr_t_eff` and `p_t2`.
     """
     k_r, k_isc, k_risc = float(k_r), float(k_isc), float(k_risc)
+    if min(k_r, k_isc, k_risc, k_nr_s, k_nr_t, k_risc_t2, k_isc_t2,
+           k_nr_t2) < 0:
+        raise ValueError('a rate cannot be negative')
+    channel = {}
+    if delta_e_t2t1 is not None:
+        if temperature is None:
+            raise ValueError('the T2 channel is thermally activated: pass '
+                             'temperature with delta_e_t2t1')
+        p1, p2 = triplet_reservoir(delta_e_t2t1, temperature)
+        k_risc = p1 * k_risc + p2 * float(k_risc_t2)
+        k_nr_t = p1 * float(k_nr_t) + p2 * float(k_nr_t2)
+        k_isc = k_isc + float(k_isc_t2)
+        channel = {'k_risc_eff': k_risc, 'k_nr_t_eff': k_nr_t, 'p_t2': p2}
+    elif k_risc_t2 or k_isc_t2 or k_nr_t2:
+        raise ValueError('rates through T2 need delta_e_t2t1 and temperature '
+                         'to weight them by the T2 population')
     k_s = k_r + float(k_nr_s) + k_isc
     k_t = float(k_nr_t) + k_risc
-    if min(k_r, k_isc, k_risc, k_nr_s, k_nr_t) < 0:
-        raise ValueError('a rate cannot be negative')
     disc = np.sqrt((k_s - k_t) ** 2 + 4.0 * k_isc * k_risc)
     lam_p = 0.5 * (k_s + k_t + disc)
     det = k_s * k_t - k_isc * k_risc
@@ -563,20 +605,17 @@ def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0):
                 'tau_delayed': float('inf'),
                 'phi_prompt': k_r / k_s if k_s > 0 else 0.0,
                 'phi_delayed': 0.0,
-                'phi_total': k_r / k_s if k_s > 0 else 0.0}
+                'phi_total': k_r / k_s if k_s > 0 else 0.0, **channel}
     # THE SMALL ROOT COMES FROM THE PRODUCT, NOT FROM THE DIFFERENCE. The two
     # roots satisfy lam_+ lam_- = det exactly, and the subtracted form
     # 0.5 (k_S + k_T - disc) loses every significant digit once
-    # k_isc k_risc << k_S^2 -- which is the ordinary case for a slow reverse
-    # crossing. Measured on formaldehyde, where 4 k_isc k_risc / k_S^2 is
-    # 1e-20: disc came back equal to k_S - k_T in double precision, lam_-
-    # underflowed to exactly zero, and the reported delayed lifetime was
-    # infinite with a yield of nan while the true lam_- was 7.9e-23 s^-1.
+    # k_isc k_risc << k_S^2, the ordinary case for a slow reverse crossing:
+    # disc then equals k_S - k_T in double precision and lam_- would be zero.
     lam_d = det / lam_p
     # THE DELAYED AMPLITUDE HAS THE SAME DISEASE ONE LEVEL UP. a_d = 1 - a_p
-    # with a_p = (k_S - lam_-)/(lam_+ - lam_-) is 1 - (1 - 1e-21) in double
-    # precision, so the delayed yield reads 0 and the two yields no longer sum
-    # to the closed-form total. Both roots satisfy
+    # with a_p = (k_S - lam_-)/(lam_+ - lam_-) can be 1 - (1 - 1e-21) in
+    # double precision, which reads 0 and breaks the sum of the two yields
+    # against the closed-form total. Both roots satisfy
     # (lambda - k_S)(lambda - k_T) = k_isc k_risc, which gives lam_+ - k_S
     # without subtracting two nearly equal numbers.
     gap = lam_p - k_t
@@ -587,4 +626,4 @@ def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0):
             'tau_prompt': 1.0 / lam_p, 'tau_delayed': 1.0 / lam_d,
             'phi_prompt': k_r * a_p / lam_p,
             'phi_delayed': k_r * a_d / lam_d,
-            'phi_total': k_r * k_t / det}
+            'phi_total': k_r * k_t / det, **channel}

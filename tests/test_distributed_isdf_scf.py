@@ -27,7 +27,7 @@ rank count owns a different set of them (water 7 tiles, ethylene 14):
     rows and they tile the grid; nothing grid-indexed is whole -- not X, M^T,
     Z or X Dm X^T (one (tile, tile) block), T (the rank's rows), a streamed
     tile, a slab of the metric -- and neither is any array of the fit;
-  * on a BLAS whose GEMM bits follow the call's shape AND the thread count
+  * on a BLAS whose GEMM bits follow the call's shape and the thread count
     of the calling rank's BLAS pool (a subprocess: every GEMM under src on
     the shape-sensitive stand-in of tests/test_force_serial_shaped.py, its
     scaling keyed on the pool too, and `Base.utils.threads` reading and
@@ -39,37 +39,27 @@ rank count owns a different set of them (water 7 tiles, ethylene 14):
     built inside the SCF's wrap bitwise the ones outside it; after a
     distributed SCF whose handle was built inside it (`build=False`), every
     rank's tiles bitwise the one-rank tiles and its record at NODE_THREADS
-    for the fit, the interaction and K -- while a GEMM over a rank's
-    concatenated
+    for the fit, the interaction and K. A GEMM over a rank's concatenated
     rows, a GEMM inside the wrap and a one-rank reference fitted at one
-    pool thread, all three shown moved, would not be;
+    pool thread are each shown to move the bits, so a tile formed any of
+    those ways would fail;
   * under the same emulated node in this process, the pool every stage of
     that SCF runs on: the fit's Cholesky, G and Z's rows, the K builds and
     the DF-J metric's factor and solve at NODE_THREADS, and `nr_rks`, the
     DF-J passes, the fit's three-centre integrals and the metric slabs at
-    one; the density-fitted SCF's K and `nr_rks` at one, as before;
+    one; the density-fitted SCF's K and `nr_rks` at one;
   * under the pyscf race (`racing_dgemm` of tests/test_force_serial_shaped.py,
     shown live on each run): every rank's converged energy and orbitals are
     rank 0's;
   * anthracene/cc-pVDZ/PBE0 at 3 ranks on the default tile, once.
 
-SHOWN TO FAIL, the pooled gate: with `distributed_isdf_jk` building the
-handle inside `blas_single_threaded` (the factory before this gate), every
-rank fitted its tiles at one pool thread and the one-rank handle at the
-process's own count, and at 2, 3 and 8 ranks every tile of both operators' Z
-differed from the one-rank tile, K at 7.1e3 and K_lr at 5.2e4 to 6.1e4
-times its rounding bound (0.2-0.7 without the defect) -- what 16-thread
-OpenBLAS nodes showed, and what no workstation
-gate could: the real `blas_single_threaded` is a no-op below
-BLAS_WRAP_MIN_THREADS (two threads here) and off the main thread (every
-simulated rank). On the shape stand-in alone, the pool left out, the same
-code passed: no GEMM of the handle or of the row fit is rank-shaped. With
-`blas_full_pool` a no-op (the handle's stages inside the SCF's wrap at one
-thread, as they ran on the 8-node pentacene run), the pooled gate fails on
-every rank's wrapped K partials and on every tile of the SCF-built handles,
-and the per-stage test reads one thread for every GEMM stage. The script's
-checks at 8 ranks, with the check of the SCF-built handle asking every rank
-for a tile: rank 7 failed it for both functionals, as on the 8-node run.
+The pool emulation is what makes the pooled gate able to fail on a single
+machine: the real `blas_single_threaded` is a no-op below
+BLAS_WRAP_MIN_THREADS and off the main thread (every simulated rank). A handle
+fitted inside `blas_single_threaded` (one pool thread) against a one-rank
+handle at the full pool differs in every tile of Z, and K then lies thousands
+of times outside its rounding bound; the shape stand-in alone, without the
+pool, does not see that.
 """
 import collections
 import hashlib
@@ -225,8 +215,8 @@ def on_the_node_pool(set_attr):
     """`Base.utils.threads` reading and limiting the calling rank's pool in
     place of the process's, every simulated rank the main thread of its own
     process on a node of NODE_THREADS: the real wraps are no-ops below
-    BLAS_WRAP_MIN_THREADS (two on a two-thread machine) and off the main thread (every
-    simulated rank), so no workstation run moves a pool without this.
+    BLAS_WRAP_MIN_THREADS and off the main thread (every simulated rank), so
+    no single-machine run moves a pool without this.
 
     set_attr: `monkeypatch.setattr`, or `setattr` in a subprocess."""
     set_attr(threads, 'threadpool_limits', NodePoolLimit)
@@ -237,8 +227,8 @@ def on_the_node_pool(set_attr):
 def pooled(shape_factor):
     """The shape-sensitive BLAS's scaling keyed on the pool as well: a GEMM
     on fewer than NODE_THREADS takes other bits, as on a BLAS whose sums
-    block by its thread count -- a two-thread MKL fits water's M^T 2.4e-3
-    apart at one and at two threads."""
+    block by its thread count (a two-thread MKL fits water's M^T 2.4e-3
+    apart at one and at two threads)."""
     def factor(op, shapes):
         count = node_pool_threads()
         return shape_factor(op, shapes if count == NODE_THREADS
@@ -526,10 +516,9 @@ def test_rows_are_serial_shaped(factored):
     factored) are the one-rank tiles bitwise at 2, 3 and 8 ranks, built
     before the SCF or inside it, J sits on its anchored bar measured on the
     same BLAS and K, K_lr on their rounding bound; K built inside the SCF's
-    wrap is K outside
-    it, bitwise; a GEMM over a rank's joined rows, one inside the wrap and a
-    reference fitted at one pool thread are moved by it, so a tile formed
-    any of those ways would not pass."""
+    wrap is K outside it, bitwise; a GEMM over a rank's joined rows, one
+    inside the wrap and a reference fitted at one pool thread are moved by
+    it, so a tile formed any of those ways would not pass."""
     got = on_the_pooled_blas(factored)
     print(f"factored={factored}: {got['ratios']}")
     assert got['perturbed'] > 0, 'the shape-sensitive BLAS scaled nothing'
@@ -606,9 +595,9 @@ def one_rank_tiles(factored):
 
 def scf_tile_faults(ref_tiles, factored):
     """At every size of SIZES, a LRC-wPBEh SCF whose handle is built inside
-    it (`build=False`): every rank's tiles of both operators
-    bitwise the one-rank tiles `ref_tiles`, and the BLAS threads its record
-    says the fit, the interaction and K ran on the count outside the SCF."""
+    it (`build=False`): every rank's tiles of both operators bitwise the
+    one-rank tiles `ref_tiles`, and the BLAS threads its record says the fit,
+    the interaction and K ran on the count outside the SCF."""
     outside = threads.blas_threads() or 0
     faults = []
     for size in SIZES:
@@ -709,11 +698,83 @@ def test_each_stage_runs_on_its_pool(monkeypatch):
     assert not faults, faults
 
 
+def test_the_loop_algebra_takes_the_pool(monkeypatch):
+    """On the emulated node, a LRC-wPBEh SCF over two ranks: pyscf's
+    generalized eigensolve and DIIS's error vector, the dense nao^3 algebra
+    every rank runs whole, on the whole pool; `nr_rks` and the DF-J passes
+    still at one thread."""
+    mfs = [fresh(WATER, 'lrc-wpbeh') for _ in range(2)]
+    seen = collections.defaultdict(set)
+    on_the_node_pool(monkeypatch.setattr)
+    for owner, name in ((scipy.linalg, 'eigh'), (lib, 'dot'),
+                        (numint, 'nr_rks'), (pyscf_jk, 'get_jk')):
+        monkeypatch.setattr(owner, name,
+                            noting(seen, name, getattr(owner, name)))
+
+    def one(comm):
+        mf = mfs[comm.Get_rank()]
+        distributed_isdf_jk(mf, comm, tile=TILE)
+        distributed_mean_field(mf)
+        release_distributed(mf)
+    run_simulated(one, 2)
+    want = {('eigh', 'pyscf.scf.hf', 'eig'): NODE_THREADS,
+            ('dot', 'pyscf.scf.diis', 'get_err_vec_orth'): NODE_THREADS,
+            ('nr_rks', dist_df.__name__, 'partial_xc'): 1,
+            ('get_jk', dist_isdf.__name__, '__call__'): 1}
+    table = {key: sorted(seen.get(key, ())) for key in want}
+    assert all(table[key] == [count] for key, count in want.items()), table
+
+
+def tagged(mo_coeff, mo_occ):
+    """The density of orbitals and occupations, tagged with them."""
+    dm = (mo_coeff * mo_occ) @ mo_coeff.T
+    return lib.tag_array(dm, mo_coeff=mo_coeff, mo_occ=mo_occ)
+
+
+def test_one_pass_serves_both_operators(serial):
+    """A range-separated SCF's two K requests per density in one pass of the
+    column tiles: once a density has shown K_lr asked for after K, the next
+    density's K request makes both and K_lr's is answered from that pass;
+    a request on another density makes its own pass, and a follower whose
+    request never came is forgotten. Every K and K_lr is bitwise the one a
+    pass of its own makes, and the passes are counted."""
+    mf = serial['water', 'lrc-wpbeh']
+    handle = dist_isdf.DistributedISDFJK(fresh(WATER, 'lrc-wpbeh').with_df,
+                                         comm=None, tile=TILE).build()
+    rng = np.random.default_rng(7)
+    densities = []
+    for _ in range(3):
+        kappa = 1e-2 * rng.normal(size=mf.mo_coeff.shape[1:] * 2)
+        rotation = scipy.linalg.expm(kappa - kappa.T)
+        densities.append(tagged(mf.mo_coeff @ rotation, mf.mo_occ))
+
+    def own_pass(dm, omega):
+        stack = np.asarray(dm).reshape(1, *dm.shape)
+        return handle.exchange_partial(stack, dist_isdf._occupied_factors(dm),
+                                       omega)[0]
+    refs = {(d, omega): own_pass(densities[d], omega)
+            for d in range(3) for omega in (None, OMEGA)}
+    handle.timings = {}
+    # (density, omega, passes after the request)
+    requests = [(0, None, 1), (0, OMEGA, 2), (1, None, 3), (1, OMEGA, 3),
+                (2, None, 4), (0, OMEGA, 5), (1, None, 6), (1, OMEGA, 7),
+                (2, None, 8), (2, OMEGA, 8)]
+    faults = []
+    for d, omega, passes in requests:
+        vk = handle.get_jk(densities[d], with_j=False, omega=omega)[1]
+        if not np.array_equal(vk, refs[d, omega]):
+            faults.append(f'K({d}, {omega}) is not its own pass\'s')
+        if handle.timings['scf_isdf_k_passes'] != passes:
+            faults.append(f"{handle.timings['scf_isdf_k_passes']} passes "
+                          f'after K({d}, {omega}), not {passes}')
+    assert handle.timings['scf_requests_k'] == len(requests)
+    assert not faults, faults
+
+
 def test_the_df_scf_keeps_blas_at_one_thread(monkeypatch):
     """On the same emulated node, the density-fitted PBE0 SCF over two ranks:
     its J/K (pyscf's contraction of the fitted rows) and `nr_rks` at one
-    BLAS thread -- the ISDF handle's stages are the only ones given the pool
-    back."""
+    BLAS thread; only the ISDF handle's stages get the pool back."""
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mfs = [dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
            for _ in range(2)]

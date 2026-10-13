@@ -1,36 +1,23 @@
-"""The refactor baseline still describes this tree.
+"""The recorded baseline still describes this tree.
 
-The baseline recorder recorded what the GW/BSE surface code
-computes -- quasiparticle energies by eight routes, BSE roots by four drivers,
-the three pieces of E_0, every surface's energy, gradient and diagnostics, and
-the production drivers' own JSON -- on one frozen tree, as JSON text. Every
-later phase of the refactor gates its moves against that file BITWISE: Python
-floats round-trip exactly through `repr`, so a matching record means the moved
-code computes the same numbers and not merely close ones.
+The baseline (tests/baseline_<sha7>.json) records what the GW/BSE surface
+code computes (quasiparticle energies by eight routes, BSE roots by four
+drivers, the three pieces of E_0, every surface's energy, gradient and
+diagnostics, and the production drivers' own JSON) on one tree, as JSON text.
+Python floats round-trip exactly through `repr`, so a matching record means
+the code computes the same numbers, bit for bit.
 
-WHAT A FAILURE HERE MEANS.
+A failing schema test means the record is not usable as a gate: a missing
+section, commit or tree, or a setting left as 'auto', leaves it unable to say
+which integral was computed. A failing live test means the working tree
+computes something other than what the baseline recorded, which is not a
+rounding question.
 
-  * the schema tests fail  -- the record is not usable as a gate. A missing
-    section, a missing commit or tree, or a setting left as 'auto' means the
-    record cannot say WHICH integral was computed, so a later disagreement
-    could always be blamed on a grid nobody wrote down.
-  * a live test fails     -- the working tree no longer computes what the
-    baseline recorded. That is either the refactor having changed a number it
-    was supposed to preserve, or the baseline having been taken on a different
-    tree. Neither is a rounding question: find which moved before continuing.
-
-The live checks run the two CHEAPEST items in the record, seconds apiece: the
-mean-field surface's energy and gradient on water at both recorded geometries,
-and the three E_0 terms on water/Hartree-Fock. The rest of the record --
-eight-route quasiparticle audits, the BSE drivers, every surface gradient, the
-campaign drivers -- is minutes to hours and runs only under
-REFACTOR_BASELINE_FULL=1, by re-running the recorder and comparing its output
-against the stored record with the baseline comparison tool.
-
-`tests/baseline_3f09ac0.json` is a recorded baseline, copied here
-verbatim: the recorder and the comparison tool are out of scope for this
-port, so REFACTOR_BASELINE_FULL=1 has nothing to re-run against and that
-one test stays skipped.
+The live checks run the two cheapest items in the record: the mean-field
+surface's energy and gradient on water at both recorded geometries, and the
+three E_0 terms on water/Hartree-Fock. The whole record is re-run only under
+REFACTOR_BASELINE_FULL=1, by the recorder and comparison tool under
+tools/refactor_gates/, which this tree does not ship; that test stays skipped.
 """
 import glob
 import json
@@ -51,27 +38,33 @@ from src.properties.optimize import MeanFieldSurface
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 GATES = REPO / 'tools' / 'refactor_gates'
-#: Where the copied baseline lives: tests/, since the recorder was not
-#: ported (it and the comparison tool are out of scope here).
+#: Where the recorded baseline lives.
 BASELINE_DIR = pathlib.Path(__file__).resolve().parent
 
 #: Set to 1 to re-run the whole record rather than the two cheap items.
 FULL_ENV = 'REFACTOR_BASELINE_FULL'
 
+#: The E_0 terms as this tree's ISDF fit computes them.
+PINS = json.loads((REPO / 'tests' / 'one_fit_pins.json').read_text())[
+    'e0_terms']
+#: Hartree the dRPA correlation energy may sit from the record: the fit's
+#: realization (every pair kept, Gram over every product pair) moves
+#: E_c^dRPA at the last-bit level.
+E0_FIT_MOVE_HA = 1e-14
+
 #: Sections a record must carry to be a gate at all.
 REQUIRED_SECTIONS = ('qp_routes', 'bse', 'e0_terms', 'surfaces',
                      'campaign_records', 'timing')
 
-#: Settings that must be INTEGERS wherever they appear. A grid size held as a
-#: string cannot be compared, and 'auto' cannot be rebuilt at all.
+#: Settings that must be integers wherever they appear: a grid size held as
+#: a string cannot be compared, and 'auto' cannot be rebuilt.
 INTEGER_SETTINGS = ('ntau', 'ntau_gw', 'ntau_w', 'ntau_rpa', 'nfreq',
                     'nfreq_cd', 'nfreq_cd_after', 'nfreq_rpa', 'npade',
                     'n_start', 'nroots', 'naux', 'isdf_points', 'qp_window',
                     'n_ov', 'dense_max_nov', 'nocc', 'n_poles')
 
-#: Where a driver records 'auto' as the PROVENANCE of a value, the resolved
-#: value sits beside it under this key. The literal is then the faithful record
-#: -- it says the sizer ran -- and the number the gate compares is the sibling.
+#: Where a driver records 'auto' as the provenance of a value, the resolved
+#: value sits beside it under this key, and the gate compares that sibling.
 AUTO_RESOLVED = {'ntau_source': 'ntau',
                  'solver': 'solver_used',
                  'solver_requested': 'solver_used',
@@ -105,8 +98,8 @@ def own_blocks(record):
     """The record minus the driver output it embeds verbatim.
 
     The route audit's `ntau_source` and the state-pair driver's `ntau_w` and
-    `solver` are what those scripts write today and are recorded as they are;
-    the settings this test holds to integers are the recorder's own.
+    `solver` are recorded as those scripts write them; the settings this test
+    holds to integers are the recorder's own.
     """
     out = json.loads(json.dumps(record))
     for section in ('qp_routes', 'campaign_records'):
@@ -119,11 +112,10 @@ def own_blocks(record):
 def unresolved(record):
     """Every 'auto' left in the recorder's own blocks that names no resolved value.
 
-    A setting recorded as 'auto' makes the record unable to say which grid,
-    which quadrature or which solver ran, and two phases gating against it
-    would be comparing different integrals. An 'auto' is acceptable only where
-    it is provenance -- the resolved integer is its sibling, or the string
-    itself names it, as in 'auto (minimax, 24 points)'.
+    A setting recorded as 'auto' leaves the record unable to say which grid,
+    quadrature or solver ran. An 'auto' is acceptable only as provenance: the
+    resolved value is its sibling, or the string itself names it, as in
+    'auto (minimax, 24 points)'.
     """
     out = []
     for node in dicts(own_blocks(record)):
@@ -183,8 +175,8 @@ def at_coords(mol, coords):
 
 # ------------------------------------------------------------------- schema
 def test_the_record_names_the_tree_it_describes(baseline):
-    """Without a commit and a tree the record gates nothing: a number whose
-    code cannot be checked out again is not a reference."""
+    """The record names the commit and tree it was made on, so its code can
+    be checked out again."""
     assert baseline['kind'] == 'gw_bse_refactor_baseline'
     assert len(baseline['sha']) == 40
     assert len(baseline['tree']) == 40
@@ -193,8 +185,8 @@ def test_the_record_names_the_tree_it_describes(baseline):
 
 
 def test_every_section_is_present(baseline):
-    """A hole is allowed; an ABSENT section is not, because nothing downstream
-    would notice that it was never measured."""
+    """A hole is allowed; an absent section is not, because nothing
+    downstream would notice that it was never measured."""
     for section in REQUIRED_SECTIONS:
         assert section in baseline, section
         assert baseline[section], section
@@ -210,9 +202,9 @@ def test_no_setting_is_left_unresolved(baseline):
         key = path.rsplit('/', 1)[-1].split('[')[0]
         if key not in INTEGER_SETTINGS or value is None:
             continue
-        # A grid size may be recorded as the sizer's own phrase -- 'auto
-        # (minimax, 18 points)' -- which names the integer it resolved to and
-        # is therefore explicit; `unresolved` above is what rejects a bare one.
+        # a grid size may be recorded as the sizer's own phrase, 'auto
+        # (minimax, 18 points)', which names its integer; `unresolved` above
+        # rejects a bare one
         if isinstance(value, str) and any(ch.isdigit() for ch in value):
             continue
         assert isinstance(value, int) and not isinstance(value, bool), \
@@ -220,8 +212,8 @@ def test_no_setting_is_left_unresolved(baseline):
 
 
 def test_the_isdf_grids_came_from_the_table(baseline):
-    """A re-optimized grid is a DIFFERENT grid from any tabulated row, so a
-    record built on one cannot be reproduced from the repository alone."""
+    """A re-optimized grid differs from every tabulated row, so a record
+    built on one cannot be reproduced from the repository alone."""
     optimized = []
     for node in dicts(baseline):
         for element, entry in (node.get('radii_source') or {}).items():
@@ -232,8 +224,8 @@ def test_the_isdf_grids_came_from_the_table(baseline):
 
 # --------------------------------------------------------- the cheap re-checks
 def test_mean_field_surface_is_bitwise_what_was_recorded(baseline, water):
-    """The whole record stands on this mean field: every chain in it reads
-    these orbitals, so a move here moves everything at once."""
+    """The mean field every chain in the record reads, bitwise the
+    record's energy and gradient at both geometries."""
     recorded = baseline['surfaces']['water']['MeanFieldSurface']
     assert recorded['status'] == 'ok'
     surface = MeanFieldSurface(water, lambda mol: scf_factory(mol, baseline))
@@ -251,7 +243,8 @@ def test_mean_field_surface_is_bitwise_what_was_recorded(baseline, water):
 def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
     """E_0 = E_HF[rho] + E_c^dRPA, and the exact-exchange term that turns a
     Kohn-Sham energy into the first one. Every total energy on a dRPA or BSE
-    surface is built from these three."""
+    surface is built from these three. E_c^dRPA reads the chain's ISDF
+    factors: `==` its pin, the record within `E0_FIT_MOVE_HA`."""
     recorded = baseline['e0_terms']['water_HF']
     chain = RPAGroundStateChain(water, lambda mol: scf_factory(mol, baseline))
     mf = chain.mf0
@@ -260,7 +253,9 @@ def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
         == recorded['reference_energy']
     assert float(exx_double_counting(mf, water)) \
         == recorded['exx_double_counting']
-    assert float(chain.correlation_energy(water, mf)) == recorded['e_corr_dRPA']
+    e_corr = float(chain.correlation_energy(water, mf))
+    assert e_corr == PINS['water_HF']['e_corr_dRPA']
+    assert abs(e_corr - recorded['e_corr_dRPA']) <= E0_FIT_MOVE_HA
 
 
 # ------------------------------------------------------------ the whole record

@@ -106,6 +106,26 @@ def solve_qp_equation_newton(func, e_start, deriv_func=None, tol=QP_NEWTON_TOL, 
     return w
 
 
+class PoleGuardRefusal(RuntimeError):
+    """The guarded Newton gave up against a pole of G.
+
+    orbital: p, whose root was sought; blocker: q, the orbital energy the
+    iterate was last pinned against (None if it never was); band: the guard
+    in force at the end; last: the last iterate. The contour deformation's
+    self-energy is continuous through every orbital energy
+    (`cd_integral_weights`), so no finer grid answers a refusal: it is the
+    guard's floor (`QP_POLE_OFFSET_MIN`) or a self-energy with a genuine pole
+    there.
+    """
+
+    def __init__(self, message, orbital, blocker, band, last):
+        super().__init__(message)
+        self.orbital = orbital
+        self.blocker = blocker
+        self.band = band
+        self.last = last
+
+
 def solve_qp_equation_newton_batch(func, e_start, deriv_func=None, tol=QP_NEWTON_TOL,
                                    max_iter=QP_NEWTON_MAX_ITER, damping=1.0):
     """Vectorized Newton-Raphson for N independent QP equations f_p(w_p)=0, batched so func can use one vectorized self-energy call.
@@ -148,13 +168,12 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
                                      linear_offset=QP_POLE_OFFSET):
     """(w, Z) of w = eps_p + xc_correction + Sigma(w), Newton HELD OFF THE POLES.
 
-    f(w) = w - eps_p - xc_correction - Sigma(w) has a pole at every orbital
-    energy, because the self-energy does: a quasiparticle route that deforms
-    the frequency contour (`GW.contour_deformation`) puts the pole of G at
-    omega = eps_q ON the contour, where the imaginary-axis integrand collapses
-    onto nu = 0 and no quadrature resolves it. The iterate is therefore kept
-    `pole_offset` away from every eps_q, and the three things that can go wrong
-    around such a pole are each answered here rather than returned as a number.
+    The iterate is kept `pole_offset` away from every orbital energy. On the
+    deformed contour (`GW.contour_deformation`) eps_q is a pole of G, through
+    which Sigma is continuous (`cd_integral_weights`), so the band costs no
+    accuracy: it sets the start and the path a frozen surface records. A
+    generic Sigma may have a pole there, and the three things that can go
+    wrong around one are each answered here rather than returned as a number.
 
     sigma, slope : callbacks Sigma(w) and dSigma/dw at fixed everything else.
                    Each decides its own residue set, so the branch of Sigma
@@ -193,7 +212,7 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
     frozen = not relax_offset
     if guard_out is not None:
         guard_out['pole_offset'] = offset
-    last_push = None
+    pushes = []
     blocker = None
     was_pinned = False
     for _ in range(max_iter):
@@ -202,12 +221,16 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
         if pinned:
             q = int(np.argmin(gaps))
             w_push = float(eps[q] + np.sign(w - eps[q] or 1.0) * offset)
-            # A root INSIDE the band makes this a two-cycle, not a fixed
-            # point: the Newton step carries the iterate off the guard and the
-            # guard puts it back, forever. The tell is the SAME pushed value
-            # twice. Yield the margin rather than the answer -- shrinking costs
-            # quadrature accuracy, cycling costs the whole calculation.
-            if (last_push is not None and abs(w_push - last_push) < tol
+            # A root INSIDE the band makes this a cycle, not a fixed point:
+            # the Newton step carries the iterate off the guard and the guard
+            # puts it back, forever. The tell is a pushed value that RECURS
+            # within one band, not only the same one twice in a row: a root
+            # inside the band of its own orbital overshoots across eps_p, the
+            # guard pushes it out on the other side, the step from there lands
+            # outside the band, and the next step falls back in, a three-cycle
+            # +offset, -offset, free, whose consecutive pushes never agree.
+            # Yield the margin rather than the answer.
+            if (any(abs(w_push - v) < tol for v in pushes)
                     and offset > offset_min):
                 if frozen:
                     # A FROZEN GUARD THAT DOES NOT REACH THE ROOT IS NEWS. The
@@ -226,7 +249,9 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
                 if guard_out is not None:
                     guard_out['pole_offset'] = offset
                 w_push = float(eps[q] + np.sign(w - eps[q] or 1.0) * offset)
-            last_push = w_push
+                # a new band starts its own record of where it pushed
+                pushes = []
+            pushes.append(w_push)
             blocker = q
             w = w_push
         was_pinned = pinned
@@ -252,14 +277,14 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
         # is a property of the SPECTRUM and says which one to look at.
         where = ('' if blocker is None else
                  f' The iterate was pinned against orbital {blocker} at '
-                 f'eps={eps[blocker]:.6f} Ha with the root near {w:.6f} Ha, '
+                 f'eps={eps[blocker]:.6f} Ha and ended at {w:.6f} Ha, '
                  f'{abs(w - eps[blocker]):.1e} Ha away'
                  + (' -- the same orbital.' if blocker == p else
                     f', not p={p} (eps={eps[p]:.6f}).'))
         if blocker is not None and blocker != p and linearize_on_capture:
-            # CAPTURE BY A POLE, NOT A ROOT. f(w) = w - eps_p - xc - Sigma(w)
-            # has a pole at every eps_q, where it runs to +-infinity; Newton
-            # near one takes ever smaller steps and converges ONTO it. The tell
+            # CAPTURE BY A POLE, NOT A ROOT. Where Sigma has a pole at eps_q,
+            # f(w) = w - eps_p - xc - Sigma(w) runs to +-infinity and Newton
+            # near it takes ever smaller steps and converges ONTO it. The tell
             # is a pin against q != p: a genuine quasiparticle root of orbital
             # p has no reason to sit 1e-4 Ha from a DIFFERENT orbital energy,
             # and the pole strength there goes to zero because dSigma/dw
@@ -288,29 +313,35 @@ def solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
                 RuntimeWarning, stacklevel=2)
             sp = slope(w)
             return w, 1.0 / (1.0 - sp)
-        raise RuntimeError(
+        # Say which limit was hit. Only a band at the floor states that the
+        # root sits within offset_min of a pole; a band above it means the
+        # iteration ran out of steps while the guard was still yielding. An
+        # iteration the guard never held has no pole to blame.
+        why = ('' if blocker is None else
+               f" A root within {offset_min:.0e} Ha of an orbital energy "
+               f"cannot be resolved by this quadrature and no offset "
+               f"resolves both." if offset <= offset_min else
+               f" The band had not reached its {offset_min:.0e} Ha floor: "
+               f"the iteration ran out of steps while the guard was still "
+               f"yielding, against a self-energy with a pole there.")
+        raise PoleGuardRefusal(
             f"CD quasiparticle Newton for p={p} did not converge in "
             f"{max_iter} steps; the last pole guard was {offset:.1e} Ha."
-            + where +
-            f" A root within {offset_min:.0e} Ha of an orbital energy "
-            f"cannot be resolved by this quadrature and no offset resolves "
-            f"both.")
+            + where + why, orbital=p, blocker=blocker, band=offset, last=w)
     if offset != pole_offset:
         warnings.warn(
             f'the quasiparticle root of orbital {p} lies inside the '
             f'{pole_offset:.0e} Ha pole guard, so the guard was relaxed to '
-            f'{offset:.1e} Ha to reach it. The self-energy quadrature is less '
-            f'accurate that close to the pole; the root is still converged to '
+            f'{offset:.1e} Ha to reach it; the root is converged to '
             f'{tol:.0e}.', RuntimeWarning, stacklevel=2)
     sp = slope(w)
     z = 1.0 / (1.0 - sp)
     if z < z_min and linearize_on_capture:
         # CONVERGENCE IS NOT EVIDENCE OF THE RIGHT ROOT. f has a zero just to
-        # either side of every pole and Newton is drawn to them; those are
-        # satellites, and Z collapses because dSigma/dw diverges there. This
-        # catches the case the guard does NOT -- where the iteration converged
-        # cleanly onto one instead of cycling against it, which is the same
-        # situation resolved by rounding rather than by the physics.
+        # either side of every pole of Sigma and Newton is drawn to them:
+        # satellites, where Z collapses because dSigma/dw diverges. This
+        # catches what the guard does not, an iteration that converged
+        # cleanly onto one instead of cycling against it.
         w_lin = float(eps[p] + (linear_offset if p < nocc
                                 else -linear_offset))
         s_lin = sigma(w_lin)

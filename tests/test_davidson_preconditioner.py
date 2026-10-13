@@ -6,8 +6,9 @@ the fit's own gauge from the block action's factors,
 
     (ii|W|aa) = [D^T (X_o o X_o)]^T W [D^T (X_v o X_v)],
 
-each rank's grid rows giving a partial of the fitted squares tile by tile,
-ONE reduction completing them, or on request ('bare') d alone. Gated here:
+each fixed grid tile's fitted squares formed whole by one rank and the tiles
+added in tile order (`ordered_chain_sum`), or on request ('bare') d alone.
+Gated here:
 
   * THE DEFAULT IS SCREENED at every entry point, and the bare path, asked
     for explicitly, never forms the screened diagonal and times nothing for
@@ -17,12 +18,9 @@ ONE reduction completing them, or on request ('bare') d alone. Gated here:
     action's own diag(A), which carries no Hartree term; TDHF's bare-Coulomb
     diagonal likewise; the DF route's diagonal from C_oo and C_vv the ISDF
     one; RPA's d itself;
-  * THE ROW REDUCTION passes `reduced_sum_verdict` on every rank at 2, 3
-    and 8 simulated ranks, whole and sliced factors: every rank's partial is
-    its own tiles' addends in tile order, bitwise, and the reduced sum lies
-    within the join bound of the partials' exact sum; a rank adding its tiles
-    in reverse fails the partial part and one dropping a tile fails the
-    bound; every rank returns rank 0's diagonal, within 1e-13 of the serial;
+  * THE TILE ORDER: every rank's diagonal is the serial one bitwise at 2, 3,
+    5 and 8 simulated ranks, whole and sliced factors; one tile's addend on
+    rank 1 moved 1e-12 relative, or dropped, fails it;
   * THE ROOTS with it on lie within ROOT_TOL of the bare-preconditioned ones
     at 1e-5, every root converged, for the BSE singlet and triplet, TDHF and
     RPA (bitwise, d alone) on the ISDF action and the BSE singlet on the DF
@@ -47,15 +45,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.constants import (DAVIDSON_PRECONDITIONER,
                                 DAVIDSON_PRECONDITIONERS)
 from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
+from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
+                                     run_simulated)
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import davidson
 from src.SingleReference.LinearResponse.davidson import (
-    df_block_action, diagonal_tiles, isdf_bse_factors, isdf_block_action,
-    isdf_df_coefficients, self_pair_densities, solve_bse_df, solve_bse_isdf,
-    solve_casida_davidson)
+    df_block_action, isdf_bse_factors, isdf_block_action,
+    isdf_df_coefficients, solve_bse_df, solve_bse_isdf, solve_casida_davidson)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from tests.reduction_bounds import reduced_sum_verdict
 from tests.test_distributed_fit_mpi import relative, roots_resolution
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -76,6 +73,8 @@ GATE_TILE = 64
 #: Pair rows per trial-space tile where a gate splits benzene's pair space.
 PAIR_TILE = 64
 RANK_SIZES = [2, 3, 8]
+#: Rank counts the diagonal is gated bitwise at, against one rank.
+DIAGONAL_SIZES = [2, 3, 5, 8]
 MODES = [('BSE', 'singlet'), ('BSE', 'triplet'), ('TDHF', 'singlet'),
          ('RPA', 'singlet')]
 
@@ -155,9 +154,9 @@ def test_the_default_is_screened():
 
 
 def test_the_bare_path_never_forms_the_screened_diagonal(systems):
-    """Asked for 'bare' -- no longer the default, the default preconditioner
-    is now the screened diagonal -- the action's screened diagonal is never
-    called, the corrections read d, and nothing is timed for it."""
+    """Asked for 'bare' (the default is the screened diagonal), the action's
+    screened diagonal is never called, the corrections read d, and nothing is
+    timed for it."""
     s = systems['water']
     act, diag = isdf_block_action(lr_of(s), s['nocc'], True, s['W_aux'],
                                   s['factors'])
@@ -211,24 +210,6 @@ def test_the_diagonal_is_the_dense_oracles(systems, name):
     assert act_df.screened_diagonal() is diag_df
 
 
-def recorded_reductions(monkeypatch, shape):
-    """{rank: (the partial it handed the reduction, what it received)} of the
-    `shape` sums `davidson` reduces."""
-    seen = {}
-    real = davidson.reduce_sum
-
-    def recording(a, comm):
-        if comm is None or a.shape != shape:
-            return real(a, comm)
-        sent = a.copy()
-        real(a, comm)
-        seen[comm.Get_rank()] = (sent, a.copy())
-        return a
-
-    monkeypatch.setattr(davidson, 'reduce_sum', recording)
-    return seen
-
-
 def rank_diagonal(comm, s, sliced):
     """This rank's screened diagonal on its grid rows, whole or sliced
     factors."""
@@ -243,84 +224,50 @@ def rank_diagonal(comm, s, sliced):
     return act.screened_diagonal()
 
 
-def row_verdicts(s, size, seen, sliced):
-    """(every rank's diagonal, every rank's `reduced_sum_verdict`) at `size`."""
-    X, D = s['factors'][0], s['factors'][1]
-    nocc, npts = s['nocc'], len(s['factors'][0])
-    X_o, X_v = np.ascontiguousarray(X[:, :nocc]), np.ascontiguousarray(X[:, nocc:])
-    seen.clear()
-    out = run_simulated(rank_diagonal, size, s, sliced)
-    pieces, owners = [], []
-    for r in range(size):
-        mine = diagonal_tiles(*contiguous_block(npts, r, size), GATE_TILE)
-        owners.append(list(range(len(pieces), len(pieces) + len(mine))))
-        pieces += mine
-    addends = [self_pair_densities(D, X_o, X_v, [p]) for p in pieces]
-    whole = self_pair_densities(D, X_o, X_v, pieces)
-    verdicts = [reduced_sum_verdict(whole, addends, owners, r, *seen[r])
-                for r in range(size)]
-    return out, verdicts, whole
-
-
 @pytest.mark.parametrize('sliced', [False, True], ids=['whole', 'sliced'])
-@pytest.mark.parametrize('size', RANK_SIZES)
-def test_the_row_reduction_is_within_its_join_bound(systems, monkeypatch,
-                                                    size, sliced):
-    """Every rank hands the ONE reduction its own grid tiles' addends in
-    tile order and receives the partials' sum within the join bound; every
-    rank returns rank 0's diagonal, the serial one's to 1e-13."""
+@pytest.mark.parametrize('size', DIAGONAL_SIZES)
+def test_the_diagonal_is_the_one_rank_bits(systems, monkeypatch, size,
+                                           sliced):
+    """Every rank's screened diagonal is the serial one bitwise: each fixed
+    grid tile's addend formed whole by one rank, the addends added in tile
+    order (`ordered_chain_sum`)."""
     s = systems['benzene']
     monkeypatch.setattr(davidson, 'DAVIDSON_DIAGONAL_TILE', GATE_TILE)
-    npts = len(s['factors'][0])
-    assert npts > 3 * size * GATE_TILE          # several tiles on every rank
-    naux, nmo = s['factors'][1].shape[1], len(s['eps'])
-    seen = recorded_reductions(monkeypatch, (naux, nmo))
-    out, verdicts, whole = row_verdicts(s, size, seen, sliced)
-    for v in verdicts:
-        assert v.serial and v.partial and v.ratio <= 1.0, v
-    for got in out:
-        assert np.array_equal(got, out[0])
+    assert len(s['factors'][0]) > 3 * size * GATE_TILE    # several per rank
     act, diag = isdf_block_action(lr_of(s), s['nocc'], True, s['W_aux'],
                                   s['factors'])
     serial = act.screened_diagonal()
-    assert np.abs(out[0] - serial).max() <= ORACLE_TOL * np.abs(
-        diag - serial).max()
-    # the serial fitted squares on the grid's own tiles, cut nowhere
-    X, D, nocc = s['factors'][0], s['factors'][1], s['nocc']
-    one = self_pair_densities(D, np.ascontiguousarray(X[:, :nocc]),
-                              np.ascontiguousarray(X[:, nocc:]),
-                              diagonal_tiles(0, npts, GATE_TILE))
-    assert np.abs(one - whole).max() <= ORACLE_TOL * np.abs(one).max()
+    out = run_simulated(rank_diagonal, size, s, sliced)
+    for r, got in enumerate(out):
+        assert np.array_equal(got, serial), (size, r)
+    print(f'[info] {size} ranks, {"sliced" if sliced else "whole"}: '
+          'every rank the serial diagonal bitwise')
 
 
-@pytest.mark.parametrize('plant', ['reversed', 'dropped'])
-def test_a_misordered_or_short_partial_fails_the_verdict(systems, monkeypatch,
-                                                         plant):
-    """The verdict is a gate: rank 1 adding its tiles in reverse fails the
-    partial part; rank 1 leaving out its last tile fails the bound."""
+@pytest.mark.parametrize('plant', ['ulp', 'dropped'])
+def test_a_moved_or_dropped_tile_fails_the_diagonal(systems, monkeypatch,
+                                                    plant):
+    """The gate can fail: one tile's addend on rank 1 moved 1e-12 relative, or
+    dropped, and the diagonal is not the serial one."""
     s = systems['benzene']
-    size = 3
     monkeypatch.setattr(davidson, 'DAVIDSON_DIAGONAL_TILE', GATE_TILE)
-    naux, nmo = s['factors'][1].shape[1], len(s['eps'])
-    seen = recorded_reductions(monkeypatch, (naux, nmo))
-    npts = len(s['factors'][0])
-    rank1 = contiguous_block(npts, 1, size)
-    real = davidson.diagonal_tiles
+    act, _ = isdf_block_action(lr_of(s), s['nocc'], True, s['W_aux'],
+                               s['factors'])
+    serial = act.screened_diagonal()
+    real = davidson.self_pair_densities
 
-    def planted(r0, r1, tile):
-        tiles = real(r0, r1, tile)
-        if (r0, r1) != rank1:
-            return tiles
-        return tiles[::-1] if plant == 'reversed' else tiles[:-1]
+    def planted(*args, **kwargs):
+        out = real(*args, **kwargs)
+        comm = current_comm()
+        if comm is not None and comm.Get_rank() == 1:
+            if plant == 'dropped':
+                return np.zeros_like(out)
+            out.flat[0] *= 1 + 1e-12
+        return out
 
-    monkeypatch.setattr(davidson, 'diagonal_tiles', planted)
-    _, verdicts, _ = row_verdicts(s, size, seen, False)
-    assert verdicts[0].partial and verdicts[2].partial
-    if plant == 'reversed':
-        assert not verdicts[1].partial
-    else:
-        assert verdicts[1].partial is False
-        assert max(v.ratio for v in verdicts) > 1.0
+    monkeypatch.setattr(davidson, 'self_pair_densities', planted)
+    out = run_simulated(rank_diagonal, 3, s, False)
+    assert not any(np.array_equal(got, serial) for got in out), plant
 
 
 @pytest.mark.parametrize('mode,spin', MODES,

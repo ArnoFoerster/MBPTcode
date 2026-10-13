@@ -20,9 +20,7 @@ LUMO's converged root lands 2.8e-17 Ha apart. Z agrees bitwise in all six
 cases and the roots in five of six. `test_the_loop_is_not_the_guarded_newton`
 holds that equivalence at the level it really has.
 
-Every gate below was shown to fail once, by breaking in the source what the
-gate watches and running this file against it; each run was restored from a
-backup copy and the restore checked with `cmp`:
+Every gate below fails when the source it watches is broken:
 
   * the occupied sign dropped in production `denominators`, so every
     denominator reads omega - eps_q - Om_m: 6 fail. On water/cc-pVDZ it
@@ -282,16 +280,18 @@ def test_the_fit_is_the_old_fit_on_water(water):
     assert np.array_equal(start, _old_initial_poles(SOP_N_POLES, gap, top))
     for p in states(nocc):
         wc = wc_explicit(b[:, p, :], c_ov, d, nu)
+        # the reference relocation is production's with coalesced poles kept
+        # (merge_tol=None); the entry point merges them (SOP_POLE_MERGE_TOL)
         assert np.array_equal(
             prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                           bounds=(gap, top)),
+                           bounds=(gap, top), merge_tol=None),
             _old_fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
                            bounds=(gap, top))), p
         poles, amp = prod.sop_from_wc(wc, nu, eps, nocc)
-        old_poles = _old_fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                                   bounds=(gap, top))
-        assert np.array_equal(poles, old_poles), p
-        assert np.array_equal(amp, _old_pole_amplitudes(wc, old_poles, nu)), p
+        merged = prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
+                                bounds=(gap, top))
+        assert np.array_equal(poles, merged), p
+        assert np.array_equal(amp, _old_pole_amplitudes(wc, merged, nu)), p
 
 
 def test_the_closed_form_is_the_old_one(water):

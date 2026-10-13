@@ -156,6 +156,16 @@ def test_koseki_route_needs_no_density(formaldehyde):
                      two_electron='somf')
 
 
+def test_koseki_route_leaves_the_rinv_origin_where_it_found_it(formaldehyde):
+    """The effective-charge sum moves the 1/r origin onto each nucleus in
+    turn; a caller's own `int1e_rinv` afterwards must still see its origin."""
+    mol = formaldehyde[0]
+    with mol.with_rinv_origin((0.3, -0.2, 0.7)):
+        before = mol.intor('int1e_rinv')
+        soc_operator(mol, two_electron=None, one_electron='koseki')
+        assert np.array_equal(mol.intor('int1e_rinv'), before)
+
+
 # ------------------------------------------------- structure of the density
 def test_el_sayed_rule(formaldehyde):
     """G2. Formaldehyde's S1 and T1 are both n->pi*; T2 is pi->pi*.

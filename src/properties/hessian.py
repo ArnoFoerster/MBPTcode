@@ -12,11 +12,10 @@ silent because nothing raises. The ISDF FORCE is exact
 energy the SCF actually reported.
 
 IT PARALLELIZES WHERE THE ANALYTIC ONE DOES NOT. pyscf's Hessian is one task
-holding a whole allocation, and it dominates a surface scan: measured on
-azobenzene/cc-pVDZ at 8 threads, the SCF is 33.4 s, the gradient 10.6 s and
-the Hessian 1389.5 s -- forty-two SCFs. The 6N displaced gradients here are
-independent, so 6N/w of them run at a time and the wall time falls with the
-worker count even though the total work rises.
+holding a whole allocation, and it dominates a surface scan at the cost of
+tens of SCFs. The 6N displaced gradients here are independent, so 6N/w of
+them run at a time and the wall time falls with the worker count even though
+the total work rises.
 
 The cost ratio is 6N (SCF + gradient) against one analytic Hessian; the wall
 time is that divided by the workers.
@@ -27,19 +26,51 @@ Hessian, and an acoustic sum rule of 5.6e-08 against pyscf's 5.1e-04. Both
 diagnostics fall as h^2, which is the finite difference's own truncation and
 says there is nothing else left in them.
 
-IT DOES NOT WORK ON THE INTERPOLATED ROUTE and is refused there. The same
-molecule gives frequencies up to 590 cm^-1 away -- a 1421 cm^-1 mode comes out
-at 2012 -- and the diagnostics fall as h^1 rather than h^2, which is the
-signature of a force that is not the derivative of its own energy at the
-displaced geometries even though it gates at 7e-09 at the reference. That is a
-statement about the ISDF gradient and not about Hessians.
+ON THE INTERPOLATED ROUTE THE GRID DECIDES. The force is the exact derivative
+of the ISDF energy at every grid, but that energy depends on the orientation
+of each atom's interpolation cloud, and the covariant atomic frames turn the
+clouds as the atoms move. On a coarse grid the surface is then rough on a
+1e-3 Bohr scale: the step falls outside its Taylor radius, the asymmetry grows
+with h, and even the h -> 0 force constants are wrong (formaldehyde at 148
+points per atom: a 1421 cm^-1 mode at 2646). Below `ISDF_HESSIAN_MIN_GRID` the
+Hessian is refused; at it formaldehyde's frequencies sit within 11 cm^-1 of
+the density-fitted route's, and the asymmetry falls as h^2.
+
+EVERY DISPLACED MEAN FIELD FITS ON THE REFERENCE GEOMETRY'S PAIR LAYOUT. The
+ISDF-K fit screens its AO pairs against `pair_tol`, a discrete choice. If
+each displaced SCF screened its own pairs, a pair crossing the threshold
+between R0 - h and R0 + h would make the two forces of one central difference
+forces of two different energies, and their difference over 2h an O(1/h)
+error in that column of the Hessian. `numerical_hessian` therefore takes the
+layout of the factory's mean field at R0 (`reference_pair_layout`) and builds
+every displaced mean field inside `frozen_pair_layout`, the way a walk does.
 """
 import numpy as np
 
 from src.Base.constants import (BOHR_TO_ANGSTROM,
                                 HESSIAN_FD_ASYMMETRY_TOL,
+                                HESSIAN_FD_NOISE_REL,
+                                HESSIAN_FD_STEP_RATIO,
+                                ISDF_GRID_ACCURACY,
+                                ISDF_HESSIAN_MIN_GRID,
                                 NUCLEAR_FD_STEP)
+from src.Base.distributed_isdf_jk import scf_pair_layout
+from src.Base.isdf_jk import ISDFJK, frozen_pair_layout
+from src.Base.separable_ri import _SHELL_ORDER
 from src.properties.optimize import mean_field_force
+from src.properties.surface import evaluate
+
+#: `numerical_hessian`'s default `pair_layout`: the layout of the factory's
+#: mean field at the reference geometry (`reference_pair_layout`).
+REFERENCE_LAYOUT = 'reference'
+
+#: Why a finite-difference Hessian of an ISDF-K mean field has a grid floor.
+ROUGH_GRID = ('the ISDF energy depends on the orientation of each atom\'s '
+              'interpolation cloud and the atomic frames turn the clouds as '
+              'the atoms move, so on a coarse grid the surface is rough on '
+              'the step\'s scale and its force constants are wrong even though '
+              'the force is exact (formaldehyde/cc-pVDZ/B3LYP: 1362 cm^-1 off '
+              'at 148 points per atom, 405 at G2, 11 at G3)')
 
 
 def displacement_list(natm, step=NUCLEAR_FD_STEP):
@@ -62,15 +93,88 @@ def displaced(mol, ia, x, sign, step=NUCLEAR_FD_STEP):
     return out
 
 
+def isdf_grid_counts(with_df):
+    """{element: (A1, A2, A3, B1) shell counts} of the grid an ISDFJK placed,
+    or None when its points were injected from outside."""
+    radii = with_df.grid_radii if with_df.grid_radii is not None else with_df.radii
+    if radii is not None:
+        return {el: tuple(len(np.atleast_1d(r.get(sh, []))) for sh in _SHELL_ORDER)
+                for el, r in radii.items()}
+    if with_df.coords is not None:
+        return None
+    mol = with_df.mol
+    counts = tuple(int(with_df.counts[sh]) for sh in _SHELL_ORDER)
+    return {mol.atom_pure_symbol(i): counts for i in range(mol.natm)}
+
+
+def require_hessian_grid(mf, level=ISDF_HESSIAN_MIN_GRID):
+    """Raise if `mf` is an ISDF-K mean field on a grid below `level`."""
+    with_df = getattr(mf, 'with_df', None)
+    if not isinstance(with_df, ISDFJK):
+        return
+    got = isdf_grid_counts(with_df)
+    if got is None:
+        raise NotImplementedError(
+            'this ISDF-K mean field was handed its interpolation points from '
+            f'outside, so its grid cannot be checked against the {level} '
+            f'floor a finite-difference Hessian needs: {ROUGH_GRID}.')
+    require_hessian_counts(mf.mol.basis, got, level)
+
+
+def require_hessian_counts(basis, counts, level=ISDF_HESSIAN_MIN_GRID):
+    """Raise unless every element's (A1, A2, A3, B1) shell counts at `basis`
+    reach the `level` grid a finite-difference ISDF-K Hessian needs.
+
+    The check of `require_hessian_grid` on the counts alone, so a driver can
+    refuse a Hessian grid before it converges the first SCF.
+    counts: {element: (A1, A2, A3, B1)}.
+    """
+    floor = ISDF_GRID_ACCURACY.get(str(basis).lower(), {}).get(level)
+    if floor is None:
+        raise NotImplementedError(
+            f'no ISDF grid is validated at {level} for {basis}, so a '
+            f'finite-difference Hessian of this ISDF-K mean field has no grid '
+            f'it may be built on: {ROUGH_GRID}.')
+    short = {el: tuple(c) for el, c in counts.items()
+             if any(n < f for n, f in zip(c, floor))}
+    if short:
+        listed = ', '.join(f'{el} {c}' for el, c in sorted(short.items()))
+        raise NotImplementedError(
+            f'a finite-difference Hessian of an ISDF-K mean field needs the '
+            f'{level} grid {tuple(floor)} at {basis} or more on every '
+            f'element, and this one has {listed}: {ROUGH_GRID}.')
+
+
 def gradient_at(mol, scf_factory, ia, x, sign, step=NUCLEAR_FD_STEP):
     """(natm, 3) analytic force at one displaced geometry.
 
     Through `mean_field_force`, not `mf.Gradients()`, so an ISDF mean field
     gets the force of ITS energy rather than of the fitted one -- the whole
-    point of differencing rather than calling pyscf's Hessian.
+    point of differencing rather than calling pyscf's Hessian. An ISDF mean
+    field below `ISDF_HESSIAN_MIN_GRID` is refused here.
     """
-    return np.asarray(mean_field_force(scf_factory(displaced(mol, ia, x, sign,
-                                                             step))))
+    mf = scf_factory(displaced(mol, ia, x, sign, step))
+    require_hessian_grid(mf)
+    return np.asarray(mean_field_force(mf))
+
+
+def reference_pair_layout(mol, scf_factory, map_fn=None):
+    """The AO-pair columns (mu, nu, weight) the ISDF-K fit of
+    `scf_factory`'s mean field at `mol` keeps (`scf_pair_layout`), which every
+    displaced mean field of a finite-difference Hessian about `mol` fits on;
+    None for a mean field without an ISDF-K fit.
+
+    One SCF, run as the single item of `map_fn`: under `mpi_map` one rank
+    converges it, inside `distributed(None)` like every displaced one, and
+    every rank receives that rank's arrays, so all ranks difference forces on
+    one layout.
+    """
+    runner = map if map_fn is None else map_fn
+
+    def one(_):
+        return scf_pair_layout(scf_factory(mol))
+
+    return list(runner(one, [0]))[0]
 
 
 def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
@@ -80,11 +184,11 @@ def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
     `pyscf.hessian` both expect. Returned SYMMETRIZED.
 
     info: a dict, filled with `asymmetry` -- max |H_ixjy - H_jyix| BEFORE the
-        symmetrization, which is the one number only the raw matrix carries. A
-        central difference makes the two halves differ solely through the
-        gradient's own noise divided by the step, so this measures the noise
-        floor at this step and NOT the truncation error. Diagnosing it after
-        the fact is impossible: the returned matrix is symmetric by
+        symmetrization, which is the one number only the raw matrix carries.
+        The two halves of a central difference of an exact force differ by
+        the force noise over the step plus the O(h^2) truncation, which is
+        what `check_hessian_noise` and `check_step_scaling` read. Diagnosing it
+        after the fact is impossible: the returned matrix is symmetric by
         construction and reports zero.
     """
     h = np.zeros((natm, natm, 3, 3))
@@ -128,63 +232,142 @@ def translation_residual(h):
 
 def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
                       verbose=False, info=None,
-                      asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL):
+                      asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL,
+                      pair_layout=REFERENCE_LAYOUT):
     """(natm, natm, 3, 3) Hessian by central differences of analytic forces.
 
     map_fn: anything with `map`'s signature, so the 6N independent displaced
         solves can be handed to a process pool. The default runs them in
         order, which is correct and slow.
+    pair_layout: the ISDF-K pair layout every displaced mean field fits on
+        (`frozen_pair_layout`). By default the one of the factory's mean field
+        at `mol` (`reference_pair_layout`, one more SCF); a caller holding
+        that mean field passes `scf_pair_layout(mf)` instead. None lets each
+        displaced mean field screen its own pairs, which puts an O(1/h) error
+        into every column across which a pair crosses `pair_tol`. Recorded in
+        `info` as `frozen_pairs` (None where no ISDF-K fit was frozen).
 
     The step is the property layer's `NUCLEAR_FD_STEP`. Differencing a GRADIENT
     rather than an energy is what makes 1e-3 Bohr comfortable here: the noise
     being divided by h is the force's, which on the interpolated route sits at
     its ~1e-9 Ha/Bohr reproducibility floor, so the Hessian inherits ~1e-6 --
     five orders below a typical force constant.
+
+    An asymmetry above the noise floor (`HESSIAN_FD_NOISE_REL`) is either h^2
+    truncation or a surface rough on the step's scale, and one step cannot
+    tell them apart: the 6N forces are then repeated at 2h and the asymmetry
+    must grow by `HESSIAN_FD_STEP_RATIO` (`check_step_scaling`). The returned
+    Hessian is the one at `step` either way.
     """
     natm = mol.natm
-    jobs = displacement_list(natm, step)
     runner = map if map_fn is None else map_fn
+    if isinstance(pair_layout, str) and pair_layout == REFERENCE_LAYOUT:
+        pair_layout = reference_pair_layout(mol, scf_factory, map_fn)
 
-    def one(item):
-        k, (ia, x, sign) = item
-        g = gradient_at(mol, scf_factory, ia, x, sign, step)
-        if verbose:
-            print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
-                  f'{"xyz"[x]} {"+" if sign > 0 else "-"}'
-                  f'{step * BOHR_TO_ANGSTROM:.5f} A  |g|max {np.abs(g).max():.3e}',
-                  flush=True)
-        return (ia, x, sign), g
+    def forces_at(h):
+        jobs = displacement_list(natm, h)
 
-    gradients = dict(runner(one, list(enumerate(jobs))))
+        def one(item):
+            k, (ia, x, sign) = item
+            # inside the job, so the block holds on whichever thread or rank
+            # runs it
+            with frozen_pair_layout(pair_layout):
+                g = gradient_at(mol, scf_factory, ia, x, sign, h)
+            if verbose:
+                print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
+                      f'{"xyz"[x]} {"+" if sign > 0 else "-"}'
+                      f'{h * BOHR_TO_ANGSTROM:.5f} A  |g|max '
+                      f'{np.abs(g).max():.3e}', flush=True)
+            return (ia, x, sign), g
+
+        return dict(runner(one, list(enumerate(jobs))))
+
+    gradients = forces_at(step)
     seen = {} if info is None else info
     h = hessian_from_gradients(gradients, natm, step, info=seen)
     seen['step'] = step
-    seen['gradients'] = len(jobs)
+    seen['gradients'] = len(gradients)
+    seen['frozen_pairs'] = (None if pair_layout is None
+                            else int(len(pair_layout[0])))
+    check_hessian_noise(h, seen, tol=asymmetry_tol)
+    if seen['asymmetry_rel'] > HESSIAN_FD_NOISE_REL:
+        twice = {}
+        hessian_from_gradients(forces_at(2.0 * step), natm, 2.0 * step,
+                               info=twice)
+        seen['asymmetry_2h'] = twice['asymmetry']
+        seen['gradients'] += 6 * natm
+        check_step_scaling(seen)
+    return h
+
+
+def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
+                    info=None, asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL):
+    """(natm, natm, 3, 3) Hessian of a surface's total energy at `mol` by
+    central differences of its force, on the conventions the surface froze.
+
+    The 6N displaced forces go through `evaluate`, one after another, each
+    over every rank of the region it runs in. `info` takes the asymmetry
+    and the sum rule (`hessian_from_gradients`), refused above
+    `asymmetry_tol` (`check_hessian_noise`).
+    """
+    jobs = displacement_list(mol.natm, step)
+    gradients = {}
+    for k, (ia, x, sign) in enumerate(jobs):
+        g, _, _ = evaluate(surface, displaced(mol, ia, x, sign, step))
+        gradients[(ia, x, sign)] = np.asarray(g)
+        if verbose:
+            print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
+                  f'{"xyz"[x]} {"+" if sign > 0 else "-"} |g|max '
+                  f'{np.abs(g).max():.3e}', flush=True)
+    seen = {} if info is None else info
+    h = hessian_from_gradients(gradients, mol.natm, step, info=seen)
+    seen['step'] = step
+    seen['gradients'] = len(gradients)
     check_hessian_noise(h, seen, tol=asymmetry_tol)
     return h
 
 
 def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL):
-    """Raise if the forces scattered too much for the difference to mean anything.
+    """Raise if the asymmetry is too large for the difference to mean anything.
 
     A SYMMETRIC MATRIX IS NOT EVIDENCE: `hessian_from_gradients` symmetrizes,
     so the asymmetry it measured beforehand is the only record of how far the
     two halves were apart, and nothing downstream can recover it. Left
-    unchecked the noise arrives as a low-frequency mode of the wrong sign --
-    the softest modes are the ones it reaches first, and they are the ones
-    carrying the Huang-Rhys weight.
+    unchecked it arrives as a low-frequency mode of the wrong sign -- the
+    softest modes are the ones it reaches first, and they are the ones
+    carrying the Huang-Rhys weight. Records `asymmetry_rel` in `info`.
     """
     scale = max(float(np.abs(np.asarray(h)).max()), 1e-30)
     rel = info['asymmetry'] / scale
+    info['asymmetry_rel'] = rel
     if rel <= tol:
         return
     raise RuntimeError(
-        f'the displaced forces scattered by {info["asymmetry"]:.2e} Ha/Bohr^2 '
-        f'({rel:.2e} of the largest force constant), above {tol:.1e}: at a '
-        f'step of {info["step"]:.1e} Bohr that is a force reproducibility of '
-        f'{info["asymmetry"] * info["step"]:.1e} Ha/Bohr, and the difference '
-        f'of two such forces carries more noise than curvature. A Hessian '
-        f'built from them puts imaginary modes at real minima. Either the '
-        f'force is not reproducible at this geometry -- build the same mean '
-        f'field twice and difference the forces -- or the step is too small '
-        f'for it.')
+        f'the finite-difference Hessian is asymmetric by {info["asymmetry"]:.2e} '
+        f'Ha/Bohr^2 ({rel:.2e} of the largest force constant), above '
+        f'{tol:.1e}, at a step of {info["step"]:.1e} Bohr. Either the forces '
+        f'are not reproducible at this geometry -- build the same mean field '
+        f'twice and difference the forces -- or the surface is not smooth on '
+        f'the scale of the step, which on an ISDF-K mean field means its grid '
+        f'is too coarse. A Hessian built from them puts imaginary modes at '
+        f'real minima.')
+
+
+def check_step_scaling(info, ratio=HESSIAN_FD_STEP_RATIO):
+    """Raise unless the asymmetry at 2h is the one at h times an h^2 ratio.
+
+    Truncation of a smooth surface grows the asymmetry fourfold per doubling;
+    a surface rough on the step's scale grows it less, force noise shrinks it.
+    Records `step_ratio` in `info`.
+    """
+    r = info['asymmetry_2h'] / max(info['asymmetry'], 1e-300)
+    info['step_ratio'] = r
+    lo, hi = ratio
+    if lo <= r <= hi:
+        return
+    raise RuntimeError(
+        f'the Hessian asymmetry grows by {r:.2f} from h = {info["step"]:.1e} '
+        f'to 2h ({info["asymmetry"]:.2e} -> {info["asymmetry_2h"]:.2e} '
+        f'Ha/Bohr^2), outside the [{lo}, {hi}] an O(h^2) truncation gives: the '
+        f'step is outside the surface\'s Taylor radius or the forces are '
+        f'noisy, and the force constants at this step are not converged.')

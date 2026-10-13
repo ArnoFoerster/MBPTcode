@@ -49,6 +49,7 @@ from src.SingleReference.ADC.static_correction import (
     build_mp2_static_correction_uhf_df,
     build_mp3_static_correction, build_mp3_static_correction_restricted,
     build_ccsd_static_correction, build_ccsd_static_correction_restricted,
+    build_density_static_correction_restricted,
     build_ccsdt_static_correction, build_ccsdt_static_correction_restricted,
     build_ks_static_correction, build_ks_static_correction_restricted,
     build_solvent_static_correction, build_solvent_static_correction_restricted,

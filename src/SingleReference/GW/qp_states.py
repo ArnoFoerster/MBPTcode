@@ -6,16 +6,19 @@ for every orbital is neither affordable nor meaningful: the deep states have no
 compressible self-energy, and a root that has walked past a neighbouring
 orbital energy is a satellite as often as a quasiparticle. So a surface names a
 SET. Inside it every orbital is solved; outside it every orbital keeps its
-mean-field eigenvalue plus a frozen scissor. Four declarations of that set are
+mean-field eigenvalue plus a frozen scissor. Five declarations of that set are
 in use:
 
     admitted   the orbitals Eq. (27) admits: |omega_p - eps_q| < Om_1 for every
                pole q the contour deformation sweeps, Om_1 the lowest neutral
                dRPA excitation. threshold='gap' tests against the particle-hole
                gap E_g, which the dRPA guarantees is a lower bound on Om_1 and
-               which needs no screening, no fit and no solve;
-               threshold='omega1' tests against a caller-supplied Om_1, which
-               is the condition itself and is tighter.
+               which needs no screening, no fit and no solve. Since
+               E_g <= Om_1, the reach measured in units of E_g is the larger
+               one, so the gap admits FEWER states than Om_1 would: every
+               orbital it admits, Om_1 admits too. threshold='omega1' tests
+               against a caller-supplied Om_1, which is the condition itself
+               and is looser.
     frontier   [nocc - half_width, nocc + half_width), widened until no
                degenerate block is split. Inside a degenerate subspace the
                eigenvectors are not determined, so giving one member of a pair
@@ -25,8 +28,12 @@ in use:
                optionally filtered on pole strength Z > QP_WINDOW_Z_MIN. The
                core is read off the molecule, so the window is chemical rather
                than a count of orbitals.
-    all        every orbital, which is the reference the other three are
+    all        every orbital, which is the reference the others are
                approximations to.
+    adaptive   the admitted orbitals as CANDIDATES, of which the surface
+               solves the subset an analytic-continuation GW at the reference
+               geometry selects (`qp_selection`); the rest of the window
+               carries per-orbital scissor tiers (`calibrate_scissor_tiers`).
 
 THE SET IS DECIDED ONCE, AT THE REFERENCE GEOMETRY, AND FROZEN. Membership is
 a discrete function of the mean-field spectrum, so a set re-decided at each
@@ -44,6 +51,14 @@ calibrated at the reference geometry on the explicitly solved roots
 nothing to the force beyond moving the diagonal -- which is what makes it safe
 for the deep states, whose leverage on a frontier quasiparticle is 0.05 meV per
 20 eV for the core and 3.6-10 meV per eV for the inner valence.
+
+A ROOT THAT IS NO QUASIPARTICLE LEAVES THE SET. A declaration names the
+orbitals before anything is solved, so it cannot know that the root the solve
+converges on has a pole strength outside (0, 1] (`is_quasiparticle_root`).
+The surface that solves the set rejects such a root at the reference geometry
+and moves its orbital to the scissor, with the reason recorded; the set is
+then frozen like everything else, and a rejected root at a displaced geometry
+is refused rather than demoted.
 """
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -82,8 +97,9 @@ def admitted_by_pole_condition(eps, nocc, p, limit):
 
     `compressible` is this test with limit fixed to the particle-hole gap, the
     dRPA lower bound on Om_1 that needs no solve. Passing the lowest dRPA root
-    instead tests the condition as it is written, which is tighter: the gap
-    admits states the true Om_1 does not.
+    instead tests the condition as it is written, which is looser: reach falls
+    as the limit grows, so with Om_1 >= E_g every state the gap admits is
+    admitted by Om_1 too, and Om_1 may admit some the gap does not.
 
     reach: the worst swept pole in units of `limit`. ok is reach < 1.
     """
@@ -91,6 +107,23 @@ def admitted_by_pole_condition(eps, nocc, p, limit):
     swept = residue_set(eps, nocc, omega)
     reach = max((abs(eps[q] - omega) for q, _ in swept), default=0.0) / float(limit)
     return bool(reach < 1.0), float(reach)
+
+
+def is_quasiparticle_root(z):
+    """Whether a converged root's pole strength Z = [1 - dSigma/dw]^-1 is a
+    quasiparticle's: 0 < Z <= 1.
+
+    A self-energy with positive spectral weights has dSigma/dw <= 0 wherever
+    it is finite, so every root of w = eps_p + Sigma(w) has Z in (0, 1]. A
+    root outside it sits on a branch only a negative weight can make: the
+    pole model's amplitudes are a least-squares fit, not spectral weights, and
+    a pole clipped onto the fit's lower bound E_g can carry one, which puts a
+    falling flank of Sigma next to an orbital at reach close to 1.
+
+    No tolerance: the bounds are those of the definition.
+    """
+    z = float(z)
+    return bool(0.0 < z <= 1.0)
 
 
 def particle_hole_gap(eps, nocc):
@@ -162,7 +195,7 @@ def resolve_qp_states(spec: QPStates, eps, nocc, *, degeneracy_tol,
     norb = len(eps)
     nocc = int(nocc)
     reach: Dict[int, float] = {}
-    if spec.kind == 'admitted':
+    if spec.kind in ('admitted', 'adaptive'):
         if spec.threshold == 'gap':
             tested = [compressible(float(eps[p]), eps, nocc)
                       for p in range(norb)]
@@ -196,9 +229,14 @@ def resolve_qp_states(spec: QPStates, eps, nocc, *, degeneracy_tol,
         name = 'all'
     explicit = tuple(sorted(int(p) for p in explicit))
     outside = tuple(p for p in range(norb) if p not in set(explicit))
+    label = f'{name}: {len(explicit)} of {norb} orbitals explicit'
+    if spec.kind == 'adaptive':
+        # The admitted window is the OUTER bound: the selection solves a
+        # subset of it and never an orbital outside it.
+        label = f'adaptive({name}) candidates: {len(explicit)} of {norb}'
     return ResolvedQPStates(
         explicit=explicit, outside=outside, spec=spec, reach=reach,
-        label=f'{name}: {len(explicit)} of {norb} orbitals explicit')
+        label=label)
 
 
 def frozen_scissor(scissor, p):
@@ -263,4 +301,23 @@ def calibrate_scissor(eps, nocc, roots, excluded):
     for p in excluded:
         near = min(probes, key=lambda q: abs(eps[q] - eps[int(p)]))
         out[int(p)] = deltas[near]
+    return out
+
+
+def calibrate_scissor_tiers(eps, roots, tier_of):
+    """Frozen shifts for the holes of an adaptive set, each from its own probe.
+
+    tier_of maps a hole to the explicit orbital, or the degenerate block of
+    explicit orbitals, whose shift it borrows; a block lends the MEAN of its
+    members' shifts, which does not depend on the rotation inside it. The map
+    is frozen at the reference geometry and the values are this geometry's
+    explicit roots minus eps, so the scissor is a number like
+    `calibrate_scissor`'s.
+    """
+    eps = np.asarray(eps, float)
+    out = {}
+    for p, probe in tier_of.items():
+        block = np.atleast_1d(probe).astype(int)
+        out[int(p)] = float(np.mean([float(roots[int(q)]) - eps[int(q)]
+                                     for q in block]))
     return out

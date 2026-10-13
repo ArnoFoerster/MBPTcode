@@ -14,7 +14,9 @@ The (transfer-q) rho contracts directly with the (transfer -q) L^{kp,km} block
 via the same aux-index contraction as PBCDFIntegrals.eri_block.
 """
 import numpy as np
-from src.SingleReference.Periodic.pbc_casida import _stacked_Lov, _transition_layout
+from pyscf.pbc.lib.kpts_helper import conj_mapping
+from src.SingleReference.Periodic.pbc_casida import (_screened_block, _stacked_Lov,
+                                                      _transition_layout)
 
 
 def kpoint_minus_q(dfints, q, kp):
@@ -54,68 +56,50 @@ def get_chi_b_vertex(dfints, q, W_all, X, Y, kp):
     """Vertex-correction transition amplitude chi_b^{S,q}[r @ kr, p @ kp] for
     target k-point kp, with kr = kp - q the internal k-point.
 
-    Periodic port of GW.transition_amplitudes.get_chi_b_vertex_df (restricted,
-    W-dressed). The vertex W-dressing entangles the exciton (i,a) with the
-    internal r and target p, so momentum conservation selects the exciton
-    ki = kr slice (a @ ka = ki + q = kp), and each of the four terms carries its
-    OWN internal W-transfer (occ/virt X vs Y). The four
-    molecular terms, with exciton i @ kr, a @ kp:
+    Periodic form of GW.transition_amplitudes.get_chi_b_vertex_df (restricted,
+    W-dressed). The exciton S of transfer q is the eigenvector v_S of the pair
+    space of that transfer, X on the excitations (a @ ki+q, i @ ki) and Y on
+    the de-excitations (j @ k+q, b @ k), which the time-reversal-adapted layout
+    stores in the slice kj = -(k+q). The amplitude closes the exciton with the
+    screened exchange, sum_pairs v (v p|W|r w)^*, over EVERY slice: the W
+    transfer kr - k changes from slice to slice. A virtual internal r takes
+    the pole at +Omega_S, eigenvector (X, Y); an occupied one the pole at
+    -Omega_S, eigenvector (Y, X):
 
-        chi_occ[k,p] = sum_ia X_ia (a_kp k_kr | i_kr p_kp)_W    [W at kr-kp = -q]
-                     + sum_ia Y_ia (a_kp p_kp | i_kr k_kr)_W    [W at 0]
-        chi_virt[c,p]= sum_ia X_ia (a_kp p_kp | i_kr c_kr)_W    [W at 0]
-                     + sum_ia Y_ia (a_kp c_kr | i_kr p_kp)_W    [W at kr-kp = -q]
+        chi_virt[c,p] = sum_k [ X_k,ia (a p|c i)^* + Y_-(k+q),jb (j p|c b)^* ]
+        chi_occ[l,p]  = sum_k [ Y_k,ia (a p|l i)^* + X_-(k+q),jb (j p|l b)^* ]
 
-    Returns (nstates, nmo, nmo): internal r @ kr (rows, occ then virt), target
-    p @ kp (cols). Reduces exactly to the molecular get_chi_b_vertex at nk=1.
-    Finite-q momentum is confirmed end-to-end by the self-energy comparison
-    against pyscf's krgw_ac (tests/test_pbc_self_energy.py).
+    with a @ k+q, i @ k, j @ k+q, b @ k. At nk = 1 these are the molecular
+    X (a p|i c) + Y (a c|i p) and X (a l|i p) + Y (a p|i l). Returns
+    (nstates, nmo, nmo): internal r @ kr (rows, occ then virt), target p @ kp
+    (cols).
     """
-    nk = dfints.nkpts
     nmo = dfints.nmo
     kconserv = dfints.kconserv_pair[q]
     kr = kpoint_minus_q(dfints, q, kp)            # internal k
-    ka = kconserv[kr]                             # = kp (exciton virtual k)
-    assert ka == kp
-    no_r, nv_r = dfints.nocc[kr], nmo - dfints.nocc[kr]
-    no_i = dfints.nocc[kr]
-    nv_a = nmo - dfints.nocc[kp]
-
-    # exciton ki=kr slice, reshaped (i in occ@kr, a in virt@kp, S)
+    cmap = conj_mapping(dfints.cell, dfints.kpts)
     offsets, N, nocc, nvirt = _transition_layout(dfints, kconserv)
-    sl = slice(offsets[kr], offsets[kr + 1])
     nstates = X.shape[1]
-    X_s = X[sl].reshape(no_i, nv_a, nstates)
-    Y_s = Y[sl].reshape(no_i, nv_a, nstates)
-
-    o_r = slice(0, dfints.nocc[kr])
-    v_r = slice(dfints.nocc[kr], nmo)
-    o_i = slice(0, dfints.nocc[kr])
-    v_a = slice(dfints.nocc[kp], nmo)
-
-    Q1 = dfints._pair_to_q(kp, kr)                # W transfer for the X/Y "-q" terms
-    Q0 = dfints._pair_to_q(kp, kp)                # W transfer 0
-    W1 = W_all[Q1]
-    W0 = W_all[Q0]
-
-    def scr(k1, k2, s1, s2, k3, k4, s3, s4, W):
-        L12 = dfints.Lblock(k1, k2)[:, s1, s2]
-        L34 = dfints.Lblock(k3, k4)[:, s3, s4]
-        return np.einsum('Pxy,PR,Rzw->xyzw', L12, W, L34)
-
-    # occ block: internal k @ kr (occ)
-    int_occ_X = scr(kp, kr, v_a, o_r, kr, kp, o_i, slice(0, nmo), W1)   # (a,k,i,p)
-    chi_occ = np.einsum('akip,iaS->kpS', int_occ_X, X_s)
-    int_occ_Y = scr(kp, kp, v_a, slice(0, nmo), kr, kr, o_i, o_r, W0)   # (a,p,i,k)
-    chi_occ += np.einsum('apik,iaS->kpS', int_occ_Y, Y_s)
-
-    # virt block: internal c @ kr (virt)
-    int_virt_X = scr(kp, kp, v_a, slice(0, nmo), kr, kr, o_i, v_r, W0)  # (a,p,i,c)
-    chi_virt = np.einsum('apic,iaS->cpS', int_virt_X, X_s)
-    int_virt_Y = scr(kp, kr, v_a, v_r, kr, kp, o_i, slice(0, nmo), W1)  # (a,c,i,p)
-    chi_virt += np.einsum('acip,iaS->cpS', int_virt_Y, Y_s)
+    allp = slice(0, nmo)
+    o_r, v_r = slice(0, nocc[kr]), slice(nocc[kr], nmo)
 
     chi = np.zeros((nstates, nmo, nmo), dtype=np.complex128)
-    chi[:, o_r, :] = chi_occ.transpose(2, 0, 1)
-    chi[:, v_r, :] = chi_virt.transpose(2, 0, 1)
+    for k in range(dfints.nkpts):
+        kq = kconserv[k]                          # k + q
+        kt = cmap[kq]                             # slice of the pair (j @ k+q, b @ k)
+        sd = slice(offsets[k], offsets[k + 1])
+        st = slice(offsets[kt], offsets[kt + 1])
+        Xd = X[sd].reshape(nocc[k], nvirt[kq], nstates)
+        Yd = Y[sd].reshape(nocc[k], nvirt[kq], nstates)
+        Xt = X[st].reshape(nocc[kq], nvirt[k], nstates)
+        Yt = Y[st].reshape(nocc[kq], nvirt[k], nstates)
+        # (a p|r i)^* and (j p|r b)^*, W at transfer kr - k
+        Ia = _screened_block(dfints, W_all, kq, kp, kr, k, slice(nocc[kq], nmo),
+                             allp, allp, slice(0, nocc[k])).conj()
+        Ij = _screened_block(dfints, W_all, kq, kp, kr, k, slice(0, nocc[kq]),
+                             allp, allp, slice(nocc[k], nmo)).conj()
+        chi[:, v_r] += (np.einsum('apri,iaS->Srp', Ia[:, :, v_r], Xd)
+                        + np.einsum('jprb,jbS->Srp', Ij[:, :, v_r], Yt))
+        chi[:, o_r] += (np.einsum('apri,iaS->Srp', Ia[:, :, o_r], Yd)
+                        + np.einsum('jprb,jbS->Srp', Ij[:, :, o_r], Xt))
     return chi
