@@ -27,6 +27,7 @@ S. J. Bintrim and T. C. Berkelbach, J. Chem. Phys. 156, 044114 (2022), eq 12.
 import math
 
 import numpy as np
+import scipy.linalg
 
 from src.Base.eri_blocks import MOEriBlocks
 from src.Base.utils.grids import minimax_time_grid
@@ -35,7 +36,7 @@ from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
-from src.SingleReference.GW.quasi_boson import RPA, QPqb
+from src.SingleReference.GW.quasi_boson import QPqb
 
 # (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
 # check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
@@ -134,23 +135,45 @@ def gw_modes_df(eps, B, nocc, screening='tda'):
     -------
     omega : ndarray, shape (nm,), Ω_m ascending, Hartree
     rho : ndarray, shape (naux, nm), index order (P, m): ρ_P,m = sum_jb B_P,jb
-        (X+Y)_jb,m on gw_modes' (X+Y), so W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m is
-        gw_modes' W up to the sign and the rotation of degenerate modes, which no
-        eq 66 quantity sees.
+        (X+Y)_jb,m with QPqb's normalisation sum_J (X-Y)_Jm (X+Y)_Jn = δ_mn, so
+        W^m_pq = sqrt(2) sum_P B_P,pq ρ_P,m is gw_modes' W up to the sign and the
+        rotation of degenerate modes, which no eq 66 quantity sees.
+
+    Notes
+    -----
+    build_rpa_AB's singlet blocks are A_ia,jb = δ_ij δ_ab Δ_ia + 2 (ia|jb) and
+    B_ia,jb = 2 (ia|jb), or 0 for TDA screening, with Δ_ia = ε_a - ε_i. A - B = Δ
+    is diagonal, so one symmetric eigh gives the modes at a few (nm, nm) arrays:
+
+        TDA:  A U = U Ω,                                (X+Y) = U,
+        RPA:  Δ^(1/2) (Δ + 4 (ia|jb)) Δ^(1/2) Z = Z Ω², (X+Y) = Δ^(1/2) Z Ω^(-1/2).
     """
     if screening not in ('tda', 'rpa'):
         raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
     eps = np.asarray(eps, float)
     no = nocc
     Bov = B[:, :no, no:].reshape(B.shape[0], -1)          # B_P,jb, (P, jb)
-    # build_rpa_AB's singlet blocks: A_ia,jb = δ_ij δ_ab (ε_a - ε_i) + 2 (ia|jb),
-    # B_ia,jb = 2 (ia|jb) or 0 for TDA screening, (ia|jb) = sum_P B_P,ia B_P,jb
-    K2 = 2.0 * (Bov.T @ Bov)
-    A = np.diag((eps[no:][None, :] - eps[:no][:, None]).ravel()) + K2
-    qb = RPA(A, np.zeros_like(K2) if screening == 'tda' else K2)
-    omega, U = qb.eigAbar
-    # ρ_P,m = sum_I B_P,I (X+Y)_I,m, (X+Y)_I,m = sum_J (e^t)_IJ U_J,m as in QPqb
-    return np.asarray(omega, float), Bov @ (qb.exp_t @ U)
+    d = (eps[no:][None, :] - eps[:no][:, None]).ravel()   # Δ_jb = ε_b - ε_j
+    # (ia|jb) = sum_P B_P,ia B_P,jb, times 2 for A (TDA), 4 for A + B (RPA)
+    C = (2.0 if screening == 'tda' else 4.0) * (Bov.T @ Bov)
+    C[np.diag_indices_from(C)] += d
+    if screening == 'tda':
+        # A U = U Ω; ρ_P,m = sum_I B_P,I U_I,m
+        # overwrite_a: LAPACK works in C itself rather than in a copy of it
+        omega, U = scipy.linalg.eigh(C, overwrite_a=True, check_finite=False)
+        del C
+        return omega, Bov @ U
+    sd = np.sqrt(d)
+    # Δ^(1/2)_I (A + B)_IJ Δ^(1/2)_J Z_J,m = Z_I,m Ω_m²
+    C *= sd[:, None]
+    C *= sd[None, :]
+    w2, Z = scipy.linalg.eigh(C, overwrite_a=True, check_finite=False)
+    del C
+    if w2[0] <= 0:
+        raise ValueError(f'RPA instability: lowest Omega^2 = {w2[0]:.3e}')
+    omega = np.sqrt(w2)
+    # ρ_P,m = sum_I B_P,I Δ^(1/2)_I Z_I,m Ω_m^(-1/2)
+    return omega, ((Bov * sd) @ Z) / np.sqrt(omega)
 
 
 def static_term_df(eps, B, rho, omega, nocc):

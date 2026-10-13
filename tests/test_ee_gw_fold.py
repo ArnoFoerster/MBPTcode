@@ -44,7 +44,9 @@ Checks, water (RHF, DF factors), basis per check:
      (1e-9);
      the folded singlets equal the W pieces' to 1e-6 eV; 1e-7 Ha below min D, where
      no tabulated grid reaches the target, and above min D, K is kernel_df's exact
-     kernel (1e-12 relative); a flip parity raises NotImplementedError.
+     kernel (1e-12 relative); a flip parity raises NotImplementedError;
+     gw_modes_df holds at most 6 (nm, nm) float64 arrays at once (traced peak,
+     water cc-pVTZ, both screenings).
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -382,6 +384,19 @@ def check_seeding_gap():
     return ok
 
 
+def traced_peak(fn):
+    """Bytes tracemalloc saw allocated at once while fn() ran, above its start."""
+    import tracemalloc
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1] - base
+    finally:
+        tracemalloc.stop()
+
+
 def check_streamed_kernel(eps, B, no):
     """pieces['K'], the eq 66 kernel streamed over slabs of k, of the W pieces and of
     the df pieces (kernel_df), against the same pieces' V, divide, Vt path at omega
@@ -398,18 +413,6 @@ def check_streamed_kernel(eps, B, no):
 
     def rel(a, b):
         return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
-
-    def traced_peak(fn):
-        # bytes tracemalloc saw allocated at once while fn() ran, above its start
-        import tracemalloc
-        tracemalloc.start()
-        base = tracemalloc.get_traced_memory()[0]
-        tracemalloc.reset_peak()
-        try:
-            fn()
-            return tracemalloc.get_traced_memory()[1] - base
-        finally:
-            tracemalloc.stop()
 
     live = ee_gw_pieces._K_LIVE
     for screening, df in (('tda', False), ('rpa', False), ('tda', True),
@@ -487,7 +490,7 @@ def check_laplace_kernel(eps, B, no):
     None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3 Ha,
     powers (1, 2) and (), to 1e-8 relative with its norm; the folded singlets to
     1e-6 eV; the exact kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
-    parity refused."""
+    parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays."""
     from src.Base.utils.time_frequency import minimax_points_for_accuracy
     ok = True
     nv = len(eps) - no
@@ -543,8 +546,9 @@ def check_laplace_kernel(eps, B, no):
         g = int(np.argmax(np.diff(lowest)))
         for label, w_at in (('1e-7 Ha below min D', d_min - 1e-7),
                             ('above min D', 0.5 * (lowest[g] + lowest[g + 1]))):
-            Yh = be.divide(P['V'](y1), P['D'] - w_at)
-            r1, n2h_ref = P['Vt'](Yh), P['dnorm2'](Yh)
+            # PL's own V, divide, Vt: a min D one ulp off would move 1/(D - w)
+            Yh = be.divide(PL['V'](y1), PL['D'] - w_at)
+            r1, n2h_ref = PL['Vt'](Yh), PL['dnorm2'](Yh)
             wsh, n2h = PL['K'](y1, w_at, (1,))
             d = max(rel(wsh[0].get(s), r1.get(s)) for s in ('aa', 'bb'))
             dn = abs(n2h - n2h_ref) / n2h_ref
@@ -558,6 +562,15 @@ def check_laplace_kernel(eps, B, no):
             ok &= check('parity' in str(exc),
                         f'{screening}: kernel_laplace refuses a flip parity',
                         str(exc)[:60])
+    # the modes' memory in units of one (nm, nm) float64 array, water cc-pVTZ: the
+    # RPA class's dense matrix functions held about 20 of them at once
+    _, e3, B3, n3 = water('cc-pvtz')
+    unit = 8 * (n3 * (len(e3) - n3)) ** 2
+    for screening in ('tda', 'rpa'):
+        units = traced_peak(lambda: ee_gw_pieces.gw_modes_df(e3, B3, n3,
+                                                             screening)) / unit
+        ok &= check(units <= 6, f'{screening}: gw_modes_df holds at most 6 (nm, nm) '
+                    'arrays at once', f'{units:.1f}, water cc-pVTZ')
     return ok
 
 
