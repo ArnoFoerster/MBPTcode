@@ -15,14 +15,3 @@ __pycache__/
 # regenerated on demand -- the shipped tables in data/ are the portable ones.
 src/Base/data/radii_cache/
 .claude/
-
-# Scratch calculation script, not part of the test suite.
-/run_scgw.py
-/run_scgw2.py
-/run_scgw_cycle.py
-/run_scgw_ir.py
-/run_scgw_ir_sigma0.py
-/run_scgw_Ne.py
-/test_frequencies.py
-/scgw2.py
-/run_scgw_ir
