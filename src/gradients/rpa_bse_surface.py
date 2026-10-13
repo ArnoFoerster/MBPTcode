@@ -33,7 +33,8 @@ import numpy as np
 
 from src.Base.declaration import ChargedExcitation, SurfacePhysics
 from src.Base.environment import environment_label
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.excited_state import (ExcitedStateChain,
+                                         replayed_first_point)
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.characters import orbital_fingerprint, track_orbital
@@ -484,9 +485,21 @@ class RPABSESurface:
         `excitation_gradient`, not `ExcitedStateChain.total_gradient`, which
         would add the mean-field force a second time.
         """
+        replay = replayed_first_point(self, mol)
+        if replay is not None:
+            return replay
         mol, mf = self.ground.mean_field(mol, mf)
-        g_0, e_0, d0 = self.ground.total_gradient(mol, mf)
-        g_om, d1 = self.excited.excitation_gradient(mol, mf)
+        ground = self.ground.total_gradient(mol, mf)
+        return self.composed(ground, self.excited.excitation_gradient(mol, mf))
+
+    @staticmethod
+    def composed(ground, excitation):
+        """(dE_nu/dR, E_nu, diagnostics) from the ground half's
+        (dE_0/dR, E_0, diagnostics) and the excited half's (dOmega/dR,
+        diagnostics): one assembly for this surface and for a manifold that
+        reuses one ground-state force under several states."""
+        g_0, e_0, d0 = ground
+        g_om, d1 = excitation
         omega = float(d1['omega'])
         return (np.asarray(g_0) + np.asarray(g_om), e_0 + omega,
                 dict(d1, e_0=e_0, e_c=d0.get('e_c'), omega=omega,

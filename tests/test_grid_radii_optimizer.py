@@ -41,7 +41,8 @@ from src.Base.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
                                    _shipped_key, _start_radii, atomic_points,
                                    fit_error_coulomb, lebedev_subshells,
                                    optimize_atomic_radii, published_grids,
-                                   search_r_max, shipped_radii)
+                                   search_r_max, shipped_radii,
+                                   shipped_radii_lookup)
 
 #: The production grid: 148 points/atom, which is where the collapse showed up.
 COUNTS_148 = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
@@ -171,12 +172,24 @@ if __name__ == '__main__':
                               origin=False)
     except ValueError:
         cusp_guarded = True
+    # A CP2K basis name is mixed case and pyscf's names are not case-sensitive,
+    # so both spellings must read the one lower-case row.
+    molopt = ('aug-SZV-MOLOPT-ae-SR', 'aug-SZV-MOLOPT-ae-SR-ri')
+    molopt_counts = {'A1': 16, 'A2': 10, 'A3': 6, 'B1': 2}
+    mixed = shipped_radii_lookup('H', *molopt, molopt_counts)
+    lower = shipped_radii_lookup('H', molopt[0].lower(), molopt[1].lower(),
+                                 molopt_counts)
+    molopt_same = (mixed is not None and lower is not None
+                   and mixed[1:] == lower[1:]
+                   and all(np.array_equal(mixed[0][n], lower[0][n])
+                           for n in mixed[0]))
     ok5 = (key == 'C|cc-pvdz|cc-pvdz-ri|8,5,3,1' and reachable and shaped
-           and cusp_guarded)
+           and cusp_guarded and molopt_same)
     all_ok &= ok5
     print(f'   key spells the physics: {key}')
     print(f'   every row reachable from its own fields: {reachable}   '
           f'radii match counts: {shaped}   cusp row guarded: {cusp_guarded}   '
+          f'mixed-case MOLOPT lookup: {molopt_same}   '
           f'{"OK" if ok5 else "FAIL"}')
 
     # 6. The box rule: one descent keeps the legacy box for every element, so

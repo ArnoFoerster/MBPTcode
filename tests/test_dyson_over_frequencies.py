@@ -2,60 +2,43 @@
 simulated ranks.
 
 `solve_qp_energy_space_time` turns chi0(i.omega) into W(i.omega) =
-[I - chi0(i.omega)]^-1 one frequency at a time: the omega = 0 passenger, the
-static W a BSE takes, inverted DRESSED, and in a continuum every other
-frequency first taken into the bare gauge (`transform`). Gated on
+[I - chi0(i.omega)]^-1 one frequency at a time: the omega = 0 passenger (the
+static W a BSE takes) is inverted dressed, and in a continuum every other
+frequency is first taken into the bare gauge (`transform`). Gated on
 water/cc-pVDZ and ethylene/cc-pVTZ Hartree-Fock and on water/cc-pVDZ in an
 IEF-PCM water continuum, each on the GW window (no passenger in the gas
 phase) and on the whole diagonal with the static W.
 
-SERIALLY (`_dyson_in_place`) the energies and W(0) are bitwise those of the
-code before the Dyson step was split over frequencies -- a pinned commit
-unpacked into a temporary directory and run in its own process, on its own
-constants, with the mean field and factors this process built and the
-continuum's cavity handed to both (`CAVITY`) -- at the automatic tau count and
-at 6 points; and one rank's `dyson_frequencies` is every frequency.
+Serially (`_dyson_in_place`) the energies and W(0) are bitwise those of a
+pinned tree whose Dyson step is not split over frequencies, unpacked into a
+temporary directory and run in its own process on the mean field and factors
+this process built, with the continuum's cavity handed to both (`CAVITY`) and
+its W frequency axis moved onto rW, the range its transform is fitted over;
+at the automatic tau count and at 6 points. One rank's `dyson_frequencies` is
+every frequency.
 
-OVER MORE THAN ONE RANK the in-core route holds chi0 by auxiliary rows
+Over more than one rank the in-core route holds chi0 by auxiliary rows
 (`_qp_grid_rows`). `_dyson_owned` gathers each frequency's chi0 whole to its
 round-robin owner and inverts it there, W(0) is broadcast from its owner, and
 `screened_interaction_rows` folds each owner's W - I into every rank's rows of
 Wt(i.tau). None of that is summed across ranks, so every gate is bitwise. At
-2, 3 and 8 simulated ranks, and at 8 on 6 tau points, where rank 7 owns no
-frequency and rank 6 at most the passenger:
-  * the frequencies the ranks invert cover every frequency exactly once, each
-    on its round-robin owner, the passenger on the rank that broadcasts W(0);
-    each rank's `dyson_frequencies` counts its own and `t_dyson` is set;
+2, 3 and 8 simulated ranks, and at 8 on 6 tau points (rank 7 owns no
+frequency):
+  * the frequencies the ranks invert cover every frequency once, each on its
+    round-robin owner, the passenger on the rank that broadcasts W(0); each
+    rank's `dyson_frequencies` counts its own and `t_dyson` is set;
   * each owner's W - I is the serial Dyson step on the same chi0, gathered
-    whole, bitwise -- the bare gauge included in the continuum;
+    whole, bitwise, the bare gauge included in the continuum;
   * W(0) is the serial step's dressed passenger, bitwise, on every rank and in
     what the driver hands a BSE;
   * every rank's rows of Wt(i.tau) are the rows of one rank's fold on that
     serial W - I, bitwise.
-chi0 itself -- proj(tau) is a sum over the ranks' grid-row tiles, so it
-re-associates -- and the energies against serial are gated in
-tests/test_simulated_ranks.py, which also calls these kernels directly at 32
-and 64 ranks.
+chi0 itself (proj(tau) is a sum over grid-row tiles, so it reassociates) and
+the energies against serial are gated in tests/test_simulated_ranks.py.
 
-Shown to fail, each planted at 3 ranks in the water diagonal (the last in the
-continuum's window), failing exactly the gates named while the rest pass:
-  a frequency inverted twice (rank 1 also takes      exactly once, round-robin
-  frequency 0) -- no bit moves                       owner, the count
-  the passenger inverted by no rank                  exactly once, round-robin
-                                                     owner, the broadcasting
-                                                     rank, W(0)
-  W(0) not broadcast (the call made a no-op)         W(0)
-  W(0) broadcast from the owner's successor          the broadcasting rank,
-                                                     W(0)
-  a Wt row from the wrong frequency (rank 1 hands    Wt rows
-  the fold two of its W - I swapped)
-  one owner's W - I moved by `PERTURBATION`          W - I, Wt rows
-  the bare gauge dropped (the step handed no         W - I, Wt rows
-  transform)
-A screened frequency inverted by no rank cannot reach a gate: the fold on its
-owner refuses it (KeyError), which is checked as well. Serially, a Dyson step
-that takes the passenger into the bare gauge too moves the continuum's W(0)
-by 8.4e-3 and its diagonal by 5.9e-3 Ha off the archived code.
+Each defect in `PLANTS`, planted at 3 ranks, fails exactly the gates named
+there; a screened frequency inverted by no rank is refused by the fold on its
+owner (KeyError).
 """
 import copy
 import os
@@ -126,21 +109,19 @@ PLANTS = {
         'water-pcm', 'window', 'no gauge', {GATE_W, GATE_WT}),
 }
 
-#: Six points is a partition fixture, not a converged grid, and says so.
+#: Six points is a partition fixture, not a converged grid.
 pytestmark = pytest.mark.filterwarnings(
     'ignore:minimax transform fit reached only:RuntimeWarning')
 
 REPO = Path(__file__).resolve().parents[1]
-#: The last commit whose Dyson step every rank ran over every frequency;
-#: pinned, since `HEAD` would compare the tree with itself.
+#: A tree whose Dyson step every rank runs over every frequency.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
 THREAD_CAPS = {name: '2' for name in
                ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
-#: The continuum's cavity, handed to both trees: the pinned commit's own
-#: default is pyscf's Lebedev order 29, not `PCM_LEBEDEV_ORDER`, so on its
-#: defaults the unpacked tree would discretize another continuum and differ
-#: before any Dyson step.
+#: The continuum's cavity, handed to both trees: the pinned tree's default
+#: is pyscf's Lebedev order 29, not `PCM_LEBEDEV_ORDER`, which would
+#: discretize another continuum.
 CAVITY = dict(lebedev_order=PCM_LEBEDEV_ORDER)
 #: The serial calls on the unpacked tree, in its own process, on the mean
 #: field and factors this process built (`{inputs}`) and on `CAVITY`, so only
@@ -158,6 +139,16 @@ from pyscf import gto, scf
 from src.Base.solvent_screening import attach_solvent_screening
 from src.SingleReference.GW.space_time import (solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
+
+import src.SingleReference.GW.space_time as _archived_space_time
+from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
+from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
+
+# the one change since the pinned commit: W's frequencies span rW, the range
+# its transform back to tau is fitted over, not the bare window
+_archived_space_time.minimax_frequency_grid = (
+    lambda n, e_min, e_max: _minimax_frequency_grid(n, _PAD[0] * e_min,
+                                                    _PAD[1] * e_max))
 
 warnings.simplefilter('ignore')
 out = {{}}
@@ -193,8 +184,8 @@ np.savez({out!r}, **out)
 
 class DysonSpy:
     """What the owned-frequency Dyson step of the grid-row route did on each
-    rank -- the frequencies it inverted, rank 0's chi0 gathered whole, the
-    W - I and W(0) it returned, the broadcast root, the Wt rows of the fold --
+    rank (the frequencies it inverted, rank 0's chi0 gathered whole, the
+    W - I and W(0) it returned, the broadcast root, the Wt rows of the fold),
     recorded in `records[rank]`, with the defect `plant` names planted:
 
       'twice'               rank 1 also inverts frequency 0
@@ -290,8 +281,8 @@ def systems():
 
 @pytest.fixture(scope='module')
 def archived(systems, tmp_path_factory):
-    """Every serial call of this file on the code before the split, unpacked
-    into a temporary directory and run in one process."""
+    """Every serial call of this file on the pinned tree, unpacked into a
+    temporary directory and run in one process."""
     tmp = tmp_path_factory.mktemp('dyson_baseline')
     tar = tmp / f'{BASELINE_COMMIT}.tar'
     done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
@@ -416,8 +407,8 @@ def _failed(gates):
 @pytest.mark.parametrize('kind', KINDS)
 @pytest.mark.parametrize('name', list(SYSTEMS))
 def test_serial_is_the_archived_code(systems, archived, name, kind):
-    """One rank inverts every frequency, as the code before the split did:
-    the same energies and the same static W, bit for bit."""
+    """One rank inverts every frequency: the energies and the static W are
+    the pinned tree's, bit for bit."""
     passenger = kind == 'diagonal' or SYSTEMS[name][2] is not None
     for ntau in ('auto', EMPTY_NTAU):
         qp, ws, t = _route(systems[name], kind, ntau)

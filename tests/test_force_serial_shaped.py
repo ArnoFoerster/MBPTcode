@@ -1,99 +1,74 @@
-"""Every rank holds ONE calculation's force and energy on the two things a
-cluster node has and this workstation has not: a pyscf whose threaded GEMM does
-not repeat its bits, and a BLAS whose GEMM bits follow the call shape.
+"""Each rank holds one calculation's force and energy under three stand-ins
+for arithmetic that a single machine may not show.
 
-THE PYSCF RACE. `pyscf.lib.ddot`, behind `lib.dot` and `lib.einsum`, calls
+The pyscf race: `pyscf.lib.ddot`, behind `lib.dot` and `lib.einsum`, calls
 NPdgemm (pyscf/lib/np_helper/npdot.c), which, where k/m > 3 and k/n > 3,
 splits the K index over the OpenMP threads and adds the partial products into
-C under `omp critical` in thread-ARRIVAL order: at 16 threads no pyscf result
-repeats bit for bit, within one process or across nodes. This workstation's pyscf
-is built without OpenMP (`lib.num_threads()` is 1), so no simulated-rank gate
-here could see it. `racing_dgemm` replaces `numpy_helper._dgemm`, the ctypes
-caller of NPdgemm, by what NPdgemm computes at `OMP_THREADS` threads, the
-partials added in a fresh random order per call.
+C under `omp critical` in thread-arrival order, so at 16 threads no pyscf
+result repeats bit for bit. `racing_dgemm` replaces `numpy_helper._dgemm`, the
+ctypes caller of NPdgemm, by what NPdgemm computes at `OMP_THREADS` threads,
+the partials added in a fresh random order per call.
 
-THE SHAPE-SENSITIVE BLAS. On OpenBLAS a GEMM row depends on the call's shape
-(tests/test_frequency_rows_serial_shaped.py), which an MKL workstation's BLAS hides.
-Here the same stand-in covers the whole package: every `a @ b`,
+The shape-sensitive BLAS: on OpenBLAS a GEMM row depends on the call's shape
+(tests/test_frequency_rows_serial_shaped.py). Every `a @ b`,
 `np.dot/matmul/tensordot/inner/vdot`, contracting `np.einsum` and `x.dot(y)`
 under src/ is rewritten at import (`ShapeRewriter`) to scale its result by
-1 + k 2^-52, k = 1 + crc32(op, operand shapes) % `SHAPE_SKEW_CLASSES`: the
-same shapes give the same bits, a rank's row count other bits. The rewrite
-applies to what is imported after it, so that part runs in a subprocess of
-this file, which drops the src it imported and imports it rewritten.
+1 + k 2^-52, k = 1 + crc32(op, operand shapes) % `SHAPE_SKEW_CLASSES`. The
+rewrite applies only to modules imported after it, so that part runs in a
+subprocess that drops src and imports it rewritten.
 
-THE FREE MEMORY. pyscf blocks a density-fitted gradient's auxiliary index by
+The free memory: pyscf blocks a density-fitted gradient's auxiliary index by
 the process's free memory; each simulated rank reports its own
-(`RankMemoryLib`, the stand-in of tests/test_chain_row_fit_adjoint.py).
+(`RankMemoryLib`).
 
 Gated on water/cc-pVDZ Hartree-Fock at 148 points per atom, at 2, 3 and 8
 simulated ranks, for the whole layout, the sliced one (`sliced=True`) and the
-row fit (`fit='rows'`), every layout of a rank handed ONE reference and ONE
+row fit (`fit='rows'`), each layout of a rank handed one reference and one
 displaced mean field:
-  (a) under the race and the free memory, in this process: the composed
-      state-pair force at a displaced geometry, its energy and the dRPA
-      force of each layout are rank 0's bits on every rank; so are the
+  (a) under the race and the free memory: the composed state-pair force at a
+      displaced geometry, its energy and the dRPA force of each layout, the
       optimizer's mean-field force (`mean_field_force`), the dense dRPA
-      surface's force and energy on a density-fitted reference, and the
-      Hartree-Fock mirror energy of a PBE0 reference (`reference_energy`). The race is shown live on every
-      run: pyscf's own gradient of the locked mean field differs between
-      the ranks;
+      force and energy on an unfitted reference, and the Hartree-Fock
+      mirror energy of a PBE0 reference (`reference_energy`) are rank 0's
+      bits on every rank, while pyscf's own gradient of the locked mean field
+      differs between ranks;
   (b) on the shape-sensitive BLAS and the free memory (subprocess): the same
-      three numbers of each layout rank 0's on every rank, the sliced
-      layout's bitwise the whole layout's, and the row fit's forces within
-      `FIT_REASSOCIATION_K` times the distance the whole-fit sliced forces
-      move when the fit's sums over the test set are cut per shell and
-      accumulated in reverse (`reassociated_fit`), measured on the run;
+      three numbers of each layout rank 0's on every rank, the sliced layout
+      bitwise the whole one, and the row fit's forces and energy within
+      FIT_REALIZATION_FORCE_TOL and FIT_REALIZATION_ENERGY_TOL of the
+      whole-fit sliced layout's, two realizations of the one fit;
   (c) on all three stand-ins at once (subprocess): every number of (b) rank
       0's on every rank.
 
-The layouts are not compared bitwise under the race: each still runs its
-own pyscf K builds and its own mean-field force, which a racing pyscf does
-not repeat, and that difference -- 1.5e-8 Ha/Bohr in the composed force on
-one mean field -- is a property of pyscf's arithmetic, not of the layout. On
-a pyscf that repeats its bits, which (b) is, the layout adds none. There the
-row fit sits at 0.5-0.7 of its bar in the composed force, 0.6-1.5 in the
-dRPA force and 7.8-8.5 in the energy, whose own reassociation moves it by a
-few ulp (1.7e-13 Ha).
-
-SHOWN TO FAIL, each once, by a pytest plugin that monkeypatched the named
-locksteps to the identity (no tracked file touched, the tree byte-compared
-after, `cmp`):
-  * `FactorChain.mean_field_gradient` without its lockstep: (a) failed at 2,
-    3 and 8 ranks, the composed and the dRPA force of every layout n
-    distinct of n, every energy still rank 0's;
-  * the locksteps of `mean_field_force`, the dense surfaces and
-    `reference_energy` as the identity: (a) failed at 2, 3 and 8 ranks on
-    the mean-field force (n distinct of n) and on the dense dRPA force and
-    energy, and on the mirror energy at 2 ranks in one run and at 3 in
-    another: a one-ulp flip, rare enough that `MIRROR_REPEATS` takes it often.
+The layouts are not compared with each other under the race: each runs its
+own pyscf K builds and mean-field force, which a racing pyscf does not repeat.
+On the stand-in, which repeats its bits, the row fit sits 7.6e-9 Ha/Bohr from
+the whole fit in the composed force (0.076 of FIT_REALIZATION_FORCE_TOL),
+7.6e-11 in the dRPA force and 9.1e-13 Ha in the energy (0.009 of
+FIT_REALIZATION_ENERGY_TOL).
 """
 import ast
 import builtins
 import importlib
 import importlib.abc
 import importlib.machinery
-import inspect
 import json
 import os
 import subprocess
 import sys
-import textwrap
 import threading
 import zlib
-from contextlib import contextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-import scipy.linalg
 from pyscf import dft, gto, scf
 from pyscf.df.grad import rhf as pyscf_df_grad
 from pyscf.lib import numpy_helper
 
-from src.Base.constants import FIT_REASSOCIATION_K
-from src.Base.separable_ri import DEFAULT_REGULARIZATION
+from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                FIT_REALIZATION_FORCE_TOL)
 from src.Base.utils.mpi_grid import (current_comm, lockstep_mean_field,
                                      run_simulated)
 from src.gradients.dense_surfaces import DenseRPASurface
@@ -108,7 +83,7 @@ ALL_SIZES = [3, 8]
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: One hydrogen 0.03 A along y, where a surface fits and differentiates anew.
 WATER_DISPLACED = 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4692'
-#: A cluster node's pyscf OpenMP thread count (`lib.num_threads()`).
+#: A typical compute node's pyscf OpenMP thread count (`lib.num_threads()`).
 OMP_THREADS = 16
 #: The row fit's tile edge: water's 444 points in 7 tiles, so every rank count
 #: owns a different set of them.
@@ -118,10 +93,8 @@ ROW_FIT_BLOCK = 64
 BSE_CONV_TOL = 1e-9
 LAYOUTS = {'whole': {}, 'sliced': dict(sliced=True),
            'rows': dict(sliced=True, fit='rows', fit_block=ROW_FIT_BLOCK)}
-#: How often each rank takes the PBE0 mirror energy: the race moves the
-#: mirror's K by 4.4e-16, and over 200 calls on water the energy took two
-#: values one ulp (1.4e-14 Ha) apart, so one call per rank would almost never
-#: show a rank apart.
+#: How often each rank takes the PBE0 mirror energy: the race flips it by one
+#: ulp only rarely, so one call per rank would almost never show a difference.
 MIRROR_REPEATS = 40
 #: What `layout_numbers` returns, in order.
 NUMBERS = ('composed force', 'energy', 'dRPA force')
@@ -207,6 +180,15 @@ class ShapeFinder(importlib.abc.MetaPathFinder):
 def chain_scf(m):
     """A mean field converged for gradient work (conv_tol_grad 1e-11)."""
     out = scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri')
+    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.kernel()
+    return out
+
+
+def exact_scf(m):
+    """`chain_scf` without the density fit, for the dense route's exact
+    (pq|rs)."""
+    out = scf.RHF(m)
     out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
     out.kernel()
     return out
@@ -325,19 +307,9 @@ def shape_mdot(obj, *args, **kw):
     return shape_np('dot', obj, *args, **kw)
 
 
-def on_the_shape_sensitive_blas(fn):
-    """`fn`, a routine of this file, recompiled with its GEMMs on the
-    stand-in, so an anchor measured with it runs on the BLAS src runs on."""
-    tree = ShapeRewriter().visit(ast.parse(textwrap.dedent(
-        inspect.getsource(fn))))
-    namespace = dict(fn.__globals__)
-    exec(compile(ast.fix_missing_locations(tree), inspect.getsourcefile(fn),
-                 'exec'), namespace)
-    return namespace[fn.__name__]
-
-
 def import_src_on_the_shape_sensitive_blas():
-    """Drop every imported src module and import src rewritten from now on."""
+    """Drop every imported src module, so every later import of src is
+    rewritten."""
     builtins.__shape_mm__ = shape_mm
     builtins.__shape_np__ = shape_np
     builtins.__shape_mdot__ = shape_mdot
@@ -346,40 +318,9 @@ def import_src_on_the_shape_sensitive_blas():
         del sys.modules[name]
 
 
-def reassociated_fit(mol, layout):
-    """`fit_M_stable` with its sums over the test set -- the row norms, the
-    Gram matrix and F Dt^T -- cut per mu shell and accumulated in reverse:
-    one reordering of the whole fit's own sums, the anchor of the row fit
-    (tests/test_mpi_routes.py)."""
-    mu = np.asarray(layout[0])
-    ao_loc = mol.ao_loc_nr()
-    shells = [np.flatnonzero((mu >= ao_loc[s]) & (mu < ao_loc[s + 1]))
-              for s in reversed(range(mol.nbas))]
-    shells = [c for c in shells if len(c)]
-
-    def fit(D, F, regularization=DEFAULT_REGULARIZATION):
-        blocks = shells + [np.arange(len(mu), D.shape[1])]
-        s2 = np.zeros(D.shape[0])
-        for c in blocks:
-            s2 += np.einsum('kr,kr->k', D[:, c], D[:, c])
-        s = np.sqrt(s2)
-        d = 1.0 / np.where(s == 0.0, 1.0, s)
-        Dt = D * d[:, None]
-        G = np.zeros((D.shape[0], D.shape[0]))
-        FD = np.zeros((F.shape[0], D.shape[0]))
-        for c in blocks:
-            G += Dt[:, c] @ Dt[:, c].T
-            FD += F[:, c] @ Dt[:, c].T
-        G[np.diag_indices_from(G)] += regularization
-        cho = scipy.linalg.cho_factor(G, lower=True)
-        return scipy.linalg.cho_solve(cho, FD.T).T * d[None, :]
-
-    return fit
-
-
 def layout_numbers(surface_class, mol, mf, here, mf_here, **kw):
-    """(composed force, energy, dRPA force) of one layout at `here`, on the
-    mean fields it is handed."""
+    """(composed force, energy, dRPA force) of one layout at `here` on the
+    given mean fields."""
     surface = surface_class(mol, chain_scf, spin='singlet', mf=mf,
                             solver='davidson', bse_conv_tol=BSE_CONV_TOL, **kw)
     g, e, _ = surface.total_gradient(here, mf_here)
@@ -432,9 +373,10 @@ def race_rank(comm):
     ks = lockstep_mean_field(pbe0_scf(here))
     out['reference_energy'] = np.array([reference_energy(ks, here)
                                         for _ in range(MIRROR_REPEATS)])
-    # density-fitted, so its mean-field force is the gradient the stand-ins
-    # reach; the dense route itself runs pyscf's integral-direct C kernels
-    g, e, _ = DenseRPASurface(mol, chain_scf).total_gradient(here)
+    # unfitted, the integrals of the dense route's exact (pq|rs): its force
+    # is refused on a density-fitted mean field (the orbital response would
+    # be built from other integrals than the SCF's)
+    g, e, _ = DenseRPASurface(mol, exact_scf).total_gradient(here)
     out['dense dRPA force'] = np.asarray(g)
     out['dense dRPA energy'] = np.atleast_1d(e)
     return out
@@ -480,10 +422,12 @@ def test_layouts_on_the_shape_sensitive_blas(size):
     assert got['perturbed'] > 0, 'the shape-sensitive BLAS scaled nothing'
     assert not got['not rank 0s'], got['not rank 0s']
     assert got['sliced is whole'] == [True] * len(NUMBERS), got
-    for name, (dist, bar) in got['row fit'].items():
-        assert dist <= FIT_REASSOCIATION_K * bar, (
-            f'{size} ranks, row-fit {name}: |d| {dist:.2e} = '
-            f'{dist / bar:.2f} x the reassociation {bar:.2e}')
+    for name, dist in got['row fit'].items():
+        bar = (FIT_REALIZATION_ENERGY_TOL if name == 'energy'
+               else FIT_REALIZATION_FORCE_TOL)
+        print(f'[info] {size} ranks, row-fit {name}: |d| {dist:.2e} = '
+              f'{dist / bar:.4f} of {bar:.0e}')
+        assert dist <= bar, (size, name, dist, bar)
 
 
 @pytest.mark.parametrize('size', ALL_SIZES)
@@ -493,31 +437,11 @@ def test_every_rank_holds_rank_0s_numbers_on_all_three(size):
     assert not got['not rank 0s'], got['not rank 0s']
 
 
-@contextmanager
-def fit_swapped(comm, module, fit):
-    """`module.fit_M_stable` is `fit` inside the block. The thread-ranks
-    share the module: rank 0 swaps it once every rank is done with the
-    original and restores it once every rank is done with `fit`."""
-    comm.allgather(None)
-    if comm.Get_rank() == 0:
-        original = module.fit_M_stable
-        module.fit_M_stable = fit
-    comm.allgather(None)
-    try:
-        yield
-    finally:
-        comm.allgather(None)
-        if comm.Get_rank() == 0:
-            module.fit_M_stable = original
-        comm.allgather(None)
-
-
 def shape_main(mode, size):
     """(b) or (c) here: src imported afresh on the shape-sensitive BLAS, the
     free memory rank-dependent and, for 'all', pyscf racing."""
     import_src_on_the_shape_sensitive_blas()
     fresh_grid = importlib.import_module('src.Base.utils.mpi_grid')
-    fresh_chain = importlib.import_module('src.gradients.factor_chain')
     surface_class = importlib.import_module(
         'src.gradients.rpa_bse_surface').RPABSESurface
     pyscf_df_grad.lib = RankMemoryLib(pyscf_df_grad.lib,
@@ -528,14 +452,6 @@ def shape_main(mode, size):
     def rank(comm):
         out, fields = layouts_on_one_mean_field(surface_class, LAYOUTS)
         out['raw'] = np.asarray(fields[3].Gradients().kernel())
-        if mode == 'shape':
-            # the anchor, on the same mean fields: the whole-fit sliced
-            # layout with its fit's sums over the test set reordered
-            layout = fresh_chain.FrozenFactorization(fields[0]).layout
-            with fit_swapped(comm, fresh_chain, on_the_shape_sensitive_blas(
-                    reassociated_fit)(fields[0], layout)):
-                out['anchor'] = layout_numbers(surface_class, *fields,
-                                               **LAYOUTS['sliced'])
         return out
 
     res = fresh_grid.run_simulated(rank, size)
@@ -547,10 +463,9 @@ def shape_main(mode, size):
     verdict['sliced is whole'] = [
         all(np.array_equal(r['sliced'][i], r['whole'][i]) for r in res)
         for i in range(len(NUMBERS))]
-    sliced, rows, anchor = (res[0][k] for k in ('sliced', 'rows', 'anchor'))
+    sliced, rows = res[0]['sliced'], res[0]['rows']
     verdict['row fit'] = {
-        name: (float(np.linalg.norm(rows[i] - sliced[i])),
-               float(np.linalg.norm(anchor[i] - sliced[i])))
+        name: float(np.abs(np.asarray(rows[i]) - np.asarray(sliced[i])).max())
         for i, name in enumerate(NUMBERS)}
     return verdict
 

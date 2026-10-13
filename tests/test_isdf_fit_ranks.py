@@ -81,11 +81,12 @@ import pytest
 from pyscf import df, gto, scf
 
 from src.Base import separable_ri
+from src.Base.constants import ISDF_DEFAULT_COUNTS
 from src.Base.separable_ri import (_ao_l_labels, ao_blocks, atomic_grid,
                                    build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS, separable_factors
+from src.SingleReference.GW.space_time import separable_factors
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -137,7 +138,6 @@ from pyscf import df, gto
 from src.Base.separable_ri import (atomic_grid, build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 
 warnings.simplefilter('ignore')
 fits = {{}}
@@ -148,7 +148,7 @@ for name, (atom, basis, budget) in {cases!r}.items():
     radii, origins = {{}}, {{}}
     for el in sorted({{mol.atom_pure_symbol(i) for i in range(mol.natm)}}):
         radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
-                                             DEFAULT_COUNTS)
+                                             {counts!r})
     coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
 
     def fit(comm=None):
@@ -168,12 +168,12 @@ def reldiff(a, b):
 
 
 def interpolation_points(mol, auxbasis):
-    """A tabulated grid at `DEFAULT_COUNTS` (`atomic_grid`): the fit is gated
-    on a fixed set of points, whatever `separable_factors` would choose."""
+    """A tabulated grid at `ISDF_DEFAULT_COUNTS` (`atomic_grid`): the fit is
+    gated on a fixed set of points, whatever `separable_factors` would choose."""
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
         radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
-                                             DEFAULT_COUNTS)
+                                             ISDF_DEFAULT_COUNTS)
     return molecular_points_covariant(mol, radii, origin_by_element=origins)
 
 
@@ -320,7 +320,8 @@ def probe_fits(tree, tmp_path, omp_threads):
     script = tmp_path / f'fits_{tag}.py'
     out = tmp_path / f'fits_{tag}.npz'
     script.write_text(FIT_PROBE.format(tree=str(tree), cases=CASES,
-                                       sizes=PROBE_SIZES, out=str(out)))
+                                       sizes=PROBE_SIZES, out=str(out),
+                                       counts=ISDF_DEFAULT_COUNTS))
     env = dict(os.environ, **THREAD_CAPS, OMP_NUM_THREADS=str(omp_threads))
     env.pop('PYTHONPATH', None)
     proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),

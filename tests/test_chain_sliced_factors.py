@@ -19,13 +19,9 @@ the whole layout on the same rank count:
     roots and vectors, the dRPA force and a one-cycle optimizer walk the
     whole layout's, and every rank's equal to rank 0's. Both layouts are
     handed ONE mean field at every geometry (`one_mean_field_per_geometry`),
-    so the layout and each chain's own pyscf K builds are all that differ,
-    and the sliced numbers are gated within `COMPOSED_GRAD_K` times what a
-    repeat of the whole layout on the same mean fields moves them: bitwise
-    here, where pyscf repeats its bits and the repeat moves nothing. A threaded
-    pyscf, whose OpenMP GEMM adds its K partials in thread-arrival order,
-    moves them run to run; tests/test_mpi_routes.py compares the layouts
-    there on the spread of several repeats, and
+    and pyscf's OpenMP is held to one thread, where its K builds add their
+    partials in one order, so the layout is all that differs and the sliced
+    numbers are the whole layout's bit for bit;
     tests/test_force_serial_shaped.py shows the layout bitwise on a
     shape-sensitive BLAS and every rank rank 0's under an emulated race;
   * THE MEMORY ASSERTION, between steps: at every evaluation the walk asks
@@ -41,9 +37,8 @@ the whole layout on the same rank count:
     quasiparticle force and its interstate element, and the charged surface,
     the whole layout's on slices;
   * every layout comparison on ONE mean field per geometry
-    (`one_mean_field_per_geometry`) and within `COMPOSED_GRAD_K` times what
-    a repeat of the whole layout moves the number (`within_repeat`): bitwise
-    here, where pyscf repeats its bits;
+    (`one_mean_field_per_geometry`) with pyscf's OpenMP on one thread:
+    bitwise;
   * what slices cannot serve is refused by name: a reaction field before any
     SCF, a chain whose kernels read the factors whole, a layout that
     contradicts a shared factorization, Eq. (18)'s densities, and a dense
@@ -74,15 +69,15 @@ factor arrays only, from M 117762, nmo = nao 10980, nocc 972, naux 28236
 import os
 import sys
 import types
+import warnings
 import weakref
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto, lib, scf
 
-from src.Base.constants import COMPOSED_GRAD_K
 from src.Base.declaration import Excitation, GroundState
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.solvent_screening import SolventScreening
@@ -243,43 +238,44 @@ def spectrum_and_vectors(surface):
     return om, pieces[10], pieces[11]
 
 
-def within_repeat(got, ref, repeat):
-    """Every array of `got` within `COMPOSED_GRAD_K` times what `repeat`, the
-    same calculation as `ref` run again, moved it: bitwise where the repeat
-    is."""
-    return len(got) == len(ref) == len(repeat) and all(
-        np.asarray(x).shape == np.asarray(y).shape
-        and np.abs(np.asarray(x) - np.asarray(y)).max()
-        <= COMPOSED_GRAD_K * np.abs(np.asarray(z) - np.asarray(y)).max()
-        for x, y, z in zip(got, ref, repeat))
+@pytest.fixture
+def pyscf_one_thread():
+    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
+    order, so two layouts on one mean field differ by the layout alone."""
+    threads = lib.num_threads()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(1)
+    yield
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        lib.num_threads(threads)
 
 
-def test_serially_the_flag_is_inert():
+def test_serially_the_flag_is_inert(pyscf_one_thread):
     with distributed(None):
         scf_factory = one_mean_field_per_geometry()
-        whole, sliced, repeat = (state_pair(flag, scf_factory)
-                                 for flag in (None, True, None))
+        whole, sliced = (state_pair(flag, scf_factory)
+                         for flag in (None, True))
         x_mo, d, *_ = sliced.ground.factors_at(sliced.ground.mol0,
                                                sliced.ground.mf0)
         assert isinstance(x_mo, np.ndarray) and isinstance(d, np.ndarray)
         gw, ew, _ = whole.total_gradient()
         gs, es, ds = sliced.total_gradient()
-        gr, er, _ = repeat.total_gradient()
-    assert within_repeat((gs, es), (gw, ew), (gr, er))
+    assert bitwise((gs, es), (gw, ew))
     assert 'factor_gathers' not in ds
 
 
 @pytest.mark.parametrize('size', SIZES)
-def test_state_pair_chain_on_slices(size):
+def test_state_pair_chain_on_slices(size, pyscf_one_thread):
     """Force, energy, roots, vectors, dRPA force and a one-cycle walk the
-    whole layout's on one mean field per geometry, within what repeating the
-    whole layout moves them; rows alone between steps."""
+    whole layout's on one mean field per geometry, bitwise; rows alone
+    between steps."""
 
     def rank(comm):
         out = {}
         scf_factory = one_mean_field_per_geometry()
-        for tag, sliced in (('whole', None), ('sliced', True),
-                            ('repeat', None)):
+        for tag, sliced in (('whole', None), ('sliced', True)):
             surface = state_pair(sliced, scf_factory)
             # at the reference first: its factors live as long as mf0 does,
             # so every scan below has the reference's to read
@@ -309,8 +305,7 @@ def test_state_pair_chain_on_slices(size):
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
         for key in ('force', 'ground', 'spectrum', 'walk'):
-            assert within_repeat(out['sliced'][key], out['whole'][key],
-                                 out['repeat'][key]), (
+            assert bitwise(out['sliced'][key], out['whole'][key]), (
                 f'rank {r} of {size}: {key} sliced != whole')
             assert bitwise(out['sliced'][key], res[0]['sliced'][key]), (
                 f'rank {r} of {size}: {key} != rank 0')
@@ -362,15 +357,14 @@ def test_gathers_are_one_per_sweep(size):
 
 @pytest.mark.parametrize('size', [2, 3])
 @pytest.mark.parametrize('solver', ['dense', 'davidson'])
-def test_excited_chain_on_slices(size, solver):
+def test_excited_chain_on_slices(size, solver, pyscf_one_thread):
     """The excited chain alone: its force, quasiparticle force and
     interstate element the whole layout's on slices, every rank rank 0's."""
 
     def rank(comm):
         out = {}
         scf_factory = one_mean_field_per_geometry()
-        for tag, sliced in (('whole', None), ('sliced', True),
-                            ('repeat', None)):
+        for tag, sliced in (('whole', None), ('sliced', True)):
             mol = own_water()
             chain = ExcitedStateChain(mol, scf_factory, mf=scf_factory(mol),
                                       solver=solver, sliced=sliced)
@@ -384,18 +378,18 @@ def test_excited_chain_on_slices(size, solver):
 
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
-        assert within_repeat(out['sliced'], out['whole'], out['repeat']), (
+        assert bitwise(out['sliced'], out['whole']), (
             f'rank {r}: sliced != whole')
         assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
 
 
-def test_charged_surface_on_slices():
+def test_charged_surface_on_slices(pyscf_one_thread):
     """E^(N-1) = E_0^dRPA - eps^QP_HOMO: the quasiparticle force on slices."""
 
     def rank(comm):
         out = []
         scf_factory = one_mean_field_per_geometry()
-        for sliced in (None, True, None):
+        for sliced in (None, True):
             mol = own_water()
             surface = RPAQPSurface(mol, scf_factory, state=0,
                                    mf=scf_factory(mol), sliced=sliced)
@@ -404,8 +398,8 @@ def test_charged_surface_on_slices():
         return out
 
     res = run_simulated(rank, 2)
-    for r, (whole, sliced, repeat) in enumerate(res):
-        assert within_repeat(sliced, whole, repeat), f'rank {r}'
+    for r, (whole, sliced) in enumerate(res):
+        assert bitwise(sliced, whole), f'rank {r}'
         assert bitwise(sliced, res[0][1]), f'rank {r} != rank 0'
 
 

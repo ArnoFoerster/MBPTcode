@@ -19,7 +19,7 @@ _KERNELS = ('bse', 'bse-tda')
 _QP_METHODS = ('g0w0', 'evgw')
 _SCREENINGS = ('rpa',)
 _CHARGE_CHANGES = (-1, 1)
-_QP_STATES_KINDS = ('admitted', 'frontier', 'valence', 'all')
+_QP_STATES_KINDS = ('admitted', 'frontier', 'valence', 'all', 'adaptive')
 _QP_STATES_THRESHOLDS = ('gap', 'omega1')
 
 
@@ -125,12 +125,26 @@ class QPStates:
     kind='valence'   the valence occupied orbitals plus extra_virtuals
                      virtuals, optionally filtered on pole strength Z > 0.5.
     kind='all'       every orbital.
+    kind='adaptive'  the admitted orbitals (`threshold` as for 'admitted') are
+                     the CANDIDATES; one analytic-continuation GW at the
+                     reference geometry selects which of them are solved
+                     explicitly, so that the first-order error
+                     sum_p |n_p| |delta_p| of each target excitation stays
+                     below tol_meV, and the rest carry a frozen scissor. The
+                     continuation selects only; it supplies no energy.
+
+    tol_meV: kind='adaptive' only, the error budget per target state in meV;
+             None takes the production constant where the set is selected.
+    targets: kind='adaptive' only, the (spin, zero-based root) pairs the
+             budget holds for; None lets the entry point name them.
     """
     kind: str = 'admitted'
     threshold: str = 'gap'
     half_width: int = 2
     extra_virtuals: int = 10
     filter_z: bool = False
+    tol_meV: Optional[float] = None
+    targets: Optional[Tuple[Tuple[str, int], ...]] = None
 
     def __post_init__(self) -> None:
         if self.kind not in _QP_STATES_KINDS:
@@ -143,6 +157,21 @@ class QPStates:
         if self.extra_virtuals < 0:
             raise ValueError(
                 f"QPStates.extra_virtuals={self.extra_virtuals!r} must be >= 0")
+        if self.kind != 'adaptive' and (self.tol_meV is not None
+                                        or self.targets is not None):
+            raise ValueError(
+                f"QPStates.tol_meV and .targets belong to kind='adaptive', "
+                f"not kind={self.kind!r}")
+        if self.tol_meV is not None and not float(self.tol_meV) >= 0.0:
+            raise ValueError(f"QPStates.tol_meV={self.tol_meV!r} must be >= 0")
+        if self.targets is not None:
+            targets = tuple((str(spin), int(root)) for spin, root in self.targets)
+            for spin, root in targets:
+                if spin not in _SPINS or root < 0:
+                    raise ValueError(
+                        f"QPStates.targets entry {(spin, root)!r}: spin in "
+                        f"{_SPINS}, zero-based root >= 0")
+            object.__setattr__(self, 'targets', targets)
 
 
 @dataclass(frozen=True)

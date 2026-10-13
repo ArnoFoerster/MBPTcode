@@ -210,9 +210,9 @@ def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
                 f"two_electron=None.")
         h1 = np.zeros((3, mol.nao_nr(), mol.nao_nr()))
         for ia in range(mol.natm):
-            mol.set_rinv_origin(mol.atom_coord(ia))
-            h1 -= koseki_charge(mol.atom_charge(ia)) * \
-                mol.intor_asymmetric('int1e_prinvxp', 3)
+            with mol.with_rinv_origin(mol.atom_coord(ia)):
+                h1 -= koseki_charge(mol.atom_charge(ia)) * \
+                    mol.intor_asymmetric('int1e_prinvxp', 3)
         return h1 * SOC_PREFACTOR
 
     if one_electron == 'x2c':
@@ -514,8 +514,12 @@ def isdf_manifolds(mf, mol, nocc, nroots=5, conv_tol=SOC_MANIFOLD_CONV_TOL,
     return (om_s, x_s, y_s), (om_t, x_t, y_t)
 
 
-def chain_manifolds(chain, mol=None, mf=None):
+def chain_manifolds(chain, mol=None, mf=None, evaluation=None):
     """((omega, X, Y) singlet, (omega, X, Y) triplet) from ONE GW and ONE W.
+
+    evaluation: a `StateEvaluation` holding both spectra
+    (`StateManifold.evaluate` with a target of each spin); its spectra are
+    returned as they are and nothing is evaluated.
 
     The adapter for `ExcitedStateChain`, whose spin channel is fixed at
     construction. `_forward` computes the quasiparticle set and the screening
@@ -531,6 +535,13 @@ def chain_manifolds(chain, mol=None, mf=None):
     varies the root off one forward pass; the two fold together the day an
     interstate quantity needs both axes at once.
     """
+    if evaluation is not None:
+        missing = [s for s in ('singlet', 'triplet')
+                   if s not in evaluation.spectrum]
+        if missing:
+            raise ValueError(f'the evaluation solved no {" or ".join(missing)} '
+                             f'spectrum; give it a target of each spin')
+        return evaluation.spectrum['singlet'], evaluation.spectrum['triplet']
     mol, mf = chain.mean_field(mol, mf)
     om_a, pieces = chain._forward(mol, mf)
     x_mo, d, eps_qp, w_aux = pieces[4], pieces[5], pieces[7], pieces[8]

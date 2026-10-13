@@ -9,11 +9,11 @@ communicator, so `run_simulated(main, n)` runs the same checks over
 thread-ranks; tests/test_distributed_isdf_scf.py gates the same properties
 in pytest over simulated ranks.
 
-THE RUN IS ONE DISTRIBUTED REGION: the handle (`distributed_isdf_jk`) and the
+The run is one distributed region: the handle (`distributed_isdf_jk`) and the
 SCF (`distributed_mean_field`) take the region's communicator ([context]),
 or are handed it ([explicit]); the serial references run on every rank
-inside `distributed(None)`. Every rank's verdict is gathered: a check that
-fails on rank 2 fails the run.
+inside `distributed(None)`. Every rank's verdict is gathered, so a check that
+fails on any rank fails the run.
 
 Checks, water/cc-pVDZ at 148 points per atom, tiles of `TILE` points (7):
   * the SCF [context], PBE0 and LRC-wPBEh: the energy within CONV_TOL of the
@@ -22,38 +22,24 @@ Checks, water/cc-pVDZ at 148 points per atom, tiles of `TILE` points (7):
     the same bits on every rank. K is a sum over row tiles of the one-rank
     handle's tile addends: every rank's partial is its own tiles' addends
     added in tile order, bitwise, and the reduced K lies at every element
-    within `rounding_bound` of the addends' exact sum -- half an ulp of each
+    within `rounding_bound` of the addends' exact sum (half an ulp of each
     partial sum a rank forms and of each join of two ranks' partials, the
-    most ANY order of the reduction can move it, floored at one ulp of
-    |K|max. A bound, not a measured response, so COMPOSED_GRAD_K does not
-    multiply it: three times it would pass K moved 8 ulp at 8 ranks and up.
-    J's bar is COMPOSED_GRAD_K times the ranks' partials reversed, floored
-    at one ulp of its largest element
+    most any order of the reduction can move it, floored at one ulp of
+    |K|max). A bound, not a measured response, so COMPOSED_GRAD_K does not
+    multiply it. J's bar is COMPOSED_GRAD_K times the ranks' partials
+    reversed, floored at one ulp of its largest element
   * the interaction's tiles [explicit]: every rank's tiles of both
     operators' Z the one-rank tiles bitwise, and together the whole grid
   * the handle built inside the SCF [context] (`build=False`):
     every rank's tiles the one-rank tiles bitwise (at 8 ranks rank 7 owns
     none of the 7), the same operators built on every rank and their tiles
-    each on one rank and together the grid's, and the BLAS threads its
-    record says the fit, the interaction and K ran on the count this rank's
-    process had outside the SCF -- on a node of BLAS_WRAP_MIN_THREADS or
-    more, where the SCF holds BLAS at one thread, that is the handle's
-    stages taking the pool back (`blas_full_pool`)
+    each on one rank and together the grid's, and the fit, the interaction
+    and K run on the BLAS thread count this rank's process had outside the
+    SCF (on a machine of BLAS_WRAP_MIN_THREADS or more, where the SCF holds
+    BLAS at one thread, the handle's stages take the pool back,
+    `blas_full_pool`)
   * rows only [context]: what every rank holds after the SCF
     (`memory_faults`) is its own tiles' rows, nothing grid-indexed whole
-
-SHOWN TO FAIL over 2, 3, 8, 32 and 64 simulated ranks, where the bound is
-2.06 ulp of |K|max at 2 and 3 ranks and 3.00 from 8 up (K_lr 2.12, 3.00): a
-tile dropped from rank 1's partial, or added to it twice, failed the bitwise
-partial on rank 1 and the bound on every rank; K moved 8 ulp at its largest
-element failed at 2.4-3.5 times the bound (K_lr 3.1-3.9), 4 ulp at 8 ranks
-at 1.1 (1.8). The sampled anchor it replaces (the largest move of the
-one-rank K over random regroupings of its addends into as many runs as
-ranks) fell to a quarter ulp of
-|K|max on 1.7-2.5 percent of 600 densities moved by an SCF's run-to-run
-drift at 32 ranks, and failed 11 of 16800 correct reductions of them
-(recursive doubling, binomial, hierarchical, rings), as it failed a 32-rank
-run on four nodes (1.78e-15 = 4.00 x 4.44e-16).
 """
 import hashlib
 import os
@@ -130,7 +116,9 @@ def memory_faults(storage, nocc, slab=None):
         faults.append('Z whole')
     if peak.get('A_block', 0) > tile * tile * 8:
         faults.append(f"a Hadamard block of {peak['A_block']} B")
-    if peak.get('T_rows', 0) > rows * nao * 8:
+    # T: the rank's rows, one set per operator a pass serves
+    operators = max(1, sum(key.startswith('interaction_') for key in now))
+    if peak.get('T_rows', 0) > operators * rows * nao * 8:
         faults.append(f"T rows {peak['T_rows']} B")
     if peak.get('stream_tile', 0) > tile * max(nocc + nao + naux, naux) * 8:
         faults.append(f"a streamed tile of {peak['stream_tile']} B")
@@ -286,7 +274,7 @@ def jk_check(gate, xc):
 
 def built_in_scf_check(gate, xc, one_tiles):
     """The handle built inside the SCF [context]: its tiles against the
-    one-rank tiles -- a rank may own none, rank 7 of 8 on water's 7 tiles --
+    one-rank tiles (a rank may own none, rank 7 of 8 on water's 7 tiles),
     the ranks' tiles of the operators every rank built each on one rank and
     together the grid, and its record of the BLAS threads against this
     process's count outside the SCF."""

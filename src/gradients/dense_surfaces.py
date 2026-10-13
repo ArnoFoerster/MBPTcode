@@ -24,13 +24,14 @@ value itself.
 """
 import numpy as np
 from pyscf import gto, scf
+from pyscf.df.addons import make_auxmol
 
 from src.Base.constants import HARTREE_TO_EV, QP_ORDER_SEARCH
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
 from src.Base.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
-from src.Base.environment import dresses_interaction, environment_of
-from src.Base.isdf_jk import mean_field_skeleton_force
+from src.Base.environment import environment_of
+from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
 from src.Base.utils.mpi_grid import lockstep
 from src.Base.utils.threads import blas_single_threaded
 from src.SingleReference.GW.qp_states import valence_qp_states
@@ -125,34 +126,53 @@ def kohn_sham_gradient_correction(mol, mf, nocc, qp_weights=None):
             g + qp_xc_correction_skeleton(mf, qp_weights, nocc))
 
 
-def refuse_a_solvated_mean_field(mf, mol, surface):
-    """Refuse a mean field carrying a continuum on a route that reports E_c^dRPA.
+def refuse_a_solvated_mean_field(mf, surface, force=False):
+    """Refuse a mean field carrying a continuum where the dense route cannot see it.
 
-    `mo_eri` is a raw four-index transform of the BARE interaction and consults
-    no environment, so E_c^dRPA here is the correlation energy of v alone. A
-    polarizable environment dresses every post-SCF interaction, v -> v + vtilde,
-    and `RPAGroundStateChain` on the SAME mean field builds E_c from the dressed
+    Two quantities on this route are blind to one. `mo_eri` is a raw
+    four-index transform of the BARE interaction and consults no environment,
+    so E_c^dRPA here is the correlation energy of v alone, while a polarizable
+    environment dresses every post-SCF interaction, v -> v + vtilde, and
+    `RPAGroundStateChain` on the SAME mean field builds E_c from the dressed
     one: the two are different functionals, against the tolerance a relaxed
-    geometry needs.
+    geometry needs. And every force here (`force=True`) differentiates a
+    Lagrangian with no reaction-field response: the orbital multipliers solve
+    against the gas-phase Fock response and the skeleton reads the bare
+    one-electron Hamiltonian, so the cavity's answer to the moving density and
+    nuclei is missing from every dense gradient, whatever the screening.
 
     TWO MARKERS, EITHER OF WHICH IS A CONTINUUM. pyscf's PCM sits on the mean
     field as `with_solvent` and has already relaxed the orbitals inside the
     reaction field; an `Environment` reaches post-SCF code as the attached
     `with_screening` and dresses the interaction. The second is asked through
-    `dresses_interaction`, whose answer is a property of the environment and not
-    of the basis it is asked in, so `mol` -- the basis this route expands
-    (pq|rs) in, there being no auxiliary one -- is the honest thing to ask it
-    about. Fixed point charges screen nothing and are left alone.
+    the environment's `screens`, the basis-free half of `dresses_interaction`:
+    this route expands (pq|rs) in no auxiliary basis, and building a kernel in
+    one only to learn that it exists would be evaluating the reaction field to
+    discover there is one. Fixed point charges screen nothing and are left
+    alone.
 
-    The check sits where E_c is formed rather than on the stored factory, so a
-    mean field handed straight to `total_energy` cannot walk past it.
+    The check sits where E_c or the force is formed rather than on the stored
+    factory, so a mean field handed straight to a surface cannot walk past it.
     """
+    environment = environment_of(mf)
     if hasattr(mf, 'with_solvent'):
         carries = 'its SCF was relaxed inside a PCM reaction field'
-    elif dresses_interaction(environment_of(mf), mol):
-        carries = f'{environment_of(mf)!r} is attached to it and dresses v'
+    elif getattr(environment, 'screens', True):
+        carries = f'{environment!r} is attached to it and dresses v'
     else:
         return
+    if force:
+        raise ValueError(
+            f'{surface} differentiates a Lagrangian with no reaction-field '
+            f'response -- gas-phase orbital multipliers and the bare '
+            f'one-electron skeleton -- but this mean field carries a '
+            f'continuum: {carries}. The force would omit the cavity\'s response '
+            f'to the moving density and nuclei, and would not be the '
+            f'derivative of any energy this surface reports. Use '
+            f'ExcitedStateChain, or RPABSESurface / RPAQPSurface, which '
+            f'differentiate an environment through the auxiliary metric. '
+            f'The energies (`total_energy`, `excitation_energy`) are not '
+            f'refused by this.')
     raise ValueError(
         f'{surface} reports E_HF + E_c^dRPA built from the BARE (pq|rs), but '
         f'this mean field carries a continuum: {carries}. The dense route has '
@@ -162,6 +182,73 @@ def refuse_a_solvated_mean_field(mf, mol, surface):
         f'RPAQPSurface composed on it, which carry the environment through '
         f'the auxiliary metric. Excitation energies and quasiparticle levels '
         f'are differences and are unaffected.')
+
+
+def mean_field_integrals(mf, mol):
+    """How the mean field's two-electron integrals are represented: ('exact',
+    None), ('df', its auxiliary molecule at `mol`) for a pyscf density-fitted
+    SCF, or ('isdf', None) for an ISDF-K one (DF Coulomb, interpolated
+    exchange), which no dense post-SCF step reproduces."""
+    with_df = getattr(mf, 'with_df', None)
+    if isinstance(with_df, ISDFJK):
+        return 'isdf', None
+    if with_df is not None:
+        return 'df', make_auxmol(mol, with_df.auxbasis)
+    return 'exact', None
+
+
+def refuse_mismatched_integrals(mf, mol, auxmol, surface, auxbasis=True):
+    """Refuse a force whose mean field and post-SCF step use different (pq|rs).
+
+    The gradient engine (`correlation_gradients`) folds the Fock matrix's
+    dependence on the orbitals, and solves the orbital multipliers, with the
+    post-SCF integrals `eri_mo`, while the mean field's own force comes from
+    the mean field. Both are the derivative of one energy only when the mean
+    field was converged with those same integrals: exact on exact, or
+    density-fitted in the auxiliary basis the post-SCF step fits in. A
+    DF-RHF reference under exact post-SCF integrals, or an exact one under
+    `auxbasis=`, returns a force 6e-5 Ha/Bohr off its own energy on water/
+    cc-pVDZ; `DenseRPASurface` and `QuasiparticleSurface`, which always use
+    the exact tensor, return forces 2.2e-6 and 6.7e-7 Ha/Bohr off on a
+    DF-RHF there (unfitted: 2e-9 to 4e-9, a central difference's
+    truncation). The energy is a well-defined functional either way (the RI
+    step of the dense-vs-cubic decomposition is an exact reference with an
+    `auxbasis`), so only the force is refused.
+
+    auxmol: the post-SCF auxiliary molecule, None for exact integrals.
+    auxbasis: whether `surface` takes an `auxbasis=` (`DenseBSESurface`);
+              `DenseRPASurface` and `QuasiparticleSurface` hold the exact
+              tensor only.
+    """
+    kind, mf_aux = mean_field_integrals(mf, mol)
+    fitted_in = (getattr(getattr(mf, 'with_df', None), 'auxbasis', None)
+                 or "pyscf's default JK-fitting set")
+    if kind == 'isdf':
+        why = ('the mean field is ISDF-K (interpolated exchange), which no '
+               'dense post-SCF integral reproduces')
+    elif kind == 'df' and auxmol is None:
+        why = (f'the mean field is density-fitted in '
+               f'{fitted_in} '
+               f'and the post-SCF integrals are exact (auxbasis=None)')
+    elif kind == 'exact' and auxmol is not None:
+        why = (f'the mean field is unfitted and the post-SCF integrals are '
+               f'fitted in {auxmol.basis!r}')
+    elif kind == 'df' and mf_aux._basis != auxmol._basis:
+        why = (f'the mean field is density-fitted in '
+               f'{fitted_in} '
+               f'and the post-SCF integrals in {auxmol.basis!r}')
+    else:
+        return
+    use = (' with auxbasis=None, or a density-fitted one with auxbasis= its '
+           'own auxiliary basis.' if auxbasis else
+           ': this surface transforms the exact (pq|rs) and takes no '
+           'auxiliary basis.')
+    raise ValueError(
+        f'{surface} differentiates its post-SCF step with the mean field\'s '
+        f'orbital response built from the post-SCF integrals, but {why}: the '
+        f'force would not be the derivative of the energy this surface '
+        f'reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean '
+        f'field{use} The energies are not refused by this.')
 
 
 class DenseRPASurface:
@@ -206,7 +293,7 @@ class DenseRPASurface:
 
     def _build(self, mol, mf=None):
         mf = self._scf(mol) if mf is None else mf
-        refuse_a_solvated_mean_field(mf, mol, 'DenseRPASurface')
+        refuse_a_solvated_mean_field(mf, 'DenseRPASurface')
         nocc = mol.nelectron // 2
         eri = mo_eri(mf, mol)
         return mf, eri, nocc, QPqb(mf.mo_energy, eri, nocc, screening='rpa')
@@ -231,6 +318,9 @@ class DenseRPASurface:
     def total_gradient(self, mol=None, mf=None):
         """(dE_0/dR, E_0, diagnostics), fully analytic."""
         mol = self.mol0 if mol is None else mol
+        mf = self._scf(mol) if mf is None else mf
+        refuse_mismatched_integrals(mf, mol, None, 'DenseRPASurface',
+                                    auxbasis=False)
         mf, eri, nocc, qp = self._build(mol, mf)
         e0 = ground_state_energy(declared_ground_state(mf, 'rpa'), mf, mol,
                                  e_corr=qp.qb.e_corr())
@@ -356,7 +446,7 @@ class QuasiparticleSurface:
         if self.screening == 'rpa':
             # E_c^dRPA enters the total energy here and nowhere else: the
             # Tamm-Dancoff surface is E_HF -/+ eps^QP and carries none.
-            refuse_a_solvated_mean_field(mf, mol, 'QuasiparticleSurface')
+            refuse_a_solvated_mean_field(mf, 'QuasiparticleSurface')
         w, _ = qp.solve_diag(self.orbital, w0=self._seed)
         self._seed = w
         e0 = ground_state_energy(declared_ground_state(mf, 'rpa'), mf, mol,
@@ -368,9 +458,20 @@ class QuasiparticleSurface:
         return lockstep(float(self._state(self.mol0 if mol is None else mol,
                                           mf)[0]))
 
+    def quasiparticle_energy(self, mol=None, mf=None):
+        """eps^QP of the surface's orbital at `mol`, in Hartree, without a
+        force: on any mean field, including one a force is refused on
+        (`refuse_mismatched_integrals`)."""
+        return lockstep(float(self._state(self.mol0 if mol is None else mol,
+                                          mf)[1]))
+
     def total_gradient(self, mol=None, mf=None):
         """(dE/dR, E, diagnostics) for the N-/+1 state, fully analytic."""
         mol = self.mol0 if mol is None else mol
+        mf = self._scf(mol) if mf is None else mf
+        refuse_a_solvated_mean_field(mf, 'QuasiparticleSurface', force=True)
+        refuse_mismatched_integrals(mf, mol, None, 'QuasiparticleSurface',
+                                    auxbasis=False)
         energy, w, mf, eri, nocc, qp, e0 = self._state(mol, mf)
         norb = mol.nao
 
@@ -423,28 +524,28 @@ class DenseBSESurface:
 
     The quasiparticle set and its roots are frozen at `mol` on construction and
     pinned everywhere else, so the surface is continuous. `refreeze` rebuilds
-    them and is the honest error bar on any minimum found here.
-
-    THIS SURFACE'S GRADIENT REFUSES A KOHN-SHAM REFERENCE. A BSE root reads a
-    Kohn-Sham static shift through EVERY orbital of the quasiparticle window at
-    once rather than through the single matrix element a quasiparticle energy
-    reads it through, and `BSEqb.partials` (`quasi_boson_adjoint.py`) refuses to
-    differentiate that shift rather than silently dropping it -- an
-    acknowledged open item of the dense route, not a porting defect, and left
-    as it stands here.
+    them and is the honest error bar on any minimum found here. Under
+    qp_root='weight' only the set is frozen: each root is the largest-weight
+    one at the geometry asked.
     """
 
     def __init__(self, mol, variant='BSE@GW', state=0, qp_orbs=None,
                  filter_z=True, scf=None, auxbasis=None, eri_blocks=False,
-                 spin='singlet'):
+                 spin='singlet', qp_root='newton'):
         """eri_blocks: build only the MO blocks the energy needs.
 
         The full (pq|rs) is nao^4, which is what puts the letter's own basis
         out of reach on a workstation. The energy touches (ia|jb), (ij|ab) and
         (pq|ia) alone, about a factor nao^2 / (nocc * nvirt) smaller. Energies
         only: gradients need the whole tensor and refuse.
+
+        qp_root: 'newton' follows each orbital's reference root by Newton from
+        its seed; 'weight' takes the root of largest pole strength at every
+        geometry (`QPqb.quasiparticle_root`), which no satellite nearer eps_p
+        can capture and which needs no seed, so `refreeze` leaves it as it is.
         """
         self.eri_blocks = eri_blocks
+        self.qp_root = qp_root
         self.mol0 = mol
         self.variant = variant
         # Kappa weights the bare exchange alone; the screening and the
@@ -454,12 +555,11 @@ class DenseBSESurface:
         self.state = state
         self.filter_z = filter_z
         # The starting point is free here too, the letter's second one being
-        # Kohn-Sham. What a Kohn-Sham reference breaks is E_0, which `_solve`
-        # repairs, and the GRADIENT, which `BSEqb.partials` refuses by the size
-        # of the shift it would have to differentiate: a BSE root reads the
-        # shift through every orbital of the quasiparticle window at once, not
-        # through the single matrix element a quasiparticle energy reads it
-        # through.
+        # Kohn-Sham. A Kohn-Sham reference moves E_0 to E_HF[rho], which
+        # `_solve` repairs, and puts <p|Sigma_x - v_xc|p> on every solved
+        # orbital: a BSE root reads that shift through every orbital of the
+        # quasiparticle set at once, each at its weight in the root
+        # (`_omega_partials`), and both terms carry their nuclear derivatives.
         self._scf = scf or tight_rhf
         self.auxbasis = auxbasis
         cfg = VARIANTS[variant]
@@ -480,9 +580,12 @@ class DenseBSESurface:
         probe = BSEqb(mf, eri, nocc, screening=self.screening,
                       bse_tda=self.bse_tda, qp_orbs=window,
                       pinned=not filter_z, delta=self.xc_shift(mf),
-                      spin=spin)
+                      spin=spin, qp_root=qp_root)
         self.qp_set = sorted(probe.qp_roots)
+        # The reference roots: what 'newton' follows, and for 'weight' the
+        # record of what the reference geometry carried.
         self.seeds = dict(probe.qp_roots)
+        self.qp_z = dict(probe.qp_z)
 
     @property
     def physics_excitation(self):
@@ -531,9 +634,7 @@ class DenseBSESurface:
         With eri_blocks the same integrals come back as the three blocks the
         energy needs, which is the same numbers without the nao^4 array.
         """
-        auxmol = (None if self.auxbasis is None
-                  else gto.M(atom=mol.atom, basis=self.auxbasis,
-                             unit=mol.unit, verbose=0))
+        auxmol = self._auxmol(mol)
         if self.eri_blocks:
             return MOEriBlocks.from_mol(mol, mf.mo_coeff,
                                         mol.nelectron // 2, auxmol=auxmol)
@@ -571,20 +672,33 @@ class DenseBSESurface:
         nocc = mol.nelectron // 2
         eri = self._eri(mol, mf)
         b = BSEqb(mf, eri, nocc, screening=self.screening, bse_tda=self.bse_tda,
-                  qp_orbs=self.qp_set, seeds=self.seeds, pinned=True,
-                  delta=self.xc_shift(mf), spin=self.spin)
+                  qp_orbs=self.qp_set, pinned=True,
+                  seeds=self.seeds if self.qp_root == 'newton' else None,
+                  delta=self.xc_shift(mf), spin=self.spin,
+                  qp_root=self.qp_root)
         return b, eri, nocc, mol.nao, self._e0(mol, mf, b).total
 
     def total_energy(self, mol=None, mf=None):
         """E_0 + Omega_nu. E_0 carries E_c^dRPA under RPA screening, so a
-        continuum is refused there and not on `excitation_gradient`, which
+        continuum is refused there and not on `excitation_energy`, which
         reports Omega alone."""
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
         if self.screening == 'rpa':
-            refuse_a_solvated_mean_field(mf, mol, 'DenseBSESurface')
+            refuse_a_solvated_mean_field(mf, 'DenseBSESurface')
         b, _, _, _, e0 = self._solve(mol, mf)
         return lockstep(e0 + float(b.Omega[self.state]))
+
+    def excitation_energy(self, mol=None, mf=None):
+        """Omega_nu alone, without a force.
+
+        Omega carries no E_c, so a continuum is not refused here, while the
+        force on it is (`excitation_gradient`).
+        """
+        mol = mol or self.mol0
+        mf = mf or self.scf_factory(mol)
+        b, _, _, _, _ = self._solve(mol, mf)
+        return lockstep(float(b.Omega[self.state]))
 
     def excitation_gradient(self, mol=None, mf=None):
         """(dOmega/dR, Omega, diagnostics) -- the excitation energy alone.
@@ -598,26 +712,33 @@ class DenseBSESurface:
         """
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
+        refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
+        refuse_mismatched_integrals(mf, mol, self._auxmol(mol),
+                                    'DenseBSESurface')
         b, eri, nocc, norb, _ = self._solve(mol, mf)
-        gF, G4, tg = b.partials(self.state)
+        gF, G4, tg, shift = self._omega_partials(b, mf)
         if self.screening == 'rpa':
             add_z_contribution(b.qp.qb, solve_Z(b.qp.qb, tg), nocc, norb,
                                gF, G4)
+        target, g_extra = (gF, G4), 0.0
+        if shift is not None:
+            # Omega alone: the shift's terms, not E_0's double counting
+            target += (qp_xc_correction_Y(mf, shift, nocc),)
+            g_extra = qp_xc_correction_skeleton(mf, shift, nocc)
         aux = self._auxmol(mol)
-        Gs, diags = correlation_gradients(mol, mf, [(gF, G4)], eri_mo=eri,
+        Gs, diags = correlation_gradients(mol, mf, [target], eri_mo=eri,
                                           auxmol=aux)
         omega = float(b.Omega[self.state])
-        return lockstep((Gs[0], omega, {
+        return lockstep((Gs[0] + g_extra, omega, {
             'omega': omega, 'stationarity': float(diags[0]['stationarity']),
             'n_qp': len(self.qp_set)}))
 
     def _auxmol(self, mol):
-        """The auxiliary basis on THIS geometry.
+        """The auxiliary basis on THIS geometry, or None without one.
 
-        Built from `atom_coords()` rather than `mol.atom`: a molecule that has
-        been through `set_geom_` carries new coordinates but the string it was
-        created from, so reading `mol.atom` would silently fit the reference
-        geometry at every displaced one.
+        Built from `atom_coords()`, the coordinates the integrals are evaluated
+        at, so the energy (`_eri`) and the gradient fit in one auxiliary basis
+        by construction rather than by two spellings of the same geometry.
         """
         if self.auxbasis is None:
             return None
@@ -628,24 +749,40 @@ class DenseBSESurface:
     def total_gradient(self, mol=None, mf=None):
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
-        if self.screening == 'rpa':
-            refuse_a_solvated_mean_field(mf, mol, 'DenseBSESurface')
+        refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
+        refuse_mismatched_integrals(mf, mol, self._auxmol(mol),
+                                    'DenseBSESurface')
         b, eri, nocc, norb, e0 = self._solve(mol, mf)
-        gF, G4, tg = b.partials(self.state)
+        gF, G4, tg, shift = self._omega_partials(b, mf)
         if self.screening == 'rpa':
             gFd, G4d = rpa_partials(b.qp.qb, nocc, norb)
             gF += gFd
             G4 += G4d
             Zm = solve_Z(b.qp.qb, tg)
             add_z_contribution(b.qp.qb, Zm, nocc, norb, gF, G4)
-        Gs, diags = correlation_gradients(mol, mf, [(gF, G4)], eri_mo=eri,
+        target, g_extra = (gF, G4), 0.0
+        if shift is not None:
+            # E_0 = E_HF[rho] and the shift, each with its own derivative
+            y_extra, g_extra = kohn_sham_gradient_correction(mol, mf, nocc,
+                                                             shift)
+            target += (y_extra,)
+        Gs, diags = correlation_gradients(mol, mf, [target], eri_mo=eri,
                                           auxmol=self._auxmol(mol))
         omega = float(b.Omega[self.state])
-        return lockstep((mf.Gradients().kernel() + Gs[0], e0 + omega,
+        return lockstep((mean_field_skeleton_force(mf) + Gs[0] + g_extra,
+                         e0 + omega,
                          {'omega': omega, 'e0': e0,
                           'e0_terms': self._e0(mol, mf, b).terms,
                           'stationarity': float(diags[0]['stationarity']),
                           'n_qp': len(self.qp_set)}))
+
+    def _omega_partials(self, b, mf):
+        """(gammaF, Gamma4, t_grad, shift weights) of Omega_state; the weights
+        are None on Hartree-Fock, where the shift is round-off and the
+        (F, ERI, t) partials are the whole derivative."""
+        if not xc_hybrid_coeff(mf)[0]:
+            return b.partials(self.state) + (None,)
+        return b.partials_with_shift(self.state)
 
     def refreeze(self, mol):
         """The same surface with the quasiparticle set rebuilt at `mol`.
@@ -654,13 +791,15 @@ class DenseBSESurface:
         change which functional the walk is on halfway through it: without
         `spin` a triplet comes back a singlet, well off itself, and without
         `eri_blocks` a surface that fits in memory rebuilds the full nao^4
-        tensor at the next geometry.
+        tensor at the next geometry. Under qp_root='weight' only the set is
+        rebuilt: no root was frozen.
         """
         return DenseBSESurface(mol, self.variant, self.state,
                                qp_orbs=self._qp_orbs_in,
                                filter_z=self.filter_z, scf=self._scf,
                                auxbasis=self.auxbasis,
-                               eri_blocks=self.eri_blocks, spin=self.spin)
+                               eri_blocks=self.eri_blocks, spin=self.spin,
+                               qp_root=self.qp_root)
 
     def label(self):
         return f'{self.variant}[S{self.state + 1}]'

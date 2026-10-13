@@ -5,7 +5,7 @@ The layer knows one interface, `PotentialEnergySurface` -- a total energy over
 the nuclei, its gradient, and the method's own way of rebuilding what it froze
 at a reference geometry -- and nothing about how that energy is obtained. A
 BSE@GW excitation, a dRPA ground state and a downfolded active-space root are
-the same object here, and a surface that has no analytic gradient yet is driven
+the same object here, and a surface that has no analytic gradient is driven
 through `FiniteDifferenceGradient` instead of being excluded.
 
     surface     the protocol, and the finite-difference gradient wrapper
@@ -24,6 +24,12 @@ through `FiniteDifferenceGradient` instead of being excluded.
                 electronic coupling as an argument
     spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors -- the coupling
                 `rates` was written to receive
+    spin_vibronic
+                the nuclear derivative of one <S|H_SO|T> element through the
+                higher states, for the Herzberg-Teller term of `rates`
+    mode_hessian
+                force constants along chosen normal modes by differencing the
+                analytic gradient: excited-state frequencies of local modes
     nonadiabatic
                 <Psi_I|d/dR Psi_J> from overlaps of those same vectors at
                 displaced geometries -- the other coupling `rates` needs, and
@@ -38,8 +44,8 @@ through `FiniteDifferenceGradient` instead of being excluded.
     hessian     the nuclear Hessian by central differences of the analytic
                 gradient, for a route pyscf's own analytic Hessian cannot serve
     fragment_bse
-                the fragment-partitioned Tamm-Dancoff BSE: site and
-                charge-transfer diabats, A_eff(Omega_0) = A_PP + Sigma(Omega_0)
+                the fragment-partitioned BSE, Tamm-Dancoff or full: site and
+                charge-transfer diabats, A_eff(Omega_0) = K_PP + Sigma(Omega_0)
                 with the rest eliminated exactly, and its resolvent vectors
     diabatic    finite differences of that diabatic matrix, relocalized at
                 every displaced geometry: the reference the analytic gradient

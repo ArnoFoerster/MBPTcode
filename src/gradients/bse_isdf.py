@@ -27,11 +27,12 @@ kappa = 2 for a singlet and 0 for a triplet, the one factor that separates
 them (`davidson` and `bse_upfolded` use the same convention). The forward pass
 reproduces production's ISDF Davidson root for root.
 
-WHAT IS STILL PAIR-SPACE HERE: the blocks themselves are (n_ov, n_ov) and the
-Casida step is a dense eigensolve, so this closes the ADJOINT CHAIN at small
-size, not yet the cost. Production already has the matrix-free Davidson that
-replaces it; wiring the adjoint to iterative eigenvectors does not change any
-of the algebra below.
+WHAT IS STILL PAIR-SPACE HERE: `bse_blocks` forms the (n_ov, n_ov) blocks and
+`bse_solve` is a dense eigensolve, the small-size reference. The adjoint
+itself needs neither: `bse_backward` reads the Casida vectors and the
+three-index blocks of `bse_cache` alone, so `ExcitedStateChain` feeds it the
+matrix-free Davidson's eigenvectors (`solve_casida_davidson`), and the grid
+form of the same reverse pass is `isdf_bse_adjoint`.
 
 X and D may be `SlicedFactors`, each rank's grid rows of X_mo and D: every
 block is a sum over the grid, so each entry point gathers X_mo and D whole
@@ -179,8 +180,13 @@ def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
     derivative coupling. C^A and C^B become x_m x_n^T + y_m y_n^T and
     x_m y_n^T + y_m x_n^T -- still rank two, so nothing below changes shape and
     the (n_ov, n_ov) matrix is still never formed. The one-sided contraction is
-    not symmetric in m <-> n; `interstate_backward` averages both orderings,
-    which is exact because dH is.
+    symmetric in m <-> n in everything that reaches the nuclei -- eps_qp_bar,
+    X_bar, D_bar and the symmetric part of W_aux_bar, the only part a symmetric
+    dW reads (water/cc-pVDZ, roots 0 and 1: the orderings differ by 4e-15 on
+    |X_bar| ~ 65); a full BSE's swap term leaves W_aux_bar an antisymmetric
+    part that does depend on the ordering and contracts to zero.
+    `interstate_backward` averages both orderings, which returns the same
+    element with a W_aux_bar free of that ordering.
 
     Hellmann-Feynman on the Casida vectors, with
 

@@ -1,34 +1,30 @@
-"""The contour-deformation pole guard as a FROZEN convention.
+"""The contour-deformation pole guard as a frozen convention.
 
 The quasiparticle Newton is held `QP_POLE_OFFSET` away from every orbital
-energy, because at omega = eps_q the pole of G sits on the contour and the
-imaginary-axis integrand collapses onto nu = 0. A root inside that band makes
-the guard and the Newton step fight, and the iteration escapes by halving the
-band -- a decision taken per call, and so per geometry, on a surface whose
-every other discrete choice is fixed at the reference geometry. `qp_energy_cd`
-now takes the band as an input a caller can PIN and reports the band actually
-used; `qp_set_gradient`/`qp_gradient_space_time` pass one per state and return
-them in `route_out['pole_offsets']`; `ExcitedStateChain` records what the first
-solve resolved and hands it to every later geometry.
+energy. A root inside that band makes the guard and the Newton step fight,
+and the iteration escapes by halving the band: a decision taken per call, and
+so per geometry, on a surface whose every other discrete choice is fixed at
+the reference geometry. `qp_energy_cd` takes the band as an input a caller
+can pin and reports the band actually used; `qp_set_gradient` and
+`qp_gradient_space_time` pass one per state and return them in
+`route_out['pole_offsets']`; `ExcitedStateChain` records what the first solve
+resolved and hands it to every later geometry.
 
-WHAT THE BAND DOES NOT DO IS MOVE THE ANSWER. A Newton that converges returns a
-root of f free of the guard, so the band changes the path and not the root:
-measured on the solvated surface below, bands spanning 1e-3 down to 1.2e-4 Ha
-give the same total energy to 1e-14 Ha. What the pinning buys is that the PATH
--- and with it which branch the capture and satellite fallbacks pick, each a
-different approximation from the self-consistent root -- is the same at every
-geometry rather than re-chosen at each.
+The band does not move the answer. A Newton that converges returns a root of
+f free of the guard, so the band changes the path and not the root: on the
+solvated surface below, bands from 1e-3 down to 1.2e-4 Ha give the same total
+energy to 1e-14 Ha. Pinning makes the path, and with it the branch the
+capture and satellite fallbacks pick, the same at every geometry.
 
-The second-difference gate below is therefore a smoothness FLOOR, not a
-before/after: on B3LYP water in a continuum the surface is analytic through the
-scan (second differences 0.3306, 0.3319, 0.3440 and 0.5204 Ha/Bohr^2 at
-h = 5e-4, 1e-3, 2e-3 and 4e-3 -- converging, where a step in E' would diverge
-like 1/h). Its enormous higher derivatives come from the HOMO's quasiparticle
-root skimming the G pole at eps_(HOMO-1), 8.1e-4 Ha away at the reference and
-4.0e-4 at dz = -4e-3; 8 mBohr out it crosses, and there the 64-point CD
-quadrature loses the spike (3.6e-4 Ha against a 128-point grid) and the Newton
-lands on a satellite with Z = -0.093. That is the limit the guard exists to
-announce, and no choice of band removes it.
+The second-difference gate below is a smoothness floor. On B3LYP water in a
+continuum the HOMO's quasiparticle root skims eps_(HOMO-1), 8.1e-4 Ha away at
+the reference and 4.0e-4 at dz = -4e-3, and crosses it 8 mBohr out; the
+self-energy is continuous there (`cd_integral_weights`), so the crossing is
+smooth (tests/test_rpa_bse_surface.py scans it at 1 mBohr).
+
+The flat-screening models carry the physical sign, W^c(0) < 0: Sigma^int
+beside eps_HOMO is -W^c(0)/2 > 0, which keeps the HOMO's root in the window no
+residue reaches.
 """
 import warnings
 
@@ -45,15 +41,16 @@ from src.gradients.rpa_bse_surface import RPABSESurface
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 
-#: A flat imaginary-axis screening scales the quasiparticle shift: 2e-3 puts
-#: the root 5.1e-4 Ha from eps_p, inside the default band and outside its floor.
+#: A flat imaginary-axis screening scales the quasiparticle shift: -5e-3 puts
+#: the root 6.4e-4 Ha from eps_p, inside the default band and outside its
+#: half, and -1e-2 1.3e-3 Ha away, outside the band.
 EPS = np.array([-0.9, -0.6, -0.35, 0.15, 0.4, 0.8])
 NOCC = 3
 NU = np.array([0.05, 0.3, 1.0, 4.0])
 WT = np.array([0.1, 0.3, 0.8, 3.0])
 
 
-def solve(p=NOCC - 1, screening=2e-3, **kw):
+def solve(p=NOCC - 1, screening=-5e-3, **kw):
     """(root, the band that was in force, the warnings) for a flat screening."""
     Bp = np.zeros((3, len(EPS)))            # a frontier state sweeps no residues
     wc = np.full((len(NU), len(EPS)), screening)
@@ -108,9 +105,9 @@ def energy_at(surface, water, dz, record=False):
 
 # ------------------------------------------------------- the band as an input
 def test_the_relaxed_band_is_reported_and_not_only_warned():
-    """The default path is untouched -- it still halves the band to reach a root
-    inside it -- and now says which band it ended on, which is exactly what a
-    caller has to record to take the same path at the next geometry."""
+    """The default path halves the band to reach a root inside it and reports
+    the band it ended on, which a caller records to take the same path at the
+    next geometry."""
     w, band, notes = solve()
     assert band == pytest.approx(QP_POLE_OFFSET / 2)
     assert any('relaxed to' in n for n in notes), notes
@@ -140,7 +137,7 @@ def test_a_pinned_band_that_misses_the_root_says_so_and_still_answers():
 
 def test_a_band_the_root_sits_outside_is_left_alone():
     """The common case must pay nothing for the rare one."""
-    w, band, notes = solve(screening=5e-3)
+    w, band, notes = solve(screening=-1e-2)
     assert band == QP_POLE_OFFSET
     assert not notes, notes
     assert abs(w - EPS[NOCC - 1]) > QP_POLE_OFFSET
@@ -222,11 +219,8 @@ def test_the_energy_scan_is_smooth_at_both_step_sizes(solvated, water):
 
     A step in E' of size delta makes (E+ - 2E0 + E-)/h^2 diverge like delta/h,
     so the two step sizes would disagree by a factor of two per halving and
-    without limit. They come out 0.3440 and 0.5204 Ha/Bohr^2: a factor 1.51,
-    which is the near-pole curvature of this surface (E'''' ~ 2e4) and not a
-    step -- the same second difference is 0.3319 at h = 1e-3 and 0.3306 at
-    5e-4, i.e. converging. A factor of three is loose against 1.51 and tight
-    against the 1/h a step would give at these steps.
+    without limit; a smooth surface gives nearly the same value at both,
+    and a factor of three is the bound.
     """
     s, e0 = solvated
     e = {dz: energy_at(s, water, dz) for dz in (-4e-3, -2e-3, 2e-3, 4e-3)}
@@ -244,7 +238,7 @@ def test_refreeze_re_derives_the_band_at_the_new_geometry(solvated, water):
 
     8 mBohr out the HOMO's root sits 1.6e-3 Ha from eps_(HOMO-1), outside the
     default band, so the refrozen surface resolves the default there where the
-    reference resolved half of it -- carrying the old value would have pinned a
+    reference resolved half of it; carrying the reference value would pin a
     band this geometry has no reason to use.
     """
     s, _ = solvated

@@ -3,92 +3,46 @@ the fitted tensor and the quadrature grid.
 
 `mpi_grid.simulated_world` runs each rank in a thread of this process and
 broadcasts and reduces through shared memory, so the whole sequence runs here
--- pyscf's SCF on every rank, the density and its orbitals locked at every J/K
-build and every quadrature, the reductions of (J, K) and of (nelec, E_xc,
-V_xc), the loop's exit settings and the converged mean field locked -- where
-MPI itself cannot start. What it does not test is the wire protocol.
+without MPI: pyscf's SCF on every rank, the density and its orbitals locked at
+every J/K build and every quadrature, the reductions of (J, K) and of (nelec,
+E_xc, V_xc), the loop's exit settings and the converged mean field locked. The
+wire protocol is not tested.
 
 Two and three ranks: 116 and 278 auxiliary functions divide evenly by neither,
 so both gates carry a rank whose block is one row short, and the slices have to
 tile their index rather than merely cover it.
 
-WHAT IS BITWISE AND WHAT IS NOT. The rows a rank builds are, against the same
-column blocks walked by one rank: the metric factor is rank 0's, replicated,
-every AO-pair column is evaluated by exactly one rank and travels verbatim, so
-the slices reassemble with no difference at all -- that is
-`test_slices_tile_the_auxiliary_index`, and it is what says the split is of
-ONE tensor. Against pyscf's DEFAULT blocking they differ by the last bit of
-the smallest elements, which is a property of how many columns go into one
-`solve_triangular` and not of the split: pyscf's own builder differs from
-itself by the same 2.5e-17 between two `max_memory` settings. The grid points
-are bitwise outright: they are rank 0's own, broadcast and sliced, so the
-weights a rank integrates concatenate back to rank 0's grid bit for bit. What
-the ranks REDUCE is not: the sums over the auxiliary index and
-over the grid points are re-associated at the rank boundaries, so the Fock
-matrix moves in its last bits and the SCF stops at a mean field that differs by
-the convergence tolerance. Every rank takes every decision -- DIIS, the
-occupation, when it has converged -- from rank 0's density and orbitals,
-locked into its own arrays at every Fock piece, and the grid is rank 0's, so
-the ranks cannot diverge further than that, and after the final lockstep they
-hold the same orbitals bit for bit. Without a communicator, or on a world of
-one, nothing here runs at all and the mean field is pyscf's own, bit for bit
-(`test_one_rank_world_is_pyscf`).
+What is bitwise and what is not. Against the same column blocks walked by one
+rank the rows a rank builds are bitwise: the metric factor is rank 0's,
+replicated, and every AO-pair column is evaluated by one rank and travels
+verbatim (`test_slices_tile_the_auxiliary_index`). Against pyscf's default
+blocking they differ in the last bit of the smallest elements, a property of
+how many columns go into one `solve_triangular`, not of the split. The grid
+points are rank 0's, broadcast and sliced, so the weights a rank integrates
+concatenate back to rank 0's grid bit for bit. The reduced sums over the
+auxiliary index and over the grid points are re-associated at the rank
+boundaries, so the Fock matrix moves in its last bits and the SCF stops at a
+mean field that differs by the convergence tolerance. Every rank takes every
+decision (DIIS, the occupation, convergence) from rank 0's density and
+orbitals, locked into its own arrays at every Fock piece, so after the final
+lockstep the ranks hold the same orbitals bit for bit. Without a
+communicator, or on a world of one, nothing here runs and the mean field is
+pyscf's own (`test_one_rank_world_is_pyscf`).
 
-WHAT SPANS TWO SCF RUNS. A distributed mean field against the serial one is
-two SCF runs, and a threaded pyscf, whose OpenMP GEMM adds its K-split
-partials in thread-arrival order, does not repeat one bit for bit. Those
-comparisons are gated on an anchored bar (`scf_bars`): `COMPOSED_GRAD_K`
-times what running the serial SCF again moves the energy, the density and the
-orbital energies, one ulp at the least, floored at `E_TOL`, `DM_TOL` and
-`MO_TOL`; where two distributed runs of one layout are compared, within
-`COMPOSED_GRAD_K` times the repeat alone, which is bitwise here, where pyscf
-repeats its bits. The checks that the serial path IS pyscf's own SCF, and the
-subprocess probe against the archived tree, are `==` on two runs:
-single-machine gates by design, met where pyscf repeats its bits.
+Comparisons that span two SCF runs. A threaded pyscf, whose OpenMP GEMM adds
+its K-split partials in thread-arrival order, does not repeat an SCF bit for
+bit, so a distributed mean field against the serial one is gated on an
+anchored bar (`scf_bars`): `COMPOSED_GRAD_K` times what running the serial SCF
+again moves the energy, the density and the orbital energies (one ulp at the
+least), floored at `E_TOL`, `DM_TOL` and `MO_TOL`; two distributed runs of one
+layout are compared within `COMPOSED_GRAD_K` times the repeat alone. The
+checks that the serial path is pyscf's own SCF, and the subprocess probe
+against the archived tree, are `==` on two runs: single-machine gates, met
+where pyscf repeats its bits.
 
-EVERY GATE HERE WAS SHOWN TO FAIL:
-
-  what is broken                         what then fails
-  one rank's partial K scaled by         the energy gate, 2.2e-8 Ha out
-  1 + 1e-6                               against a tolerance of 1e-10
-  one rank's partial V_xc scaled by      the DENSITY gate, 2.2e-7 out, and the
-  1 + 1e-6                               orbital energies, 1.9e-7 Ha -- not the
-                                         energy, which is stationary in the
-                                         density and reads E_xc, not V_xc
-  one rank's partial E_xc scaled by      the energy gate, 3.0e-6 Ha out
-  1 + 1e-6
-  the reduction of J and K made a        every gate: each rank iterates on its
-  no-op (the collective still called)    own rows' J and K, the ranks stop at
-                                         different cycles and the next
-                                         lockstep refuses on every rank
-  the reduction of the quadrature made   every gate: the ranks fall out of step
-  a no-op                                the same way and the run raises
-  the row split made a no-op, every      the tiling gate on the blocks and on
-  rank keeping the whole tensor          the bytes, and the energy by 28 Ha
-  the point split made a no-op, every    the tiling gate on the point counts,
-  rank integrating the whole grid        and the PBE0 energy by 7.2 Ha
-  one AO-pair column block skipped by    the reassembly gate, and the energy
-  the rank that owns it                  by 47.3 Ha with the SCF still
-                                         reporting itself converged
-  the density's lockstep taken out of    the repair gate: rank 1 keeps the
-  `get_jk`, rank 1's density moved one   density it was handed, its DIIS
-  ulp before one J/K build               extrapolates another Fock matrix from
-                                         the next cycle on, and the audit
-                                         counts no repair
-  rank 1 given conv_tol 1e-2 and         nothing -- which is the point:
-  max_cycle 1                            `test_worker_takes_no_decision` says
-                                         the exit is rank 0's; with the exit
-                                         settings' lockstep taken out, rank 1
-                                         stops early and the next lockstep
-                                         refuses on every rank
-  the refusal of a with_df that is       the with_df gate: both ranks converge a
-  neither pyscf's DF nor ISDF's          foreign with_df mean field on plain
-  taken out                              density-fitted rows and report nothing
-
-THE TIMERS read the clock at stage boundaries and are gated the way every
-other instrumented route in this repo is: every key present on every rank,
-the stages inside the total, the cycle count pyscf's own, and the dict
-JSON-clean for a caller that records it.
+The timers read the clock at stage boundaries and are gated like every other
+instrumented route: every key present on every rank, the stages inside the
+total, the cycle count pyscf's own, and the dict JSON-clean.
 """
 import json
 import os
@@ -134,10 +88,10 @@ MO_TOL = 1e-8
 #: cycle count, which is what makes the comparison a comparison of solutions.
 CONV_TOL = 1e-12
 #: pyscf's default is sqrt(conv_tol) = 1e-6, which stops the iteration with a
-#: density good to ~1e-8 -- the density gate itself. Two runs whose fitted
+#: density good to ~1e-8, the density gate itself. Two runs whose fitted
 #: tensors differ in the last bit then stop a cycle apart and differ by that
-#: floor rather than by anything the split did: ethylene/cc-pVTZ measures
-#: 1.7e-8 at the default and 2.6e-12 here, on the same solution.
+#: floor rather than by anything the split did (ethylene/cc-pVTZ: 1.7e-8 at
+#: the default, 2.6e-12 here).
 CONV_TOL_GRAD = 1e-9
 #: Relative scaling of one rank's partial. Small enough to be a rounding-sized
 #: defect and large enough that the energy gate catches it.
@@ -147,7 +101,7 @@ PERTURBATION = 1e-6
 #: kept its own density would extrapolate another Fock matrix from there on.
 PERTURBED_BUILD = 4
 #: How far the fitted tensor may sit from pyscf's own default-blocked one.
-#: Not the split's error: `incore.cholesky_eri` differs from ITSELF by 2.5e-17
+#: Not the split's error: `incore.cholesky_eri` differs from itself by 2.5e-17
 #: on ethylene/cc-pVTZ between max_memory 4000 and 20, because the number of
 #: columns in one `solve_triangular` decides how LAPACK blocks the solve.
 CDERI_BLOCKING_TOL = 1e-15
@@ -160,10 +114,10 @@ CASES = [('water', WATER, 'cc-pvdz', None),
          ('ethylene', ETHYLENE, 'cc-pvtz', 'pbe0')]
 
 REPO = Path(__file__).resolve().parents[1]
-#: The build before its metric solve ran on the pool the build's wrap took:
-#: every row it made is the row this tree must still make. The attenuated
-#: operator's rows have no such tree -- that build refused a range-separated
-#: functional over ranks -- so the rows compared are the bare operator's.
+#: A tree whose build runs its metric solve at one BLAS thread inside the
+#: build's wrap: every row it makes is the row this tree must make. That tree
+#: refuses a range-separated functional over ranks, so only the bare
+#: operator's rows are compared.
 ONE_POOL_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
 #: The molecules the rows probe builds, at every rank count of `SIZES`.
 ROWS_CASES = (('water', WATER, 'cc-pvdz'),
@@ -290,12 +244,20 @@ def converge(comm, mf, **kwargs):
 
 
 def converge_with_grid(comm, mf):
-    """A distributed SCF, plus the grid rank 0 ended up integrating over and
-    whether this rank built a grid of its own."""
+    """A distributed SCF, plus the grid this rank ended up holding and how
+    many grids it built itself (`Grids.build` on its own mean field)."""
+    grids, build, built = mf.grids, mf.grids.build, []
+
+    def counted(*args, **kwargs):
+        built.append(1)
+        return build(*args, **kwargs)
+
+    grids.build = counted
     out = converge(comm, mf)
-    out['weights'] = (np.asarray(mf.grids.weights) if comm.Get_rank() == 0
-                      else None)
-    out['built_grid'] = mf.grids.coords is not None
+    del grids.build
+    out['weights'] = np.asarray(mf.grids.weights)
+    out['coords'] = np.asarray(mf.grids.coords)
+    out['built_grid'] = len(built)
     return out
 
 
@@ -377,13 +339,13 @@ def slice_record(comm, mf):
 def serial_column_walk(mf, blocks):
     """The whole cderi, one rank walking the column blocks the ranks divided.
 
-    THE REFERENCE THE SPLIT IS EXACT AGAINST. pyscf's own serial tensor is not
+    The reference the split is exact against. pyscf's own serial tensor is not
     bit-stable in its own `max_memory`: the column count handed to one
-    `solve_triangular` decides how LAPACK blocks the solve, and
-    `incore.cholesky_eri` on ethylene/cc-pVTZ at max_memory 4000 against 20
-    differs by 2.5e-17 on elements of order 1. So what says the split is exact
-    is the same block list walked by one rank, and what says the blocking is
-    immaterial is that its distance to pyscf's default is that same last bit.
+    `solve_triangular` decides how LAPACK blocks the solve (2.5e-17 on
+    elements of order 1 on ethylene/cc-pVTZ between max_memory 4000 and 20).
+    So the split is checked exact against the same block list walked by one
+    rank, and the blocking immaterial by its distance to pyscf's default
+    being that same last bit.
     """
     auxmol = addons.make_auxmol(mf.mol, mf.with_df.auxbasis)
     low, mode = distributed_df._metric_factor(mf.mol, auxmol)
@@ -400,14 +362,12 @@ def test_slices_tile_the_auxiliary_index(serial):
     """Each rank holds ceil(naux/nranks) rows at most, the blocks tile the
     auxiliary index, and the resident bytes fall with the rank count.
 
-    The reassembled slices are BITWISE the same block list walked serially:
-    every column is evaluated by exactly one rank and travels verbatim, so
-    anything less than exact would mean the ranks are holding rows of
-    different tensors. That reference shares this module's own block kernel,
-    so it is the exactness of the SPLIT it pins and not the correctness of
-    the kernel; what pins the kernel is the second comparison, against
-    pyscf's own `DF.build` tensor, which is a different implementation and
-    differs only by the blocking's last bit -- see `serial_column_walk`.
+    The reassembled slices are bitwise the same block list walked serially:
+    every column is evaluated by one rank and travels verbatim. That
+    reference shares this module's block kernel, so it pins the exactness of
+    the split, not the kernel; the kernel is pinned by the comparison against
+    pyscf's own `DF.build` tensor, a different implementation that differs
+    only by the blocking's last bit (see `serial_column_walk`).
     """
     for name, atom, basis, xc in (CASES[0], CASES[2]):
         ref = serial[(name, xc)]
@@ -444,9 +404,8 @@ def test_column_blocks_tile_and_divide(serial):
     """Every AO-pair column block is evaluated by exactly one rank, and how
     many each evaluates falls with the rank count.
 
-    The integral pass is the half of the build that used to run whole on every
-    rank; what divides it is this partition, and what keeps the tensor one
-    tensor is that the parts tile pyscf's own block list.
+    This partition divides the integral pass, and the parts tiling pyscf's
+    own block list keep the tensor one tensor.
     """
     for name, atom, basis, xc in (CASES[0], CASES[2]):
         counts = {}
@@ -467,17 +426,21 @@ def test_column_blocks_tile_and_divide(serial):
 def test_points_tile_rank_zero_grid(monkeypatch, size, name, atom, basis, xc):
     """The blocks a rank integrates tile rank 0's grid, bit for bit.
 
-    The grid is rank 0's -- pyscf's own build, pyscf's own pruning against the
-    first density -- and it is broadcast, not rebuilt, so the weights the ranks
-    integrate concatenate back to exactly the array rank 0 holds. The blocks
+    The grid is rank 0's (pyscf's own build and pruning against the first
+    density), broadcast, not rebuilt, so the weights the ranks integrate
+    concatenate back to the array rank 0 holds. The blocks
     are whole multiples of ALIGNMENT_UNIT, which is what keeps every rank on
     the sparse AO kernels the serial run uses. No other rank builds a grid of
-    its own: its `initialize_grids` builds nothing while the handle is in.
+    its own: its `initialize_grids` builds nothing while the handle is in,
+    and after the SCF it holds rank 0's whole grid, bit for bit.
     """
     seen = integrated(monkeypatch)
     out = on_ranks(converge_with_grid, size, atom, basis, xc)
     assert all(r['converged'] for r in out)
-    assert [r['built_grid'] for r in out] == [True] + [False] * (size - 1)
+    assert [r['built_grid'] for r in out] == [1] + [0] * (size - 1)
+    assert all(np.array_equal(r['weights'], out[0]['weights'])
+               and np.array_equal(r['coords'], out[0]['coords'])
+               for r in out[1:])
     whole = out[0]['weights']
     blocks = [seen[r][0] for r in range(size)]
     weights = [seen[r][1] for r in range(size)]
@@ -508,13 +471,12 @@ def perturb_grid_partial(monkeypatch, which):
 def test_perturbed_grid_partial_moves_the_mean_field(serial, monkeypatch):
     """One rank's V_xc scaled by 1 + 1e-6 fails the density and orbital gates.
 
-    THE ENERGY DOES NOT CATCH THIS ONE, and that is a property of the
-    functional, not of the split: `rks.energy_elec` builds E from `vhf.exc`,
-    the quadrature's ENERGY, and never from its potential, and E is stationary
-    in the density -- so a first-order defect in V_xc costs second order in the
-    energy, measured 1.8e-13 Ha against 2.2e-7 in the density and 1.9e-7 Ha in
-    the orbital energies. The gate on the potential is therefore the density,
-    and the energy gate below covers the other half of the same reduction.
+    The energy does not catch this one, a property of the functional, not of
+    the split: `rks.energy_elec` builds E from `vhf.exc`, the quadrature's
+    energy, never from its potential, and E is stationary in the density, so a
+    first-order defect in V_xc costs second order in the energy. The gate on
+    the potential is therefore the density; the energy gate below covers the
+    other half of the same reduction.
     """
     ref = serial[('water', 'pbe0')]
     perturb_grid_partial(monkeypatch, 2)
@@ -526,10 +488,10 @@ def test_perturbed_grid_partial_moves_the_mean_field(serial, monkeypatch):
 def test_perturbed_grid_energy_moves_the_energy(serial, monkeypatch):
     """One rank's E_xc scaled by 1 + 1e-6 fails the energy gate, 3.0e-6 Ha out.
 
-    The half of the reduced triple that the total energy does read. Its
-    partner `nelec` moves nothing at all -- pyscf only logs the integrated
-    electron count -- so of the three terms every rank reduces, one is checked
-    here, one in the test above, and the third is a diagnostic.
+    The half of the reduced triple that the total energy reads. `nelec` moves
+    nothing (pyscf only logs the integrated electron count), so of the three
+    terms every rank reduces, one is checked here, one in the test above, and
+    the third is a diagnostic.
     """
     ref = serial[('water', 'pbe0')]
     perturb_grid_partial(monkeypatch, 1)
@@ -562,9 +524,9 @@ def test_split_grid_off_leaves_the_quadrature_whole(serial, monkeypatch):
     grid, the others no point, and rank 0's quadrature reaches them through
     the reduction as exact zeros added to it.
 
-    Bitwise against the J/K-only handle installed by hand -- the same mean
+    Compared against the J/K-only handle installed by hand (the same mean
     field through `distributed_df_jk` with pyscf's own numint, every rank
-    integrating its own whole grid -- so rank 0's quadrature is pyscf's own
+    integrating its own whole grid), so rank 0's quadrature is pyscf's own
     call on pyscf's own grid, and the mean field keeps pyscf's own numint
     object, not a restored copy of it.
     """
@@ -577,7 +539,7 @@ def test_split_grid_off_leaves_the_quadrature_whole(serial, monkeypatch):
     assert [seen[r][0] for r in range(2)] == [(0, whole), (whole, whole)]
     assert np.array_equal(seen[0][1], mfs[0].grids.weights)
     assert seen[1][1].size == 0
-    assert mfs[1].grids.coords is None
+    assert np.array_equal(mfs[1].grids.weights, mfs[0].grids.weights)
     assert all(mf._numint is ni for mf, ni in zip(mfs, numints))
 
     def jk_only(comm, mf):
@@ -598,9 +560,9 @@ def test_a_skipped_column_block_breaks_the_tensor(serial, monkeypatch):
     """A rank that does not evaluate one of its blocks leaves those columns
     unwritten, and nothing downstream would say so on its own.
 
-    The check that the column partition is load-bearing: the exchange places
-    what it is given, so a block nobody computed is a hole in the tensor, and
-    the SCF still converges -- 47.3 Ha out, and calling itself converged.
+    The exchange places what it is given, so a block nobody computed is a
+    hole in the tensor, and the SCF still reports itself converged, far from
+    the serial energy.
     """
     ref = serial[('water', None)]
     first = on_ranks(slice_record, 2, WATER, 'cc-pvdz', None)[0]
@@ -623,9 +585,9 @@ def test_a_skipped_column_block_breaks_the_tensor(serial, monkeypatch):
 def test_perturbed_partial_moves_the_energy(serial, monkeypatch):
     """One rank's exchange partial scaled by 1 + 1e-6 fails the energy gate.
 
-    The check that says the reduction is load-bearing: the workers' rows reach
-    the Fock matrix rank 0 iterates on, so a defect in one rank's partial is a
-    defect in the answer rather than something the SCF absorbs.
+    The workers' rows reach the Fock matrix rank 0 iterates on, so a defect
+    in one rank's partial is a defect in the answer rather than something the
+    SCF absorbs.
     """
     ref = serial[('water', None)]
     partial_jk = DistributedDF.partial_jk
@@ -645,11 +607,10 @@ def test_perturbed_partial_moves_the_energy(serial, monkeypatch):
 def test_worker_takes_no_decision(serial):
     """A worker handed a broken SCF driver changes nothing.
 
-    Rank 1 gets conv_tol 1e-2 and one cycle -- settings that on its own would
-    give a mean field nowhere near converged, and a loop that leaves while
-    rank 0 is still in it -- and the answer is still rank 0's, because the
-    loop's exit settings are locked to rank 0's before it starts and every
-    other decision is taken from rank 0's density.
+    Rank 1 gets conv_tol 1e-2 and one cycle, settings that on their own would
+    leave the loop while rank 0 is still in it, and the answer is still rank
+    0's: the loop's exit settings are locked to rank 0's before it starts and
+    every other decision is taken from rank 0's density.
     """
     ref = serial[('water', None)]
     mfs = [mean_field(WATER, 'cc-pvdz', None) for _ in range(2)]
@@ -666,13 +627,13 @@ def test_a_perturbed_density_is_repaired_at_entry(serial, monkeypatch):
     """Rank 1's density moved one ulp per element before one J/K build is
     rank 0's again when the build starts.
 
-    What stands in for a node whose eigensolver differed in a last bit. The
+    This stands in for a rank whose eigensolver differed in a last bit. The
     lockstep writes rank 0's density into rank 1's own array, the one pyscf's
-    loop keeps, so every Fock matrix pyscf then diagonalizes -- the DIIS
-    extrapolation included, which reads the density through its error vector
-    -- holds the same bits on every rank, and the audit counts exactly the
-    one repair. Hartree-Fock, so the J/K build is the only lockstep in a cycle
-    and nothing after it can repair what it missed.
+    loop keeps, so every Fock matrix pyscf then diagonalizes (the DIIS
+    extrapolation included, which reads the density through its error vector)
+    holds the same bits on every rank, and the audit counts one repair.
+    Hartree-Fock, so the J/K build is the only lockstep in a cycle and nothing
+    after it can repair what it missed.
     """
     get_jk, eig = DistributedDF.get_jk, scf.hf.SCF.eig
     builds, focks = {}, {}
@@ -719,8 +680,8 @@ def test_the_context_is_the_communicator(serial):
     inside `distributed(None)` it is pyscf's own `kernel()`.
 
     The first is how a job script hands the ranks to every kernel at once;
-    the second is how a stretch of it that every rank runs on its own --
-    `mpi_map`'s items -- stays serial.
+    the second is how a stretch that every rank runs on its own (`mpi_map`'s
+    items) stays serial.
     """
     explicit = on_ranks(converge, 2, WATER, 'cc-pvdz', 'pbe0')
 
@@ -792,13 +753,13 @@ def test_a_foreign_with_df_is_refused_while_isdf_is_dispatched():
     """A `with_df` whose exact type is neither pyscf's own `DF` nor an
     `ISDFJK` answers J/K some way the row slices cannot repeat, so it is
     refused on every rank, by class name, before any slice is built or any
-    cycle run. An ISDF `with_df` is no longer refused here: it is dispatched
-    to `distributed_isdf_jk.DistributedISDFJK` instead, which divides its
-    grid tiles and auxiliary shells rather than a fitted tensor's rows;
-    `tests/test_distributed_isdf_scf.py` gates that SCF itself, so this only
-    checks that the dispatch reaches a converged mean field and does not
-    raise. Without a communicator the refusal does not run at all -- the
-    foreign mean field is its own serial kernel, bit for bit."""
+    cycle run. An ISDF `with_df` is dispatched to
+    `distributed_isdf_jk.DistributedISDFJK`, which divides its grid tiles and
+    auxiliary shells rather than a fitted tensor's rows;
+    `tests/test_distributed_isdf_scf.py` gates that SCF, so this only checks
+    that the dispatch reaches a converged mean field. Without a communicator
+    the refusal does not run and the foreign mean field is its own serial
+    kernel, bit for bit."""
     mfs = [foreign_mean_field() for _ in range(2)]
 
     def one_rank(comm):
@@ -844,12 +805,12 @@ def timed(comm, mf, **kwargs):
 def test_timings_account_for_the_wall(size, name, atom, basis, xc):
     """Every key on every rank, the stages inside the total, cycles pyscf's.
 
-    The stages fall SHORT of the total by the installation of the handles,
+    The stages fall short of the total by the installation of the handles,
     which belongs to no stage; nothing may exceed it. Every rank runs the
     guess and the loop and takes part in every lockstep, and every rank's
     locksteps cover the same payload, at least the density at every Fock
-    piece -- moved, or skipped by the checked locksteps where every rank's
-    digest was rank 0's.
+    piece (moved, or skipped by the checked locksteps where every rank's
+    digest was rank 0's).
     """
     out = on_ranks(timed, size, atom, basis, xc)
     nao = gto.M(atom=atom, basis=basis, verbose=0).nao_nr()
@@ -889,7 +850,7 @@ def test_timings_account_for_the_wall(size, name, atom, basis, xc):
 
 def test_timings_survive_split_grid_off():
     """With the quadrature whole on rank 0 every rank still takes part in
-    every quadrature -- the others with no point, adding zeros -- and the
+    every quadrature (the others with no point, adding zeros), and the
     grid it builds is rank 0's own time."""
     out = on_ranks(lambda comm, mf: timed(comm, mf, split_grid=False), 2,
                    WATER, 'cc-pvdz', 'pbe0')
@@ -941,8 +902,8 @@ def rows_both_trees(tmp_path_factory):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('name', [c[0] for c in ROWS_CASES])
 def test_rows_are_the_one_pool_trees_bits(rows_both_trees, name, size):
-    """The bare rows the ranks build, reassembled, are the bytes the build
-    made before its metric solve took the wrap's BLAS pool.
+    """The bare rows the ranks build, reassembled, are the bytes of the
+    `ONE_POOL_COMMIT` tree, whose metric solve runs at one BLAS thread.
 
     Under the thread caps no wrap engages (`BLAS_WRAP_MIN_THREADS`), so what
     this pins is the integrals and everything around the solve; that the
@@ -959,11 +920,10 @@ def test_the_metric_solve_runs_on_the_pool_the_wrap_took(serial, monkeypatch):
     at one thread and every block's metric solve runs on the count the wrap
     found, with the rows it gives unchanged.
 
-    The solve is naux^2 flops per column against naux for the integrals: at
-    the chlorophyllide dimer, held at one thread, it was the whole 986 s of
-    `scf_build_integrals`. The wrap is entered here with `min_threads=1` on a
-    pool of two, on the main thread, where it holds; the blocks are walked
-    the way one rank walks them.
+    The solve is naux^2 flops per column against naux for the integrals, so
+    held at one thread it dominates the build. The wrap is entered here with
+    `min_threads=1` on a pool of two, on the main thread, where it holds; the
+    blocks are walked the way one rank walks them.
     """
     threadpoolctl = pytest.importorskip('threadpoolctl')
     mf = serial[('water', None)]['mf']

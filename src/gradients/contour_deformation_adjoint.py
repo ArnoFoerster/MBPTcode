@@ -25,7 +25,8 @@ half, so a residue's value and its adjoint can never come from two spellings.
 import numpy as np
 
 from src.Base.constants import LAPLACE_SCREENING_TOL
-from src.SingleReference.GW.contour_deformation import _need
+from src.SingleReference.GW.contour_deformation import (_need,
+                                                        cd_integral_weights)
 from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
                                                    LaplaceRealScreening,
                                                    ov_energies, screening_aux)
@@ -251,24 +252,23 @@ def sigma_cd_backward(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues,
         d_bar = np.zeros_like(d)
     elif want_chi0:
         chi0_bar_out = np.zeros((len(nu_points),) + (Bp.shape[0],) * 2)
-    for k, (nu, wt) in enumerate(zip(nu_points, nu_weights)):
+    c, dc = cd_integral_weights(de, nu_points, nu_weights)
+    coeff = -sigma_bar / np.pi
+    for k, nu in enumerate(nu_points):
         WtB = screening_aux(C_ov, d, nu, True)[1] @ Bp if explicit else wbp[k]
-        g = de / (de ** 2 + nu ** 2)
-        coeff = -sigma_bar * wt / np.pi
-        # Sigma^int = coeff * sum_q g_q Bp[:,q]^T (W - I) Bp[:,q]
-        bb, wc, cb = integral_term_backward(Bp, WtB, coeff * g,
+        # Sigma^int = coeff * sum_q c_kq Bp[:,q]^T (W - I) Bp[:,q]
+        bb, wc, cb = integral_term_backward(Bp, WtB, coeff * c[k],
                                             want_chi0=chi0_bar_out is not None)
         Bp_bar += bb
         if explicit:
-            cvb, db, _ = screening_chain(WtB, coeff * g, C_ov, d, nu, True)
+            cvb, db, _ = screening_chain(WtB, coeff * c[k], C_ov, d, nu, True)
             Cov_bar += cvb
             d_bar += db
         elif cb is not None:
             chi0_bar_out[k] = cb
-        # d g_q / d(omega - eps_q)
-        dg = (nu ** 2 - de ** 2) / (de ** 2 + nu ** 2) ** 2
-        eps_bar -= coeff * wc * dg
-        omega_bar += coeff * float(wc @ dg)
+        # d c_kq / d(omega - eps_q)
+        eps_bar -= coeff * wc * dc[k]
+        omega_bar += coeff * float(wc @ dc[k])
     if explicit:
         occ, virt = get_occ_virt_indices(eps, nocc)
         d4 = d_bar.reshape(len(occ), len(virt))

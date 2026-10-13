@@ -292,36 +292,81 @@ def ov_coupling(mol, mf, nocc, w):
             + _sigma_contraction(mol, mf.mo_coeff, w_sig, False))
 
 
-def analytic_coupling(chain, m, n, mol=None, mf=None):
+def occupied_count(mf):
+    """The closed-shell occupied count of `mf`."""
+    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
+
+
+def evaluated_root(evaluation, key):
+    """(spin, root index, (omega, X, Y) of that spin) of state `key` of a
+    `StateEvaluation`."""
+    if key not in evaluation.root:
+        raise ValueError(f'the evaluation holds no state {key!r}; it holds '
+                         f'{tuple(evaluation.root)}')
+    spin = evaluation.target[key][0]
+    return spin, evaluation.root[key], evaluation.spectrum[spin]
+
+
+def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     """(d_mn, diagnostics) in 1/Bohr between two BSE roots of `chain`.
 
     Antisymmetric in m <-> n: the interstate numerator is symmetric -- both
     orderings are averaged in the chain's interstate backward pass -- and the
-    gap changes sign.
+    gap changes sign. One forward pass serves the numerator and the
+    state-to-state density.
+
+    evaluation: a `StateEvaluation` whose `interstate` holds (m, n), m and n
+    its state keys; the numerator, the vectors and the mean field are read off
+    it, `chain` is not used, and only the configuration term's Z-vector runs.
     """
     if m == n:
         raise ValueError('a derivative coupling needs two different roots')
-    mol, mf = chain.mean_field(mol, mf)
-    num, diags = chain.interstate_gradient(m, n, mol=mol, mf=mf)
-    _, pieces = chain._forward(mol, mf)
-    xn, yn = pieces[10], pieces[11]
-    goo, gvv = state_to_state_density(chain.nocc, xn[:, m], yn[:, m],
-                                      xn[:, n], yn[:, n])
-    csf = configuration_coupling(mol, mf, chain.nocc, goo, gvv)
+    if evaluation is not None:
+        if (m, n) not in evaluation.interstate:
+            raise ValueError(f'the evaluation holds no interstate numerator '
+                             f'for {(m, n)!r}; pass couplings=[{(m, n)!r}] to '
+                             f'evaluate')
+        num, diags = evaluation.interstate[(m, n)]
+        _, rm, (_, xn, yn) = evaluated_root(evaluation, m)
+        _, rn, _ = evaluated_root(evaluation, n)
+        mol, mf = evaluation.mol, evaluation.mf
+    else:
+        chain.require_differentiable_environment()
+        mol, mf = chain.mean_field(mol, mf)
+        om, pieces = chain._forward(mol, mf)
+        xn, yn = pieces[10], pieces[11]
+        num, diags = chain._interstate_gradient(pieces, om, m, n)
+        rm, rn = m, n
+    nocc = occupied_count(mf)
+    goo, gvv = state_to_state_density(nocc, xn[:, rm], yn[:, rm],
+                                      xn[:, rn], yn[:, rn])
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
     amp = num / diags['gap']
     return amp + csf, dict(diags, branch_amplitude=float(np.abs(amp).max()),
                            branch_configuration=float(np.abs(csf).max()))
 
 
-def analytic_ground_coupling(chain, n, mol=None, mf=None):
+def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
     """(d_0n, diagnostics) in 1/Bohr between the ground state and BSE root `n`.
 
     The S1 -> S0 internal-conversion coupling. One Z-vector and no displaced
     solve; see `ground_state_coupling` for why it has no amplitude term.
+
+    evaluation: a `StateEvaluation` holding state `n` (a key of it, a
+    singlet); its vectors and mean field are used and no forward pass runs.
     """
-    mol, mf = chain.mean_field(mol, mf)
-    om, pieces = chain._forward(mol, mf)
-    xn, yn = pieces[10], pieces[11]
-    d = ground_state_coupling(mol, mf, chain.nocc, xn[:, n], yn[:, n])
-    return d, {'omega_n': float(om[n]), 'gap': float(om[n]),
+    if evaluation is not None:
+        spin, root, (om, xn, yn) = evaluated_root(evaluation, n)
+        if spin != 'singlet':
+            raise ValueError(f'd_0n couples the closed-shell ground state to a '
+                             f'singlet; state {n!r} is a {spin}')
+        mol, mf = evaluation.mol, evaluation.mf
+    else:
+        mol, mf = chain.mean_field(mol, mf)
+        om, pieces = chain._forward(mol, mf)
+        xn, yn = pieces[10], pieces[11]
+        root = n
+    d = ground_state_coupling(mol, mf, occupied_count(mf), xn[:, root],
+                              yn[:, root])
+    return d, {'omega_n': float(om[root]), 'gap': float(om[root]),
                'branch_configuration': float(np.abs(d).max())}

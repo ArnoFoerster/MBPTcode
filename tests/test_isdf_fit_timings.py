@@ -45,9 +45,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.constants import ISDF_DEFAULT_COUNTS
 from src.Base.separable_ri import atomic_grid
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS, separable_factors
+from src.SingleReference.GW.space_time import separable_factors
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -87,8 +88,8 @@ THREAD_CAPS = {name: '2' for name in
 #: tree has no `timings=` keyword at all, so this calls `separable_factors`
 #: exactly as it always could. The grid goes in as explicit radii: the
 #: archived code substituted the published cc-pVTZ grids for a bare call,
-#: which the grid-keyword rule retired, so a bare call is a different grid in
-#: the two trees at that basis. Radii alone ARE the grid in both -- no table
+#: which this tree does not, so a bare call is a different grid in the two
+#: trees at that basis. Radii alone ARE the grid in both -- no table
 #: row is consulted and no nuclear point is added -- so the comparison stays
 #: on the timers.
 BITWISE_PROBE = '''
@@ -138,13 +139,13 @@ def _factors(case, comm=None, timings=None, radii=None):
 
 
 def _table_radii(case):
-    """The shipped rows at `DEFAULT_COUNTS`, as plain lists of floats (repr
+    """The shipped rows at `ISDF_DEFAULT_COUNTS`, as plain lists of floats (repr
     round-trips a float64 exactly) for the archived probe to rebuild."""
     mol = case['mol']
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     return {el: {shell: [float(x) for x in np.atleast_1d(r)]
                  for shell, r in atomic_grid(el, str(mol.basis), case['auxbasis'],
-                                             DEFAULT_COUNTS)[0].items()}
+                                             ISDF_DEFAULT_COUNTS)[0].items()}
             for el in elements}
 
 
@@ -258,8 +259,8 @@ def _archived_factors(archive_dir, tmp_path, case_name, radii):
 def test_timings_move_no_bits_against_the_archive(case, tmp_path_factory,
                                                   archive):
     """The pre-instrumentation code's own factors, run as a subprocess on the
-    extracted tree, against this tree's -- called the way every production
-    entry point now can, with `timings=`.
+    extracted tree, against this tree's, called the way every production
+    entry point can, with `timings=`.
 
     Nothing between the two trees touches the arithmetic of the fit: the only
     change is a clock read and a dict write at phase boundaries that were

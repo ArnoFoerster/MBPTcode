@@ -1,33 +1,25 @@
-"""The forward physics under the ISDF gradient chain, where it now lives.
+"""The forward physics the ISDF gradient chain reads from production modules.
 
-Three routines that describe a MEAN FIELD rather than a derivative of one --
-its response kernel, its Fock in the MO basis, the pseudo-inverse of an
-auxiliary metric -- moved to `src.Base.pyscf_interface`, and the mean field
-with its exact exchange removed moved to `src.Base.isdf_jk`. The gradient
-package imports them back, so there is ONE implementation and no copy that can
-drift; every check below is against the expression the moved routine encodes,
-evaluated independently here, and is bitwise rather than tolerant.
+Three routines that describe a mean field rather than a derivative of one
+(its response kernel, its Fock in the MO basis, the pseudo-inverse of an
+auxiliary metric) live in `src.Base.pyscf_interface`, and the mean field with
+its exact exchange removed lives in `src.Base.isdf_jk`. The gradient package
+imports them, so there is one implementation; every check below is bitwise
+against the expression the routine encodes, evaluated independently here.
 
-Three more pairs were read and NOT merged, because the two members compute
-different objects:
+Two pairs compute different objects and stay separate:
 
     point_layout            returns the atom-local clouds and their owners;
-                            `molecular_points_covariant` returns the PLACED
+                            `molecular_points_covariant` returns the placed
                             points. They share the stacking order, so the
-                            clouds rotated and translated ARE production's
-                            cloud, bitwise, and that is what is checked.
+                            clouds rotated and translated are production's
+                            cloud, bitwise.
     continued_frames        carries a discrete branch over from a reference
                             frame; `atomic_frames` decides one from the
-                            geometry. They agree only where the continuation
-                            is a no-op, which on water it exactly is.
-    test_set_three_center   is (mu nu|P) on the test-set pairs, blocked over
-                            the mu shells; `test_set_D` is the COLLOCATION of
-                            those pairs on the interpolation points. The
-                            blocked build is checked against the dense tensor
-                            it exists to avoid forming.
+                            geometry. They agree where the continuation is a
+                            no-op, as on water.
 
-WHAT THE PERTURBATIONS SAY. Every gate here is shown once to reject a wrong
-answer, so that none of them is an identity that cannot fail:
+Each gate rejects a perturbation:
 
     gate                         perturbation                      rejected
     response kernel              the operator scaled by 1 + 1e-12  yes
@@ -39,19 +31,15 @@ answer, so that none of them is an identity that cannot fail:
                                  exact exchange in place
     placed interpolation points  one local point moved by 1e-12    yes
     frame continuation           two reference axes flipped        yes
-    blocked three-centre rows    one element moved by 1e-12        yes
     the rebuilt fit              M from `fit_M_streaming`          yes
 
-THE FIT IS REBUILT AND STAYS REBUILT. `isdf_exchange_skeleton` does not take
-the mean field's own M: `fit_adjoint` reverses `fit_M_stable` on a frozen
-column set, while `fit_M_streaming` -- what the SCF ran, and what
-`build_separable_ri` returns -- forms its Gram matrix from the UNSCREENED test
-set and its right-hand side from the screened one. Measured on water/cc-pVDZ,
-the two fit matrices differ by 1.11e-08 relative to |M|max = 3.4e+05, and
-substituting one for the other moves the skeleton force by 3.5e-08 Ha/Bohr on
-Hartree-Fock and 7.3e-09 on PBE0. The Hartree-Fock figure is above the 1e-8
-Ha/Bohr reproducibility floor a gradient here is gated at, so the estimators
-cannot be mixed and the rebuild is not removable.
+The whole-form `isdf_exchange_skeleton` refits M rather than taking the mean
+field's own: `fit_adjoint` reverses `fit_M_stable` on an explicit test set,
+while the SCF's M comes from `fit_M_streaming`, another realization. On
+water/cc-pVDZ, where the pair screen keeps every pair, the two fit matrices
+differ by 1.1e-8 relative in the fit's near-null space, and substituting one
+for the other moves the Hartree-Fock skeleton force by 2.8e-10 Ha/Bohr, below
+the 1e-8 reproducibility floor.
 """
 import functools
 import pathlib
@@ -70,13 +58,9 @@ from src.Base.constants import AUX_METRIC_LINDEP
 from src.Base.isdf_jk import exchange_free_reference, isdf_jk, range_coulomb
 from src.Base.pyscf_interface import (aux_metric_inverse, fock_mo,
                                       response_kernel)
-# aliased: pytest collects a module-level name starting with `test_` as a test
 from src.Base.separable_ri import atomic_frames, molecular_points_covariant
-from src.Base.separable_ri import test_set_layout as pair_layout
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
-from src.gradients.factor_chain import \
-    test_set_three_center as pair_three_centre
 from src.gradients.isdf_derivatives import (continued_frames,
                                             isdf_exchange_skeleton,
                                             isdf_fock_partial_exchange,
@@ -84,6 +68,9 @@ from src.gradients.isdf_derivatives import (continued_frames,
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 
 AUXBASIS = 'cc-pvdz-ri'
+#: What the tiled mean-field force may miss pyscf's gradient of the
+#: exchange-free reference plus the exchange skeleton by on one grid.
+EXACT_SPLIT_BAR = 1e-12
 GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
             ('H', (0.0, -0.7572, -0.4692)))
 #: The long-range channel whose auxiliary metric is numerically singular: 50 of
@@ -93,10 +80,10 @@ OMEGA = 0.2
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 #: |M_stable - M_streaming| / |M_stable|max on water/cc-pVDZ, and the Ha/Bohr
-#: the substitution moves the Hartree-Fock skeleton force by. The second is
-#: what decides the question: it is above the 1e-8 reproducibility floor.
+#: the substitution moves the Hartree-Fock skeleton force by, below the 1e-8
+#: reproducibility floor.
 FIT_FACTOR_DISCREPANCY = 1.11e-08
-FIT_FORCE_DISCREPANCY_HF = 3.5e-08
+FIT_FORCE_DISCREPANCY_HF = 2.79e-10
 GRADIENT_FLOOR = 1e-8
 
 
@@ -161,16 +148,16 @@ def tikhonov_inverse(V, lindep):
 
 
 def test_the_moved_routines_are_one_object_and_not_a_copy():
-    """A move that leaves a copy behind is the failure this whole exercise is
-    about: two spellings diverge silently. The gradient package's names must BE
-    production's, by identity."""
+    """The gradient package's names are production's objects, by identity,
+    so no second spelling can drift."""
     assert derivatives.response_kernel is production_interface.response_kernel
     assert derivatives.fock_mo is production_interface.fock_mo
-    assert (derivatives.aux_metric_inverse
-            is production_interface.aux_metric_inverse)
+    # the tiled fitted skeleton inverts no attenuated metric, so the gradient
+    # package does not hold the name
+    assert not hasattr(derivatives, 'aux_metric_inverse')
     assert (mean_field_module.exchange_free_reference
             is production_jk.exchange_free_reference)
-    # and the shim is gone: one function under one name in both modules
+    # one function under one name in both modules
     assert (mean_field_module.isdf_fock_partial_exchange
             is derivatives.isdf_fock_partial_exchange)
     assert (mean_field_module.isdf_exchange_skeleton
@@ -178,9 +165,8 @@ def test_the_moved_routines_are_one_object_and_not_a_copy():
 
 
 def test_the_response_kernel_is_pyscfs_own_operator():
-    """G(x) = dV_eff/dD . x is `gen_response`, and on Hartree-Fock it reduces to
-    vj - 0.5 vk, which is the whole difference between the two references in a
-    Lagrangian built on it."""
+    """G(x) = dV_eff/dD . x is `gen_response`, and on Hartree-Fock it reduces
+    to vj - 0.5 vk."""
     for xc in (None, 'pbe0'):
         mf = fitted(xc)
         x = symmetric_direction(mf.mol.nao_nr())
@@ -209,9 +195,9 @@ def test_the_mo_fock_is_the_transformed_fock():
 
 
 def test_the_auxiliary_inverse_is_tikhonov_and_not_a_truncation():
-    """The bare Coulomb metric is full rank and this is an ordinary inverse; the
-    long-range metric is not, and the shifted spectrum keeps the object a true
-    inverse of what is evaluated, which is what makes -V^-1 dV V^-1 exact."""
+    """The bare Coulomb metric is full rank and this is an ordinary inverse;
+    the long-range metric is not, and the eigenvalue cut keeps the object a
+    true inverse on the kept space, so -V^-1 dV V^-1 is exact."""
     auxmol, bare, attenuated = metrics()
     naux = auxmol.nao_nr()
     for V in (bare, attenuated):
@@ -226,8 +212,8 @@ def test_the_auxiliary_inverse_is_tikhonov_and_not_a_truncation():
 
 def test_the_quasiparticle_correction_is_the_static_exchange_diagonal():
     """<p|Sigma_x - v_xc|p> is production's own one-body term, so the chain
-    differentiates and `calc_qp_energy` evaluates one function; the wrapper adds
-    nothing but the all-states default."""
+    differentiates the function `calc_qp_energy` evaluates; the wrapper adds
+    only the all-states default."""
     for xc in (None, 'pbe0'):
         mf = fitted(xc)
         nmo = mf.mo_coeff.shape[1]
@@ -243,10 +229,15 @@ def test_the_quasiparticle_correction_is_the_static_exchange_diagonal():
 
 
 def test_the_exchange_free_reference_carries_none_of_the_exact_exchange():
-    """It is the mean field the interpolation did NOT touch: same orbitals, same
-    quadrature, same auxiliary basis, and no a_x K. Its gradient plus the ISDF
-    exchange skeleton is the whole force, bitwise -- which is the statement that
-    makes the split a decomposition rather than an approximation."""
+    """The reference keeps the orbitals, quadrature and auxiliary basis and
+    drops a_x K; its gradient plus the ISDF exchange skeleton is the whole
+    force, an exact split.
+
+    The force is assembled from tiled terms (`skeleton_tiles`), so the two
+    agree to `EXACT_SPLIT_BAR`, not bitwise, on a grid without density
+    pruning. On a density-pruned grid they differ by the pruned points' own
+    terms (1.3e-9): pyscf's full response differentiates the unpruned grid,
+    the force the pruned one the energy sums."""
     for xc in (None, 'pbe0'):
         mf = interpolated(xc)
         ref = exchange_free_reference(mf)
@@ -255,17 +246,21 @@ def test_the_exchange_free_reference_carries_none_of_the_exact_exchange():
         assert np.array_equal(ref.mo_energy, mf.mo_energy)
         if xc is not None:
             assert ref.grids is mf.grids
+            base = dft.RKS(water(), xc=xc)
+            base.grids.prune, base.small_rho_cutoff = None, 0.0
+            mf = converged(isdf_jk(base, auxbasis=AUXBASIS))
+            ref = exchange_free_reference(mf)
         g0 = ref.Gradients()
         g0.grid_response = True
-        assert np.array_equal(
-            isdf_mean_field_gradient(mf),
-            np.asarray(g0.kernel()) + isdf_exchange_skeleton(mf))
+        apart = np.abs(isdf_mean_field_gradient(mf)
+                       - np.asarray(g0.kernel())
+                       - isdf_exchange_skeleton(mf)).max()
+        assert apart < EXACT_SPLIT_BAR, (xc, apart)
 
 
 def test_the_point_layout_places_productions_own_interpolation_points():
-    """The clouds rotated into their frames and translated to their nuclei ARE
-    `molecular_points_covariant`'s cloud: same order, same arithmetic, so the
-    row order of X is the same object on both sides."""
+    """The clouds rotated into their frames and translated to their nuclei
+    are `molecular_points_covariant`'s cloud bitwise, in the same row order."""
     mf = interpolated('pbe0')
     mol, with_df = mf.mol, mf.with_df
     pts_local, owner = point_layout(mol, with_df.grid_radii,
@@ -280,36 +275,22 @@ def test_the_point_layout_places_productions_own_interpolation_points():
 
 
 def test_the_frame_continuation_is_a_no_op_at_its_own_reference():
-    """Continuing `atomic_frames` onto itself changes nothing -- the signs come
-    from fixed generic references and are already what the matching picks -- so
-    the two are one convention here, and differ only once a path has moved the
-    branch."""
+    """Continuing `atomic_frames` onto itself changes nothing: the signs come
+    from fixed generic references and are already what the matching picks;
+    the two differ only once a path has moved the branch."""
     mol = water()
     frames = atomic_frames(mol)[0]
     assert np.array_equal(continued_frames(mol, frames), frames)
 
 
-def test_the_blocked_three_centre_rows_are_the_dense_tensors_own():
-    """(mu nu|P) on the test-set pairs, blocked over the mu shells, against the
-    dense (nao, nao, naux) tensor it exists not to form: 209 GB at a hundred
-    atoms."""
-    mf = interpolated('pbe0')
-    mol, auxmol = mf.mol, mf.with_df.auxmol
-    mu, nu, _ = pair_layout(mol, mf.with_df.coords)
-    dense = pyscf_df.incore.aux_e2(
-        mol, auxmol, intor='int3c2e', aosym='s1').reshape(
-            mol.nao_nr(), mol.nao_nr(), auxmol.nao_nr())
-    assert np.array_equal(pair_three_centre(mol, auxmol, mu, nu),
-                          dense[mu, nu, :])
-
-
-def test_the_skeletons_fit_cannot_be_taken_from_the_mean_field(monkeypatch):
-    """The two estimators are not interchangeable at the accuracy a force is
-    gated at. `fit_adjoint` reverses `fit_M_stable` on the frozen column set;
-    `fit_M_streaming` is a different estimator, and substituting it moves the
-    Hartree-Fock skeleton force above the reproducibility floor."""
+def test_the_skeletons_fit_from_the_mean_field_moves_the_force(monkeypatch):
+    """Two realizations of the fit inside one adjoint: `fit_adjoint`
+    reverses `fit_M_stable` on an explicit test set; `fit_M_streaming`
+    realizes the same estimator otherwise, and substituting it moves the
+    Hartree-Fock skeleton force by FIT_FORCE_DISCREPANCY_HF, below the
+    reproducibility floor."""
     mf = interpolated(None)
-    reference = isdf_exchange_skeleton(mf)
+    reference = isdf_exchange_skeleton(mf, fit='replicated')
     streaming = mf.with_df.M               # what the SCF itself fitted
     stable = derivatives.fit_M_stable
     rebuilt = {}
@@ -319,7 +300,7 @@ def test_the_skeletons_fit_cannot_be_taken_from_the_mean_field(monkeypatch):
         return streaming
 
     monkeypatch.setattr(derivatives, 'fit_M_stable', substituted)
-    moved = isdf_exchange_skeleton(mf)
+    moved = isdf_exchange_skeleton(mf, fit='replicated')
     monkeypatch.undo()
 
     factor = (np.abs(rebuilt['M'] - streaming).max()
@@ -327,12 +308,12 @@ def test_the_skeletons_fit_cannot_be_taken_from_the_mean_field(monkeypatch):
     force = float(np.abs(moved - reference).max())
     assert factor == pytest.approx(FIT_FACTOR_DISCREPANCY, rel=0.1)
     assert force == pytest.approx(FIT_FORCE_DISCREPANCY_HF, rel=0.2)
-    assert force > GRADIENT_FLOOR
+    assert force < GRADIENT_FLOOR
 
 
 def test_the_production_homes_import_without_the_gradient_package():
-    """Forward physics that still needed an adjoint module to import would not
-    have moved. Fresh interpreters, both modules, both orders."""
+    """Each production module imports without any src.gradients module, in
+    a fresh interpreter."""
     for module in ('src.Base.pyscf_interface', 'src.Base.isdf_jk'):
         code = (f'import sys, {module}; '
                 "assert not [m for m in sys.modules "
@@ -344,9 +325,9 @@ def test_the_production_homes_import_without_the_gradient_package():
 
 
 def test_the_two_gradient_modules_import_in_either_order():
-    """The shim that stood in for the cycle is gone, so the dependency runs one
-    way: the adjoints and the ISDF exchange skeleton in `isdf_derivatives`, the
-    assembly of one mean-field force in `isdf_mean_field`."""
+    """The dependency runs one way: the adjoints and the ISDF exchange
+    skeleton in `isdf_derivatives`, the assembly of one mean-field force in
+    `isdf_mean_field`."""
     names = ('src.gradients.isdf_derivatives', 'src.gradients.isdf_mean_field')
     for order in (names, names[::-1]):
         code = f'import {order[0]}; import {order[1]}'
@@ -358,8 +339,8 @@ def test_the_two_gradient_modules_import_in_either_order():
 
 
 def test_every_gate_rejects_its_own_perturbation():
-    """A check that cannot fail is not a check. One perturbation per gate above,
-    each of them the smallest thing that gate exists to catch."""
+    """One perturbation per gate above, each the smallest thing that gate
+    catches, is rejected."""
     mf = fitted('pbe0')
     mol = mf.mol
     x = symmetric_direction(mol.nao_nr())
@@ -407,25 +388,16 @@ def test_every_gate_rejects_its_own_perturbation():
     assert not np.array_equal(placed, molecular_points_covariant(
         interp.mol, interp.with_df.grid_radii,
         origin_by_element=interp.with_df.grid_origins))
-    # TWO axes, so the reference stays a proper rotation: flipping one alone
-    # is undone by the parity repair, which is the convention working.
+    # two axes, so the reference stays a proper rotation: one flip alone is
+    # undone by the parity repair
     flipped = frames.copy()
     flipped[0, :2] *= -1.0
     assert not np.array_equal(continued_frames(interp.mol, flipped), frames)
 
-    # the blocked three-centre rows
-    auxmol = interp.with_df.auxmol
-    muv, nuv, _ = pair_layout(interp.mol, interp.with_df.coords)
-    rows = pair_three_centre(interp.mol, auxmol, muv, nuv).copy()
-    rows[0, 0] += 1e-12
-    assert not np.array_equal(
-        pair_three_centre(interp.mol, auxmol, muv, nuv), rows)
-
 
 def test_the_folded_exchange_partial_is_the_skeleton_at_two_densities():
-    """The shim's one caller-visible content: a folded Fock partial's exchange
-    half is the SCF's own contraction with W^2 replaced by W1 W2 and the
-    bilinear coefficient doubled, which is what makes the two agree with
+    """A folded Fock partial's exchange half is the SCF's own contraction
+    with W^2 replaced by W1 W2 and the bilinear coefficient doubled, as in
     `fock_partial_skeleton_df` at the same gamma."""
     mf = interpolated('pbe0')
     nmo = mf.mo_coeff.shape[1]

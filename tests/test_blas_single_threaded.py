@@ -1,10 +1,10 @@
 """Holding BLAS at one thread is a scheduling decision, not an arithmetic one.
 
 `Base.utils.threads.blas_single_threaded` exists because pyscf's OpenMP pool
-and the BLAS pool spin against each other: on sixteen cores the exchange build
-and the exchange-correlation potential cost 1.90 and 10.38 s with both pools
-wide and 0.04 and 0.63 s with BLAS at one. None of that may reach a number the
-code returns. What the gates here pin:
+and the BLAS pool spin against each other: with both pools wide the exchange
+build and the exchange-correlation potential take an order of magnitude
+longer than with BLAS at one. None of that may reach a number the code
+returns. What the gates here pin:
 
   the wrap absent    without threadpoolctl the context manager is
                      `contextlib.nullcontext` and no thread count moves, so a
@@ -70,14 +70,13 @@ import pytest
 from pyscf import df as pyscf_df, dft, gto
 
 import src.Base.separable_ri as separable_ri
-from src.Base.constants import BLAS_WRAP_MIN_THREADS
+from src.Base.constants import BLAS_WRAP_MIN_THREADS, ISDF_DEFAULT_COUNTS
 from src.Base.separable_ri import (atomic_grid, build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils import threads
 from src.Base.utils.threads import blas_single_threaded, blas_threads
 import src.SingleReference.GW.qp_solve as qp_solve
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -119,7 +118,7 @@ def isdf_case(atom, basis, aux):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
-        radii[el], origins[el] = atomic_grid(el, mol.basis, aux, DEFAULT_COUNTS)
+        radii[el], origins[el] = atomic_grid(el, mol.basis, aux, ISDF_DEFAULT_COUNTS)
     coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
     return dict(mol=mol, coords=coords,
                 auxmol=pyscf_df.addons.make_auxmol(mol, auxbasis=aux))
@@ -348,7 +347,7 @@ def test_a_wrap_widened_over_the_gram_would_move_the_fit(isdf_grid_threaded):
     with threads.threadpool_limits(limits=1, user_api='blas'):
         narrow = separable_ri.fit_M_streaming(*fit)
     assert relative(wide, narrow) > FACTOR_TOL, (
-        f'{AMBIENT_BLAS_THREADS} BLAS threads no longer move this fit, so the '
+        f'{AMBIENT_BLAS_THREADS} BLAS threads do not move this fit, so the '
         'gate above is blind')
 
 

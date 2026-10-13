@@ -1,75 +1,60 @@
 """The SCF's Fock build divided over the ranks: the auxiliary index of the
 density fit, and the points of the exchange-correlation grid.
 
-WHY THE SCF IS THE STAGE LEFT. Every other stage of a GW/BSE run divides --
-tau, frequency, the rows of Zt, the screened kernel -- and the mean field does
-not: every rank converges the same SCF on the same data, so its wall is what it
-was at one rank however many there are. On a 16-core node at 1 rank x 16 threads,
-anthracene/cc-pVTZ is 32 s of SCF against 35 s for everything four ranks
-divide, and pentacene/cc-pVTZ is 429-448 s against 101 s -- 60% of a rank's
-wall spent computing one calculation four times.
+Every other stage of a GW/BSE run divides over the ranks (tau, frequency, the
+rows of Zt, the screened kernel). Undivided, the mean field is the same SCF on
+the same data on every rank, with `cderi`, naux x nao(nao+1)/2 doubles, whole
+on every rank, and spilled to disk and streamed back once per cycle where it
+exceeds max_memory (`pyscf/df/df.py::DF.build`).
 
-Its memory is the worse half. `cderi`, naux x nao(nao+1)/2 doubles, is 1.8 GB
-at anthracene and 6.5 GB at pentacene, whole on every rank. At max_memory 4000
-MB pentacene's does not fit, so pyscf spills it to disk and streams it back
-once per cycle (`pyscf/df/df.py::DF.build`, which picks in-core against
-out-of-core on exactly that comparison), and that spill is most of the gap
-between the ~100 s the SCF costs in core and the 430 s measured.
-
-WHAT DIVIDES. J and K are sums over the auxiliary index,
+What divides. J and K are sums over the auxiliary index,
 
     J_{mu nu} = sum_P L^P_{mu nu} sum_{la si} L^P_{la si} D_{la si}
     K_{mu nu} = sum_P sum_{la si} L^P_{mu la} D_{la si} L^P_{si nu}
 
 with L^P the fitted three-index tensor, so a contiguous block of P gives a
-partial of both and the partials add. Rank r holds ONLY its block of rows --
-`contiguous_block(naux, r, nranks)`, ceil(naux/nranks) of them, tiling the
-auxiliary index -- and its partial comes from pyscf's OWN contraction: this
-object IS a `pyscf.df.DF` whose stored tensor is the slice, so
+partial of both and the partials add. Rank r holds only its block of rows
+(`contiguous_block(naux, r, nranks)`, ceil(naux/nranks) of them, tiling the
+auxiliary index), and its partial comes from pyscf's own contraction: this
+object is a `pyscf.df.DF` whose stored tensor is the slice, so
 `pyscf/df/df_jk.py::get_jk` reads it through `DF.loop` and sums over the rows
 that are there, with nothing re-implemented. One reduction adds the ranks'
-partials. Per-rank storage is naux_r x nao(nao+1)/2 x 8 bytes: 451 MB per rank
-at anthracene on four, 1.6 GB at pentacene on four, where the whole tensor
-does not fit at all.
+partials. Per-rank storage is naux_r x nao(nao+1)/2 x 8 bytes.
 
-AND THE GRID, WHICH IS THE LARGER HALF. On a hybrid, `nr_rks` costs more than
-the fitted exchange it accompanies -- 1.00 s against 0.08 s for K on
-naphthalene/cc-pVDZ/PBE0 (`GW/qp_solve.py::static_exchange_mean_field_matrix`)
--- so dividing J and K alone divides a tenth of the time. The grid integral is
-a sum over points,
+The grid. On a hybrid, `nr_rks` costs more than the fitted exchange it
+accompanies, so dividing J and K alone divides a small share of the time. The
+grid integral is a sum over points,
 
     nelec = sum_g w_g rho(r_g),   E_xc = sum_g w_g rho(r_g) eps_xc(r_g)
     V_g^{mu nu} = sum_g w_g v_xc(r_g) chi_mu(r_g) chi_nu(r_g)
 
 so a contiguous block of points is a partial of all three and the partials
-add, exactly as the auxiliary rows do. Rank 0 builds `mf.grids` -- pyscf's own
+add, as the auxiliary rows do. Rank 0 builds `mf.grids` (pyscf's own
 `Grids.build`, with pyscf's own pruning, and the density-dependent
-`prune_small_rho_grids_` its SCF applies on the first Fock build -- and
-broadcasts the coordinates and weights ONCE (32 bytes a point: 9.5 MB at
-anthracene, 14.3 MB at pentacene). Every rank then takes its block, rebuilds
-the screening mask for it (`make_mask` on its own points, since `non0tab` is
-indexed in blocks of the array it was made for) and runs pyscf's own
-`numint.nr_rks` on a `Grids` carrying nothing else. The blocks are cut in
-units of `ALIGNMENT_UNIT` points, because `NumInt.block_loop` turns the sparse
-AO kernels off on a grid whose length is not a multiple of it.
+`prune_small_rho_grids_` its SCF applies on the first Fock build) and
+broadcasts the coordinates and weights once, 32 bytes a point. Every rank then
+takes its block, rebuilds the screening mask for it (`make_mask` on its own
+points, since `non0tab` is indexed in blocks of the array it was made for) and
+runs pyscf's own `numint.nr_rks` on a `Grids` carrying nothing else. The blocks
+are cut in units of `ALIGNMENT_UNIT` points, because `NumInt.block_loop` turns
+the sparse AO kernels off on a grid whose length is not a multiple of it.
 
-THE LONG-RANGE OPERATOR IS A SECOND TENSOR. A range-separated hybrid asks
-for the exchange of erf(omega r)/r beside the bare one (LRC-wPBEh: 0.2 of the
-bare K and 0.8 of the long-range one at omega = 0.2), and pyscf answers it
-from a second fitted tensor, built from the attenuated three- and two-centre
+The long-range operator is a second tensor. A range-separated hybrid asks for
+the exchange of erf(omega r)/r beside the bare one (LRC-wPBEh: 0.2 of the bare
+K and 0.8 of the long-range one at omega = 0.2), and pyscf answers it from a
+second fitted tensor, built from the attenuated three- and two-centre
 integrals (`pyscf/df/df.py::range_coulomb`). Here that is a second
 `DistributedDF` for that omega, built the same way inside the attenuated
-operator the first time the SCF asks for it and cut by the same rule into
-the rows of ITS metric factor -- the attenuated metric is singular, so it
-takes pyscf's eigen-replacement and has fewer rows than the bare one. Its
-partials reduce exactly as the bare one's. It doubles a rank's slice.
+operator the first time the SCF asks for it and cut by the same rule into the
+rows of its metric factor (the attenuated metric is singular, so it takes
+pyscf's eigen-replacement and has fewer rows than the bare one). Its partials
+reduce as the bare one's. It doubles a rank's slice.
 
-What the split does NOT buy is the resident grid memory: `block_loop` already
+The split does not reduce the resident grid memory: `block_loop` already
 streams the AO values in blocks capped at 1200 x BLKSIZE points and by
-max_memory, so the buffer is ~1.2 GB at anthracene and ~1.8 GB at pentacene
-whatever the rank count, until a rank's slice falls below one block (past four
-ranks at anthracene, past six at pentacene). What falls with the rank count is
-the number of blocks a rank walks, which is the time.
+max_memory, whatever the rank count, until a rank's slice falls below one
+block. What falls with the rank count is the number of blocks a rank walks,
+which is the time.
 
 Not split: the NLC grid (`nr_nlc_vxc` on `nlcgrids`), integrated on rank 0
 alone because VV10 is a double sum over the points and not a sum of blocks;
@@ -78,97 +63,95 @@ the grid rank 0 hands out; and with `split_grid=False` the whole quadrature,
 which is the fit's division timed apart from the grid's. Rank 0's result is
 shared through the same reduction, the other ranks adding exact zeros.
 
-HOW A RANK GETS ITS ROWS: THE TENSOR IS CUT TWICE. cderi = L^-1 (P|mu nu) with
+How a rank gets its rows: the tensor is cut twice. cderi = L^-1 (P|mu nu) with
 L the Cholesky factor of the auxiliary metric (P|Q), so row P of the result
 reads raw rows 0..P: no factorization of the metric lets a rank evaluate its
-own rows from its own auxiliary shells. What a row slice does NOT need is the
-whole raw tensor -- only the whole auxiliary extent of the AO-pair COLUMNS in
-flight, which is exactly the block `pyscf/df/incore.py::cholesky_eri` forms in
-its buffer. So the evaluation is cut by COLUMN and the storage by ROW, and one
-exchange turns the first into the second: each rank takes its share of pyscf's
-own block list (round-robin, so a round is one block per rank), evaluates
-those blocks whole and solves the metric against them, and each round the
-ranks trade the row slices of the blocks they just built. Every column is
-evaluated by exactly one rank, the whole tensor crosses the wire exactly once
-(6.5 GB at pentacene, 1.6 GB per rank on four) and no rank holds more of it
-than its slice plus one round.
+own rows from its own auxiliary shells. What a row slice does not need is the
+whole raw tensor, only the whole auxiliary extent of the AO-pair columns in
+flight, which is the block `pyscf/df/incore.py::cholesky_eri` forms in its
+buffer. So the evaluation is cut by column and the storage by row, and one
+exchange turns the first into the second: each rank takes its share of
+pyscf's own block list (round-robin, so a round is one block per rank),
+evaluates those blocks whole and solves the metric against them, and each
+round the ranks trade the row slices of the blocks they just built. Every
+column is evaluated by one rank, the whole tensor crosses the wire once, and
+no rank holds more of it than its slice plus one round. (A replicated
+evaluation, every rank walking every block, would need no communication but
+would not divide in time.)
 
-Leaving the evaluation replicated instead -- every rank walking every block
-and keeping its own rows -- costs no wire at all, and it is what the build did
-until it was measured: 52 s of a 78 s four-rank SCF at pentacene, invariant in
-the rank count, two thirds of the run.
-
-THE LAST BIT OF THE TENSOR BELONGS TO THE BLOCKING, NOT THE SPLIT. How many
+The last bit of the tensor belongs to the blocking, not the split. How many
 columns go into one `solve_triangular` decides how LAPACK blocks the solve, so
 cderi is not bit-stable in the width of the blocks: `incore.cholesky_eri` on
-ethylene/cc-pVTZ differs from ITSELF by 2.5e-17 between max_memory 4000 and
+ethylene/cc-pVTZ differs from itself by 2.5e-17 between max_memory 4000 and
 20. The ranks' slices reassemble bitwise into the same block list walked by
 one rank, which is what says the split is exact; against pyscf's default
 blocking they sit that same last bit away.
 
-EVERY RANK RUNS THE DRIVER; ONLY THE TWO HANDLES COMMUNICATE. pyscf's SCF loop
-runs unchanged on every rank. It takes discrete decisions from its own
-arithmetic -- the DIIS extrapolation, the occupation, when it has converged --
+Every rank runs the driver; only the two handles communicate. pyscf's SCF
+loop runs unchanged on every rank. It takes discrete decisions from its own
+arithmetic (the DIIS extrapolation, the occupation, when it has converged),
 and ranks deciding them from last-bit-different numbers fall out of step and
 then call the same collective a different number of times. So both handles
 `lockstep` their input at entry: `get_jk` and the quadrature write rank 0's
 density matrix, and the orbitals and occupations tagging it (both
 `df_jk.get_jk` and the rho evaluator read them), into every rank's own arrays
-IN PLACE before any partial is formed. The partials are then partials of one
+in place before any partial is formed. The partials are then partials of one
 density, the all-reduced J, K and V_xc are the same bits on every rank, and
-because the lockstep wrote into the LOOP'S OWN density and orbitals, whatever
-pyscf decides next -- the energy, the orbital gradient, the DIIS error vector
--- is computed from the same inputs on every rank. What no per-call lockstep
+because the lockstep wrote into the loop's own density and orbitals, whatever
+pyscf decides next (the energy, the orbital gradient, the DIIS error vector)
+is computed from the same inputs on every rank. What no per-call lockstep
 reaches is the loop's exit, so `conv_tol`, `conv_tol_grad`, `max_cycle` and
 `conv_check` are rank 0's from the start, and the converged spectrum,
 orbitals, occupations, energy and flag are locked once more at the end, so
-every rank returns rank 0's mean field bit for bit even where a node's
+every rank returns rank 0's mean field bit for bit even where a rank's
 eigensolver differed in a last bit. The grid is the one piece not run
 everywhere: while the quadrature handle is installed only rank 0's
 `initialize_grids` builds anything, and its points reach the others inside the
-quadrature, once per epoch.
+quadrature, once per epoch. At the end rank 0's whole grid (the points pruned
+against its density) is written onto every rank's `mf.grids` (and
+`nlcgrids`), so no rank builds and prunes its own afterwards: a rank pruning
+against the converged density keeps another point count, and every later
+consumer of the grid (a Fock build, a response kernel, a grid-response
+skeleton, pyscf's gradient) would integrate another quadrature on each rank.
 
-Per Fock build that is two locksteps of the density and its orbitals, 2 x (2
-nao^2 + nmo) doubles, one all-reduce of 2 nao^2 for (J, K) and one of nao^2
-for (nelec, E_xc, V_xc): 17.6 MB at anthracene, 41.0 MB at pentacene, against
-a stage that costs tens of seconds. The two locksteps are checked
+Per Fock build that is two locksteps of the density and its orbitals,
+2 x (2 nao^2 + nmo) doubles, one all-reduce of 2 nao^2 for (J, K) and one of
+nao^2 for (nelec, E_xc, V_xc). The two locksteps are checked
 (`mpi_grid.lockstep(check=True)`), so where the ranks agree they send 8 bytes
-an array and only the all-reduces carry volume. One-off on top of that, the
-metric factor (16 and 39 MB), the grid (9.5 and 14.3 MB) and the fitted
-tensor's one crossing (1.8 and 6.5 GB, once).
+an array and only the all-reduces carry volume. One-off on top of that: the
+metric factor, the grid and the fitted tensor's one crossing.
 
-WHAT THE SCF LEAVES BEHIND. The slices outlive the SCF that built them, on
+What the SCF leaves behind. The slices outlive the SCF that built them, on
 `mf._distributed`, because the static exchange every quasiparticle route
 builds next is the same two operators over the same ranks: one K and one
-v_xc on the DFT grid, 7.4 s at pentacene and invariant in the rank count
-until it goes through these handles. They are NOT left installed -- a
-downstream `with_df.loop()` or a response kernel would read one rank's block
-as the whole -- so `distributed_fock` is the bracket that installs them for a
-stage and takes them off again. What they hold is this rank's slice, 1.6 GB
-at pentacene on four ranks; `release_distributed` gives it back.
+v_xc on the DFT grid. They are not left installed (a downstream
+`with_df.loop()` or a response kernel would read one rank's block as the
+whole), so `distributed_fock` is the bracket that installs them for a stage
+and takes them off again. What they hold is this rank's slice;
+`release_distributed` gives it back.
 
-WHERE THE WALL CLOCK GOES. A distributed run leaves `TIMING_KEYS` on
-`mf._distributed_timings`, filled on EVERY rank, because the question a rank
+Where the wall clock goes. A distributed run leaves `TIMING_KEYS` on
+`mf._distributed_timings`, filled on every rank, because the question a rank
 count raises is not how long the SCF took but which part of it did not divide.
 The loop's own work, `scf_driver`, is replicated and the same on every rank;
 what a rank cannot spend on its own share it spends waiting inside the
 reductions and the locksteps for the slowest rank, `scf_reduce` and
 `scf_lockstep`.
 
-WHAT THE NUMBERS DO. The reductions re-associate the sums over P and over the
+What the numbers do. The reductions re-associate the sums over P and over the
 grid points, so J, K and V_xc differ from the serial ones in the last bits,
 and the SCF converges to a mean field that differs at the convergence
-tolerance -- not more, because every rank takes every decision from the same
+tolerance and not more, because every rank takes every decision from the same
 numbers. Gated on water/cc-pVDZ and ethylene/cc-pVTZ at RHF, PBE0 and UKS with
 conv_tol 1e-12: energies within 1e-10 Ha of serial, densities within 1e-8,
 orbital energies within 1e-8 Ha, and the orbitals identical bit for bit across
 ranks.
 
-PYSCF INTERNALS. Three of the names imported below are private to pyscf --
+pyscf internals. Three of the names imported below are private to pyscf:
 `df.incore._eig_decompose` (the metric factor's eigen-fallback),
 `df.outcore._guess_shell_ranges` (the AO-pair column blocks `cholesky_eri`
 walks) and `dft.gen_grid.ALIGNMENT_UNIT` (the point count `block_loop` keeps
-its sparse kernels on for) -- because the split is exact only if it walks
+its sparse kernels on for), because the split is exact only if it walks
 pyscf's own blocking. They were checked against pyscf 2.12.1, the version the
 tests here run on; a pyscf that renames one fails at import, not in a result.
 """
@@ -208,10 +191,15 @@ from src.Base.utils.threads import blas_full_pool, blas_single_threaded
 #: reductions and `scf_lockstep` inside the locksteps and the per-quadrature
 #: header, both largely the wait for the slowest rank; `scf_driver` is the
 #: rest of pyscf's loop -- DIIS, the eigenproblem, the density, the energy, the
-#: convergence test -- which every rank runs. No rank idles and none runs the
-#: loop alone, so no key is one rank's. They sum to no more than `scf_total`,
-#: the whole call. `scf_lockstep_mb` is what this rank moved through
-#: `lockstep` in the call and `scf_lockstep_skipped_mb` what the checked
+#: convergence test -- which every rank runs. A build made inside the loop (the
+#: ISDF handle fits on its first request) is `scf_build_slices`, not driver.
+#: Inside `scf_driver`, `_DRIVER_STAGES`: `scf_driver_eig` the generalized
+#: eigenproblems, `scf_driver_fock` the Fock assembly with its DIIS
+#: extrapolation, `scf_driver_rdm1` the densities, `scf_driver_grad` the
+#: orbital gradients; `scf_driver_other` is the rest. No rank idles and none
+#: runs the loop alone, so no key is one rank's. They sum to no more than
+#: `scf_total`, the whole call. `scf_lockstep_mb` is what this rank moved
+#: through `lockstep` in the call and `scf_lockstep_skipped_mb` what the checked
 #: locksteps of the density and the result did not move because every rank's
 #: digest agreed. `scf_requests_jk` and `scf_requests_xc` count the
 #: J/K builds and the quadratures this rank contributed a partial to.
@@ -220,27 +208,51 @@ TIMING_KEYS = ('scf_build_slices', 'scf_build_integrals',
                'scf_fock_xc', 'scf_reduce', 'scf_lockstep', 'scf_driver',
                'scf_lockstep_mb', 'scf_lockstep_skipped_mb', 'scf_cycles',
                'scf_requests_jk', 'scf_requests_xc', 'scf_build_blocks',
-               'scf_total')
+               'scf_driver_eig', 'scf_driver_fock', 'scf_driver_rdm1',
+               'scf_driver_grad', 'scf_driver_other', 'scf_total')
 
 #: The keys of TIMING_KEYS that count rather than measure.
 _COUNT_KEYS = ('scf_cycles', 'scf_requests_jk', 'scf_requests_xc',
                'scf_build_blocks')
 
 #: The stages of pyscf's own SCF driver that are timed around rather than
-#: inside a handle. They are timed by WRAPPING the bound method, not by calling
+#: inside a handle. They are timed by wrapping the bound method, not by calling
 #: it here: pyscf passes its own arguments to both (`get_init_guess(mol,
-#: mf.init_guess, s1e=s1e, **kwargs)`), and a copy of that call is a copy that
-#: can drift -- a guess taken with the wrong key lands on a different SCF
-#: solution, not a slower one. `initialize_grids` carries `Grids.build` and the
-#: `prune_small_rho_grids_` pass, which evaluates the density on the whole grid
-#: on rank 0 and builds nothing on the others.
+#: mf.init_guess, s1e=s1e, **kwargs)`), and a copy of that call could drift (a
+#: guess taken with the wrong key lands on a different SCF solution).
+#: `initialize_grids` carries `Grids.build` and the `prune_small_rho_grids_`
+#: pass, which evaluates the density on the whole grid on rank 0 and builds
+#: nothing on the others.
 _TIMED_STAGES = (('get_init_guess', 'scf_guess'),
                  ('initialize_grids', '_grid_build'))
 
+#: The dense linear algebra of pyscf's loop, which every rank runs whole on a
+#: nao x nao problem: the generalized eigensolve, DIIS's error vector
+#: C^T (S D F - F D S) C (four nao^3 GEMMs) and extrapolation, the density and
+#: the orbital gradient. Wrapped like `_TIMED_STAGES`, and each takes back the
+#: BLAS pool the driver's wrap took (`blas_full_pool`): held at one thread
+#: they run a rank's whole nao^3 share of every cycle on one of its cores.
+#: A call that would build a Fock piece (`get_fock` without `vhf`, a solvent's
+#: without its `v_solvent`; `get_grad` without `fock`) runs as it came, on one
+#: thread and off these clocks.
+_DRIVER_STAGES = (('eig', 'scf_driver_eig'),
+                  ('get_fock', 'scf_driver_fock'),
+                  ('make_rdm1', 'scf_driver_rdm1'),
+                  ('get_grad', 'scf_driver_grad'))
+
 #: The keys a stage inside `mf.kernel()` adds to; what is left of the kernel's
 #: wall is `scf_driver`.
-_KERNEL_STAGES = ('scf_guess', '_grid_build', 'scf_grid', 'scf_fock_jk',
-                  'scf_fock_xc', 'scf_reduce', 'scf_lockstep')
+_KERNEL_STAGES = ('scf_build_slices', 'scf_guess', '_grid_build', 'scf_grid',
+                  'scf_fock_jk', 'scf_fock_xc', 'scf_reduce', 'scf_lockstep')
+
+#: A mean field's quadrature grids, each rank 0's on every rank after the SCF.
+_GRID_ATTRIBUTES = ('grids', 'nlcgrids')
+
+#: What a built and pruned pyscf `Grids` holds: the points and their Becke
+#: weights, each point's atom and unpartitioned weight (the grid response
+#: reads both), and the AO screening mask of those points.
+_GRID_ARRAYS = ('coords', 'weights', 'atm_idx', 'quadrature_weights',
+                'non0tab', 'screen_index')
 
 
 def _spent(timings, key, since):
@@ -277,6 +289,48 @@ def _time_stages(mf, timings):
     return saved
 
 
+def _driver_stages(mf, timings):
+    """`_DRIVER_STAGES` on `mf` timed and on the full BLAS pool; what to put
+    back."""
+    saved = []
+    for name, key in _DRIVER_STAGES:
+        saved.append((name, mf.__dict__.get(name)))
+        setattr(mf, name, _pooled(getattr(mf, name), mf, name, timings, key))
+    return saved
+
+
+def _pooled(func, mf, name, timings, key):
+    """`func` on the pool the driver's wrap took, timed under `key`, where
+    the call is linear algebra only; as it came otherwise."""
+    def call(*args, **kwargs):
+        if not _builds_nothing(mf, name, args, kwargs):
+            return func(*args, **kwargs)
+        t0 = time.time()
+        try:
+            with blas_full_pool():
+                return func(*args, **kwargs)
+        finally:
+            _spent(timings, key, t0)
+    return call
+
+
+def _builds_nothing(mf, name, args, kwargs):
+    """Whether this call of a `_DRIVER_STAGES` method needs no Fock piece:
+    `get_fock` handed h1e and vhf (with a solvent's v_solvent on it), and
+    `get_grad` handed the Fock matrix."""
+    if name == 'get_fock':
+        h1e = kwargs.get('h1e', args[0] if len(args) > 0 else None)
+        vhf = kwargs.get('vhf', args[2] if len(args) > 2 else None)
+        solvated = getattr(mf, 'with_solvent', None) is not None
+        return (h1e is not None and vhf is not None
+                and (not solvated
+                     or getattr(vhf, 'v_solvent', None) is not None))
+    if name == 'get_grad':
+        fock = kwargs.get('fock', args[2] if len(args) > 2 else None)
+        return fock is not None
+    return True
+
+
 def _restore_methods(mf, saved):
     """The bound methods back as they were."""
     for name, original in saved:
@@ -307,8 +361,8 @@ def _replicated_metric_factor(mol, auxmol, comm):
 
     L^-1 mixes the whole auxiliary index into every row, so rows built against
     two factors that differ in the last bits are rows of two different tensors
-    and their partials are not partials of one sum. (naux, naux) doubles: 16 MB
-    at anthracene, one broadcast, once.
+    and their partials are not partials of one sum. (naux, naux) doubles, one
+    broadcast, once.
     """
     if comm.Get_rank() == 0:
         low, mode = _metric_factor(mol, auxmol)
@@ -328,16 +382,16 @@ def _column_blocks(mol, nao_pair, naux, size):
 
     pyscf's own boundaries (`pyscf/df/outcore.py::_guess_shell_ranges`, the
     list `incore.cholesky_eri` walks), so a block is a whole number of AO
-    shells and every column of cderi is evaluated by exactly one rank with
-    exactly the arithmetic a serial walk of the same list gives it.
+    shells and every column of cderi is evaluated by one rank with the
+    arithmetic a serial walk of the same list gives it.
 
-    A PURE FUNCTION OF THE PROBLEM AND THE RANK COUNT, deliberately: a width
-    read off the free memory a rank happens to have would differ between
-    ranks, and a block list that does not tile is columns nobody evaluates.
-    It is sized against the SLICE instead -- four buffers of (naux, width) are
-    live at once (the two integral buffers, the piece this rank sends, the
-    pieces it receives), and `DF_EXCHANGE_TRANSIENT_FRACTION` is what they may
-    add up to beside the slice being built. `build` refuses upfront if that
+    A pure function of the problem and the rank count: a width read off the
+    free memory a rank happens to have would differ between ranks, and a
+    block list that does not tile is columns nobody evaluates. It is sized
+    against the slice instead: four buffers of (naux, width) are live at once
+    (the two integral buffers, the piece this rank sends, the pieces it
+    receives), and `DF_EXCHANGE_TRANSIENT_FRACTION` is what they may add up to
+    beside the slice being built. `build` refuses upfront if that
     peak does not fit, rather than shrinking the blocks until the exchange is
     all the run does.
     """
@@ -355,7 +409,7 @@ def _round_block(blocks, cycle, rank, size):
     """(width, offset) of the block rank `rank` owns in this exchange round.
 
     Round-robin, `partition`'s rule: rank r owns blocks r, r + size, ..., so
-    round k is exactly one block per rank, in rank order. A round past the end
+    round k is one block per rank, in rank order. A round past the end
     of the list leaves the last ranks with nothing to send, which is a legal
     round of zero-width pieces rather than a special case.
     """
@@ -371,20 +425,18 @@ def _solve_column_block(env, low, mode, block, bufs):
     `pyscf/df/incore.py::cholesky_eri` (lines 188-217 in pyscf 2.12), one
     iteration of it: the three-centre integrals of those AO pairs against the
     whole auxiliary index, and the metric factor solved against them. The
-    same branch on the
-    contiguity of the integral block, because that is what decides which
-    LAPACK call runs and the serial tensor is what these columns must equal.
+    same branch on the contiguity of the integral block, because that decides
+    which LAPACK call runs and the serial tensor is what these columns must
+    equal.
 
-    The result ALIASES the integral buffer the solve overwrote, so the next
+    The result aliases the integral buffer the solve overwrote, so the next
     block destroys it: consume it before asking for another.
 
-    TWO POOLS. The integrals are libcint's, OpenMP over the block's (i, P)
+    Two pools: the integrals are libcint's, OpenMP over the block's (i, P)
     shell jobs, and run inside the caller's `blas_single_threaded`; the solve
     is BLAS's, naux^2 flops per column against naux for the integrals, and
-    runs on the pool that wrap took (`blas_full_pool`). Held at one thread it
-    was the whole of `scf_build_integrals` at the chlorophyllide dimer: the
-    bare trsm and the attenuated GEMM, 1.0e14 flops over two ranks in 986 s,
-    50 GFLOP/s, one core's peak, at 16 threads a rank and at 128.
+    runs on the pool that wrap took (`blas_full_pool`), since held at one
+    thread it would dominate the build.
     """
     mol, auxmol, int3c, atm, bas, benv, ao_loc, cintopt = env
     bufs1, bufs2 = bufs
@@ -430,16 +482,14 @@ def _distributed_cderi(mol, auxmol, low, mode, blocks, comm, timings=None):
     """This rank's contiguous auxiliary rows of cderi, built by every rank at
     once and transposed from columns to rows in one exchange.
 
-    THE TENSOR IS CUT TWICE. The integrals are cut by AO-pair COLUMN, because
-    that is the only index the evaluation divides along: the metric factor is
-    triangular, so a row of the result reads the whole auxiliary extent of the
-    columns in flight, and a rank evaluating a block of rows would have to
-    evaluate every column of it. It is stored cut by auxiliary ROW, because
-    that is the index J and K sum over. So each rank walks its own blocks --
-    round-robin over pyscf's block list, one block per rank per round -- and
-    each round the ranks exchange the row-slices of the blocks they just
-    built, every rank's piece of every block going straight into its own
-    slice. The whole tensor crosses the wire exactly once and no rank ever
+    The integrals are cut by AO-pair column, the only index the evaluation
+    divides along: the metric factor is triangular, so a row of the result
+    reads the whole auxiliary extent of the columns in flight. The result is
+    stored cut by auxiliary row, the index J and K sum over. So each rank
+    walks its own blocks (round-robin over pyscf's block list, one block per
+    rank per round), and each round the ranks exchange the row-slices of the
+    blocks they just built, every rank's piece of every block going straight
+    into its own slice. The whole tensor crosses the wire once and no rank
     holds more of it than its slice plus one round.
     """
     naux = low.shape[0]
@@ -482,8 +532,7 @@ def _lockstep_density(dms, comm, timings=None):
 
     Checked (`mpi_grid.lockstep(check=True)`): every rank diagonalized the
     same all-reduced Fock matrix, so digests prove the density rank 0's and
-    only a drifted array is broadcast; the audited eight-node pentacene SCF
-    found no rank apart in 28 locksteps of 308 MB together.
+    only a drifted array is broadcast.
     """
     if np.iscomplexobj(dms):
         raise NotImplementedError(
@@ -497,12 +546,12 @@ def _lockstep_density(dms, comm, timings=None):
 
 
 def _reduce_parts(arrays, comm):
-    """The ranks' partials added, in ONE reduction for the whole Fock piece.
+    """The ranks' partials added, in one reduction for the whole Fock piece.
 
-    The sum is re-associated -- rank boundaries first, then whatever order a
-    rank used inside its own block -- so the result differs from the serial
+    The sum is re-associated (rank boundaries first, then whatever order a
+    rank used inside its own block), so the result differs from the serial
     one in the last bits. `reduce_sum` adds in rank order, so it differs in
-    the SAME last bits on every rank and in every repeat.
+    the same last bits on every rank and in every repeat.
     """
     shapes = [np.shape(a) for a in arrays]
     buf = np.concatenate([np.ravel(np.asarray(a, dtype=float))
@@ -525,9 +574,9 @@ def _grid_slice(mol, coords, weights, cutoff, rank, size, make_mask):
     multiple, so a rank's block should be too.
 
     `non0tab` is rebuilt rather than sliced: it is indexed in blocks of
-    BLKSIZE ROWS of the coordinate array it was made for, so rank r's block
+    BLKSIZE rows of the coordinate array it was made for, so rank r's block
     starts at the wrong place in rank 0's mask. Nothing calls `build` on the
-    result -- `block_loop` rebuilds a grid only when `coords is None` -- and it
+    result (`block_loop` rebuilds a grid only when `coords is None`), and it
     carries no `atm_idx` or `quadrature_weights`, which the quadrature does
     not read and only a grid-response gradient would.
     """
@@ -556,7 +605,7 @@ class DistributedDF(df.df.DF):
     """A `with_df` holding one contiguous block of the auxiliary index.
 
     Subclasses pyscf's DF for the plumbing `_DFHF` expects and for `DF.loop`,
-    which yields the stored tensor in blocks -- that tensor being this rank's
+    which yields the stored tensor in blocks: that tensor being this rank's
     rows is the whole mechanism, and `df_jk.get_jk` then sums over them
     without knowing it is computing a partial.
 
@@ -692,8 +741,8 @@ class DistributedDF(df.df.DF):
 
         `df_jk.get_jk` on this object: the contraction is pyscf's, and it sums
         over the rows `DF.loop` yields, which are the ones this rank owns. A
-        rank that owns none contributes zeros -- surplus ranks are a legitimate
-        configuration, and pyscf's accumulator would meet no block at all.
+        rank that owns none contributes zeros (surplus ranks are a legitimate
+        configuration, and pyscf's accumulator would meet no block at all).
         """
         if self._cderi is None:
             self.build()
@@ -709,12 +758,12 @@ class DistributedDF(df.df.DF):
         return (vj if with_j else None), (vk if with_k else None)
 
     def _reduce_jk(self, vj, vk, with_j, with_k):
-        """The ranks' partials added, in ONE reduction of both matrices.
+        """The ranks' partials added, in one reduction of both matrices.
 
-        The sum over the auxiliary index is re-associated here -- rank
-        boundaries first, then rows within a rank -- so J and K differ from the
+        The sum over the auxiliary index is re-associated here (rank
+        boundaries first, then rows within a rank), so J and K differ from the
         serial ones in the last bits. `reduce_sum` adds in rank order, so they
-        differ in the SAME last bits on every rank and in every repeat.
+        differ in the same last bits on every rank and in every repeat.
         """
         t0 = time.time()
         out = iter(_reduce_parts([x for x, want in ((vj, with_j), (vk, with_k))
@@ -732,10 +781,10 @@ class DistributedDF(df.df.DF):
         return self
 
     def uninstall(self):
-        """Put the mean field's own DF object back, KEEPING the slice.
+        """Put the mean field's own DF object back, keeping the slice.
 
         A row slice is not a cderi: a downstream caller that iterates
-        `mf.with_df.loop()` -- the GW fit, the solvent screening -- would read
+        `mf.with_df.loop()` (the GW fit, the solvent screening) would read
         one rank's rows and call them the tensor. So this object answers J/K
         only while a distributed stage is running, and what is left on the
         mean field between stages is the DF the caller handed in.
@@ -763,14 +812,14 @@ class DistributedNumInt(numint.NumInt):
 
     `pyscf/dft/rks.py::get_veff` reaches the grid through `ks._numint.nr_rks`,
     so this object standing in for `mf._numint` is the whole hook. Everything
-    it does not override -- `eval_xc_eff`, `get_rho`, the response kernels a
-    later TDDFT or gradient asks for -- is pyscf's and runs on whatever grid
-    it is handed, which on rank 0 is still the whole one.
+    it does not override (`eval_xc_eff`, `get_rho`, the response kernels a
+    later TDDFT or gradient asks for) is pyscf's and runs on whatever grid it
+    is handed, which on rank 0 is still the whole one.
 
     Every rank calls the quadrature at the same point of the same SCF loop: it
     locksteps the density, adds this rank's points' partial to the others' and
-    returns the total. The grid itself travels once per EPOCH, rank 0's count
-    of how many times the grid it was handed has changed -- the SCF's first
+    returns the total. The grid itself travels once per epoch, rank 0's count
+    of how many times the grid it was handed has changed: the SCF's first
     Fock build prunes it by density, and that is a decision, so the other
     ranks take rank 0's points rather than repeat it.
 
@@ -841,6 +890,15 @@ class DistributedNumInt(numint.NumInt):
         `max_memory` is rank 0's, since it sets how `block_loop` blocks the
         points and so the order of the sums inside a rank's partial.
         """
+        max_memory = self._follow_grid(mol, grids, max_memory)
+        dms = _lockstep_density(dms, self.comm, self.timings)
+        return self._reduce_xc(self.partial_xc(method, mol, xc_code, dms,
+                                               relativity, hermi, max_memory,
+                                               verbose))
+
+    def _follow_grid(self, mol, grids, max_memory):
+        """Rank 0's grid decision on every rank, this rank's points of it
+        taken where it is new; rank 0's `max_memory`. Collective."""
         t0 = time.time()
         header = None
         if self.comm.Get_rank() == 0 and grids.coords is not None:
@@ -858,10 +916,59 @@ class DistributedNumInt(numint.NumInt):
         if fresh:
             self._take_grid(mol, grids, npoints, cutoff)
         _spent(self.timings, 'scf_grid' if fresh else 'scf_lockstep', t0)
+        return max_memory
+
+    # -- the response quadrature an orbital-response solve calls -------------
+
+    def cache_xc_kernel(self, mol, grids, xc_code, mo_coeff, mo_occ, spin=0,
+                        max_memory=2000):
+        """(rho0, v_xc, f_xc) at this rank's points of rank 0's grid.
+
+        Pointwise quantities, so this rank's block of them is what its
+        partial of `nr_rks_fxc` reads and nothing is reduced; the
+        orbitals are rank 0's. Collective (the grid decision).
+        """
+        max_memory = self._follow_grid(mol, grids, max_memory)
+        mo_coeff, mo_occ = lockstep((np.asarray(mo_coeff), np.asarray(mo_occ)),
+                                    self.comm, check=True)
+        grids_here, npoints = self._grids, self._grids.weights.size
+        if npoints == 0:
+            # libxc on no points: the shapes from one zero-weight point
+            grids_here = _grid_slice(mol, np.zeros((1, 3)), np.zeros(1),
+                                     self._grids.cutoff, 0, 1,
+                                     self.make_mask)[0]
+        out = numint.cache_xc_kernel(self, mol, grids_here, xc_code, mo_coeff,
+                                     mo_occ, spin, max_memory)
+        return tuple(np.asarray(a)[..., :npoints] for a in out)
+
+    def nr_rks_fxc(self, mol, grids, xc_code, dm0, dms, relativity=0,
+                   hermi=0, rho0=None, vxc=None, fxc=None, max_memory=2000,
+                   verbose=None):
+        """f_xc . dms over the whole grid, from every rank's block of points
+        and of the kernel `cache_xc_kernel` returned. Collective.
+
+        A sum over grid points like `nr_rks`'s V_xc, so the partials add in
+        one reduction; the GGA hermitization inside is linear and commutes
+        with it. `max_memory` is rank 0's (it blocks the points).
+        """
+        max_memory = self._follow_grid(mol, grids, max_memory)
+        npoints = self._grids.weights.size
+        if fxc is not None and np.shape(fxc)[-1] != npoints:
+            raise ValueError(
+                f'the response kernel holds {np.shape(fxc)[-1]} points and '
+                f'this rank integrates {npoints}: it was cached on another '
+                'grid than the one rank 0 now holds, so it would be read '
+                'against the wrong points.')
         dms = _lockstep_density(dms, self.comm, self.timings)
-        return self._reduce_xc(self.partial_xc(method, mol, xc_code, dms,
-                                               relativity, hermi, max_memory,
-                                               verbose))
+        t0 = time.time()
+        partial = numint.nr_rks_fxc(self, mol, self._grids, xc_code, dm0, dms,
+                                    relativity, hermi, rho0, vxc, fxc,
+                                    max_memory, verbose)
+        _spent(self.timings, 'scf_fock_xc', t0)
+        t0 = time.time()
+        out = _reduce_parts([partial], self.comm)[0]
+        _spent(self.timings, 'scf_reduce', t0)
+        return out
 
     def _take_grid(self, mol, grids, npoints, cutoff):
         """This rank's points of rank 0's new grid, with a mask built for
@@ -907,8 +1014,8 @@ class DistributedNumInt(numint.NumInt):
     def _reduce_xc(self, partial):
         """(nelec, excsum, vmat) added over the ranks in one reduction.
 
-        All three are sums over grid points -- the electron count, the
-        exchange-correlation energy and its potential matrix -- so a block of
+        All three are sums over grid points (the electron count, the
+        exchange-correlation energy and its potential matrix), so a block of
         points is a partial of each. The GGA hermitization inside `nr_rks` is
         linear (V + V^T), so it commutes with the sum over blocks.
         """
@@ -935,7 +1042,7 @@ class DistributedNumInt(numint.NumInt):
         return self
 
     def uninstall(self):
-        """Put the mean field's own numint back, KEEPING this rank's points.
+        """Put the mean field's own numint back, keeping this rank's points.
 
         Everything this object does not override runs on whatever grid it is
         handed, so a response kernel a later TDDFT asks for would quietly
@@ -962,7 +1069,7 @@ def distributed_df_jk(mf, comm=None, timings=None):
     """Give `mf` a `with_df` holding one block of the auxiliary index per rank.
 
     Returns the object, built and installed, or None on a one-rank world,
-    where `mf` is left exactly as it came in. From here every rank's
+    where `mf` is left as it came in. From here every rank's
     `mf.get_jk` is the collective; `uninstall()` puts back the mean field's
     own DF object while the slice stays. `distributed_fock` is that bracket
     and `distributed_mean_field` the whole sequence for an SCF.
@@ -970,7 +1077,7 @@ def distributed_df_jk(mf, comm=None, timings=None):
     Only pyscf's own `DF` is replaced by fitted rows: its J/K is the
     contraction of the fitted three-centre tensor that the slices divide. An
     `ISDFJK` answers J/K from interpolated factors, and gets the handle that
-    divides THOSE (`distributed_isdf_jk.DistributedISDFJK`: its grid tiles
+    divides those (`distributed_isdf_jk.DistributedISDFJK`: its grid tiles
     and auxiliary shells). Any other subclass answers J/K its own way, and
     swapping in plain density-fitted rows would converge a different mean
     field without a word, so it is refused on every rank.
@@ -1012,8 +1119,8 @@ def distributed_numint(mf, comm=None, timings=None, split=True):
     """Give `mf` a `_numint` that integrates only this rank's grid points.
 
     Returns the object, or None where there is nothing to divide: a one-rank
-    world, or a mean field with no exchange-correlation grid at all -- a
-    Hartree-Fock one, whose whole Fock build is already J and K. The grid
+    world, or a mean field with no exchange-correlation grid at all (a
+    Hartree-Fock one, whose whole Fock build is already J and K). The grid
     itself is not touched here: rank 0 builds it inside its own SCF, where
     pyscf prunes it against the first density, and it travels on the first
     quadrature. `split=False` keeps every point on rank 0.
@@ -1039,9 +1146,9 @@ def distributed_handles(mf, comm=None):
     """`mf`'s (J/K, quadrature, comm) handles under `comm`, or None.
 
     What a converged distributed SCF leaves on `mf._distributed`: the objects
-    holding THIS rank's slice of the fitted tensor and of the grid, so a later
-    stage that wants the same Fock pieces -- the static exchange the
-    quasiparticle routes build once -- reuses them instead of paying the slice
+    holding this rank's slice of the fitted tensor and of the grid, so a later
+    stage that wants the same Fock pieces (the static exchange the
+    quasiparticle routes build once) reuses them instead of paying the slice
     build again. They are not installed on the mean field between stages;
     `distributed_fock` is the bracket that installs them.
 
@@ -1059,10 +1166,9 @@ def distributed_handles(mf, comm=None):
 def release_distributed(mf):
     """Drop `mf`'s handles and the slices they hold.
 
-    THE MEMORY THEY HOLD IS THE SLICE: this rank's rows of the fitted tensor,
-    naux/nranks x nao(nao+1)/2 x 8 bytes -- 451 MB per rank at anthracene on
-    four, 1.6 GB at pentacene -- plus this rank's grid points and their
-    screening mask, a few MB, and on rank 0 a reference to the whole grid.
+    The memory they hold is the slice: this rank's rows of the fitted tensor,
+    naux/nranks x nao(nao+1)/2 x 8 bytes, plus this rank's grid points and
+    their screening mask, and on rank 0 a reference to the whole grid.
     That is the SCF's own working set kept alive after it; a caller that will
     not build another Fock matrix from this mean field should say so here.
     """
@@ -1081,16 +1187,18 @@ def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
     """`mf` answering J/K and the quadrature over the ranks inside the block.
 
     Yields the (J/K, quadrature, comm) handles, or None where there is nothing
-    distributed -- no communicator, a world of one, or `build=False` on a mean
-    field that carries no handles. Inside the block every rank's Fock pieces
+    distributed (no communicator, a world of one, or `build=False` on a mean
+    field that carries no handles). Inside the block every rank's Fock pieces
     are collectives, so every rank runs the same calls. On the way out the
     mean field has pyscf's own objects back and the handles stay on
     `mf._distributed`.
 
     `build=False` is for a stage that is only worth distributing if the SCF
-    already paid for the slices: building them here costs the whole build
-    again (15 s at pentacene on four ranks, 8 s on eight), which is more than
-    a static exchange build saves below about eight ranks.
+    already paid for the slices: building them here costs the whole slice
+    build again, which can exceed what the stage saves.
+
+    Blocks nest: an inner block leaves installed what an enclosing one
+    installed, so a routine may bracket its own Fock pieces whoever calls it.
     """
     comm = current_comm() if comm is None else comm
     handles = distributed_handles(mf, comm)
@@ -1115,11 +1223,13 @@ def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
                    distributed_numint(mf, comm, timings, split=split_grid),
                    comm)
         mf._distributed = handles
+        parts = [part for part in handles[:2] if part is not None]
     else:
-        for part in handles[:2]:
-            if part is not None:
-                part.install(mf)
-    parts = [part for part in handles[:2] if part is not None]
+        # An enclosing block's handles stay installed when this one ends.
+        parts = [part for part in handles[:2]
+                 if part is not None and part._replaced is None]
+        for part in parts:
+            part.install(mf)
     for part in parts:
         part.timings = timings
     try:
@@ -1137,9 +1247,9 @@ def distributed_df_storage(mf, comm=None):
     """What one rank holds of the fitted tensor under this split, in GB.
 
     `Base.utils.memory.describe_df_storage` reads the mean field's own DF
-    object, which is the WHOLE tensor and is not what a rank stores here -- and
+    object, which is the whole tensor and is not what a rank stores here; and
     after `distributed_mean_field` has put that object back, unbuilt, there is
-    nothing resident for it to read at all. This answers the same question for
+    nothing resident for it to read. This answers the same question for
     the split: how many of the naux rows this rank owns, what they weigh, and
     what the tensor would have weighed on every rank.
     """
@@ -1167,14 +1277,14 @@ def distributed_df_storage(mf, comm=None):
 def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
     """`mf` converged, on every rank, with its Fock build divided over them.
 
-    Takes an UNCONVERGED density-fitted mean field that every rank built
+    Takes an unconverged density-fitted mean field that every rank built
     identically, and returns rank 0's converged one on all of them. Every rank
     runs pyscf's SCF driver unchanged against the reduced J/K and the reduced
     quadrature, whose entry locksteps keep the loops in step; the settings
     that end the loop are rank 0's from the start, and the converged spectrum,
-    orbitals, occupations, energy and flag are rank 0's at the end, so the
-    ranks agree bitwise before anything downstream decides a grid size or a
-    point count from them.
+    orbitals, occupations, energy, flag and grid are rank 0's at the end, so
+    the ranks agree bitwise before anything downstream decides a grid size or
+    a point count from them.
 
     comm: defaults to `current_comm()`.
 
@@ -1183,7 +1293,7 @@ def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
     than a cheaper route: it is the same answer, and slower.
 
     A distributed run leaves its wall clock, stage by stage, on
-    `mf._distributed_timings` -- `TIMING_KEYS`, on every rank -- and its
+    `mf._distributed_timings` (`TIMING_KEYS`, on every rank) and its
     handles on `mf._distributed`, so the next stage to want a Fock piece over
     the same ranks reuses this rank's slices instead of building them again.
     Both travel on the mean field rather than in a return value because the
@@ -1192,8 +1302,8 @@ def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
     the slice: `release_distributed` is how a caller gives it back.
 
     Without a communicator, or on a world of one, this is `mf.kernel()` and
-    nothing else -- the serial path is pyscf's, untouched, bit for bit, and
-    carries neither timings nor handles for the same reason.
+    nothing else: the serial path is pyscf's, bit for bit, and carries
+    neither timings nor handles.
     """
     comm = current_comm() if comm is None else comm
     if comm is None or comm.Get_size() == 1:
@@ -1204,7 +1314,7 @@ def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
     stats0 = lockstep_stats()
     _lockstep_exit_settings(mf, comm, timings)
     with distributed_fock(mf, comm, split_grid, timings):
-        saved = _time_stages(mf, timings)
+        saved = _time_stages(mf, timings) + _driver_stages(mf, timings)
         # The checkpoint is rank 0's to write: two ranks writing one HDF5
         # file corrupt it.
         chkfile = mf.chkfile
@@ -1216,7 +1326,8 @@ def distributed_mean_field(mf, comm=None, dm0=None, split_grid=True):
             # pyscf's own OpenMP runs the Fock build (the DF contraction,
             # `nr_rks` on the DFT grid), so BLAS is held at one thread and the
             # two pools stop spinning against each other; the ISDF handle's
-            # GEMM stages (its row fit, Z, K) take the pool back inside
+            # GEMM stages (its row fit, Z, K) and the loop's own dense linear
+            # algebra (`_DRIVER_STAGES`) take the pool back inside
             # (`blas_full_pool`).
             with blas_single_threaded():
                 mf.kernel(dm0=dm0)
@@ -1255,21 +1366,85 @@ def _lockstep_result(mf, comm, timings):
     eigensolve after the last Fock build and the energy it reports are each
     rank's own arithmetic; this makes them rank 0's bit for bit. Checked, as
     the density is: the arrays move only where a digest shows a rank apart.
+    The quadrature grid, which only rank 0 built, follows (`_lockstep_grids`).
     """
     t0 = time.time()
     (mf.mo_energy, mf.mo_coeff, mf.mo_occ, mf.e_tot,
      mf.converged) = lockstep((mf.mo_energy, mf.mo_coeff, mf.mo_occ,
                                mf.e_tot, mf.converged), comm, check=True)
     _spent(timings, 'scf_lockstep', t0)
+    t0 = time.time()
+    moved = _lockstep_grids(mf, comm)
+    _spent(timings, 'scf_grid' if moved else 'scf_lockstep', t0)
+
+
+def _lockstep_grids(mf, comm):
+    """Rank 0's built grids written onto every rank's `mf`, bit for bit.
+
+    Rank 0 built and pruned them inside the SCF, against its own density;
+    the other ranks' were never built (`_builds_no_grid`), and building them
+    now would prune against the converged density and keep another point
+    count. The arrays move verbatim, the screening mask with them, so no rank
+    builds or prunes anything afterwards. A mean field without a built grid
+    on rank 0 (Hartree-Fock, or no VV10 grid) moves nothing. True where a
+    grid moved, on every rank.
+    """
+    rank, moved = comm.Get_rank(), False
+    for name in _GRID_ATTRIBUTES:
+        grids = getattr(mf, name, None)
+        header = None
+        if rank == 0 and grids is not None and grids.coords is not None:
+            fields = []
+            for field in _GRID_ARRAYS:
+                a = getattr(grids, field, None)
+                if field == 'screen_index' and a is grids.non0tab:
+                    fields.append((field, 'non0tab'))
+                elif a is None:
+                    fields.append((field, None))
+                else:
+                    fields.append((field, (a.shape, a.dtype.str)))
+            header = (float(grids.cutoff), tuple(fields))
+        header = broadcast(header, comm)
+        if header is None:
+            continue
+        moved = True
+        if grids is None:
+            raise RuntimeError(
+                f'rank 0 holds a built mf.{name} and rank {rank} has none: '
+                'the ranks were handed different mean fields.')
+        cutoff, fields = header
+        moving = [(field, spec) for field, spec in fields
+                  if isinstance(spec, tuple)]
+        arrays = [getattr(grids, field) if rank == 0
+                  else np.empty(shape, dtype=np.dtype(dtype))
+                  for field, (shape, dtype) in moving]
+        if arrays:
+            received = replicate(*arrays, comm=comm)
+            arrays = [received] if len(arrays) == 1 else list(received)
+        if rank == 0:
+            continue
+        values = dict(zip((field for field, _ in moving), arrays))
+        for field, spec in fields:
+            if spec is None:
+                values[field] = None
+            elif spec == 'non0tab':
+                values[field] = values['non0tab']
+        for field in _GRID_ARRAYS:
+            setattr(grids, field, values[field])
+        grids.cutoff = cutoff
+    return moved
 
 
 def _driver_time(timings, before, t_kernel):
     """`scf_driver`: the kernel's wall minus every stage timed inside it,
-    which is pyscf's own loop -- DIIS, the eigenproblem, the density, the
-    energy, the convergence test -- and the grid build folded into
-    `scf_grid`."""
+    which is pyscf's own loop (DIIS, the eigenproblem, the density, the
+    energy, the convergence test), and the grid build folded into
+    `scf_grid`; `scf_driver_other` is the driver less `_DRIVER_STAGES`."""
     inside = sum(timings.get(key, 0.0) - before[key] for key in _KERNEL_STAGES)
     timings['scf_driver'] = max(time.time() - t_kernel - inside, 0.0)
+    timings['scf_driver_other'] = max(
+        timings['scf_driver'] - sum(timings.get(key, 0.0)
+                                    for _, key in _DRIVER_STAGES), 0.0)
     timings['scf_grid'] = (timings.get('scf_grid', 0.0)
                            + timings.pop('_grid_build', 0.0))
 

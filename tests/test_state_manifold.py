@@ -147,19 +147,19 @@ def test_bse_roots_off_one_pass_equal_independent_surfaces(bse, mol):
     solution, so any difference at all would mean the pin leaked.
     """
     from src.gradients.excited_state import ExcitedStateChain
-    calls, orig = {'n': 0}, type(bse)._forward
+    calls, orig = {'n': 0}, type(bse)._shared_forward
 
     def counted(self, m, f):
         calls['n'] += 1
         return orig(self, m, f)
 
-    type(bse)._forward = counted
+    type(bse)._shared_forward = counted
     try:
         man = StateManifold(bse, states=(0, 1, 2))
         got = man.energies()
         assert calls['n'] == 1, 'three roots must cost ONE forward pass'
     finally:
-        type(bse)._forward = orig
+        type(bse)._shared_forward = orig
 
     for n in (0, 1, 2):
         ref = ExcitedStateChain(mol, rhf, spin='singlet', state=n,
@@ -225,21 +225,21 @@ def test_a_composed_root_is_that_root_and_not_root_zero(composed, root1_referenc
 
 
 def test_composed_energies_come_off_one_forward_pass(composed, root1_reference):
-    """Counted on the EXCITED half, which is where the pass now has to be
+    """Counted on the EXCITED half, which is where the pass has to be
     pinned; pinning the outer object would leave one pass per root."""
     e_ref, _ = root1_reference
-    calls, orig = {'n': 0}, type(composed.excited)._forward
+    calls, orig = {'n': 0}, type(composed.excited)._shared_forward
 
     def counted(self, m, f):
         calls['n'] += 1
         return orig(self, m, f)
 
-    type(composed.excited)._forward = counted
+    type(composed.excited)._shared_forward = counted
     try:
         got = StateManifold(composed, states=(0, 1)).energies()
         assert calls['n'] == 1, 'two roots must cost ONE forward pass'
     finally:
-        type(composed.excited)._forward = orig
+        type(composed.excited)._shared_forward = orig
     assert got[1] == pytest.approx(e_ref, abs=1e-12)
     assert got[0] < got[1]
 

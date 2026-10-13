@@ -27,7 +27,7 @@ from src.Base.utils.analyticalContinuation import (greedy_pade_order,
 from src.Base.utils.mpi_grid import (current_comm, lockstep,
                                      lockstep_mean_field)
 from src.Base.utils.threads import blas_single_threaded
-from src.Solvers.qp_equation import solve_qp_equation
+from src.Solvers.qp_equation import pole_strength, solve_qp_equation
 
 
 def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
@@ -376,7 +376,7 @@ def static_exchange_correction(mf, mol, p_state, dm_correction=None,
 
 def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
                                  greedy=True, solver_mode='pole_strength',
-                                 max_order=None):
+                                 max_order=None, with_z=False):
     """Pade-continue Sigma_c off the imaginary axis and solve the QP equation.
 
         w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w)
@@ -391,6 +391,8 @@ def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
     max_order     : cap on the number of Pade nodes, applied after the greedy
                     ordering. None keeps all of them, which is the T = 0 behaviour; pass
                     `matsubara.ir_continuation_order(beta, wmax)` for a metal.
+    with_z        : return (root, Z), Z = 1/(1 - dRe Sigma_c/dw) of the
+                    continued fraction at the root, NaN where it is flat.
     """
     z_ord, f_ord = z_fit, sigma_iw
     if greedy:
@@ -413,7 +415,10 @@ def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
         sigma_c_w = pade_eval(np.array([w], dtype=complex), z_ord, pade_coeffs)[0]
         return w - eps[p_state] - xc_correction - sigma_c_w.real
 
-    return solve_qp_equation(residual, eps[p_state], method=solver_mode)
+    root = solve_qp_equation(residual, eps[p_state], method=solver_mode)
+    if not with_z:
+        return root
+    return root, float(pole_strength(residual, root))
 
 
 def imaginary_axis_sample_points(freq_points, nocc, p_state, mu):

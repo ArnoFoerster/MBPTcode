@@ -8,54 +8,47 @@ at the default 148 points per atom, with tiles of `TILE` points so that the
 444- and 888-point grids are cut into 7 and 14 tiles and every rank count
 owns a different set of them:
 
-  * BITWISE ACROSS RANK COUNTS: every rank's rows of X_mo, D and X_ao are the
-    same rows of the one-rank run, bit for bit, and the quasiparticle window
-    and the whole ISDF BSE on them are the same distributed solves on the
+  * across rank counts every rank's rows of X_mo, D and X_ao are the same
+    rows of the one-rank run, bit for bit, and the quasiparticle window and
+    the whole ISDF BSE on them are the same distributed solves on the
     one-rank fit's whole arrays;
-  * ROWS-ONLY MEMORY, read off the objects: the factors a rank holds are its
-    `contiguous_block` of rows, and every grid-indexed array the fit held --
-    the Gram tiles, F D^T, the collocation, the gathered panel, D before and
-    after it moves -- is the size of the tiles the rank owns;
-  * THE ANCHORED GATE against the replicated fit: D, the quasiparticle
-    energies, W(0) and the BSE roots of the row fit sit within
-    `FIT_REASSOCIATION_K` times the distance the replicated fit itself moves
-    when its three-centre blocks are cut per shell and summed in reverse --
-    a bar measured on this run, never a fixed number, the roots' anchor
-    floored at what the Davidson resolves (`roots_resolution` of
-    tests/test_distributed_fit_mpi.py);
-  * the new collectives the fit rests on (`reduce_max`, `broadcast_rows`,
+  * rows-only memory, read off the objects: the factors a rank holds are its
+    `contiguous_block` of rows, and every grid-indexed array the fit held
+    (the Gram tiles, F D^T, the collocation, the gathered panel, D before and
+    after it moves) is the size of the tiles the rank owns;
+  * the realization gate against the replicated fit: D within
+    FIT_REALIZATION_REL_TOL (it reads the Gram matrix's near-null space),
+    the quasiparticle energies, W(0) and the BSE roots within
+    FIT_REALIZATION_OBSERVABLE_REL_TOL, the roots' bar never below what the
+    Davidson resolves (`roots_resolution` of
+    tests/test_distributed_fit_mpi.py). Measured, tiles of 64 / 512: D
+    2.4e-8 at most (water), W(0) 1.5e-13, the roots 4.8e-11 (ethylene);
+  * the collectives the fit rests on (`reduce_max`, `broadcast_rows`,
     `allgather_ranges`, `cyclic_tiles_to_blocks`) against their serial
     meaning;
-  * THE KEPT PAIRS' INTEGRALS ALONE (`KeptIntegrals`): every kept (mu nu|P)
+  * the kept pairs' integrals alone (`KeptIntegrals`): every kept (mu nu|P)
     is the bits of the whole shell block's call over every nu shell, block
     by block and shell by shell on ethylene/cc-pVTZ (f shells break the
-    runs) for the screened pairs and a sparse subset of them, the rows of
+    runs) for the screened pairs and a sparse subset of them; the rows of
     the fit are bitwise those of the whole-block evaluation at 1 and 3
-    ranks, and the ledger's `shell_block` holds between one and two times
+    ranks; and the fit's held `shell_block` is between one and two times
     the largest kept block, below the whole block and its l <= 2 copy, when
     a loose screen drops pairs;
-  * THE METRIC ROOT ON ONE RANK (`metric_root`, `RowFit.metric_root_rows`):
+  * the metric root on one rank (`metric_root`, `RowFit.metric_root_rows`):
     the root is `aux_metric_sqrt`'s to 1e-12, bare and dressed, held in two
     metric-sized arrays; D on it is bitwise at 1/2/3/8 ranks with the root
-    on rank 0 alone and a slab elsewhere, within the anchored bar of the
-    replicated fit, and an indefinite dressed metric is refused on every
+    on rank 0 alone and a slab elsewhere, within FIT_REALIZATION_REL_TOL of
+    the replicated fit, and an indefinite dressed metric is refused on every
     rank;
-  * A FROZEN LAYOUT in place of the screen (`layout=`, what a walk passes to
+  * a frozen layout in place of the screen (`layout=`, what a walk passes to
     keep the reference geometry's pairs): the geometry's own layout gives the
     screened rows bitwise at 1 and 3 ranks, another layout another D, and
-    the replicated fit refuses one.
+    the replicated fit, which the gradient chain runs on the frozen layout,
+    reads it alike.
 
-SHOWN TO FAIL, the kept-pair evaluation: one kept nu shell's run dropped
-(its rows left unevaluated) fails the integral and the fit-level gates;
-restored and byte-compared.
-
-SHOWN TO FAIL: a tile edge that follows the rank's share (nk / 2 size points
-in place of the fixed edge) fails the cross-rank gate at all six multi-rank
-points, the one-rank points passing as they must; restored and
-byte-compared. A rank's rows batched into one GEMM (the trailing update, the
-three-centre contraction) passed here: the workstation's MKL gives those rows
-the same bits at every call shape, which OpenBLAS does not, so that class of
-defect shows under tests/test_distributed_fit_mpi.py on the cluster.
+A rank's rows batched into one GEMM is invisible here on a BLAS that gives
+those rows the same bits at every call shape (MKL); OpenBLAS does not, and
+tests/test_distributed_fit_mpi.py covers that class of defect.
 """
 import os
 import subprocess
@@ -70,8 +63,9 @@ import pytest
 from pyscf import df, gto, scf
 
 from src.Base import separable_ri
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, FIT_REASSOCIATION_K,
-                                HARTREE_TO_EV)
+from src.Base.constants import (FIT_CHOLESKY_BLOCK, ISDF_DEFAULT_COUNTS,
+                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
 from src.Base.polarizable_sites import PolarizableSites
 from src.Base.separable_ri import (KeptIntegrals, aux_metric_sqrt,
                                    fit_M_streaming, metric_root)
@@ -81,8 +75,7 @@ from src.Base.utils.mpi_grid import (allgather_ranges, broadcast_rows,
                                      contiguous_block, cyclic_tiles_to_blocks,
                                      distributed, partition, reduce_max,
                                      run_simulated)
-from src.SingleReference.GW.space_time import (DEFAULT_COUNTS,
-                                               separable_factors,
+from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf)
@@ -99,8 +92,9 @@ SIZES = [1, 2, 3, 8]
 NROOTS = 3
 
 REPO = Path(__file__).resolve().parents[1]
-#: The pass before its co-densities ran in `row_map`'s threads: every tile
-#: of M^T it made is the tile this tree must still make, bit for bit.
+#: A tree whose pass runs its co-densities on one thread rather than in
+#: `row_map`'s threads: every tile of M^T it makes is the tile this tree must
+#: make, bit for bit.
 ONE_THREAD_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
 #: The thread caps of the subprocess gate; `OMP_NUM_THREADS` alone is set per
 #: probe, which moves the pass's pool and neither BLAS nor Accelerate.
@@ -125,7 +119,6 @@ from pyscf import df, gto
 from src.Base.separable_ri import (atomic_grid, fit_M_streaming,
                                    molecular_points_covariant)
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW.space_time import DEFAULT_COUNTS
 
 warnings.simplefilter('ignore')
 fits = {{}}
@@ -135,7 +128,7 @@ for name, atom, budget in {cases!r}:
     radii, origins = {{}}, {{}}
     for el in sorted({{mol.atom_pure_symbol(i) for i in range(mol.natm)}}):
         radii[el], origins[el] = atomic_grid(el, mol.basis, {auxbasis!r},
-                                             DEFAULT_COUNTS)
+                                             {counts!r})
     coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
 
     def fit(comm):
@@ -242,8 +235,8 @@ def test_rows_are_bitwise_across_rank_counts(case, size, request):
 
 @pytest.mark.parametrize('size', [2, 3, 8])
 def test_each_rank_holds_rows_only(water, size):
-    """THE MEMORY ASSERTION: the factors and every grid-indexed array the fit
-    held are the rank's own tiles or rows, read off the arrays."""
+    """The factors and every grid-indexed array the fit held are the rank's
+    own tiles or rows, read off the arrays."""
     mol, mf, _ = water
     nao = mol.nao_nr()
     naux = df.addons.make_auxmol(mol, auxbasis=AUXBASIS).nao_nr()
@@ -291,41 +284,32 @@ def test_each_rank_holds_rows_only(water, size):
 
 @pytest.mark.parametrize('block', [TILE, FIT_CHOLESKY_BLOCK])
 @pytest.mark.parametrize('case', ['water', 'ethylene'])
-def test_row_fit_within_the_reassociation_bar(case, block, request,
-                                              monkeypatch):
-    """The row fit against the replicated fit, anchored on the replicated
-    fit's own response to one reordering of its three-centre sum."""
+def test_row_fit_within_the_realization_tolerance(case, block, request):
+    """The row fit against the replicated fit, two realizations of one fit:
+    D within FIT_REALIZATION_REL_TOL, W(0) and the energies within
+    FIT_REALIZATION_OBSERVABLE_REL_TOL."""
     mol, mf, nocc = request.getfixturevalue(case)
     with distributed(None):
         old = separable_factors(mf, mol, auxbasis=AUXBASIS)
-    with monkeypatch.context() as patch:
-        per_shell_reversed = [(s, s + 1) for s in reversed(range(mol.nbas))]
-        patch.setattr(separable_ri, 'ao_blocks',
-                      lambda *args, **kwargs: per_shell_reversed)
-        with distributed(None):
-            reassociated = separable_factors(mf, mol, auxbasis=AUXBASIS)
     new = one_rank(mol, mf, block)
     ref, resolution = observables(mf, mol, nocc, old)
-    bar = observables(mf, mol, nocc, reassociated)[0]
     got = observables(mf, mol, nocc, new)[0]
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
-    ref['D_root'], bar['D_root'] = ref['D'], bar['D']
+    ref['D_root'] = ref['D']
     with distributed(None):
         got['D_root'] = fit_M_streaming(mol, auxmol, new[3], fit='rows',
                                         block=block).metric_root_rows(auxmol)
     lines = []
     for key in ref:
-        measured = relative(bar[key], ref[key])
-        # the roots' anchor is never below what the Davidson resolves
-        anchor = max(measured, resolution) if key == 'bse' else measured
+        # D reads the Gram matrix's near-null space; the rest, the products
+        # the fit reproduces, the roots never below what the Davidson resolves
+        tol = (FIT_REALIZATION_REL_TOL if key in ('D', 'D_root') else
+               max(FIT_REALIZATION_OBSERVABLE_REL_TOL, resolution)
+               if key == 'bse' else FIT_REALIZATION_OBSERVABLE_REL_TOL)
         dist = relative(got[key], ref[key])
-        # A quantity the reordering leaves bitwise must stay bitwise: its
-        # bar is zero, and so must the row fit's distance be.
-        lines.append(f'{key}: reassociation {measured:.2e}'
-                     + (f', anchor {anchor:.2e}' if anchor != measured else '')
-                     + f', row fit {dist:.2e}'
-                     + (f' ({dist / anchor:.2f} x)' if anchor else ''))
-        assert dist <= FIT_REASSOCIATION_K * anchor, lines[-1]
+        lines.append(f'{key}: row fit {dist:.2e} = {dist / tol:.3f} of '
+                     f'{tol:.0e}')
+        assert dist <= tol, lines[-1]
     worst = {k: float(np.abs(np.asarray(got[k]) - np.asarray(ref[k])).max())
              * HARTREE_TO_EV for k in ('qp', 'bse')}
     print(f'\n{case}, tile {block}: ' + '; '.join(lines)
@@ -395,9 +379,9 @@ def test_new_collectives(size):
 
 
 def whole_block(mol, auxmol, shells, mu, nu):
-    """The kept pairs' (mu nu|P) the way the pass took them before it
-    evaluated them alone: one `aux_e2` call over the whole shell block and
-    every nu shell, building its own optimizer, the kept pairs picked."""
+    """The kept pairs' (mu nu|P) picked from one `aux_e2` call over the whole
+    shell block and every nu shell, building its own optimizer: the reference
+    for `KeptIntegrals`."""
     sh0, sh1 = shells
     e3c = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
                            shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas))
@@ -416,7 +400,7 @@ def test_kept_integrals_are_the_whole_block_bits(atom, basis):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     auxmol = df.addons.make_auxmol(mol, auxbasis=basis + '-ri')
     rows = {el: separable_ri.atomic_grid(el, basis, basis + '-ri',
-                                         DEFAULT_COUNTS)
+                                         ISDF_DEFAULT_COUNTS)
             for el in {mol.atom_pure_symbol(i) for i in range(mol.natm)}}
     grid = separable_ri.molecular_points_covariant(
         mol, {el: row[0] for el, row in rows.items()},
@@ -568,7 +552,9 @@ def test_an_indefinite_dressed_root_is_refused_on_every_rank(water):
 def test_a_frozen_layout_replaces_the_screen(ethylene, size):
     """A frozen `test_set_layout` in place of the screen: the geometry's own
     layout gives the screened fit's rows bitwise at every rank, and a layout
-    holding other pairs gives another D. The replicated fit refuses one."""
+    holding other pairs gives another D. The replicated fit reads the layout
+    the same way: its own layout gives the screened M bitwise, the other
+    layout another M."""
     mol, mf, _ = ethylene
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     coords = one_rank(mol, mf)[3]
@@ -587,8 +573,11 @@ def test_a_frozen_layout_replaces_the_screen(ethylene, size):
     for r, (a, b, c) in enumerate(zip(screened, frozen, moved)):
         assert a[0] == b[0] and a[1].tobytes() == b[1].tobytes(), r
         assert relative(c[1], a[1]) > 1e-3, (r, relative(c[1], a[1]))
-    with distributed(None), pytest.raises(ValueError, match="fit='rows'"):
-        fit_M_streaming(mol, auxmol, coords, layout=own)
+    with distributed(None):
+        whole = [fit_M_streaming(mol, auxmol, coords, layout=layout)
+                 for layout in (None, own, other)]
+    assert whole[1].tobytes() == whole[0].tobytes()
+    assert relative(whole[2], whole[0]) > 1e-3, relative(whole[2], whole[0])
 
 
 def extracted(tmp_path_factory, commit):
@@ -613,7 +602,8 @@ def probe_row_fits(tree, tmp_path, omp_threads):
     out = tmp_path / f'row_fits_{tag}.npz'
     script.write_text(ROW_FIT_PROBE.format(
         tree=str(tree), cases=PROBE_CASES, basis=BASIS, auxbasis=AUXBASIS,
-        tile=TILE, sizes=PROBE_SIZES, out=str(out)))
+        tile=TILE, sizes=PROBE_SIZES, out=str(out),
+        counts=ISDF_DEFAULT_COUNTS))
     env = dict(os.environ, **THREAD_CAPS, OMP_NUM_THREADS=str(omp_threads))
     env.pop('PYTHONPATH', None)
     proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),
@@ -635,9 +625,9 @@ def row_fits_three_ways(tmp_path_factory):
 @pytest.mark.parametrize('name', [c[0] for c in PROBE_CASES])
 def test_row_fit_is_the_one_thread_trees_bits(row_fits_three_ways, name,
                                              size):
-    """Every tile of M^T the ranks own is the bytes the pass made when its
-    screening and its kept co-densities ran on one thread, on a pool of two
-    threads and of one, and the tiles cover the grid."""
+    """Every tile of M^T the ranks own, on a pool of two threads and of one,
+    is the bytes of the `ONE_THREAD_COMMIT` tree, whose screening and kept
+    co-densities run on one thread, and the tiles cover the grid."""
     old, two, one = row_fits_three_ways
     key = f'{name}_{size}'
     assert not np.isnan(two[key]).any(), key

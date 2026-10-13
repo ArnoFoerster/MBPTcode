@@ -24,6 +24,13 @@ WHAT EACH GATE IS FOR:
   both orderings, so the sign comes from the gap alone.
 - the excitation gradient must be untouched by the refactor that gave the
   interstate seed its own entry into the same reverse chain.
+- `ov_coupling`, the occupied-virtual block of the derivative overlap for ANY
+  weight, against the same contraction of displaced solves: the ground-state
+  coupling is one weight of it, the fragment localization response another
+  that is no amplitude at all.
+- `kernel_pieces` is the forward before the Casida step, and the fold to the
+  nuclei reads nothing the roots carry: a force folded off it equals the one
+  folded off the full forward.
 """
 import os
 import sys
@@ -41,6 +48,7 @@ from src.gradients.derivative_coupling import (analytic_coupling,
                                                analytic_ground_coupling,
                                                canonical_overlap_derivative,
                                                configuration_coupling,
+                                               ov_coupling,
                                                state_to_state_density)
 from src.gradients.excited_state import ExcitedStateChain
 from src.properties import rates, vibronic
@@ -199,6 +207,58 @@ def test_configuration_term_z_vector_matches_displaced_solves(chain):
                 np.einsum('ab,ab->', a[nocc:, nocc:], gvv, optimize=True)
                 - np.einsum('ij,ji->', goo, a[:nocc, :nocc], optimize=True))
     assert np.abs(ana - num).max() < 1e-5 * max(np.abs(num).max(), 1.0)
+
+
+def test_ov_coupling_matches_displaced_solves(chain):
+    """`ov_coupling` for a random occupied-virtual weight against the same
+    contraction of the canonical overlap derivative by difference.
+
+    `ground_state_coupling` is the case W = sqrt(2) (X - Y) and is gated
+    against the reference coupling below; a random W is what checks the
+    contraction itself, the weight the fragment localization response hands
+    it being no amplitude at all. The occupied-virtual block carries a
+    central difference's h^2 at 2e-5 relative here, so the reference is
+    extrapolated from h and h/2, (4 f(h/2) - f(h)) / 3, and the gate sits
+    at what remains (4e-9 measured).
+    """
+    mol, mf = chain.mean_field()
+    nocc = chain.nocc
+    w = np.random.default_rng(3).normal(size=(nocc,
+                                              mf.mo_coeff.shape[1] - nocc))
+    ana = ov_coupling(mol, mf, nocc, w)
+    num = np.zeros_like(ana)
+    for atom in range(mol.natm):
+        for axis in range(3):
+            f = [np.einsum('ia,ia->', w, canonical_overlap_derivative(
+                     mol, mf, chain.scf_factory, atom, axis,
+                     step=h)[:nocc, nocc:])
+                 for h in (NUCLEAR_FD_STEP, 0.5 * NUCLEAR_FD_STEP)]
+            num[atom, axis] = (4.0 * f[1] - f[0]) / 3.0
+    assert np.abs(ana - num).max() < 1e-7 * np.abs(num).max()
+
+
+def test_kernel_pieces_are_the_forward_before_the_casida_step(chain):
+    """`kernel_pieces` holds `_forward`'s pieces with no roots, and the fold
+    to the nuclei reads nothing the roots carry: the excitation force folded
+    off it equals the one folded off the full forward.
+
+    The fragment-diabatic gradients fold their own seeds off these pieces,
+    one fold per element, so the tape is kept (`release_tape=False`).
+    """
+    mol, mf = chain.mean_field()
+    _, full = chain._forward(mol, mf)
+    kern = chain.kernel_pieces(mol, mf)
+    assert len(kern) == len(full) == 17
+    assert kern[9] == {} and kern[10] is None and kern[11] is None
+    for k in (4, 5, 6, 7, 8):
+        assert np.array_equal(np.asarray(kern[k]), np.asarray(full[k]))
+    assert kern[12] == full[12]
+    # the fold consumes x_bar and d_bar, so each fold gets its own seeds
+    ref = chain._fold_to_nuclei(full, *chain._casida_seeds(full, 0),
+                                release_tape=False)[0]
+    got = chain._fold_to_nuclei(kern, *chain._casida_seeds(full, 0),
+                                release_tape=False)[0]
+    assert np.abs(got - ref).max() <= 1e-12 * np.abs(ref).max()
 
 
 def test_residual_is_the_reference_step_and_not_a_missing_term(chain):

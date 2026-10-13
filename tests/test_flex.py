@@ -10,6 +10,13 @@
    as lam^4. A wrong double-counting coefficient shows up as lam^2, a wrong
    third-order piece as lam^3.
 3. The diagonal QP equation converges and returns a quasiparticle.
+4. The pp/hh term in closed form (pp_term='poles': one pair diagonalization
+   per spin, the operator being block-diagonal in the spectator) equals the
+   Lanczos resolvent, for the Riccati ladder and for the CCD channels; and
+   phonons recovered from amplitudes, (A + dH) X = (1 + dN) X omega with
+   Y = T X, reproduce TDHF for the ring amplitude; and the pair pencil solve
+   (Cholesky reduction + MRRR, free of dsygvd's 32-bit workspace limit)
+   equals the generalized eigh.
 
 Run: python tests/test_flex.py, or under pytest.
 """
@@ -20,17 +27,21 @@ import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import scipy.linalg as la
 from pyscf import gto, scf
+from scipy.sparse.linalg import LinearOperator, minres
 
 from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC import ADCSolverRestricted
+from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC import adc_r_flex as FX
 from src.SingleReference.ADC import adc_r_sigma_df
 from src.SingleReference.ADC import adc_u_faddeev as FU
+from src.SingleReference.ADC.cc_amplitudes import ccd_t2_restricted
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from scipy.sparse.linalg import LinearOperator, minres
+from src.SingleReference.LinearResponse.riccati import channel_corrections_from_amplitudes
 
 
 def check(ok, label, detail=''):
@@ -143,6 +154,47 @@ def check_qp(eps, B, nocc):
                  f"{r['niter']} Newton steps")
 
 
+def check_closed_form(basis='6-31g'):
+    ok = True
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis=basis, verbose=0)
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    eps, B, nocc = mf.mo_energy, DFIntegrals.from_scf(mol, mf).B_aa, mol.nelectron // 2
+    for spin in ('singlet', 'triplet'):
+        A, Bm = LinearResponseSolver(eps, coeff_df=B).build_casida_matrices(
+            nocc, lBSE=True, triplet=(spin == 'triplet'))
+        T = FR._eh_channel(eps, nocc, spin, B, None, 'riccati', 'rpa')['T']
+        dH, dN = channel_corrections_from_amplitudes(Bm, A, T)
+        w, X = la.eigh(A + dH, np.eye(len(A)) + dN)
+        d = np.abs(np.sort(w) - np.sort(CasidaSolver(A, Bm).solve()[0])).max()
+        ok &= check(d < 1e-10, f'phonons from the ring amplitude == TDHF ({spin})', f'{d:.1e}')
+    s = ADCSolverRestricted.from_arrays(eps, B_aa=B, nocc=nocc)
+    t2 = ccd_t2_restricted(mf, conv_tol=1e-12, conv_tol_normt=1e-10)
+    for label, kw in (('Riccati ladder', {}), ('CCD channels', {'t2': t2})):
+        fl = FX.FlexSelfEnergy(s, nocc, **kw)
+        fp = FX.FlexSelfEnergy(s, nocc, pp_term='poles', **kw)
+        d = 0.0
+        for p in (nocc - 1, nocc - 2, nocc):
+            for w in (eps[p] - 0.3, eps[p] + 0.05, -1.7, 0.4):
+                a, da = fl.sigma_operator('pp', p, w)
+                b, db = fp._sigma_ladder(p, w)
+                d = max(d, abs(a - b), abs(da - db))
+        ok &= check(d < 1e-9, f'closed-form pp/hh term == Lanczos ({label})', f'{d:.1e}')
+    rng = np.random.default_rng(7)
+    n = 300
+    A = rng.standard_normal((n, n))
+    A = A + A.T
+    T = 0.1 * rng.standard_normal((n, n))
+    S = np.eye(n) + T @ T.T
+    w, X = FX._eigh_pencil(A.copy(), S.copy())
+    d = max(np.abs(w - la.eigh(A, S, eigvals_only=True)).max(),
+            np.abs(X.T @ S @ X - np.eye(n)).max(), np.abs(A @ X - S @ X * w).max())
+    ok &= check(d < 1e-10, 'Cholesky + MRRR pencil solve == generalized eigh', f'{d:.1e}')
+    return ok
+
+
 def run():
     warnings.simplefilter('ignore')
     mol, eps, B = build()
@@ -154,6 +206,8 @@ def run():
     all_ok &= check_third_order(eps, B, nocc)
     print('\n-- the quasiparticle equation')
     all_ok &= check_qp(eps, B, nocc)
+    print('\n-- the pp/hh term in closed form, and CCD channels')
+    all_ok &= check_closed_form()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return all_ok
 

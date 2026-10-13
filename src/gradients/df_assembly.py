@@ -17,9 +17,10 @@ this is the assembly both routes feed.
 The FORWARD side of the same factorization -- `df_integrals` and the fitted
 four-index `df_eri_mo` the gradient here differentiates -- is `Base.eri_blocks`.
 
-pyscf sign convention, verified against finite differences in Bohr:
-int3c2e_ip1 = -(grad mu nu|P), int3c2e_ip2 = -(mu nu|grad P),
-int2c2e_ip1 = -(grad P|Q).
+pyscf sign convention, measured against finite differences in Bohr, grad on
+the electron coordinate: int3c2e_ip1 = (grad mu nu|P), int3c2e_ip2 =
+(mu nu|grad P), int2c2e_ip1 = (grad P|Q). A function centred on atom A moves
+as d/dR_A = -grad, so every nuclear derivative built from them carries a minus.
 """
 import numpy as np
 from pyscf import df as pyscf_df
