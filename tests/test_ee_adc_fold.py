@@ -111,7 +111,7 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       singlets and triplets, nroots 3, from the seeds of M, max_subspace 40 and 4):
       the model converges, its roots lie within 1e-3 Ha of the Newton roots, and
       the per-root Newton polish from them, at most three steps a root, returns
-      the Newton roots to 1e-7 Ha.
+      the Newton roots to 1e-7 Ha; two cycles leave it unconverged, warned.
   31. solver='davidson' is the default of solve_folded: on water singlets, nroots
       3, its roots equal solver='newton''s to 1e-8 Ha and its T1 to 1e-6, loop
       reads 'davidson', solver='bogus' raises ValueError; on CH4 / 6-31G
@@ -121,7 +121,7 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       cannot fix (strong coupling, the centre held at M's root) comes back
       converged False with a warning, and so does a 4-fold level, every partner;
       a root the Davidson hands over twice is reported, the copy dropped, the
-      displaced root solved by index.
+      displaced root solved by index; max_newton 0 still returns the root.
 
 The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
@@ -1686,7 +1686,8 @@ def check_davidson_omega(eps, B, no):
     of M, at max_subspace 40 and 4 (a collapse every cycle): the model converges,
     its roots lie within 1e-3 Ha of the Newton roots (its first-order error away
     from the centre), and the per-root Newton polish from them, at most three
-    steps a root, returns the Newton roots to 1e-7 Ha."""
+    steps a root, returns the Newton roots to 1e-7 Ha; two cycles leave the model
+    unconverged, with a warning."""
     from src.SingleReference.ADC.eeADC import ee_fold
     P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
     d_min = float(np.min(P['D']))
@@ -1714,6 +1715,15 @@ def check_davidson_omega(eps, B, no):
                         'equal the Newton roots',
                         f'model |d| {dm:.1e} Ha, polished |d| {d:.1e} Ha, {cyc} '
                         f'cycles, polish steps {steps}')
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _, _, conv, cyc = ee_fold._davidson_omega(
+                P, spin, X0, 3, d_min, 1e-8, 1e-9, 40, 2, 'test')
+        msgs = [str(x.message) for x in caught]
+        ok &= check(any('not converged' in x for x in msgs) and not conv.all()
+                    and cyc == 2,
+                    f'{spin}: a model out of cycles warns, its roots unconverged',
+                    f'{len(msgs)} warning(s), conv {conv.tolist()}, {cyc} cycles')
     return ok
 
 
@@ -1785,7 +1795,8 @@ def check_default_polish():
     one polish step comes back converged False with the solve's warning, never at
     the model's value as converged, and a 4-fold level so held comes back whole,
     every partner unconverged; two roots the Davidson hands over as copies of one
-    are reported, the copy dropped, and the root it displaced solved by index."""
+    are reported, the copy dropped, and the root it displaced solved by index;
+    max_newton 0 leaves the Davidson a budget and returns the root."""
     from src.SingleReference.ADC.eeADC import ee_fold
     ok = True
     m, C, D = np.array([0.5, 0.9]), np.array([[0.25, 0.0]]), np.array([0.8])
@@ -1872,6 +1883,17 @@ def check_default_polish():
                 'a level one polish step cannot fix: every partner converged False, '
                 'the level warned', f'nout {res.omega.size}, converged '
                 f'{res.converged.tolist()}, loop {res.loop}')
+    # max_newton 0: the Newton budget spent at once, the Davidson still runs
+    m, C, D = np.array([0.5, 0.9]), np.array([[0.1, 0.0]]), np.array([1.2])
+    w0 = np.sort(_synthetic_exact(m, C, D)[0])[0]
+    try:
+        res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
+                                   dense_limit=0, max_newton=0)
+        d, why = abs(float(res.omega[0]) - w0), f'loop {res.loop}'
+    except Exception as err:
+        d, why = np.inf, f'{type(err).__name__}: {err}'
+    ok &= check(d < 1e-6, 'max_newton 0 on the default returns the root',
+                f'|dw| {d:.1e} Ha, {why}')
     # the dense branch seeds M in full; the Davidson takes the levels it follows
     n = 200
     C = np.zeros((2, n))

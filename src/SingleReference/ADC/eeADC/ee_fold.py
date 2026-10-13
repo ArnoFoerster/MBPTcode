@@ -509,8 +509,10 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     roots' vectors when it would pass max_subspace. Convergence is the model
     residual below tol_residual and the roots moving less than tol_omega between
     cycles; a root away from om0 keeps the model's second-order error, so the
-    caller polishes each root exactly. Every application of A_eff, A' and M counts
-    against the traced call, which prints one line per cycle.
+    caller polishes each root exactly. An exit before convergence, the cycle budget
+    spent or no new direction left, warns when a model residual stays at or above
+    tol_residual. Every application of A_eff, A' and M counts against the traced
+    call, which prints one line per cycle.
 
     X0 : ndarray, shape (n, m0), start vectors, whole levels of M's seeds
     d_min : float, the lowest doubles energy; model roots at or above it are dropped
@@ -540,9 +542,17 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     S0 = S1 = np.empty((n, 0))
     oms_prev = None
 
-    def below(oms, X, conv, cycle):
+    def below(oms, X, conv, rn, cycle, why=None):
         # the levels that start below nroots; a root followed past them is distinct
         k = max(b for a, b in _levels(oms) if a < nroots)
+        # a residual met in a space that cannot grow is converged; a root that
+        # only moved past tol_omega is left to the polish
+        bad = np.flatnonzero(rn[:k] >= tol_residual) if why else np.empty(0, int)
+        if bad.size:
+            warnings.warn(f'{label}: {bad.size} of {k} model root(s) not converged '
+                          f'after {cycle} cycle(s), {why}; largest model residual '
+                          f'{rn[bad].max():.1e}; the exact polish starts from them',
+                          RuntimeWarning, stacklevel=5)
         return oms[:k], X[:, :k], conv[:k], cycle
 
     for cycle in range(1, max_cycle + 1):
@@ -591,7 +601,7 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
              + ', |r| ' + ' '.join(f'{r:.1e}' for r in rn))
         oms_prev = oms
         if conv.all():
-            return below(oms, X, conv, cycle)
+            return below(oms, X, conv, rn, cycle)
         # M's diagonal at each root's own ω, its component along the root removed
         # (the tree's Davidson correction, which keeps a converging root moving)
         precond = jacobi_davidson_precond(diag_s)
@@ -606,8 +616,8 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
             # the roots moved away: a new centre, every image rebuilt
             om0, S0, S1 = centre, np.empty((n, 0)), np.empty((n, 0))
         elif added == 0:
-            return below(oms, X, conv, cycle)
-    return below(oms, X, conv, max_cycle)
+            return below(oms, X, conv, rn, cycle, 'no new direction left')
+    return below(oms, X, conv, rn, max_cycle, 'its cycle budget spent')
 
 
 def _eig_level(pieces, omega, spin, Y, dense, tol_residual, label):
@@ -1131,7 +1141,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
         # the seed levels it may follow, not every eigenvector the dense branch has
         oms, X, conv_d, cycles = _davidson_omega(
             pieces, spin, X0[:, :runs[-1][1]], nroots, float(np.min(pieces['D'])),
-            tol_residual, tol_omega, max(8 * nroots, 24), max_newton * 50,
+            tol_residual, tol_omega, max(8 * nroots, 24), max(max_newton, 1) * 50,
             label + ' davidson')
         note(f'davidson: {oms.size} root(s) in {cycles} cycle(s), '
              f'{int(np.count_nonzero(conv_d))} converged in the model')
