@@ -1746,6 +1746,21 @@ def check_davidson_omega(eps, B, no):
                     and cyc == 2,
                     f'{spin}: a model out of cycles warns, its roots unconverged',
                     f'{len(msgs)} warning(s), conv {conv.tolist()}, {cyc} cycles')
+    # the centre follows the nroots lowest roots, never the roots followed past
+    # them: a new centre is the median of the previous cycle's nroots lowest
+    pat = r'davidson cycle \d+: \d+ vectors, centre ([0-9.]+), roots ([0-9. ]+), \|r'
+    for nr in (1, 2):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ee_fold.solve_folded(P, nr, spin='singlet', verbose=1)
+        rows = [(float(c), [float(x) for x in r.split()])
+                for c, r in re.findall(pat, out.getvalue())]
+        moves = [(c, float(np.median(r0[:nr])))
+                 for (c0, r0), (c, _) in zip(rows, rows[1:]) if c != c0]
+        dev = max((abs(c - m) for c, m in moves), default=np.inf)
+        ok &= check(dev < 2e-6, f'singlets, nroots {nr}: every new centre is the '
+                    'median of the nroots lowest roots',
+                    f'{len(moves)} recentre(s), max |centre - median| {dev:.1e} Ha')
     return ok
 
 

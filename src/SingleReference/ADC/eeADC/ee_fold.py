@@ -505,16 +505,16 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     root's, so a level cut by nroots is followed whole while the model splits it.
     Each adds its model residual to Q through the Jacobi-Davidson correction on
     M's diagonal, and the vectors of a level (_levels) come from one eigh at its
-    mean ω, orthonormal. When the median root lies farther than _RECENTRE from
-    om0 the centre moves there and every image is rebuilt; Q collapses onto the
-    roots' vectors, their images rotated, when it would pass max_subspace, so the
-    roots and their new directions may pass it. Convergence is the model
-    residual below tol_residual and the roots moving less than tol_omega between
-    cycles; a root away from om0 keeps the model's second-order error, so the
-    caller polishes each root exactly. An exit before convergence, the cycle budget
-    spent or no new direction left, warns when a model residual stays at or above
-    tol_residual. Every application of A_eff, A' and M counts against the traced
-    call, which prints one line per cycle.
+    mean ω, orthonormal. When the median of the nroots lowest roots lies farther
+    than _RECENTRE from om0 the centre moves there and every image is rebuilt; Q
+    collapses onto the roots' vectors, their images rotated, when it would pass
+    max_subspace, so the roots and their new directions may pass it. Convergence
+    is the model residual below tol_residual and the roots moving less than
+    tol_omega between cycles; a root away from om0 keeps the model's second-order
+    error, so the caller polishes each root exactly. An exit before convergence,
+    the cycle budget spent or no new direction left, warns when a model residual
+    stays at or above tol_residual. Every application of A_eff, A' and M counts
+    against the traced call, which prints one line per cycle.
 
     X0 : ndarray, shape (n, m0), start vectors, whole levels of M's seeds
     d_min : float, the lowest doubles energy; model roots at or above it are dropped
@@ -615,7 +615,9 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
             G = Q.T @ Qc
             Q, S0, S1 = Qc, S0 @ G, S1 @ G
         Q, added = _orth_append(Q, np.column_stack(new))
-        centre = float(np.median(oms))
+        # the nroots lowest set the centre: a root followed past them, a collapse's
+        # leftover among them, would swing it and rebuild every image for nothing
+        centre = float(np.median(oms[:nroots]))
         if abs(centre - om0) > _RECENTRE:
             # the roots moved away: a new centre, every image rebuilt
             om0, S0, S1 = centre, np.empty((n, 0)), np.empty((n, 0))
