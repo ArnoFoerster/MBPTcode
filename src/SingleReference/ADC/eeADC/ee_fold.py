@@ -566,8 +566,8 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
         # the nroots lowest roots, the rest of a level they cut, and each of the
         # next _FOLLOW whose root may be degenerate with the cut root: distance
         # within the sum of the two residual norms, each bounding its root's error.
-        # A partner the start held only through the random vector converges last
-        # and is followed until it joins the level or leaves the window
+        # A partner that converges late is followed until it joins the level or
+        # leaves the window
         c = min(nroots, oms.size) - 1
         r = c + 1
         while r < oms.size and (oms[r] - oms[r - 1] <= _DEGENERATE or (
@@ -940,9 +940,10 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         the pieces set none.
     verbose : int, 1 prints one line per outer step, per eigensolve outside the
         steps (seeds, count, check), per count round and per Davidson cycle, each
-        stamped with the call's elapsed time and matvec count (every application of
-        the operator, A_eff' included), and inside a long eigensolve a line at most
-        every _HEARTBEAT (600) s.
+        stamped with the call's elapsed time and matvec count (each application of
+        M, A_eff or A_eff' inside an eigensolve or the root-wise Davidson; the dense
+        branch's builds and the scalar A_eff' passes for T1 are not counted), and
+        inside a long eigensolve a line at most every _HEARTBEAT (600) s.
     solver : {'davidson', 'newton'}, the root-wise Davidson or the per-level
         Newton loops from the seeds.
 
