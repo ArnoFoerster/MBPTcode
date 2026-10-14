@@ -149,10 +149,14 @@ the same inputs without it, as their added lines check.
       NotImplementedError; a slab holds at most _K_LIVE slab blocks per slab index
       (the slope of tracemalloc's peak from width 1 to 2, water cc-pVTZ).
       Checks 10 and 28 take dict(P, K=None), the generic path, as their baseline.
+  36. ee_spin_blocks._STREAM_GB follows MBPT_STREAM_GB of the environment at
+      import (a subprocess): 0.0001 GB gives one index per slab, unset 16 GB holds
+      all 44 indices in one slab.
 
 Run: python tests/test_ee_adc_fold.py
 """
 import os
+import subprocess
 import sys
 import warnings
 
@@ -2029,6 +2033,16 @@ def check_stream():
     ok &= check(plans == {12500: (44, 1), 10: (3, 3), 4: (1, 3), 0: (1, 1)},
                 '_slab_plan: one slab when the budget holds all, else workers x width '
                 'within it, never below one index', str(plans))
+    # the budget follows MBPT_STREAM_GB of the environment, read at import
+    code = ('from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb; '
+            'print(sb._STREAM_GB, sb._slab_plan(44, 1000, 10))')
+    knob = dict(os.environ, MBPT_STREAM_GB='0.0001')   # 0.1 MB: 1 index, 1 slab
+    base = {k: v for k, v in os.environ.items() if k != 'MBPT_STREAM_GB'}
+    got = [subprocess.run([sys.executable, '-c', code], env=e, capture_output=True,
+                          text=True).stdout.split() for e in (knob, base)]
+    ok &= check(got[0] == ['0.0001', '(1,', '1)'] and got[1] == ['16.0', '(44,', '1)'],
+                '_STREAM_GB: MBPT_STREAM_GB=0.0001 gives one index per slab, unset '
+                '16 GB holds all 44', str(got))
     return ok
 
 

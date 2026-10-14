@@ -41,7 +41,9 @@ from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threa
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
-_STREAM_GB = 16.0       # GB a streamed kernel's slabs in flight may hold together
+# GB a streamed kernel's slabs in flight may hold together; the job's environment
+# sets it through MBPT_STREAM_GB (one slab needs n * live * per_index * 8 bytes).
+_STREAM_GB = float(os.environ.get('MBPT_STREAM_GB', 16.0))
 _STREAM_POOLS = {}
 _STREAM_LOCK = threading.Lock()
 
