@@ -32,14 +32,14 @@ from src.Base.utils.analyticalContinuation import pade_continue_elementwise
 # --- Convergence parameters ---
 # Outer scGW cycle
 GAMMA_CONVERGENCE = 1e-6    # max |gamma - gamma_old| at which the cycle stops
-GAMMA_MIXING = 0.6          # fraction of the new gamma kept in each iteration
+GAMMA_MIXING = 0.3          # fraction of the new gamma kept in each iteration
 MU_CONVERGENCE = 1e-3       # max change of mu between repeated mu searches
 MAX_SCF_ITER = 100          # cap on scGW iterations
 MAX_MU_ITER = 50            # cap on repeated mu searches per scGW iteration
 
 # mu search (mu_cycle)
 MU_STEP = 1e-6              # first step away from the starting mu
-TRACE_TOL = 1e-5            # |Tr[gamma] - nocc| at which mu is converged
+TRACE_TOL = 1e-8            # |Tr[gamma] - nocc| at which mu is converged
 MU_TOL = 1e-10              # smallest bisection bracket width
 STALL_TRACE_TOL = 1e-4      # |Tr[gamma] - nocc| still accepted at that width
 MAX_BRACKET_ITER = 50
@@ -363,7 +363,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     # the omega -> tau transform is. Measured on Ne/cc-pVDZ, with the default
     # Matsubara sampling: 100/dG.min() diverged within ~5 iterations,
     # 25/dG.min() was stable.
-    beta = 100.0 / dG.min()
+    beta = 25.0 / dG.min()
 
     # The default Matsubara sampling only reaches 1.1 - 1.4 x omega_max,
     # which leaves the transform ill-conditioned near tau = 0 and beta, where
@@ -413,7 +413,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     gamma = density_matrix_ir(G0, grid_f)
     print(f'Trace gamma_G0: {np.trace(gamma)}, expected nocc: {nocc}\n')
 
-    G_tau, chi_omega, W_omega, sigma_new = calc_new_sigma_ir(
+    _, _, _, sigma_new = calc_new_sigma_ir(
         G0, grid_f, grid_b, X_mo, D)
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
@@ -453,18 +453,25 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
         mu_convergence = MU_CONVERGENCE
 
-        for _ in range(MAX_MU_ITER):
-            mu_old = mu
+        # for _ in range(MAX_MU_ITER):
+        #     mu_old = mu
 
-            mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
-                            sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+        #     mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
+        #                     sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
 
-            if abs(mu_old - mu) <= mu_convergence:
-                break
-        else:
-            raise RuntimeError(f'scGW: mu did not settle within {MAX_MU_ITER} '
-                               f'mu searches (last change {abs(mu_old - mu):.2e})')
+        #     if abs(mu_old - mu) <= mu_convergence:
+        #         break
+        # else:
+        #     raise RuntimeError(f'scGW: mu did not settle within {MAX_MU_ITER} '
+        #                        f'mu searches (last change {abs(mu_old - mu):.2e})')
 
+
+        # TESTING ONE MU CYCLE INSTEAD OF CONVERGING MU
+        mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
+                                   sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+        F = build_new_F(gamma, V, h_mo)
+
+        
         print(f'Mu post mu_scf: {mu}')
 
         gamma = alpha * gamma + (1 - alpha) * gamma_old
