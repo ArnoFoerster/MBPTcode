@@ -68,7 +68,9 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       is re-solved per branch, on both branches.
   19. a state folded to within a found root's window, that root not the cut, below
       or above it: the found root's branch comes from its own vector and the missed
-      state is solved, both roots exact, no warning, on both branches.
+      state is solved, both roots exact, no warning, on both branches and both
+      solvers (the repair is the count's, reached through solver='newton'; the
+      default's Davidson finds the state itself).
   20. the index solve keeps the cut's vectors in every start: a state folded
       between two found roots is solved on the Davidson branch from a start of
       exact eigenvectors (n 4) and from one symmetry block of two (n 200), without
@@ -127,7 +129,7 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
 
 The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
-solver='newton' in checks 4, 5, 8, 12, 13, 18, 21 and 23, where the default meets
+solver='newton' in checks 4, 5, 8, 12, 13, 18, 19, 21 and 23, where the default meets
 the same inputs without it, as their added lines check.
   33. ee_spin_blocks._stream runs fn once per slab of an index range, the last
       slab shorter than the width, with more workers than slabs, and sums the
@@ -1338,12 +1340,14 @@ def check_window_branch():
     for delta, tol_omega in ((1e-6, 1e-6), (-1e-6, 1e-6), (5e-9, 1e-10)):
         om = 0.5 - delta
         C = np.array([[0.0, 0.0, np.sqrt((0.9 - om) * (1.2 - om))]])
-        for dl in (2000, 0):
+        for dl, solver in ((2000, 'davidson'), (0, 'davidson'), (2000, 'newton'),
+                           (0, 'newton')):
             got, d, msgs = _fold_run(np.array([0.5, 0.6, 0.9]), C, np.array([1.2]), 2,
-                                     tol_omega=tol_omega, dense_limit=dl)
+                                     tol_omega=tol_omega, dense_limit=dl,
+                                     solver=solver)
             ok &= check(d < 1e-8 and not msgs,
                         f'delta {delta:+.0e}, tol_omega {tol_omega:.0e}, dense_limit '
-                        f'{dl}: both roots, no warning',
+                        f'{dl}, {solver}: both roots, no warning',
                         f'got {np.round(got, 9).tolist()}, {len(msgs)} warning(s)')
     return ok
 
@@ -2033,16 +2037,21 @@ def check_stream():
     ok &= check(plans == {12500: (44, 1), 10: (3, 3), 4: (1, 3), 0: (1, 1)},
                 '_slab_plan: one slab when the budget holds all, else workers x width '
                 'within it, never below one index', str(plans))
-    # the budget follows MBPT_STREAM_GB of the environment, read at import
+    # the budget follows MBPT_STREAM_GB of the environment, read at import; the
+    # child finds src through the repository root this file put on sys.path
     code = ('from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb; '
             'print(sb._STREAM_GB, sb._slab_plan(44, 1000, 10))')
-    knob = dict(os.environ, MBPT_STREAM_GB='0.0001')   # 0.1 MB: 1 index, 1 slab
-    base = {k: v for k, v in os.environ.items() if k != 'MBPT_STREAM_GB'}
-    got = [subprocess.run([sys.executable, '-c', code], env=e, capture_output=True,
-                          text=True).stdout.split() for e in (knob, base)]
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    path = os.pathsep.join(p for p in (root, os.environ.get('PYTHONPATH', '')) if p)
+    knob = dict(os.environ, MBPT_STREAM_GB='0.0001', PYTHONPATH=path)   # 0.1 MB
+    base = dict({k: v for k, v in os.environ.items() if k != 'MBPT_STREAM_GB'},
+                PYTHONPATH=path)
+    runs = [subprocess.run([sys.executable, '-c', code], env=e, capture_output=True,
+                           text=True) for e in (knob, base)]
+    got = [r.stdout.split() for r in runs]
     ok &= check(got[0] == ['0.0001', '(1,', '1)'] and got[1] == ['16.0', '(44,', '1)'],
                 '_STREAM_GB: MBPT_STREAM_GB=0.0001 gives one index per slab, unset '
-                '16 GB holds all 44', str(got))
+                '16 GB holds all 44', str(got) + ''.join(r.stderr[-120:] for r in runs))
     return ok
 
 

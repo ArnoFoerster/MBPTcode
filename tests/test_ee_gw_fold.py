@@ -46,7 +46,8 @@ Checks, water (RHF, DF factors), basis per check:
      no tabulated grid reaches the target, and above min D, K is kernel_df's exact
      kernel (1e-12 relative); a flip parity raises NotImplementedError;
      gw_modes_df holds at most 6 (nm, nm) float64 arrays at once (traced peak,
-     water cc-pVTZ, both screenings).
+     water cc-pVTZ, both screenings); static_term_df in slabs of three modes, on
+     one and on three workers, equals its one-slab form to 1e-12 relative.
 
 Run: python tests/test_ee_gw_fold.py
 """
@@ -490,7 +491,8 @@ def check_laplace_kernel(eps, B, no):
     None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3 Ha,
     powers (1, 2) and (), to 1e-8 relative with its norm; the folded singlets to
     1e-6 eV; the exact kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
-    parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays."""
+    parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays;
+    static_term_df in slabs of three modes equals its one-slab form."""
     from src.Base.utils.time_frequency import minimax_points_for_accuracy
     ok = True
     nv = len(eps) - no
@@ -510,6 +512,24 @@ def check_laplace_kernel(eps, B, no):
         ok &= check(PL['W'] is None and dM < 1e-12,
                     f'{screening}, laplace: W is None, M equals the W pieces\'',
                     f'{dM:.1e} relative')
+        # static_term_df's slabs over the modes: three modes per slab, so 14 slabs
+        # with a short last one, on one and on three workers, against one slab
+        from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
+        omega_m, rho = ee_gw_pieces.gw_modes_df(eps, B, no, screening)
+        one = ee_gw_pieces.static_term_df(eps, B, rho, omega_m, no)
+        for workers in (1, 3):
+            keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
+            sb._STREAM_GB = 8 * no * nv * 2 * 3 * workers * 1.0001 / 1e9
+            sb._stream_workers = lambda w=workers: w
+            try:
+                plan = sb._slab_plan(omega_m.size, no * nv, 2)
+                slabbed = ee_gw_pieces.static_term_df(eps, B, rho, omega_m, no)
+            finally:
+                sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
+            d = rel(slabbed, one)
+            ok &= check(plan == (3, workers) and d < 1e-12,
+                        f'{screening}: static_term_df in slabs of 3 modes on {workers} '
+                        'worker(s) equals one slab', f'plan {plan}, {d:.1e} relative')
         Yt = be.divide(P['V'](y1), P['D'] - om)
         ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - om))]
         n2_ref = P['dnorm2'](Yt)
