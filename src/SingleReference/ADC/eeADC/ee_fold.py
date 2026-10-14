@@ -22,7 +22,9 @@ For the eigenpair (λ(ω), y) of A_eff(ω) with sum_ia y_ia² = 1,
     dλ/dω = -sum_K (sum_jb V_K,jb y_jb)² / (D_K - ω)²,
     T1 = 1 / (1 - dλ/dω)      (the singles weight of the full eigenvector),
 
-and self-consistency λ(ω) = ω is reached per root by Newton,
+and self-consistency λ(ω) = ω is reached by default in one Davidson whose roots
+carry their own ω (solver='davidson', _davidson_omega), each root then polished
+by Newton, or per root by Newton alone (solver='newton'),
 
     ω_{k+1} = ω_k + (λ(ω_k) - ω_k) T1(ω_k),
 
@@ -433,7 +435,9 @@ def _subspace_pick(Y):
 
 
 def _model_roots(H0, H1, om0, nroots, d_min, tol):
-    """The nroots lowest roots of the subspace model H(ω) = H0 + (ω - om0) H1.
+    """At most nroots roots of the subspace model H(ω) = H0 + (ω - om0) H1, lowest
+    first; _davidson_omega passes the subspace dimension, so every branch below
+    d_min is solved and the caller cuts.
 
     H0, H1 : ndarray, shape (m, m), symmetric: Q^T A_eff(om0) Q and Q^T A'(om0) Q
     om0 : float, the frequency the images were taken at
@@ -898,7 +902,9 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     span (overlap below 0.5) warns, as a root crossing does. A level whose g
     eigenvalues spread by more than 1e-8 Ha at convergence is re-solved per root,
     with a RuntimeWarning. nroots = 0 returns an empty result. Stops at
-    |λ - ω| < tol_omega; a root or a level that exhausts max_newton (then
+    |λ - ω| < tol_omega (on the default branch two model roots within 1e-8 Ha are
+    one level solved at its mean, so a tol_omega below that width holds per level,
+    not between its partners); a root or a level that exhausts max_newton (then
     max_fixed) steps comes back converged False with a RuntimeWarning. A level cut
     by nroots comes back whole: up to g - 1 roots more than asked. Two roots that
     land on one root (|Δω| below the larger of 2 tol_omega and tol_residual,
@@ -950,7 +956,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     spin : {'singlet', 'triplet', None}
     tol_omega, tol_residual : float, Hartree and residual norm.
     t_min : float, singles weight below which the fixed-point loop takes over.
-    max_newton, max_fixed : int, step budgets per root or level.
+    max_newton, max_fixed : int, step budgets per root or level; max_newton also
+        sets the default solver's cycle budget, 50 per step and at least 50.
     dense_limit : int or None, channel size at or below which A_eff is built and
         eigh'd; None takes pieces['dense_limit'], 0 (Davidson at every size) when
         the pieces set none.
