@@ -215,6 +215,7 @@ def static_term_df(eps, B, rho, omega, nocc):
 
     width, workers = _sb._slab_plan(omega.size, no * nv, 2)
     (P, Q), _ = _stream(slab, omega.size, width, workers)
+    # δ_ij (P_ab + P_ba) - δ_ab (Q_ij + Q_ji)
     return (np.einsum('ij,ab->iajb', np.eye(no), P + P.T, optimize=True)
             - np.einsum('ab,ij->iajb', np.eye(nv), Q + Q.T, optimize=True))
 
