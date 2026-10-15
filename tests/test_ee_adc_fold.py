@@ -127,7 +127,9 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       cannot fix (strong coupling, the centre held at M's root) comes back
       converged False with a warning, and so does a 4-fold level, every partner;
       a root the Davidson hands over twice is reported, the copy dropped, the
-      displaced root solved by index; max_newton 0 still returns the root.
+      displaced root solved by index; max_newton 0 still returns the root;
+      seeds left unconverged are one note line on the default, not a warning, and
+      solve_symmetric's warning with solver='newton'.
 
 The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
@@ -1976,6 +1978,44 @@ def check_default_polish():
         d, why = np.inf, f'{type(err).__name__}: {err}'
     ok &= check(d < 1e-6, 'max_newton 0 on the default returns the root',
                 f'|dw| {d:.1e} Ha, {why}')
+    # the seeds' solve left unconverged: a start only on the default, so one note
+    # line and no warning; Newton keeps solve_symmetric's warning
+    import contextlib
+    import io
+    orig_solve, seen = ee_fold._solve, {}
+
+    def unconverged(matvec, diag, **k):
+        e, X, conv = orig_solve(matvec, diag, **k)
+        if k.get('label', '').endswith(' seeds'):
+            seen[k.get('warn_unconverged', True)] = True
+            conv = np.zeros_like(conv)
+        return e, X, conv
+    ee_fold._solve = unconverged
+    try:
+        out = io.StringIO()
+        with warnings.catch_warnings(record=True) as caught, \
+                contextlib.redirect_stdout(out):
+            warnings.simplefilter('always')
+            res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
+                                       dense_limit=0, verbose=1)
+        warn_dav = sorted(seen)
+        seen.clear()
+        with warnings.catch_warnings(record=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            warnings.simplefilter('always')
+            ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
+                                 dense_limit=0, solver='newton')
+        warn_new = sorted(seen)
+    finally:
+        ee_fold._solve = orig_solve
+    noted = [ln for ln in out.getvalue().splitlines()
+             if 'seeds:' in ln and 'unconverged' in ln]
+    ok &= check(len(noted) == 1 and not caught and warn_dav == [False]
+                and warn_new == [True] and abs(float(res.omega[0]) - w0) < 1e-6,
+                'seeds left unconverged: one note line and no warning on the default, '
+                "solve_symmetric's warning kept with solver='newton'",
+                f'{len(noted)} note line(s), {len(caught)} warning(s), '
+                f'warn_unconverged {warn_dav} / {warn_new}')
     # the dense branch seeds M in full; the Davidson takes the levels it follows
     n = 200
     C = np.zeros((2, n))

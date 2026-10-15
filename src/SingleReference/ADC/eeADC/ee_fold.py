@@ -721,11 +721,13 @@ def _level_step(pieces, spin, Y, dense, tol_residual, label):
     return step
 
 
-def _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label):
+def _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label, note=None):
     """Seeds of M, lowest first, e (ns,) and X (n, ns), and the levels among them
     that start below nroots; on the Davidson branch the seeds are solved to
     _SEED_RESIDUAL and extended until the last such level ends before the last seed,
-    so a level cut by nroots comes back whole."""
+    so a level cut by nroots comes back whole. With note the seeds are a start only:
+    seeds left unconverged go to note as one line, not to solve_symmetric's
+    warning."""
     if dense:
         # sum_q M_pq v_qr = w_r v_pr, M built from n matvecs
         e, X = np.linalg.eigh(dense_effective(m0, n))
@@ -734,10 +736,14 @@ def _seed_levels(m0, diag_s, n, nroots, dense, tol_residual, label):
     while True:
         ns = min(nroots + extra, n)
         # sum_q M_pq x_qr = e_r x_pr, the ns lowest by Davidson
-        e, X, _ = _solve(m0, diag_s, nroots=ns,
-                         tol_residual=min(tol_residual, _SEED_RESIDUAL),
-                         label=label + ' seeds')
+        e, X, conv = _solve(m0, diag_s, nroots=ns,
+                            tol_residual=min(tol_residual, _SEED_RESIDUAL),
+                            label=label + ' seeds', warn_unconverged=note is None)
         e, X = np.asarray(e, float), np.asarray(X, float)
+        if note is not None and not np.all(conv):
+            note(f'seeds: {int(np.count_nonzero(~np.asarray(conv, bool)))} of {ns} '
+                 'left unconverged, a start only; the model roots carry their own '
+                 'residuals')
         runs = [(a, b) for a, b in _levels(e) if a < nroots]
         if runs[-1][1] < ns or ns == n:
             return e, X, runs
@@ -1022,7 +1028,8 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
     # the Davidson starts from whole levels as far as it may follow past nroots:
     # residuals keep a level's symmetry, so a partner the start lacks enters late
     e0, X0, runs = _seed_levels(m0, diag_s, n, nroots + (solver == 'davidson')
-                                * _FOLLOW, dense, tol_residual, label)
+                                * _FOLLOW, dense, tol_residual, label,
+                                note=note if solver == 'davidson' else None)
     # per root, appended as levels are solved; copy marks a duplicate's copy
     omega, y_out, t1_out, level, steps, loop, converged, copy = ([] for _ in range(8))
     kw = dict(tol_omega=tol_omega, t_min=t_min, max_newton=max_newton,
