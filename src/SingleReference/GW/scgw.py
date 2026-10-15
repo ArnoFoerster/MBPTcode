@@ -19,6 +19,7 @@ off the peaks of the spectral function.
 """
 import numpy as np
 import scipy.signal
+import resource
 
 from pyscf.data.elements import chemcore
 from src.Base.pyscf_interface import (get_orbital_energies,
@@ -33,6 +34,7 @@ from src.Base.utils.analyticalContinuation import pade_continue_elementwise
 # Outer scGW cycle
 GAMMA_CONVERGENCE = 1e-6    # max |gamma - gamma_old| at which the cycle stops
 GAMMA_MIXING = 0.3          # fraction of the new gamma kept in each iteration
+F_MIXING = 0.1
 MU_CONVERGENCE = 1e-3       # max change of mu between repeated mu searches
 MAX_SCF_ITER = 100          # cap on scGW iterations
 MAX_MU_ITER = 50            # cap on repeated mu searches per scGW iteration
@@ -332,7 +334,9 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     grid_kind: only 'IR' is implemented.
     save_file: if given, (w_real, A) is written there as CSV.
     kwargs: `factors` (precomputed output of `separable_factors`) or
-        `auxbasis` (used to build them).
+        `auxbasis` (used to build them); `beta` and `omega_max` override
+        the IR grid parameters that are otherwise derived from mf's
+        orbital energies (e.g. to run different starts on the same grid).
 
     Returns (qpes, A, w_real): the peak positions, the spectral function and
     the real frequency axis it is on.
@@ -356,14 +360,14 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     dG = np.abs(eps - mu)
     e_min = eps[virt].min() - eps[occ].max()
     e_max = eps[virt].max() - eps[occ].min()
-    omega_max = 3.0 * (dG.max() + e_max)
+    omega_max = kwargs.get('omega_max') or 3.0 * (dG.max() + e_max)
 
     # beta must be large enough that the gap is effectively at T = 0, but
     # not larger: Lambda = beta * omega_max also sets how well conditioned
     # the omega -> tau transform is. Measured on Ne/cc-pVDZ, with the default
     # Matsubara sampling: 100/dG.min() diverged within ~5 iterations,
     # 25/dG.min() was stable.
-    beta = 25.0 / dG.min()
+    beta = kwargs.get('beta') or 25.0 / dG.min()
 
     # The default Matsubara sampling only reaches 1.1 - 1.4 x omega_max,
     # which leaves the transform ill-conditioned near tau = 0 and beta, where
@@ -433,6 +437,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     gamma_convergence = GAMMA_CONVERGENCE
 
     alpha = GAMMA_MIXING
+    alpha_F = F_MIXING
 
     gamma = density_matrix_ir(G, grid_f)
 
@@ -469,7 +474,10 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         # TESTING ONE MU CYCLE INSTEAD OF CONVERGING MU
         mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
                                    sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+        F_old = F
         F = build_new_F(gamma, V, h_mo)
+
+        F = alpha_F * F + (1 - alpha_F) * F_old
 
         
         print(f'Mu post mu_scf: {mu}')
@@ -526,5 +534,8 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         a_left, a_mid, a_right = A[peak - 1], A[peak], A[peak + 1]
         shift = 0.5 * (a_left - a_right) / (a_left - 2 * a_mid + a_right)
         qpes[i] = w_real[peak] + shift * w_step
+
+    peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
+    print(f'\nPeak memory usage: {peak_gib} GB\n')
 
     return qpes, A, w_real
