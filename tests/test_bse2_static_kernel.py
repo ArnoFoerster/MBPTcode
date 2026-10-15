@@ -18,7 +18,18 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
 3. Shifting the HF energies by -0.3 Ha puts the LUMO below zero, so a
    particle-particle denominator eps_c + eps_d changes sign inside its sum: the
    routine warns once, and stays silent on the unshifted set.
-4. H2/STO-3G, nocc = nvirt = 1: the size-one block shape against the dense form.
+4. H2/STO-3G, nocc = nvirt = 1: the size-one block shape against the dense form,
+   for both kernels.
+5. kernel='eq71', the crossed class of eq 71 in place of the loop class of the
+   printed eq 72, on H2O/6-31G: the DF blocks against the crossed class in the
+   spin-orbital vertex form of the second-order block (the twelve-class split of
+   `developments/ee_gw_fold/dbse2_derivation_2026-10-13/eq74_block_classes.py` in
+   mbpt-tooling) with the static denominator, plus the dense ladders, at the default
+   block size and at one with a partial last block, the B block by the letter swap
+   j <-> b that takes the printed A blocks to their B blocks; the loop class in
+   the vertex form against the printed particle-hole term, which ties the vertex
+   normalisation to the QuAcK-checked kernel; the crossed class's triplet vanishes
+   in both forms and the routine's triplet blocks are zero.
 """
 import os
 import sys
@@ -80,6 +91,88 @@ def dense_theta(eps, coeff, W_aux, nocc, ladders=True):
                                 W[v, v, v, v], s_cd, W[v, o, v, o])
     n_pair = A.shape[0] * A.shape[1]
     return A.reshape(n_pair, n_pair), B.reshape(n_pair, n_pair)
+
+
+def spin_orbital_w(coeff, W_aux):
+    """W_pq,rs = sum_PQ B_P,pq W_PQ B_Q,rs over spin orbitals, spins interleaved
+    (spin orbital 2p, 2p + 1 = spatial p alpha, beta), zero across spin in a pair."""
+    w_sp = np.einsum('Ppq,PQ,Qrs->pqrs', coeff, W_aux, coeff)
+    idx = np.arange(2 * w_sp.shape[0])
+    sp, sg = idx // 2, idx % 2
+    same = sg[:, None] == sg[None, :]
+    return w_sp[np.ix_(sp, sp, sp, sp)] * same[:, :, None, None] \
+        * same[None, None, :, :]
+
+
+def singlet_triplet(X):
+    """S = X_aa,aa + X_aa,bb and T = X_aa,aa - X_aa,bb of a spin-orbital block
+    X[i, a, j, b] with interleaved spins, as (n_pair, n_pair) blocks in (ia, jb)."""
+    S = X[::2, ::2, ::2, ::2] + X[::2, ::2, 1::2, 1::2]
+    T = X[::2, ::2, ::2, ::2] - X[::2, ::2, 1::2, 1::2]
+    n_pair = S.shape[0] * S.shape[1]
+    return S.reshape(n_pair, n_pair), T.reshape(n_pair, n_pair)
+
+
+def second_order_classes_static(eps, coeff, W_aux, nocc):
+    """The crossed class -(I.L + L.I) and the loop class -(I.K + K.I) of the
+    second-order block A R A^T / 4 over a 2p2h state, in spin orbitals, with the
+    static denominator of eq 72's recipe (drop omega and every external orbital
+    energy, keep the internal pair's): R -> -1/(e_d - e_k) in the crossed class,
+    whose internal pair is (k, d), and R -> -1/(e_d - e_l) in the loop class,
+    internal pair (l, d). Vertices over ordered doubles (k, l, c, d) from the
+    pair (i, a), chemist W: I = delta_ac W_ik,ld, K = delta_ik W_ac,ld,
+    L = delta_il W_ad,kc. Returns the singlet and triplet of each class as
+    (n_pair, n_pair) blocks in (ia, jb) over spatial pairs:
+    {'crossed': (S, T), 'loop': (S, T)}."""
+    w = spin_orbital_w(coeff, W_aux)
+    n = w.shape[0]
+    e = eps[np.arange(n) // 2]
+    no = 2 * nocc
+    nv = n - no
+    o, v = slice(0, no), slice(no, n)
+    # vertices (i, a; k, l, c, d)
+    I = np.einsum('ikld,ac->iaklcd', w[o, o, o, v], np.eye(nv))
+    K = np.einsum('acld,ik->iaklcd', w[v, v, o, v], np.eye(no))
+    L = np.einsum('adkc,il->iaklcd', w[v, v, o, v], np.eye(no))
+    e_o, e_v = e[o], e[v]
+    R_crossed = np.broadcast_to(
+        -1.0 / (e_v[None, None, None, :] - e_o[:, None, None, None]), (no, no, nv, nv))
+    R_loop = np.broadcast_to(
+        -1.0 / (e_v[None, None, None, :] - e_o[None, :, None, None]), (no, no, nv, nv))
+
+    def prod(X, R, Z):
+        ns = no * nv
+        return ((X.reshape(ns, -1) * R.ravel()) @ Z.reshape(ns, -1).T) \
+            .reshape(no, nv, no, nv)
+
+    crossed = -(prod(I, R_crossed, L) + prod(L, R_crossed, I))
+    loop = -(prod(I, R_loop, K) + prod(K, R_loop, I))
+    return {'crossed': singlet_triplet(crossed), 'loop': singlet_triplet(loop)}
+
+
+def crossed_class_B_static(eps, coeff, W_aux, nocc):
+    """The B block of the crossed class by the letter swap j <-> b that takes the
+    routine's printed A blocks to its B blocks (an assumption, see its Notes), in
+    spin orbitals: sum_kc (W_ik,bc W_ka,jc + W_jk,ac W_kb,ic) / (e_c - e_k), as
+    singlet and triplet (n_pair, n_pair) blocks in (ia, jb)."""
+    w = spin_orbital_w(coeff, W_aux)
+    n = w.shape[0]
+    e = eps[np.arange(n) // 2]
+    no = 2 * nocc
+    o, v = slice(0, no), slice(no, n)
+    d_kc = 1.0 / (e[v][None, :] - e[o][:, None])
+    N = np.einsum('ikbc,kc,kajc->iajb', w[o, o, v, v], d_kc, w[o, v, o, v])
+    return singlet_triplet(N + N.transpose(2, 3, 0, 1))
+
+
+def eq71_reference(eps, coeff, W_aux, nocc):
+    """The kernel='eq71' singlet blocks: the crossed class's singlet in the vertex
+    form (A) and by the letter swap (B), each plus the dense ladders."""
+    S_cA, _ = second_order_classes_static(eps, coeff, W_aux, nocc)['crossed']
+    S_cB, _ = crossed_class_B_static(eps, coeff, W_aux, nocc)
+    A_full, B_full = dense_theta(eps, coeff, W_aux, nocc)
+    A_ph, B_ph = dense_theta(eps, coeff, W_aux, nocc, ladders=False)
+    return S_cA + (A_full - A_ph), S_cB + (B_full - B_ph)
 
 
 if __name__ == '__main__':
@@ -164,6 +257,51 @@ if __name__ == '__main__':
     dev = max(abs(A1 - A1_ref).max(), abs(B1 - B1_ref).max())
     all_ok &= check(A1.shape == (1, 1) and dev < 1e-12 * max(abs(A1_ref).max(), 1.0),
                     'nocc = nvirt = 1 block shape vs dense', f'abs dev {dev:.1e}')
+    A1, B1 = static_second_order_kernel_df(eps1, coeff1, w1, 1, kernel='eq71')
+    A1_ref, B1_ref = eq71_reference(eps1, coeff1, w1, 1)
+    dev = max(abs(A1 - A1_ref).max(), abs(B1 - B1_ref).max())
+    all_ok &= check(A1.shape == (1, 1) and dev < 1e-12 * max(abs(A1_ref).max(), 1.0),
+                    "nocc = nvirt = 1 block shape vs dense, kernel='eq71'",
+                    f'abs dev {dev:.1e}')
+
+    # 5. kernel='eq71' on H2O/6-31G: the crossed class in the spin-orbital vertex
+    #    form plus the dense ladders; the loop class in the same form against the
+    #    printed particle-hole term; the triplet zero.
+    mol5 = gto.M(atom=GEOM, basis='6-31g', unit='Angstrom', verbose=0)
+    mf5 = scf.RHF(mol5)
+    mf5.conv_tol = 1e-10
+    mf5.kernel()
+    eps5 = np.asarray(get_orbital_energies(mf5, representation='spatial'), float)
+    coeff5 = get_density_fitting_coefficients(mol5, mf5, representation='spatial')
+    w5 = LinearResponseSolver(eps5, coeff_df=coeff5,
+                              spin_mode='restricted').static_screening_aux(nocc)
+    nv5 = len(eps5) - nocc
+    classes = second_order_classes_static(eps5, coeff5, w5, nocc)
+    A5_ph, _ = dense_theta(eps5, coeff5, w5, nocc, ladders=False)
+    A5_ref, B5_ref = eq71_reference(eps5, coeff5, w5, nocc)
+    scale5 = max(np.abs(A5_ref).max(), np.abs(B5_ref).max())
+    dev = np.abs(classes['loop'][0] - A5_ph).max() / scale5
+    all_ok &= check(dev < 1e-10, 'loop class (vertex form, static) vs printed '
+                    'particle-hole term', f'max rel dev {dev:.1e}')
+    for blksize in (8, 3):
+        A5, B5 = static_second_order_kernel_df(eps5, coeff5, w5, nocc, blksize=blksize,
+                                               kernel='eq71')
+        dev = max(np.abs(A5 - A5_ref).max(), np.abs(B5 - B5_ref).max()) / scale5
+        all_ok &= check(dev < 1e-10, f"kernel='eq71' vs crossed class + ladders, "
+                        f'blksize={blksize} (nvirt={nv5})', f'max rel dev {dev:.1e}')
+    dev = max(np.abs(classes['crossed'][1]).max(),
+              np.abs(crossed_class_B_static(eps5, coeff5, w5, nocc)[1]).max()) / scale5
+    all_ok &= check(dev < 1e-12, 'crossed class triplet vanishes, A (vertex form) '
+                    'and B (letter swap)', f'max rel {dev:.1e}')
+    A5_t, B5_t = static_second_order_kernel_df(eps5, coeff5, w5, nocc, kernel='eq71',
+                                               channel='triplet')
+    all_ok &= check(A5_t.shape == (nocc * nv5,) * 2 and not A5_t.any()
+                    and not B5_t.any(), "kernel='eq71', channel='triplet' is zero")
+    try:
+        static_second_order_kernel_df(eps5, coeff5, w5, nocc, kernel='eq74')
+        all_ok &= check(False, 'unknown kernel raises ValueError')
+    except ValueError:
+        all_ok &= check(True, 'unknown kernel raises ValueError')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

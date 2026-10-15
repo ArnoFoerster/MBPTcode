@@ -615,7 +615,7 @@ def static_screened_coulomb_aux(eps, coeff_df, nocc):
 
 
 def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8,
-                                  channel='singlet'):
+                                  channel='singlet', kernel='printed'):
     """Static second-order GW kernel Θ^GW (BSE2@GW) as Casida A and B blocks.
 
     The two blocks to add to the BSE@GW Casida matrices of
@@ -638,11 +638,17 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     eta : float
         Regularisation of every denominator, 1/x -> x / (x^2 + eta^2).
     blksize : int
-        Virtual orbitals c per block of the particle-particle ladder, whose
-        (a, c, b, d) intermediate is held for one block only.
+        Virtual orbitals c per block of the particle-particle ladder and of the
+        crossed class, whose (a, c, b, d) and (a, k, b, c) intermediates are held
+        for one block only.
     channel : {'singlet', 'triplet'}
         Spin adaptation of the M_S = 0 block: the six terms of the Notes for the
-        singlet, their particle-hole terms alone for the triplet.
+        singlet, their particle-hole terms alone for the triplet, which the
+        crossed class of kernel='eq71' leaves empty.
+    kernel : {'printed', 'eq71'}
+        The class the particle-hole term carries: 'printed' the loop class of
+        the reference's eq 72 as printed, 'eq71' the crossed class its eq 71
+        holds (the Notes).
 
     Returns
     -------
@@ -680,12 +686,28 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     The reference's text calls the triplet unaffected (its Sec. III D); its
     eq 72 in spin orbitals gives the triplet the particle-hole terms.
 
+    Eq 71 of the reference, Θ = i G G (W W + W W) untruncated, holds the crossed
+    class of the second-order block in place of the loop class the printed eq 72
+    carries. Its static form by the same recipe (drop ω and every external orbital
+    energy, keep the internal pair's) is, with kernel='eq71',
+
+        Θ^A_ia,jb = 2 sum_kc (W_ik,jc W_ka,bc + W_jk,ic W_kb,ac) / d_kc + ladders
+        Θ^B_ia,jb = 2 sum_kc (W_ik,bc W_ka,jc + W_jk,ac W_kb,ic) / d_kc + ladders
+
+    the ladders those above and the B block by the letter swap j ↔ b that takes
+    the printed A blocks to their B blocks, an assumption the reference does not
+    settle. W_ik,jc ties spin(k) to
+    spin(i) and spin(c) to spin(j), so the crossed class enters the singlet twice
+    (the factor 2) and the triplet not at all: Θ^T = 0 with kernel='eq71'.
+
     References
     ----------
     E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 71-73.
     """
     if channel not in ('singlet', 'triplet'):
         raise ValueError(f"channel must be 'singlet' or 'triplet', got {channel!r}")
+    if kernel not in ('printed', 'eq71'):
+        raise ValueError(f"kernel must be 'printed' or 'eq71', got {kernel!r}")
     occ, virt = get_occ_virt_indices(eps, nocc)
     no, nv = len(occ), len(virt)
     n_pair = no * nv
@@ -710,19 +732,61 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     D_vv = L.T @ coeff_df[:, virt[:, None], virt].reshape(naux, nv * nv)
     D_vo = D_ov.reshape(naux, no, nv).transpose(0, 2, 1).reshape(naux, nv * no)
     del L
+    if kernel == 'eq71' and channel == 'triplet':
+        return np.zeros((n_pair, n_pair)), np.zeros((n_pair, n_pair))
 
-    # Particle-hole terms: Pi_PQ = sum_kc D_P,kc D_Q,kc / d_kc
     d_kc = (eps[virt][None, :] - eps[occ][:, None]).ravel()
-    Pi = (D_ov * reg(d_kc)) @ D_ov.T
-    # Θ^A_ia,jb = 4 sum_PQ D_P,ij Pi_PQ D_Q,ab
-    theta_A = 4.0 * (D_oo.T @ Pi @ D_vv).reshape(no, no, nv, nv) \
-        .transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
-    # Θ^B_ia,jb = 4 sum_PQ D_P,ib Pi_PQ D_Q,ja
-    theta_B = 4.0 * (D_ov.T @ Pi @ D_ov).reshape(no, nv, no, nv) \
-        .transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
-    del Pi
-    if channel == 'triplet':
-        return theta_A, theta_B
+    if kernel == 'printed':
+        # Particle-hole terms: Pi_PQ = sum_kc D_P,kc D_Q,kc / d_kc
+        Pi = (D_ov * reg(d_kc)) @ D_ov.T
+        # Θ^A_ia,jb = 4 sum_PQ D_P,ij Pi_PQ D_Q,ab
+        theta_A = 4.0 * (D_oo.T @ Pi @ D_vv).reshape(no, no, nv, nv) \
+            .transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
+        # Θ^B_ia,jb = 4 sum_PQ D_P,ib Pi_PQ D_Q,ja
+        theta_B = 4.0 * (D_ov.T @ Pi @ D_ov).reshape(no, nv, no, nv) \
+            .transpose(0, 3, 2, 1).reshape(n_pair, n_pair)
+        del Pi
+        if channel == 'triplet':
+            return theta_A, theta_B
+    else:
+        # Crossed class, blocked over c; the (ia <-> jb) partner of each sum is
+        # its transpose
+        r_kc = reg(d_kc).reshape(no, nv)
+        D_ov3 = D_ov.reshape(naux, no, nv)
+        D_vv3 = D_vv.reshape(naux, nv, nv)
+        M = np.zeros((n_pair, n_pair))
+        N = np.zeros((n_pair, n_pair))
+        for c0 in range(0, nv, blksize):
+            cs = slice(c0, min(c0 + blksize, nv))
+            nc = cs.stop - cs.start
+            r = r_kc[:, cs]
+            D_oc = D_ov3[:, :, cs].reshape(naux, no * nc)
+            D_vc = D_vv3[:, :, cs].reshape(naux, nv * nc)
+            # X_ik,jc = W_ik,jc = sum_P D_P,ik D_P,jc
+            # Y_ak,bc = W_ak,bc = sum_P D_P,ak D_P,bc
+            X = (D_oo.T @ D_oc).reshape(no, no, no, nc)
+            Y = (D_vo.T @ D_vc).reshape(nv, no, nv, nc)
+            # M_ia,jb += sum_kc X_ik,jc Y_ak,bc / d_kc
+            U = X.transpose(0, 2, 1, 3).reshape(no * no, no * nc)
+            V = (Y.transpose(1, 3, 0, 2) * r[:, :, None, None]) \
+                .reshape(no * nc, nv * nv)
+            M += (U @ V).reshape(no, no, nv, nv) \
+                .transpose(0, 2, 1, 3).reshape(n_pair, n_pair)
+            # X2_ik,bc = W_ik,bc = sum_P D_P,ik D_P,bc
+            # Y2_ak,jc = W_ak,jc = sum_P D_P,ak D_P,jc
+            X2 = (D_oo.T @ D_vc).reshape(no, no, nv, nc)
+            Y2 = (D_vo.T @ D_oc).reshape(nv, no, no, nc)
+            # N_ia,jb += sum_kc X2_ik,bc Y2_ak,jc / d_kc
+            U = X2.transpose(0, 2, 1, 3).reshape(no * nv, no * nc)
+            V = (Y2.transpose(1, 3, 0, 2) * r[:, :, None, None]) \
+                .reshape(no * nc, nv * no)
+            N += (U @ V).reshape(no, nv, nv, no) \
+                .transpose(0, 2, 3, 1).reshape(n_pair, n_pair)
+            del X, Y, X2, Y2, U, V
+        # Θ^A_ia,jb = 2 (M_ia,jb + M_jb,ia),  Θ^B_ia,jb = 2 (N_ia,jb + N_jb,ia)
+        theta_A = 2.0 * (M + M.T)
+        theta_B = 2.0 * (N + N.T)
+        del M, N
 
     # Hole-hole ladder, s_kl = ε_k + ε_l
     s_kl = reg(eps[occ][:, None] + eps[occ][None, :])
