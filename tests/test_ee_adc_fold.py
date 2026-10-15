@@ -105,7 +105,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       flip parity and with each one, to 1e-12 relative.
   28. dmatvec(u, vector=True) is dA_eff/domega u: its quadratic form is -dmatvec(u)
       to 1e-12 relative and it equals the central difference of matvec at
-      h = 1e-4 Ha to 1e-6 relative; at omega None it is zeros; an optional
+      h = 1e-4 Ha to 1e-6 relative, on the streamed kernel and on the generic
+      path; at omega None it is zeros; an optional
       pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
       forms, bitwise, called once per application with powers (1,), () and (2,).
   29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
@@ -155,7 +156,8 @@ the same inputs without it, as their added lines check.
       it agree to 1e-9 Ha; a singles vector with a flip parity raises
       NotImplementedError; a slab holds at most _K_LIVE slab blocks per slab index
       (the slope of tracemalloc's peak from width 1 to 2, water cc-pVTZ).
-      Checks 10 and 28 take dict(P, K=None), the generic path, as their baseline.
+      Check 10 takes dict(P, K=None), the generic path, as its baseline; check 28
+      runs its derivative test on both.
   36. ee_spin_blocks._STREAM_GB follows MBPT_STREAM_GB of the environment at
       import (a subprocess): 0.0001 GB gives one index per slab, unset 16 GB holds
       all 44 indices in one slab; its parser _stream_gb takes unset and a positive
@@ -1660,26 +1662,32 @@ def check_split_contractions():
 def check_kernel_hook(eps, B, no):
     """dmatvec(u, vector=True) is dA_eff/domega applied to u: its quadratic form is
     -dmatvec(u) to 1e-12 relative, the central difference of matvec at h = 1e-4 Ha
-    to 1e-6 relative, zeros at omega None; an optional pieces['K'] replaces the V,
+    to 1e-6 relative, on the streamed kernel and on the generic path, zeros at
+    omega None; an optional pieces['K'] replaces the V,
     divide, Vt path of matvec and of both dmatvec forms, bitwise, called once per
     application with the powers (1,), () and (2,)."""
     from src.SingleReference.ADC.eeADC import ee_fold
     ok = True
     nv = B.shape[1] - no
-    P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
-    P = dict(P, K=None)                     # the generic path, not the streamed kernel
+    PK = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
+    P = dict(PK, K=None)                    # the generic path, not the streamed kernel
     om, h = 0.3, 1e-4
-    mv, dmv, diag_s, _, _ = ee_fold.folded_operator(P, om, spin='singlet')
-    mvp = ee_fold.folded_operator(P, om + h, spin='singlet')[0]
-    mvm = ee_fold.folded_operator(P, om - h, spin='singlet')[0]
-    u = np.random.default_rng(2).standard_normal(diag_s.size)
-    u /= np.linalg.norm(u)
-    g = dmv(u, vector=True)
-    fd = (mvp(u) - mvm(u)) / (2 * h)
-    d1 = abs(float(u @ g) + dmv(u)) / abs(dmv(u))
-    d2 = float(np.max(np.abs(g - fd)) / np.max(np.abs(fd)))
-    ok &= check(d1 < 1e-12 and d2 < 1e-6,
-                'dmatvec(u, vector=True) is dA_eff/domega u', f'{d1:.1e}, {d2:.1e}')
+    u = None
+    # the generic path last: its mv, dmv and g are the K hook's baseline below
+    for pieces, path in ((PK, 'the streamed kernel'), (P, 'the generic path')):
+        mv, dmv, diag_s, _, _ = ee_fold.folded_operator(pieces, om, spin='singlet')
+        mvp = ee_fold.folded_operator(pieces, om + h, spin='singlet')[0]
+        mvm = ee_fold.folded_operator(pieces, om - h, spin='singlet')[0]
+        if u is None:
+            u = np.random.default_rng(2).standard_normal(diag_s.size)
+            u /= np.linalg.norm(u)
+        g = dmv(u, vector=True)
+        fd = (mvp(u) - mvm(u)) / (2 * h)
+        d1 = abs(float(u @ g) + dmv(u)) / abs(dmv(u))
+        d2 = float(np.max(np.abs(g - fd)) / np.max(np.abs(fd)))
+        ok &= check(d1 < 1e-12 and d2 < 1e-6,
+                    f'dmatvec(u, vector=True) is dA_eff/domega u, {path}',
+                    f'{d1:.1e}, {d2:.1e}')
     dmv0 = ee_fold.folded_operator(P, None, spin='singlet')[1]
     ok &= check(dmv0(u) == 0.0
                 and np.array_equal(dmv0(u, vector=True), np.zeros(u.size)),

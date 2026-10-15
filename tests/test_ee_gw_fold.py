@@ -39,10 +39,10 @@ Checks, water (RHF, DF factors), basis per check:
   9. build_pieces_gw(..., laplace=True) (6-31G, TDA and RPA screening): W is None;
      M, and Vt (D - ω)^-1 V and its norm through the DF forms of V and Vt, equal the
      W pieces' to 1e-12 relative; pieces['K'], kernel_laplace, equals the W pieces'
-     V, divide, Vt at 0.3 Ha for powers (1, 2) and its norm to 1e-8 relative, on
-     the grid minimax_points_for_accuracy gives for relative error _LAPLACE_TARGET
-     (1e-9);
-     the folded singlets equal the W pieces' to 1e-6 eV; 1e-7 Ha below min D, where
+     V, divide, Vt at 0.3, -0.2 and 0.05 Ha and 3e-3 Ha below min D for powers
+     (1, 2) and its norm to 1e-8 relative, on the grid minimax_points_for_accuracy
+     gives for relative error _LAPLACE_TARGET (1e-9); the folded singlets and
+     triplets equal the W pieces' to 1e-6 eV; 1e-7 Ha below min D, where
      no tabulated grid reaches the target, and above min D, K is kernel_df's exact
      kernel (1e-12 relative); a flip parity raises NotImplementedError;
      gw_modes_df holds at most 6 (nm, nm) float64 arrays at once (traced peak,
@@ -488,9 +488,10 @@ def check_streamed_kernel(eps, B, no):
 
 def check_laplace_kernel(eps, B, no):
     """build_pieces_gw(..., laplace=True) against the W pieces, both screenings: W
-    None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3 Ha,
-    powers (1, 2) and (), to 1e-8 relative with its norm; the folded singlets to
-    1e-6 eV; the exact kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
+    None; M and the DF V and Vt to 1e-12 relative; kernel_laplace at omega 0.3,
+    -0.2 and 0.05 Ha and 3e-3 Ha below min D, powers (1, 2) and (), to 1e-8
+    relative with its norm; the folded singlets and triplets to 1e-6 eV; the exact
+    kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
     parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays;
     static_term_df in slabs of three modes equals its one-slab form."""
     from src.Base.utils.time_frequency import minimax_points_for_accuracy
@@ -539,26 +540,33 @@ def check_laplace_kernel(eps, B, no):
         ok &= check(d < 1e-12 and dn < 1e-12,
                     f'{screening}, laplace: the DF V and Vt give the W pieces\' '
                     'Vt (D - w)^-1 V', f'{d:.1e}, norm {dn:.1e} relative')
-        # PL's own min D: its modes come from another product of the same factors
+        # PL's own min D: its modes come from another product of the same factors;
+        # towards min D the grid grows (about 30 points 3e-3 Ha below it)
         d_min = float(np.min(PL['D']))
-        ntau, err = minimax_points_for_accuracy(
-            d_min - om, float(np.max(PL['D'])) - om, ee_gw_pieces._LAPLACE_TARGET,
-            relative=True)
-        ws, n2 = PL['K'](y1, om, (1, 2))
-        ws0, n20 = PL['K'](y1, om, ())
-        d = [max(rel(w.get(s), r.get(s)) for s in ('aa', 'bb'))
-             for w, r in zip(ws, ref)]
-        dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
-        ok &= check(len(ws) == 2 and ws0 == [] and max(d) < 1e-8 and dn < 1e-8,
-                    f'{screening}: kernel_laplace equals V, divide, Vt',
-                    f'power 1 {d[0]:.1e}, power 2 {d[1]:.1e}, norm {dn:.1e} '
-                    f'relative, ntau {ntau} (grid error {err:.1e})')
-        a = ee_fold.solve_folded(P, 3, spin='singlet', dense_limit=0)
-        b = ee_fold.solve_folded(PL, 3, spin='singlet', dense_limit=0)
-        dw = float(np.max(np.abs(a.omega - b.omega))) * HARTREE_TO_EV
-        ok &= check(b.omega.size == 3 and dw < 1e-6,
-                    f'{screening}: the folded singlets with and without laplace',
-                    f'max |dw| {dw:.1e} eV')
+        for w_at in (om, -0.2, 0.05, d_min - 3e-3):
+            Yt = be.divide(P['V'](y1), P['D'] - w_at)
+            ref = [P['Vt'](Yt), P['Vt'](be.divide(Yt, P['D'] - w_at))]
+            n2_ref = P['dnorm2'](Yt)
+            ntau, err = minimax_points_for_accuracy(
+                d_min - w_at, float(np.max(PL['D'])) - w_at,
+                ee_gw_pieces._LAPLACE_TARGET, relative=True)
+            ws, n2 = PL['K'](y1, w_at, (1, 2))
+            ws0, n20 = PL['K'](y1, w_at, ())
+            d = [max(rel(w.get(s), r.get(s)) for s in ('aa', 'bb'))
+                 for w, r in zip(ws, ref)]
+            dn = max(abs(n2 - n2_ref), abs(n20 - n2_ref)) / n2_ref
+            ok &= check(len(ws) == 2 and ws0 == [] and max(d) < 1e-8 and dn < 1e-8,
+                        f'{screening}: kernel_laplace equals V, divide, Vt at omega '
+                        f'{w_at:.4f} Ha',
+                        f'power 1 {d[0]:.1e}, power 2 {d[1]:.1e}, norm {dn:.1e} '
+                        f'relative, ntau {ntau} (grid error {err:.1e})')
+        for spin in ('singlet', 'triplet'):
+            a = ee_fold.solve_folded(P, 3, spin=spin, dense_limit=0)
+            b = ee_fold.solve_folded(PL, 3, spin=spin, dense_limit=0)
+            dw = float(np.max(np.abs(a.omega - b.omega))) * HARTREE_TO_EV
+            ok &= check(b.omega.size == 3 and dw < 1e-6,
+                        f'{screening}: the folded {spin}s with and without laplace',
+                        f'max |dw| {dw:.1e} eV')
         # the exact fallback: 1e-7 Ha below min D, where no tabulated grid reaches
         # the target, and above min D, mid-way across the widest gap of its 50
         # lowest D_K
