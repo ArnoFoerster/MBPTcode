@@ -155,7 +155,9 @@ the same inputs without it, as their added lines check.
       Checks 10 and 28 take dict(P, K=None), the generic path, as their baseline.
   36. ee_spin_blocks._STREAM_GB follows MBPT_STREAM_GB of the environment at
       import (a subprocess): 0.0001 GB gives one index per slab, unset 16 GB holds
-      all 44 indices in one slab.
+      all 44 indices in one slab; its parser _stream_gb takes unset and a positive
+      number silently and an empty, non-numeric, nan, inf or non-positive value as
+      16 GB with one warning naming it.
 
 Run: python tests/test_ee_adc_fold.py
 """
@@ -2060,6 +2062,26 @@ def check_stream():
     ok &= check(got[0] == ['0.0001', '(1,', '1)'] and got[1] == ['16.0', '(44,', '1)'],
                 '_STREAM_GB: MBPT_STREAM_GB=0.0001 gives one index per slab, unset '
                 '16 GB holds all 44', str(got) + ''.join(r.stderr[-120:] for r in runs))
+    # the parser behind it
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        try:
+            silent = [sb._stream_gb(t) for t in (None, '2.5', '1e-3')]
+        except RuntimeWarning as w:
+            silent = str(w)
+    ok &= check(silent == [16.0, 2.5, 1e-3],
+                '_stream_gb: unset is 16 GB and a positive number itself, silently',
+                str(silent))
+    loud = {}
+    for text in ('', 'abc', 'nan', 'inf', '-1', '0'):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            gb = sb._stream_gb(text)
+        loud[text] = (gb, len(caught),
+                      bool(caught) and repr(text) in str(caught[0].message))
+    ok &= check(all(v == (16.0, 1, True) for v in loud.values()),
+                '_stream_gb: an empty, non-numeric, nan, inf or non-positive value is '
+                '16 GB with one warning naming it', str(loud))
     return ok
 
 

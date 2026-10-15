@@ -32,6 +32,7 @@ import functools
 import itertools
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -41,9 +42,27 @@ from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threa
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
+
+
+def _stream_gb(text):
+    """The slab budget in GB from MBPT_STREAM_GB: unset is 16; a finite number above
+    zero is itself; anything else is 16 with a warning naming the value."""
+    if text is None:
+        return 16.0
+    try:
+        gb = float(text)
+    except ValueError:
+        gb = np.nan
+    if np.isfinite(gb) and gb > 0.0:
+        return gb
+    warnings.warn(f'MBPT_STREAM_GB={text!r} is no finite budget above zero; '
+                  'streaming at 16 GB', RuntimeWarning)
+    return 16.0
+
+
 # GB a streamed kernel's slabs in flight may hold together; the job's environment
 # sets it through MBPT_STREAM_GB (one slab needs n * live * per_index * 8 bytes).
-_STREAM_GB = float(os.environ.get('MBPT_STREAM_GB', 16.0))
+_STREAM_GB = _stream_gb(os.environ.get('MBPT_STREAM_GB'))
 _STREAM_POOLS = {}
 _STREAM_LOCK = threading.Lock()
 
