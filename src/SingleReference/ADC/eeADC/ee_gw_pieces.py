@@ -513,7 +513,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False, df=False):
 
             return _ksum(vv, nv, Y.size) - _ksum(oo, no, Y.size)
 
-        def kernel(y1, omega, powers=(1,)):
+        def kernel(y1, om, powers=(1,)):
             # sum_K V_K,ia (V y1)_K / (D_K - ω)^p for each p in powers, and
             # sum_K (V y1)_K² / (D_K - ω)², streamed over slabs of k, the pair's
             # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
@@ -524,7 +524,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False, df=False):
             def slab(k0, k1):
                 nk = k1 - k0
                 Wook = Woo[:, k0:k1]                              # W^m_ik, (i, k, m)
-                den = _ew(np.subtract, D[k0:k1], omega)           # D_kcm - ω
+                den = _ew(np.subtract, D[k0:k1], om)              # D_kcm - ω
 
                 def vt(Y):
                     # the slab's share of couple_t: w_ia = sum_cm W^m_ac Y_icm on the
