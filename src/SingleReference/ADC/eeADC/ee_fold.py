@@ -547,6 +547,10 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
     om0 = float(np.linalg.eigvalsh(0.5 * (Q.T @ MQ + MQ.T @ Q))[0])
     S0 = S1 = np.empty((n, 0))
     oms_prev = None
+    # two model roots apart by more than tol_omega are two levels, each solved at
+    # its own root (the model resolves them, below); the cut keeps the count's
+    # width _DEGENERATE, so a partner within it comes back whole
+    width = min(_DEGENERATE, tol_omega)
 
     def below(oms, X, conv, rn, cycle, why=None):
         # the levels that start below nroots; a root followed past them is distinct
@@ -590,7 +594,7 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
                 r <= c + _FOLLOW and oms[r] - oms[c] <= rn[r] + rn[c] + _DEGENERATE)):
             r += 1
         oms, C = oms[:r], C[:, :r]
-        for a, b in _levels(oms):
+        for a, b in _levels(oms, width):
             if b - a > 1:
                 # one orthonormal set per level: branches a..b-1 at the mean root
                 w_l = oms[a:b].mean()
@@ -902,9 +906,9 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     span (overlap below 0.5) warns, as a root crossing does. A level whose g
     eigenvalues spread by more than 1e-8 Ha at convergence is re-solved per root,
     with a RuntimeWarning. nroots = 0 returns an empty result. Stops at
-    |λ - ω| < tol_omega (on the default branch two model roots within 1e-8 Ha are
-    one level solved at its mean, so a tol_omega below that width holds per level,
-    not between its partners); a root or a level that exhausts max_newton (then
+    |λ - ω| < tol_omega (on the default branch two model roots within the smaller
+    of 1e-8 Ha and tol_omega are one level solved at its mean); a root or a level
+    that exhausts max_newton (then
     max_fixed) steps comes back converged False with a RuntimeWarning. A level cut
     by nroots comes back whole: up to g - 1 roots more than asked. Two roots that
     land on one root (|Δω| below the larger of 2 tol_omega and tol_residual,
@@ -1164,7 +1168,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
             # exact polish from the model roots: λ(ω) = ω per root, or per level
             # on its partners' span
             first = len(omega)
-            solve_seeds(oms, X, _levels(oms))
+            solve_seeds(oms, X, _levels(oms, min(_DEGENERATE, tol_omega)))
             loop[first:] = ['davidson'] * (len(loop) - first)
     mark_copies()
     # the count check: below min_K D_K the folded roots at or below ω number the

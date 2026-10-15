@@ -53,10 +53,12 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       tol_omega stops the index solve at once.
   15. dense_limit=None takes the pieces' own default: none at adc2 (Davidson), 40
       at gw (dense on water/6-31G, n 40); an explicit value overrides.
-  16. the count's window: a level split by 2e-9 Ha at the cut, tol_omega 1e-10,
-      counts whole, so a state folded below it is found and none warns; a
-      distinct partner 1e-7 or 1e-6 Ha above the cut, not asked for, costs no
-      warning and one count, widened once, at default tolerances.
+  16. the count's window: a pair of M split by 2e-9 Ha at the cut, tol_omega 1e-10,
+      is two roots to the default, which returns the two lowest exact, a state
+      folded below the pair among them, and none warns, since the count's window
+      (1e-8 Ha) holds the partner; a distinct partner 1e-7 or 1e-6 Ha above the
+      cut, not asked for, costs no warning and one count, widened once, at default
+      tolerances.
   17. the count's check off the span of its own vectors: on the Davidson branch at
       n 800, a state last on M's diagonal folded lowest, where the roots found and
       M's seeds are exact eigenvectors of A_eff, is found at nroots 1 and 3, also
@@ -1060,9 +1062,10 @@ def check_index_solve(eps, B, no):
 
 
 def check_count_window():
-    """The count's window against a level and against an unrequested partner: a
-    pair of M split by 2e-9 Ha (one level, solved at its mean) is the cut at
-    tol_omega 1e-10, with and without a state that folds below it; a distinct
+    """The count's window against a near pair and against an unrequested partner:
+    a pair of M split by 2e-9 Ha, two roots at tol_omega 1e-10, is the cut, with
+    and without a state that folds below it: the two lowest come back exact and the
+    partner, inside the count's 1e-8 Ha window, costs no warning; a distinct
     partner 1e-7 or 1e-6 Ha above the cut, not asked for, at default tolerances:
     the partner lies in the window, so the count's Davidson widens once past it."""
     from src.SingleReference.ADC.eeADC import ee_fold
@@ -1071,7 +1074,7 @@ def check_count_window():
     for hidden in (True, False):
         C = np.array([[0.0, 0.0, 0.0, 1.149 if hidden else 0.0]])
         w, _ = _synthetic_exact(m, C, D)
-        nw = 3 if hidden else 2
+        nw = 2
         for dense_limit, route in ((2000, 'dense'), (0, 'Davidson')):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
@@ -1079,10 +1082,11 @@ def check_count_window():
                                            spin='singlet', tol_omega=1e-10,
                                            dense_limit=dense_limit)
             d = np.abs(res.omega - w[:nw]).max() if res.omega.size == nw else np.inf
-            what = 'a state folded below it is found' if hidden else 'none warns'
-            ok &= check(d < 2e-9 and not caught,
-                        f'{route}: a level split by 2e-9 Ha at the cut, tol_omega '
-                        f'1e-10, counts whole; {what}',
+            what = 'the state folded below it is found' if hidden else 'none warns'
+            ok &= check(d < 4e-10 and not caught,
+                        f'{route}: a pair split by 2e-9 Ha at the cut, tol_omega '
+                        f'1e-10: the two lowest exact, the partner in the count\'s '
+                        f'window; {what}',
                         f'nout {res.omega.size}, max |dw| {d:.1e} Ha, '
                         f'{len(caught)} warning(s)')
     calls, solve = [], ee_fold.solve_symmetric
@@ -1345,10 +1349,14 @@ def check_window_branch():
             got, d, msgs = _fold_run(np.array([0.5, 0.6, 0.9]), C, np.array([1.2]), 2,
                                      tol_omega=tol_omega, dense_limit=dl,
                                      solver=solver)
-            ok &= check(d < 1e-8 and not msgs,
+            # the default tells two model roots apart down to tol_omega; Newton's
+            # seeds within 1e-8 Ha are one level at its mean
+            bound = 1e-8 if solver == 'newton' else min(1e-8, 4 * tol_omega)
+            ok &= check(d < bound and not msgs,
                         f'delta {delta:+.0e}, tol_omega {tol_omega:.0e}, dense_limit '
                         f'{dl}, {solver}: both roots, no warning',
-                        f'got {np.round(got, 9).tolist()}, {len(msgs)} warning(s)')
+                        f'got {np.round(got, 11).tolist()}, max |dw| {d:.1e} Ha, '
+                        f'{len(msgs)} warning(s)')
     return ok
 
 
