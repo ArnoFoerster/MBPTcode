@@ -98,7 +98,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
   26. ee_spin_blocks._ew, the elementwise pass split over the thread pin, equals the
       plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
       difference with an (a, b)-transposed operand, an in-place sum, a scalar
-      product, a quotient, and a broadcast shape it leaves to NumPy.
+      product, a quotient, and a broadcast shape it leaves to NumPy; _ew and _ksum
+      on two or three rows use the pin's one executor, none keyed by the row count.
   27. ee_spin_blocks.ooov_ia and ovvv_ia, their products summed over j-slabs on 4
       threads, equal the block-wise einsum on anti4's blocks for an X without a
       flip parity and with each one, to 1e-12 relative.
@@ -1574,7 +1575,9 @@ def check_trace(eps, B, no):
 
 def check_threaded_elementwise():
     """_ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
-    array above the size where the pass is split."""
+    array above the size where the pass is split; _ew and _ksum over fewer rows
+    than the pin take the pin's executor, so one pool serves every slab width."""
+    from src.Base.utils import threads as th
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     rng = np.random.default_rng(3)
     a = rng.standard_normal((64, 32, 32, 32))
@@ -1592,15 +1595,25 @@ def check_threaded_elementwise():
                  'scalar product': (sb._ew(np.multiply, a, -1.0), -a),
                  'quotient': (sb._ew(np.true_divide, a, d), a / d),
                  'broadcast, left to NumPy': (sb._ew(np.multiply, a, d[0]), a * d[0])}
+        pid = os.getpid()
+        before = {k for k in th._ROW_POOLS if k[0] == pid}
+        sb._ew(np.add, a.reshape(2, -1), 1.0)
+        sb._ew(np.add, rng.standard_normal((3, 400000)), 1.0)
+        sb._ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
+        pools = {k[1] for k in th._ROW_POOLS if k[0] == pid} - {k[1] for k in before}
     finally:
         if keep is None:
             del os.environ['OMP_NUM_THREADS']
         else:
             os.environ['OMP_NUM_THREADS'] = keep
     bad = [k for k, (x, y) in cases.items() if not np.array_equal(x, y)]
-    return check(split and not bad,
-                 'the threaded elementwise pass equals the plain ufunc bit for bit',
-                 f'split {split}, differing {bad}')
+    ok = check(split and not bad,
+               'the threaded elementwise pass equals the plain ufunc bit for bit',
+               f'split {split}, differing {bad}')
+    ok &= check(pools <= {4},
+                '_ew and _ksum on 2 and 3 rows take the pin\'s executor, none keyed '
+                'by the row count', f'new pools keyed {sorted(pools)}')
+    return ok
 
 
 def check_split_contractions():

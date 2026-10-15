@@ -83,8 +83,11 @@ def _ew(op, a, b, out=None):
     so the result equals op(a, b) bit for bit. out may be a, never a view of b
     under another axis order."""
     a = np.asarray(a)
-    nt = min(_threads(), a.shape[0] if a.ndim else 1)
-    if nt < 2 or a.size < _EW_MIN or (np.ndim(b) and np.shape(b) != a.shape):
+    rows = a.shape[0] if a.ndim else 1
+    # the pin keys row_map's one executor; row_map clamps its ranges to the rows
+    nt = _threads()
+    if (nt < 2 or rows < 2 or a.size < _EW_MIN
+            or (np.ndim(b) and np.shape(b) != a.shape)):
         return op(a, b) if out is None else op(a, b, out=out)
     if out is None:
         out = np.empty(a.shape, np.result_type(a, b))
@@ -93,7 +96,7 @@ def _ew(op, a, b, out=None):
         s = slice(r0, r1)
         op(a[s], b[s] if np.ndim(b) else b, out=out[s])
 
-    row_map(slab, a.shape[0], nt)
+    row_map(slab, rows, nt)
     return out
 
 
@@ -108,8 +111,8 @@ def _ksum(fn, n, size):
     order, so the sum is reordered against fn(0, n), not random. Off the main
     thread, inside a _stream slab, the product stays whole: the slabs already
     share the cores, and the BLAS count is not this call's to hold at one."""
-    nt = min(_threads(), n)
-    if (nt < 2 or size < _KSUM_MIN
+    nt = _threads()
+    if (nt < 2 or n < 2 or size < _KSUM_MIN
             or threading.current_thread() is not threading.main_thread()):
         return fn(0, n)
     with blas_single_threaded():
