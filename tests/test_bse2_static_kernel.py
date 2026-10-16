@@ -34,8 +34,9 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
    1e-12 relative, for both kernels and both channels at eta 0 and 1e-3, on
    H2/STO-3G, H2O/cc-pVDZ (exact factors) and cyclazine/6-31G (density fitted,
    Monino and Loos's geometry); command-line names select a subset; and on water
-   with a device budget that caps every block at one virtual. Without CuPy these
-   rows print a skip line, and device='gpu' raises ImportError.
+   with a device budget that caps every block at one virtual. Without CuPy, or
+   with CuPy and no visible GPU, these rows print a skip line; without CuPy
+   device='gpu' raises ImportError.
 """
 import os
 import sys
@@ -361,6 +362,8 @@ if __name__ == '__main__':
         except ImportError:
             all_ok &= check(True, "device='gpu' without CuPy raises ImportError")
         print("  [skip] device='gpu' against the CPU path: CuPy is not importable")
+    elif not cupy.is_available():
+        print("  [skip] device='gpu' against the CPU path: CuPy sees no GPU")
     else:
         name = cupy.cuda.runtime.getDeviceProperties(0)['name']
         print(f"  device: {name.decode() if isinstance(name, bytes) else name}, "
