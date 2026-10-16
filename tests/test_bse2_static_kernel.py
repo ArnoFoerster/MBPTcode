@@ -30,6 +30,12 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
    the vertex form against the printed particle-hole term, which ties the vertex
    normalisation to the QuAcK-checked kernel; the crossed class's triplet vanishes
    in both forms and the routine's triplet blocks are zero.
+6. device='gpu' against the CPU path on the same factors, Theta^A and Theta^B to
+   1e-12 relative, for both kernels and both channels at eta 0 and 1e-3, on
+   H2/STO-3G, H2O/cc-pVDZ (exact factors) and cyclazine/6-31G (density fitted,
+   Monino and Loos's geometry); command-line names select a subset; and on water
+   with a device budget that caps every block at one virtual. Without CuPy these
+   rows print a skip line, and device='gpu' raises ImportError.
 """
 import os
 import sys
@@ -43,9 +49,15 @@ from pyscf import gto, scf
 from src.Base.constants import HARTREE_TO_EV
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
+from src.SingleReference.LinearResponse import linear_response
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_second_order_kernel_df)
+
+try:
+    import cupy
+except ImportError:              # optional: only the device='gpu' rows need it
+    cupy = None
 
 # QuAcK mol/H2O.xyz, Angstrom
 GEOM = 'O 0.0000 0.0000 0.0000; H 0.7571 0.0000 0.5861; H -0.7571 0.0000 0.5861'
@@ -60,6 +72,23 @@ QUACK_QP_EV = np.array([
 QUACK_EV = {('bse', False): (8.450045, 7.664144), ('bse', True): (8.484507, 7.698575),
             ('bse2', False): (8.736268, 7.802672), ('bse2', True): (8.759333, 8.010908)}
 TOL_EV = 1e-5
+# cycl[3,3,3]azine S0, B3LYP/cc-pVDZ, Monino and Loos, JCP 159, 034105 (2023), SI
+# page S3, Angstrom
+CYCLAZINE = """N 0.000000 0.009080 0.000000; C 1.224802 0.716230 0.000000
+C -1.224802 0.716230 0.000000; C 2.437473 -0.010534 0.000000
+C -2.437473 -0.010534 0.000000; H 3.363630 0.562441 0.000000
+H -3.363630 0.562441 0.000000; C 1.201735 2.129808 0.000000
+C -1.201735 2.129808 0.000000; H 2.161023 2.645400 0.000000
+H -2.161023 2.645400 0.000000; C 0.000000 2.821547 0.000000
+H 0.000000 3.914218 0.000000; C 0.000000 -1.405179 0.000000
+C 2.435666 -1.397141 0.000000; C -2.435666 -1.397141 0.000000
+H 3.381943 -1.943483 0.000000; H -3.381943 -1.943483 0.000000
+C 1.235729 -2.091996 0.000000; C -1.235729 -2.091996 0.000000
+H 1.202592 -3.180558 0.000000; H -1.202592 -3.180558 0.000000"""
+# (geometry, basis, density fitting) of the device='gpu' rows
+GPU_SYSTEMS = {'h2': ('H 0 0 0; H 0 0 0.74', 'sto-3g', False),
+               'water': (GEOM, 'cc-pvdz', False),
+               'cyclazine': (CYCLAZINE, '6-31g', True)}
 
 
 def check(ok, label, detail=''):
@@ -173,6 +202,21 @@ def eq71_reference(eps, coeff, W_aux, nocc):
     A_full, B_full = dense_theta(eps, coeff, W_aux, nocc)
     A_ph, B_ph = dense_theta(eps, coeff, W_aux, nocc, ladders=False)
     return S_cA + (A_full - A_ph), S_cB + (B_full - B_ph)
+
+
+def hf_factors(atom, basis, density_fit):
+    """(eps, coeff, W_aux, nocc) at RHF: orbital energies, the three-index factor
+    (with_df's when density_fit, else the exact one) and the static screening."""
+    mol = gto.M(atom=atom, basis=basis, unit='Angstrom', verbose=0)
+    mf = scf.RHF(mol).density_fit() if density_fit else scf.RHF(mol)
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    nocc = mol.nelectron // 2
+    eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
+    coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+    w_aux = LinearResponseSolver(eps, coeff_df=coeff,
+                                 spin_mode='restricted').static_screening_aux(nocc)
+    return eps, coeff, w_aux, nocc
 
 
 if __name__ == '__main__':
@@ -302,6 +346,68 @@ if __name__ == '__main__':
         all_ok &= check(False, 'unknown kernel raises ValueError')
     except ValueError:
         all_ok &= check(True, 'unknown kernel raises ValueError')
+
+    # 6. device='gpu' against the CPU path on the same factors; the sign-change
+    #    warning concerns the physics of an input, not the comparison
+    try:
+        static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='tpu')
+        all_ok &= check(False, 'unknown device raises ValueError')
+    except ValueError:
+        all_ok &= check(True, 'unknown device raises ValueError')
+    if cupy is None:
+        try:
+            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='gpu')
+            all_ok &= check(False, "device='gpu' without CuPy raises ImportError")
+        except ImportError:
+            all_ok &= check(True, "device='gpu' without CuPy raises ImportError")
+        print("  [skip] device='gpu' against the CPU path: CuPy is not importable")
+    else:
+        name = cupy.cuda.runtime.getDeviceProperties(0)['name']
+        print(f"  device: {name.decode() if isinstance(name, bytes) else name}, "
+              f'CuPy {cupy.__version__}')
+        names = [a for a in sys.argv[1:] if not a.startswith('--')] \
+            or list(GPU_SYSTEMS)
+        for sname in names:
+            eps_s, coeff_s, w_s, nocc_s = hf_factors(*GPU_SYSTEMS[sname])
+            for kernel in ('printed', 'eq71'):
+                for channel in ('singlet', 'triplet'):
+                    devs, host = [], True
+                    for eta in (0.0, 1e-3):
+                        kw = dict(eta=eta, channel=channel, kernel=kernel)
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings('ignore',
+                                                    message='a ladder denominator')
+                            ref = static_second_order_kernel_df(
+                                eps_s, coeff_s, w_s, nocc_s, **kw)
+                            got = static_second_order_kernel_df(
+                                eps_s, coeff_s, w_s, nocc_s, device='gpu', **kw)
+                        host &= all(type(x) is np.ndarray for x in got)
+                        scale = max(np.abs(ref[0]).max(), np.abs(ref[1]).max(),
+                                    1e-300)
+                        devs.append(max(np.abs(got[0] - ref[0]).max(),
+                                        np.abs(got[1] - ref[1]).max()) / scale)
+                    all_ok &= check(host and max(devs) < 1e-12,
+                                    f"{sname}: device='gpu' vs cpu, "
+                                    f'kernel={kernel!r}, {channel}, host arrays',
+                                    f'max rel dev {devs[0]:.1e} at eta 0, '
+                                    f'{devs[1]:.1e} at eta 1e-3')
+        # a device budget that caps every block at one virtual
+        keep, devs = linear_response.BSE2_GPU_BLOCK_GB, []
+        linear_response.BSE2_GPU_BLOCK_GB = 1e-12
+        try:
+            for kernel in ('printed', 'eq71'):
+                ref = static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
+                                                    kernel=kernel)
+                got = static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
+                                                    kernel=kernel, device='gpu')
+                scale = max(np.abs(ref[0]).max(), np.abs(ref[1]).max())
+                devs.append(max(np.abs(got[0] - ref[0]).max(),
+                                np.abs(got[1] - ref[1]).max()) / scale)
+        finally:
+            linear_response.BSE2_GPU_BLOCK_GB = keep
+        all_ok &= check(max(devs) < 1e-12, "water: device='gpu' vs cpu, singlet, "
+                        'BSE2_GPU_BLOCK_GB at 1e-12 (blocks of one virtual)',
+                        f'max rel dev {devs[0]:.1e} printed, {devs[1]:.1e} eq71')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

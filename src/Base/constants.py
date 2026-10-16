@@ -306,6 +306,13 @@ COMPOSED_GRAD_K = 3
 # excitation energy and squared in every oscillator strength.
 CASIDA_NORM_TOL = 1e-4
 
+# GB of the per-block intermediates of the static second-order GW kernel on the
+# GPU (`linear_response.static_second_order_kernel_df`, device='gpu'): every
+# block over virtuals is capped where its intermediates reach this, beside the
+# pair-sized accumulators and the DF factors, which it does not count. It moves
+# the memory and the GEMM shapes only, never a number beyond the summation order.
+BSE2_GPU_BLOCK_GB = 16.0
+
 # Closest a classical polarizable site may sit to a QM nucleus, in Bohr. The
 # exact folding of W onto the QM region holds only where the two subsystems'
 # orbitals do not overlap (Li, D'Avino, Duchemin, Beljonne and Blase, Phys.
