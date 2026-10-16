@@ -5,8 +5,8 @@ stand-in (gw_like: occupied +0.03 Ha, virtual -0.05 Ha on the HF energies), so a
 energy set is visible; the W lines are screened at the HF energies throughout.
 
   1. build_pieces_dbse2 (6-31G): M per channel equals the Casida A of
-     LinearResponseSolver at the GW energies, lBSE=False for singles='eq62' and
-     lBSE=True with the static W_aux for 'eq62+eq59', to 1e-10 Ha; D is
+     LinearResponseSolver at the GW energies, lBSE=True with the bare metric for
+     singles='eq62' and with the static W_aux for 'eq62+eq59', to 1e-10 Ha; D is
      e_c + e_d - e_k - e_l, shape (no, no, nv, nv); V(y) has the eight signed blocks
      '+aaaa' ... '-baba' of that shape; Vt is the eta-transpose of V (V dense by unit
      singles, Vt on random doubles, eta = +1 on the '+' blocks, -1 on the '-' blocks) to
@@ -47,10 +47,13 @@ from pyscf import gto, scf
 
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_fold
+from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_screened_coulomb_aux)
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+# the signed doubles blocks of one pair, the order the dense forms below stack them in
+KEYS = ('+aaaa', '-aaaa', '+bbbb', '-bbbb', '+abab', '-abab', '+baba', '-baba')
 
 
 def check(ok, label, detail=''):
@@ -122,11 +125,114 @@ def check_boundaries(eps, B, no):
     return ok
 
 
+def flat_doubles(Z):
+    """SB doubles on KEYS -> one vector, the blocks in KEYS order."""
+    return np.concatenate([Z.get(k).ravel() for k in KEYS])
+
+
+def dense_coupling(P):
+    """(V, eta): V (8 n_d, 2 ns) the coupling on the full spin-orbital singles (aa then
+    bb) by unit vectors, rows the doubles in KEYS order; eta (8 n_d,) the metric, +1 on
+    the '+' blocks and -1 on the '-' blocks."""
+    no, nv = P['no'], P['nv']
+    ns = no * nv
+    E = np.eye(2 * ns)
+    cols = [flat_doubles(P['V'](ee_fold.singles_flat_to_sb(E[:, k], no, nv)))
+            for k in range(2 * ns)]
+    n_d = no * no * nv * nv
+    eta = np.concatenate([np.full(n_d, 1.0 if k[0] == '+' else -1.0) for k in KEYS])
+    return np.column_stack(cols), eta
+
+
+def check_pieces(eps, B, no):
+    """M per channel against the Casida A at the GW energies; D; the eight blocks; Vt
+    the eta-transpose of V; dnorm2 signed; the refusals; inputs untouched."""
+    ok = True
+    nv = len(eps) - no
+    ns = no * nv
+    eps_gw = gw_like(eps, no)
+    W_aux = static_screened_coulomb_aux(eps, B, no)
+    lr = LinearResponseSolver(eps_gw, coeff_df=B, spin_mode='restricted')
+    # the Casida A with the bare metric is eq 62 (lBSE=False drops the exchange: the
+    # direct RPA block), with the static W_aux it is eq 62 + eq 59
+    for singles, metric in (('eq62', np.eye(B.shape[0])), ('eq62+eq59', W_aux)):
+        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel='eq71',
+                                               singles=singles)
+        Ma, Mx = P['M'].get('aaaa'), P['M'].get('aabb')
+        for spin, sgn, triplet in (('singlet', 1.0, False), ('triplet', -1.0, True)):
+            A, _ = lr.build_casida_matrices(no, lBSE=True, W_aux=metric,
+                                            triplet=triplet)
+            Mch = (Ma + sgn * Mx).reshape(ns, ns)
+            d = float(np.max(np.abs(Mch - np.asarray(A))))
+            ok &= check(d < 1e-10, f'{singles} {spin}: M equals the Casida A at the GW '
+                        'energies', f'max |d| {d:.1e} Ha')
+    eo, ev = eps_gw[:no], eps_gw[no:]
+    Dref = (ev[None, None, :, None] + ev[None, None, None, :]
+            - eo[:, None, None, None] - eo[None, :, None, None])
+    ok &= check(P['D'].shape == (no, no, nv, nv) and np.array_equal(P['D'], Dref)
+                and P['level'] == 'dbse2',
+                "D is e_c + e_d - e_k - e_l, shape (no, no, nv, nv); level 'dbse2'",
+                str(P['D'].shape))
+    Y = P['V'](ee_fold.singles_flat_to_sb(np.eye(2 * ns)[:, 0], no, nv))
+    ok &= check(sorted(Y.keys()) == sorted(KEYS)
+                and all(Y.get(k).shape == (no, no, nv, nv) for k in KEYS),
+                'V(y) has the eight signed blocks of shape (no, no, nv, nv)',
+                ' '.join(sorted(Y.keys())))
+    V, eta = dense_coupling(P)
+    rng = np.random.default_rng(7)
+    Zr = SB({k: rng.standard_normal((no, no, nv, nv)) for k in KEYS})
+    zf = flat_doubles(Zr)
+    wt = ee_fold.singles_sb_to_flat(P['Vt'](Zr), no, nv)
+    d = float(np.max(np.abs(wt - V.T @ (eta * zf))))
+    ok &= check(d < 1e-12, 'Vt is the eta-transpose of V', f'{d:.1e}')
+    dn, ref = float(P['dnorm2'](Zr)), float((eta * zf) @ zf)
+    ok &= check(abs(dn - ref) < 1e-12 * abs(ref), 'dnorm2 is |Y+|^2 - |Y-|^2',
+                f'{dn:.6f} vs {ref:.6f}')
+    Zp = SB({k: Zr.get(k) * (1.0 if k[0] == '+' else 0.0) for k in KEYS})
+    Zm = SB({k: Zr.get(k) * (1.0 if k[0] == '-' else 0.0) for k in KEYS})
+    ok &= check(P['dnorm2'](Zp) > 0 and P['dnorm2'](Zm) < 0,
+                "dnorm2 > 0 on a '+'-only Y and < 0 on a '-'-only Y")
+    ee_dbse2_pieces.build_pieces_dbse2(eps, eps, B, no)
+    ok &= check(True, 'the HF energies pass as eps_gw')
+    bad = eps_gw.copy()
+    bad[no - 1], bad[no] = bad[no], bad[no - 1]
+    try:
+        ee_dbse2_pieces.build_pieces_dbse2(bad, eps, B, no)
+        ok &= check(False, 'a closed GW gap raises ValueError')
+    except ValueError as exc:
+        ok &= check('gap' in str(exc), 'a closed GW gap raises ValueError',
+                    str(exc)[:60])
+    y1 = ee_fold.singles_flat_to_sb(np.eye(2 * ns)[:, 0], no, nv)
+    try:
+        P['V'](SB({'aa': y1.get('aa')}, parity=1.0))
+        ok &= check(False, 'a flip parity raises NotImplementedError')
+    except NotImplementedError:
+        ok &= check(True, 'a flip parity raises NotImplementedError')
+    for kw, word in ((dict(sets=('eq61',)), 'sets'), (dict(singles='eq59'), 'singles')):
+        try:
+            ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, **kw)
+            ok &= check(False, f'an unknown {word} raises ValueError')
+        except ValueError as exc:
+            ok &= check(word in str(exc), f'an unknown {word} raises ValueError',
+                        str(exc)[:60])
+    D0, B0 = P['D'].copy(), B.copy()
+    matvec, _, diag_s, _, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
+    u = np.linspace(-1.0, 1.0, diag_s.size)
+    u0 = u.copy()
+    matvec(u)
+    ee_fold.solve_folded(P, 1, spin='singlet')
+    ok &= check(np.array_equal(u, u0) and np.array_equal(P['D'], D0)
+                and np.array_equal(B, B0),
+                'matvec and solve_folded leave u, D and B untouched')
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
     eps, B, no = water('6-31g')
     all_ok &= check_boundaries(eps, B, no)
+    all_ok &= check_pieces(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
