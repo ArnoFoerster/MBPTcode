@@ -9,8 +9,9 @@ from src.SingleReference.LinearResponse import imaginary_frequency
 
 try:
     import cupy as cp
+    from cupy import cublas      # a submodule `import cupy` leaves unbound
 except ImportError:              # optional: only device='gpu' needs it
-    cp = None
+    cp = cublas = None
 
 DEVICES = ('cpu', 'gpu')
 
@@ -1011,7 +1012,7 @@ def _second_order_kernel_gpu(eps, coeff_df, L, occ, virt, reg, blksize, channel,
 
     def gemm(a, b, out, alpha):
         # out_pq += alpha sum_r a_pr b_rq, in place
-        cp.cublas.gemm('N', 'N', a, b, out=out, alpha=alpha, beta=1.0)
+        cublas.gemm('N', 'N', a, b, out=out, alpha=alpha, beta=1.0)
 
     Lg = cp.asarray(L)
 
