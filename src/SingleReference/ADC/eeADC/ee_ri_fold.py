@@ -1,5 +1,7 @@
 """Density-fitted ADC(2) singles operator with the doubles folded in, for large
-molecules: no array of doubles size is ever held whole.
+molecules: the doubles exist one occupied tile at a time; only the MP1
+amplitudes of M's second-order term are kept, per rank and up to
+EE_RI_AMPLITUDE_CACHE_GB, the tiles past it rebuilt in every product.
 
 The folded problem of ee_fold, A_eff(w) y = w y with
 
@@ -64,11 +66,24 @@ import numpy as np
 from pyscf import df as pyscf_df
 from pyscf import lib
 
-from src.Base.constants import EE_RI_AUX_CHUNK, EE_RI_TILE_GB
-from src.Base.utils.mpi_grid import current_comm, ordered_sum, reduce_sum
+from src.Base.constants import (EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
+                                 EE_RI_EXCHANGE_CHUNK, EE_RI_FOLD_DIAG_EXPONENT,
+                                 EE_RI_FOLD_DIAG_GAP,
+                                 EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
+                                 EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
+                                 EE_RI_TILE_GB)
+from src.Base.utils.mpi_grid import (NodeShared, allgather_ranges, current_comm,
+                                     exchange_blocks, ordered_chain_sum, ordered_sum,
+                                     reduce_sum)
 from src.Base.utils.threads import openmp_threads, row_map
 
+try:
+    import cupy as cp
+except ImportError:              # optional: only device='gpu' needs it
+    cp = None
+
 SPINS = ('singlet', 'triplet')
+DEVICES = ('cpu', 'gpu')
 LEVELS = ('adc1', 'adc2')
 
 
@@ -81,20 +96,44 @@ class RIFactors:
     shell reference, in the layouts the operator contracts:
 
     eo, ev : (no,), (nv,) active orbital energies, Hartree
-    L      : (no nv, naux), rows (i, a): B^P_ia
-    Boo    : (no, no, naux), B^P_ij
-    BooT   : (no, naux, no), B^P_ij as [i, P, j]
-    Bvv    : (nv, naux, nv), B^P_ab as [a, P, b]
+    LT     : (naux, no, nv), B^P_ia, auxiliary-major (the stored form)
+    L      : (no nv, naux), rows (i, a): B^P_ia, a view of LT
+    BooP   : (naux, no, no), B^P_ij as [P, i, j] (the stored form)
+    Boo    : (no, no, naux), B^P_ij, a view of BooP
+    Bvv    : (nv, naux, nv), B^P_ab as [a, P, b], whole; or None, and then
+    bvv_chunks : {c: (nv, p1 - p0, nv)}, only the auxiliary chunks
+             [p0, p1) = aux_chunks(...)[0][c] this rank owns: v^2 naux is the
+             largest factor, and over MPI ranks it is held once, split
+    LT and BooP, read whole by every rank, may live in node-shared windows
+    (`shared`, the NodeShared objects that hold them), one copy per node.
     """
 
-    def __init__(self, eo, ev, L, Boo, Bvv):
+    def __init__(self, eo, ev, L, Boo, Bvv=None, bvv_chunks=None, LT=None,
+                 BooP=None, shared=()):
         self.eo, self.ev = np.asarray(eo, float), np.asarray(ev, float)
         self.no, self.nv = self.eo.size, self.ev.size
-        self.L = np.ascontiguousarray(L)
-        self.naux = self.L.shape[1]
-        self.Boo = np.ascontiguousarray(Boo)
-        self.BooT = np.ascontiguousarray(Boo.transpose(0, 2, 1))
-        self.Bvv = np.ascontiguousarray(Bvv)
+        self.LT = (LT if LT is not None else np.ascontiguousarray(
+            np.asarray(L).reshape(self.no, self.nv, -1).transpose(2, 0, 1)))
+        self.naux = self.LT.shape[0]
+        self.BooP = (BooP if BooP is not None else
+                     np.ascontiguousarray(np.asarray(Boo).transpose(2, 0, 1)))
+        self.Bvv = None if Bvv is None else np.ascontiguousarray(Bvv)
+        self.bvv_chunks = bvv_chunks
+        self.shared = tuple(shared)
+
+    @property
+    def L(self):
+        return self.LT.reshape(self.naux, -1).T
+
+    @property
+    def Boo(self):
+        return self.BooP.transpose(1, 2, 0)
+
+    def bvv(self, c, p0, p1):
+        """B^P_ab of the auxiliary chunk c = [p0, p1) as [a, P, b], contiguous."""
+        if self.Bvv is not None:
+            return np.ascontiguousarray(self.Bvv[:, p0:p1])
+        return self.bvv_chunks[c]
 
     @classmethod
     def from_full(cls, eps, B, no):
@@ -107,10 +146,26 @@ class RIFactors:
                    B[:, v, v].transpose(1, 0, 2))
 
     def nbytes(self):
-        return self.L.nbytes + self.Boo.nbytes + self.BooT.nbytes + self.Bvv.nbytes
+        """Bytes of this rank's factors, a node-shared array counted whole."""
+        vv = (self.Bvv.nbytes if self.Bvv is not None else
+              sum(a.nbytes for a in self.bvv_chunks.values()))
+        return self.LT.nbytes + self.BooP.nbytes + vv
 
 
-def bare_factors(mol, mf, frozen=0, auxbasis=None, chunk=EE_RI_AUX_CHUNK):
+def aux_chunks(naux, nv, size, width=None):
+    """(p0, p1) chunks of the auxiliary index, fixed by naux and nv alone (or
+    an explicit width), and the rank owning each: consecutive runs, so that a
+    sum over chunks in chunk order (ordered_chain_sum) has the one-rank bits
+    at every rank count. That covers the B_vv sums; the occupied tiles keep
+    their bits across rank counts only at one tile size (RIFoldADC2's kt)."""
+    step = width or max(1, min(EE_RI_EXCHANGE_CHUNK, int(
+        EE_RI_TILE_GB * 1024 ** 3 / (8.0 * 3 * nv * nv))))
+    chunks = [(p0, min(p0 + step, naux)) for p0 in range(0, naux, step)]
+    return chunks, [c * size // len(chunks) for c in range(len(chunks))]
+
+
+def bare_factors(mol, mf, frozen=0, auxbasis=None, chunk=EE_RI_AUX_CHUNK, comm=None,
+                 aux_chunk=None):
     """RIFactors of the BARE Coulomb interaction on the orbitals of `mf`, the
     `frozen` lowest occupied dropped.
 
@@ -118,7 +173,9 @@ def bare_factors(mol, mf, frozen=0, auxbasis=None, chunk=EE_RI_AUX_CHUNK):
     SCF); a name builds a separate one (the correlation fit, e.g.
     'aug-cc-pvdz-ri'). An environment attached to `mf` is deliberately not
     applied: the continuum enters this route through the singles block alone
-    (module docstring), never through the factor.
+    (module docstring), never through the factor. Over the ranks of comm
+    B_vv is kept in this rank's auxiliary chunks (aux_chunks, width aux_chunk;
+    the operator must be given the same), all of them on a single rank.
     """
     if auxbasis is None:
         with_df = getattr(mf, 'with_df', None)
@@ -136,28 +193,47 @@ def bare_factors(mol, mf, frozen=0, auxbasis=None, chunk=EE_RI_AUX_CHUNK):
     Cv = np.ascontiguousarray(C[:, nocc:])
     no, nv = Co.shape[1], Cv.shape[1]
     naux = with_df.get_naoaux()
-    L = np.empty((no, nv, naux))
-    Boo = np.empty((no, no, naux))
-    Bvv = np.empty((nv, naux, nv))
+    # L and B_oo auxiliary-major, once per node, written by its first rank
+    sh_l, sh_o = NodeShared((naux, no, nv), comm), NodeShared((naux, no, no), comm)
+    LT, BooP = sh_l.array, sh_o.array
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    # B_vv in its auxiliary chunks on one rank too: a chunk sliced out of a
+    # whole [a, P, b] array is a copy of v^2 per auxiliary row at every use
+    chunks, owners = aux_chunks(naux, nv, size, aux_chunk)
+    mine = {c: (chunks[c], np.empty((nv, chunks[c][1] - chunks[c][0], nv)))
+            for c in range(len(chunks)) if owners[c] == rank}
     p0 = 0
     for blk in with_df.loop(blksize=chunk):
         p1 = p0 + blk.shape[0]
         ao = lib.unpack_tril(blk)                       # (p, nao, nao)
         nao = ao.shape[1]
-        half_o = (ao.reshape(-1, nao) @ Co).reshape(-1, nao, no)   # (p, mu, i)
-        half_o = half_o.transpose(0, 2, 1).reshape(-1, nao)        # (p i, mu)
-        L[:, :, p0:p1] = (half_o @ Cv).reshape(-1, no, nv).transpose(1, 2, 0)
-        Boo[:, :, p0:p1] = (half_o @ Co).reshape(-1, no, no).transpose(1, 2, 0)
-        del half_o
-        half_v = (ao.reshape(-1, nao) @ Cv).reshape(-1, nao, nv)
-        half_v = half_v.transpose(0, 2, 1).reshape(-1, nao)        # (p a, mu)
-        Bvv[:, p0:p1, :] = (half_v @ Cv).reshape(-1, nv, nv).transpose(1, 0, 2)
-        del half_v, ao
+        if sh_l.fills:
+            half_o = (ao.reshape(-1, nao) @ Co).reshape(-1, nao, no)  # (p, mu, i)
+            half_o = half_o.transpose(0, 2, 1).reshape(-1, nao)       # (p i, mu)
+            LT[p0:p1] = (half_o @ Cv).reshape(-1, no, nv)
+            BooP[p0:p1] = (half_o @ Co).reshape(-1, no, no)
+            del half_o
+        # the rows of this block that B_vv keeps here
+        keep = [(c, max(p0, q0), min(p1, q1)) for c, ((q0, q1), _) in mine.items()
+                if max(p0, q0) < min(p1, q1)]
+        if keep:
+            half_v = (ao.reshape(-1, nao) @ Cv).reshape(-1, nao, nv)
+            half_v = half_v.transpose(0, 2, 1).reshape(-1, nao)    # (p a, mu)
+            vv = (half_v @ Cv).reshape(-1, nv, nv).transpose(1, 0, 2)
+            for c, lo, hi in keep:
+                q0 = mine[c][0][0]
+                mine[c][1][:, lo - q0:hi - q0, :] = vv[:, lo - p0:hi - p0, :]
+            del half_v, vv
+        del ao
         p0 = p1
     if p0 != naux:
         raise RuntimeError(f'the DF loop returned {p0} of {naux} auxiliary rows')
-    return RIFactors(eps[frozen:nocc], eps[nocc:], L.reshape(no * nv, naux),
-                     Boo, Bvv)
+    sh_l.ready()
+    sh_o.ready()
+    return RIFactors(eps[frozen:nocc], eps[nocc:], None, None, None,
+                     {c: a for c, (_, a) in mine.items()},
+                     LT=LT, BooP=BooP, shared=(sh_l, sh_o))
 
 
 # ----------------------------------------------------------------------
@@ -203,6 +279,119 @@ def _segments(r0, r1, nv):
     return out
 
 
+class _DoublesGPU:
+    """The doubles kernel of an RIFoldADC2 on this rank's GPU (CuPy, FP64): the
+    factor L auxiliary-major and the orbital energies resident; per tile the
+    pair GEMMs H = Bt L^T and H^T = L Bt^T, one fused pass forming
+    Gt = 2 S - S~ (singlet, S = H + H^T) or 2 H - S~ (triplet), one fused pass
+    scaling it by (w - D)^-1 with D_kcld = e_c + e_d - e_k - e_l formed on
+    the fly, the Gam GEMM and the B_oo half of the back-transformation. Gam
+    goes back to the host, where the B_vv half is formed by the chunks' owners.
+    The arithmetic is the CPU path's; the sums run in another order, so the two
+    agree to rounding, not to the bit."""
+
+    _GT = r"""
+        long long q = i; const long long d = q % nv; q /= nv;
+        const long long l = q % no; q /= no; const long long c = q % nv;
+        const long long k = q / nv;
+        const long long x = ((k * nv + d) * no + l) * nv + c;   // (k, d, l, c)
+        const double sx = H[x] + HT[x];
+        G = singlet ? 2.0 * (H[i] + HT[i]) - sx : 2.0 * H[i] - sx;
+    """
+    _R = r"""
+        long long q = i; const long long d = q % nv; q /= nv;
+        const long long l = q % no; q /= no; const long long c = q % nv;
+        const long long k = q / nv;
+        const double x = w - (ev[c] + ev[d] - eo[k0 + k] - eo[l]);
+        R = G[i] / x;
+    """
+    # |Y|^2 summand of the image at w: singlet w^2 S (S - S~/2), triplet
+    # w^2 [(H - H^T)^2 / 2 + (S - S~)^2 / 4], S = H + H^T
+    _N = r"""
+        long long q = i; const long long d = q % nv; q /= nv;
+        const long long l = q % no; q /= no; const long long c = q % nv;
+        const long long k = q / nv;
+        const long long x = ((k * nv + d) * no + l) * nv + c;
+        const double y = 1.0 / (w - (ev[c] + ev[d] - eo[k0 + k] - eo[l]));
+        const double s = H[i] + HT[i], sx = H[x] + HT[x];
+        if (singlet) { N = y * y * s * (s - 0.5 * sx); }
+        else { const double a = H[i] - HT[i], b = s - sx;
+               N = y * y * (0.5 * a * a + 0.25 * b * b); }
+    """
+
+    def __init__(self, op):
+        if cp is None:
+            raise ImportError("device='gpu' needs CuPy, which is not importable")
+        self.op = op
+        f = op.f
+        self.no, self.nv, self.naux = op.no, op.nv, f.naux
+        self.L2 = cp.asarray(f.LT.reshape(f.naux, -1))              # (naux, no nv)
+        self.Boo = cp.asarray(np.ascontiguousarray(f.Boo))          # (no, no, naux)
+        self.eo, self.ev = cp.asarray(f.eo), cp.asarray(f.ev)
+        self.singlet = op.spin == 'singlet'
+        self.k_gt = cp.ElementwiseKernel(
+            'raw float64 H, raw float64 HT, int64 nv, int64 no, bool singlet',
+            'float64 G', self._GT, 'ee_fold_gt')
+        self.k_r = cp.ElementwiseKernel(
+            'raw float64 G, raw float64 eo, raw float64 ev, int64 k0, int64 nv, '
+            'int64 no, float64 w', 'float64 R', self._R, 'ee_fold_r')
+        self.k_n = cp.ElementwiseKernel(
+            'raw float64 H, raw float64 HT, raw float64 eo, raw float64 ev, '
+            'int64 k0, int64 nv, int64 no, float64 w, bool singlet', 'float64 N',
+            self._N, 'ee_fold_n')
+
+    def upload(self, BtT):
+        """The dressed factor of one column, (naux, no nv), on the device."""
+        return cp.asarray(BtT)
+
+    def _pair(self, Btg, k0, k1):
+        nv = self.nv
+        rows = slice(k0 * nv, k1 * nv)
+        H = Btg[:, rows].T @ self.L2
+        HT = self.L2[:, rows].T @ Btg
+        return H, HT
+
+    def _back_oo(self, Gam, k0, k1):
+        """sum_kP B_kjP Gam_kbP for Gam (kt nv, naux) on the device, (no nv,)."""
+        kt = k1 - k0
+        GkPb = Gam.reshape(kt, self.nv, -1).transpose(0, 2, 1).reshape(-1, self.nv)
+        Bjk = self.Boo[k0:k1].transpose(1, 0, 2).reshape(self.no, -1)
+        return (Bjk @ GkPb).ravel()
+
+    def images_tile(self, k0, k1, Btg, nodes):
+        """The CPU path's _images_tile: (Gam (p, kt nv, naux), B_oo half (p, no nv))
+        as host arrays."""
+        nv, no = self.nv, self.no
+        H, HT = self._pair(Btg, k0, k1)
+        G = cp.empty_like(H)
+        self.k_gt(H, HT, nv, no, self.singlet, G)
+        del H, HT
+        R = cp.empty_like(G)
+        gams = np.empty((len(nodes), (k1 - k0) * nv, self.naux))
+        img = np.empty((len(nodes), no * nv))
+        for q, w in enumerate(nodes):
+            self.k_r(G, self.eo, self.ev, k0, nv, no, float(w), R)
+            Gam = R @ self.L2.T
+            img[q] = cp.asnumpy(self._back_oo(Gam, k0, k1))
+            gams[q] = cp.asnumpy(Gam)
+        return gams, img
+
+    def doubles_tile(self, k0, k1, Btg, omega):
+        """The CPU path's _doubles_tile: (Gam, B_oo half, |Y|^2) on the host."""
+        nv, no = self.nv, self.no
+        H, HT = self._pair(Btg, k0, k1)
+        N = cp.empty_like(H)
+        self.k_n(H, HT, self.eo, self.ev, k0, nv, no, float(omega), self.singlet, N)
+        nrm = float(N.sum())
+        G = N                                                       # reused
+        self.k_gt(H, HT, nv, no, self.singlet, G)
+        del H, HT
+        R = cp.empty_like(G)
+        self.k_r(G, self.eo, self.ev, k0, nv, no, float(omega), R)
+        Gam = R @ self.L2.T
+        return cp.asnumpy(Gam), cp.asnumpy(self._back_oo(Gam, k0, k1)), nrm
+
+
 class RIFoldADC2:
     """A_eff(w) of one spin channel of closed-shell ADC(1)/ADC(2) on flat
     singles vectors u (no nv,), (i, a) row-major, from RIFactors.
@@ -210,31 +399,47 @@ class RIFoldADC2:
     level 'adc1' is CIS (no second order, no doubles); 'adc2' the strict
     ADC(2). reaction_field: a TransitionReactionField or None. tile_gb bounds
     the tile working set; threads the element-wise passes (default: the
-    process's OpenMP count).
+    process's OpenMP count); aux_chunk the width of the auxiliary chunks
+    (default: aux_chunks' rule), which split factors were built with; device
+    'gpu' runs the doubles kernel on this rank's GPU (_DoublesGPU), 'cpu' on
+    the host.
 
     Over MPI ranks (comm, default the current one) the occupied tiles are
     dealt round-robin and every tile's contribution is summed in tile order
     (ordered_sum), so at one tile size a product has the same bits at every
-    rank count; each rank holds the factors whole. Construction, `apply` and `doubles_dot` are
+    rank count. Each rank holds L and B_oo whole and B_vv in its auxiliary
+    chunks (aux_chunks); the dressed factor is gathered whole and the B_vv
+    term of the back-transformation is formed by the chunks' owners and summed
+    in chunk order. Construction, `apply`, `fold_images` and `doubles_dot` are
     then collectives: every rank calls them with the same arguments
     (ee_driver drives them from rank 0 with root_driven_solve)."""
 
     def __init__(self, factors, spin, level='adc2', reaction_field=None,
-                 tile_gb=EE_RI_TILE_GB, threads=None, comm=None):
+                 tile_gb=EE_RI_TILE_GB, threads=None, comm=None, aux_chunk=None,
+                 device='cpu'):
         if spin not in SPINS:
             raise ValueError(f'spin={spin!r}; the folded route solves one '
                              f'channel, one of {SPINS}')
         if level not in LEVELS:
             raise ValueError(f'level={level!r}; expected one of {LEVELS}')
+        if device not in DEVICES:
+            raise ValueError(f'device={device!r}; expected one of {DEVICES}')
         self.f, self.spin, self.level = factors, spin, level
         self.rf = reaction_field
         self.threads = int(threads or openmp_threads())
+        self.tile_gb = tile_gb
         no, nv = factors.no, factors.nv
         self.no, self.nv, self.n = no, nv, no * nv
+        # LT[P, i, a] = B^P_ia, the factor's own auxiliary-major storage
+        self.LT = factors.LT
         self.delta = (factors.ev[None, :] - factors.eo[:, None]).ravel()
         self.d_min = 2.0 * (factors.ev.min() - factors.eo.max())
         self.e_mp2 = None
+        # columns of M (every product), trial vectors given fold images, and
+        # their images summed over frequencies
         self.matvecs = 0
+        self.image_columns = 0
+        self.node_images = 0
         self.comm = current_comm() if comm is None else comm
         rank, size = ((0, 1) if self.comm is None else
                       (self.comm.Get_rank(), self.comm.Get_size()))
@@ -242,10 +447,25 @@ class RIFoldADC2:
         # gives every rank a tile
         per_k = 8.0 * nv * no * nv * 5
         self.kt = int(max(1, min(-(-no // size), tile_gb * 1024 ** 3 // per_k)))
-        tiles = [(k0, min(k0 + self.kt, no)) for k0 in range(0, no, self.kt)]
+        self.tiles = [(k0, min(k0 + self.kt, no)) for k0 in range(0, no, self.kt)]
         # (tile index, (k0, k1)) of this rank's tiles
-        self.my_tiles = [(t, tiles[t]) for t in range(rank, len(tiles), size)]
+        self.my_tiles = [(t, self.tiles[t])
+                         for t in range(rank, len(self.tiles), size)]
+        self.size, self.rank = size, rank
+        # the auxiliary chunks, their owners, this rank's, and every rank's
+        # row ranges of an auxiliary-major array
+        self.chunks, self.owners = aux_chunks(factors.naux, nv, size, aux_chunk)
+        self.my_chunks = [c for c, o in enumerate(self.owners) if o == rank]
+        if factors.bvv_chunks is not None and (
+                sorted(factors.bvv_chunks) != self.my_chunks or any(
+                    factors.bvv_chunks[c].shape[1] != self.chunks[c][1] - self.chunks[c][0]
+                    for c in self.my_chunks)):
+            raise ValueError('the factors hold other B_vv chunks than this operator '
+                             'reads: build both with the same comm and aux_chunk')
+        self.chunk_ranges = [[self.chunks[c] for c, o in enumerate(self.owners)
+                              if o == r] for r in range(size)]
         self._setup()
+        self.gpu = _DoublesGPU(self) if device == 'gpu' and level == 'adc2' else None
 
     # ---- element-wise passes over one tile --------------------------------
 
@@ -277,7 +497,13 @@ class RIFoldADC2:
     def _setup(self):
         f, no, nv = self.f, self.no, self.nv
         coul = np.einsum('pP,pP->p', f.L, f.L, optimize=True)        # (ia|ia)
-        exch = np.einsum('iiP,aPa->ia', f.Boo, f.Bvv, optimize=True).ravel()
+        # (ii|aa) = sum_P B_iiP B_aaP, summed over the auxiliary chunks in order
+        Bii = np.ascontiguousarray(np.einsum('iiP->iP', f.Boo))
+        terms = {}
+        for c in self.my_chunks:
+            p0, p1 = self.chunks[c]
+            terms[c] = (Bii[:, p0:p1] @ np.einsum('aPa->Pa', f.bvv(c, p0, p1))).ravel()
+        exch = ordered_chain_sum(terms, self.owners, self.comm, np.zeros(no * nv))
         first = (2.0 * coul - exch) if self.spin == 'singlet' else -exch
         diag = self.delta + first
         if self.rf is not None and self.spin == 'singlet':
@@ -289,6 +515,9 @@ class RIFoldADC2:
             return
         singlet = self.spin == 'singlet'
         parts = []
+        # the spin channel's MP1 amplitudes of each tile, kept for M's
+        # products while they fit EE_RI_AMPLITUDE_CACHE_GB on this rank
+        self._T, kept = {}, 0.0
         for t, (k0, k1) in self.my_tiles:
             I = self._ints(k0, k1)
             tau = np.empty_like(I)
@@ -319,6 +548,10 @@ class RIFoldADC2:
             xv_t = np.zeros((nv, nv))
             for k in range(kt):
                 xv_t += 0.5 * (I[k].reshape(nv, -1) @ tau[k].reshape(nv, -1).T)
+            if kept + tau.nbytes / 1024 ** 3 <= EE_RI_AMPLITUDE_CACHE_GB:
+                # singlet: tau is T itself; triplet: T = -(ic|ka) / D, from I
+                self._T[t] = tau if singlet else self._triplet_amplitudes(I, k0)
+                kept += tau.nbytes / 1024 ** 3
             del I, tau
             parts.append((t, np.concatenate([[e_t], xd_t.ravel(), xo_t.ravel(),
                                              xv_t.ravel()])))
@@ -333,6 +566,123 @@ class RIFoldADC2:
         diag = (diag + (np.diag(self.xo)[:, None] + np.diag(self.xv)[None, :]).ravel()
                 - xdiag.ravel())
         self.diag = diag
+        self._fold_diag_setup()
+
+    def _fold_diag_setup(self):
+        """The Laplace sums of fold_diagonal, once: with 1/x = sum_t W_t e^(-t x)
+        and every exponent split into non-negative parts (so nothing overflows),
+
+            P[t, a] = sum_c e^(-t (e_c - e_v)) sum_PQ B_acP X_t,PQ B_acQ
+            H[t, i] = sum_k e^(-t (e_o - e_k)) sum_PQ B_kiP X_t,PQ B_kiQ
+            X_t,PQ  = sum_ld B_ldP B_ldQ e^(-t (e_d - e_l - e_v + e_o))
+
+        e_v, e_o the lowest virtual and highest occupied energy. The virtuals
+        are dealt round-robin and taken in batches of tile_gb, each
+        virtual's B_vv rows whole on its rank and its sum one fixed-shape
+        product, so the bits do not depend on the rank count."""
+        f, no, nv, naux = self.f, self.no, self.nv, self.f.naux
+        eo, ev = f.eo, f.ev
+        x_hi = 2.0 * (ev.max() - eo.min())
+        s = np.arange(np.log(EE_RI_FOLD_DIAG_TAIL / x_hi),
+                      np.log(EE_RI_FOLD_DIAG_EXPONENT / EE_RI_FOLD_DIAG_GAP)
+                      + EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_STEP)
+        self.lap_t = np.exp(s)
+        self.lap_w = EE_RI_FOLD_DIAG_STEP * self.lap_t
+        gap = ev.min() - eo.max()
+        L2 = self.LT.reshape(naux, -1)
+        eld = (ev[None, :] - eo[:, None]).ravel() - gap
+        Boo2 = f.BooP.reshape(naux, no * no)
+        nt = self.lap_t.size
+        P, H = np.zeros((nt, nv)), np.empty((nt, no))
+        deal = [list(range(r, nv, self.size)) for r in range(self.size)]
+        rank = self.rank
+        nb = max(1, int(self.tile_gb * 1024 ** 3 // (8.0 * naux * nv)))
+        for b in range(max(1, -(-len(deal[0]) // nb))):
+            batch = [d[b * nb:(b + 1) * nb] for d in deal]
+            rows = self._bvv_rows(batch)
+            for j, t in enumerate(self.lap_t):
+                Xt = (L2 * np.exp(-t * eld)) @ L2.T
+                ec = np.exp(-t * (ev - ev.min()))
+                for a, Ba in zip(batch[rank], rows):
+                    P[j, a] = np.sum(Ba * (Xt @ Ba), axis=0) @ ec
+                if b == 0:
+                    # [k, i]: sum_PQ B_kiP X_PQ B_kiQ
+                    q = np.sum(Boo2 * (Xt @ Boo2), axis=0).reshape(no, no)
+                    H[j] = np.exp(-t * (eo.max() - eo)) @ q
+            del rows
+        # each virtual's sum on one rank, zeros elsewhere: exact
+        self.lap_p = reduce_sum(P, self.comm)
+        self.lap_h = H
+
+    def _bvv_rows(self, batch):
+        """B^P_ac (naux, nv) for each a in batch[rank], batch[r] the virtuals
+        rank r wants: views of the whole B_vv, or gathered from the auxiliary
+        chunks' owners in one exchange_blocks that every rank enters."""
+        f, nv, naux = self.f, self.nv, self.f.naux
+        rank = self.rank
+        if f.Bvv is not None:
+            return [f.Bvv[a] for a in batch[rank]]
+        mine_of = [[c for c, o in enumerate(self.owners) if o == r]
+                   for r in range(self.size)]
+        send = [np.concatenate([np.ravel(f.bvv(c, *self.chunks[c])[a])
+                                for a in batch[r] for c in self.my_chunks] or
+                               [np.empty(0)]) for r in range(self.size)]
+        shapes = [(len(batch[rank]) * nv * sum(self.chunks[c][1] - self.chunks[c][0]
+                                                for c in mine_of[r]),)
+                  for r in range(self.size)]
+        got = exchange_blocks(send, shapes, self.comm)
+        out = [np.empty((naux, nv)) for _ in batch[rank]]
+        for r in range(self.size):
+            off = 0
+            for k in range(len(out)):
+                for c in mine_of[r]:
+                    p0, p1 = self.chunks[c]
+                    out[k][p0:p1] = got[r][off:off + (p1 - p0) * nv].reshape(p1 - p0, nv)
+                    off += (p1 - p0) * nv
+        return out
+
+    def fold_diagonal(self, omega):
+        """The configuration-dependent model of the folded doubles' diagonal at
+        omega, (no nv,), Hartree: -EE_RI_FOLD_DIAG_PARTICLE times the particle
+        relaxation sum_cld (ac|ld)^2 / (D - w) - EE_RI_FOLD_DIAG_HOLE times the
+        hole one sum_kld (ki|ld)^2 / (D - w); zeros without doubles. For the
+        block solver's seeds: the spread over the configurations, not the level."""
+        if self.level != 'adc2':
+            return np.zeros(self.n)
+        eo, ev, t = self.f.eo, self.f.ev, self.lap_t
+        gap = ev.min() - eo.max()
+        # the rest of each exponent, >= d_min - w for every configuration
+        rp = np.maximum(2.0 * ev.min() - eo.max() - eo - omega, 0.0)       # (no,)
+        rh = np.maximum(ev + gap - eo.max() - omega, 0.0)                  # (nv,)
+        part = (self.lap_w[None, :] * np.exp(-np.outer(rp, t))) @ self.lap_p
+        hole = (self.lap_w[None, :] * np.exp(-np.outer(rh, t))) @ self.lap_h
+        return -(EE_RI_FOLD_DIAG_PARTICLE * part
+                 + EE_RI_FOLD_DIAG_HOLE * hole.T).ravel()
+
+    def _triplet_amplitudes(self, I, k0):
+        """T[k, c, l, d] = -(kd|lc) / D_kcld of a tile, from I = (kc|ld)."""
+        T = np.empty_like(I)
+
+        def seg(k, c0, c1):
+            T[k, c0:c1] = -I[k, :, :, c0:c1].transpose(2, 1, 0) / self._denom(k0 + k, c0, c1)
+        self._rows(I.shape[0], seg)
+        return T
+
+    def _amplitudes(self, t, k0, k1):
+        """The spin channel's MP1 amplitudes of tile t: cached, or rebuilt from
+        (kc|ld) by the same arithmetic, so the bits do not depend on the cache."""
+        if t in self._T:
+            return self._T[t]
+        I = self._ints(k0, k1)
+        if self.spin != 'singlet':
+            return self._triplet_amplitudes(I, k0)
+        T = np.empty_like(I)
+
+        def seg(k, c0, c1):
+            T[k, c0:c1] = (2.0 * I[k, c0:c1] - I[k, :, :, c0:c1].transpose(2, 1, 0)
+                           ) / self._denom(k0 + k, c0, c1)
+        self._rows(k1 - k0, seg)
+        return T
 
     # ---- global (cheap) pieces of a product ------------------------------
 
@@ -340,61 +690,132 @@ class RIFoldADC2:
         """sum_jb (ia|jb) X_jb, X (no nv, m)."""
         return self.f.L @ (self.f.L.T @ X)
 
-    def _exchange_oovv(self, X):
-        """sum_jb (ij|ab) X_jb, X (no nv, m)."""
-        f, no, nv = self.f, self.no, self.nv
-        out = np.empty_like(X)
-        Bvv2 = f.Bvv.reshape(nv, -1)                    # [b, (P, a)]
-        Boo2 = f.Boo.reshape(no, -1)                    # [i, (j, P)]
-        for j in range(X.shape[1]):
-            Y = X[:, j].reshape(no, nv) @ Bvv2          # [j, (P, a)]
-            out[:, j] = (Boo2 @ Y.reshape(-1, nv)).ravel()
-        return out
+    def _exchange(self, X, kinds):
+        """The exchange terms of X (no nv, m) named in kinds, each (no nv, m):
+        'ovov' sum_kc (ic|ka) X_kc, 'oovv' sum_jb (ij|ab) X_jb; summed over
+        auxiliary chunks dealt over the ranks, every column of X at once."""
+        f, no, nv, m = self.f, self.no, self.nv, X.shape[1]
+        Xc = X.reshape(no, nv, m)
+        if 'ovov' in kinds:
+            Xcat = np.ascontiguousarray(Xc.transpose(1, 0, 2)).reshape(nv, no * m)
+        if 'oovv' in kinds:
+            Xs = np.ascontiguousarray(Xc.transpose(2, 0, 1)).reshape(m * no, nv)
+        terms = {}
+        for c in self.my_chunks:
+            p0, p1 = self.chunks[c]
+            pc = p1 - p0
+            t = np.empty((len(kinds), no * nv, m))
+            for q, kind in enumerate(kinds):
+                if kind == 'ovov':
+                    # LTc[(P, i), c] = L_icP, read again as [(P, k), a] = L_kaP
+                    LTc = self.LT[p0:p1].reshape(pc * no, nv)
+                    # Z[P, i, k, j] = sum_c L_icP x^j_kc: O(no^2 nv naux)
+                    Z = (LTc @ Xcat).reshape(pc, no, no, m)
+                    # t^j_ia = sum_Pk Z[P, i, k, j] L_kaP
+                    Zt = np.ascontiguousarray(Z.transpose(3, 1, 0, 2)
+                                              ).reshape(m * no, pc * no)
+                    t[q] = (Zt @ LTc).reshape(m, no * nv).T
+                else:
+                    # Y[(j, k), (P, a)] = sum_b x^j_kb B_baP, B_vv symmetric
+                    Bc = f.bvv(c, p0, p1).reshape(nv, pc * nv)
+                    Y = (Xs @ Bc).reshape(m, no * pc, nv)
+                    # t^j_ia = sum_kP B_ikP Y[(j, k), (P, a)]
+                    Boo2 = np.ascontiguousarray(f.Boo[:, :, p0:p1]).reshape(no, -1)
+                    for j in range(m):
+                        t[q, :, j] = (Boo2 @ Y[j]).ravel()
+            terms[c] = t
+        return ordered_chain_sum(terms, self.owners, self.comm,
+                                 np.zeros((len(kinds), no * nv, m)))
 
-    def _exchange_ovov(self, X):
-        """sum_kc (ic|ka) X_kc, X (no nv, m), in auxiliary chunks."""
-        f, no, nv = self.f, self.no, self.nv
-        L3 = f.L.reshape(no, nv, -1)
-        out = np.zeros_like(X)
-        step = max(1, int(EE_RI_TILE_GB * 1024 ** 3 / (8.0 * 3 * nv * nv)))
-        for p0 in range(0, f.naux, step):
-            p1 = min(p0 + step, f.naux)
-            Lp = np.ascontiguousarray(L3[:, :, p0:p1])            # (k, a, P)
-            Lp2 = Lp.reshape(no, -1)
-            for j in range(X.shape[1]):
-                x = X[:, j].reshape(no, nv)
-                # W[c, a, P] = sum_k x_kc L_kaP; out_ia += sum_cP L_icP W_caP
-                W = (x.T @ Lp2).reshape(nv, nv, p1 - p0)
-                W = np.ascontiguousarray(W.transpose(0, 2, 1)).reshape(-1, nv)
-                out[:, j] += (Lp2 @ W).ravel()
-        return out
-
-    def _k_apply(self, X):
-        """K X: singlet 2 (ia|kc) - (ic|ka), triplet -(ic|ka)."""
-        ex = self._exchange_ovov(X)
+    def _k_apply(self, X, ex=None):
+        """K X: singlet 2 (ia|kc) - (ic|ka), triplet -(ic|ka); ex the term
+        sum_kc (ic|ka) X_kc where already made."""
+        if ex is None:
+            ex = self._exchange(X, ('ovov',))[0]
         if self.spin == 'singlet':
             return 2.0 * self._coulomb(X) - ex
         return -ex
 
     def _dressed(self, x):
-        """Bt[k, c, P] = sum_i B_kiP x_ic - sum_a x_ka B_aPc, as (no nv, naux)."""
+        """Bt^P_kc = sum_i B_kiP x_ic - sum_a x_ka B_aPc, auxiliary-major as
+        (naux, no nv): each rank forms the rows of its auxiliary chunks, which
+        travel verbatim to every rank (allgather_ranges)."""
         f, no, nv = self.f, self.no, self.nv
-        x = x.reshape(no, nv)
-        t = (f.BooT.reshape(-1, no) @ x).reshape(no, -1, nv)       # [k, P, c]
-        t -= (x @ f.Bvv.reshape(nv, -1)).reshape(no, -1, nv)
-        return np.ascontiguousarray(t.transpose(0, 2, 1)).reshape(no * nv, -1)
+        x = np.ascontiguousarray(x, float).reshape(no, nv)
+        BtT = np.zeros((f.naux, no * nv))
+        for c in self.my_chunks:
+            p0, p1 = self.chunks[c]
+            pc = p1 - p0
+            t = f.BooP[p0:p1] @ x                                       # [P, k, c]
+            t -= (x @ f.bvv(c, p0, p1).reshape(nv, -1)).reshape(no, pc, nv
+                                                                ).transpose(1, 0, 2)
+            BtT[p0:p1] = t.reshape(pc, -1)
+        return allgather_ranges(BtT, self.chunk_ranges, self.comm)
 
-    def _back(self, Gam, k0, k1):
-        """The rows k0..k1-1 of G, Gam (kt nv, naux), carried back to the
-        singles: sum_P [sum_k B_kjP Gam_kbP - sum_c Gam_jcP B_cPb], (no nv,)."""
+    def _pair(self, BtT, k0, k1):
+        """(H, H^T) of a tile, each (kt, nv, no, nv): H_kc,ld = sum_P Bt_kcP B_ldP
+        and H^T_kc,ld = sum_P B_kcP Bt_ldP, from the auxiliary-major factors."""
+        nv, no = self.nv, self.no
+        kt, rows = k1 - k0, slice(k0 * nv, k1 * nv)
+        LT2 = self.LT.reshape(self.f.naux, -1)
+        H = (BtT[:, rows].T @ LT2).reshape(kt, nv, no, nv)
+        HT = (LT2[:, rows].T @ BtT).reshape(kt, nv, no, nv)
+        return H, HT
+
+    def _back_oo(self, Gam, k0, k1):
+        """sum_kP B_kjP Gam_kbP of the rows k0..k1-1 of G, Gam (..., kt nv, naux),
+        (..., no nv): the B_oo half of the back-transformation, local to a tile."""
         f, no, nv = self.f, self.no, self.nv
         kt = k1 - k0
-        GkPb = np.ascontiguousarray(Gam.reshape(kt, nv, -1).transpose(0, 2, 1)
-                                    ).reshape(-1, nv)                 # [(k, P), b]
+        lead = Gam.shape[:-2]
+        GkPb = np.ascontiguousarray(Gam.reshape(lead + (kt, nv, -1)).swapaxes(-1, -2)
+                                    ).reshape(lead + (-1, nv))       # [(k, P), b]
         Bjk = np.ascontiguousarray(f.Boo[k0:k1].transpose(1, 0, 2)).reshape(no, -1)
-        out = Bjk @ GkPb
-        out[k0:k1] -= Gam.reshape(kt, -1) @ f.Bvv.reshape(-1, nv)
-        return out.ravel()
+        return (Bjk @ GkPb).reshape(lead + (-1,))
+
+    def _back_vv(self, gams, p):
+        """-sum_cP Gam_kcP B_cPb for every tile's rows, gams {t: (p, kt nv, naux)}
+        of this rank's tiles: each auxiliary slice goes to its chunk's owner
+        (exchange_blocks), which contracts it with its B_vv chunk; the chunks are
+        summed in chunk order (ordered_chain_sum). Returns (p, no nv), every rank."""
+        f, nv, no = self.f, self.nv, self.no
+        rank = self.rank
+        mine_of = [[c for c, o in enumerate(self.owners) if o == r]
+                   for r in range(self.size)]
+        tiles_of = [list(range(r, len(self.tiles), self.size))
+                    for r in range(self.size)]
+
+        def width(t, c):
+            return p * (self.tiles[t][1] - self.tiles[t][0]) * nv * (
+                self.chunks[c][1] - self.chunks[c][0])
+
+        send = [np.concatenate([np.ravel(gams[t][:, :, slice(*self.chunks[c])])
+                                for t in tiles_of[rank] for c in mine_of[s]] or
+                               [np.empty(0)]) for s in range(self.size)]
+        shapes = [(sum(width(t, c) for t in tiles_of[r] for c in mine_of[rank]),)
+                  for r in range(self.size)]
+        got = exchange_blocks(send, shapes, self.comm)
+        # where each (tile, chunk) block lies in what rank r sent
+        at = {}
+        for r in range(self.size):
+            off = 0
+            for t in tiles_of[r]:
+                for c in self.my_chunks:
+                    at[t, c] = (r, off)
+                    off += width(t, c)
+        terms = {}
+        for c in self.my_chunks:
+            p0, p1 = self.chunks[c]
+            # every tile's rows of the chunk in one (p no, nv pc) block, so the
+            # chunk is read once and the product's shape is the rank count's none
+            Gc = np.empty((p, no, nv * (p1 - p0)))
+            for t, (k0, k1) in enumerate(self.tiles):
+                r, off = at[t, c]
+                Gc[:, k0:k1] = got[r][off:off + width(t, c)].reshape(
+                    p, k1 - k0, nv * (p1 - p0))
+            terms[c] = -(Gc.reshape(p * no, -1) @ f.bvv(c, p0, p1).reshape(-1, nv)
+                         ).reshape(p, no * nv)
+        return ordered_chain_sum(terms, self.owners, self.comm, np.zeros((p, no * nv)))
 
     # ---- the product -------------------------------------------------------
 
@@ -402,7 +823,9 @@ class RIFoldADC2:
         """(A_eff U, |Y|^2): U (n, m); omegas None (M alone) or (m,) Hartree,
         one frequency per column. |Y|^2 (m,) is sum_K Y_K^2 of the doubles
         image Y = (D - w)^-1 C^T u (zeros without omegas)."""
-        U = np.asarray(U, float)
+        # contiguous, as the MPI stand-in hands it: a Davidson's strided or
+        # column-major block would take other BLAS paths and change the bits
+        U = np.ascontiguousarray(U, float)
         if U.ndim == 1:
             U = U[:, None]
         m = U.shape[1]
@@ -410,8 +833,10 @@ class RIFoldADC2:
         no, nv = self.no, self.nv
         singlet = self.spin == 'singlet'
         out = self.delta[:, None] * U
-        ex = self._exchange_oovv(U)
-        out += (2.0 * self._coulomb(U) - ex) if singlet else -ex
+        # one pass over the auxiliary chunks for both exchange terms of U
+        ex = self._exchange(U, ('oovv',) if self.level == 'adc1'
+                            else ('oovv', 'ovov'))
+        out += (2.0 * self._coulomb(U) - ex[0]) if singlet else -ex[0]
         if self.rf is not None and singlet:
             out += 2.0 * self.rf.apply(U)
         norms = np.zeros(m)
@@ -420,57 +845,47 @@ class RIFoldADC2:
         for j in range(m):
             u = U[:, j].reshape(no, nv)
             out[:, j] += (self.xo @ u + u @ self.xv).ravel()
-        KU = self._k_apply(U)
+        KU = self._k_apply(U, ex[1])
         W = np.concatenate([U, KU], axis=1)            # (n, 2m)
         # T W by tiles of rows; rows of other ranks' tiles stay zero, so the
         # sum over ranks is exact in any order
         TW = np.zeros_like(W)
         for t, (k0, k1) in self.my_tiles:
             kt = k1 - k0
-            rows = slice(k0 * nv, k1 * nv)
-            I = self._ints(k0, k1)
-            T = np.empty_like(I)
-
-            def seg_t(k, c0, c1, I=I, T=T, k0=k0):
-                Ax = I[k, :, :, c0:c1].transpose(2, 1, 0)
-                D = self._denom(k0 + k, c0, c1)
-                if singlet:
-                    T[k, c0:c1] = (2.0 * I[k, c0:c1] - Ax) / D
-                else:
-                    T[k, c0:c1] = -Ax / D
-
-            self._rows(kt, seg_t)
-            TW[rows] = T.reshape(kt * nv, -1) @ W
-            del T, I
+            T = self._amplitudes(t, k0, k1)
+            TW[k0 * nv:k1 * nv] = T.reshape(kt * nv, -1) @ W
+            del T
         reduce_sum(TW, self.comm)
         out -= 0.5 * (self._k_apply(TW[:, :m]) + TW[:, m:])
         if omegas is None:
             return out, norms
         # the doubles, one vector at a time: one dressed factor is held
         omegas = np.broadcast_to(np.asarray(omegas, float), (m,))
-        parts = []
         for j in range(m):
-            Bt = self._dressed(U[:, j])
+            BtT = self._dressed(U[:, j])
+            Btg = None if self.gpu is None else self.gpu.upload(BtT)
+            parts, gams = [], {}
             for t, (k0, k1) in self.my_tiles:
-                img, nrm = self._doubles_tile(k0, k1, Bt, omegas[j])
-                parts.append(((t, j), np.concatenate([img, [nrm]])))
-            del Bt
-        # per column, the tiles in tile order
-        for j in range(m):
-            mine = [(t, a) for (t, jj), a in parts if jj == j]
-            tot = ordered_sum(mine, self.comm, shape=(self.n + 1,),
+                Gam, img, nrm = (self._doubles_tile(k0, k1, BtT, omegas[j])
+                                 if Btg is None else
+                                 self.gpu.doubles_tile(k0, k1, Btg, omegas[j]))
+                parts.append((t, np.concatenate([img, [nrm]])))
+                gams[t] = Gam[None]
+            del BtT
+            # the tiles in tile order, then the B_vv half in chunk order
+            tot = ordered_sum(parts, self.comm, shape=(self.n + 1,),
                               onto=np.zeros(self.n + 1))
             out[:, j] += tot[:-1]
+            out[:, j] += self._back_vv(gams, 1)[0]
             norms[j] = tot[-1]
         return out, norms
 
-    def _doubles_tile(self, k0, k1, Bt, omega):
-        """One tile of the doubles: (its folded image (no nv,), its |Y|^2)."""
-        nv, no, L = self.nv, self.no, self.f.L
+    def _doubles_tile(self, k0, k1, BtT, omega):
+        """One tile of the doubles: (Gam (kt nv, naux), the B_oo half of its
+        folded image (no nv,), its |Y|^2)."""
+        nv, L = self.nv, self.f.L
         kt = k1 - k0
-        rows = slice(k0 * nv, k1 * nv)
-        H = (Bt[rows] @ L.T).reshape(kt, nv, no, nv)
-        HT = (L[rows] @ Bt.T).reshape(kt, nv, no, nv)
+        H, HT = self._pair(BtT, k0, k1)
         singlet = self.spin == 'singlet'
         if singlet:
             def seg_g(k, c0, c1):
@@ -498,7 +913,67 @@ class RIFoldADC2:
         nrm = sum(self._rows(kt, seg_r))
         Gam = R.reshape(kt * nv, -1) @ L
         del H, HT, R
-        return self._back(Gam, k0, k1), nrm
+        return Gam, self._back_oo(Gam, k0, k1), nrm
+
+    def fold_images(self, U, nodes):
+        """(M U, F): F (p, n, m), F[q] = sum_K C_K (C^T U)_K / (w_q - D_K) =
+        A_eff(w_q) U - M U at each of the p frequencies w_q; a column's doubles
+        are built once and only the denominator changes between frequencies."""
+        # contiguous: a strided column would leave BLAS and change the bits
+        U = np.ascontiguousarray(U, float)
+        if U.ndim == 1:
+            U = U[:, None]
+        nodes = np.atleast_1d(np.asarray(nodes, float))
+        n, m, p = self.n, U.shape[1], nodes.size
+        MU = self.apply(U, None)[0]
+        self.image_columns += m
+        self.node_images += m * p
+        if self.level == 'adc1':
+            return MU, np.zeros((p, n, m))
+        F = np.empty((p, n, m))
+        for j in range(m):
+            BtT = self._dressed(U[:, j])
+            Btg = None if self.gpu is None else self.gpu.upload(BtT)
+            parts, gams = [], {}
+            for t, (k0, k1) in self.my_tiles:
+                gams[t], img = (self._images_tile(k0, k1, BtT, nodes)
+                                if Btg is None else
+                                self.gpu.images_tile(k0, k1, Btg, nodes))
+                parts.append((t, img.ravel()))
+            del BtT, Btg
+            # the tiles in tile order, then the B_vv half in chunk order
+            F[:, :, j] = ordered_sum(parts, self.comm, shape=(p * n,),
+                                     onto=np.zeros(p * n)).reshape(p, n)
+            F[:, :, j] += self._back_vv(gams, p)
+        return MU, F
+
+    def _images_tile(self, k0, k1, BtT, nodes):
+        """One tile at the frequencies nodes: (Gam (p, kt nv, naux), the B_oo
+        half of its images (p, no nv))."""
+        nv, no, L = self.nv, self.no, self.f.L
+        kt = k1 - k0
+        H, HT = self._pair(BtT, k0, k1)
+        # S = H + H^T, held in HT
+        def seg_s(k, c0, c1):
+            HT[k, c0:c1] += H[k, c0:c1]
+        self._rows(kt, seg_s)
+        if self.spin == 'singlet':
+            # Gt = 2 S - S~, held in H: R = w Gt at every frequency
+            def seg_g(k, c0, c1):
+                H[k, c0:c1] = 2.0 * HT[k, c0:c1] - HT[k, :, :, c0:c1].transpose(2, 1, 0)
+        else:
+            # Gt = 2 H - S~, held in H
+            def seg_g(k, c0, c1):
+                H[k, c0:c1] = 2.0 * H[k, c0:c1] - HT[k, :, :, c0:c1].transpose(2, 1, 0)
+        self._rows(kt, seg_g)
+        Gt, R = H, HT
+        gams = np.empty((nodes.size, kt * nv, self.f.naux))
+        for q, w in enumerate(nodes):
+            def seg_r(k, c0, c1, w=w):
+                R[k, c0:c1] = Gt[k, c0:c1] / (w - self._denom(k0 + k, c0, c1))
+            self._rows(kt, seg_r)
+            gams[q] = R.reshape(kt * nv, -1) @ L
+        return gams, self._back_oo(gams, k0, k1)
 
     def doubles_dot(self, ur, wr, us, ws):
         """sum_K Y_K(ur, wr) Y_K(us, ws), the doubles images' overlap."""
@@ -512,14 +987,8 @@ class RIFoldADC2:
         parts = []
         for t, (k0, k1) in self.my_tiles:
             kt = k1 - k0
-            rows = slice(k0 * nv, k1 * nv)
-            Hr = (Br[rows] @ L.T).reshape(kt, nv, no, nv)
-            Tr = (L[rows] @ Br.T).reshape(kt, nv, no, nv)
-            if same:
-                Hs, Ts = Hr, Tr
-            else:
-                Hs = (Bs[rows] @ L.T).reshape(kt, nv, no, nv)
-                Ts = (L[rows] @ Bs.T).reshape(kt, nv, no, nv)
+            Hr, Tr = self._pair(Br, k0, k1)
+            Hs, Ts = (Hr, Tr) if same else self._pair(Bs, k0, k1)
 
             def seg(k, c0, c1):
                 D = self._denom(k0 + k, c0, c1)
@@ -595,10 +1064,28 @@ class _RootDriven:
         Y = self.act(np.vstack([U, om[None, :], np.zeros((1, m))]))
         return Y[:self.n], Y[self.n]
 
+    def fold_images(self, U, nodes):
+        U = np.asarray(U, float)
+        if U.ndim == 1:
+            U = U[:, None]
+        nodes = np.atleast_1d(np.asarray(nodes, float))
+        n, m, p = self.n, U.shape[1], nodes.size
+        # columns: U, padded to hold the nodes in row n; row n+1 the tag 2,
+        # then m and p
+        X = np.zeros((n + 2, max(m, p, 3)))
+        X[:n, :m], X[n, :p] = U, nodes
+        X[n + 1, :3] = 2.0, m, p
+        Y = self.act(X)
+        return Y[:n], Y[n:].reshape(p, n, m)
+
     def doubles_dot(self, ur, wr, us, ws):
         X = np.column_stack([np.concatenate([np.ravel(ur), [wr, 1.0]]),
                              np.concatenate([np.ravel(us), [ws, 1.0]])])
         return float(self.act(X)[0, 0])
+
+    def fold_diagonal(self, omega):
+        # made at construction on every rank: local
+        return self.op.fold_diagonal(omega)
 
     def pieces(self):
         p = self.op.pieces()
@@ -622,6 +1109,10 @@ def drive(op, solve):
             om = X[n]
             AU, nrm = op.apply(X[:n], None if np.isnan(om[0]) else om)
             return np.vstack([AU, nrm[None, :]])
+        if X[n + 1, 0] == 2.0:
+            m, p = int(X[n + 1, 1]), int(X[n + 1, 2])
+            MU, F = op.fold_images(X[:n, :m], X[n, :p])
+            return np.vstack([MU, F.reshape(p * n, m)])
         return np.array([[op.doubles_dot(X[:n, 0], X[n, 0], X[:n, 1], X[n, 1])]])
 
     return root_driven_solve(lambda act: solve(_RootDriven(op, act)),

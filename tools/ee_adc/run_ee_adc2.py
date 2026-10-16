@@ -20,8 +20,9 @@ prints the problem's size, the memory the operator holds and the floating
 point work of one product, and exits.
 
 --distribute runs over MPI ranks (srun -n N): every rank converges the same
-SCF and takes rank 0's orbitals, holds the DF factors whole and works on its
-share of the occupied tiles of each product; rank 0 alone iterates and writes.
+SCF and takes rank 0's orbitals, holds L and B_oo once per node, B_vv in its
+share of the auxiliary chunks and the MP1 amplitudes of its occupied tiles, and
+works on those tiles in each product; rank 0 alone iterates and writes.
 """
 import argparse
 import hashlib
@@ -52,7 +53,8 @@ sys.path.insert(0, ROOT)
 import numpy as np                                                  # noqa: E402
 from pyscf import df, gto, lib, scf                                 # noqa: E402
 
-from src.Base.constants import EE_RI_TILE_GB, HARTREE_TO_EV        # noqa: E402
+from src.Base.constants import (EE_RI_AMPLITUDE_CACHE_GB,           # noqa: E402
+                                EE_RI_TILE_GB, HARTREE_TO_EV)
 from src.Base.utils.mpi_grid import (distributed, grid_comm,        # noqa: E402
                                      lockstep_mean_field)
 from src.Base.utils.threads import blas_threads, openmp_threads    # noqa: E402
@@ -94,26 +96,33 @@ def peak_rss_gb():
     return r / (1024 ** 3 if platform.system() == 'Darwin' else 1024 ** 2)
 
 
-def estimate(mol, nfrozen, auxbasis, jk_auxbasis, tile_gb):
-    """Sizes, memory one process holds (GB) and the work of one product (flop).
+def estimate(mol, nfrozen, auxbasis, jk_auxbasis, tile_gb, ranks=1):
+    """Sizes, memory one process of `ranks` holds (GB) and the work of one
+    product (flop).
 
     The SCF holds the JK fit's AO tensor; the factor build the correlation
-    fit's AO tensor beside the MO factors; a product the factors, one tile
-    and two (nocc nvir, naux) arrays of the vector it is on."""
+    fit's AO tensor beside the MO factors; a product the factors (L and B_oo
+    whole, B_vv and the kept MP1 amplitudes this rank's share), one tile and
+    two (nocc nvir, naux) arrays of the vector it is on; the fold diagonal's
+    setup a batch of whole B_vv rows of at most one tile."""
     no = mol.nelectron // 2 - nfrozen
     nv = mol.nao - mol.nelectron // 2
     naux = df.make_auxmol(mol, auxbasis).nao
     naux_jk = df.make_auxmol(mol, jk_auxbasis).nao
     gb = 8.0 / 1024 ** 3
     npair = mol.nao * (mol.nao + 1) / 2
-    factors = (no * nv * naux + 2 * no * no * naux + nv * nv * naux) * gb
+    amplitudes = min(EE_RI_AMPLITUDE_CACHE_GB, (no * nv) ** 2 * gb / ranks)
+    factors = (no * nv * naux + no * no * naux + nv * nv * naux / ranks) * gb
     tile = min(tile_gb, 5 * no * nv * nv * no * gb)
     per_vector = 2 * no * nv * naux * gb
+    fold_diag = min(tile_gb, nv * nv * naux * gb / ranks) + naux * naux * gb
     flop_m = 2.0 * (no * nv) ** 2 * naux
     peak = max(npair * naux_jk * gb,
-               factors + max(npair * naux * gb, tile + per_vector))
+               factors + amplitudes + max(npair * naux * gb, tile + per_vector,
+                                          fold_diag))
     return dict(nocc_active=no, nvir=nv, naux=naux, naux_jk=naux_jk,
-                nfrozen=nfrozen, factors_gb=factors, tile_gb=tile,
+                nfrozen=nfrozen, ranks=ranks, factors_gb=factors,
+                amplitudes_gb=amplitudes, tile_gb=tile,
                 per_vector_gb=per_vector, cderi_jk_gb=npair * naux_jk * gb,
                 cderi_ri_gb=npair * naux * gb, peak_gb=peak,
                 flop_singles_product=flop_m, flop_folded_product=4 * flop_m)
@@ -170,9 +179,14 @@ def main():
     p.add_argument('--scf-conv-tol-grad', type=float, default=1e-6)
     p.add_argument('--max-memory', type=int, default=4000, help='MB')
     p.add_argument('--tile-gb', type=float, default=EE_RI_TILE_GB)
+    p.add_argument('--device', default='cpu', choices=('cpu', 'gpu'),
+                   help='gpu: the doubles kernel on each rank\'s GPU (CuPy)')
     p.add_argument('--out-dir', required=True)
     p.add_argument('--label', default=None)
     p.add_argument('--estimate-only', action='store_true')
+    p.add_argument('--ranks', type=int, default=None,
+                   help='ranks the estimate divides the split factors over '
+                        '(default: the launch\'s)')
     p.add_argument('--distribute', action='store_true',
                    help='run over the MPI ranks of the launch')
     args = p.parse_args()
@@ -190,7 +204,8 @@ def run(args, comm):
                 verbose=4 if root and not args.estimate_only else 0,
                 max_memory=args.max_memory)
     nfrozen = frozen_core(mol) if args.frozen == 'auto' else int(args.frozen)
-    est = estimate(mol, nfrozen, args.auxbasis, args.jk_auxbasis, args.tile_gb)
+    ranks = args.ranks or (1 if comm is None else comm.Get_size())
+    est = estimate(mol, nfrozen, args.auxbasis, args.jk_auxbasis, args.tile_gb, ranks)
     say(json.dumps(dict(estimate=est, nao=mol.nao, natm=mol.natm,
                         ranks=1 if comm is None else comm.Get_size(),
                         blas_threads=blas_threads(),
@@ -253,14 +268,16 @@ def run(args, comm):
                                  nroots=args.nroots, fold=True, frozen=nfrozen,
                                  auxbasis=args.auxbasis, environment=env,
                                  conv_tol=args.conv_tol, return_fold=True,
-                                 tile_gb=args.tile_gb)
+                                 tile_gb=args.tile_gb, device=args.device)
         op = res.operator
         ch = dict(omega_eV=(np.asarray(e) * HARTREE_TO_EV).tolist(),
                   singles_weight_T1=np.asarray(res.t1).tolist(),
                   converged=np.asarray(res.converged).tolist(),
                   newton_steps=np.asarray(res.steps).tolist(),
                   loop=list(res.loop), level=np.asarray(res.level).tolist(),
-                  e_mp2=op.e_mp2, product_columns=op.matvecs, tile_k=op.kt,
+                  e_mp2=op.e_mp2, product_columns=op.matvecs,
+                  image_columns=op.image_columns, node_images=op.node_images,
+                  tile_k=op.kt,
                   wall_s=time.time() - t, peak_rss_gb=peak_rss_gb())
         if root:
             with open(path, 'w') as fh:

@@ -39,6 +39,7 @@ import warnings
 
 import numpy as np
 from pyscf import scf as _scf
+from pyscf.lib import logger
 
 from src.Base.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
@@ -46,10 +47,11 @@ from src.Base.pyscf_interface import (
     DFIntegrals)
 from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_r_sigma, ee_r_sigma_df, ee_utils)
-from src.Base.constants import EE_RI_TILE_GB
+from src.Base.constants import EE_FOLD_RESIDUAL_GAP, EE_RI_TILE_GB
 from src.Base.environment import attached_environment, resolve_environment
 from src.Base.utils import memory
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Base.utils.mpi_grid import current_comm
 from src.Solvers.davidson import diagonal_seeds, solve_symmetric
 
 DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
@@ -93,7 +95,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  en_dress=None, frozen=0, auxbasis=None,
                  ms_sector='auto', max_subspace=None, return_parity=False,
                  dense_limit=None, threshold=5000, fold=False,
-                 environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB):
+                 environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
+                 device='cpu'):
     """(e, Z): the lowest `nroots` excitation energies and their vectors.
 
     en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
@@ -122,7 +125,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     docstring): Z is then the singles part of each full eigenvector,
     sqrt(T1) y, on the flat spin-orbital singles layout (2 nocc nvir, frozen
     orbitals dropped); conv_tol is both its residual and its frequency
-    tolerance (Hartree); tile_gb bounds a tile's working set. return_fold
+    tolerance (Hartree); tile_gb bounds a tile's working set; device 'gpu' runs
+    the folded route's doubles kernel on each rank's GPU. return_fold
     adds the ee_fold.FoldResult (singles weights T1, steps, converged).
 
     environment: a continuum, or None for the one attached to mf (if any);
@@ -139,7 +143,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if fold:
         return _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol,
                                 en_dress, frozen, auxbasis, dense_limit,
-                                return_fold, env, tile_gb, route)
+                                return_fold, env, tile_gb, route, device)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
@@ -217,7 +221,8 @@ def _bare(mf):
 
 
 def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
-                     auxbasis, dense_limit, return_fold, env, tile_gb, route):
+                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
+                     device='cpu'):
     """fold=True: the density-fitted tiled fold of ee_ri_fold."""
     from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
@@ -233,21 +238,25 @@ def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
     if auxbasis == 'exact':
         raise ValueError("fold=True takes a real auxiliary basis, not 'exact'")
     with _bare(mf):
+        # over MPI ranks each keeps B_vv in its own auxiliary chunks only
         factors = ee_ri_fold.bare_factors(mol, mf, frozen=frozen,
-                                          auxbasis=auxbasis)
+                                          auxbasis=auxbasis, comm=current_comm())
     rf = (None if env is None else
           ee_ri_fold.TransitionReactionField.from_environment(env, mol, mf,
                                                               frozen))
     # over MPI ranks the operator's tiles are shared out and rank 0 alone
     # iterates (ee_ri_fold.drive); serially this is the plain solve
     op = ee_ri_fold.RIFoldADC2(factors, spin, level=level, reaction_field=rf,
-                               tile_gb=tile_gb)
+                               tile_gb=tile_gb, device=device)
 
     def solve(o):
         if level == 'adc2':
-            r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin,
-                                     tol_omega=conv_tol, tol_residual=conv_tol,
-                                     dense_limit=dense_limit)
+            # the roots' error goes as the residual squared
+            r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, tol_omega=conv_tol,
+                                     tol_residual=max(conv_tol, np.sqrt(
+                                         conv_tol * EE_FOLD_RESIDUAL_GAP)),
+                                     dense_limit=dense_limit, method='block',
+                                     verbose=int(mol.verbose >= logger.INFO))
         else:
             r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
         return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,

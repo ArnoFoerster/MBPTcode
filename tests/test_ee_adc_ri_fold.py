@@ -30,6 +30,16 @@ second-order term keeping the bare interaction. Checks:
   9. over simulated MPI ranks (2 and 3, one tile per occupied orbital) the
      operator's set-up, its products and the folded roots driven from rank 0
      are the serial ones bit for bit, on every rank.
+ 10. B_vv split over the ranks: bare_factors on rank r of 3 keeps exactly its
+     auxiliary chunks, bit for bit the slices of the whole factor; over 2 and 3
+     simulated ranks each holding only its chunks, the products (M U, A_eff(w)
+     U with |Y|^2, fold_images, doubles_dot) and the block solver's roots are
+     the serial whole-factor ones bit for bit, on every rank.
+ 11. the fold-diagonal model the block solver seeds with: its Laplace sums equal
+     the direct particle and hole sums to 1e-4 relative, and, its mean matched, it
+     follows the exact diagonal of the folded doubles (correlation above 0.7,
+     rms under 0.8 of the diagonal's spread), singlets and triplets; zeros at
+     ADC(1).
 
 Run: python tests/test_ee_adc_ri_fold.py
 """
@@ -42,10 +52,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, mp, scf, tdscf
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.constants import (EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
+                                HARTREE_TO_EV)
 from src.Base.environment import NoEnvironment, attach_environment
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.solvent_screening import SolventScreening
+from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 
@@ -115,8 +127,11 @@ def check_operator(mf):
                 f'{op.e_mp2:.12f} vs {e_ref:.12f}')
     # check 3: the bare factors
     G = ee_ri_fold.bare_factors(mol, mf)
+    # B_vv comes in its auxiliary chunks, all on this one rank
+    Gvv = np.concatenate([G.bvv(c, p0, p1) for c, (p0, p1) in
+                          enumerate(ee_ri_fold.aux_chunks(G.naux, G.nv, 1)[0])], axis=1)
     errf = max(float(np.abs(G.L - F.L).max()), float(np.abs(G.Boo - F.Boo).max()),
-               float(np.abs(G.Bvv - F.Bvv).max()))
+               float(np.abs(Gvv - F.Bvv).max()))
     ok &= check(errf < 1e-12, 'bare_factors equals DFIntegrals slices', f'{errf:.1e}')
     return ok
 
@@ -260,7 +275,6 @@ def check_refusals(mf):
 
 def check_ranks(mf):
     """Check 9."""
-    from src.Base.utils.mpi_grid import run_simulated
     ok = True
     mol = mf.mol
     no = mol.nelectron // 2
@@ -291,6 +305,116 @@ def check_ranks(mf):
     return ok
 
 
+class _RankStub:
+    """Get_rank/Get_size of one rank, for a build that only asks its place."""
+
+    def __init__(self, rank, size):
+        self.rank, self.size = rank, size
+
+    def Get_rank(self):
+        return self.rank
+
+    def Get_size(self):
+        return self.size
+
+
+def check_split_bvv(mf):
+    """Check 10."""
+    ok = True
+    mol = mf.mol
+    no = mol.nelectron // 2
+    # chunks of 16 auxiliary functions: several per rank at water/cc-pVDZ
+    width = 16
+    whole = ee_ri_fold.bare_factors(mol, mf, auxbasis='cc-pvdz-ri')
+    # the one-rank factor's B_vv, whole, from its own chunks
+    wvv = np.concatenate([whole.bvv(c, p0, p1) for c, (p0, p1) in enumerate(
+        ee_ri_fold.aux_chunks(whole.naux, whole.nv, 1)[0])], axis=1)
+    chunks, owners = ee_ri_fold.aux_chunks(whole.naux, whole.nv, 3, width)
+    for r in range(3):
+        part = ee_ri_fold.bare_factors(mol, mf, auxbasis='cc-pvdz-ri',
+                                       comm=_RankStub(r, 3), aux_chunk=width)
+        mine = [c for c, o in enumerate(owners) if o == r]
+        same = (part.Bvv is None and sorted(part.bvv_chunks) == mine and all(
+            np.array_equal(part.bvv_chunks[c], wvv[:, slice(*chunks[c])])
+            for c in mine) and np.array_equal(part.L, whole.L))
+        ok &= check(same, f'rank {r} of 3 keeps its B_vv chunks {mine}, bit for bit',
+                    f'{part.nbytes() / whole.nbytes():.2f} of the whole factors')
+    eps = np.asarray(get_orbital_energies(mf), float)
+    F = ee_ri_fold.RIFactors.from_full(eps, DFIntegrals.from_scf(mol, mf).B_aa, no)
+    U = np.random.default_rng(9).standard_normal((F.no * F.nv, 2))
+
+    def solve(o):
+        r = ee_fold.solve_folded(o.pieces(), 3, spin='singlet', dense_limit=0,
+                                 method='block')
+        return dict(omega=r.omega, t1=r.t1)
+
+    def products(comm):
+        size = 1 if comm is None else comm.Get_size()
+        rank = 0 if comm is None else comm.Get_rank()
+        ch, ow = ee_ri_fold.aux_chunks(F.naux, F.nv, size, width)
+        G = F if comm is None else ee_ri_fold.RIFactors(
+            F.eo, F.ev, F.L, F.Boo, None,
+            {c: np.ascontiguousarray(F.Bvv[:, slice(*ch[c])])
+             for c, o in enumerate(ow) if o == rank})
+        op = ee_ri_fold.RIFoldADC2(G, 'singlet', tile_gb=1e-9, threads=1, comm=comm,
+                                   aux_chunk=width)
+        m0 = op.apply(U, None)[0]
+        a, nrm = op.apply(U, [0.4, 0.7])
+        img = op.fold_images(U, [0.3, 0.5])[1]
+        dd = op.doubles_dot(U[:, 0], 0.4, U[:, 1], 0.6)
+        return [m0, a, nrm, img, np.array([dd]), op.diag], ee_ri_fold.drive(op, solve)
+
+    ser, ser_roots = products(None)
+    for size in (2, 3):
+        outs = run_simulated(products, size)
+        same = all(all(np.array_equal(x, y) for x, y in zip(o, ser))
+                   and np.array_equal(r['omega'], ser_roots['omega'])
+                   and np.array_equal(r['t1'], ser_roots['t1']) for o, r in outs)
+        ok &= check(same, f'{size} simulated ranks, B_vv split: products and block '
+                    'roots equal the serial whole-factor run bit for bit')
+    return ok
+
+
+def check_fold_diagonal(mf):
+    """Check 11."""
+    ok = True
+    mol = mf.mol
+    no = mol.nelectron // 2
+    eps = np.asarray(get_orbital_energies(mf), float)
+    B = DFIntegrals.from_scf(mol, mf).B_aa
+    F = ee_ri_fold.RIFactors.from_full(eps, B, no)
+    eo, ev = F.eo, F.ev
+    # (ac|ld) as [a, c, l, d] and (ki|ld) as [k, i, l, d]
+    vvov = np.einsum('aPc,ldP->acld', F.Bvv, F.L.reshape(no, F.nv, -1))
+    ooov = np.einsum('kiP,ldP->kild', F.Boo, F.L.reshape(no, F.nv, -1))
+    for spin in ee_ri_fold.SPINS:
+        op = ee_ri_fold.RIFoldADC2(F, spin, threads=2)
+        w = 0.5 * op.d_min
+        dp = np.array([np.einsum('acld,cld->a', vvov ** 2, 1.0 / (
+            w + eo[i] + eo[None, :, None] - ev[:, None, None] - ev[None, None, :]))
+            for i in range(no)])
+        dh = np.array([np.einsum('kild,kld->i', ooov ** 2, 1.0 / (
+            w - ev[a] + eo[:, None, None] + eo[None, :, None] - ev[None, None, :]))
+            for a in range(F.nv)]).T
+        model = op.fold_diagonal(w)
+        direct = (EE_RI_FOLD_DIAG_PARTICLE * dp + EE_RI_FOLD_DIAG_HOLE * dh).ravel()
+        err = float(np.abs(model - direct).max() / np.abs(direct).max())
+        ok &= check(err < 1e-4, f'{spin}: fold_diagonal is the Laplace form of the '
+                    'direct sums', f'{err:.1e} relative')
+        I = np.eye(op.n)
+        exact = np.einsum('pk,pk->k', I, op.apply(I, np.full(op.n, w))[0]
+                          - op.apply(I, None)[0])
+        shifted = model - model.mean() + exact.mean()
+        corr = float(np.corrcoef(model, exact)[0, 1])
+        rms = float(np.sqrt(np.mean((shifted - exact) ** 2)))
+        ok &= check(corr > 0.7 and rms < 0.8 * exact.std(),
+                    f'{spin}: fold_diagonal follows the exact folded diagonal',
+                    f'corr {corr:.2f}, rms {rms:.4f} vs spread {exact.std():.4f} Ha')
+    op1 = ee_ri_fold.RIFoldADC2(F, 'singlet', level='adc1', threads=2)
+    ok &= check(not np.any(op1.fold_diagonal(0.3)), 'adc1: no fold diagonal')
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     all_ok = True
@@ -304,6 +428,8 @@ def run():
         all_ok &= check_gas_default(mf)
         all_ok &= check_refusals(mf)
         all_ok &= check_ranks(mf)
+        all_ok &= check_split_bvv(mf)
+        all_ok &= check_fold_diagonal(mf)
     return all_ok
 
 
