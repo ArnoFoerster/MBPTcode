@@ -17,26 +17,60 @@ Routes:
                    `spin` there goes through the numerical CSF isometry.
 
 level in ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2').
+
+    e, Z = solve_ee_adc(mf, level='adc2', spin='singlet', fold=True,
+                        auxbasis='aug-cc-pvdz-ri', frozen=ncore)   # large molecules
+
+fold=True folds the doubles into the singles problem (ee_fold) and builds
+every doubles-shaped quantity a tile at a time from the DF factors
+(ee_ri_fold): no array of doubles size is held, so it is the route for
+molecules of a thousand basis functions. adc1 and adc2, one spin channel.
+
+environment: a polarizable continuum (src.Base.solvent_screening), given here
+or attached to the mean field. The mean field must already be relaxed in its
+eps_static continuum (`env.mean_field(mol, factory)`); the excitation's fast
+reaction field, at the optical constant, enters the singles block as the
+linear-response term 2 (ia|vtilde|jb) of singlets (nothing for triplets),
+and every second-order term keeps the bare interaction on the solvated
+orbitals -- the PTE convention, ee_ri_fold's module docstring. At adc1 this is
+TDA/CIS in linear-response PCM with a non-equilibrium (optical) response.
+
+state_specific ('off', 'vertical', 'equilibrium'; fold=True): the reaction
+field of each root's unrelaxed ISR-ADC(2) difference density, (1/2) dV Q dV
+(ee_state_specific), added to its eigenvalue: at eps_inf with the ground
+state's slow polarization frozen (vertical), or at eps_static (equilibrium);
+the LR term stays at eps_inf either way. Triplets, which have no LR term,
+take their whole response to the excitation from it.
 """
 import warnings
 
 import numpy as np
 from pyscf import scf as _scf
+from pyscf.lib import logger
 
 from src.Base.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri, get_uhf_spin_orbital_arrays_blockstacked,
     DFIntegrals)
 from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
-                                     ee_r_sigma, ee_r_sigma_df, ee_utils)
+                                     ee_r_sigma, ee_r_sigma_df, ee_utils,
+                                     ee_ri_density, ee_state_specific)
+from src.Base.constants import EE_FOLD_RESIDUAL_GAP, EE_RI_TILE_GB
+from src.Base.environment import attached_environment, resolve_environment
 from src.Base.utils import memory
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Base.utils.mpi_grid import current_comm
 from src.Solvers.davidson import diagonal_seeds, solve_symmetric
 
 DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
                         # dependent long before it converges; a 59-dim
                         # open-shell sector hit exactly that. Every route
                         # honours it.
+
+FOLD_DENSE_LIMIT = 64   # singles channel size up to which the fold builds
+                        # A_eff densely: n products per Newton step against a
+                        # Davidson's dozen, so only where Davidson would run
+                        # out of space
 
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 
@@ -68,7 +102,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  df=False, spin=None, matrix_free=True, conv_tol=1e-8,
                  en_dress=None, frozen=0, auxbasis=None,
                  ms_sector='auto', max_subspace=None, return_parity=False,
-                 dense_limit=DENSE_LIMIT, threshold=5000):
+                 dense_limit=None, threshold=5000, fold=False,
+                 environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
+                 device='cpu', state_specific='off'):
     """(e, Z): the lowest `nroots` excitation energies and their vectors.
 
     en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
@@ -82,17 +118,55 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     an Ms = 0 triplet. It labels the roots of a spin=None solve.
 
     dense_limit: configurations below which the supermatrix is built and
-    diagonalized instead of iterated on (see DENSE_LIMIT). Exposed so a test
-    can force the iterative route onto a system small enough to also solve
-    densely -- which is the only way to compare the two.
+    diagonalized instead of iterated on (see DENSE_LIMIT, the default; with
+    fold=True the singles channel's size, default FOLD_DENSE_LIMIT, since a
+    dense A_eff costs one product per configuration at every Newton step).
+    Exposed so a test can force the iterative route onto a system small
+    enough to also solve densely -- which is the only way to compare the two.
 
     threshold: configurations above which a DENSE solve is distributed over
     MPI ranks via ELPA, the same knob and the same backend the charged IP/EA
     route uses (ADCSolver.solve). Below it the solve is local. Distributed,
-    the eigenvectors come back on rank 0 only and Z is None elsewhere."""
+    the eigenvectors come back on rank 0 only and Z is None elsewhere.
+
+    fold: True solves the folded problem on density-fitted tiles (module
+    docstring): Z is then the singles part of each full eigenvector,
+    sqrt(T1) y, on the flat spin-orbital singles layout (2 nocc nvir, frozen
+    orbitals dropped); conv_tol is both its residual and its frequency
+    tolerance (Hartree); tile_gb bounds a tile's working set; device 'gpu' runs
+    the folded route's doubles kernel on each rank's GPU. return_fold
+    adds the ee_fold.FoldResult (singles weights T1, steps, converged).
+
+    environment: a continuum, or None for the one attached to mf (if any);
+    see the module docstring for the convention. Restricted closed-shell
+    spin-free routes only.
+
+    state_specific: 'off' (default), 'vertical' or 'equilibrium', fold=True
+    in a continuum only. e is then omega plus each root's state-specific
+    shift (module docstring); the FoldResult (return_fold) keeps the
+    eigenvalues in .omega, the shifts of both modes in .ss_shifts
+    ({'vertical', 'equilibrium'}, Hartree; equilibrium needs eps_static),
+    the one added in .ss_shift, and each root's active-space spatial
+    difference density in .delta_density."""
     mol = mol if mol is not None else mf.mol
     if spin is not None and spin not in _CHANNEL:
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
+    if return_fold and not fold:
+        raise ValueError('return_fold needs fold=True')
+    if dense_limit is None:
+        dense_limit = FOLD_DENSE_LIMIT if fold else DENSE_LIMIT
+    env = _reaction_field_environment(mf, mol, environment, route)
+    if ee_state_specific.check_mode(state_specific) != 'off':
+        if not fold:
+            raise NotImplementedError('state_specific is wired on fold=True')
+        if env is None:
+            raise ValueError(f'state_specific={state_specific!r} needs a '
+                             'continuum (environment)')
+    if fold:
+        return _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol,
+                                en_dress, frozen, auxbasis, dense_limit,
+                                return_fold, env, tile_gb, route, device,
+                                state_specific)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
@@ -126,7 +200,148 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                          "'unrestricted' or 'spinorbital'")
     return _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                             conv_tol, en_dress, frozen, auxbasis, max_subspace,
-                            return_parity, dense_limit, threshold)
+                            return_parity, dense_limit, threshold, env)
+
+
+def _reaction_field_environment(mf, mol, environment, route):
+    """The continuum whose optical reaction field dresses the singles, or None.
+
+    An environment that does not respond (none, point charges) acts through
+    the mean field alone and needs nothing here. One that screens must be a
+    surface-charge continuum, the route a closed-shell spin-free one, and the
+    mean field relaxed in that continuum's eps_static: without it the result
+    would be the frozen-polarization half of the shift, not the solvated
+    excitation."""
+    env = resolve_environment(environment, mf)
+    if not getattr(env, 'screens', False):
+        return None
+    if not hasattr(env, 'ov_grid_potential'):
+        raise NotImplementedError(
+            f'{env!r}: the EE-ADC routes take a surface-charge continuum '
+            '(SolventScreening); this environment has no transition '
+            'reaction field here')
+    if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
+        raise NotImplementedError(
+            'a continuum is wired on the restricted spin-free routes only')
+    if getattr(env, 'eps_static', None) is not None:
+        with_solvent = getattr(mf, 'with_solvent', None)
+        if with_solvent is None:
+            raise ValueError(
+                'the continuum has an eps_static but the mean field was not '
+                'relaxed in it; build it with env.mean_field(mol, factory)')
+        env.check_ground_state_continuum(with_solvent)
+    return env
+
+
+def _bare(mf):
+    """A context in which mf hands out the bare interaction: an attached
+    environment is taken off for the length of the block. The continuum
+    enters the EE-ADC routes through the singles term alone."""
+    import contextlib
+    if getattr(mf, 'with_screening', None) is None:
+        return contextlib.nullcontext(mf)
+    return attached_environment(mf, None)
+
+
+def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
+                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
+                     device='cpu', state_specific='off'):
+    """fold=True: the density-fitted tiled fold of ee_ri_fold."""
+    from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
+    if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
+        raise ValueError('fold=True is a closed-shell spin-free route')
+    if level not in ee_ri_fold.LEVELS:
+        raise ValueError(f'fold=True takes level in {ee_ri_fold.LEVELS}; '
+                         f'level={level!r}')
+    if spin not in _CHANNEL:
+        raise ValueError("fold=True solves one channel: spin='singlet' or "
+                         "'triplet'")
+    if en_dress is not None:
+        raise ValueError('fold=True has no Epstein-Nesbet dressing')
+    if auxbasis == 'exact':
+        raise ValueError("fold=True takes a real auxiliary basis, not 'exact'")
+    with _bare(mf):
+        # over MPI ranks each keeps B_vv in its own auxiliary chunks only
+        factors = ee_ri_fold.bare_factors(mol, mf, frozen=frozen,
+                                          auxbasis=auxbasis, comm=current_comm())
+    rf = (None if env is None else
+          ee_ri_fold.TransitionReactionField.from_environment(env, mol, mf,
+                                                              frozen))
+    # over MPI ranks the operator's tiles are shared out and rank 0 alone
+    # iterates (ee_ri_fold.drive); serially this is the plain solve
+    op = ee_ri_fold.RIFoldADC2(factors, spin, level=level, reaction_field=rf,
+                               tile_gb=tile_gb, device=device)
+
+    def solve(o):
+        if level == 'adc2':
+            # the roots' error goes as the residual squared
+            r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, tol_omega=conv_tol,
+                                     tol_residual=max(conv_tol, np.sqrt(
+                                         conv_tol * EE_FOLD_RESIDUAL_GAP)),
+                                     dense_limit=dense_limit, solver='block',
+                                     verbose=int(mol.verbose >= logger.INFO))
+        else:
+            r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
+        return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,
+                    loop=list(r.loop), converged=r.converged, level=r.level)
+
+    out = ee_ri_fold.drive(op, solve)
+    embed, _, _ = _channel_basis(2 * op.n, op.no, op.nv, 'adc1',
+                                 _CHANNEL[spin])
+    res = ee_fold.FoldResult(out['omega'], out['y'], out['t1'], out['steps'],
+                             out['loop'], out['converged'], embed, out['level'])
+    Z = np.column_stack([embed(res.x1[:, k]) for k in range(res.omega.size)])
+    res.operator = op
+    e = res.omega
+    if state_specific != 'off':
+        _state_specific(res, op, env, mol, mf, frozen, state_specific, tile_gb)
+        e = res.omega_ss
+    return (e, Z, res) if return_fold else (e, Z)
+
+
+def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb):
+    """res with the roots' difference densities and state-specific shifts
+    (ee_state_specific); a collective over op's ranks, every rank holding the
+    same roots after ee_ri_fold.drive."""
+    res.delta_density = [
+        ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
+                                         res.t1[k], tile_gb=tile_gb)
+        for k in range(res.omega.size)]
+    modes = ('vertical',) if getattr(env, 'eps_static', None) is None else \
+        ('vertical', 'equilibrium')
+    if mode not in modes:
+        raise ValueError(f'state_specific={mode!r} needs the continuum\'s '
+                         'eps_static')
+    nocc = mol.nelectron // 2
+    mo_act = np.asarray(mf.mo_coeff)[:, frozen:]
+    if mo_act.shape[1] != op.no + op.nv or nocc - frozen != op.no:
+        raise RuntimeError('the active orbitals do not match the operator')
+    res.ss_shifts = ee_state_specific.state_specific_energies(
+        env, mol, mo_act, res.delta_density, modes)
+    res.ss_mode = mode
+    res.ss_shift = res.ss_shifts[mode]
+    res.omega_ss = res.omega + res.ss_shift
+
+
+def _solve_cis_ri(op, nroots, conv_tol, dense_limit):
+    """ADC(1) on the tiled operator: no doubles, one eigenproblem, as a
+    FoldResult with unit singles weights."""
+    from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
+    embed, _, _ = _channel_basis(2 * op.n, op.no, op.nv, 'adc1',
+                                 _CHANNEL[op.spin])
+    mv = ee_ri_fold.FoldedMatvec(op, None)
+    if op.n <= dense_limit:
+        e, X = np.linalg.eigh(ee_fold.dense_effective(mv, op.n))
+        e, X, conv = e[:nroots], X[:, :nroots], np.ones(min(nroots, op.n), bool)
+    else:
+        e, X, conv = solve_symmetric(mv, op.diag, nroots=nroots,
+                                     x0=_open_seeds(op.diag, nroots, None),
+                                     tol_residual=conv_tol,
+                                     label='ee-ADC(1) (tiled)')
+    k = len(e)
+    return ee_fold.FoldResult(np.asarray(e), np.asarray(X), np.ones(k),
+                              np.ones(k, int), ['index'] * k,
+                              np.asarray(conv, bool), embed, np.arange(k))
 
 
 def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
@@ -178,7 +393,7 @@ def _solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
 def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                      conv_tol, en_dress=None, frozen=0, auxbasis=None,
                      max_subspace=None, return_parity=False,
-                     dense_limit=DENSE_LIMIT, threshold=5000):
+                     dense_limit=DENSE_LIMIT, threshold=5000, env=None):
     """max_subspace caps the Davidson subspace. It is a MEMORY knob, and at
     scale the dominant one: the doubles vector is no^2 nv^2, the solver holds
     the operator's image alongside the subspace (so TWICE that per trial
@@ -203,6 +418,47 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
     eps = eps[act]
     no -= frozen
     nv = len(eps) - no
+    with _bare(mf):
+        aop, diag, dims = _spin_free_operator(mf, mol, level, df, spin,
+                                              en_dress, act, no, eps,
+                                              auxbasis)
+    if env is not None:
+        aop, diag = _with_reaction_field(aop, diag, env, mol, mf, frozen, no,
+                                         nv)
+    return _spin_free_solve(aop, diag, dims, no, nv, level, nroots, spin,
+                            matrix_free, conv_tol, max_subspace,
+                            return_parity, dense_limit, threshold, mf)
+
+
+def _with_reaction_field(aop, diag, env, mol, mf, frozen, no, nv):
+    """aop and diag with the singles block's transition reaction field,
+    (ia|vtilde|jb) between every pair of spin-conserving singles: a spin-
+    orbital excitation's transition density is a charge density whichever its
+    spin, so the alpha and beta singles blocks couple alike (the triplet
+    combination cancels)."""
+    from src.SingleReference.ADC.eeADC.ee_ri_fold import TransitionReactionField
+    rf = TransitionReactionField.from_environment(env, mol, mf, frozen)
+    n_s = no * nv
+    raw = aop
+
+    def dressed(vec):
+        vec = np.asarray(vec).ravel()
+        out = np.array(raw(vec), dtype=float).ravel()
+        t = rf.apply((vec[:n_s] + vec[n_s:2 * n_s])[:, None])[:, 0]
+        out[:n_s] += t
+        out[n_s:2 * n_s] += t
+        return out
+
+    d = np.array(diag, dtype=float)
+    rd = rf.diagonal()
+    d[:n_s] += rd
+    d[n_s:2 * n_s] += rd
+    return dressed, d
+
+
+def _spin_free_operator(mf, mol, level, df, spin, en_dress, act, no, eps,
+                        auxbasis):
+    """(aop, diag, dims) of the spin-free route on the active orbitals."""
     if df:
         if auxbasis == 'exact':
             # eigendecomposed B, naux = norb^2: a plumbing check that the DF
@@ -224,7 +480,14 @@ def _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
         aop, diag, dims = ee_r_sigma.build_operator(
             eps, V, no, level=level, en_dress=en_dress,
             parity=_CHANNEL.get(spin))
+    return aop, diag, dims
 
+
+def _spin_free_solve(aop, diag, dims, no, nv, level, nroots, spin,
+                     matrix_free, conv_tol, max_subspace, return_parity,
+                     dense_limit, threshold, mf):
+    """Solve the spin-free operator: dense below dense_limit, else Davidson;
+    one spin channel in its flip-pair basis when spin is given."""
     n = dims['nH']
     embed = None
     if spin is not None:

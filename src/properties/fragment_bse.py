@@ -50,6 +50,13 @@ Omega = 0, and turns singular first there), the resolvent is a
 conjugate-gradient solve, and Sigma has no pole between the diabats and Q. A
 charge-transfer configuration that comes close to the site energies belongs in
 P as an explicit diabat, never in Q; the partition refuses otherwise.
+Above the dense limit the guard is a Davidson on Q to a residual of
+FRAGMENT_GUARD_TOL, and one that stops short still decides when it can: a
+Ritz value bounds the lowest eigenvalue from above, so one below the test
+point is a refusal for certain, and one above it by more than its residual
+passes with a warning. The resolvent's conjugate gradients check the same
+property again on the way: a direction of non-positive curvature means
+K_QQ - Omega_0 S_QQ is not positive definite, and the partition refuses.
 
 DENSE AND MATRIX-FREE ARE ONE CODE PATH. `BSEOperator` applies K to a block of
 vectors, densely from `bse_blocks` for small systems and through the ISDF
@@ -65,6 +72,7 @@ WHAT IS NOT HERE. No nuclear derivatives: those are
 `src.gradients.fragment_diabatic`, and their finite-difference reference is
 `src.properties.diabatic`.
 """
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -72,7 +80,9 @@ from scipy.linalg import eigh, null_space
 
 from src.Base.constants import (FRAGMENT_DAVIDSON_EXTRA_ROOTS,
                                 FRAGMENT_DAVIDSON_MIN_SPACE,
+                                FRAGMENT_GUARD_MAX_CYCLE,
                                 FRAGMENT_GUARD_NEWTON_TOL,
+                                FRAGMENT_GUARD_TOL,
                                 FRAGMENT_PHASE_SEED,
                                 FRAGMENT_POLE_MARGIN, FRAGMENT_SOLVE_TOL,
                                 FRAGMENT_DENSE_MAX,
@@ -307,6 +317,33 @@ def _lowest(apply, diag, n, dim, tol, x0=None, dense_max=FRAGMENT_DENSE_MAX):
     return root_driven_solve(solve, apply, dim)
 
 
+def _guard_lowest(apply, diag, dim, x0=None, tol=FRAGMENT_GUARD_TOL,
+                  max_cycle=None, dense_max=FRAGMENT_DENSE_MAX):
+    """(theta, x, |r|, converged) for the lowest eigenpair of a symmetric
+    operator, as the pole guard needs it: dense up to `dense_max` rows (exact,
+    |r| = 0), above it the shared symmetric Davidson, root-driven over ranks.
+    It does not raise when the Davidson stops short: theta is then the lowest
+    Ritz value, an upper bound to the lowest eigenvalue, and |r| its residual
+    norm, which is what the caller's verdict reads."""
+    if dim <= dense_max:
+        m = apply(np.eye(dim))
+        w, v = np.linalg.eigh(0.5 * (m + m.T))
+        return float(w[0]), v[:, 0], 0.0, True
+
+    def solve(act):
+        def mv(v):
+            return act(np.reshape(v, (dim, 1)))[:, 0]
+        e, x, conv = solve_symmetric(
+            mv, np.asarray(diag, float), nroots=1, x0=x0, tol_residual=tol,
+            max_cycle=(FRAGMENT_GUARD_MAX_CYCLE if max_cycle is None
+                       else max_cycle),
+            label='pole guard', warn_unconverged=False)
+        x = np.ascontiguousarray(x[:, 0])
+        rnorm = float(np.linalg.norm(mv(x) - e[0] * x))
+        return float(e[0]), x, rnorm, bool(conv[0])
+    return root_driven_solve(solve, apply, dim)
+
+
 def _lowest_pencil(apply, diag, n, m, tol, dense_max=FRAGMENT_DENSE_MAX):
     """(values, vectors) of the n lowest positive roots of a full BSE on m
     pairs; `apply` acts on stacked (2m, k) blocks, `diag` (m,) estimates A's
@@ -340,7 +377,16 @@ def _batched_cg(apply, rhs, prec, tol, maxiter=2000):
             return x
         idx = np.flatnonzero(active)
         ap = apply(p[:, idx])
-        alpha = rz[idx] / np.einsum('ij,ij->j', p[:, idx], ap)
+        pap = np.einsum('ij,ij->j', p[:, idx], ap)
+        # rank 0's verdict, so every rank leaves the loop together
+        if lockstep(bool((pap <= 0.0).any())):
+            raise ValueError(
+                'the resolvent met a direction of non-positive curvature: '
+                'K_QQ - Omega_0 S_QQ is not positive definite, so Sigma has '
+                'a pole at or below Omega_0. Make the configuration that '
+                'comes close an explicit diabat (sites / ct) or lower '
+                'Omega_0.')
+        alpha = rz[idx] / pap
         x[:, idx] += p[:, idx] * alpha
         r[:, idx] -= ap * alpha
         znew = prec(r[:, idx])
@@ -559,7 +605,7 @@ class FragmentPartition:
         say(f'pole guard on Q ({dim} rows), Omega_0 = {omega0:.6f} Ha')
         q_low = lockstep(float(cls._q_lowest(k_loc, shifted, proj, sig, sp,
                                              diag, dim, tda, omega0, margin,
-                                             tol, dense_max)))
+                                             tol, dense_max, say=say)))
         say(f'lowest positive eigenvalue on Q {q_low:.6f} Ha')
         if not omega0 < q_low - margin:
             raise ValueError(
@@ -595,7 +641,7 @@ class FragmentPartition:
 
     @staticmethod
     def _q_lowest(k_loc, shifted, proj, sig, sp, diag, dim, tda, omega0,
-                  margin, tol, dense_max=FRAGMENT_DENSE_MAX):
+                  margin, tol, dense_max=FRAGMENT_DENSE_MAX, say=None):
         """The lowest positive eigenvalue of the pencil on Q.
 
         Through H(om) = Pi^T (K - om S) Pi + c (S p)(S p)^T, whose lowest
@@ -605,9 +651,14 @@ class FragmentPartition:
         explicit Q basis; iteratively, H(Omega_0 + margin) is checked
         positive -- the guard itself -- and Newton on its lowest eigenvalue,
         d mu / d om = -(Pi x)^T S (Pi x), locates the eigenvalue.
+
+        A Davidson that stops short of FRAGMENT_GUARD_TOL still decides when
+        its Ritz value theta (an upper bound to the lowest eigenvalue) and
+        residual |r| allow it: theta below the test point is a refusal, theta
+        above it by more than |r| a pass, with a warning, and the returned
+        value is the estimate from that one solve. Otherwise it raises.
         """
-        # a guard, not a result: 1e-7 Ha is ample against the margin
-        gtol = max(tol, 1e-7)
+        say = say if say is not None else (lambda msg: None)
         if not tda and dim <= dense_max:
             q = null_space(sp.T)
             kq = q.T @ k_loc(q)
@@ -620,13 +671,43 @@ class FragmentPartition:
 
             def h(x):
                 return shifted(x, om) + big * (sp @ (sp.T @ x))
-            w, x = _lowest(h, diag - om * sig + big * (sp ** 2).sum(axis=1),
-                           1, dim, gtol, x0=x0, dense_max=dense_max)
-            return float(w[0]), x[:, 0]
+            return _guard_lowest(h, diag - om * sig
+                                 + big * (sp ** 2).sum(axis=1), dim, x0=x0,
+                                 tol=max(tol, FRAGMENT_GUARD_TOL),
+                                 dense_max=dense_max)
+
+        def short(theta, rnorm, test):
+            """The verdict of a Davidson that stopped short at `test`:
+            'below' (certain), 'above' (theta - |r| clears it) or raise."""
+            if theta < test:
+                return 'below'
+            if theta - rnorm > test:
+                warnings.warn(
+                    f'pole guard: the Davidson on Q stopped at |r| = '
+                    f'{rnorm:.1e} above {max(tol, FRAGMENT_GUARD_TOL):.0e}; '
+                    f'its Ritz value {theta:.6f} clears {test:.6f} by more '
+                    'than the residual, and the resolvent checks positive '
+                    'definiteness again', RuntimeWarning, stacklevel=3)
+                return 'above'
+            raise RuntimeError(
+                f'pole guard: the Davidson on Q stopped at Ritz value '
+                f'{theta:.6f}, |r| = {rnorm:.1e}, which cannot decide against '
+                f'{test:.6f}')
+
         if tda:
-            return lowest(0.0)[0]
+            theta, _, rnorm, conv = lowest(0.0)
+            say(f'pole guard: lowest on Q {theta:.6f} Ha, |r| {rnorm:.1e}, '
+                f'converged {conv}')
+            if not conv:
+                short(theta, rnorm, omega0 + margin)
+            return theta
         om = omega0 + margin
-        mu, x = lowest(om)
+        mu, x, rnorm, conv = lowest(om)
+        say(f'pole guard: lowest of the shifted pencil at {om:.6f} Ha is '
+            f'{mu:.3e}, |r| {rnorm:.1e}, converged {conv}')
+        # an unconverged pass takes one Newton estimate and no further
+        # solve: the verdict is decided, the value only reported
+        solve_on = conv or short(mu, rnorm, 0.0) == 'below'
         # The sign of mu at Omega_0 + margin decides the guard; Newton,
         # each Davidson warm-started from the last eigenvector, locates the
         # eigenvalue a refusal names. mu and x are rank 0's
@@ -639,8 +720,16 @@ class FragmentPartition:
                 break
             step = -mu / slope
             om += step
-            mu, x = lowest(om, x)
+            if not solve_on:
+                break
+            mu, x, rnorm, conv = lowest(om, x)
             if lockstep(bool(abs(step) < FRAGMENT_GUARD_NEWTON_TOL)):
+                break
+            if not conv:
+                # Newton only sharpens the reported value; an unconverged
+                # step ends it at the last estimate
+                say(f'pole guard: Newton stopped at {om:.6f} Ha, |r| '
+                    f'{rnorm:.1e}')
                 break
         return om
 

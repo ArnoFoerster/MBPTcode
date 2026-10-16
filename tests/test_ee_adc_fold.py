@@ -45,8 +45,8 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       triple: nroots = 1 returns the triple, equal to the full solve, on both
       branches and without a warning; a root above a doubles energy skips the
       count with a warning. Check 12's collapsing pair drops its copy and gets the
-      missed root back by branch index, on the Davidson branch too at tol_omega
-      far below tol_residual.
+      missed root back by branch index; on the Davidson branch, seeded by A_eff
+      near the roots, both roots come back at tol_omega far below tol_residual.
   14. the count where M misleads it: a state M's diagonal ranks last but folded
       lowest, a missing branch mixed with a found root at the cut (25 points), and
       one count solve per call when nothing is missing; a bracket narrower than
@@ -63,11 +63,12 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       n 800, a state last on M's diagonal folded lowest, where the roots found and
       M's seeds are exact eigenvectors of A_eff, is found at nroots 1 and 3, also
       inside a coupled block, without a warning.
-  18. the count's paths that warn or fall back: two Newton steps leave every root
+  18. the count's paths that warn or fall back: one Newton step leaves every root
       unconverged and the surplus warns; a pair closer than tol_omega returns one
       root and says so; with no round left the missing root is named; an index
       step that leaves its bracket bisects it; a missing group whose roots differ
-      is re-solved per branch, on both branches.
+      is re-solved per branch (dense), or, degenerate at the seed frequency, is a
+      level re-solved per root (Davidson).
   19. a state folded to within a found root's window, that root not the cut, below
       or above it: the found root's branch comes from its own vector and the missed
       state is solved, both roots exact, no warning, on both branches and both
@@ -868,11 +869,13 @@ def check_collapsing_pair():
         warnings.simplefilter('always')
         res = ee_fold.solve_folded(P, 2, spin='singlet', tol_omega=1e-12,
                                    dense_limit=0, solver='newton')
+    # solver 'newton' seeds from A_eff near the roots, where the pair is
+    # apart: a collapse, if any, is caught, and both roots come back
     dup = any('landed on one root' in str(x.message) for x in caught)
     d = np.abs(res.omega - pair).max() if res.omega.size == 2 else np.inf
-    ok &= check(dup and d < 1e-8,
-                'Davidson, tol_omega 1e-12 at tol_residual 1e-6: the collapse is '
-                'caught and both roots come back', f'max |dw| {d:.1e} Ha')
+    ok &= check(d < 1e-8,
+                'Davidson, tol_omega 1e-12 at tol_residual 1e-6: both roots come '
+                'back', f'max |dw| {d:.1e} Ha, collapse reported {dup}')
     for dl in (2000, 0):
         # the root-wise Davidson follows both branches: no seed collapses
         with warnings.catch_warnings(record=True) as caught:
@@ -1146,12 +1149,13 @@ def check_hidden_branch():
     Cb = np.zeros((1, n))
     Cb[0, na:] = rng.standard_normal(nb)
     Cb *= 2.2 / np.linalg.norm(Cb)
-    calls, solve = [], ee_fold.solve_symmetric
+    # the checks off the found span: each call may run more than one Davidson
+    calls, beside = [], ee_fold._lowest_beside
 
     def counted(*a, **k):
-        calls.append(k.get('label', ''))
-        return solve(*a, **k)
-    ee_fold.solve_symmetric = counted
+        calls.append(' check')
+        return beside(*a, **k)
+    ee_fold._lowest_beside = counted
     try:
         for tag, mm, CC, DD in (('diagonal', m, C, D),
                                 ('coupled block', Mf, Cb, [2.2])):
@@ -1171,9 +1175,9 @@ def check_hidden_branch():
                             f'lowest is found at nroots {nroots}, by one check that '
                             'finds it and one that confirms',
                             f'max |dw| {d:.1e} Ha, loop {res.loop}, '
-                            f'{len(caught)} warning(s), {n_check} check solve(s)')
+                            f'{len(caught)} warning(s), {n_check} check call(s)')
     finally:
-        ee_fold.solve_symmetric = solve
+        ee_fold._lowest_beside = beside
     return ok
 
 
@@ -1269,9 +1273,9 @@ def check_warning_paths(eps, B, no):
         return _synthetic_pieces(m, C, D), np.sort(_synthetic_exact(m, C, D)[0])
 
     P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)[3]
-    res, msgs = run(P, 5, max_newton=2, max_fixed=0)
+    res, msgs = run(P, 5, max_newton=1, max_fixed=0)
     ok = check(any('where A_eff has' in x for x in msgs) and not res.converged.any(),
-               'two Newton steps: every root unconverged, and the count warns of the '
+               'one Newton step: every root unconverged, and the count warns of the '
                'surplus', f'converged {res.converged.tolist()}')
     # split 5.9e-9 Ha, below the default tol_omega: one root at that resolution
     Pp, w = pair(1e-8)
@@ -1321,10 +1325,19 @@ def check_warning_paths(eps, B, no):
         res, msgs = run(_synthetic_pieces(m, C, D), 1, tol_omega=1e-10,
                         dense_limit=dl)
         d = abs(res.omega[0] - w[0])
-        ok &= check(any('re-solved per branch' in x for x in msgs) and d < 1e-10
-                    and res.loop == ['index'],
-                    f'dense_limit {dl}: a missing group split at its roots is '
-                    're-solved per branch, the lowest root exact', f'|dw| {d:.1e} Ha')
+        if dl:
+            ok &= check(any('re-solved per branch' in x for x in msgs) and d < 1e-10
+                        and res.loop == ['index'],
+                        f'dense_limit {dl}: a missing group split at its roots is '
+                        're-solved per branch, the lowest root exact',
+                        f'|dw| {d:.1e} Ha')
+        else:
+            # the seeds of A_eff at ω* = 0.5, where both states sit at 0.3: one
+            # level, which splits at its roots and is re-solved per root
+            ok &= check(len(msgs) == 1 and 'split by' in msgs[0] and d < 1e-10,
+                        f'dense_limit {dl}: the pair degenerate at the seed '
+                        'frequency is a level that splits, re-solved per root, the '
+                        'lowest root exact', f'|dw| {d:.1e} Ha, loop {res.loop}')
     return ok
 
 
@@ -1386,10 +1399,14 @@ def check_index_start():
     m = np.diag(np.r_[0.5, 0.6, np.linspace(0.62, 1.5, n - 3), 1.6]) + R
     C = np.zeros((1, n))
     C[0, -1] = np.sqrt((1.6 - om) * (0.8 - om))
-    got, d, msgs = _fold_run(m, C, np.array([0.8]), 2, dense_limit=0)
-    ok &= check(d < 1e-7 and not msgs,
-                'n 200, two irreps: the steep state of the other irrep is found',
-                f'|dw| {d:.1e} Ha, {len(msgs)} warning(s)')
+    # the default; and Newton, where the state's T1 of 0.2 takes the fixed-point
+    # loop, whose last step is within tol_omega but not quadratically below it
+    for solver, kw in (('davidson', {}), ('newton', {'tol_omega': 1e-8})):
+        got, d, msgs = _fold_run(m, C, np.array([0.8]), 2, dense_limit=0,
+                                 solver=solver, **kw)
+        ok &= check(d < 1e-7 and not msgs,
+                    f'n 200, two irreps, {solver}: the steep state of the other '
+                    'irrep is found', f'|dw| {d:.1e} Ha, {len(msgs)} warning(s)')
     return ok
 
 
@@ -1764,7 +1781,8 @@ def check_davidson_omega(eps, B, no):
     for spin in ('singlet', 'triplet'):
         ref = ee_fold.solve_folded(P, 3, spin=spin, tol_omega=1e-9, tol_residual=1e-8)
         m0, _, diag_s, _, _ = ee_fold.folded_operator(P, None, spin)
-        _, X0, _ = ee_fold._seed_levels(m0, diag_s, diag_s.size, 3, False, 1e-8, 't')
+        _, X0, _ = ee_fold._seed_levels(P, spin, m0, diag_s, diag_s.size, 3, False,
+                                        1e-8, 't', at_fold=False)
         for cap in (40, 4):
             oms, X, conv, cyc = ee_fold._davidson_omega(
                 P, spin, X0, 3, d_min, 1e-8, 1e-9, cap, 200, 'test')
@@ -1884,10 +1902,11 @@ def check_solver_default(eps, B, no):
     r_new, mv_new = _closing_mv(P4, 1, 'triplet', solver='newton')
     same = r_dav.omega.shape == r_new.omega.shape == (3,)
     d = float(np.max(np.abs(r_dav.omega - r_new.omega))) if same else np.inf
-    ok &= check(same and d < 1e-8 and 'index' in r_new.loop
-                and r_dav.loop == ['davidson'] * 3,
+    # Newton reaches it from its seeds of A_eff, M's would need the count's index
+    ok &= check(same and d < 1e-8 and r_dav.loop == ['davidson'] * 3,
                 'CH4 / 6-31G triplets, nroots 1: the default finds the T2 triple '
-                'that Newton reaches by index', f'|dw| {d:.1e} Ha, {r_new.loop}')
+                "of solver='newton' without an index solve",
+                f'|dw| {d:.1e} Ha, {r_dav.loop}, newton {r_new.loop}')
     ok &= check(0 < mv_dav < mv_new,
                 'there the default closes on fewer matvecs than Newton',
                 f'{mv_dav} against {mv_new}')
@@ -2117,8 +2136,10 @@ def check_stream():
     knob = dict(os.environ, MBPT_STREAM_GB='0.0001', PYTHONPATH=path)   # 0.1 MB
     base = dict({k: v for k, v in os.environ.items() if k != 'MBPT_STREAM_GB'},
                 PYTHONPATH=path)
+    # cwd root: `python -c` puts the cwd first on sys.path, so another checkout's
+    # src there would shadow the tree under test
     runs = [subprocess.run([sys.executable, '-c', code], env=e, capture_output=True,
-                           text=True) for e in (knob, base)]
+                           text=True, cwd=root) for e in (knob, base)]
     got = [r.stdout.split() for r in runs]
     ok &= check(got[0] == ['0.0001', '(1,', '1)'] and got[1] == ['16.0', '(44,', '1)'],
                 '_STREAM_GB: MBPT_STREAM_GB=0.0001 gives one index per slab, unset '

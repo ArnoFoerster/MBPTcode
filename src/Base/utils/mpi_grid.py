@@ -136,6 +136,16 @@ def _try_init_mpi():
     return _HAS_MPI
 
 
+def _mpi():
+    """The mpi4py.MPI module for a call on a genuine communicator. Holding one
+    means mpi4py is imported and MPI initialized, also when the caller passed
+    it and grid_comm never probed, so this binds the module and starts nothing."""
+    global MPI, _HAS_MPI
+    if MPI is None:
+        MPI, _HAS_MPI = sys.modules['mpi4py.MPI'], True
+    return MPI
+
+
 def grid_comm(comm=None):
     """(comm, rank, size), or (None, 0, 1) when MPI is unavailable or disabled.
 
@@ -192,7 +202,7 @@ def reduce_sum(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_sum(part)
         else:
-            comm.Allreduce(MPI.IN_PLACE, part, op=MPI.SUM)
+            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().SUM)
     if buf is not a:
         a[...] = buf
     return a
@@ -325,8 +335,8 @@ def _reduce_scatter_once(send, recv, counts, comm):
     if isinstance(comm, SimulatedComm):
         comm.reduce_scatter_sum(send, recv, counts)
     else:
-        comm.Reduce_scatter([send, MPI.DOUBLE], [recv, MPI.DOUBLE],
-                            recvcounts=counts, op=MPI.SUM)
+        comm.Reduce_scatter([send, _mpi().DOUBLE], [recv, _mpi().DOUBLE],
+                            recvcounts=counts, op=_mpi().SUM)
 
 
 def allgather_blocks(a, comm):
@@ -360,7 +370,7 @@ def allgather_blocks(a, comm):
         row = int(np.prod(buf.shape[1:], dtype=int))
         counts = [(stop - start) * row for start, stop in blocks]
         displs = [start * row for start, _ in blocks]
-        comm.Allgatherv(MPI.IN_PLACE, [buf, counts, displs, MPI.DOUBLE])
+        comm.Allgatherv(_mpi().IN_PLACE, [buf, counts, displs, _mpi().DOUBLE])
     if buf is not a:
         a[...] = buf
     return a
@@ -395,9 +405,9 @@ def allgather_rows(a, comm):
     else:
         row = int(np.prod(buf.shape[1:], dtype=int))
         if row:
-            rowtype = MPI.DOUBLE.Create_contiguous(row).Commit()
+            rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
-                comm.Allgatherv(MPI.IN_PLACE,
+                comm.Allgatherv(_mpi().IN_PLACE,
                                 [buf, [stop - start for start, stop in blocks],
                                  [start for start, _ in blocks], rowtype])
             finally:
@@ -425,7 +435,7 @@ def reduce_max(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_max(part)
         else:
-            comm.Allreduce(MPI.IN_PLACE, part, op=MPI.MAX)
+            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().MAX)
     if buf is not a:
         a[...] = buf
     return a
@@ -453,7 +463,7 @@ def broadcast_rows(a, root, comm):
         if isinstance(comm, SimulatedComm):
             comm.bcast_into(part, root)
         elif part.size:
-            rowtype = MPI.DOUBLE.Create_contiguous(row).Commit()
+            rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
                 comm.Bcast([part, part.shape[0], rowtype], root=root)
             finally:
@@ -493,6 +503,38 @@ def allgather_ranges(a, ranges, comm):
     return a
 
 
+class NodeShared:
+    """A float64 array held once per node: every rank of `comm` on one node maps
+    the same memory (an MPI-3 shared window on the node's communicator), so an
+    array every rank reads whole costs one copy per node instead of one per
+    rank. `fills` is True on the rank that writes it (the node's first);
+    `ready()` is the node barrier after which the others may read. Serially, on
+    a world of one and on a SimulatedComm the array is private and `fills` is
+    True. Keep the object alive as long as the array is used: the window is
+    freed with it."""
+
+    def __init__(self, shape, comm):
+        shape = tuple(int(x) for x in shape)
+        self.node, self.win = None, None
+        # a window only on a genuine mpi4py communicator; nothing here starts MPI
+        mod = sys.modules.get('mpi4py.MPI')
+        if (comm is None or comm.Get_size() == 1 or mod is None
+                or not isinstance(comm, mod.Comm)):
+            self.array, self.fills = np.empty(shape), True
+            return
+        self.node = comm.Split_type(_mpi().COMM_TYPE_SHARED)
+        self.fills = self.node.Get_rank() == 0
+        nbytes = 8 * int(np.prod(shape, dtype=np.int64)) if self.fills else 0
+        self.win = _mpi().Win.Allocate_shared(nbytes, 8, comm=self.node)
+        buf, _ = self.win.Shared_query(0)
+        self.array = np.ndarray(buffer=buf, dtype=np.float64, shape=shape)
+
+    def ready(self):
+        """Barrier on the node: the filling rank has written the array."""
+        if self.node is not None:
+            self.node.Barrier()
+
+
 def _gather_ranges_once(buf, ranges, comm):
     """`allgather_ranges` in one collective, in place on the contiguous buf."""
     rank = comm.Get_rank()
@@ -506,7 +548,7 @@ def _gather_ranges_once(buf, ranges, comm):
             mine = (np.concatenate([buf[s0:s1] for s0, s1 in ranges[rank]])
                     if counts[rank] else np.empty((0,) + tail))
             recv = np.empty((sum(counts),) + tail)
-            rowtype = MPI.DOUBLE.Create_contiguous(row).Commit()
+            rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
                 comm.Allgatherv([mine, counts[rank], rowtype],
                                 [recv, counts, _displacements(counts),
@@ -635,7 +677,7 @@ def exchange_rows(send, send_ranges, recv, recv_ranges, comm):
             for (c, d), piece in zip(recvs, got):
                 recv[c:d] = piece
         elif row:
-            rowtype = MPI.DOUBLE.Create_contiguous(row).Commit()
+            rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
                 comm.Alltoallv(
                     [send, [b - a for a, b in sends], [a for a, _ in sends],
@@ -733,8 +775,8 @@ def exchange_blocks(send_blocks, recv_shapes, comm):
         sendcounts = [int(np.size(b)) for b in send_blocks]
         recvbuf = np.empty(sum(counts))
         comm.Alltoallv(
-            [sendbuf, sendcounts, _displacements(sendcounts), MPI.DOUBLE],
-            [recvbuf, counts, _displacements(counts), MPI.DOUBLE])
+            [sendbuf, sendcounts, _displacements(sendcounts), _mpi().DOUBLE],
+            [recvbuf, counts, _displacements(counts), _mpi().DOUBLE])
         got = [recvbuf[d:d + n] for d, n
                in zip(_displacements(counts), counts)]
     return [np.reshape(piece, shape) for piece, shape in zip(got, recv_shapes)]

@@ -60,6 +60,12 @@ FULL BSE (the pencil K v = Omega S v, K = [[A, B], [B, A]], S = diag(1, -1)):
   the pole guard) gives the dense partition.
 - the root gradient through the partition equals the supermolecular full-BSE
   root gradient, with the orbital-rotation terms vanishing.
+- the POLE GUARD decides from a Davidson starved of cycles when its Ritz
+  value and residual allow it, and says it cannot otherwise: one cycle cannot
+  decide, five pass with a warning and leave A_eff unchanged, and an Omega_0
+  at the lowest eigenvalue on Q is refused however short the Davidson. With
+  the guard bypassed, the resolvent's conjugate gradients refuse an Omega_0
+  above that eigenvalue on their own (non-positive curvature).
 - the elements in point charges, both charge-transfer diabats explicit,
   against finite differences, and the iterative gradient against the dense
   one.
@@ -429,6 +435,38 @@ def test_full_bse_iterative_gradient_matches_dense(full_chain, monkeypatch):
         g = iterative.element(*ab)[0]
         assert min(np.abs(g - r).max(), np.abs(g + r).max()) \
             < 1e-7 * np.abs(r).max()
+
+
+def test_an_unconverged_pole_guard_decides_or_says_it_cannot(
+        full_chain, orbitals, full_partition, monkeypatch):
+    isdf = BSEOperator.from_chain(full_chain, route='isdf')[0]
+    force_iterative(monkeypatch)
+    converged = FragmentPartition.build(isdf, orbitals, SITES)
+    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 1)
+    with pytest.raises(RuntimeError, match='cannot decide'):
+        FragmentPartition.build(isdf, orbitals, SITES)
+    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 5)
+    with pytest.warns(RuntimeWarning, match='pole guard'):
+        short = FragmentPartition.build(isdf, orbitals, SITES)
+    # the guard decides; Sigma never depended on it
+    assert np.abs(short.a_eff - converged.a_eff).max() < 1e-12
+    assert abs(short.q_lowest - full_partition.q_lowest) < 1e-4
+    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 2)
+    with pytest.raises(ValueError, match='not below the lowest positive'):
+        FragmentPartition.build(isdf, orbitals, SITES,
+                                omega0=full_partition.q_lowest)
+
+
+def test_the_resolvent_refuses_an_indefinite_q_block(
+        full_chain, orbitals, full_partition, monkeypatch):
+    isdf = BSEOperator.from_chain(full_chain, route='isdf')[0]
+    force_iterative(monkeypatch)
+    # a guard that always passes: the conjugate gradients are on their own
+    monkeypatch.setattr(FragmentPartition, '_q_lowest',
+                        staticmethod(lambda *a, **k: 10.0))
+    with pytest.raises(ValueError, match='non-positive curvature'):
+        FragmentPartition.build(isdf, orbitals, SITES,
+                                omega0=full_partition.q_lowest + 0.02)
 
 
 if __name__ == '__main__':
