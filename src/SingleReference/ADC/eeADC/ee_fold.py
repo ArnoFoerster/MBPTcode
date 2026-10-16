@@ -69,7 +69,7 @@ from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
 from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
                                   overlap_pick, solve_symmetric)
 
-FOLD_LEVELS = ('adc2', 'gf2', 'gw')
+FOLD_LEVELS = ('adc2', 'gf2', 'gw', 'dbse2')
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 # the progress record of the solve_folded call in flight at verbose >= 1, else None
 _TRACE = contextvars.ContextVar('ee_fold_trace', default=None)
@@ -180,10 +180,10 @@ def _check_level(pieces):
     if pieces['level'] not in FOLD_LEVELS:
         raise ValueError(f"the fold needs a bare-diagonal doubles block; level="
                          f"{pieces['level']!r} is not one of {FOLD_LEVELS}")
-    if pieces['level'] == 'gw' and pieces.get('dnorm2') is None:
-        # the adc2 flat layout would read none of the (k, c, m) blocks
-        raise ValueError("level='gw' needs pieces['dnorm2'], the norm of its "
-                         "(k, c, m) doubles")
+    if pieces['level'] in ('gw', 'dbse2') and pieces.get('dnorm2') is None:
+        # the adc2 flat layout would read none of these doubles blocks
+        raise ValueError(f"level={pieces['level']!r} needs pieces['dnorm2'], the norm "
+                         "of its own doubles layout")
 
 
 def _check_vector(u, n):
