@@ -35,8 +35,8 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
    H2/STO-3G, H2O/cc-pVDZ (exact factors) and cyclazine/6-31G (density fitted,
    Monino and Loos's geometry); command-line names select a subset; on water
    with a device budget that caps every block at one virtual; and on water with a
-   device too small for the two pair-sized arrays, which raises ValueError
-   before any upload. Without CuPy, or
+   device too small for the two pair-sized arrays and the DF factors, which
+   raises ValueError before any upload. Without CuPy, or
    with CuPy and no visible GPU, these rows print a skip line; without CuPy
    device='gpu' raises ImportError.
 """
@@ -415,8 +415,10 @@ if __name__ == '__main__':
                         'BSE2_GPU_BLOCK_GB at 1e-12 (blocks of one virtual)',
                         f'max rel dev {devs[0]:.1e} printed, {devs[1]:.1e} eq71')
         # a device whose free memory, pool included, cannot hold the two
-        # pair-sized arrays: refused before anything else of cp is touched
-        need = 16 * (nocc * (len(eps_hf) - nocc)) ** 2 / 1024 ** 3
+        # pair-sized arrays and the DF factors: refused before anything else of
+        # cp is touched
+        need = (16 * (nocc * (len(eps_hf) - nocc)) ** 2
+                + 8 * coeff.shape[0] * len(eps_hf) ** 2) / 1024 ** 3
         real = linear_response.cp
         linear_response.cp = types.SimpleNamespace(
             cuda=types.SimpleNamespace(
