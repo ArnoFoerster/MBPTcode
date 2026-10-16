@@ -364,3 +364,75 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'level': 'dbse2',
             'no': no, 'nv': nv, 'be': _eq.SPIN_BLOCKED, 'dense_limit': _DENSE_LIMIT,
             'Bt': Bt, 'pairs': pairs}
+
+
+# the index of the ordered doubles (k, l, c, d) a vertex ties to the external pair
+_FIXED = {'I': 2, 'J': 3, 'K': 0, 'L': 1}
+# the leg of the doubles a vertex puts the singles' spin on
+_LEG = {'I': 'kc', 'K': 'kc', 'J': 'ld', 'L': 'ld'}
+
+
+def static_limit_pieces(eps_gw, eps_hf, B, nocc, kernel='eq71', channel='singlet'):
+    """The static limit of the pieces' terms: Θ at ω = 0 with the external energies at
+    the chemical potential, eq 72's recipe, for the check against the static kernel.
+
+    Parameters
+    ----------
+    eps_gw, eps_hf, B, nocc : as build_pieces_dbse2
+    kernel : {'eq71', 'printed'}
+    channel : {'singlet', 'triplet'}
+
+    Returns
+    -------
+    theta : ndarray, shape (n_pair, n_pair), index order (ia, jb) with ia = i nv + a:
+        the static Θ^A of the channel, zero when the channel's pair list is empty
+
+    Notes
+    -----
+    For each vertex product A.B of the channel's pairs, weight w_AB = x_A y_B + y_A x_B,
+    the static denominator keeps the internal indices only, those neither vertex ties to
+    the external pair (I ties c, J ties d, K ties k, L ties l):
+    R^AB_K = -1 / sum_internal(+ε_c, +ε_d, -ε_k, -ε_l). Spin: a product of two vertices
+    on one leg ((I, K) with (I, K), or (J, L) with (J, L)) has aa,aa = 2 P and
+    aa,bb = 0, a product across the legs aa,aa = aa,bb = P, with
+    P_ia,jb = sum_K A_ia,K B_jb,K R^AB_K the spatial product by unit vectors through
+    _vertex_images; the singlet is aa,aa + aa,bb and the triplet aa,aa - aa,bb.
+    """
+    pairs = coupling_pairs(kernel, channel)
+    eps_gw = np.asarray(eps_gw, float)
+    no = nocc
+    nv = eps_gw.size - no
+    ns = no * nv
+    theta = np.zeros((ns, ns))
+    if not pairs:
+        return theta
+    _, Bt = dressed_factors(eps_hf, B, no)
+    # the dense vertex images on unit singles: rows (ia), columns the doubles (klcd)
+    E = np.eye(ns).reshape(ns, no, nv)
+    img = [_vertex_images(Bt, no, E[k]) for k in range(ns)]
+    VA = {'I': np.stack([t.ravel() for t, _ in img]),
+          'K': np.stack([u.ravel() for _, u in img]),
+          'J': np.stack([t.transpose(1, 0, 3, 2).ravel() for t, _ in img]),
+          'L': np.stack([u.transpose(1, 0, 3, 2).ravel() for _, u in img])}
+    del img
+    eo, ev = eps_gw[:no], eps_gw[no:]
+    shape = (no, no, nv, nv)
+    # the signed energy of each index of (k, l, c, d) on the doubles
+    energy = (np.broadcast_to(-eo[:, None, None, None], shape),
+              np.broadcast_to(-eo[None, :, None, None], shape),
+              np.broadcast_to(ev[None, None, :, None], shape),
+              np.broadcast_to(ev[None, None, None, :], shape))
+    for x, y in pairs:
+        for a, A in enumerate(VERTICES):
+            for b, Bv in enumerate(VERTICES):
+                w = x[a] * y[b] + y[a] * x[b]
+                if w == 0.0:
+                    continue
+                internal = {0, 1, 2, 3} - {_FIXED[A], _FIXED[Bv]}
+                # R^AB_K = -1 / sum over the internal indices of their signed energies
+                R = -1.0 / sum(energy[i] for i in sorted(internal))
+                # P_ia,jb = sum_K A_ia,K B_jb,K R^AB_K
+                P = VA[A] @ (VA[Bv] * R.ravel()[None, :]).T
+                mult = 2.0 if channel == 'singlet' or _LEG[A] == _LEG[Bv] else 0.0
+                theta += w * mult * P
+    return theta
