@@ -149,3 +149,218 @@ def _check_names(kernel, sets, singles, screening):
         raise ValueError(f"singles={singles!r}; expected one of {SINGLES}")
     if screening not in ('tda', 'rpa'):
         raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
+
+
+def _vertex_images(Bt, no, y):
+    """The images t = I y and u = K y of a spatial singles block on the ordered doubles.
+
+    Parameters
+    ----------
+    Bt : ndarray, shape (naux, norb, norb), index order (P, p, q), the dressed factors
+    no : int
+    y : ndarray, shape (no, nv), index order (i, a)
+
+    Returns
+    -------
+    t : ndarray, shape (no, no, nv, nv), index order (k, l, c, d),
+        t_klcd = sum_i w(ik|ld) y_ic, vertex I; vertex J's image is t with the swap
+        (k, c) <-> (l, d)
+    u : ndarray, shape (no, no, nv, nv), index order (k, l, c, d),
+        u_klcd = sum_a w(ac|ld) y_ka, vertex K; vertex L's image is u with the swap
+        (k, c) <-> (l, d)
+    """
+    naux = Bt.shape[0]
+    nv = y.shape[1]
+    Boo, Bov, Bvv = Bt[:, :no, :no], Bt[:, :no, no:], Bt[:, no:, no:]
+    # ZI_P,kc = sum_i B~_P,ik y_ic ;  ZK_P,kc = sum_a y_ka B~_P,ac
+    ZI = np.matmul(Boo.transpose(0, 2, 1), y)
+    ZK = np.matmul(y, Bvv)
+    Bld = Bov.reshape(naux, no * nv)
+    out = []
+    for Z in (ZI, ZK):
+        # x_kc,ld = sum_P Z_P,kc B~_P,ld, then (k, c, l, d) -> (k, l, c, d)
+        T = (Z.reshape(naux, no * nv).T @ Bld).reshape(no, nv, no, nv)
+        out.append(T.transpose(0, 2, 1, 3))
+    return out[0], out[1]
+
+
+def _vertex_images_t(Bt, no, Y):
+    """The transposes I^T Y and K^T Y of one doubles block onto a singles block.
+
+    Parameters
+    ----------
+    Bt : ndarray, shape (naux, norb, norb), index order (P, p, q), the dressed factors
+    no : int
+    Y : ndarray, shape (no, no, nv, nv), index order (k, l, c, d); for J^T and L^T pass
+        Y with (k, c) <-> (l, d), Y.transpose(1, 0, 3, 2)
+
+    Returns
+    -------
+    wI : ndarray, shape (no, nv), index order (i, a),
+        (I^T Y)_ia = sum_kld w(ik|ld) Y_klad = sum_Pk B~_P,ik G_P,ka
+    wK : ndarray, shape (no, nv), index order (i, a),
+        (K^T Y)_ia = sum_lcd w(ac|ld) Y_ilcd = sum_Pc B~_P,ac G_P,ic
+    with G_P,kc = sum_ld B~_P,ld Y_klcd.
+    """
+    naux = Bt.shape[0]
+    nv = Y.shape[2]
+    Boo, Bov, Bvv = Bt[:, :no, :no], Bt[:, :no, no:], Bt[:, no:, no:]
+    # G_P,kc = sum_ld B~_P,ld Y_klcd : (P, ld) @ (ld, kc)
+    Yx = Y.transpose(1, 3, 0, 2).reshape(no * nv, no * nv)
+    G = (Bov.reshape(naux, no * nv) @ Yx).reshape(naux, no, nv)
+    # wI_ia = sum_Pk B~_P,ik G_P,ka ;  wK_ia = sum_Pc B~_P,ac G_P,ic
+    wI = np.einsum('Pik,Pka->ia', Boo, G, optimize=True)
+    wK = np.einsum('Pac,Pic->ia', Bvv, G, optimize=True)
+    return wI, wK
+
+
+def _singles_block(eps_gw, B, Bt, nocc, singles):
+    """M of eq 62 at the GW energies, with eq 59's static W for singles='eq62+eq59'.
+
+    Returns SB, blocks (no, nv, no, nv), index order (i, a, j, b): the CIS block of the
+    gf2 builder with the GW energies on its diagonal, A_ia,jb = (ε_a - ε_i) δ_ij δ_ab +
+    (ia|jb) - (ij|ab) on 'aaaa' and 'bbbb', (ia|jb) on 'aabb' and 'bbaa'; for
+    'eq62+eq59' minus Wc_ia,jb = sum_P B~_P,ij B~_P,ab - sum_P B_P,ij B_P,ab on the
+    same-spin blocks, the screened exchange of eq 59 in place of the bare one.
+    """
+    no = nocc
+    nv = eps_gw.size - no
+    # A^GW of eq 62: the gf2 builder's first-order singles block at the GW energies
+    M = ee_r_sigma_df.build_operator(eps_gw, B, no, level='gf2', pieces=True)[3]['M']
+    if singles == 'eq62+eq59':
+        naux = B.shape[0]
+        # Wc_ij,ab = sum_P B~_P,ij B~_P,ab - sum_P B_P,ij B_P,ab
+        Wc = (Bt[:, :no, :no].reshape(naux, -1).T @ Bt[:, no:, no:].reshape(naux, -1)
+              - B[:, :no, :no].reshape(naux, -1).T @ B[:, no:, no:].reshape(naux, -1))
+        # (i, j, a, b) -> (i, a, j, b)
+        Wc = Wc.reshape(no, no, nv, nv).transpose(0, 2, 1, 3)
+        M = M - SB({'aaaa': Wc, 'bbbb': Wc})
+    return M
+
+
+def _combine(c, t1, u1, t2, u2):
+    """sum over the vertices of c_A times A's image on one doubles block: c_I t(s1) +
+    c_K u(s1) + c_J t(s2)^T + c_L u(s2)^T, ^T the swap (k, c) <-> (l, d)."""
+    out = None
+    for coef, arr in ((c[0], t1), (c[2], u1), (c[1], t2.transpose(1, 0, 3, 2)),
+                      (c[3], u2.transpose(1, 0, 3, 2))):
+        if coef == 0.0:
+            continue
+        out = coef * arr if out is None else out + coef * arr
+    return out
+
+
+def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
+                       screening='rpa', singles='eq62'):
+    """The pieces of ee_fold.folded_operator for eq 71's doubles on the signed fold.
+
+    Parameters
+    ----------
+    eps_gw : ndarray, shape (norb,), the GW quasiparticle energies ε^GW_p, Hartree,
+        occupied first: the singles diagonal of eq 62 and the doubles diagonal D
+    eps_hf : ndarray, shape (norb,), HF orbital energies, Hartree, the reference the W
+        lines are screened at
+    B : ndarray, shape (naux, norb, norb), index order (Q, p, q), DF factors with
+        (pq|rs) = sum_Q B_Q,pq B_Q,rs
+    nocc : int, doubly occupied orbitals
+    kernel : {'eq71', 'printed'}, the module docstring's table
+    sets : tuple of str, the doubles sets; ('eq71',) alone until eq 61's set joins
+    screening : {'tda', 'rpa'}, the screening of eq 61's modes, read when that set joins
+    singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block)
+
+    Returns
+    -------
+    dict
+        'M' SB, blocks (no, nv, no, nv), index order (i, a, j, b); 'V' SB singles
+        {'aa', 'bb'} of (no, nv), index order (i, a) -> SB doubles on the eight keys
+        '+aaaa', '-aaaa', '+bbbb', '-bbbb', '+abab', '-abab', '+baba', '-baba', each
+        (no, no, nv, nv), index order (k, l, c, d), the copy's sign then the spin string
+        of (k, l, c, d); 'Vt' the η-transpose, w_ia = sum_K V+_K,ia Z+_K - sum_K
+        V-_K,ia Z-_K; 'D' ndarray, shape (no, no, nv, nv), index order (k, l, c, d),
+        D_klcd = ε_c + ε_d - ε_k - ε_l at the GW energies, shared by every block;
+        'dnorm2' SB doubles -> |Z+|² - |Z-|²; 'level' 'dbse2'; 'no', 'nv', 'be';
+        'dense_limit' 40; 'Bt' the dressed factors and 'pairs' the singlet list of
+        coupling_pairs, for inspection.
+
+    Notes
+    -----
+    With the pair (x, y) over (I, J, K, L), X = sum_A x_A A and Y = sum_B y_B B, the
+    copies are V± = (X ± Y)/√2; on the block whose (k, c) pair carries spin s1 and
+    whose (l, d) pair carries s2, X y1 = x_I t(y^s1) + x_K u(y^s1) + x_J t(y^s2)^T +
+    x_L u(y^s2)^T with (t, u) of _vertex_images and ^T the swap (k, c) <-> (l, d).
+    Vt(Z) = V+^T Z+ - V-^T Z- = X^T Zx + Y^T Zy with Zx = (Z+ - Z-)/√2 and
+    Zy = (Z+ + Z-)/√2: I^T and K^T read the blocks whose (k, c) carries the output
+    spin, J^T and L^T those whose (l, d) does, each through _vertex_images_t. The
+    doubles exist inside one call only.
+    """
+    _check_names(kernel, sets, singles, screening)
+    eps_gw = np.asarray(eps_gw, float)
+    eps_hf = np.asarray(eps_hf, float)
+    no = nocc
+    nv = eps_gw.size - no
+    if eps_gw[:no].max() >= eps_gw[no:].min():
+        raise ValueError('eps_gw: the GW gap is closed (occupied max '
+                         f'{eps_gw[:no].max():.4f} Ha, virtual min '
+                         f'{eps_gw[no:].min():.4f} Ha); energies in Hartree, occupied '
+                         'first')
+    pairs = coupling_pairs(kernel, 'singlet')
+    if len(pairs) != 1:
+        raise NotImplementedError('one coupling pair per set at milestone 1')
+    x, y = pairs[0]
+    _, Bt = dressed_factors(eps_hf, B, no)
+    M = _singles_block(eps_gw, B, Bt, no, singles)
+    eo, ev = eps_gw[:no], eps_gw[no:]
+    # D_klcd = ε_c + ε_d - ε_k - ε_l
+    D = (ev[None, None, :, None] + ev[None, None, None, :]
+         - eo[:, None, None, None] - eo[None, :, None, None])
+    blocks = (('a', 'a'), ('a', 'b'), ('b', 'a'), ('b', 'b'))      # (s1, s2)
+
+    def V(y1):
+        if y1.parity is not None:
+            raise NotImplementedError('V takes y1 without a flip parity')
+        img = {s: _vertex_images(Bt, no, y1.get(s + s)) for s in 'ab'}
+        out = {}
+        for s1, s2 in blocks:
+            t1, u1 = img[s1]
+            t2, u2 = img[s2]
+            Xb = _combine(x, t1, u1, t2, u2)
+            Yb = _combine(y, t1, u1, t2, u2)
+            key = s1 + s2 + s1 + s2
+            # V± = (X ± Y)/√2 on this block
+            out['+' + key] = (Xb + Yb) / _SQRT2
+            out['-' + key] = (Xb - Yb) / _SQRT2
+        return SB(out)
+
+    def Vt(Z):
+        def combined(keys, sign):
+            # (Z+ + sign Z-)/√2 summed over the given spin blocks
+            return sum(Z.get('+' + k) + sign * Z.get('-' + k) for k in keys) / _SQRT2
+
+        w = {}
+        for a in 'ab':
+            # the blocks whose (k, c) pair, and whose (l, d) pair, carries spin a
+            kc = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s1 == a]
+            ld = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s2 == a]
+            wa = np.zeros((no, nv))
+            # Zx = (Z+ - Z-)/√2 meets X^T, Zy = (Z+ + Z-)/√2 meets Y^T
+            for c, sign in ((x, -1.0), (y, 1.0)):
+                if c[0] != 0.0 or c[2] != 0.0:
+                    # I^T, K^T read the blocks whose (k, c) pair carries spin a
+                    wI, wK = _vertex_images_t(Bt, no, combined(kc, sign))
+                    wa = wa + c[0] * wI + c[2] * wK
+                if c[1] != 0.0 or c[3] != 0.0:
+                    # J^T, L^T read those whose (l, d) pair does, with (k, c) <-> (l, d)
+                    Zs = combined(ld, sign)
+                    wI, wK = _vertex_images_t(Bt, no, Zs.transpose(1, 0, 3, 2))
+                    wa = wa + c[1] * wI + c[3] * wK
+            w[a + a] = wa
+        return SB(w)
+
+    def dnorm2(Z):
+        # |Z+|² - |Z-|²
+        return float(sum((1.0 if k[0] == '+' else -1.0) * np.vdot(v, v)
+                         for k, v in Z.items()))
+
+    return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'level': 'dbse2',
+            'no': no, 'nv': nv, 'be': _eq.SPIN_BLOCKED, 'dense_limit': _DENSE_LIMIT,
+            'Bt': Bt, 'pairs': pairs}
