@@ -54,8 +54,8 @@ def _try_init_mpi():
 # CuPy is imported on the first solve that may use it, as mpi4py is above.
 # MBPT_EIGH_DEVICE picks the device of a dense solve: 'auto' (the default) uses a
 # visible GPU at or above the threshold and the host below it, or when the
-# device memory runs out; 'cpu' never uses the GPU; 'gpu' always does, at any
-# size, and raises where it cannot.
+# device runs out of memory or cuSOLVER refuses the size; 'cpu' never uses the
+# GPU; 'gpu' always does, at any size, and raises where it cannot.
 EIGH_DEVICES = ('auto', 'cpu', 'gpu')
 _CP = None
 _CP_TRIED = False
@@ -96,15 +96,15 @@ def _eigh_gpu(M, required):
     try:
         w, Z = cp.linalg.eigh(cp.asarray(M))
         return cp.asnumpy(w), cp.asnumpy(Z)
-    except cp.cuda.memory.OutOfMemoryError as exc:
+    # Xsyevd's workspace query rejects a size it cannot take with INVALID_VALUE
+    except (cp.cuda.memory.OutOfMemoryError, cp.cuda.cusolver.CUSOLVERError) as exc:
         if required:
             raise
         reason = f'{type(exc).__name__}: {exc}'
     # outside the except, so the failed solve's arrays are released first
     cp.get_default_memory_pool().free_all_blocks()
-    warnings.warn(f'GPU diagonalization does not fit the device at '
-                  f'N={M.shape[0]} ({reason}); solving on the host',
-                  RuntimeWarning, stacklevel=3)
+    warnings.warn(f'GPU diagonalization failed at N={M.shape[0]} ({reason}); '
+                  f'solving on the host', RuntimeWarning, stacklevel=3)
     return None
 
 def get_global_indices_1d(local_size, block_size, grid_dim, process_coord):

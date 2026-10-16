@@ -11,8 +11,8 @@
    |Z^H Z - 1| below 1e-12, host arrays out; 'auto' above the threshold takes the
    device; the Casida A-B diagonal, A-B full and TDA branches under 'gpu' against
    'cpu', omega to 1e-12 relative, X and Y to 1e-10 after aligning column signs;
-   a device out-of-memory under 'auto' falls back to the host with one
-   RuntimeWarning, and under 'gpu' raises.
+   a device out-of-memory or a cuSOLVER refusal under 'auto' falls back to the
+   host with one RuntimeWarning, and under 'gpu' raises.
 """
 import os
 import sys
@@ -145,26 +145,36 @@ else:
                         f"Casida {label}: 'gpu' against 'cpu'",
                         f'omega {domega:.1e} rel, X and Y {dvec:.1e}')
 
-    def no_room(a):
-        raise cp.cuda.memory.OutOfMemoryError(a.nbytes, 0)
+    def refusing(exc):
+        def eigh(a):
+            raise exc
+        return eigh
 
-    cp.linalg.eigh = no_room
-    try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            w_fall, _ = solve('auto', M_real, threshold=10)
-        runtime = [c for c in caught if issubclass(c.category, RuntimeWarning)]
-        all_ok &= check(np.abs(w_fall - w_ref).max() < 1e-12 and len(runtime) == 1,
-                        "'auto' falls back to the host on a device out-of-memory",
-                        f'{len(runtime)} RuntimeWarning'
-                        + (f': {runtime[0].message}' if runtime else ''))
+    # INVALID_VALUE is what Xsyevd raises on a size it rejects
+    for label, exc in (('a device out-of-memory',
+                        cp.cuda.memory.OutOfMemoryError(M_real.nbytes, 0)),
+                       ('a cuSOLVER refusal', cp.cuda.cusolver.CUSOLVERError(3))):
+        cp.linalg.eigh = refusing(exc)
         try:
-            solve('gpu', M_real)
-            all_ok &= check(False, "'gpu' raises on a device out-of-memory")
-        except cp.cuda.memory.OutOfMemoryError:
-            all_ok &= check(True, "'gpu' raises on a device out-of-memory")
-    finally:
-        cp.linalg.eigh = keep_eigh
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always')
+                    w_fall, _ = solve('auto', M_real, threshold=10)
+                runtime = [c for c in caught
+                           if issubclass(c.category, RuntimeWarning)]
+                ok = np.abs(w_fall - w_ref).max() < 1e-12 and len(runtime) == 1
+                detail = (f'{len(runtime)} RuntimeWarning'
+                          + (f': {runtime[0].message}' if runtime else ''))
+            except type(exc) as e:
+                ok, detail = False, f'{type(e).__name__} escaped: {e}'
+            all_ok &= check(ok, f"'auto' falls back to the host on {label}", detail)
+            try:
+                solve('gpu', M_real)
+                all_ok &= check(False, f"'gpu' raises on {label}")
+            except type(exc):
+                all_ok &= check(True, f"'gpu' raises on {label}")
+        finally:
+            cp.linalg.eigh = keep_eigh
 
 if keep_env is None:
     os.environ.pop('MBPT_EIGH_DEVICE', None)
