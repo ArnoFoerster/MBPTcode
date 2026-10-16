@@ -319,13 +319,12 @@ def _operator_folded(pieces, omega, spin):
     mv = FoldedMatvec(op, omega)
 
     def dmatvec(u, vector=False):
-        if vector:
-            raise NotImplementedError(
-                f'{type(op).__name__} forms no dA_eff/domega images; '
-                "solver='newton' or 'block' solves on it")
         if omega is None:
-            return 0.0
+            return np.zeros(op.n) if vector else 0.0
         u = _check_vector(u, op.n)
+        if vector:
+            # dA_eff/dω u = -C (D - ω)^-2 C^T u, the operator's derivative image
+            return op.fold_images(u[:, None], [omega], derivative=[True])[1][0][:, 0]
         return float(op.doubles_dot(u, omega, u, omega))
 
     return mv, dmatvec, op.diag.copy(), embed, restrict
@@ -664,11 +663,18 @@ def _davidson_omega(pieces, spin, X0, nroots, d_min, tol_residual, tol_omega,
 
     for cycle in range(1, max_cycle + 1):
         matvec, dmatvec, diag_s, _, _ = folded_operator(pieces, om0, spin)
-        # images of the columns not yet imaged at this centre
-        for k in range(S0.shape[1], Q.shape[1]):
-            S0 = np.column_stack([S0, matvec(Q[:, k])])
-            S1 = np.column_stack([S1, dmatvec(Q[:, k], vector=True)])
-            counted(2)
+        # images of the columns not yet imaged at this centre, both from one pass
+        # of the doubles where the matvec has one (an operator's `both`)
+        fresh = Q[:, S0.shape[1]:]
+        if fresh.shape[1]:
+            both = getattr(matvec, 'both', None)
+            if both is not None:
+                A0, A1 = both(fresh)
+            else:
+                A0 = np.column_stack([matvec(q) for q in fresh.T])
+                A1 = np.column_stack([dmatvec(q, vector=True) for q in fresh.T])
+            S0, S1 = np.column_stack([S0, A0]), np.column_stack([S1, A1])
+            counted(2 * fresh.shape[1])
         H0, H1 = Q.T @ S0, Q.T @ S1
         H0, H1 = 0.5 * (H0 + H0.T), 0.5 * (H1 + H1.T)
         # roots to a tenth of the level width, so _levels can tell a level apart
@@ -1384,8 +1390,9 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     solver : {'davidson', 'newton', 'block'}, the root-wise Davidson, the
         per-level Newton loops from the seeds, or the block Davidson over images
         at Chebyshev frequencies (its trace counts each image at a node as one
-        application); an operator's pieces (pieces['operator']) take 'newton'
-        or 'block'.
+        application); on an operator's pieces (pieces['operator']) the
+        Davidson images A_eff and dA_eff/dω together, from one pass of the
+        doubles per new direction (the operator's `both`).
 
     Returns
     -------
@@ -1407,10 +1414,6 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
     if solver not in ('davidson', 'newton', 'block'):
         raise ValueError(f"solver={solver!r}; expected 'davidson', 'newton' or "
                          "'block'")
-    if solver == 'davidson' and pieces.get('operator') is not None:
-        # the root-wise Davidson needs dA_eff/dω images, which the operator lacks
-        raise ValueError("solver='davidson' needs dA_eff/domega images; an "
-                         "operator's pieces take solver='newton' or 'block'")
     m0, _, diag_s, embed, _ = folded_operator(pieces, None, spin)
     n = diag_s.size
     if dense_limit is None:

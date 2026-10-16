@@ -28,8 +28,9 @@ second-order term keeping the bare interaction. Checks:
   8. refusals: a continuum with eps_static on a gas-phase mean field, fold
      with spin None, fold at adc3, a continuum on the spin-orbital route.
   9. over simulated MPI ranks (2 and 3, one tile per occupied orbital) the
-     operator's set-up, its products and the folded roots driven from rank 0
-     are the serial ones bit for bit, on every rank.
+     operator's set-up, its products and the folded roots driven from rank 0,
+     by solver 'newton' and by the default's Davidson, are the serial ones bit
+     for bit, on every rank.
  10. B_vv split over the ranks: bare_factors on rank r of 3 keeps exactly its
      auxiliary chunks, bit for bit the slices of the whole factor; over 2 and 3
      simulated ranks each holding only its chunks, the products (M U, A_eff(w)
@@ -40,6 +41,12 @@ second-order term keeping the bare interaction. Checks:
      follows the exact diagonal of the folded doubles (correlation above 0.7,
      rms under 0.8 of the diagonal's spread), singlets and triplets; zeros at
      ADC(1).
+ 12. the operator's dA_eff/dw images, fold_images with a derivative node, equal
+     folded_operator's dmatvec(u, vector=True) on ee_r_sigma_df's pieces (same
+     factors) to 1e-12 relative, singlets and triplets at w = 0.3 and 0.9 Ha, and
+     FoldedMatvec.both gives A_eff U and dA_eff/dw U in one pass, the same to
+     1e-12; the root-wise Davidson (solve_folded's default) on the operator
+     returns solver 'newton''s roots to 1e-8 Ha.
 
 Run: python tests/test_ee_adc_ri_fold.py
 """
@@ -285,7 +292,8 @@ def check_ranks(mf):
     def solve(o):
         r = ee_fold.solve_folded(o.pieces(), 3, spin='triplet', dense_limit=0,
                                  solver='newton')
-        return dict(omega=r.omega, t1=r.t1)
+        d = ee_fold.solve_folded(o.pieces(), 3, spin='triplet', dense_limit=0)
+        return dict(omega=r.omega, t1=r.t1, omega_d=d.omega)
 
     def rank(comm):
         op = ee_ri_fold.RIFoldADC2(F, 'triplet', tile_gb=1e-9, threads=1,
@@ -298,6 +306,7 @@ def check_ranks(mf):
         outs = run_simulated(rank, size)
         same = all(np.array_equal(o['omega'], ser[0]['omega'])
                    and np.array_equal(o['t1'], ser[0]['t1'])
+                   and np.array_equal(o['omega_d'], ser[0]['omega_d'])
                    and np.array_equal(d, ser[1]) and e == ser[2]
                    and np.array_equal(p[0], ser[3][0])
                    and np.array_equal(p[1], ser[3][1])
@@ -416,6 +425,45 @@ def check_fold_diagonal(mf):
     return ok
 
 
+def check_derivative(mf):
+    """Check 12."""
+    ok = True
+    mol = mf.mol
+    no = mol.nelectron // 2
+    eps = np.asarray(get_orbital_energies(mf), float)
+    B = DFIntegrals.from_scf(mol, mf).B_aa
+    _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
+    F = ee_ri_fold.RIFactors.from_full(eps, B, no)
+    rng = np.random.default_rng(7)
+
+    def rel(a, b):
+        return float(np.abs(a - b).max() / np.abs(b).max())
+
+    for spin in ee_ri_fold.SPINS:
+        op = ee_ri_fold.RIFoldADC2(F, spin, threads=2)
+        for om in (0.3, 0.9):
+            dmv = ee_fold.folded_operator(P, om, spin)[1]
+            dmo = ee_fold.folded_operator(op.pieces(), om, spin)[1]
+            U = rng.standard_normal((op.n, 2))
+            ref = np.column_stack([dmv(u, vector=True) for u in U.T])
+            got = np.column_stack([dmo(u, vector=True) for u in U.T])
+            fm = ee_ri_fold.FoldedMatvec(op, om)
+            A0, A1 = fm.both(U)
+            e = (rel(got, ref), rel(A1, ref), rel(A0, fm.matmat(U)))
+            ok &= check(max(e) < 1e-12,
+                        f'{spin} w={om}: the operator\'s dA_eff/dw images, and '
+                        'both() in one pass', ', '.join(f'{x:.1e}' for x in e))
+        a = ee_fold.solve_folded(op.pieces(), 3, spin=spin, dense_limit=0)
+        b = ee_fold.solve_folded(op.pieces(), 3, spin=spin, dense_limit=0,
+                                 solver='newton')
+        d = (float(np.abs(a.omega - b.omega).max())
+             if a.omega.shape == b.omega.shape else np.inf)
+        ok &= check(d < 1e-8 and set(a.loop) == {'davidson'},
+                    f'{spin}: the default\'s Davidson on the operator returns '
+                    "solver 'newton''s roots", f'{d:.1e} Ha, loop {a.loop}')
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     all_ok = True
@@ -431,6 +479,7 @@ def run():
         all_ok &= check_ranks(mf)
         all_ok &= check_split_bvv(mf)
         all_ok &= check_fold_diagonal(mf)
+        all_ok &= check_derivative(mf)
     return all_ok
 
 

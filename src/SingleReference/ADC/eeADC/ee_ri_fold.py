@@ -307,6 +307,14 @@ class _DoublesGPU:
         const double x = w - (ev[c] + ev[d] - eo[k0 + k] - eo[l]);
         R = G[i] / x;
     """
+    # the ω-derivative of R: d/dω G / (ω - D) = -G / (ω - D)^2
+    _R2 = r"""
+        long long q = i; const long long d = q % nv; q /= nv;
+        const long long l = q % no; q /= no; const long long c = q % nv;
+        const long long k = q / nv;
+        const double x = w - (ev[c] + ev[d] - eo[k0 + k] - eo[l]);
+        R = -G[i] / (x * x);
+    """
     # |Y|^2 summand of the image at w: singlet w^2 S (S - S~/2), triplet
     # w^2 [(H - H^T)^2 / 2 + (S - S~)^2 / 4], S = H + H^T
     _N = r"""
@@ -337,6 +345,9 @@ class _DoublesGPU:
         self.k_r = cp.ElementwiseKernel(
             'raw float64 G, raw float64 eo, raw float64 ev, int64 k0, int64 nv, '
             'int64 no, float64 w', 'float64 R', self._R, 'ee_fold_r')
+        self.k_r2 = cp.ElementwiseKernel(
+            'raw float64 G, raw float64 eo, raw float64 ev, int64 k0, int64 nv, '
+            'int64 no, float64 w', 'float64 R', self._R2, 'ee_fold_r2')
         self.k_n = cp.ElementwiseKernel(
             'raw float64 H, raw float64 HT, raw float64 eo, raw float64 ev, '
             'int64 k0, int64 nv, int64 no, float64 w, bool singlet', 'float64 N',
@@ -360,7 +371,7 @@ class _DoublesGPU:
         Bjk = self.Boo[k0:k1].transpose(1, 0, 2).reshape(self.no, -1)
         return (Bjk @ GkPb).ravel()
 
-    def images_tile(self, k0, k1, Btg, nodes):
+    def images_tile(self, k0, k1, Btg, nodes, derivative):
         """The CPU path's _images_tile: (Gam (p, kt nv, naux), B_oo half (p, no nv))
         as host arrays."""
         nv, no = self.nv, self.no
@@ -372,7 +383,8 @@ class _DoublesGPU:
         gams = np.empty((len(nodes), (k1 - k0) * nv, self.naux))
         img = np.empty((len(nodes), no * nv))
         for q, w in enumerate(nodes):
-            self.k_r(G, self.eo, self.ev, k0, nv, no, float(w), R)
+            kern = self.k_r2 if derivative[q] else self.k_r
+            kern(G, self.eo, self.ev, k0, nv, no, float(w), R)
             Gam = R @ self.L2.T
             img[q] = cp.asnumpy(self._back_oo(Gam, k0, k1))
             gams[q] = cp.asnumpy(Gam)
@@ -917,16 +929,20 @@ class RIFoldADC2:
         del H, HT, R
         return Gam, self._back_oo(Gam, k0, k1), nrm
 
-    def fold_images(self, U, nodes):
+    def fold_images(self, U, nodes, derivative=None):
         """(M U, F): F (p, n, m), F[q] = sum_K C_K (C^T U)_K / (w_q - D_K) =
-        A_eff(w_q) U - M U at each of the p frequencies w_q; a column's doubles
-        are built once and only the denominator changes between frequencies."""
+        A_eff(w_q) U - M U at each of the p frequencies w_q, or, where
+        derivative[q] (bool, (p,); default none), its ω-derivative dA_eff/dω U =
+        -sum_K C_K (C^T U)_K / (w_q - D_K)^2; a column's doubles are built once and
+        only the denominator changes between frequencies."""
         # contiguous: a strided column would leave BLAS and change the bits
         U = np.ascontiguousarray(U, float)
         if U.ndim == 1:
             U = U[:, None]
         nodes = np.atleast_1d(np.asarray(nodes, float))
         n, m, p = self.n, U.shape[1], nodes.size
+        derivative = (np.zeros(p, bool) if derivative is None
+                      else np.broadcast_to(np.asarray(derivative, bool), (p,)))
         MU = self.apply(U, None)[0]
         self.image_columns += m
         self.node_images += m * p
@@ -938,9 +954,9 @@ class RIFoldADC2:
             Btg = None if self.gpu is None else self.gpu.upload(BtT)
             parts, gams = [], {}
             for t, (k0, k1) in self.my_tiles:
-                gams[t], img = (self._images_tile(k0, k1, BtT, nodes)
+                gams[t], img = (self._images_tile(k0, k1, BtT, nodes, derivative)
                                 if Btg is None else
-                                self.gpu.images_tile(k0, k1, Btg, nodes))
+                                self.gpu.images_tile(k0, k1, Btg, nodes, derivative))
                 parts.append((t, img.ravel()))
             del BtT, Btg
             # the tiles in tile order, then the B_vv half in chunk order
@@ -949,9 +965,9 @@ class RIFoldADC2:
             F[:, :, j] += self._back_vv(gams, p)
         return MU, F
 
-    def _images_tile(self, k0, k1, BtT, nodes):
+    def _images_tile(self, k0, k1, BtT, nodes, derivative):
         """One tile at the frequencies nodes: (Gam (p, kt nv, naux), the B_oo
-        half of its images (p, no nv))."""
+        half of its images (p, no nv)), derivative[q] as fold_images'."""
         nv, no, L = self.nv, self.no, self.f.L
         kt = k1 - k0
         H, HT = self._pair(BtT, k0, k1)
@@ -971,8 +987,10 @@ class RIFoldADC2:
         Gt, R = H, HT
         gams = np.empty((nodes.size, kt * nv, self.f.naux))
         for q, w in enumerate(nodes):
-            def seg_r(k, c0, c1, w=w):
-                R[k, c0:c1] = Gt[k, c0:c1] / (w - self._denom(k0 + k, c0, c1))
+            def seg_r(k, c0, c1, w=w, two=bool(derivative[q])):
+                x = w - self._denom(k0 + k, c0, c1)
+                # Gt / (ω - D), or its ω-derivative -Gt / (ω - D)^2
+                R[k, c0:c1] = -Gt[k, c0:c1] / (x * x) if two else Gt[k, c0:c1] / x
             self._rows(kt, seg_r)
             gams[q] = R.reshape(kt * nv, -1) @ L
         return gams, self._back_oo(gams, k0, k1)
@@ -1034,6 +1052,12 @@ class FoldedMatvec:
     def matmat(self, U):
         return self.op.apply(U, self._omegas(U.shape[1]))[0]
 
+    def both(self, U):
+        """(A_eff(w) U, dA_eff/dw U), U (n, m): one pass of the doubles for both."""
+        w = float(self.omega)
+        MU, F = self.op.fold_images(U, [w, w], derivative=[False, True])
+        return MU + F[0], F[1]
+
     def norm2(self, u):
         if self.omega is None:
             return 0.0
@@ -1066,17 +1090,19 @@ class _RootDriven:
         Y = self.act(np.vstack([U, om[None, :], np.zeros((1, m))]))
         return Y[:self.n], Y[self.n]
 
-    def fold_images(self, U, nodes):
+    def fold_images(self, U, nodes, derivative=None):
         U = np.asarray(U, float)
         if U.ndim == 1:
             U = U[:, None]
         nodes = np.atleast_1d(np.asarray(nodes, float))
         n, m, p = self.n, U.shape[1], nodes.size
         # columns: U, padded to hold the nodes in row n; row n+1 the tag 2,
-        # then m and p
-        X = np.zeros((n + 2, max(m, p, 3)))
+        # then m, p and the p derivative flags
+        X = np.zeros((n + 2, max(m, 3 + p)))
         X[:n, :m], X[n, :p] = U, nodes
         X[n + 1, :3] = 2.0, m, p
+        if derivative is not None:
+            X[n + 1, 3:3 + p] = np.broadcast_to(np.asarray(derivative, bool), (p,))
         Y = self.act(X)
         return Y[:n], Y[n:].reshape(p, n, m)
 
@@ -1113,7 +1139,7 @@ def drive(op, solve):
             return np.vstack([AU, nrm[None, :]])
         if X[n + 1, 0] == 2.0:
             m, p = int(X[n + 1, 1]), int(X[n + 1, 2])
-            MU, F = op.fold_images(X[:n, :m], X[n, :p])
+            MU, F = op.fold_images(X[:n, :m], X[n, :p], X[n + 1, 3:3 + p] > 0.5)
             return np.vstack([MU, F.reshape(p * n, m)])
         return np.array([[op.doubles_dot(X[:n, 0], X[n, 0], X[:n, 1], X[n, 1])]])
 
