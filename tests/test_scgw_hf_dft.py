@@ -5,8 +5,8 @@ cycle reduces to self-consistent HF, so the peaks of A(w) must sit at the HF
 orbital energies, whether the cycle starts from HF or from DFT orbitals.
 
 Test 2 (start independence): the full scGW cycle is self-consistent, so
-starting it from HF or from DFT orbitals must give the same converged F
-(compared through its eigenvalues, on a shared IR grid).
+starting it from HF or from DFT orbitals must give the same Galitskii-Migdal
+energy (on a shared IR grid).
 
 Sigma is switched off by monkeypatching: scgw.calc_new_sigma_ir is replaced
 by a wrapper that returns a zero Sigma, and put back afterwards. Nothing in
@@ -32,32 +32,10 @@ from src.SingleReference.GW.space_time import separable_factors
 # parabola, so they match the HF levels to well below this.
 QPE_TOL = 1e-3
 
-# The cycle stops at max |delta gamma| = 1e-6; with the mixing, the converged
-# F of two runs agree to ~1e-5 Ha (measured on Ne/cc-pVDZ), so this leaves
-# an order of magnitude of margin.
-F_EIG_TOL = 1e-4
-
-
-@contextmanager
-def capture_final_F():
-    """Inside this block, the converged F of each scGW run is recorded.
-
-    After the cycle, solve_qp_energy_scgw passes the converged F to
-    build_Greal_from_F (once per run), so a wrapper around it sees F without
-    changing anything. Yields a list that gets one F per run.
-    """
-    original = scgw.build_Greal_from_F
-    captured = []
-
-    def recording(freq_points, sigma_real, F, eta):
-        captured.append(F.copy())
-        return original(freq_points, sigma_real, F, eta)
-
-    scgw.build_Greal_from_F = recording
-    try:
-        yield captured
-    finally:
-        scgw.build_Greal_from_F = original
+# The cycle stops at max |delta gamma| = 1e-6. On H2/cc-pVDZ the E_GM of an
+# HF and a PBE start then agree to 2e-8 Ha (their one-body and correlation
+# parts to ~1.5e-7 each), so this leaves margin for larger systems.
+E_GM_TOL = 1e-6
 
 
 @contextmanager
@@ -116,8 +94,8 @@ def test_sigma_zero_gives_hf(mol, mf_start, eps_hf, name):
     nocc = mol.nelectron // 2
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
     with sigma_switched_off():
-        qpes, A, w_real = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
-                                                    factors=factors)
+        qpes, A, w_real, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+                                                       factors=factors)
     return compare_peaks(name, qpes, expected_hf_peaks(mol, eps_hf))
 
 
@@ -140,24 +118,25 @@ def shared_grid_params(mfs, nocc):
     return max(betas), max(omega_maxes)
 
 
-def converged_F_eigenvalues(mol, mf_start, **grid):
+def converged_gm_energy(mol, mf_start, **grid):
     """Full scGW (real Sigma) from the orbitals of mf_start.
 
-    Returns the eigenvalues of the converged F. F is in the MO basis of
-    mf_start, but its eigenvalues are not, so they can be compared between
-    starts. grid: optional beta / omega_max, passed on to override the IR grid.
+    Returns the Galitskii-Migdal energy of the converged G and Sigma. It is a
+    total energy, so unlike F it does not depend on the MO basis of the start
+    and can be compared directly. grid: optional beta / omega_max, passed on
+    to override the IR grid.
     """
     nocc = mol.nelectron // 2
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
-    with capture_final_F() as captured:
-        scgw.solve_qp_energy_scgw(mf_start, mol, nocc, factors=factors, **grid)
-    return np.linalg.eigvalsh(captured[-1])
+    _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+                                              factors=factors, **grid)
+    return E_gm
 
 
 def test_start_independence(mol, mf_hf, mf_dft, name):
     """scGW is self-consistent, so its result must not depend on the start.
 
-    Compares the eigenvalues of the converged F from an HF and a DFT start.
+    Compares the Galitskii-Migdal energy from an HF and a DFT start.
     The peaks of A(w) are not used: the Pade continuation amplifies tiny
     differences in Sigma far from mu, so they can differ while the converged
     state is the same. Left to itself, each run builds its IR grid from its
@@ -168,19 +147,18 @@ def test_start_independence(mol, mf_hf, mf_dft, name):
     beta, omega_max = shared_grid_params([mf_hf, mf_dft], mol.nelectron // 2)
     print(f'\nShared IR grid: beta = {beta:.4g}, omega_max = {omega_max:.4g}')
     try:
-        eig_hf = converged_F_eigenvalues(mol, mf_hf, beta=beta, omega_max=omega_max)
-        eig_dft = converged_F_eigenvalues(mol, mf_dft, beta=beta, omega_max=omega_max)
+        E_hf = converged_gm_energy(mol, mf_hf, beta=beta, omega_max=omega_max)
+        E_dft = converged_gm_energy(mol, mf_dft, beta=beta, omega_max=omega_max)
     except RuntimeError as err:
         print(f'\n=== {name} ===\n{err}\n{name}: FAIL')
         return False
 
-    diff = eig_dft - eig_hf
+    diff = E_dft - E_hf
     print(f'\n=== {name} ===')
-    print(f'{"eig F (HF)":>14} {"eig F (DFT)":>14} {"diff":>12}')
-    for a, b, d in zip(eig_hf, eig_dft, diff):
-        print(f'{a:14.6f} {b:14.6f} {d:12.2e}')
-    ok = np.abs(diff).max() < F_EIG_TOL
-    print(f'max |diff| = {np.abs(diff).max():.2e} (tol {F_EIG_TOL:.0e})')
+    print(f'E_GM (HF start)  = {E_hf:.10f} Ha')
+    print(f'E_GM (DFT start) = {E_dft:.10f} Ha')
+    ok = abs(diff) < E_GM_TOL
+    print(f'|diff| = {abs(diff):.2e} Ha (tol {E_GM_TOL:.0e})')
     print(f'{name}: {"PASS" if ok else "FAIL"}')
     return ok
 

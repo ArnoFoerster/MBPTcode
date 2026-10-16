@@ -13,7 +13,9 @@ with mu adjusted so that Tr[gamma] equals the number of occupied orbitals.
 Two IR grids are used, both at the same beta and omega_max: a fermion grid
 for G and Sigma, and a boson grid for chi and W. Once converged, Sigma is
 continued to the real axis with Pade and the quasiparticle energies are read
-off the peaks of the spectral function.
+off the peaks of the spectral function. The total energy is the
+Galitskii-Migdal energy of the converged G and Sigma
+(`galitskii_migdal_energy`).
 
 `solve_qp_energy_scgw` is the entry point.
 """
@@ -73,6 +75,42 @@ def density_matrix_ir(G, grid_f):
 
     G_greater_beta = G_even_beta + G_odd_beta
     return -G_greater_beta
+
+def galitskii_migdal_energy(G, sigma_mo, V, h_mo, grid_f, e_nuc):
+    """Closed-shell Galitskii-Migdal total energy from G and Sigma_c.
+
+        E = E_nuc + Tr[gamma (h + F)] + (1/beta) sum_n Tr[Sigma_c(i.omega_n) G(i.omega_n)]
+
+    with gamma per spin and F = h + 2J[gamma] - K[gamma]. The prefactor of
+    the correlation term is 2 (spin) x 1/2 (GM).
+
+    The Matsubara sum runs over all n, not over the IR sampling points. It is
+    done as in `density_matrix_ir`: (1/beta) sum_n X(i.omega_n) = -X(tau = beta)
+    for a fermionic X, evaluated through the IR basis. Tr[Sigma G] decays as
+    1/omega^2, so X(tau) has no jump at tau = 0 and no convergence factor is
+    needed. The trace is taken before the transform: the matrix Sigma G does
+    not satisfy X(-i.omega) = X(i.omega)^dagger, which the even/odd split
+    assumes, but its trace satisfies x(-i.omega) = x(i.omega)*.
+
+    G is expected to be the Dyson solution for sigma_mo; at convergence
+    sigma_mo = Sigma[G] as well. gamma and F are rebuilt from G, not taken
+    from the (mixed) quantities of the scGW cycle.
+
+    Checked on H2/cc-pVDZ: with Sigma = 0 and the HF G0 it reproduces the HF
+    energy to 3e-8; for G0 and Sigma[G0] with the interaction scaled by
+    lambda, E_c / lambda^2 tends to twice the direct MP2 energy.
+
+    G, sigma_mo: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
+    Returns (E, E_c): the total energy and its correlation part, both real.
+    """
+    gamma = density_matrix_ir(G, grid_f)
+    F = build_new_F(gamma, V, h_mo)
+    E_1b = np.einsum('pq,qp->', gamma, h_mo + F).real
+
+    tr_sigma_G = np.einsum('wij,wji->w', sigma_mo, G)
+    E_c = density_matrix_ir(tr_sigma_G[:, None, None], grid_f)[0, 0].real
+
+    return e_nuc + E_1b + E_c, E_c
 
 def build_new_F(gamma, V, h_mo):
     """Closed-shell Fock matrix F = h + 2J[gamma] - K[gamma], in the MO basis.
@@ -327,6 +365,8 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     self-consistency (convergence is on the density matrix), then continues
     Sigma to the real axis with Pade and takes the quasiparticle energies
     from the peaks of the spectral function A(omega) = -Tr[Im G(omega)] / pi.
+    The total energy is the Galitskii-Migdal energy of the converged G and
+    Sigma.
 
     mf, mol: converged pyscf mean-field object and its molecule.
     nocc: number of doubly occupied orbitals.
@@ -338,8 +378,9 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         the IR grid parameters that are otherwise derived from mf's
         orbital energies (e.g. to run different starts on the same grid).
 
-    Returns (qpes, A, w_real): the peak positions, the spectral function and
-    the real frequency axis it is on.
+    Returns (qpes, A, w_real, E_gm): the peak positions, the spectral
+    function, the real frequency axis it is on, and the Galitskii-Migdal
+    total energy of the converged G and Sigma (`galitskii_migdal_energy`).
     With skip_scf=True, returns
     (G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
@@ -422,6 +463,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
     V = get_two_electron_integrals_chemist(mol,mf)
+    e_nuc = mol.energy_nuc()
 
     F = build_new_F(gamma, V, h_mo)
     G = build_G_from_F(mu, grid_f.omega_points, sigma_new, F)
@@ -474,6 +516,8 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         # TESTING ONE MU CYCLE INSTEAD OF CONVERGING MU
         mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
                                    sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+
+        # add mixing of F
         F_old = F
         F = build_new_F(gamma, V, h_mo)
 
@@ -486,13 +530,21 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
         delta_gamma = np.max(np.abs(gamma - gamma_old))
         delta_mu = abs(mu - mu_pre_scf)
-        print(f'Delta gamma: {delta_gamma}\nDelta mu: {delta_mu}\nDelta Sigma: {delta_sigma}\n\n')
+
+        # G is the Dyson solution for sigma_new, so this is the GM energy of
+        # the current iterate; it converges with the cycle.
+        E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
+        print(f'Delta gamma: {delta_gamma}\nDelta mu: {delta_mu}\nDelta Sigma: {delta_sigma}\n'
+              f'E_GM: {E_gm} (E_c: {E_c})\n\n')
     else:
         if delta_gamma > gamma_convergence:
             raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
                                f'(delta gamma = {delta_gamma:.2e})')
 
     print('\n----END SCF----\n')
+
+    E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
+    print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
@@ -538,4 +590,4 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
     print(f'\nPeak memory usage: {peak_gib} GB\n')
 
-    return qpes, A, w_real
+    return qpes, A, w_real, E_gm
