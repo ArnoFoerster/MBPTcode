@@ -49,7 +49,7 @@ from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_fold
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (
-    LinearResponseSolver, static_screened_coulomb_aux)
+    LinearResponseSolver, static_screened_coulomb_aux, static_second_order_kernel_df)
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 # the signed doubles blocks of one pair, the order the dense forms below stack them in
@@ -322,6 +322,25 @@ def check_transcription(eps, B, no):
     return ok
 
 
+def check_static_limit(eps, B, no):
+    """The static limit of the pieces' terms against the tree's static kernel at the GW
+    energies, both kernels, both channels."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    W_aux = static_screened_coulomb_aux(eps, B, no)
+    for kernel in ee_dbse2_pieces.KERNELS:
+        for channel in ('singlet', 'triplet'):
+            got = ee_dbse2_pieces.static_limit_pieces(eps_gw, eps, B, no, kernel=kernel,
+                                                      channel=channel)
+            ref, _ = static_second_order_kernel_df(eps_gw, B, W_aux, no, eta=0.0,
+                                                   channel=channel, kernel=kernel)
+            d = float(np.max(np.abs(got - ref)))
+            ok &= check(d < 1e-10, f'{kernel} {channel}: the static limit equals the '
+                        'static kernel',
+                        f'max |d| {d:.1e} Ha, |Theta| {np.abs(ref).max():.1e}')
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -329,6 +348,7 @@ def main():
     all_ok &= check_boundaries(eps, B, no)
     all_ok &= check_pieces(eps, B, no)
     all_ok &= check_transcription(eps, B, no)
+    all_ok &= check_static_limit(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
