@@ -13,6 +13,14 @@ SCF relaxes at the solvent's static dielectric constant and the excitation's
 reaction field answers at the optical one, in the singlet singles block; the
 second-order terms keep the bare interaction (see ee_ri_fold).
 
+--state-specific vertical|equilibrium adds each root's state-specific term,
+the reaction field of its unrelaxed ISR-ADC(2) difference density
+(ee_state_specific): at the optical constant with the ground state's slow
+polarization frozen (vertical) or at the static one (equilibrium). The
+channel record keeps the eigenvalue (omega_eV, which holds the LR term of
+singlets), the shifts of both modes and the one added (omega_ss_eV); each
+root's active-space difference density goes to density_<spin>.npz.
+
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
 spin channel in channel_<spin>.json; a rerun reuses both. --estimate-only
@@ -171,6 +179,10 @@ def main():
                    help="'gas' or a solvent name of pyscf's SMD table")
     p.add_argument('--spins', nargs='+', default=['singlet', 'triplet'])
     p.add_argument('--nroots', type=int, default=6)
+    p.add_argument('--state-specific', default='off',
+                   choices=('off', 'vertical', 'equilibrium'),
+                   help='add the state-specific reaction field of each '
+                        "root's difference density (needs a continuum)")
     p.add_argument('--frozen', default='auto',
                    help="'auto' (core shells), or a number of orbitals")
     p.add_argument('--conv-tol', type=float, default=1e-6,
@@ -210,6 +222,8 @@ def run(args, comm):
                         ranks=1 if comm is None else comm.Get_size(),
                         blas_threads=blas_threads(),
                         omp_threads=openmp_threads())), flush=True)
+    if args.state_specific != 'off' and args.environment == 'gas':
+        raise SystemExit('--state-specific needs --environment (a continuum)')
     if args.estimate_only:
         need = est['peak_gb']
         if need * 1024 > args.max_memory:
@@ -235,12 +249,20 @@ def run(args, comm):
                         convention='SCF at eps_static; LR transition reaction '
                                    'field at eps_optical in the singlet singles '
                                    'block; second order with the bare '
-                                   'interaction')
+                                   'interaction; state-specific term '
+                                   '(1/2) dV Q dV of the unrelaxed ISR-ADC(2) '
+                                   'difference density: ' + {
+                                       'off': 'not added',
+                                       'vertical': 'Q at eps_optical, slow '
+                                                   'polarization frozen',
+                                       'equilibrium': 'Q at eps_static'}[
+                                       args.state_specific])
 
     record = dict(label=args.label, xyz=os.path.abspath(args.xyz),
                   xyz_sha256=sha256(args.xyz), basis=args.basis,
                   auxbasis=args.auxbasis, jk_auxbasis=args.jk_auxbasis,
-                  method='ADC(2) (strict, folded doubles, density fitted)',
+                  method='ADC(2) (folded doubles, density fitted)',
+                  state_specific=args.state_specific,
                   environment=env_info, nroots=args.nroots,
                   conv_tol=args.conv_tol, code=git_sha(), estimate=est,
                   host=platform.node(), threads=dict(blas=blas_threads(),
@@ -260,17 +282,20 @@ def run(args, comm):
         path = os.path.join(args.out_dir, f'channel_{spin}.json')
         if os.path.isfile(path):
             with open(path) as fh:
-                channels[spin] = json.load(fh)
-            say(f'{spin}: reused {path}', flush=True)
-            continue
+                stored = json.load(fh)
+            if stored.get('state_specific', 'off') == args.state_specific:
+                channels[spin] = stored
+                say(f'{spin}: reused {path}', flush=True)
+                continue
         t = time.time()
         e, _, res = solve_ee_adc(mf, mol, level='adc2', spin=spin,
                                  nroots=args.nroots, fold=True, frozen=nfrozen,
                                  auxbasis=args.auxbasis, environment=env,
                                  conv_tol=args.conv_tol, return_fold=True,
-                                 tile_gb=args.tile_gb, device=args.device)
+                                 tile_gb=args.tile_gb, device=args.device,
+                                 state_specific=args.state_specific)
         op = res.operator
-        ch = dict(omega_eV=(np.asarray(e) * HARTREE_TO_EV).tolist(),
+        ch = dict(omega_eV=(np.asarray(res.omega) * HARTREE_TO_EV).tolist(),
                   singles_weight_T1=np.asarray(res.t1).tolist(),
                   converged=np.asarray(res.converged).tolist(),
                   newton_steps=np.asarray(res.steps).tolist(),
@@ -278,7 +303,17 @@ def run(args, comm):
                   e_mp2=op.e_mp2, product_columns=op.matvecs,
                   image_columns=op.image_columns, node_images=op.node_images,
                   tile_k=op.kt,
-                  wall_s=time.time() - t, peak_rss_gb=peak_rss_gb())
+                  wall_s=time.time() - t, peak_rss_gb=peak_rss_gb(),
+                  state_specific=args.state_specific)
+        if args.state_specific != 'off':
+            ch['ss_shifts_eV'] = {m: (np.asarray(v) * HARTREE_TO_EV).tolist()
+                                  for m, v in res.ss_shifts.items()}
+            ch['ss_shift_eV'] = (np.asarray(res.ss_shift) * HARTREE_TO_EV).tolist()
+            ch['omega_ss_eV'] = (np.asarray(e) * HARTREE_TO_EV).tolist()
+            if root:
+                np.savez(os.path.join(args.out_dir, f'density_{spin}.npz'),
+                         delta_density=np.asarray(res.delta_density),
+                         omega=res.omega, t1=res.t1, nfrozen=nfrozen)
         if root:
             with open(path, 'w') as fh:
                 json.dump(ch, fh, indent=1)
@@ -287,7 +322,8 @@ def run(args, comm):
 
     record['channels'] = channels
     if 'singlet' in channels and 'triplet' in channels:
-        s, tr = channels['singlet']['omega_eV'], channels['triplet']['omega_eV']
+        key = 'omega_ss_eV' if args.state_specific != 'off' else 'omega_eV'
+        s, tr = channels['singlet'][key], channels['triplet'][key]
         record['S'] = s[:3]
         record['T'] = tr[:3]
         record['dEST_eV'] = s[0] - tr[0]

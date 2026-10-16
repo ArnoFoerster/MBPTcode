@@ -58,9 +58,11 @@ triplet's transition density has no charge, so nothing). Every
 second-order term -- M2, the coupling, the doubles -- is built with the bare
 interaction on the solvated orbitals: correlation inside a frozen reaction
 field, the PTE convention of PCM-ADC (Lunkenheimer and Koehn, J. Chem. Theory
-Comput. 9, 977 (2013); Mewes et al., J. Chem. Theory Comput. 11, 4643 (2015)).
+Comput. 9, 977 (2013); Mewes et al., J. Phys. Chem. A 119, 5446 (2015)).
 At ADC(1) this is pyscf's TDA in PCM with a non-equilibrium (optical)
-response, which the tests check to rounding.
+response, which the tests check to rounding. The other half of the response
+to the excitation, the reaction field of the state's difference density, is
+added after the solve when asked for (ee_ri_density, ee_state_specific).
 """
 import numpy as np
 from pyscf import df as pyscf_df
@@ -396,9 +398,9 @@ class RIFoldADC2:
     """A_eff(w) of one spin channel of closed-shell ADC(1)/ADC(2) on flat
     singles vectors u (no nv,), (i, a) row-major, from RIFactors.
 
-    level 'adc1' is CIS (no second order, no doubles); 'adc2' the strict
-    ADC(2). reaction_field: a TransitionReactionField or None. tile_gb bounds
-    the tile working set; threads the element-wise passes (default: the
+    level 'adc1' is CIS (no second order, no doubles); 'adc2' ADC(2).
+    reaction_field: a TransitionReactionField or None. tile_gb bounds the
+    tile working set; threads the element-wise passes (default: the
     process's OpenMP count); aux_chunk the width of the auxiliary chunks
     (default: aux_chunks' rule), which split factors were built with; device
     'gpu' runs the doubles kernel on this rank's GPU (_DoublesGPU), 'cpu' on
