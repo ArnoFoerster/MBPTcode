@@ -62,7 +62,7 @@ from src.Base.constants import (EE_FOLD_BLOCK_BRACKET, EE_FOLD_BLOCK_BUFFER,
 from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
                                   overlap_pick, solve_symmetric)
 
-FOLD_LEVELS = ('adc2', 'gf2', 'gw')
+FOLD_LEVELS = ('adc2', 'gf2', 'gw', 'dbse2')
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 _DEGENERATE = 1e-8      # Hartree: seeds spread by at most this are one level
 _SEED_RESIDUAL = 1e-9   # tight seeds: Ritz error |r|²/gap far below _DEGENERATE
@@ -176,10 +176,10 @@ def _check_level(pieces):
     if pieces['level'] not in FOLD_LEVELS:
         raise ValueError(f"the fold needs a bare-diagonal doubles block; level="
                          f"{pieces['level']!r} is not one of {FOLD_LEVELS}")
-    if pieces['level'] == 'gw' and pieces.get('dnorm2') is None:
-        # the adc2 flat layout would read none of the (k, c, m) blocks
-        raise ValueError("level='gw' needs pieces['dnorm2'], the norm of its "
-                         "(k, c, m) doubles")
+    if pieces['level'] in ('gw', 'dbse2') and pieces.get('dnorm2') is None:
+        # the adc2 flat layout would read none of these doubles blocks
+        raise ValueError(f"level={pieces['level']!r} needs pieces['dnorm2'], the norm "
+                         "of its own doubles layout")
 
 
 def _check_vector(u, n):
