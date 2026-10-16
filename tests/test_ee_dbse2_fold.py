@@ -37,12 +37,16 @@ energy set is visible; the W lines are screened at the HF energies throughout.
 
 Run: python tests/test_ee_dbse2_fold.py
 """
+import contextlib
+import io
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import scipy.linalg
 from pyscf import gto, scf
 
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
@@ -341,6 +345,128 @@ def check_static_limit(eps, B, no):
     return ok
 
 
+def dense_signed_supermatrix(P):
+    """H = [[M, (eta V)^T], [V, D]] over the full spin-orbital singles (aa then bb) and
+    the doubles in KEYS order, from the pieces by unit vectors; eta is +1 on the '+'
+    blocks and -1 on the '-' blocks, so Z = (omega - D)^-1 V y gives the module's
+    A_eff. Returns (H, ns, eta_full) with eta_full +1 on the singles."""
+    no, nv = P['no'], P['nv']
+    m0, _, diag_s, _, _ = ee_fold.folded_operator(P, None, spin=None)
+    ns = diag_s.size
+    M = ee_fold.dense_effective(m0, ns)
+    V, eta = dense_coupling(P)
+    D = np.tile(P['D'].ravel(), len(KEYS))
+    H = np.block([[M, (eta[:, None] * V).T], [V, np.diag(D)]])
+    return H, ns, np.concatenate([np.ones(ns), eta])
+
+
+def flip_partner(no, nv):
+    """The alpha<->beta flip on the supermatrix's basis as an involution perm (n,):
+    singles aa <-> bb, doubles '+aaaa' <-> '+bbbb', '+abab' <-> '+baba', the '-' ones
+    alike, the (k, l, c, d) order untouched."""
+    ns, n_d = no * nv, no * no * nv * nv
+    perm = np.empty(2 * ns + len(KEYS) * n_d, int)
+    perm[:ns] = np.arange(ns, 2 * ns)
+    perm[ns:2 * ns] = np.arange(ns)
+    tr = str.maketrans('ab', 'ba')
+    off = {k: 2 * ns + i * n_d for i, k in enumerate(KEYS)}
+    for k in KEYS:
+        o = off[k.translate(tr)]
+        perm[off[k]:off[k] + n_d] = np.arange(o, o + n_d)
+    return perm
+
+
+def channel_block(H, perm, sign):
+    """E^T H E on the sign eigenspace of the flip, E the orthonormal pairs
+    (e_i + sign e_perm(i))/sqrt2 over the representatives i < perm(i); (H_s, reps)."""
+    reps = np.flatnonzero(np.arange(perm.size) < perm)
+    part = perm[reps]
+    Hr = H[reps] + sign * H[part]
+    return 0.5 * (Hr[:, reps] + sign * Hr[:, part]), reps
+
+
+def solve_counted(P, nroots, **kw):
+    """solve_folded with its trace captured; (result, matvec count)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        res = ee_fold.solve_folded(P, nroots, verbose=1, **kw)
+    mv = re.findall(r'mv = (\d+)', buf.getvalue())
+    return res, int(mv[-1]) if mv else -1
+
+
+def check_fold_vs_unfolded(basis):
+    """Every folded root is a real eigenvalue of the dense signed supermatrix of its
+    pieces and its T1 the eigenvector's |y|^2 / (|y|^2 + |Z+|^2 - |Z-|^2); the lowest
+    roots complete; Newton against the Davidson; the Hermitian misfold as control."""
+    ok = True
+    eps, B, no = water(basis)
+    nv = len(eps) - no
+    ns = no * nv
+    eps_gw = gw_like(eps, no)
+    perm = flip_partner(no, nv)
+    for kernel in ee_dbse2_pieces.KERNELS:
+        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
+                                               singles='eq62+eq59')
+        H, ns_full, eta_full = dense_signed_supermatrix(P)
+        d_min = float(P['D'].min())
+        blocks = {}
+        for spin, sign in (('singlet', 1.0), ('triplet', -1.0)):
+            Hs, reps = channel_block(H, perm, sign)
+            blocks[spin] = (Hs, eta_full[reps], ns)
+        if basis == 'sto-3g':
+            blocks[None] = (H, eta_full, ns_full)
+        for spin, (Hs, wts, nsing) in blocks.items():
+            w, v = scipy.linalg.eig(Hs)
+            real = np.abs(w.imag) < 1e-9
+            wr, vr = w[real].real, v[:, real].real
+            below = np.sort(wr[wr < d_min])
+            print(f'    {kernel} {basis} {spin}: {int((~real).sum())} complex '
+                  f'eigenvalues of {w.size}, {below.size} real below min D = '
+                  f'{d_min:.3f} Ha')
+            nroots = int(min(below.size, 6))
+            results = {}
+            for label, solver, dl in (('newton', 'newton', 0),
+                                      ('davidson', 'davidson', 0),
+                                      ('default', 'davidson', None)):
+                kw = dict(spin=spin, solver=solver, tol_omega=1e-12, tol_residual=1e-10)
+                if dl is not None:
+                    kw['dense_limit'] = dl
+                res, mv = solve_counted(P, nroots, **kw)
+                results[label] = res
+                dw, dt = [], []
+                for r in range(res.omega.size):
+                    k = int(np.argmin(np.abs(wr - res.omega[r])))
+                    dw.append(abs(wr[k] - res.omega[r]))
+                    u = vr[:, k]
+                    t1 = float(u[:nsing] @ u[:nsing]) / float((wts * u) @ u)
+                    dt.append(abs(t1 - res.t1[r]))
+                n = min(res.omega.size, nroots)
+                dc = float(np.max(np.abs(np.sort(res.omega)[:n] - below[:n])))
+                ok &= check(max(dw) < 3e-10 and max(dt) < 1e-8 and dc < 3e-10
+                            and n == nroots and bool(res.converged.all()),
+                            f'{kernel} {basis} {spin} {label}: roots and T1 are '
+                            f'eigenpairs of the signed supermatrix, lowest {nroots} '
+                            'complete', f'max |dw| {max(dw):.1e} Ha, max |dT1| '
+                            f'{max(dt):.1e}, {mv} matvecs')
+            a, b = results['newton'], results['davidson']
+            n = min(a.omega.size, b.omega.size, nroots)
+            dw = float(np.max(np.abs(a.omega[:n] - b.omega[:n])))
+            dt = float(np.max(np.abs(a.t1[:n] - b.t1[:n])))
+            ok &= check(dw < 1e-8 and dt < 1e-8,
+                        f'{kernel} {basis} {spin}: newton and davidson agree',
+                        f'max |dw| {dw:.1e} Ha, max |dT1| {dt:.1e}')
+        if basis == 'sto-3g':
+            # the control: the Hermitian misfold [[M, V^T], [V, D]] has other roots
+            Hm = H.copy()
+            Hm[:ns_full, ns_full:] *= eta_full[ns_full:][None, :]
+            wm = np.sort(np.linalg.eigvalsh(Hm))
+            res = ee_fold.solve_folded(P, 1, spin='singlet', tol_omega=1e-12)
+            d = float(np.min(np.abs(wm - res.omega[0])))
+            ok &= check(d > 1e-6, f'{kernel}: control, the Hermitian misfold differs',
+                        f'nearest {d:.1e} Ha')
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -349,6 +475,8 @@ def main():
     all_ok &= check_pieces(eps, B, no)
     all_ok &= check_transcription(eps, B, no)
     all_ok &= check_static_limit(eps, B, no)
+    all_ok &= check_fold_vs_unfolded('sto-3g')
+    all_ok &= check_fold_vs_unfolded('6-31g')
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
