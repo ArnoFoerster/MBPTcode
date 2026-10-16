@@ -33,13 +33,16 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
 6. device='gpu' against the CPU path on the same factors, Theta^A and Theta^B to
    1e-12 relative, for both kernels and both channels at eta 0 and 1e-3, on
    H2/STO-3G, H2O/cc-pVDZ (exact factors) and cyclazine/6-31G (density fitted,
-   Monino and Loos's geometry); command-line names select a subset; and on water
-   with a device budget that caps every block at one virtual. Without CuPy, or
+   Monino and Loos's geometry); command-line names select a subset; on water
+   with a device budget that caps every block at one virtual; and on water with a
+   device too small for the two pair-sized arrays, which raises ValueError
+   before any upload. Without CuPy, or
    with CuPy and no visible GPU, these rows print a skip line; without CuPy
    device='gpu' raises ImportError.
 """
 import os
 import sys
+import types
 import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -411,6 +414,26 @@ if __name__ == '__main__':
         all_ok &= check(max(devs) < 1e-12, "water: device='gpu' vs cpu, singlet, "
                         'BSE2_GPU_BLOCK_GB at 1e-12 (blocks of one virtual)',
                         f'max rel dev {devs[0]:.1e} printed, {devs[1]:.1e} eq71')
+        # a device whose free memory, pool included, cannot hold the two
+        # pair-sized arrays: refused before anything else of cp is touched
+        need = 16 * (nocc * (len(eps_hf) - nocc)) ** 2 / 1024 ** 3
+        real = linear_response.cp
+        linear_response.cp = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(
+                Device=lambda: types.SimpleNamespace(mem_info=(1024, 1024))),
+            get_default_memory_pool=lambda: types.SimpleNamespace(
+                free_bytes=lambda: 1024))
+        try:
+            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='gpu')
+            msg = 'no error'
+        except ValueError as e:
+            msg = str(e)
+        finally:
+            linear_response.cp = real
+        all_ok &= check(f'{need:.3g} GiB' in msg
+                        and f'{2048 / 1024 ** 3:.3g} GiB' in msg,
+                        "water: device='gpu' past the free memory raises ValueError",
+                        msg)
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)
