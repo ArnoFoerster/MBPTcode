@@ -227,12 +227,108 @@ def check_pieces(eps, B, no):
     return ok
 
 
+def transcription(Bt, eps_gw, no, omega, kernel):
+    """Theta(omega) of ee_dbse2_pieces' table on spin orbitals (interleaved spins, the
+    W lines zero across spin in a pair), as the (ns, ns) singlet and triplet blocks in
+    (ia, jb): the vertices and products of eq74_fold_identity.py with w from the dressed
+    factors and the GW energies in the doubles' denominators."""
+    n_sp = eps_gw.size
+    # w(pq|rs) = sum_P Bt_P,pq Bt_P,rs on spatial orbitals, then on spin orbitals
+    w_sp = np.einsum('Ppq,Prs->pqrs', Bt, Bt, optimize=True)
+    n = 2 * n_sp
+    idx = np.arange(n)
+    sp, sg = idx // 2, idx % 2
+    same = sg[:, None] == sg[None, :]
+    w = w_sp[np.ix_(sp, sp, sp, sp)] * same[:, :, None, None] * same[None, None, :, :]
+    eps = eps_gw[sp]
+    no2, nv2 = 2 * no, 2 * (n_sp - no)
+    o, v = slice(0, no2), slice(no2, n)
+    eo, ev = eps[o], eps[v]
+    D = (ev[None, None, :, None] + ev[None, None, None, :]
+         - eo[:, None, None, None] - eo[None, :, None, None])
+    R = 1.0 / (omega - D)
+
+    def vertex(kind, y):
+        # t_kc,ld = sum_i w(ik|ld) y_ic ; u_kc,ld = sum_a w(ac|ld) y_ka
+        t = np.einsum('ikld,ic->kcld', w[o, o, o, v], y)
+        u = np.einsum('acld,ka->kcld', w[v, v, o, v], y)
+        if kind == 'I':
+            return t.transpose(0, 2, 1, 3)              # Y_klcd = t_kc,ld
+        if kind == 'J':
+            return t.transpose(2, 0, 3, 1)              # Y_klcd = t_ld,kc
+        if kind == 'K':
+            return u.transpose(0, 2, 1, 3)
+        return u.transpose(2, 0, 3, 1)
+
+    ns2 = no2 * nv2
+    E = np.eye(ns2).reshape(ns2, no2, nv2)
+    VX = {X: np.stack([vertex(X, E[k]) for k in range(ns2)]).reshape(ns2, -1)
+          for X in 'IJKL'}
+
+    def product(X, Y):
+        # sum_K (X e_ia)_K (Y e_jb)_K / (omega - D_K)
+        T = np.einsum('xK,K,yK->xy', VX[X], R.ravel(), VX[Y])
+        return T.reshape(no2, nv2, no2, nv2)
+
+    if kernel == 'printed':
+        T = (product('I', 'J') + product('K', 'L') - product('I', 'K')
+             - product('K', 'I'))
+    else:
+        T = (product('I', 'J') + product('K', 'L') - product('I', 'L')
+             - product('L', 'I'))
+    S = T[::2, ::2, ::2, ::2] + T[::2, ::2, 1::2, 1::2]
+    Tt = T[::2, ::2, ::2, ::2] - T[::2, ::2, 1::2, 1::2]
+    ns = S.shape[0] * S.shape[1]
+    return {'singlet': S.reshape(ns, ns), 'triplet': Tt.reshape(ns, ns)}
+
+
+def check_transcription(eps, B, no):
+    """Theta(omega) from the pieces, A_eff(omega) - M per channel, against the
+    spin-orbital transcription of each kernel; eq 71's triplet zero, the printed one's
+    carrying the loop terms; the other kernel's transcription is the negative
+    control."""
+    ok = True
+    nv = len(eps) - no
+    ns = no * nv
+    eps_gw = gw_like(eps, no)
+    omega = 0.3
+    got, ref = {}, {}
+    for kernel in ee_dbse2_pieces.KERNELS:
+        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel)
+        ref[kernel] = transcription(P['Bt'], eps_gw, no, omega, kernel)
+        Ma, Mx = P['M'].get('aaaa'), P['M'].get('aabb')
+        for spin, sgn in (('singlet', 1.0), ('triplet', -1.0)):
+            mv_w = ee_fold.folded_operator(P, omega, spin)[0]
+            mv_0 = ee_fold.folded_operator(P, None, spin)[0]
+            A_w = ee_fold.dense_effective(mv_w, ns)
+            A_0 = ee_fold.dense_effective(mv_0, ns)
+            d0 = float(np.max(np.abs(A_0 - (Ma + sgn * Mx).reshape(ns, ns))))
+            got[kernel, spin] = A_w - A_0
+            d = float(np.max(np.abs(got[kernel, spin] - ref[kernel][spin])))
+            ok &= check(d < 1e-11 and d0 < 1e-12,
+                        f'{kernel} {spin}: Theta(omega) from the pieces equals the '
+                        'transcription', f'max |d| {d:.1e} Ha, M {d0:.1e}')
+    d1 = float(np.max(np.abs(ref['eq71']['triplet'])))
+    d2 = float(np.max(np.abs(got['eq71', 'triplet'])))
+    ok &= check(d1 < 1e-12 and d2 < 1e-12, "eq71: Theta has no triplet part",
+                f'transcription {d1:.1e}, pieces {d2:.1e} Ha')
+    d3 = float(np.max(np.abs(ref['printed']['triplet'])))
+    ok &= check(d3 > 1e-3, 'printed: the triplet carries the loop terms',
+                f'max {d3:.1e} Ha')
+    d4 = float(np.max(np.abs(got['eq71', 'singlet'] - ref['printed']['singlet'])))
+    ok &= check(d4 > 1e-3,
+                "control: eq71's pieces differ from the printed transcription",
+                f'max |d| {d4:.1e} Ha')
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
     eps, B, no = water('6-31g')
     all_ok &= check_boundaries(eps, B, no)
     all_ok &= check_pieces(eps, B, no)
+    all_ok &= check_transcription(eps, B, no)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
