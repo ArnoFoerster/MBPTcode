@@ -58,10 +58,9 @@ from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_second_order_kernel_df)
 
-try:
-    import cupy
-except ImportError:              # optional: only the device='gpu' rows need it
-    cupy = None
+# the routine's own CuPy, None where its import failed; only the device='gpu'
+# rows need it
+cupy = linear_response.cp
 
 # QuAcK mol/H2O.xyz, Angstrom
 GEOM = 'O 0.0000 0.0000 0.0000; H 0.7571 0.0000 0.5861; H -0.7571 0.0000 0.5861'
