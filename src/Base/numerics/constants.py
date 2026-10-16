@@ -417,7 +417,7 @@ COMPOSED_GRAD_K = 3
 # excitation energy and squared in every oscillator strength.
 CASIDA_NORM_TOL = 1e-4
 
-# GB of the per-block intermediates of the static second-order GW kernel on the
+# GiB of the per-block intermediates of the static second-order GW kernel on the
 # GPU (`linear_response.static_second_order_kernel_df`, device='gpu'): every
 # block over virtuals is capped where its intermediates reach this, beside the
 # pair-sized accumulators and the DF factors, which it does not count. It moves

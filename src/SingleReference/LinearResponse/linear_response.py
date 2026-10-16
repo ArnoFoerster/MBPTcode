@@ -661,7 +661,9 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     device : {'cpu', 'gpu'}
         'gpu' forms the blocks on this process's GPU (CuPy, FP64) from the
         host's Cholesky factor of W_aux, `_second_order_kernel_gpu`, and
-        returns them as host arrays, equal to the CPU path's to rounding.
+        returns them as host arrays, equal to the CPU path's to rounding. A
+        device whose free memory cannot hold two (n_pair, n_pair) arrays
+        raises ValueError before any upload.
 
     Returns
     -------
@@ -904,6 +906,14 @@ def _second_order_kernel_gpu(eps, coeff_df, L, occ, virt, reg, blksize, channel,
         return np.zeros((n_pair, n_pair)), np.zeros((n_pair, n_pair))
     naux = coeff_df.shape[0]
     printed, singlet = kernel == 'printed', channel == 'singlet'
+    # the two pair-sized arrays against the device's free memory, the bytes the
+    # pool caches but holds no array in counted as free
+    need = 2 * 8 * n_pair ** 2
+    free = cp.cuda.Device().mem_info[0] + cp.get_default_memory_pool().free_bytes()
+    if need > free:
+        raise ValueError(f'the two pair-sized device arrays need '
+                         f'{need / 1024 ** 3:.3g} GiB, the device has '
+                         f'{free / 1024 ** 3:.3g} GiB free')
 
     def blocks(per_virtual):
         # slices over the virtuals, blksize wide, capped where per_virtual
