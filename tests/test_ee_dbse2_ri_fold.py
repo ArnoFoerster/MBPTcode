@@ -31,6 +31,17 @@ Checks:
      form='laplace' on sets=('eq61', 'eq71') equals form='exact' to 1e-8 relative on
      the product at 0.3 Ha with no fallback (eq 71's set on the quadrature, the mode
      set on its exact tile).
+  10. sets=('eq66',), level gw through the operator (spec check 6's second clause):
+     from_mo(eps, eps, B, no, spin, sets=('eq66',), screening=) against
+     ee_fold.folded_operator on build_pieces_gw(eps, B, no, screening, df=True), both
+     screenings, both spins: the product at None, 0.3 and 0.5 Ha and the signed norm to
+     1e-12 relative, the diagonal against the dense channel matrix to 1e-12;
+     solve_folded ('davidson', two roots, dense_limit 0, tol_omega 1e-9) on the
+     operator's pieces against the W pieces (df=False): roots to 1e-8 Ha, T1 to 1e-8,
+     every root converged (the roots test_ee_gw_fold.py pins to QuAcK's supermatrix);
+     pieces()['level'] is 'gw'; static_term_pq's blocks assembled by einsum equal
+     static_term_df to 1e-14; refusals: ('eq66',) with dressed factors, with
+     singles='eq62+eq59', and ('eq61', 'eq66'), each ValueError naming the argument.
   6. form='laplace' against form='exact' (both kernels, both channels): products and
      signed norms at 0.3 and 0.5 Ha, fold_images at three nodes with a derivative node
      between, doubles_dot at two frequencies and at one, each to 1e-8 relative (the
@@ -354,6 +365,79 @@ def check_modes(eps, B, no):
     return ok
 
 
+def check_eq66(eps, B, no):
+    """Check 10: level gw through the operator against build_pieces_gw's pieces."""
+    ok = True
+    nv = eps.size - no
+    n = no * nv
+    U = np.random.default_rng(23).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    tight = dict(dense_limit=0, tol_omega=1e-9, tol_residual=1e-8)
+    for screening in ('tda', 'rpa'):
+        P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening, df=True)
+        Pw = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
+        for spin in SPINS:
+            tag = f'eq66 {screening} {spin}'
+            op = make(eps, eps, B, no, spin, sets=('eq66',), screening=screening)
+            for omega in (None, 0.3, 0.5):
+                mv, dmv, _, _, _ = ee_fold.folded_operator(P, omega, spin)
+                A = np.column_stack([mv(U[:, j]) for j in range(3)])
+                Bm, nrm = op.apply(U, None if omega is None else np.full(3, omega))
+                ok &= check(rel(Bm, A) < 1e-12, f'{tag} w={omega}: product',
+                            f'{rel(Bm, A):.1e}')
+                if omega is not None:
+                    ref = np.array([dmv(U[:, j]) for j in range(3)])
+                    ok &= check(rel(nrm, ref) < 1e-12, f'{tag} w={omega}: signed norm',
+                                f'{rel(nrm, ref):.1e}')
+            mv = ee_fold.folded_operator(P, None, spin)[0]
+            dense = np.column_stack([mv(e) for e in np.eye(n)])
+            ok &= check(rel(op.diag, np.diag(dense)) < 1e-12,
+                        f'{tag}: diagonal is the dense channel matrix diagonal',
+                        f'{rel(op.diag, np.diag(dense)):.1e}')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                ref = ee_fold.solve_folded(Pw, 2, spin=spin, solver='davidson', **tight)
+                r = ee_fold.solve_folded(op.pieces(), 2, spin=spin, solver='davidson',
+                                         **tight)
+            same_shape = r.omega.shape == ref.omega.shape
+            d = float(np.abs(r.omega - ref.omega).max()) if same_shape else np.inf
+            dt = float(np.abs(r.t1 - ref.t1).max()) if same_shape else np.inf
+            ok &= check(d < 1e-8 and dt < 1e-8 and r.converged.all()
+                        and op.pieces()['level'] == 'gw',
+                        f"{tag}: two Davidson roots and T1 equal the W pieces'; level "
+                        "'gw'", f'{d:.1e} Ha, {dt:.1e} on T1, '
+                        + ' '.join(f'{w:.6f}' for w in r.omega))
+        om, rho = P['modes'] if 'modes' in P else ee_gw_pieces.gw_modes_df(
+            eps, B, no, screening)
+        Pb, Qb = ee_gw_pieces.static_term_pq(eps, B[:, :no, no:], rho, om, no)
+        Abar = (np.einsum('ij,ab->iajb', np.eye(no), Pb + Pb.T)
+                - np.einsum('ab,ij->iajb', np.eye(nv), Qb + Qb.T))
+        d = float(np.abs(Abar - ee_gw_pieces.static_term_df(eps, B, rho, om, no)).max())
+        ok &= check(Pb.shape == (nv, nv) and Qb.shape == (no, no) and d < 1e-14,
+                    f'eq66 {screening}: static_term_pq assembled equals static_term_df',
+                    f'{d:.1e}')
+    bare = RIFactors.from_full(eps, B, no)
+    Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
+    dressed = RIFactors.from_full(eps, Bt, no)
+    modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
+    direct = ee_dbse2_ri_fold.RIFoldDBSE2
+    cases = (
+        ('dressed', lambda: direct(bare, dressed, 'singlet', sets=('eq66',),
+                                   modes=modes)),
+        ('singles', lambda: make(eps, eps, B, no, 'singlet', sets=('eq66',),
+                                 singles='eq62+eq59')),
+        ('sets', lambda: make(eps, eps, B, no, 'singlet', sets=('eq61', 'eq66'))),
+    )
+    for word, build in cases:
+        try:
+            build()
+            ok &= check(False, f'eq66 with {word}: raises ValueError')
+        except ValueError as err:
+            ok &= check(word in str(err), f'eq66 with {word}: raises ValueError naming '
+                        'it', str(err)[:70])
+    return ok
+
+
 def check_memory():
     """Check 4: the device memory pre-flight lifted from the static kernel."""
     ok = True
@@ -662,6 +746,8 @@ def main():
     ok &= check_ranks(eps, B, no)
     print('check 7: the modes at the HF energies; the Laplace form on the two sets')
     ok &= check_modes(eps, B, no)
+    print("check 10: sets=('eq66',), level gw through the operator")
+    ok &= check_eq66(eps, B, no)
     print('check 4: the device memory pre-flight')
     ok &= check_memory()
     print('check 5: the device class on the numpy stand-in')

@@ -68,6 +68,13 @@ runs exact whatever `form` says: `form` is eq 71's set's switch. The level's d_m
 the lower of the sets' minima, 2 (min ε_v - max ε_o) for eq 71's and Ω_min + min ε_v -
 max ε_o for the mode set; the tile budget sums _tile_bytes and _mode_bytes.
 
+sets=('eq66',) is level 'gw' (eq 66, ee_gw_pieces' module docstring) through the same
+mode tile with the square pairing: at the HF energies throughout (from_mo(eps_hf,
+eps_hf, ...)), the singles block A^HF + Ā^GW with eq 70's Ā applied as u (P + Pᵀ) -
+(Q + Qᵀ) u from static_term_pq's two blocks, and the doubles Θ^66 = (J + K).(J + K),
+R_J = R_K = w (Y^J + Y^K), |Z|² = Σ w² (Y^J + Y^K)², the one copy on a positive metric;
+no dressed factors, kernel unread, singles 'eq62' only.
+
 The same cores run on numpy and on cupy (_tile_core, _mode_tile and _laplace_sums take
 the array module).
 
@@ -84,7 +91,7 @@ from src.Base.utils.mpi_grid import allgather_ranges, ordered_chain_sum, ordered
 from src.Base.utils.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces as _pieces
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import _LAPLACE_TARGET as LAPLACE_TARGET
-from src.SingleReference.ADC.eeADC.ee_gw_pieces import gw_modes_df
+from src.SingleReference.ADC.eeADC.ee_gw_pieces import gw_modes_df, static_term_pq
 from src.SingleReference.ADC.eeADC.ee_ri_fold import DEVICES, RIFactors, RIFoldADC2
 from src.SingleReference.LinearResponse.linear_response import device_memory_check
 
@@ -94,8 +101,8 @@ except ImportError:
     cp = None
 
 FORMS = ('exact', 'laplace')
-# the doubles sets, each tuple sorted: eq 71's, eq 61's, the level dbse2
-SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'))
+# the doubles sets, each tuple sorted: eq 71's, eq 61's, the level dbse2, level gw
+SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'), ('eq66',))
 # the J and L coefficients change sign in the triplet's second pair (X̃, Ỹ)
 _FLIP = np.array([1.0, -1.0, 1.0, -1.0])
 # the swap (k, c) <-> (l, d) exchanges I with J and K with L
@@ -555,9 +562,11 @@ class RIFoldDBSE2(RIFoldADC2):
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
     eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES); form : 'exact' or
     'laplace' (FORMS, the module docstring), eq 71's set's, refused without it (naming
-    form); sets : one of SETS in any order; modes : (omega (nm,), rho (naux, nm)) of
-    gw_modes_df at the HF energies, required by a mode set (ValueError naming modes; a
-    rho of another row count than bare.naux names naux). tile_gb, threads, comm,
+    form); sets : one of SETS in any order, ('eq66',) level gw at the HF energies (no
+    dressed factors, singles 'eq62', kernel unread; another set beside it names sets);
+    modes : (omega (nm,), rho (naux, nm)) of gw_modes_df at the HF energies, required
+    by a mode set, eq 61's or eq 66's (ValueError naming modes; a rho of another row
+    count than bare.naux names naux). tile_gb, threads, comm,
     aux_chunk as RIFoldADC2 (threads reaches the inner operator and the
     back-transformation; the tile's element-wise passes run on one core); device 'cpu',
     or 'gpu' for eq 71's doubles of both forms on this rank's GPU (_DoublesDBSE2GPU,
@@ -575,7 +584,14 @@ class RIFoldDBSE2(RIFoldADC2):
         sets = tuple(sorted(sets))
         if sets not in SETS:
             raise ValueError(f"sets={sets!r}; expected one of {SETS}")
-        has71, mode_set = 'eq71' in sets, 'eq61' in sets
+        has71, square = 'eq71' in sets, sets == ('eq66',)
+        mode_set = 'eq61' in sets or square
+        if square and singles != 'eq62':
+            raise ValueError(f"singles={singles!r} with sets=('eq66',): level gw's "
+                             "singles block is eq 62 plus eq 70; pass singles='eq62'")
+        if square and dressed is not None:
+            raise ValueError("dressed factors with sets=('eq66',): level gw has no W "
+                             'lines; pass dressed=None')
         if kernel not in _pieces.KERNELS:
             raise ValueError(f"kernel={kernel!r}; expected one of {_pieces.KERNELS}")
         if singles not in _pieces.SINGLES:
@@ -616,19 +632,23 @@ class RIFoldDBSE2(RIFoldADC2):
         self.screening = None
         self.pair = _pieces.coupling_pairs(kernel, 'singlet')[0]
         self.laplace_fallbacks = 0
+        self.square = square
+        # eq 70's Ā as its two blocks, read by _setup and _singles
+        self.P, self.Q = ((None, None) if not square else
+                          static_term_pq(np.concatenate([bare.eo, bare.ev]), bare.LT,
+                                         rho, om, bare.no))
         # M = eq 62 at the GW energies: CIS on the bare factors
         self.m_op = RIFoldADC2(bare, spin, level='adc1', tile_gb=tile_gb,
                                threads=threads, comm=comm, aux_chunk=aux_chunk)
         super().__init__(bare if dressed is None else dressed, spin, level='adc1',
                          tile_gb=tile_gb, threads=threads, comm=comm,
                          aux_chunk=aux_chunk)
-        self.level = 'dbse2'
+        self.level = 'gw' if square else 'dbse2'
         # L2[P, (l, d)] = B~_P,ld, the dressed factor eq 71's images close through;
         # L2b the bare one of the mode set
         self.L2 = self.LT.reshape(self.f.naux, -1)
         self.L2b = self.m_op.LT.reshape(bare.naux, -1)
         self.om, self.rho, self.nm = om, rho, 0 if om is None else int(om.size)
-        self.square = False
         per_k = float(_tile_bytes(1, self.no, self.nv, self.f.naux)) if has71 else 0.0
         if mode_set:
             fb = self.m_op.f
@@ -688,7 +708,7 @@ class RIFoldDBSE2(RIFoldADC2):
         if 'eq71' in sets or kw.get('singles', 'eq62') == 'eq62+eq59':
             _, Bt = _pieces.dressed_factors(eps_hf, B, no)
             dressed = RIFactors.from_full(eps_gw, Bt, no)
-        mode_set = 'eq61' in sets
+        mode_set = 'eq61' in sets or 'eq66' in sets
         if mode_set and kw.get('modes') is None:
             kw['modes'] = gw_modes_df(eps_hf, B, no, screening)
         op = cls(bare, dressed, spin, **kw)
@@ -709,10 +729,15 @@ class RIFoldDBSE2(RIFoldADC2):
 
     def _setup(self):
         """The singles diagonal: M's from the inner operator; for singles 'eq62+eq59'
-        eq 59's swap on it, (ii|aa) - w(ii|aa). No second-order pieces at this level."""
+        eq 59's swap on it, (ii|aa) - w(ii|aa); for level gw eq 70's diagonal,
+        (P + Pᵀ)_aa - (Q + Qᵀ)_ii. No second-order pieces at this level."""
         diag = self.m_op.diag
         if self.singles == 'eq62+eq59':
             diag = diag + self._exch_diag(self.m_op.f) - self._exch_diag(self.f)
+        if self.square:
+            # Ā_ia,ia = (P + Pᵀ)_aa - (Q + Qᵀ)_ii
+            diag = diag + (2.0 * np.diag(self.P)[None, :]
+                           - 2.0 * np.diag(self.Q)[:, None]).ravel()
         self.diag = diag
 
     def _grid(self, omega, omega2=None):
@@ -734,11 +759,18 @@ class RIFoldDBSE2(RIFoldADC2):
 
     def _singles(self, U):
         """M U (n, m): eq 62 at the GW energies from the inner operator; for singles
-        'eq62+eq59' the exchange swap -(ij|ab) -> -w(ij|ab) on top."""
+        'eq62+eq59' the exchange swap -(ij|ab) -> -w(ij|ab) on top; for level gw eq 70's
+        Ā u = u (P + Pᵀ) - (Q + Qᵀ) u per column."""
         out = self.m_op.apply(U, None)[0]
         if self.singles == 'eq62+eq59':
             out = (out + self.m_op._exchange(U, ('oovv',))[0]
                    - self._exchange(U, ('oovv',))[0])
+        if self.square:
+            Pt, Qt = self.P + self.P.T, self.Q + self.Q.T
+            for j in range(U.shape[1]):
+                u = U[:, j].reshape(self.no, self.nv)
+                # (Ā u)_ia = Σ_b (P + Pᵀ)_ab u_ib - Σ_j (Q + Qᵀ)_ij u_ja
+                out[:, j] += (u @ Pt - Qt @ u).ravel()
         return out
 
     def _vertex_factors(self, u, f=None):
