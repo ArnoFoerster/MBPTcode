@@ -25,7 +25,7 @@ pieces['dnorm2'] is |Z+|² - |Z-|²; T1 = 1/(1 - dλ/dω) may leave (0, 1] (the 
 guards it). M is eq 62 at the GW energies, the singlet
 A_ia,jb = (ε^GW_a - ε^GW_i) δ_ij δ_ab + 2 (ia|jb) - (ij|ab) and the triplet -(ij|ab);
 singles='eq62+eq59' puts eq 59's static w(ij|ab) in place of (ij|ab), the full static
-BSE@GW singles block (the milestone 1 check against BSE2@GW, not a level).
+BSE@GW singles block (the comparison against BSE2@GW, not a level of ours).
 
 Spin. Every W line conserves spin along itself, so for the singles block of spin s1 the
 vertices I and K put their image in the doubles blocks whose pair (k, c) carries s1, J
@@ -56,17 +56,18 @@ KERNELS = ('eq71', 'printed')
 SINGLES = ('eq62', 'eq62+eq59')
 SETS = ('eq71',)
 _CHANNELS = ('singlet', 'triplet')
-_SQRT2 = np.sqrt(2.0)
-# the pair (x, y) of each kernel over VERTICES: with X = sum_A x_A A the copies
-# V± = (X ± Y)/√2 fold to X.Y + Y.X, so the 1/√2 inside x and y gives the (X.Y + Y.X)/2
-# of the module docstring
-_PAIRS = {'eq71': (np.array([1.0, 0.0, -1.0, 0.0]) / _SQRT2,
-                   np.array([0.0, 1.0, 0.0, -1.0]) / _SQRT2),
-          'printed': (np.array([1.0, 0.0, 0.0, -1.0]) / _SQRT2,
-                      np.array([0.0, 1.0, -1.0, 0.0]) / _SQRT2)}
+# the pair (x, y) of each kernel over VERTICES: X = sum_A x_A A and Y = sum_B y_B B of
+# the module docstring's table, the copies V± = (X ± Y)/2
+_PAIRS = {'eq71': (np.array([1.0, 0.0, -1.0, 0.0]), np.array([0.0, 1.0, 0.0, -1.0])),
+          'printed': (np.array([1.0, 0.0, 0.0, -1.0]),
+                      np.array([0.0, 1.0, -1.0, 0.0]))}
 # kernels without a triplet term: every product mixes an (I, K) and a (J, L) vertex,
 # whose aa,aa and aa,bb blocks are equal
 _TRIPLET_FREE = ('eq71',)
+# the index of the ordered doubles (k, l, c, d) a vertex ties to the external pair
+_FIXED = {'I': 2, 'J': 3, 'K': 0, 'L': 1}
+# the leg of the doubles a vertex puts the singles' spin on
+_LEG = {'I': 'kc', 'K': 'kc', 'J': 'ld', 'L': 'ld'}
 # a channel of up to 40 singles builds A_eff densely, as the gw builder
 _DENSE_LIMIT = 40
 
@@ -125,9 +126,11 @@ def coupling_pairs(kernel, channel):
     -------
     list of (x, y)
         x, y : ndarray, shape (4,), coefficients over VERTICES = (I, J, K, L):
-        X = sum_A x_A A, Y = sum_B y_B B, the copies V± = (X ± Y)/√2, the kernel
-        X.Y + Y.X. Empty when the kernel has no term in the channel ('eq71' in the
-        triplet).
+        X = sum_A x_A A, Y = sum_B y_B B, the copies V± = (X ± Y)/2, the kernel
+        Θ = (X.Y + Y.X)/2. Empty when the kernel has no term in the channel ('eq71'
+        in the triplet). The triplet list describes the pieces: build_pieces_dbse2
+        applies the singlet pair and the singles projection gives the triplet;
+        static_limit_pieces alone reads the triplet list.
     """
     if kernel not in KERNELS:
         raise ValueError(f"kernel={kernel!r}; expected one of {KERNELS}")
@@ -143,8 +146,8 @@ def _check_names(kernel, sets, singles, screening):
     if kernel not in KERNELS:
         raise ValueError(f"kernel={kernel!r}; expected one of {KERNELS}")
     if tuple(sets) != SETS:
-        raise ValueError(f"sets={tuple(sets)!r}; expected {SETS} (eq 61's set joins at "
-                         'milestone 3)')
+        raise ValueError(f"sets={tuple(sets)!r}; expected {SETS}; only eq 71's set is "
+                         'implemented')
     if singles not in SINGLES:
         raise ValueError(f"singles={singles!r}; expected one of {SINGLES}")
     if screening not in ('tda', 'rpa'):
@@ -157,7 +160,7 @@ def _vertex_images(Bt, no, y):
     Parameters
     ----------
     Bt : ndarray, shape (naux, norb, norb), index order (P, p, q), the dressed factors
-    no : int
+    no : int, doubly occupied orbitals
     y : ndarray, shape (no, nv), index order (i, a)
 
     Returns
@@ -178,7 +181,7 @@ def _vertex_images(Bt, no, y):
     Bld = Bov.reshape(naux, no * nv)
     out = []
     for Z in (ZI, ZK):
-        # x_kc,ld = sum_P Z_P,kc B~_P,ld, then (k, c, l, d) -> (k, l, c, d)
+        # T_kc,ld = sum_P Z_P,kc B~_P,ld, then (k, c, l, d) -> (k, l, c, d)
         T = (Z.reshape(naux, no * nv).T @ Bld).reshape(no, nv, no, nv)
         out.append(T.transpose(0, 2, 1, 3))
     return out[0], out[1]
@@ -190,7 +193,7 @@ def _vertex_images_t(Bt, no, Y):
     Parameters
     ----------
     Bt : ndarray, shape (naux, norb, norb), index order (P, p, q), the dressed factors
-    no : int
+    no : int, doubly occupied orbitals
     Y : ndarray, shape (no, no, nv, nv), index order (k, l, c, d); for J^T and L^T pass
         Y with (k, c) <-> (l, d), Y.transpose(1, 0, 3, 2)
 
@@ -217,11 +220,22 @@ def _vertex_images_t(Bt, no, Y):
 def _singles_block(eps_gw, B, Bt, nocc, singles):
     """M of eq 62 at the GW energies, with eq 59's static W for singles='eq62+eq59'.
 
-    Returns SB, blocks (no, nv, no, nv), index order (i, a, j, b): the CIS block of the
-    gf2 builder with the GW energies on its diagonal, A_ia,jb = (ε_a - ε_i) δ_ij δ_ab +
-    (ia|jb) - (ij|ab) on 'aaaa' and 'bbbb', (ia|jb) on 'aabb' and 'bbaa'; for
-    'eq62+eq59' minus Wc_ia,jb = sum_P B~_P,ij B~_P,ab - sum_P B_P,ij B_P,ab on the
-    same-spin blocks, the screened exchange of eq 59 in place of the bare one.
+    Parameters
+    ----------
+    eps_gw : ndarray, shape (norb,), the GW energies ε^GW_p, Hartree, occupied first
+    B, Bt : ndarray, shape (naux, norb, norb), index order (P, p, q), the bare and the
+        dressed DF factors
+    nocc : int, doubly occupied orbitals
+    singles : {'eq62', 'eq62+eq59'}
+
+    Returns
+    -------
+    M : SB, blocks (no, nv, no, nv), index order (i, a, j, b): the CIS block of the
+        gf2 builder with the GW energies on its diagonal, A_ia,jb = (ε_a - ε_i) δ_ij
+        δ_ab + (ia|jb) - (ij|ab) on 'aaaa' and 'bbbb', (ia|jb) on 'aabb' and 'bbaa';
+        for 'eq62+eq59' minus Wc_ia,jb = sum_P B~_P,ij B~_P,ab - sum_P B_P,ij B_P,ab
+        on the same-spin blocks, the screened exchange of eq 59 in place of the bare
+        one.
     """
     no = nocc
     nv = eps_gw.size - no
@@ -239,8 +253,20 @@ def _singles_block(eps_gw, B, Bt, nocc, singles):
 
 
 def _combine(c, t1, u1, t2, u2):
-    """sum over the vertices of c_A times A's image on one doubles block: c_I t(s1) +
-    c_K u(s1) + c_J t(s2)^T + c_L u(s2)^T, ^T the swap (k, c) <-> (l, d)."""
+    """sum over the vertices of c_A times A's image on one doubles block.
+
+    Parameters
+    ----------
+    c : ndarray, shape (4,), coefficients over VERTICES = (I, J, K, L)
+    t1, u1 : ndarray, shape (no, no, nv, nv), index order (k, l, c, d), the images
+        (t, u) of _vertex_images of the singles block whose spin the (k, c) pair carries
+    t2, u2 : the same of the block whose spin the (l, d) pair carries
+
+    Returns
+    -------
+    ndarray, shape (no, no, nv, nv), index order (k, l, c, d): c_I t1 + c_K u1 +
+        c_J t2^T + c_L u2^T, ^T the swap (k, c) <-> (l, d); None when every c_A is 0
+    """
     out = None
     for coef, arr in ((c[0], t1), (c[2], u1), (c[1], t2.transpose(1, 0, 3, 2)),
                       (c[3], u2.transpose(1, 0, 3, 2))):
@@ -259,13 +285,16 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     eps_gw : ndarray, shape (norb,), the GW quasiparticle energies ε^GW_p, Hartree,
         occupied first: the singles diagonal of eq 62 and the doubles diagonal D
     eps_hf : ndarray, shape (norb,), HF orbital energies, Hartree, the reference the W
-        lines are screened at
+        lines are screened at. Refused: a closed GW gap, a HOMO below -2 in either array
+        (eV passed as Hartree) and a GW gap outside 0.2 to 5 times the HF gap (mixed
+        units); a swap of the two arrays in Hartree is not detectable here
     B : ndarray, shape (naux, norb, norb), index order (Q, p, q), DF factors with
         (pq|rs) = sum_Q B_Q,pq B_Q,rs
     nocc : int, doubly occupied orbitals
     kernel : {'eq71', 'printed'}, the module docstring's table
-    sets : tuple of str, the doubles sets; ('eq71',) alone until eq 61's set joins
-    screening : {'tda', 'rpa'}, the screening of eq 61's modes, read when that set joins
+    sets : tuple of str, the doubles sets; ('eq71',) is the only one implemented
+    screening : {'tda', 'rpa'}, the screening of eq 61's modes, read once that set is
+        implemented
     singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block)
 
     Returns
@@ -280,16 +309,19 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
         D_klcd = ε_c + ε_d - ε_k - ε_l at the GW energies, shared by every block;
         'dnorm2' SB doubles -> |Z+|² - |Z-|²; 'level' 'dbse2'; 'no', 'nv', 'be';
         'dense_limit' 40; 'Bt' the dressed factors and 'pairs' the singlet list of
-        coupling_pairs, for inspection.
+        coupling_pairs, for inspection. FoldResult.t1 of a solve on these pieces may
+        exceed 1: T1 = 1/(1 + dnorm2) and dnorm2 < 0 on a rising branch, the common
+        case of kernel 'printed'; the driver guards the window, the solver does not.
 
     Notes
     -----
     With the pair (x, y) over (I, J, K, L), X = sum_A x_A A and Y = sum_B y_B B, the
-    copies are V± = (X ± Y)/√2; on the block whose (k, c) pair carries spin s1 and
+    copies are V± = (X ± Y)/2; on the block whose (k, c) pair carries spin s1 and
     whose (l, d) pair carries s2, X y1 = x_I t(y^s1) + x_K u(y^s1) + x_J t(y^s2)^T +
     x_L u(y^s2)^T with (t, u) of _vertex_images and ^T the swap (k, c) <-> (l, d).
-    Vt(Z) = V+^T Z+ - V-^T Z- = X^T Zx + Y^T Zy with Zx = (Z+ - Z-)/√2 and
-    Zy = (Z+ + Z-)/√2: I^T and K^T read the blocks whose (k, c) carries the output
+    Vt(Z)_ia = sum_K V+_K,ia Z+_K - sum_K V-_K,ia Z-_K = sum_K X_K,ia Zx_K + sum_K
+    Y_K,ia Zy_K with Zx = (Z+ - Z-)/2 and Zy = (Z+ + Z-)/2: I^T and K^T read the
+    blocks whose (k, c) carries the output
     spin, J^T and L^T those whose (l, d) does, each through _vertex_images_t. The
     doubles exist inside one call only.
     """
@@ -297,15 +329,30 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     eps_gw = np.asarray(eps_gw, float)
     eps_hf = np.asarray(eps_hf, float)
     no = nocc
-    nv = eps_gw.size - no
+    norb = eps_gw.size
+    if eps_hf.shape != (norb,) or B.shape[1:] != (norb, norb):
+        raise ValueError(f"shapes eps_gw {eps_gw.shape}, eps_hf {eps_hf.shape}, B "
+                         f"{B.shape}: one norb for all three")
+    if not 0 < no < norb:
+        raise ValueError(f"nocc={no}; expected 0 < nocc < norb={norb}")
+    nv = norb - no
+    for name, e in (('eps_gw', eps_gw), ('eps_hf', eps_hf)):
+        if e[no - 1] < -2.0:
+            raise ValueError(f"{name}: HOMO {e[no - 1]:.3f} looks like eV; energies in "
+                             'Hartree')
     if eps_gw[:no].max() >= eps_gw[no:].min():
         raise ValueError('eps_gw: the GW gap is closed (occupied max '
                          f'{eps_gw[:no].max():.4f} Ha, virtual min '
                          f'{eps_gw[no:].min():.4f} Ha); energies in Hartree, occupied '
                          'first')
+    gap_gw = eps_gw[no:].min() - eps_gw[:no].max()
+    gap_hf = eps_hf[no:].min() - eps_hf[:no].max()
+    if not 0.2 < gap_gw / gap_hf < 5.0:
+        raise ValueError(f"GW gap {gap_gw:.4f} Ha against HF gap {gap_hf:.4f} Ha: "
+                         'mixed units, or a reference without a gap')
     pairs = coupling_pairs(kernel, 'singlet')
     if len(pairs) != 1:
-        raise NotImplementedError('one coupling pair per set at milestone 1')
+        raise NotImplementedError('one coupling pair per set')
     x, y = pairs[0]
     _, Bt = dressed_factors(eps_hf, B, no)
     M = _singles_block(eps_gw, B, Bt, no, singles)
@@ -326,15 +373,15 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
             Xb = _combine(x, t1, u1, t2, u2)
             Yb = _combine(y, t1, u1, t2, u2)
             key = s1 + s2 + s1 + s2
-            # V± = (X ± Y)/√2 on this block
-            out['+' + key] = (Xb + Yb) / _SQRT2
-            out['-' + key] = (Xb - Yb) / _SQRT2
+            # V± = (X ± Y)/2 on this block
+            out['+' + key] = (Xb + Yb) / 2.0
+            out['-' + key] = (Xb - Yb) / 2.0
         return SB(out)
 
     def Vt(Z):
         def combined(keys, sign):
-            # (Z+ + sign Z-)/√2 summed over the given spin blocks
-            return sum(Z.get('+' + k) + sign * Z.get('-' + k) for k in keys) / _SQRT2
+            # (Z+ + sign Z-)/2 summed over the given spin blocks
+            return sum(Z.get('+' + k) + sign * Z.get('-' + k) for k in keys) / 2.0
 
         w = {}
         for a in 'ab':
@@ -342,7 +389,7 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
             kc = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s1 == a]
             ld = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s2 == a]
             wa = np.zeros((no, nv))
-            # Zx = (Z+ - Z-)/√2 meets X^T, Zy = (Z+ + Z-)/√2 meets Y^T
+            # Zx = (Z+ - Z-)/2 meets X^T, Zy = (Z+ + Z-)/2 meets Y^T
             for c, sign in ((x, -1.0), (y, 1.0)):
                 if c[0] != 0.0 or c[2] != 0.0:
                     # I^T, K^T read the blocks whose (k, c) pair carries spin a
@@ -366,12 +413,6 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
             'Bt': Bt, 'pairs': pairs}
 
 
-# the index of the ordered doubles (k, l, c, d) a vertex ties to the external pair
-_FIXED = {'I': 2, 'J': 3, 'K': 0, 'L': 1}
-# the leg of the doubles a vertex puts the singles' spin on
-_LEG = {'I': 'kc', 'K': 'kc', 'J': 'ld', 'L': 'ld'}
-
-
 def static_limit_pieces(eps_gw, eps_hf, B, nocc, kernel='eq71', channel='singlet'):
     """The static limit of the pieces' terms: Θ at ω = 0 with the external energies at
     the chemical potential, eq 72's recipe, for the check against the static kernel.
@@ -389,14 +430,17 @@ def static_limit_pieces(eps_gw, eps_hf, B, nocc, kernel='eq71', channel='singlet
 
     Notes
     -----
-    For each vertex product A.B of the channel's pairs, weight w_AB = x_A y_B + y_A x_B,
-    the static denominator keeps the internal indices only, those neither vertex ties to
+    For each vertex product A.B of the channel's pairs, weight w_AB = (x_A y_B +
+    y_A x_B)/2 (Θ = (X.Y + Y.X)/2), the static denominator keeps the internal indices
+    only, those neither vertex ties to
     the external pair (I ties c, J ties d, K ties k, L ties l):
     R^AB_K = -1 / sum_internal(+ε_c, +ε_d, -ε_k, -ε_l). Spin: a product of two vertices
     on one leg ((I, K) with (I, K), or (J, L) with (J, L)) has aa,aa = 2 P and
     aa,bb = 0, a product across the legs aa,aa = aa,bb = P, with
     P_ia,jb = sum_K A_ia,K B_jb,K R^AB_K the spatial product by unit vectors through
     _vertex_images; the singlet is aa,aa + aa,bb and the triplet aa,aa - aa,bb.
+    Cost: four dense (n_pair, no² nv²) vertex matrices, a check for small systems only
+    (cyclazine would need 4 TB each).
     """
     pairs = coupling_pairs(kernel, channel)
     eps_gw = np.asarray(eps_gw, float)
@@ -425,7 +469,7 @@ def static_limit_pieces(eps_gw, eps_hf, B, nocc, kernel='eq71', channel='singlet
     for x, y in pairs:
         for a, A in enumerate(VERTICES):
             for b, Bv in enumerate(VERTICES):
-                w = x[a] * y[b] + y[a] * x[b]
+                w = (x[a] * y[b] + y[a] * x[b]) / 2.0
                 if w == 0.0:
                     continue
                 internal = {0, 1, 2, 3} - {_FIXED[A], _FIXED[Bv]}
