@@ -62,6 +62,7 @@ from src.Base.utils.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces as _pieces
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import _LAPLACE_TARGET as LAPLACE_TARGET
 from src.SingleReference.ADC.eeADC.ee_ri_fold import DEVICES, RIFactors, RIFoldADC2
+from src.SingleReference.LinearResponse.linear_response import device_memory_check
 
 try:
     import cupy as cp
@@ -337,6 +338,64 @@ def _laplace_sums(xp, L2, Boo2, Bvv2, eo, ev, ZI, ZK, g, tau, wt, lo, coefs):
     return [x.ravel() for x in sums]
 
 
+class _DoublesDBSE2GPU:
+    """The doubles of an RIFoldDBSE2 on this rank's device through the array module xp
+    (CuPy, FP64; numpy stands in for the host test of the same lines): the dressed
+    factor L2 and the GW energies resident, for form 'laplace' the dressed oo and vv
+    blocks too. A column's vertex factors go up once (upload); the exact form runs
+    _tile_core and _tile_overlap on xp and hands the Gam halves and the norm back to
+    the host, the Laplace form runs _laplace_sums whole on xp. The arithmetic is the
+    host path's; the device sums in another order, so the two agree to rounding."""
+
+    def __init__(self, op, xp=None):
+        xp = cp if xp is None else xp
+        if xp is None:
+            raise ImportError("device='gpu' needs CuPy, which is not importable")
+        self.xp = xp
+        self.pair, self.spin = op.pair, op.spin
+        self.to_host = getattr(xp, 'asnumpy', np.asarray)
+        laplace = op.form == 'laplace'
+        # the residents and the working set of one tile (its ten arrays) or of one
+        # Laplace node (three n_aux² products and four factor-sized arrays)
+        need = op.L2.nbytes
+        if laplace:
+            need += (op.Boo2.nbytes + op.Bvv2.nbytes + 3 * 8 * op.f.naux ** 2
+                     + 4 * op.L2.nbytes)
+            label = 'the dressed factors and one Laplace node'
+        else:
+            need += 10 * 8 * op.kt * op.nv * op.no * op.nv
+            label = 'the dressed factor and one tile'
+        if hasattr(xp, 'cuda'):
+            free = (xp.cuda.Device().mem_info[0]
+                    + xp.get_default_memory_pool().free_bytes())
+            device_memory_check(need, free, label)
+        self.L2 = xp.asarray(op.L2)
+        self.eo, self.ev = xp.asarray(op.f.eo), xp.asarray(op.f.ev)
+        if laplace:
+            self.Boo2, self.Bvv2 = xp.asarray(op.Boo2), xp.asarray(op.Bvv2)
+
+    def upload(self, Z):
+        """The vertex factors (ZI, ZK) of one column on the device."""
+        return tuple(self.xp.asarray(z) for z in Z)
+
+    def tile(self, k0, k1, Z, nodes, derivative):
+        """_tile_core on the device: (gam_I, gam_K, nrm), the halves as host arrays."""
+        gI, gK, nrm = _tile_core(self.xp, self.L2, self.eo, self.ev, k0, k1, Z[0],
+                                 Z[1], self.pair, self.spin, nodes, derivative)
+        return self.to_host(gI), self.to_host(gK), nrm
+
+    def overlap(self, k0, k1, Zr, wr, Zs, ws):
+        """_tile_overlap on the device, a float."""
+        return _tile_overlap(self.xp, self.L2, self.eo, self.ev, k0, k1, Zr, wr, Zs,
+                             ws, self.pair, self.spin)
+
+    def laplace(self, Z, g, tau, wt, lo, coefs):
+        """_laplace_sums on the device, the sums as host arrays."""
+        return [self.to_host(v) for v in _laplace_sums(
+            self.xp, self.L2, self.Boo2, self.Bvv2, self.eo, self.ev, Z[0], Z[1], g,
+            tau, wt, lo, coefs)]
+
+
 class RIFoldDBSE2(RIFoldADC2):
     """A_eff(ω) of one spin channel at level 'dbse2' on flat singles vectors u (no nv,),
     (i, a) row-major: the singles block M of eq 62 at the GW energies plus eq 71's
@@ -347,9 +406,10 @@ class RIFoldDBSE2(RIFoldADC2):
     carry the GW energies (eo, ev), else ValueError. kernel : 'eq71' or 'printed'
     (ee_dbse2_pieces.KERNELS); singles : 'eq62' or 'eq62+eq59' (its SINGLES); form :
     'exact' or 'laplace' (FORMS, the module docstring). tile_gb, threads, comm,
-    aux_chunk as RIFoldADC2; device 'cpu' or 'gpu'. The inherited fold_diagonal
-    returns zeros (no second-order model at this level); pieces() hands the operator
-    to ee_fold.solve_folded; laplace_fallbacks counts the (column, node) pairs the
+    aux_chunk as RIFoldADC2; device 'cpu', or 'gpu' for the doubles of both forms on
+    this rank's GPU (_DoublesDBSE2GPU, CuPy). The inherited fold_diagonal returns
+    zeros (no second-order model at this level); pieces() hands the operator to
+    ee_fold.solve_folded; laplace_fallbacks counts the (column, node) pairs the
     Laplace form handed to the exact tile.
     """
 
@@ -398,9 +458,7 @@ class RIFoldDBSE2(RIFoldADC2):
             self.Boo2 = self.f.BooP.reshape(self.f.naux, -1)
             self.Bvv2 = np.ascontiguousarray(self.f.Bvv.transpose(1, 0, 2)).reshape(
                 self.f.naux, -1)
-        if device == 'gpu':
-            raise NotImplementedError('the device path of RIFoldDBSE2 is not written')
-        self.gpu = None
+        self.gpu = _DoublesDBSE2GPU(self) if device == 'gpu' else None
 
     @classmethod
     def from_mo(cls, eps_gw, eps_hf, B, nocc, spin, **kw):
@@ -487,7 +545,8 @@ class RIFoldDBSE2(RIFoldADC2):
 
     def _doubles_exact(self, Z, nodes, derivative):
         """(F (p, n), nrm (p,)) of the exact tile: Iᵀ R_I + Kᵀ R_K of the channel vector
-        with vertex factors Z = (ZI, ZK) at the nodes, the folded doubles (or their
+        with vertex factors Z = (ZI, ZK), on the device where self.gpu is set, at the
+        nodes, the folded doubles (or their
         ω-derivative), and the signed norm at each node. The tiles' Iᵀ halves and
         norms are summed in tile order, the Kᵀ halves by the auxiliary chunks' owners
         in chunk order; no collective inside the tile loop."""
@@ -495,8 +554,11 @@ class RIFoldDBSE2(RIFoldADC2):
         ZI, ZK = Z
         parts, gams_K = [], {}
         for t, (k0, k1) in self.my_tiles:
-            gI, gK, nrm = _tile_core(np, self.L2, self.f.eo, self.f.ev, k0, k1, ZI, ZK,
-                                     self.pair, self.spin, nodes, derivative)
+            if self.gpu is None:
+                gI, gK, nrm = _tile_core(np, self.L2, self.f.eo, self.f.ev, k0, k1, ZI,
+                                         ZK, self.pair, self.spin, nodes, derivative)
+            else:
+                gI, gK, nrm = self.gpu.tile(k0, k1, Z, nodes, derivative)
             parts.append((t, np.concatenate([self._back_oo(gI, k0, k1).ravel(), nrm])))
             gams_K[t] = gK
         tot = ordered_sum(parts, self.comm, shape=(p * n + p,),
@@ -506,8 +568,10 @@ class RIFoldDBSE2(RIFoldADC2):
         return F, tot[p * n:]
 
     def _laplace(self, Z, grid, coefs):
-        """_laplace_sums on the host arrays at one grid."""
+        """_laplace_sums at one grid, on the host or the device."""
         tau, wt, lo = grid
+        if self.gpu is not None:
+            return self.gpu.laplace(Z, self.g, tau, wt, lo, coefs)
         return _laplace_sums(np, self.L2, self.Boo2, self.Bvv2, self.f.eo, self.f.ev,
                              Z[0], Z[1], self.g, tau, wt, lo, coefs)
 
@@ -516,6 +580,8 @@ class RIFoldDBSE2(RIFoldADC2):
         (or their ω-derivative) and the signed norm at each node, by the operator's
         form; a Laplace node without a grid goes through the exact tile."""
         Z = self._vertex_factors(u)
+        if self.gpu is not None:
+            Z = self.gpu.upload(Z)
         if self.form == 'exact':
             return self._doubles_exact(Z, nodes, derivative)
         u = np.ravel(np.asarray(u, float))
@@ -588,6 +654,9 @@ class RIFoldDBSE2(RIFoldADC2):
         same = ur is us or np.array_equal(ur, us)
         Zr = self._vertex_factors(ur)
         Zs = Zr if same else self._vertex_factors(us)
+        if self.gpu is not None:
+            Zr = self.gpu.upload(Zr)
+            Zs = Zr if same else self.gpu.upload(Zs)
         wr, ws = float(wr), float(ws)
         if self.form == 'laplace':
             gr, gs = self._grid(wr), self._grid(ws)
@@ -601,8 +670,9 @@ class RIFoldDBSE2(RIFoldADC2):
             self.laplace_fallbacks += 1
         parts = []
         for t, (k0, k1) in self.my_tiles:
-            v = _tile_overlap(np, self.L2, self.f.eo, self.f.ev, k0, k1, Zr, wr, Zs, ws,
-                              self.pair, self.spin)
+            v = (_tile_overlap(np, self.L2, self.f.eo, self.f.ev, k0, k1, Zr, wr, Zs,
+                               ws, self.pair, self.spin) if self.gpu is None
+                 else self.gpu.overlap(k0, k1, Zr, wr, Zs, ws))
             parts.append((t, np.array([v])))
         return float(ordered_sum(parts, self.comm, shape=(1,), onto=np.zeros(1))[0])
 

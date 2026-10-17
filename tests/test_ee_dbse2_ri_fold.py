@@ -28,11 +28,21 @@ Checks:
      ValueError.
   4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
      device path: need above free raises ValueError naming the label and the GiB, need
-     within free returns None. Check 5 is the device path's (Task 4).
+     within free returns None.
+  5. the device class on the numpy stand-in (_DoublesDBSE2GPU(op, xp=np)) against the
+     host path, both forms, both kernels, both channels: the product and the signed norm
+     at 0.3 Ha, fold_images at three nodes with a derivative node between, doubles_dot
+     of two vectors and of one, each to 1e-12 relative; the Laplace form's fallback
+     node through the device tile; two simulated ranks with the stand-in, one occupied
+     per tile, equal the serial run bit for bit; a device reporting one byte free is
+     refused before the upload (ValueError naming GiB), both forms; device='gpu'
+     without CuPy raises ImportError naming CuPy; the Laplace form on two ranks or
+     without the whole B~_vv raises NotImplementedError.
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
 import sys
+import types
 import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -258,6 +268,115 @@ def check_memory():
     return ok
 
 
+class _TinyDevice:
+    """numpy behind a cuda attribute and a memory pool that report one byte free."""
+
+    def __init__(self):
+        self.cuda = types.SimpleNamespace(
+            Device=lambda: types.SimpleNamespace(mem_info=(1, 1)))
+
+    def get_default_memory_pool(self):
+        return types.SimpleNamespace(free_bytes=lambda: 0)
+
+    def __getattr__(self, name):
+        return getattr(np, name)
+
+
+def check_device(eps, B, no):
+    """Check 5: the device class on the numpy stand-in against the host path."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    n = no * (eps.size - no)
+    U = np.random.default_rng(13).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    device = ee_dbse2_ri_fold._DoublesDBSE2GPU
+    nodes, deriv = [0.3, 0.4, 0.5], [False, True, False]
+    for form in ee_dbse2_ri_fold.FORMS:
+        for kernel in KERNELS:
+            for spin in SPINS:
+                tag = f'{kernel} {spin} {form} stand-in'
+                zero = kernel == 'eq71' and spin == 'triplet'
+                oph = make(eps_gw, eps, B, no, spin, kernel=kernel, form=form)
+                opd = make(eps_gw, eps, B, no, spin, kernel=kernel, form=form)
+                opd.gpu = device(opd, xp=np)
+                Ah, nh = oph.apply(U, np.full(3, 0.3))
+                Ad, nd = opd.apply(U, np.full(3, 0.3))
+                ok &= check(close(Ad, Ah, False) and close(nd, nh, zero),
+                            f'{tag}: product and signed norm at w=0.3',
+                            f'{rel(Ad, Ah):.1e}, {rel(nd, nh):.1e}')
+                Mh, Fh = oph.fold_images(U, nodes, derivative=deriv)
+                Md, Fd = opd.fold_images(U, nodes, derivative=deriv)
+                good = close(Md, Mh, False)
+                for q in range(3):
+                    good &= close(Fd[q], Fh[q], zero)
+                ok &= check(good, f'{tag}: fold_images, a derivative node between two '
+                            'plain ones', f'{rel(Fd, Fh):.1e}')
+                good, details = True, []
+                for r_, s_, wr, ws in ((0, 1, 0.3, 0.5), (0, 0, 0.3, 0.3)):
+                    dh = oph.doubles_dot(U[:, r_], wr, U[:, s_], ws)
+                    dd = opd.doubles_dot(U[:, r_], wr, U[:, s_], ws)
+                    good &= close(dd, dh, zero)
+                    details.append(f'{rel(dd, dh):.1e}')
+                ok &= check(good, f'{tag}: doubles_dot of two vectors at (0.3, 0.5) '
+                            'and of one vector at (0.3, 0.3)', ', '.join(details))
+                if form == 'laplace':
+                    inside = np.full(3, opd.d_min + 0.05)
+                    Ah = oph.apply(U, inside)[0]
+                    Ad = opd.apply(U, inside)[0]
+                    ok &= check(close(Ad, Ah, False) and opd.laplace_fallbacks == 3
+                                and oph.laplace_fallbacks == 3,
+                                f'{tag}: the fallback node through the device tile',
+                                f'{rel(Ad, Ah):.1e}, {opd.laplace_fallbacks} fallbacks')
+        op = make(eps_gw, eps, B, no, 'singlet', kernel='printed', form=form)
+        try:
+            device(op, xp=_TinyDevice())
+            ok &= check(False, f'{form}: a device with one byte free is refused')
+        except ValueError as err:
+            ok &= check('GiB' in str(err), f'{form}: a device with one byte free is '
+                        'refused before the upload', str(err)[:70])
+    # the exact form on two simulated ranks, one occupied per tile, each rank with the
+    # stand-in device, equals the serial stand-in run bit for bit (check 3's shape);
+    # the Laplace form refuses more than one rank and a streamed B~_vv
+    Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
+    bare = RIFactors.from_full(eps_gw, B, no)
+    dressed = RIFactors.from_full(eps_gw, Bt, no)
+
+    def rank(comm, form='exact'):
+        op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
+                                          form=form, tile_gb=1e-9, threads=1, comm=comm)
+        op.gpu = device(op, xp=np)
+        return (op.apply(U[:, :2], [0.3, 0.5]),
+                op.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5))
+
+    ser = rank(None)
+    same = all(np.array_equal(p[0], ser[0][0]) and np.array_equal(p[1], ser[0][1])
+               and d == ser[1] for p, d in run_simulated(rank, 2))
+    ok &= check(same, 'exact stand-in: two simulated ranks, one occupied per tile, '
+                'equal the serial run bit for bit')
+    streamed = RIFactors.from_full(eps_gw, Bt, no)
+    streamed.Bvv = None
+    cases = (('two ranks', lambda: run_simulated(rank, 2, form='laplace')),
+             ('no whole B~_vv', lambda: ee_dbse2_ri_fold.RIFoldDBSE2(
+                 bare, streamed, 'singlet', form='laplace')))
+    for word, build in cases:
+        try:
+            build()
+            ok &= check(False, f'laplace with {word}: raises NotImplementedError')
+        except NotImplementedError as err:
+            ok &= check('one rank' in str(err), f'laplace with {word}: raises '
+                        'NotImplementedError naming one rank', str(err)[:70])
+    if ee_dbse2_ri_fold.cp is None:
+        try:
+            make(eps_gw, eps, B, no, 'singlet', device='gpu')
+            ok &= check(False, "device='gpu' without CuPy raises ImportError")
+        except ImportError as err:
+            ok &= check('CuPy' in str(err), "device='gpu' without CuPy raises "
+                        'ImportError naming CuPy', str(err)[:70])
+    else:
+        print("  [skip] device='gpu' without CuPy: CuPy is importable here")
+    return ok
+
+
 def check_laplace(eps, B, no):
     """Check 6."""
     ok = True
@@ -346,6 +465,8 @@ def main():
     ok &= check_ranks(eps, B, no)
     print('check 4: the device memory pre-flight')
     ok &= check_memory()
+    print('check 5: the device class on the numpy stand-in')
+    ok &= check_device(eps, B, no)
     print('check 6: the Laplace form against the exact form')
     ok &= check_laplace(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
