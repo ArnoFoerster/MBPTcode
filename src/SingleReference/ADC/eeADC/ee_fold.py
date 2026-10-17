@@ -548,15 +548,21 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     tol : float, a root is accepted where |λ_j(ω) - ω| < tol
 
     Every branch λ_j(ω) of H(ω), j the sorted index, is followed from om0. Its
-    slope c_j^T H1 c_j is ≤ 0, so g(ω) = λ_j(ω) - ω falls with slope ≤ -1, the
-    root is unique and lies between ω and ω + g(ω) for every ω: Newton
-    ω + g / (1 - c_j^T H1 c_j) inside the bracket so narrowed, bisection where a
-    step leaves it (a kink where two branches of H(ω) cross exactly). λ_j ≤ λ_j+1
-    at every ω, so the roots rise with j: the first branch whose root reaches d_min
-    ends the search. Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the
-    subspace eigenvectors at the roots.
+    slope c_j^T H1 c_j is at most s_max, the largest eigenvalue of H1 (≤ 0 where the
+    doubles carry a positive metric; small and positive on a rising branch of the
+    signed fold, whose T1 exceeds 1). For s_max < 1, g(ω) = λ_j(ω) - ω falls with
+    slope ≤ s_max - 1 < 0, the root is unique and lies between ω and
+    ω + g(ω) / (1 - s_max) for every ω: Newton ω + g / (1 - c_j^T H1 c_j) inside
+    the bracket so narrowed, bisection where a step leaves it (a kink where two
+    branches of H(ω) cross exactly). A model with s_max ≥ 1 keeps the bracket
+    [ω, ω + g] and may drop its branches. λ_j ≤ λ_j+1 at every ω, so the roots rise
+    with j: the first branch whose root reaches d_min ends the search. Returns oms
+    (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the roots.
     """
     m = H0.shape[0]
+    # the bracket's reach, 1/(1 - s_max): g falls at least at that rate
+    s_max = float(np.linalg.eigvalsh(H1).max())
+    reach = 1.0 / (1.0 - s_max) if s_max < 1.0 else 1.0
     found = []
     for j in range(m):
         om, lo, hi = om0, -np.inf, np.inf
@@ -566,8 +572,10 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
             g = float(w[j]) - om
             if abs(g) < tol:
                 break
-            # the root lies in [ω, ω + g] for g > 0, in [ω + g, ω] for g < 0
-            lo, hi = (max(lo, min(om, om + g)), min(hi, max(om, om + g)))
+            # the root lies in [ω, ω + g reach] for g > 0, in [ω + g reach, ω] for
+            # g < 0
+            lo, hi = (max(lo, min(om, om + g * reach)),
+                      min(hi, max(om, om + g * reach)))
             nxt = om + g / (1.0 - float(c @ H1 @ c))      # Newton on λ_j(ω) - ω
             om = nxt if lo < nxt < hi else 0.5 * (lo + hi)
         if abs(g) >= tol:
@@ -1340,8 +1348,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
 
     Completeness (solvers 'davidson' and 'newton'): below min_K D_K each
     eigenvalue λ_j(ω) of
-    A_eff(ω), counted from the lowest, falls with ω (dλ/dω ≤ 0), so λ_j(ω) = ω
-    has one root ω_j, and
+    A_eff(ω), counted from the lowest, has slope dλ/dω < 1 (≤ 0 for a positive
+    metric), so λ_j(ω) = ω has one root ω_j, and
     ω_1 ≤ ω_2 ≤ ...: the folded roots at or below ω number the λ_j(ω) ≤ ω, and
     the nroots lowest roots are those of branches 1 to nroots. The fold can
     reorder the seeds of M, so at ω_c, the nroots-th lowest root found, the
