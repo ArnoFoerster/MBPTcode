@@ -276,6 +276,54 @@ def _combine(c, t1, u1, t2, u2):
     return out
 
 
+def check_energies(eps_gw, eps_hf, B, nocc):
+    """The energy and shape refusals of build_pieces_dbse2, shared with the RI operator.
+
+    Parameters
+    ----------
+    eps_gw, eps_hf : array_like, shape (norb,), Hartree, occupied first
+    B : ndarray, shape (naux, norb, norb), index order (Q, p, q)
+    nocc : int, doubly occupied orbitals
+
+    Returns
+    -------
+    eps_gw, eps_hf : ndarray, shape (norb,), as float arrays
+    no, nv : int, the occupied and virtual counts
+
+    Raises
+    ------
+    ValueError
+        the three shapes disagree; nocc outside (0, norb); a HOMO below -2 in either
+        array (eV passed as Hartree); a closed GW gap; a GW gap outside 0.2 to 5 times
+        the HF gap (mixed units, or a reference without a gap)
+    """
+    eps_gw = np.asarray(eps_gw, float)
+    eps_hf = np.asarray(eps_hf, float)
+    no = nocc
+    norb = eps_gw.size
+    if eps_hf.shape != (norb,) or B.shape[1:] != (norb, norb):
+        raise ValueError(f"shapes eps_gw {eps_gw.shape}, eps_hf {eps_hf.shape}, B "
+                         f"{B.shape}: one norb for all three")
+    if not 0 < no < norb:
+        raise ValueError(f"nocc={no}; expected 0 < nocc < norb={norb}")
+    nv = norb - no
+    for name, e in (('eps_gw', eps_gw), ('eps_hf', eps_hf)):
+        if e[no - 1] < -2.0:
+            raise ValueError(f"{name}: HOMO {e[no - 1]:.3f} looks like eV; energies in "
+                             'Hartree')
+    if eps_gw[:no].max() >= eps_gw[no:].min():
+        raise ValueError('eps_gw: the GW gap is closed (occupied max '
+                         f'{eps_gw[:no].max():.4f} Ha, virtual min '
+                         f'{eps_gw[no:].min():.4f} Ha); energies in Hartree, occupied '
+                         'first')
+    gap_gw = eps_gw[no:].min() - eps_gw[:no].max()
+    gap_hf = eps_hf[no:].min() - eps_hf[:no].max()
+    if not 0.2 < gap_gw / gap_hf < 5.0:
+        raise ValueError(f"GW gap {gap_gw:.4f} Ha against HF gap {gap_hf:.4f} Ha: "
+                         'mixed units, or a reference without a gap')
+    return eps_gw, eps_hf, no, nv
+
+
 def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
                        screening='rpa', singles='eq62'):
     """The pieces of ee_fold.folded_operator for eq 71's doubles on the signed fold.
@@ -326,30 +374,7 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     doubles exist inside one call only.
     """
     _check_names(kernel, sets, singles, screening)
-    eps_gw = np.asarray(eps_gw, float)
-    eps_hf = np.asarray(eps_hf, float)
-    no = nocc
-    norb = eps_gw.size
-    if eps_hf.shape != (norb,) or B.shape[1:] != (norb, norb):
-        raise ValueError(f"shapes eps_gw {eps_gw.shape}, eps_hf {eps_hf.shape}, B "
-                         f"{B.shape}: one norb for all three")
-    if not 0 < no < norb:
-        raise ValueError(f"nocc={no}; expected 0 < nocc < norb={norb}")
-    nv = norb - no
-    for name, e in (('eps_gw', eps_gw), ('eps_hf', eps_hf)):
-        if e[no - 1] < -2.0:
-            raise ValueError(f"{name}: HOMO {e[no - 1]:.3f} looks like eV; energies in "
-                             'Hartree')
-    if eps_gw[:no].max() >= eps_gw[no:].min():
-        raise ValueError('eps_gw: the GW gap is closed (occupied max '
-                         f'{eps_gw[:no].max():.4f} Ha, virtual min '
-                         f'{eps_gw[no:].min():.4f} Ha); energies in Hartree, occupied '
-                         'first')
-    gap_gw = eps_gw[no:].min() - eps_gw[:no].max()
-    gap_hf = eps_hf[no:].min() - eps_hf[:no].max()
-    if not 0.2 < gap_gw / gap_hf < 5.0:
-        raise ValueError(f"GW gap {gap_gw:.4f} Ha against HF gap {gap_hf:.4f} Ha: "
-                         'mixed units, or a reference without a gap')
+    eps_gw, eps_hf, no, nv = check_energies(eps_gw, eps_hf, B, nocc)
     pairs = coupling_pairs(kernel, 'singlet')
     if len(pairs) != 1:
         raise NotImplementedError('one coupling pair per set')
