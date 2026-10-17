@@ -289,6 +289,8 @@ class _DoublesGPU:
     scaling it by (w - D)^-1 with D_kcld = e_c + e_d - e_k - e_l formed on
     the fly, the Gam GEMM and the B_oo half of the back-transformation. Gam
     goes back to the host, where the B_vv half is formed by the chunks' owners.
+    For doubles_dot, one fused pass forms the overlap summand of two columns'
+    images and only its sum goes back.
     The arithmetic is the CPU path's; the sums run in another order, so the two
     agree to rounding, not to the bit."""
 
@@ -328,6 +330,23 @@ class _DoublesGPU:
         else { const double a = H[i] - HT[i], b = s - sx;
                N = y * y * (0.5 * a * a + 0.25 * b * b); }
     """
+    # overlap summand of the images of columns r at wr and s at ws,
+    # y = 1 / ((wr - D)(ws - D)): singlet y S_r (S_s - S~_s/2), triplet
+    # y [(H_r - H^T_r)(H_s - H^T_s) / 2 + (S_r - S~_r)(S_s - S~_s) / 4]
+    _O = r"""
+        long long q = i; const long long d = q % nv; q /= nv;
+        const long long l = q % no; q /= no; const long long c = q % nv;
+        const long long k = q / nv;
+        const long long x = ((k * nv + d) * no + l) * nv + c;
+        const double D = ev[c] + ev[d] - eo[k0 + k] - eo[l];
+        const double y = 1.0 / ((wr - D) * (ws - D));
+        const double sr = Hr[i] + HTr[i], ss = Hs[i] + HTs[i];
+        const double sxs = Hs[x] + HTs[x];
+        if (singlet) { O = y * sr * (ss - 0.5 * sxs); }
+        else { const double sxr = Hr[x] + HTr[x];
+               O = y * (0.5 * (Hr[i] - HTr[i]) * (Hs[i] - HTs[i])
+                        + 0.25 * (sr - sxr) * (ss - sxs)); }
+    """
 
     def __init__(self, op):
         if cp is None:
@@ -352,6 +371,10 @@ class _DoublesGPU:
             'raw float64 H, raw float64 HT, raw float64 eo, raw float64 ev, '
             'int64 k0, int64 nv, int64 no, float64 w, bool singlet', 'float64 N',
             self._N, 'ee_fold_n')
+        self.k_o = cp.ElementwiseKernel(
+            'raw float64 Hr, raw float64 HTr, raw float64 Hs, raw float64 HTs, '
+            'raw float64 eo, raw float64 ev, int64 k0, int64 nv, int64 no, '
+            'float64 wr, float64 ws, bool singlet', 'float64 O', self._O, 'ee_fold_o')
 
     def upload(self, BtT):
         """The dressed factor of one column, (naux, no nv), on the device."""
@@ -404,6 +427,17 @@ class _DoublesGPU:
         self.k_r(G, self.eo, self.ev, k0, nv, no, float(omega), R)
         Gam = R @ self.L2.T
         return cp.asnumpy(Gam), cp.asnumpy(self._back_oo(Gam, k0, k1)), nrm
+
+    def overlap(self, k0, k1, Bgr, wr, Bgs, ws):
+        """One tile's share of doubles_dot for the dressed factors Bgr at wr and
+        Bgs at ws on the device, a float."""
+        nv, no = self.nv, self.no
+        Hr, HTr = self._pair(Bgr, k0, k1)
+        Hs, HTs = (Hr, HTr) if Bgs is Bgr else self._pair(Bgs, k0, k1)
+        O = cp.empty_like(Hr)
+        self.k_o(Hr, HTr, Hs, HTs, self.eo, self.ev, k0, nv, no, float(wr),
+                 float(ws), self.singlet, O)
+        return float(O.sum())
 
 
 class RIFoldADC2:
@@ -1003,6 +1037,13 @@ class RIFoldADC2:
         same = ur is us or np.array_equal(ur, us)
         Br = self._dressed(ur)
         Bs = Br if same else self._dressed(us)
+        if self.gpu is not None:
+            Bgr = self.gpu.upload(Br)
+            Bgs = Bgr if same else self.gpu.upload(Bs)
+            parts = [(t, np.array([self.gpu.overlap(k0, k1, Bgr, wr, Bgs, ws)]))
+                     for t, (k0, k1) in self.my_tiles]
+            return float(ordered_sum(parts, self.comm, shape=(1,),
+                                     onto=np.zeros(1))[0])
         singlet = self.spin == 'singlet'
         parts = []
         for t, (k0, k1) in self.my_tiles:
