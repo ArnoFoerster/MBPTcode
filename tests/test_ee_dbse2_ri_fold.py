@@ -1,24 +1,36 @@
-"""The RI operator of eq 71's doubles (ee_dbse2_ri_fold.RIFoldDBSE2) against the pieces
-route (ee_dbse2_pieces.build_pieces_dbse2), water 6-31G (RHF, DF factors). The GW
-energies are the deterministic stand-in of test_ee_dbse2_fold (gw_like: occupied +0.03
-Ha, virtual -0.05 Ha on the HF energies); the W lines are screened at the HF energies.
+"""The RI operator of the dBSE2 doubles (ee_dbse2_ri_fold.RIFoldDBSE2) against the
+pieces route (ee_dbse2_pieces.build_pieces_dbse2), water 6-31G (RHF, DF factors), on
+every set of SETS: eq 71's doubles alone, eq 61's alone, both. The GW energies are the
+deterministic stand-in of test_ee_dbse2_fold (gw_like: occupied +0.03 Ha, virtual -0.05
+Ha on the HF energies); the W lines and the modes are screened at the HF energies.
 
 Checks:
-  1. the operator equals ee_fold.folded_operator on the pieces, both kernels, both
-     singles blocks, both channels: the product at w = None, 0.3 and 0.5 Ha, the signed
-     norm, the derivative image, fold_images at a node, the diagonal, doubles_dot at two
-     frequencies, each to 1e-12 relative; d_min is min D exactly; one occupied per tile
-     gives the same products. Eq 71's triplet has no doubles, so its doubles rows
-     compare zero with zero at 1e-14 absolute. Refusals: energies in eV, bare and
-     dressed factors at different energies, an unknown kernel, singles or device, each
-     ValueError naming the input.
-  2. solve_folded on the operator's pieces() against the explicit pieces, solvers
-     'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel, both
-     kernels: roots to 1e-8 Ha, T1 to 1e-8, every root converged (eq 71's triplet is M
-     alone on both routes).
+  1. the operator equals ee_fold.folded_operator on the pieces, every set, both
+     kernels, both singles blocks, both channels: the product at w = None, 0.3 and 0.5
+     Ha, the signed norm, the derivative image, fold_images at a node, the diagonal,
+     doubles_dot at two frequencies, each to 1e-12 relative; d_min is min D exactly (the
+     lower of the sets' minima on the two-set level); the product at d_min + 0.05 Ha, a
+     node inside the lower set's continuum, against the pieces; one occupied per tile
+     gives the same products. Eq 71's triplet has no doubles, so on sets=('eq71',) its
+     doubles rows compare zero with zero at 1e-14 absolute. Refusals: energies in eV,
+     bare and dressed factors at different energies, an unknown kernel, singles or
+     device, sets=('eq71',) without dressed factors, a mode set without modes, modes
+     whose rho has naux + 1 rows (naming naux), sets outside SETS, form='laplace' on a
+     set without eq 71's (naming form), each ValueError naming the input.
+  2. solve_folded on the operator's pieces() against the explicit pieces, every set,
+     solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
+     both kernels: roots to 1e-8 Ha, T1 to 1e-8, every root converged (eq 71's triplet
+     is M alone on both routes).
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
-     equal the serial run bit for bit: products and signed norms at two frequencies,
-     the diagonal, two Newton roots driven through ee_ri_fold.drive.
+     equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, the
+     singlet: products and signed norms at two frequencies, the diagonal, two Newton
+     roots driven through ee_ri_fold.drive.
+  7. the modes: from_mo on sets=('eq61',) equals the constructor given gw_modes_df's
+     modes at the HF energies to 1e-12 on the product at 0.3 Ha and differs from the
+     same with modes at the GW energies by more than 1e-6 relative (review focus 1);
+     form='laplace' on sets=('eq61', 'eq71') equals form='exact' to 1e-8 relative on
+     the product at 0.3 Ha with no fallback (eq 71's set on the quadrature, the mode
+     set on its exact tile).
   6. form='laplace' against form='exact' (both kernels, both channels): products and
      signed norms at 0.3 and 0.5 Ha, fold_images at three nodes with a derivative node
      between, doubles_dot at two frequencies and at one, each to 1e-8 relative (the
@@ -59,7 +71,8 @@ from pyscf import gto, scf
 
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold
+from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold,
+                                           ee_gw_pieces)
 from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, drive
 from src.SingleReference.LinearResponse import linear_response
 
@@ -68,6 +81,13 @@ HARTREE_TO_EV = 27.211386245988
 KERNELS = ('eq71', 'printed')
 SINGLES = ('eq62', 'eq62+eq59')
 SPINS = ('singlet', 'triplet')
+# the sets of the pieces route, the operator's SETS without eq 66's level
+SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'))
+
+
+def zero_doubles(kernel, spin, sets):
+    """True where the channel has no doubles: eq 71's triplet on eq 71's set alone."""
+    return kernel == 'eq71' and spin == 'triplet' and sets == ('eq71',)
 
 
 def check(ok, label, detail=''):
@@ -109,8 +129,8 @@ def close(a, b, zero):
     return rel(a, b) < 1e-12
 
 
-def check_operator(eps, B, no):
-    """Check 1."""
+def check_operator(eps, B, no, sets):
+    """Check 1 on one set."""
     ok = True
     eps_gw = gw_like(eps, no)
     n = no * (eps.size - no)
@@ -119,12 +139,14 @@ def check_operator(eps, B, no):
     for kernel in KERNELS:
         for singles in SINGLES:
             P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
-                                                   singles=singles)
+                                                   singles=singles, sets=sets)
             for spin in SPINS:
-                tag = f'{kernel} {singles} {spin}'
-                # eq 71 has no triplet part: its doubles rows compare zero with zero
-                zero = kernel == 'eq71' and spin == 'triplet'
-                op = make(eps_gw, eps, B, no, spin, kernel=kernel, singles=singles)
+                tag = f"{'+'.join(sets)} {kernel} {singles} {spin}"
+                # eq 71 has no triplet part: on its set alone the doubles rows compare
+                # zero with zero
+                zero = zero_doubles(kernel, spin, sets)
+                op = make(eps_gw, eps, B, no, spin, kernel=kernel, singles=singles,
+                          sets=sets)
                 Bm03 = None
                 for omega in (None, 0.3, 0.5):
                     mv, dmv, diag_s, embed, _ = ee_fold.folded_operator(P, omega, spin)
@@ -166,9 +188,20 @@ def check_operator(eps, B, no):
                             f'{tag}: doubles_dot at two frequencies',
                             f'{d:.6e} against {dref:.6e}')
                 ok &= check(op.pieces()['d_min'] == float(P['D'].min()),
-                            f'{tag}: d_min is min D exactly')
+                            f'{tag}: d_min is min D exactly',
+                            f"{op.d_min:.6f} Ha, sets' minima "
+                            + ', '.join(f'{P["D"][sl].min():.6f}' for _, _, sl
+                                        in P['segments']['a'][::2]))
+                # a node inside the lower set's continuum: the fold is a plain divide
+                # there on both routes
+                inside = op.d_min + 0.05
+                mv = ee_fold.folded_operator(P, inside, spin)[0]
+                A = np.column_stack([mv(U[:, j]) for j in range(3)])
+                Bm = op.apply(U, np.full(3, inside))[0]
+                ok &= check(rel(Bm, A) < 1e-12, f'{tag} w=d_min+0.05: product inside '
+                            "the lower set's continuum", f'{rel(Bm, A):.1e}')
                 tiny = make(eps_gw, eps, B, no, spin, kernel=kernel, singles=singles,
-                            tile_gb=1e-9)
+                            tile_gb=1e-9, sets=sets)
                 e = rel(tiny.apply(U, np.full(3, 0.3))[0], Bm03)
                 ok &= check(tiny.kt == 1 and e < 1e-12,
                             f'{tag}: one occupied per tile gives the same products',
@@ -182,16 +215,27 @@ def check_refusals(eps, B, no):
     eps_gw = gw_like(eps, no)
     make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
     bare_hf = RIFactors.from_full(eps, B, no)
+    bare_gw = RIFactors.from_full(eps_gw, B, no)
     Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
     dressed_gw = RIFactors.from_full(eps_gw, Bt, no)
+    om, rho = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
+    bad_rho = np.vstack([rho, rho[:1]])
+    direct = ee_dbse2_ri_fold.RIFoldDBSE2
     cases = (
         ('eV', lambda: make(eps_gw * HARTREE_TO_EV, eps * HARTREE_TO_EV, B, no,
                             'singlet')),
-        ('energies',
-         lambda: ee_dbse2_ri_fold.RIFoldDBSE2(bare_hf, dressed_gw, 'singlet')),
+        ('energies', lambda: direct(bare_hf, dressed_gw, 'singlet')),
         ('kernel', lambda: make(eps_gw, eps, B, no, 'singlet', kernel='x')),
         ('singles', lambda: make(eps_gw, eps, B, no, 'singlet', singles='x')),
         ('device', lambda: make(eps_gw, eps, B, no, 'singlet', device='tpu')),
+        ('dressed', lambda: direct(bare_gw, None, 'singlet')),
+        ('modes', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',))),
+        ('naux', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',),
+                                modes=(om, bad_rho))),
+        ('sets', lambda: make(eps_gw, eps, B, no, 'singlet',
+                              sets=('eq61', 'eq71', 'x'))),
+        ('form', lambda: make(eps_gw, eps, B, no, 'singlet', sets=('eq61',),
+                              form='laplace')),
     )
     for word, build in cases:
         try:
@@ -208,23 +252,29 @@ def check_solves(eps, B, no):
     ok = True
     eps_gw = gw_like(eps, no)
     tight = dict(dense_limit=0, tol_omega=1e-9, tol_residual=1e-8)
-    for kernel in KERNELS:
-        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel)
-        for spin in SPINS:
-            op = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo(eps_gw, eps, B, no, spin,
-                                                      kernel=kernel)
-            for solver in ('newton', 'davidson', 'block'):
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore', RuntimeWarning)
-                    ref = ee_fold.solve_folded(P, 2, spin=spin, solver=solver, **tight)
-                    r = ee_fold.solve_folded(op.pieces(), 2, spin=spin, solver=solver,
-                                             **tight)
-                same_shape = r.omega.shape == ref.omega.shape
-                d = float(np.abs(r.omega - ref.omega).max()) if same_shape else np.inf
-                dt = float(np.abs(r.t1 - ref.t1).max()) if same_shape else np.inf
-                ok &= check(d < 1e-8 and dt < 1e-8 and r.converged.all(),
-                            f'{kernel} {spin} {solver}: roots and T1 on the operator '
-                            'equal the pieces', f'{d:.1e} Ha, {dt:.1e} on T1')
+    for sets in SETS:
+        for kernel in KERNELS:
+            P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
+                                                   sets=sets)
+            for spin in SPINS:
+                op = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo(eps_gw, eps, B, no, spin,
+                                                          kernel=kernel, sets=sets)
+                for solver in ('newton', 'davidson', 'block'):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        ref = ee_fold.solve_folded(P, 2, spin=spin, solver=solver,
+                                                   **tight)
+                        r = ee_fold.solve_folded(op.pieces(), 2, spin=spin,
+                                                 solver=solver, **tight)
+                    same_shape = r.omega.shape == ref.omega.shape
+                    d = (float(np.abs(r.omega - ref.omega).max()) if same_shape
+                         else np.inf)
+                    dt = float(np.abs(r.t1 - ref.t1).max()) if same_shape else np.inf
+                    ok &= check(d < 1e-8 and dt < 1e-8 and r.converged.all(),
+                                f"{'+'.join(sets)} {kernel} {spin} {solver}: roots and "
+                                'T1 on the operator equal the pieces',
+                                f'{d:.1e} Ha, {dt:.1e} on T1, '
+                                + ' '.join(f'{w:.6f}' for w in r.omega))
     return ok
 
 
@@ -235,6 +285,7 @@ def check_ranks(eps, B, no):
     Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
     bare = RIFactors.from_full(eps_gw, B, no)
     dressed = RIFactors.from_full(eps_gw, Bt, no)
+    modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
     u = np.random.default_rng(5).standard_normal((no * (eps.size - no), 2))
 
     def solve(o):
@@ -244,6 +295,7 @@ def check_ranks(eps, B, no):
 
     def rank(comm):
         op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
+                                          sets=('eq61', 'eq71'), modes=modes,
                                           tile_gb=1e-9, threads=1, comm=comm)
         prod = op.apply(u, [0.3, 0.5])
         return drive(op, solve), op.diag, prod
@@ -257,7 +309,48 @@ def check_ranks(eps, B, no):
                    and np.array_equal(p[0], ser[2][0])
                    and np.array_equal(p[1], ser[2][1])
                    for o, d, p in outs)
-        ok &= check(same, f'{size} simulated ranks equal the serial run bit for bit')
+        ok &= check(same, f'eq61+eq71 printed singlet: {size} simulated ranks equal '
+                    'the serial run bit for bit')
+    return ok
+
+
+def check_modes(eps, B, no):
+    """Check 7: the modes at the HF energies (review focus 1); the Laplace form on the
+    two-set level."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    n = no * (eps.size - no)
+    U = np.random.default_rng(19).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    bare = RIFactors.from_full(eps_gw, B, no)
+    for spin in SPINS:
+        op = make(eps_gw, eps, B, no, spin, sets=('eq61',))
+        hf = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, sets=('eq61',),
+                                          modes=ee_gw_pieces.gw_modes_df(eps, B, no,
+                                                                         'rpa'))
+        gw = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, sets=('eq61',),
+                                          modes=ee_gw_pieces.gw_modes_df(eps_gw, B, no,
+                                                                         'rpa'))
+        A = op.apply(U, np.full(3, 0.3))[0]
+        d_hf, d_gw = rel(hf.apply(U, np.full(3, 0.3))[0], A), rel(
+            gw.apply(U, np.full(3, 0.3))[0], A)
+        ok &= check(d_hf < 1e-12 and d_gw > 1e-6 and op.screening == 'rpa',
+                    f'eq61 {spin}: from_mo builds the modes at the HF energies, not '
+                    'the GW ones', f'HF modes {d_hf:.1e}, GW modes {d_gw:.1e}')
+        ok &= check(op.nm == no * (eps.size - no)
+                    and op.rho.shape == (B.shape[0], op.nm)
+                    and op.om.shape == (op.nm,) and op.L2b.shape == (B.shape[0], n),
+                    f'eq61 {spin}: nm, om, rho and L2b carry the modes and the bare '
+                    'factor', f'nm {op.nm}, rho {op.rho.shape}, L2b {op.L2b.shape}')
+        ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'))
+        opl = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), form='laplace')
+        Ae, ne = ope.apply(U, np.full(3, 0.3))
+        Al, nl = opl.apply(U, np.full(3, 0.3))
+        ok &= check(rel(Al, Ae) < 1e-8 and rel(nl, ne) < 1e-8
+                    and opl.laplace_fallbacks == 0,
+                    f'eq61+eq71 {spin}: the Laplace form of eq 71 beside the exact '
+                    'mode tile equals the exact form', f'{rel(Al, Ae):.1e}, norm '
+                    f'{rel(nl, ne):.1e}, {opl.laplace_fallbacks} fallbacks')
     return ok
 
 
@@ -559,13 +652,16 @@ def main():
     eps, B, no = water('6-31g')
     ok = True
     print('check 1: the operator against the pieces route (6-31G)')
-    ok &= check_operator(eps, B, no)
+    for sets in SETS:
+        ok &= check_operator(eps, B, no, sets)
     print('refusals')
     ok &= check_refusals(eps, B, no)
     print('check 2: the three solvers on the operator against the pieces')
     ok &= check_solves(eps, B, no)
     print('check 3: simulated ranks')
     ok &= check_ranks(eps, B, no)
+    print('check 7: the modes at the HF energies; the Laplace form on the two sets')
+    ok &= check_modes(eps, B, no)
     print('check 4: the device memory pre-flight')
     ok &= check_memory()
     print('check 5: the device class on the numpy stand-in')
