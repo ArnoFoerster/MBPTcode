@@ -22,9 +22,10 @@ energy set is visible; the W lines are screened at the HF energies throughout.
      |y|^2 / (|y|^2 + |Z+|^2 - |Z-|^2) to 1e-8; at least six real eigenvalues lie below
      min D and the lowest six are the roots (completeness to the sixth); the two solvers
      agree to 1e-8 Ha and 1e-8 on T1, their matvec counts and solver loops per root
-     printed side by side (the eq71 6-31G Davidson leg keeps its model, asserted; the
-     printed kernel's roots have T1 > 1 and its model drops them to Newton on the seeds,
-     printed, 2026-10-17); the count of complex eigenvalues and the lowest complex real
+     printed side by side (the 6-31G Davidson leg of both kernels keeps its model,
+     asserted: the printed kernel's roots have T1 > 1, and since 2026-10-17 the model's
+     bracket follows the rising branch); the count of complex eigenvalues and the
+     lowest complex real
      part against min D are printed.
   3. eq 74 as printed (kernel 'printed', I.J + K.L - I.K - K.I) and Yamada's kernel
      ('eq71', I.J + K.L - I.L - L.I) transcribed on spin orbitals at omega = 0.3 Ha
@@ -472,8 +473,9 @@ def check_fold_vs_unfolded(basis):
                 if res.omega.size == 0:
                     ok &= check(False, f'{kernel} {basis} {spin} {label}: no roots')
                     continue
-                if (kernel, basis, label) == ('eq71', '6-31g', 'davidson'):
-                    # the printed kernel's model drops its T1 > 1 roots to Newton
+                if (basis, label) == ('6-31g', 'davidson'):
+                    # the model's bracket follows a rising branch (the printed
+                    # kernel's T1 > 1 roots) as well as a falling one
                     ok &= check(all(l == 'davidson' for l in res.loop),
                                 f'{kernel} {basis} {spin}: the Davidson model keeps '
                                 'its roots', f'loops {loops}')
