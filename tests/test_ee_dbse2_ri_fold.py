@@ -22,10 +22,17 @@ Checks:
   6. form='laplace' against form='exact' (both kernels, both channels): products and
      signed norms at 0.3 and 0.5 Ha, fold_images at three nodes with a derivative node
      between, doubles_dot at two frequencies and at one, each to 1e-8 relative (the
-     quadrature's 1e-9 target; the achieved error printed); a node at min D + 0.05 Ha
-     falls back to the exact tile (equal to 1e-12, laplace_fallbacks counted); two
-     Newton roots within 1e-8 Ha of the exact form's; an unknown form raises
-     ValueError.
+     quadrature's 1e-9 target; the achieved error printed); doubles_dot at two
+     frequencies 1e-2, 1e-5 and 1e-9 Ha apart (the duplicate check's regime); a node at
+     min D + 0.05 Ha falls back to the exact tile (equal to 1e-12, laplace_fallbacks
+     counted), also between two grid nodes in one fold_images call with the derivative
+     on it; one grid serves the image and its derivative at one frequency; fold_images
+     counts its M columns in matvecs; two Newton roots within 1e-8 Ha of the exact
+     form's; an unknown form raises ValueError.
+  9. the tile budget (_tile_bytes) bounds the peak traced by tracemalloc over one
+     _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
+     budget (_laplace_bytes) the peak of one Laplace node, each within a factor two;
+     the device class's need carries both budgets and the residents.
   4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
      device path: need above free raises ValueError naming the label and the GiB, need
      within free returns None.
@@ -42,6 +49,7 @@ Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
 import sys
+import tracemalloc
 import types
 import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -424,6 +432,21 @@ def check_laplace(eps, B, no):
                 dl = opl.doubles_dot(U[:, 0], wr, U[:, 1], ws)
                 good, detail = within(dl, de, zero)
                 ok &= check(good, f'{tag}: doubles_dot at ({wr}, {ws})', detail)
+            # two frequencies close together, where solve_folded's duplicate check
+            # calls it: the partial fraction's conditioning
+            good, details = True, []
+            for d in (1e-2, 1e-5, 1e-9):
+                de = ope.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.3 + d)
+                dl = opl.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.3 + d)
+                g, detail = within(dl, de, zero)
+                good &= g
+                details.append(detail)
+            ok &= check(good, f'{tag}: doubles_dot at frequencies 1e-2, 1e-5 and 1e-9 '
+                        'Ha apart', ', '.join(details))
+            mv = ope.matvecs
+            ope.fold_images(U, nodes)
+            ok &= check(ope.matvecs - mv == 3, f'{tag}: fold_images counts its M '
+                        'columns in matvecs', f'{ope.matvecs - mv} for 3 columns')
             # the rows above ran on grids (no fallback); the three columns at a node
             # inside the continuum are the only fallbacks
             inside = opl.d_min + 0.05
@@ -443,12 +466,92 @@ def check_laplace(eps, B, no):
                  if rl.omega.shape == re_.omega.shape else np.inf)
             ok &= check(d < 1e-8 and rl.converged.all(),
                         f'{tag}: two Newton roots equal the exact form', f'{d:.1e} Ha')
+            # a fallback node between two grid nodes in one call, the derivative on it
+            nodes3, deriv3 = [0.3, inside, 0.5], [False, True, False]
+            Fe = ope.fold_images(U, nodes3, derivative=deriv3)[1]
+            before = opl.laplace_fallbacks
+            Fl = opl.fold_images(U, nodes3, derivative=deriv3)[1]
+            good = close(Fl[1], Fe[1], zero)
+            details = [f'{rel(Fl[1], Fe[1]):.1e}']
+            for q in (0, 2):
+                g, detail = within(Fl[q], Fe[q], zero)
+                good &= g
+                details.append(detail)
+            ok &= check(good and opl.laplace_fallbacks - before == 3,
+                        f'{tag}: fold_images with a fallback node between two grid '
+                        'nodes, the derivative on it',
+                        f"{', '.join(details)}, {opl.laplace_fallbacks - before} "
+                        'fallbacks')
+            # the image and its derivative at one frequency share one grid and one pass
+            calls = []
+            grid = opl._grid
+            opl._grid = lambda *a: (calls.append(a), grid(*a))[1]
+            opl.fold_images(U[:, :1], [0.3, 0.3], derivative=[False, True])
+            del opl._grid
+            ok &= check(len(calls) == 1, f'{tag}: one grid for the image and its '
+                        'derivative at one frequency', f'{len(calls)} grids built')
     try:
         make(eps_gw, eps, B, no, 'singlet', form='x')
         ok &= check(False, 'form: raises ValueError')
     except ValueError as err:
         ok &= check('form' in str(err), 'form: raises ValueError naming it',
                     str(err)[:70])
+    return ok
+
+
+def check_budget(eps, B, no):
+    """Check 9: the budgets bound the peaks tracemalloc traces over one call."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    op = make(eps_gw, eps, B, no, 'triplet', kernel='printed', form='laplace')
+    nv, naux = op.nv, op.f.naux
+    u = np.random.default_rng(17).standard_normal((2, op.n))
+    Zr, Zs = op._vertex_factors(u[0]), op._vertex_factors(u[1])
+    (k0, k1), = op.tiles
+    kt = k1 - k0
+
+    def peak(fn):
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+        fn()
+        _, top = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return top
+
+    def bounded(measured, budget, label):
+        return check(0.5 * budget < measured <= budget, label,
+                     f'{measured / 1e3:.0f} kB traced, {budget / 1e3:.0f} kB budgeted')
+
+    nodes, deriv = np.array([0.3, 0.4]), np.array([False, True])
+    core = peak(lambda: ee_dbse2_ri_fold._tile_core(
+        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr[0], Zr[1], op.pair, op.spin, nodes,
+        deriv))
+    ok &= bounded(core, ee_dbse2_ri_fold._tile_bytes(kt, no, nv, naux, 2),
+                  'the tile budget bounds _tile_core at two nodes (triplet)')
+    overlap = peak(lambda: ee_dbse2_ri_fold._tile_overlap(
+        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr, 0.3, Zs, 0.5, op.pair, op.spin))
+    tile = ee_dbse2_ri_fold._tile_bytes(kt, no, nv, naux)
+    ok &= bounded(overlap, tile, 'the tile budget bounds _tile_overlap of two vectors')
+    # the printed singlet holds every closure, the largest Laplace node
+    opl = make(eps_gw, eps, B, no, 'singlet', kernel='printed', form='laplace')
+    Zl = opl._vertex_factors(u[0])
+    grid = opl._grid(0.3)
+    node = peak(lambda: opl._laplace(Zl, grid, [lambda t, w: w, lambda t, w: w * t]))
+    lap = ee_dbse2_ri_fold._laplace_bytes(no, nv, naux)
+    ok &= bounded(node, lap, 'the Laplace budget bounds one Laplace node (printed '
+                  'singlet, image and derivative)')
+    residents = op.L2.nbytes + op.Boo_i.nbytes + op.Bvv_a.nbytes
+    op.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op, xp=np)
+    ok &= check(op.gpu.need >= residents + 2 * op.L2.nbytes + lap + tile,
+                "the Laplace device's need carries the residents, the uploaded "
+                'factors, one Laplace node and the fallback tile',
+                f'{op.gpu.need / 1e6:.1f} MB')
+    ope = make(eps_gw, eps, B, no, 'triplet', kernel='printed')
+    ope.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(ope, xp=np)
+    ok &= check(ope.gpu.need >= 3 * ope.L2.nbytes + tile,
+                "the exact device's need carries the factor, the uploaded factors and "
+                'one tile', f'{ope.gpu.need / 1e6:.1f} MB')
     return ok
 
 
@@ -469,6 +572,8 @@ def main():
     ok &= check_device(eps, B, no)
     print('check 6: the Laplace form against the exact form')
     ok &= check_laplace(eps, B, no)
+    print('check 9: the budgets against traced peaks')
+    ok &= check_budget(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1
 
