@@ -10,33 +10,45 @@ energy set is visible; the W lines are screened at the HF energies throughout.
      e_c + e_d - e_k - e_l, shape (no, no, nv, nv); V(y) has the eight signed blocks
      '+aaaa' ... '-baba' of that shape; Vt is the eta-transpose of V (V dense by unit
      singles, Vt on random doubles, eta = +1 on the '+' blocks, -1 on the '-' blocks) to
-     1e-12; dnorm2 is |Y+|^2 - |Y-|^2, positive on a '+'-only Y and negative on a
-     '-'-only Y; the HF energies pass as eps_gw, a closed GW gap raises ValueError, a
-     flip parity raises NotImplementedError; matvec and solve_folded leave u, D and B
-     untouched.
+     1e-12; dnorm2 is |Z+|^2 - |Z-|^2, positive on a '+'-only Z and negative on a
+     '-'-only Z; the HF energies pass as eps_gw, a closed GW gap raises ValueError, a
+     flip parity raises NotImplementedError; matvec and solve_folded leave u, D, M and
+     B untouched.
   2. fold against unfolded: the dense signed supermatrix [[M, V+^T, -V-^T], [V+, D, 0],
      [V-, 0, D]] from the pieces by unit vectors, eig not eigh; STO-3G the whole matrix,
      6-31G per channel on the eigenspaces of the alpha<->beta flip; both kernels; every
      root of solver 'newton' and 'davidson' (singlet, triplet, and spin=None on STO-3G)
      is a real eigenvalue to 3e-10 Ha (1e-8 eV) and its T1 the eigenvector's
-     |y|^2 / (|y|^2 + |Z+|^2 - |Z-|^2) to 1e-8; every real eigenvalue below min D is a
-     root (completeness); the two solvers agree to 1e-8 Ha and 1e-8 on T1, their matvec
-     counts printed side by side; the count of complex eigenvalues is printed.
+     |y|^2 / (|y|^2 + |Z+|^2 - |Z-|^2) to 1e-8; at least six real eigenvalues lie below
+     min D and the lowest six are the roots (completeness to the sixth); the two solvers
+     agree to 1e-8 Ha and 1e-8 on T1, their matvec counts and solver loops per root
+     printed side by side (the eq71 6-31G Davidson leg keeps its model, asserted; the
+     printed kernel's roots have T1 > 1 and its model drops them to Newton on the seeds,
+     printed, 2026-10-17); the count of complex eigenvalues and the lowest complex real
+     part against min D are printed.
   3. eq 74 as printed (kernel 'printed', I.J + K.L - I.K - K.I) and Yamada's kernel
      ('eq71', I.J + K.L - I.L - L.I) transcribed on spin orbitals at omega = 0.3 Ha
      against A_eff(omega) - M from the pieces, singlet and triplet, 6-31G, to 1e-11 Ha;
-     eq 71's triplet is zero to 1e-12, the printed triplet carries the loop terms.
+     eq 71's triplet is zero to 1e-12, the printed triplet carries the loop terms. The
+     builder's stored dressed factors equal dressed_factors' (check 5 pins those to
+     W_aux). The product table is the spec's, pinned by the derivation
+     (eq74_fold_identity.py, eq74_vs_yamada.out.txt in the tooling repo), not
+     re-derived here.
   4. the static limit of the pieces' terms (static_limit_pieces) against
      static_second_order_kernel_df(..., kernel=, channel=) at the GW energies, both
-     kernels, both channels, 6-31G, to 1e-10 Ha.
+     kernels, both channels, 6-31G, to 1e-10 Ha; eq 71's triplet leg compares zero
+     with zero.
   5. boundaries: 'dbse2' is a fold level; the dressed W lines reproduce
      sum_PQ B_P,pq W_PQ B_Q,rs to 1e-12; coupling_pairs('eq71', 'triplet') is empty and
      'printed' keeps its pair; an unknown kernel, channel, sets or singles raises
-     ValueError; a B of the wrong shape raises ValueError; pieces at level 'dbse2'
-     without dnorm2 raise ValueError in folded_operator.
+     ValueError; a B of the wrong shape raises ValueError; eps_gw or eps_hf in eV (a
+     HOMO below -2), mixed units (a GW gap outside 0.2 to 5 times the HF gap), eps_gw
+     of another length than B and nocc = norb raise ValueError naming the input; pieces
+     at level 'dbse2' without dnorm2 raise ValueError in folded_operator.
 
 Run: python tests/test_ee_dbse2_fold.py
 """
+import collections
 import contextlib
 import io
 import os
@@ -120,6 +132,19 @@ def check_boundaries(eps, B, no):
     except ValueError as exc:
         ok &= check('shape' in str(exc), 'a B of the wrong shape raises ValueError',
                     str(exc)[:60])
+    ev = 27.211386
+    for label, word, args in (
+            ('eps_gw in eV', 'eV', (eps * ev, eps, B, no)),
+            ('eps_hf in eV', 'eV', (eps, eps * ev, B, no)),
+            ('both energies in eV', 'eV', (eps * ev, eps * ev, B, no)),
+            ('eps_gw at a tenth of eps_hf', 'gap', (eps * 0.1, eps, B, no)),
+            ('eps_gw of another length than B', 'shape', (eps[:-1], eps, B, no)),
+            ('nocc = norb', 'nocc', (eps, eps, B, len(eps)))):
+        try:
+            ee_dbse2_pieces.build_pieces_dbse2(*args)
+            ok &= check(False, f'{label} raises ValueError')
+        except ValueError as exc:
+            ok &= check(word in str(exc), f'{label} raises ValueError', str(exc)[:60])
     try:
         ee_fold.folded_operator({'level': 'dbse2'}, 0.3)
         ok &= check(False, "dbse2 pieces without dnorm2 raise ValueError")
@@ -190,12 +215,12 @@ def check_pieces(eps, B, no):
     d = float(np.max(np.abs(wt - V.T @ (eta * zf))))
     ok &= check(d < 1e-12, 'Vt is the eta-transpose of V', f'{d:.1e}')
     dn, ref = float(P['dnorm2'](Zr)), float((eta * zf) @ zf)
-    ok &= check(abs(dn - ref) < 1e-12 * abs(ref), 'dnorm2 is |Y+|^2 - |Y-|^2',
+    ok &= check(abs(dn - ref) < 1e-12 * abs(ref), 'dnorm2 is |Z+|^2 - |Z-|^2',
                 f'{dn:.6f} vs {ref:.6f}')
     Zp = SB({k: Zr.get(k) * (1.0 if k[0] == '+' else 0.0) for k in KEYS})
     Zm = SB({k: Zr.get(k) * (1.0 if k[0] == '-' else 0.0) for k in KEYS})
     ok &= check(P['dnorm2'](Zp) > 0 and P['dnorm2'](Zm) < 0,
-                "dnorm2 > 0 on a '+'-only Y and < 0 on a '-'-only Y")
+                "dnorm2 > 0 on a '+'-only Z and < 0 on a '-'-only Z")
     ee_dbse2_pieces.build_pieces_dbse2(eps, eps, B, no)
     ok &= check(True, 'the HF energies pass as eps_gw')
     bad = eps_gw.copy()
@@ -220,14 +245,16 @@ def check_pieces(eps, B, no):
             ok &= check(word in str(exc), f'an unknown {word} raises ValueError',
                         str(exc)[:60])
     D0, B0 = P['D'].copy(), B.copy()
+    M0 = {k: v.copy() for k, v in P['M'].items()}
     matvec, _, diag_s, _, _ = ee_fold.folded_operator(P, 0.3, spin='singlet')
     u = np.linspace(-1.0, 1.0, diag_s.size)
     u0 = u.copy()
     matvec(u)
     ee_fold.solve_folded(P, 1, spin='singlet')
     ok &= check(np.array_equal(u, u0) and np.array_equal(P['D'], D0)
-                and np.array_equal(B, B0),
-                'matvec and solve_folded leave u, D and B untouched')
+                and np.array_equal(B, B0)
+                and all(np.array_equal(P['M'].get(k), v) for k, v in M0.items()),
+                'matvec and solve_folded leave u, D, M and B untouched')
     return ok
 
 
@@ -297,9 +324,13 @@ def check_transcription(eps, B, no):
     eps_gw = gw_like(eps, no)
     omega = 0.3
     got, ref = {}, {}
+    _, Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)
     for kernel in ee_dbse2_pieces.KERNELS:
         P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel)
-        ref[kernel] = transcription(P['Bt'], eps_gw, no, omega, kernel)
+        dB = float(np.max(np.abs(P['Bt'] - Bt)))
+        ok &= check(dB < 1e-14, f"{kernel}: the builder's dressed factors are "
+                    "dressed_factors' (check 5 pins those to W_aux)", f'{dB:.1e}')
+        ref[kernel] = transcription(Bt, eps_gw, no, omega, kernel)
         Ma, Mx = P['M'].get('aaaa'), P['M'].get('aabb')
         for spin, sgn in (('singlet', 1.0), ('triplet', -1.0)):
             mv_w = ee_fold.folded_operator(P, omega, spin)[0]
@@ -420,9 +451,13 @@ def check_fold_vs_unfolded(basis):
             real = np.abs(w.imag) < 1e-9
             wr, vr = w[real].real, v[:, real].real
             below = np.sort(wr[wr < d_min])
+            cplx = w[~real].real
+            above = float(cplx.min() - d_min) if cplx.size else float('nan')
             print(f'    {kernel} {basis} {spin}: {int((~real).sum())} complex '
                   f'eigenvalues of {w.size}, {below.size} real below min D = '
-                  f'{d_min:.3f} Ha')
+                  f'{d_min:.3f} Ha, lowest complex Re {above:+.3f} Ha from min D')
+            ok &= check(below.size >= 6, f'{kernel} {basis} {spin}: at least six real '
+                        'eigenvalues below min D', f'{below.size}')
             nroots = int(min(below.size, 6))
             results = {}
             for label, solver, dl in (('newton', 'newton', 0),
@@ -433,6 +468,15 @@ def check_fold_vs_unfolded(basis):
                     kw['dense_limit'] = dl
                 res, mv = solve_counted(P, nroots, **kw)
                 results[label] = res
+                loops = dict(collections.Counter(res.loop))
+                if res.omega.size == 0:
+                    ok &= check(False, f'{kernel} {basis} {spin} {label}: no roots')
+                    continue
+                if (kernel, basis, label) == ('eq71', '6-31g', 'davidson'):
+                    # the printed kernel's model drops its T1 > 1 roots to Newton
+                    ok &= check(all(l == 'davidson' for l in res.loop),
+                                f'{kernel} {basis} {spin}: the Davidson model keeps '
+                                'its roots', f'loops {loops}')
                 dw, dt = [], []
                 for r in range(res.omega.size):
                     k = int(np.argmin(np.abs(wr - res.omega[r])))
@@ -447,11 +491,11 @@ def check_fold_vs_unfolded(basis):
                             f'{kernel} {basis} {spin} {label}: roots and T1 are '
                             f'eigenpairs of the signed supermatrix, lowest {nroots} '
                             'complete', f'max |dw| {max(dw):.1e} Ha, max |dT1| '
-                            f'{max(dt):.1e}, {mv} matvecs')
+                            f'{max(dt):.1e}, {mv} matvecs, loops {loops}')
             a, b = results['newton'], results['davidson']
             n = min(a.omega.size, b.omega.size, nroots)
-            dw = float(np.max(np.abs(a.omega[:n] - b.omega[:n])))
-            dt = float(np.max(np.abs(a.t1[:n] - b.t1[:n])))
+            dw = float(np.max(np.abs(a.omega[:n] - b.omega[:n]))) if n else np.inf
+            dt = float(np.max(np.abs(a.t1[:n] - b.t1[:n]))) if n else np.inf
             ok &= check(dw < 1e-8 and dt < 1e-8,
                         f'{kernel} {basis} {spin}: newton and davidson agree',
                         f'max |dw| {dw:.1e} Ha, max |dT1| {dt:.1e}')
@@ -462,7 +506,7 @@ def check_fold_vs_unfolded(basis):
             wm = np.sort(np.linalg.eigvalsh(Hm))
             res = ee_fold.solve_folded(P, 1, spin='singlet', tol_omega=1e-12)
             d = float(np.min(np.abs(wm - res.omega[0])))
-            ok &= check(d > 1e-6, f'{kernel}: control, the Hermitian misfold differs',
+            ok &= check(d > 1e-3, f'{kernel}: control, the Hermitian misfold differs',
                         f'nearest {d:.1e} Ha')
     return ok
 
