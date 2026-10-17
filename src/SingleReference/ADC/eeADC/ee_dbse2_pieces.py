@@ -1,9 +1,11 @@
-"""Eq 71 of Monino and Loos 2023 as the signed `pieces` of the EE fold (level 'dbse2').
+"""Eqs 61 and 71 of Monino and Loos 2023 as the signed `pieces` of the EE fold (level
+'dbse2'), two sets of doubles selected by `sets`.
 
-The dynamical second-order kernel Θ(ω) of the BSE@GW lives on the ordered 2h2p doubles
-K = (k, l, c, d) with D_K = ε^GW_c + ε^GW_d - ε^GW_k - ε^GW_l and the W lines of eq 73,
-the static screened interaction in DF form, w(pq|rs) = sum_P B~_P,pq B~_P,rs
-(dressed_factors). Four couplings take the pair (i, a) to the doubles,
+Eq 71's set (k, l, c, d). The dynamical second-order kernel Θ(ω) of the BSE@GW lives on
+the ordered 2h2p doubles K = (k, l, c, d) with D_K = ε^GW_c + ε^GW_d - ε^GW_k - ε^GW_l
+and the W lines of eq 73, the static screened interaction in DF form, w(pq|rs) =
+sum_P B~_P,pq B~_P,rs (dressed_factors). Four couplings take the pair (i, a) to the
+doubles,
 
     I_ia,K = δ_ac w(ik|ld)    J_ia,K = δ_ad w(il|kc)
     K_ia,K = δ_ik w(ac|ld)    L_ia,K = δ_il w(ad|kc)
@@ -30,23 +32,46 @@ BSE@GW singles block (the comparison against BSE2@GW, not a level of ours).
 Spin. Every W line conserves spin along itself, so for the singles block of spin s1 the
 vertices I and K put their image in the doubles blocks whose pair (k, c) carries s1, J
 and L in those whose pair (l, d) carries s1, the other pair running over both spins. The
-doubles are the four SB blocks 'aaaa', 'bbbb', 'abab', 'baba' of shape (no, no, nv, nv),
-index order (k, l, c, d), the spin string in that order; each copy is one set of them,
-keyed '+aaaa', '-aaaa', ..., and all eight share D. The singlet/triplet projection acts
-on the singles, as at every level. Eq 71's Θ has no triplet part, every product of it
-pairing an (I, K) vertex with a (J, L) one (coupling_pairs('eq71', 'triplet') is
-empty); the printed Θ's triplet carries its loop terms I.K + K.I. A later class of the
-second-order block enters as a pair of its own, its vertex type added to VERTICES.
+doubles are the four blocks 'aaaa', 'bbbb', 'abab', 'baba' of shape (no, no, nv, nv),
+index order (k, l, c, d), the spin string in that order; each copy is one set of them
+and all eight share D. The singlet/triplet projection acts on the singles, as at every
+level. Eq 71's Θ has no triplet part, every product of it pairing an (I, K) vertex with
+a (J, L) one (coupling_pairs('eq71', 'triplet') is empty); the printed Θ's triplet
+carries its loop terms I.K + K.I. A later class of the second-order block enters as a
+pair of its own, its vertex type added to VERTICES.
+
+Eq 61's set (k, c, m). The dynamical part of the dBSE@GW kernel lives on a particle-hole
+pair times a screening mode m of the RPA at the HF energies (gw_modes_df: Ω_m and
+ρ_P,m, with M^ph_pq,m = W^m_pq = sqrt2 sum_P B_P,pq ρ_P,m through the bare factors),
+D_kcm = Ω_m + ε^GW_c - ε^GW_k, and two couplings of eq 64,
+
+    J_ia,kcm = -δ_ac W^m_ik    K_ia,kcm = +δ_ik W^m_ac
+
+whose signed cross Θ^61 = J.K + K.J folds as the copies V_± = (J ± K)/sqrt2 on the same
+metric η: V+.V+ - V-.V- = J.K + K.J. The square (J + K).(J + K) at the HF energies is
+eq 66, level 'gw' of ee_gw_pieces, which the RI operator reaches through its
+sets=('eq66',). Neither coupling carries exchange, so Θ^61 is the same in both channels
+and J and K put their image in the doubles whose pair (k, c) carries the singles'
+spin.
+
+Layout. The doubles of both sets lie on one flat vector per spin: SB keys 'a' and 'b'
+by the spin of the (k, c) pair, each key the segments eq61+, eq61- (no nv nm each, index
+order (k, c, m)), eq71+ssss, eq71-ssss, eq71+ss'ss', eq71-ss'ss' (no² nv² each, index
+order (k, l, c, d)) in that order, a set absent from `sets` having no segments;
+pieces['segments'][s] lists (name, sign, slice) of key s and pieces['D'] is the one
+flat vector both keys share (SB.divide maps it onto every key).
 
 References
 ----------
-E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 59, 62, 71 to 74.
+E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 59, 61, 62, 64, 66,
+71 to 74.
 A. Yamada et al., Phys. Rev. B 106, 045113 (2022), eqs 12 and 13.
 """
 import numpy as np
 
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
+from src.SingleReference.ADC.eeADC.ee_gw_pieces import gw_modes_df
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (
     static_screened_coulomb_aux)
@@ -54,8 +79,10 @@ from src.SingleReference.LinearResponse.linear_response import (
 VERTICES = ('I', 'J', 'K', 'L')
 KERNELS = ('eq71', 'printed')
 SINGLES = ('eq62', 'eq62+eq59')
-SETS = ('eq71',)
+# the doubles sets, each tuple sorted; the RI operator adds ('eq66',)
+SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'))
 _CHANNELS = ('singlet', 'triplet')
+_OTHER = {'a': 'b', 'b': 'a'}
 # the pair (x, y) of each kernel over VERTICES: X = sum_A x_A A and Y = sum_B y_B B of
 # the module docstring's table, the copies V± = (X ± Y)/2
 _PAIRS = {'eq71': (np.array([1.0, 0.0, -1.0, 0.0]), np.array([0.0, 1.0, 0.0, -1.0])),
@@ -145,13 +172,107 @@ def coupling_pairs(kernel, channel):
 def _check_names(kernel, sets, singles, screening):
     if kernel not in KERNELS:
         raise ValueError(f"kernel={kernel!r}; expected one of {KERNELS}")
-    if tuple(sets) != SETS:
-        raise ValueError(f"sets={tuple(sets)!r}; expected {SETS}; only eq 71's set is "
-                         'implemented')
+    if tuple(sorted(sets)) not in SETS:
+        raise ValueError(f"sets={tuple(sets)!r}; expected one of {SETS}")
     if singles not in SINGLES:
         raise ValueError(f"singles={singles!r}; expected one of {SINGLES}")
     if screening not in ('tda', 'rpa'):
         raise ValueError(f"screening={screening!r}; expected 'tda' or 'rpa'")
+
+
+def _segments(no, nv, nm, sets):
+    """The flat per-spin layout of the module docstring.
+
+    Parameters
+    ----------
+    no, nv : int, the occupied and virtual counts
+    nm : int, the mode count (read when 'eq61' is in sets)
+    sets : tuple of str, sorted, one of SETS
+
+    Returns
+    -------
+    segments : dict, {'a': [(name, sign, slice)], 'b': [...]}: the segments of each key
+        in the layout's order, name 'eq61+', 'eq61-', 'eq71+ssss', 'eq71-ssss',
+        'eq71+ss'ss'', 'eq71-ss'ss'' with s the key and s' the other spin, sign +1.0
+        on a '+' copy and -1.0 on a '-' copy, slice into the key's flat vector; the two
+        keys carry the same slices
+    n_flat : int, the length of each key's flat vector
+    """
+    out, n_flat = {}, 0
+    for s in 'ab':
+        parts = []
+        if 'eq61' in sets:
+            parts += [('eq61+', 1.0, no * nv * nm), ('eq61-', -1.0, no * nv * nm)]
+        if 'eq71' in sets:
+            n71 = no * no * nv * nv
+            same, mixed = s * 4, s + _OTHER[s] + s + _OTHER[s]
+            parts += [('eq71+' + same, 1.0, n71), ('eq71-' + same, -1.0, n71),
+                      ('eq71+' + mixed, 1.0, n71), ('eq71-' + mixed, -1.0, n71)]
+        segs, start = [], 0
+        for name, sign, length in parts:
+            segs.append((name, sign, slice(start, start + length)))
+            start += length
+        out[s] = segs
+        n_flat = start
+    return out, n_flat
+
+
+def _mode_images(B, rho, no, y):
+    """The images Y^J = J y and Y^K = K y of a spatial singles block on eq 61's doubles.
+
+    Parameters
+    ----------
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q), the bare DF factors
+    rho : ndarray, shape (naux, nm), index order (P, m), gw_modes_df's ρ_P,m
+    no : int, doubly occupied orbitals
+    y : ndarray, shape (no, nv), index order (i, a)
+
+    Returns
+    -------
+    YJ : ndarray, shape (no, nv, nm), index order (k, c, m),
+        Y^J_kcm = -sum_i W^m_ik y_ic = -sqrt2 sum_P (sum_i B_P,ik y_ic) ρ_P,m
+    YK : ndarray, shape (no, nv, nm), index order (k, c, m),
+        Y^K_kcm = +sum_a W^m_ac y_ka = +sqrt2 sum_P (sum_a y_ka B_P,ac) ρ_P,m
+    """
+    naux, nm = rho.shape
+    nv = y.shape[1]
+    Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
+    # ZI_P,kc = sum_i B_P,ik y_ic ;  ZK_P,kc = sum_a y_ka B_P,ac
+    ZI = np.matmul(Boo.transpose(0, 2, 1), y)
+    ZK = np.matmul(y, Bvv)
+    # Y^J_kcm = -sqrt2 sum_P ZI_P,kc ρ_P,m ;  Y^K_kcm = +sqrt2 sum_P ZK_P,kc ρ_P,m
+    YJ = -np.sqrt(2.0) * (ZI.reshape(naux, no * nv).T @ rho).reshape(no, nv, nm)
+    YK = np.sqrt(2.0) * (ZK.reshape(naux, no * nv).T @ rho).reshape(no, nv, nm)
+    return YJ, YK
+
+
+def _mode_images_t(B, rho, no, Y):
+    """The transposes J^T Y and K^T Y of one eq 61 doubles block onto a singles block.
+
+    Parameters
+    ----------
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q), the bare DF factors
+    rho : ndarray, shape (naux, nm), index order (P, m)
+    no : int, doubly occupied orbitals
+    Y : ndarray, shape (no, nv, nm), index order (k, c, m)
+
+    Returns
+    -------
+    wJ : ndarray, shape (no, nv), index order (i, a),
+        (J^T Y)_ia = -sum_km W^m_ik Y_kam = -sqrt2 sum_Pk B_P,ik G_P,ka
+    wK : ndarray, shape (no, nv), index order (i, a),
+        (K^T Y)_ia = +sum_cm W^m_ac Y_icm = +sqrt2 sum_Pc B_P,ac G_P,ic
+    with G_P,kc = sum_m ρ_P,m Y_kcm.
+    """
+    naux, nm = rho.shape
+    nv = Y.shape[1]
+    Boo, Bvv = B[:, :no, :no], B[:, no:, no:]
+    # G_P,kc = sum_m ρ_P,m Y_kcm : (P, m) @ (m, kc)
+    G = (rho @ Y.reshape(no * nv, nm).T).reshape(naux, no, nv)
+    # wJ_ia = -sqrt2 sum_Pk B_P,ik G_P,ka ;  wK_ia = +sqrt2 sum_Pc B_P,ac G_P,ic
+    wJ = -np.sqrt(2.0) * np.einsum('Pik,Pka->ia', Boo, G, optimize=True)
+    wK = np.sqrt(2.0) * np.einsum('Pac,Pic->ia', Bvv, G, optimize=True)
+    return wJ, wK
 
 
 def _vertex_images(Bt, no, y):
@@ -325,116 +446,176 @@ def check_energies(eps_gw, eps_hf, B, nocc):
 
 
 def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
-                       screening='rpa', singles='eq62'):
-    """The pieces of ee_fold.folded_operator for eq 71's doubles on the signed fold.
+                       screening='rpa', singles='eq62', modes=None):
+    """The pieces of ee_fold.folded_operator for the dBSE2 doubles on the signed fold.
 
     Parameters
     ----------
     eps_gw : ndarray, shape (norb,), the GW quasiparticle energies ε^GW_p, Hartree,
-        occupied first: the singles diagonal of eq 62 and the doubles diagonal D
+        occupied first: the singles diagonal of eq 62 and the doubles diagonals D
     eps_hf : ndarray, shape (norb,), HF orbital energies, Hartree, the reference the W
-        lines are screened at. Refused: a closed GW gap, a HOMO below -2 in either array
-        (eV passed as Hartree) and a GW gap outside 0.2 to 5 times the HF gap (mixed
-        units); a swap of the two arrays in Hartree is not detectable here
+        lines and the modes are screened at. Refused: a closed GW gap, a HOMO below -2
+        in either array (eV passed as Hartree) and a GW gap outside 0.2 to 5 times the
+        HF gap (mixed units); a swap of the two arrays in Hartree is not detectable here
     B : ndarray, shape (naux, norb, norb), index order (Q, p, q), DF factors with
         (pq|rs) = sum_Q B_Q,pq B_Q,rs
     nocc : int, doubly occupied orbitals
-    kernel : {'eq71', 'printed'}, the module docstring's table
-    sets : tuple of str, the doubles sets; ('eq71',) is the only one implemented
-    screening : {'tda', 'rpa'}, the screening of eq 61's modes, read once that set is
-        implemented
+    kernel : {'eq71', 'printed'}, the module docstring's table; read for eq 71's set
+    sets : tuple of str, the doubles sets, one of SETS in any order: ('eq71',) eq 71's
+        set alone, ('eq61',) eq 61's, ('eq61', 'eq71') both (the level dbse2)
+    screening : {'tda', 'rpa'}, the screening of eq 61's modes
     singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block)
+    modes : None or (omega, rho), gw_modes_df's modes at eps_hf, omega (nm,) and rho
+        (naux, nm), index order (P, m); None builds them when 'eq61' is in sets. A rho
+        of another row count than naux raises ValueError naming naux
 
     Returns
     -------
     dict
         'M' SB, blocks (no, nv, no, nv), index order (i, a, j, b); 'V' SB singles
-        {'aa', 'bb'} of (no, nv), index order (i, a) -> SB doubles on the eight keys
-        '+aaaa', '-aaaa', '+bbbb', '-bbbb', '+abab', '-abab', '+baba', '-baba', each
-        (no, no, nv, nv), index order (k, l, c, d), the copy's sign then the spin string
-        of (k, l, c, d); 'Vt' the η-transpose, w_ia = sum_K V+_K,ia Z+_K - sum_K
-        V-_K,ia Z-_K; 'D' ndarray, shape (no, no, nv, nv), index order (k, l, c, d),
-        D_klcd = ε_c + ε_d - ε_k - ε_l at the GW energies, shared by every block;
-        'dnorm2' SB doubles -> |Z+|² - |Z-|²; 'level' 'dbse2'; 'no', 'nv', 'be';
-        'dense_limit' 40; 'Bt' the dressed factors and 'pairs' the singlet list of
-        coupling_pairs, for inspection. FoldResult.t1 of a solve on these pieces may
-        exceed 1: T1 = 1/(1 + dnorm2) and dnorm2 < 0 on a rising branch, the common
-        case of kernel 'printed'; the driver guards the window, the solver does not.
+        {'aa', 'bb'} of (no, nv), index order (i, a) -> SB doubles on the keys 'a' and
+        'b', each a flat ndarray of shape (n_flat,) on the module docstring's layout;
+        'Vt' the η-transpose, w_ia = sum_K V+_K,ia Z+_K - sum_K V-_K,ia Z-_K over the
+        segments; 'D' ndarray, shape (n_flat,), shared by both keys, Ω_m + ε_c - ε_k on
+        the eq 61 segments (index order (k, c, m)) and ε_c + ε_d - ε_k - ε_l on the
+        eq 71 ones (index order (k, l, c, d)), at the GW energies; 'dnorm2' SB doubles
+        ->
+        sum over keys and segments of sign |Z[key][slice]|²; 'segments' the layout
+        (_segments); 'modes' (omega, rho) when 'eq61' is in sets, else None; 'level'
+        'dbse2'; 'no', 'nv', 'be'; 'dense_limit' 40; 'sets' the sorted tuple; 'Bt' the
+        dressed factors (None when neither eq 71's set nor eq 59 needs them) and 'pairs'
+        the singlet list of coupling_pairs ([] without eq 71's set), for inspection.
+        FoldResult.t1 of a solve on these pieces may exceed 1: T1 = 1/(1 + dnorm2) and
+        dnorm2 < 0 on a rising branch, the common case of kernel 'printed'; the driver
+        guards the window, the solver does not.
 
     Notes
     -----
-    With the pair (x, y) over (I, J, K, L), X = sum_A x_A A and Y = sum_B y_B B, the
-    copies are V± = (X ± Y)/2; on the block whose (k, c) pair carries spin s1 and
-    whose (l, d) pair carries s2, X y1 = x_I t(y^s1) + x_K u(y^s1) + x_J t(y^s2)^T +
-    x_L u(y^s2)^T with (t, u) of _vertex_images and ^T the swap (k, c) <-> (l, d).
+    Eq 71's set: with the pair (x, y) over (I, J, K, L), X = sum_A x_A A and Y = sum_B
+    y_B B, the copies are V± = (X ± Y)/2; on the block whose (k, c) pair carries spin s1
+    and whose (l, d) pair carries s2, X y1 = x_I t(y^s1) + x_K u(y^s1) + x_J t(y^s2)^T
+    + x_L u(y^s2)^T with (t, u) of _vertex_images and ^T the swap (k, c) <-> (l, d).
     Vt(Z)_ia = sum_K V+_K,ia Z+_K - sum_K V-_K,ia Z-_K = sum_K X_K,ia Zx_K + sum_K
     Y_K,ia Zy_K with Zx = (Z+ - Z-)/2 and Zy = (Z+ + Z-)/2: I^T and K^T read the
-    blocks whose (k, c) carries the output
-    spin, J^T and L^T those whose (l, d) does, each through _vertex_images_t. The
-    doubles exist inside one call only.
+    blocks whose (k, c) carries the output spin, J^T and L^T those whose (l, d) does,
+    each through _vertex_images_t.
+    Eq 61's set on key s: V± = (Y^J ± Y^K)/sqrt2 of the block y^ss (_mode_images);
+    Vt(Z) = J^T (Z+ - Z-)/sqrt2 + K^T (Z+ + Z-)/sqrt2 (_mode_images_t). The doubles
+    exist inside one call only.
     """
     _check_names(kernel, sets, singles, screening)
+    sets = tuple(sorted(sets))
     eps_gw, eps_hf, no, nv = check_energies(eps_gw, eps_hf, B, nocc)
-    pairs = coupling_pairs(kernel, 'singlet')
-    if len(pairs) != 1:
-        raise NotImplementedError('one coupling pair per set')
-    x, y = pairs[0]
-    _, Bt = dressed_factors(eps_hf, B, no)
+    has61, has71 = 'eq61' in sets, 'eq71' in sets
+    naux = B.shape[0]
+    pairs, x, y, Bt = [], None, None, None
+    if has71:
+        pairs = coupling_pairs(kernel, 'singlet')
+        if len(pairs) != 1:
+            raise NotImplementedError('one coupling pair per set')
+        x, y = pairs[0]
+    if has71 or singles == 'eq62+eq59':
+        _, Bt = dressed_factors(eps_hf, B, no)
+    om, rho, nm = None, None, 0
+    if has61:
+        if modes is None:
+            om, rho = gw_modes_df(eps_hf, B, no, screening)
+        else:
+            om, rho = np.asarray(modes[0], float), np.asarray(modes[1], float)
+            if rho.ndim != 2 or rho.shape[0] != naux:
+                raise ValueError(f'modes: rho of shape {rho.shape}; expected (naux='
+                                 f'{naux}, nm), index order (P, m)')
+            if om.shape != (rho.shape[1],):
+                raise ValueError(f'modes: omega of shape {om.shape} against rho '
+                                 f'{rho.shape}; expected (nm,) with nm = rho.shape[1]')
+        nm = om.size
     M = _singles_block(eps_gw, B, Bt, no, singles)
     eo, ev = eps_gw[:no], eps_gw[no:]
-    # D_klcd = ε_c + ε_d - ε_k - ε_l
-    D = (ev[None, None, :, None] + ev[None, None, None, :]
-         - eo[:, None, None, None] - eo[None, :, None, None])
-    blocks = (('a', 'a'), ('a', 'b'), ('b', 'a'), ('b', 'b'))      # (s1, s2)
+    segments, n_flat = _segments(no, nv, nm, sets)
+    # one flat D for both keys: Ω_m + ε_c - ε_k on the eq 61 segments, ε_c + ε_d - ε_k
+    # - ε_l on the eq 71 ones
+    D = np.empty(n_flat)
+    for name, _, sl in segments['a']:
+        if name.startswith('eq61'):
+            D[sl] = (om[None, None, :] + ev[None, :, None] - eo[:, None, None]).ravel()
+        else:
+            D[sl] = (ev[None, None, :, None] + ev[None, None, None, :]
+                     - eo[:, None, None, None] - eo[None, :, None, None]).ravel()
+    where = {s: {name: sl for name, _, sl in segments[s]} for s in 'ab'}
+    sqrt2 = np.sqrt(2.0)
 
     def V(y1):
         if y1.parity is not None:
             raise NotImplementedError('V takes y1 without a flip parity')
-        img = {s: _vertex_images(Bt, no, y1.get(s + s)) for s in 'ab'}
+        img = {s: _vertex_images(Bt, no, y1.get(s + s)) for s in 'ab'} if has71 else {}
         out = {}
-        for s1, s2 in blocks:
-            t1, u1 = img[s1]
-            t2, u2 = img[s2]
-            Xb = _combine(x, t1, u1, t2, u2)
-            Yb = _combine(y, t1, u1, t2, u2)
-            key = s1 + s2 + s1 + s2
-            # V± = (X ± Y)/2 on this block
-            out['+' + key] = (Xb + Yb) / 2.0
-            out['-' + key] = (Xb - Yb) / 2.0
+        for s in 'ab':
+            z = np.empty(n_flat)
+            if has61:
+                YJ, YK = _mode_images(B, rho, no, y1.get(s + s))
+                # V± = (Y^J ± Y^K)/sqrt2
+                z[where[s]['eq61+']] = ((YJ + YK) / sqrt2).ravel()
+                z[where[s]['eq61-']] = ((YJ - YK) / sqrt2).ravel()
+            if has71:
+                t1, u1 = img[s]
+                for s2 in (s, _OTHER[s]):
+                    t2, u2 = img[s2]
+                    Xb = _combine(x, t1, u1, t2, u2)
+                    Yb = _combine(y, t1, u1, t2, u2)
+                    key = s + s2 + s + s2
+                    # V± = (X ± Y)/2 on this block
+                    z[where[s]['eq71+' + key]] = ((Xb + Yb) / 2.0).ravel()
+                    z[where[s]['eq71-' + key]] = ((Xb - Yb) / 2.0).ravel()
+            out[s] = z
         return SB(out)
 
     def Vt(Z):
+        def block(copy, key):
+            # the (k, l, c, d) view of one eq 71 block, held by the key of its (k, c)
+            # pair's spin
+            s1 = key[0]
+            return Z.get(s1)[where[s1]['eq71' + copy + key]].reshape(no, no, nv, nv)
+
         def combined(keys, sign):
             # (Z+ + sign Z-)/2 summed over the given spin blocks
-            return sum(Z.get('+' + k) + sign * Z.get('-' + k) for k in keys) / 2.0
+            return sum(block('+', k) + sign * block('-', k) for k in keys) / 2.0
 
         w = {}
         for a in 'ab':
-            # the blocks whose (k, c) pair, and whose (l, d) pair, carries spin a
-            kc = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s1 == a]
-            ld = [s1 + s2 + s1 + s2 for s1, s2 in blocks if s2 == a]
             wa = np.zeros((no, nv))
-            # Zx = (Z+ - Z-)/2 meets X^T, Zy = (Z+ + Z-)/2 meets Y^T
-            for c, sign in ((x, -1.0), (y, 1.0)):
-                if c[0] != 0.0 or c[2] != 0.0:
-                    # I^T, K^T read the blocks whose (k, c) pair carries spin a
-                    wI, wK = _vertex_images_t(Bt, no, combined(kc, sign))
-                    wa = wa + c[0] * wI + c[2] * wK
-                if c[1] != 0.0 or c[3] != 0.0:
-                    # J^T, L^T read those whose (l, d) pair does, with (k, c) <-> (l, d)
-                    Zs = combined(ld, sign)
-                    wI, wK = _vertex_images_t(Bt, no, Zs.transpose(1, 0, 3, 2))
-                    wa = wa + c[1] * wI + c[3] * wK
+            if has61:
+                za = Z.get(a)
+                Zp = za[where[a]['eq61+']].reshape(no, nv, nm)
+                Zm = za[where[a]['eq61-']].reshape(no, nv, nm)
+                # J^T (Z+ - Z-)/sqrt2 + K^T (Z+ + Z-)/sqrt2
+                wa = wa + _mode_images_t(B, rho, no, (Zp - Zm) / sqrt2)[0]
+                wa = wa + _mode_images_t(B, rho, no, (Zp + Zm) / sqrt2)[1]
+            if has71:
+                # the blocks whose (k, c) pair, and whose (l, d) pair, carries spin a
+                kc = [a + s2 + a + s2 for s2 in 'ab']
+                ld = [s1 + a + s1 + a for s1 in 'ab']
+                # Zx = (Z+ - Z-)/2 meets X^T, Zy = (Z+ + Z-)/2 meets Y^T
+                for c, sign in ((x, -1.0), (y, 1.0)):
+                    if c[0] != 0.0 or c[2] != 0.0:
+                        # I^T, K^T read the blocks whose (k, c) pair carries spin a
+                        wI, wK = _vertex_images_t(Bt, no, combined(kc, sign))
+                        wa = wa + c[0] * wI + c[2] * wK
+                    if c[1] != 0.0 or c[3] != 0.0:
+                        # J^T, L^T read those whose (l, d) pair does, (k, c) <-> (l, d)
+                        Zs = combined(ld, sign)
+                        wI, wK = _vertex_images_t(Bt, no, Zs.transpose(1, 0, 3, 2))
+                        wa = wa + c[1] * wI + c[3] * wK
             w[a + a] = wa
         return SB(w)
 
     def dnorm2(Z):
-        # |Z+|² - |Z-|²
-        return float(sum((1.0 if k[0] == '+' else -1.0) * np.vdot(v, v)
-                         for k, v in Z.items()))
+        # sum over keys and segments of sign |Z[key][slice]|²
+        return float(sum(sign * np.vdot(Z.get(s)[sl], Z.get(s)[sl])
+                         for s in 'ab' for _, sign, sl in segments[s]))
 
-    return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'level': 'dbse2',
-            'no': no, 'nv': nv, 'be': _eq.SPIN_BLOCKED, 'dense_limit': _DENSE_LIMIT,
+    return {'M': M, 'V': V, 'Vt': Vt, 'D': D, 'dnorm2': dnorm2, 'segments': segments,
+            'modes': (om, rho) if has61 else None, 'level': 'dbse2', 'no': no,
+            'nv': nv, 'be': _eq.SPIN_BLOCKED, 'dense_limit': _DENSE_LIMIT, 'sets': sets,
             'Bt': Bt, 'pairs': pairs}
 
 
