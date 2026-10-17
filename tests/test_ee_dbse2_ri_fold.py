@@ -19,6 +19,13 @@ Checks:
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
      equal the serial run bit for bit: products and signed norms at two frequencies,
      the diagonal, two Newton roots driven through ee_ri_fold.drive.
+  6. form='laplace' against form='exact' (both kernels, both channels): products and
+     signed norms at 0.3 and 0.5 Ha, fold_images at three nodes with a derivative node
+     between, doubles_dot at two frequencies and at one, each to 1e-8 relative (the
+     quadrature's 1e-9 target; the achieved error printed); a node at min D + 0.05 Ha
+     falls back to the exact tile (equal to 1e-12, laplace_fallbacks counted); two
+     Newton roots within 1e-8 Ha of the exact form's; an unknown form raises
+     ValueError. Checks 4 and 5 are the device path's (later tasks).
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
@@ -232,6 +239,81 @@ def check_ranks(eps, B, no):
     return ok
 
 
+def check_laplace(eps, B, no):
+    """Check 6."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    n = no * (eps.size - no)
+    U = np.random.default_rng(11).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    tight = dict(dense_limit=0, tol_omega=1e-9, tol_residual=1e-8)
+
+    def within(a, b, zero):
+        """(ok, detail): 1e-8 relative, or 1e-12 absolute on a zero reference."""
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        if zero:
+            e = float(np.abs(a - b).max())
+            return e < 1e-12, f'{e:.1e} abs'
+        return rel(a, b) < 1e-8, f'{rel(a, b):.1e}'
+
+    for kernel in KERNELS:
+        for spin in SPINS:
+            tag = f'{kernel} {spin} laplace'
+            zero = kernel == 'eq71' and spin == 'triplet'
+            ope = make(eps_gw, eps, B, no, spin, kernel=kernel)
+            opl = make(eps_gw, eps, B, no, spin, kernel=kernel, form='laplace')
+            for omega in (0.3, 0.5):
+                om = np.full(3, omega)
+                Ae, ne = ope.apply(U, om)
+                Al, nl = opl.apply(U, om)
+                good, detail = within(Al, Ae, False)
+                ok &= check(good, f'{tag} w={omega}: product', detail)
+                good, detail = within(nl, ne, zero)
+                ok &= check(good, f'{tag} w={omega}: signed norm', detail)
+            nodes, deriv = [0.3, 0.4, 0.5], [False, True, False]
+            Me, Fe = ope.fold_images(U, nodes, derivative=deriv)
+            Ml, Fl = opl.fold_images(U, nodes, derivative=deriv)
+            good = rel(Ml, Me) < 1e-12
+            details = []
+            for q in range(3):
+                g, d = within(Fl[q], Fe[q], zero)
+                good &= g
+                details.append(d)
+            ok &= check(good, f'{tag}: fold_images, a derivative node between two '
+                        'plain ones', ', '.join(details))
+            for wr, ws in ((0.3, 0.5), (0.3, 0.3)):
+                de = ope.doubles_dot(U[:, 0], wr, U[:, 1], ws)
+                dl = opl.doubles_dot(U[:, 0], wr, U[:, 1], ws)
+                good, detail = within(dl, de, zero)
+                ok &= check(good, f'{tag}: doubles_dot at ({wr}, {ws})', detail)
+            # the rows above ran on grids (no fallback); the three columns at a node
+            # inside the continuum are the only fallbacks
+            inside = opl.d_min + 0.05
+            Ae = ope.apply(U, np.full(3, inside))[0]
+            Al = opl.apply(U, np.full(3, inside))[0]
+            ok &= check(rel(Al, Ae) < 1e-12 and opl.laplace_fallbacks == 3,
+                        f'{tag}: a node inside the doubles continuum falls back to the '
+                        'exact tile, the rows before it did not',
+                        f'{rel(Al, Ae):.1e}, {opl.laplace_fallbacks} fallbacks')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                re_ = ee_fold.solve_folded(ope.pieces(), 2, spin=spin, solver='newton',
+                                           **tight)
+                rl = ee_fold.solve_folded(opl.pieces(), 2, spin=spin, solver='newton',
+                                          **tight)
+            d = (float(np.abs(rl.omega - re_.omega).max())
+                 if rl.omega.shape == re_.omega.shape else np.inf)
+            ok &= check(d < 1e-8 and rl.converged.all(),
+                        f'{tag}: two Newton roots equal the exact form', f'{d:.1e} Ha')
+    try:
+        make(eps_gw, eps, B, no, 'singlet', form='x')
+        ok &= check(False, 'form: raises ValueError')
+    except ValueError as err:
+        ok &= check('form' in str(err), 'form: raises ValueError naming it',
+                    str(err)[:70])
+    return ok
+
+
 def main():
     eps, B, no = water('6-31g')
     ok = True
@@ -243,6 +325,8 @@ def main():
     ok &= check_solves(eps, B, no)
     print('check 3: simulated ranks')
     ok &= check_ranks(eps, B, no)
+    print('check 6: the Laplace form against the exact form')
+    ok &= check_laplace(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1
 
