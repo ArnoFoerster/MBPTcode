@@ -863,6 +863,26 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
     return theta_A, theta_B
 
 
+def device_memory_check(need, free, label):
+    """Refuse a device allocation of `need` bytes that `free` bytes cannot hold.
+
+    Parameters
+    ----------
+    need, free : int
+        The bytes the caller is about to allocate, and the bytes the device has free.
+    label : str
+        What `need` holds, named first in the error.
+
+    Raises
+    ------
+    ValueError
+        When `need` exceeds `free`, naming both in GiB.
+    """
+    if need > free:
+        raise ValueError(f'{label} need {need / 1024 ** 3:.3g} GiB, the device has '
+                         f'{free / 1024 ** 3:.3g} GiB free')
+
+
 def _second_order_kernel_gpu(eps, coeff_df, L, occ, virt, reg, blksize, channel,
                              kernel):
     """Θ^A, Θ^B of static_second_order_kernel_df on this process's GPU (CuPy, FP64).
@@ -912,10 +932,7 @@ def _second_order_kernel_gpu(eps, coeff_df, L, occ, virt, reg, blksize, channel,
     # BSE2_GPU_BLOCK_GB, come on top
     need = 2 * 8 * n_pair ** 2 + 8 * naux * (no + nv) ** 2
     free = cp.cuda.Device().mem_info[0] + cp.get_default_memory_pool().free_bytes()
-    if need > free:
-        raise ValueError(f'the pair-sized arrays and the DF factors need '
-                         f'{need / 1024 ** 3:.3g} GiB, the device has '
-                         f'{free / 1024 ** 3:.3g} GiB free')
+    device_memory_check(need, free, 'the pair-sized arrays and the DF factors')
 
     def blocks(per_virtual):
         # slices over the virtuals, blksize wide, capped where per_virtual
