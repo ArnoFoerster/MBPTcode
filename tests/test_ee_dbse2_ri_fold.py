@@ -25,7 +25,10 @@ Checks:
      quadrature's 1e-9 target; the achieved error printed); a node at min D + 0.05 Ha
      falls back to the exact tile (equal to 1e-12, laplace_fallbacks counted); two
      Newton roots within 1e-8 Ha of the exact form's; an unknown form raises
-     ValueError. Checks 4 and 5 are the device path's (later tasks).
+     ValueError.
+  4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
+     device path: need above free raises ValueError naming the label and the GiB, need
+     within free returns None. Check 5 is the device path's (Task 4).
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
@@ -40,6 +43,7 @@ from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold
 from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, drive
+from src.SingleReference.LinearResponse import linear_response
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 HARTREE_TO_EV = 27.211386245988
@@ -239,6 +243,21 @@ def check_ranks(eps, B, no):
     return ok
 
 
+def check_memory():
+    """Check 4: the device memory pre-flight lifted from the static kernel."""
+    ok = True
+    try:
+        linear_response.device_memory_check(2 ** 31, 2 ** 30, 'x')
+        ok &= check(False, 'need above free raises ValueError')
+    except ValueError as err:
+        ok &= check(str(err).startswith('x need') and 'GiB' in str(err),
+                    'need above free raises ValueError naming the label and GiB',
+                    str(err)[:70])
+    ok &= check(linear_response.device_memory_check(1, 2, 'x') is None,
+                'need within free returns None')
+    return ok
+
+
 def check_laplace(eps, B, no):
     """Check 6."""
     ok = True
@@ -325,6 +344,8 @@ def main():
     ok &= check_solves(eps, B, no)
     print('check 3: simulated ranks')
     ok &= check_ranks(eps, B, no)
+    print('check 4: the device memory pre-flight')
+    ok &= check_memory()
     print('check 6: the Laplace form against the exact form')
     ok &= check_laplace(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
