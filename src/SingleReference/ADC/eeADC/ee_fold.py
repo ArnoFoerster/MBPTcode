@@ -16,7 +16,10 @@ metric the supermatrix is symmetric (K is a spin-resolved (k, l, c, d)). Level
 gw (ee_gw_pieces, eq 66: BSE@GW with one doubles set) has the same shape with
 K = (k, c, m) per spin block, a particle-hole pair times a screening mode,
 D_kcm = Ω_m + ε_c - ε_k, and the plain sum over its blocks as the doubles norm
-(pieces['dnorm2']).
+(pieces['dnorm2']). Level dbse2 (ee_dbse2_pieces, eq 71 of Monino and Loos) puts
+two copies of its doubles on one diagonal with the metric η = diag(+1, -1): its
+'Vt' is the η-transpose of V and its dnorm2 the signed norm |Z+|² - |Z-|², so the
+derivative below carries both signs and T1 may exceed 1.
 For the eigenpair (λ(ω), y) of A_eff(ω) with sum_ia y_ia² = 1,
 
     dλ/dω = -sum_K (sum_jb V_K,jb y_jb)² / (D_K - ω)²,
@@ -205,7 +208,8 @@ def folded_operator(pieces, omega, spin=None):
         'Vt' (the reverse map), 'D' (ndarray, shape (no, no, nv, nv), index
         order (i, j, a, b), or, at level gw, shape (no, nv, nm), index order
         (k, c, m)), 'level', 'no', 'nv', 'be'; 'dnorm2' (optional: SB doubles
-        -> float sum_K Y_K², for a doubles layout other than adc2's);
+        -> float sum_K Y_K², for a doubles layout other than adc2's; the signed
+        |Z+|² - |Z-|² at level dbse2);
         'dense_limit' (optional int, default 0: solve_folded's dense_limit when
         the caller passes None); 'K' (optional: the fused kernel
         K(y1, omega, powers) -> (ws, dn2) with y1 an SB singles vector, ws[i]
@@ -222,8 +226,9 @@ def folded_operator(pieces, omega, spin=None):
     matvec : callable
         u (n,) -> A_eff(ω) u (n,), n = 2 no nv or the channel's size.
     dmatvec : callable
-        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float), so that
-        dλ/dω = -dmatvec(y) for a unit eigenvector y; 0.0 when omega is None.
+        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float; the pieces'
+        signed dnorm2 at level dbse2), so that dλ/dω = -dmatvec(y) for a unit
+        eigenvector y; 0.0 when omega is None.
         dmatvec(u, vector=True) -> dA_eff/dω u = -V^T (D - ω)^-2 V u (n,), so
         that u @ dmatvec(u, vector=True) == -dmatvec(u); zeros when omega is
         None.
@@ -350,7 +355,8 @@ class FoldResult:
     y : ndarray, shape (n, nout), unit singles vectors in the channel basis
     x1 : ndarray, shape (n, nout), sqrt(T1) y, the singles part of the unit full
         eigenvector; embed(x1[:, r]) is the full flat spin-orbital singles vector
-    t1 : ndarray, shape (nout,), singles weights in (0, 1]
+    t1 : ndarray, shape (nout,), singles weights in (0, 1], above 1 at level dbse2 on
+        a rising branch (dnorm2 < 0)
     level : ndarray, shape (nout,), int, the level of each root; the partners of a
         degenerate level share its index and its omega, and a seed level that
         A_eff splits gives each of its roots a level of its own
