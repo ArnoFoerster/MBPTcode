@@ -25,8 +25,13 @@ ee_dbse2_pieces.dressed_factors) feed the doubles. The inherited tiles over the 
 index, auxiliary chunks and back-transformation halves of RIFoldADC2 run on the dressed
 factors. Per tile the images I = H, J = Hᵀ of the factor ZI_P,kc = Σ_i B~_P,ik u_ic and
 K = H, L = Hᵀ of ZK_P,kc = Σ_a u_ka B~_P,ac come from RIFoldADC2._pair's two GEMMs each,
-the swap (k, c) <-> (l, d) being the pair's transpose; the divide is exact. The same
-tile core runs on numpy and on cupy (_tile_core takes the array module).
+the swap (k, c) <-> (l, d) being the pair's transpose. Every back-transformation is
+row-local to the tile: with v^sw the swap of a doubles vector v and D swap-symmetric,
+Aᵀ v = (A^sw)ᵀ v^sw, so Jᵀ R_J = Iᵀ R_J^sw and Lᵀ R_L = Kᵀ R_L^sw, where the swapped
+R is the same combination of the four images with the coefficients of I and J (K and L)
+exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (_back_oo) and B~_vv
+(_back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact. The
+same tile core runs on numpy and on cupy (_tile_core takes the array module).
 
 References
 ----------
@@ -46,6 +51,8 @@ except ImportError:
 
 # the J and L coefficients change sign in the triplet's second pair (X̃, Ỹ)
 _FLIP = np.array([1.0, -1.0, 1.0, -1.0])
+# the swap (k, c) <-> (l, d) exchanges I with J and K with L
+_SWAP = (1, 0, 3, 2)
 
 
 def _channel_factors(spin):
@@ -59,8 +66,8 @@ def _denominator(xp, eo, ev, k0, k1):
             - eo[k0:k1, None, None, None] - eo[None, None, :, None])
 
 
-def _images(xp, L2, no, nv, k0, k1, ZI, ZK, pair, spin):
-    """The kernel's X̂, Ŷ (and X̃, Ỹ in the triplet) on one tile.
+def _vertex_images(xp, L2, no, nv, k0, k1, ZI, ZK):
+    """The images I, J, K, L of one channel vector on one tile.
 
     Parameters
     ----------
@@ -69,34 +76,53 @@ def _images(xp, L2, no, nv, k0, k1, ZI, ZK, pair, spin):
     no, nv : int
     k0, k1 : int, the tile's occupied rows
     ZI, ZK : ndarray, shape (naux, no nv), index order (P, (k, c)), the vertex factors
-    pair : (x, y), each shape (4,), coefficients over (I, J, K, L)
-    spin : {'singlet', 'triplet'}
 
     Returns
     -------
-    Xh, Yh, Xt, Yt : ndarray, shape (kt, nv, no, nv), index order (k, c, l, d);
-        Xt and Yt None in the singlet
+    tuple of four ndarray, shape (kt, nv, no, nv), index order (k, c, l, d):
+        I_kc,ld = Σ_P ZI_P,kc B~_P,ld, J_kc,ld = Σ_P B~_P,kc ZI_P,ld (the swap), and
+        K, L the same of ZK
     """
     kt, rows = k1 - k0, slice(k0 * nv, k1 * nv)
     shape = (kt, nv, no, nv)
-    # I_kc,ld = Σ_P ZI_P,kc B~_P,ld ; J_kc,ld = Σ_P B~_P,kc ZI_P,ld (the swap);
-    # K and L the same of ZK
-    verts = ((ZI[:, rows].T @ L2).reshape(shape), (L2[:, rows].T @ ZI).reshape(shape),
-             (ZK[:, rows].T @ L2).reshape(shape), (L2[:, rows].T @ ZK).reshape(shape))
+    return ((ZI[:, rows].T @ L2).reshape(shape), (L2[:, rows].T @ ZI).reshape(shape),
+            (ZK[:, rows].T @ L2).reshape(shape), (L2[:, rows].T @ ZK).reshape(shape))
 
-    def combine(c):
-        out = None
-        for coef, arr in zip(c, verts):
-            if coef == 0.0:
-                continue
-            out = coef * arr if out is None else out + coef * arr
-        return out
 
+def _combine(verts, c):
+    """Σ_B c_B B over the four images, None when every c_B is 0."""
+    out = None
+    for coef, arr in zip(c, verts):
+        if coef == 0.0:
+            continue
+        out = coef * arr if out is None else out + coef * arr
+    return out
+
+
+def _row_coefficients(pair, spin):
+    """(b_I, b_K), each shape (4,): R_I = w Σ_B b_I,B B and R_K = w Σ_B b_K,B B over the
+    images (I, J, K, L), so that Θ u = Iᵀ R_I + Kᵀ R_K on every tile.
+
+    Notes
+    -----
+    From Θ u = Σ_A Aᵀ R_A with R_A = w [c_hat (x_A Ŷ + y_A X̂) + c_tilde (x̃_A Ỹ +
+    ỹ_A X̃)] / 2 and Jᵀ R_J = Iᵀ R_J^sw, Lᵀ R_L = Kᵀ R_L^sw: the swap of a combination
+    of the images is the combination with I <-> J and K <-> L exchanged (_SWAP).
+    """
     x, y = pair
-    Xh, Yh = combine(x), combine(y)
-    if spin == 'singlet':
-        return Xh, Yh, None, None
-    return Xh, Yh, combine(x * _FLIP), combine(y * _FLIP)
+    ch, ct = _channel_factors(spin)
+    b = np.zeros((2, 4))
+    for xx, yy, c in ((x, y, ch), (x * _FLIP, y * _FLIP, ct)):
+        if c == 0.0:
+            continue
+        for row, a in enumerate((0, 2)):
+            asw = _SWAP[a]
+            for v in range(4):
+                # Aᵀ [x_A Ŷ + y_A X̂]: image v with x_A y_v + y_A x_v
+                b[row, v] += c * (xx[a] * yy[v] + yy[a] * xx[v])
+                # (A^sw)ᵀ [...]^sw: image v of Ŷ, X̂ lands on image _SWAP[v]
+                b[row, _SWAP[v]] += c * (xx[asw] * yy[v] + yy[asw] * xx[v])
+    return 0.5 * b[0], 0.5 * b[1]
 
 
 def _tile_core(xp, L2, eo, ev, k0, k1, ZI, ZK, pair, spin, nodes, derivative):
@@ -104,39 +130,42 @@ def _tile_core(xp, L2, eo, ev, k0, k1, ZI, ZK, pair, spin, nodes, derivative):
 
     Parameters
     ----------
-    xp, L2, k0, k1, ZI, ZK, pair, spin : as _images
+    xp, L2, k0, k1, ZI, ZK : as _vertex_images
     eo, ev : ndarray, shape (no,), (nv,), the GW energies on xp
+    pair : (x, y), each shape (4,), coefficients over (I, J, K, L)
+    spin : {'singlet', 'triplet'}
     nodes : ndarray, shape (p,), the frequencies ω_q, Hartree
     derivative : ndarray of bool, shape (p,), the ω-derivative at node q
 
     Returns
     -------
     gam_I, gam_K : ndarray, shape (p, kt nv, naux), index order (q, (k, c), P),
-        Gam = R_A (kt nv, no nv) @ L2ᵀ for the vertices A = I, K: the Iᵀ and Kᵀ halves
-        close through B~_oo and B~_vv on the tile's rows
-    gp_J, gp_L : ndarray, shape (p, naux, no nv), index order (q, P, (l, d)),
-        G' = L2[:, rows] @ R_A for A = J, L: their halves close over every occupied row
+        Gam_kc,P = Σ_ld R_kc,ld B~_P,ld for R = R_I and R = R_K: the Iᵀ half closes
+        through B~_oo on the tile's rows (_back_oo), the Kᵀ half through B~_vv
+        (_back_vv, with its minus sign)
     nrm : ndarray, shape (p,), host, the signed norm Σ_K Zx_K Zy_K at each node
 
     Notes
     -----
-    With w = 1/(ω_q - D) (or -1/(ω_q - D)² where derivative[q]) and the module
-    docstring's factors,
-    R_A = w [c_hat (x_A Ŷ + y_A X̂) + c_tilde (x̃_A Ỹ + ỹ_A X̃)] / 2, so that
-    Θ u = Σ_A Aᵀ R_A. The norm uses the plain w:
+    w = 1/(ω_q - D), or -1/(ω_q - D)² where derivative[q]; R_I and R_K are
+    _row_coefficients' combinations of the images times w. The norm uses the plain w:
     Σ w² X̂ Ŷ c_hat + Σ w² X̃ Ỹ c_tilde.
     """
     no, nv = int(eo.size), int(ev.size)
-    kt, rows = k1 - k0, slice(k0 * nv, k1 * nv)
+    kt = k1 - k0
     naux = L2.shape[0]
-    Xh, Yh, Xt, Yt = _images(xp, L2, no, nv, k0, k1, ZI, ZK, pair, spin)
-    ch, ct = _channel_factors(spin)
+    verts = _vertex_images(xp, L2, no, nv, k0, k1, ZI, ZK)
     x, y = pair
-    xt, yt = x * _FLIP, y * _FLIP
+    ch, ct = _channel_factors(spin)
+    Xh, Yh = _combine(verts, x), _combine(verts, y)
+    Xt, Yt = (None, None) if ct == 0.0 else (_combine(verts, x * _FLIP),
+                                             _combine(verts, y * _FLIP))
+    bI, bK = _row_coefficients(pair, spin)
+    RI, RK = _combine(verts, bI), _combine(verts, bK)
+    del verts
     D = _denominator(xp, eo, ev, k0, k1)
     p = len(nodes)
     gam_I, gam_K = xp.empty((p, kt * nv, naux)), xp.empty((p, kt * nv, naux))
-    gp_J, gp_L = xp.empty((p, naux, no * nv)), xp.empty((p, naux, no * nv))
     nrm = np.zeros(p)
     for q, omega in enumerate(nodes):
         w = 1.0 / (float(omega) - D)
@@ -148,24 +177,11 @@ def _tile_core(xp, L2, eo, ev, k0, k1, ZI, ZK, pair, spin, nodes, derivative):
         if derivative[q]:
             # d/dω 1/(ω - D) = -1/(ω - D)²
             w = -w * w
-        for a in range(4):
-            # R_A = w [c_hat (x_A Ŷ + y_A X̂) + c_tilde (x̃_A Ỹ + ỹ_A X̃)] / 2
-            R = ch * (x[a] * Yh + y[a] * Xh)
-            if ct:
-                R += ct * (xt[a] * Yt + yt[a] * Xt)
-            R *= 0.5 * w
-            R2 = R.reshape(kt * nv, no * nv)
-            if a == 0:
-                # Gam_kc,P = Σ_ld R_kc,ld B~_P,ld
-                gam_I[q] = R2 @ L2.T
-            elif a == 2:
-                gam_K[q] = R2 @ L2.T
-            elif a == 1:
-                # G'_P,ld = Σ_kc B~_P,kc R_kc,ld
-                gp_J[q] = L2[:, rows] @ R2
-            else:
-                gp_L[q] = L2[:, rows] @ R2
-    return gam_I, gam_K, gp_J, gp_L, nrm
+        # Gam_kc,P = Σ_ld (w R)_kc,ld B~_P,ld; R None where the kernel has no term
+        # (eq 71's triplet)
+        for gam, R in ((gam_I, RI), (gam_K, RK)):
+            gam[q] = 0.0 if R is None else (w * R).reshape(kt * nv, no * nv) @ L2.T
+    return gam_I, gam_K, nrm
 
 
 def _tile_overlap(xp, L2, eo, ev, k0, k1, Zr, wr, Zs, ws, pair, spin):
@@ -173,15 +189,19 @@ def _tile_overlap(xp, L2, eo, ev, k0, k1, Zr, wr, Zs, ws, pair, spin):
     images: with Zx = w X̂ u, Zy = w Ŷ u, (Zx_r . Zy_s + Zy_r . Zx_s) / 2 per pair with
     the channel factors. Zr, Zs are the (ZI, ZK) factor pairs of the two vectors."""
     no, nv = int(eo.size), int(ev.size)
-    Xr, Yr, Xtr, Ytr = _images(xp, L2, no, nv, k0, k1, Zr[0], Zr[1], pair, spin)
-    Xs, Ys, Xts, Yts = ((Xr, Yr, Xtr, Ytr) if Zs is Zr else
-                        _images(xp, L2, no, nv, k0, k1, Zs[0], Zs[1], pair, spin))
+    x, y = pair
+    ch, ct = _channel_factors(spin)
+    vr = _vertex_images(xp, L2, no, nv, k0, k1, Zr[0], Zr[1])
+    vs = vr if Zs is Zr else _vertex_images(xp, L2, no, nv, k0, k1, Zs[0], Zs[1])
     D = _denominator(xp, eo, ev, k0, k1)
     w2 = 1.0 / ((wr - D) * (ws - D))
-    ch, ct = _channel_factors(spin)
-    v = 0.5 * ch * float(xp.sum(w2 * (Xr * Ys + Yr * Xs)))
-    if ct:
-        v += 0.5 * ct * float(xp.sum(w2 * (Xtr * Yts + Ytr * Xts)))
+    v = 0.0
+    for c, cx, cy in ((ch, x, y), (ct, x * _FLIP, y * _FLIP)):
+        if c == 0.0:
+            continue
+        Xr, Yr = _combine(vr, cx), _combine(vr, cy)
+        Xs, Ys = (Xr, Yr) if vs is vr else (_combine(vs, cx), _combine(vs, cy))
+        v += 0.5 * c * float(xp.sum(w2 * (Xr * Ys + Yr * Xs)))
     return v
 
 
@@ -222,8 +242,8 @@ class RIFoldDBSE2(RIFoldADC2):
         self.level = 'dbse2'
         # L2[P, (l, d)] = B~_P,ld, the dressed factor the images close through
         self.L2 = self.LT.reshape(self.f.naux, -1)
-        # ten tile-sized arrays live in one tile: the four images, their combinations
-        # and the divided image of each vertex
+        # ten tile-sized arrays live in one tile: the four images, their four
+        # combinations, the denominator and a divided image
         per_k = 8.0 * self.nv * self.no * self.nv * 10
         self.kt = int(max(1, min(-(-self.no // self.size),
                                  tile_gb * 1024 ** 3 // per_k)))
@@ -303,41 +323,20 @@ class RIFoldDBSE2(RIFoldADC2):
         return (allgather_ranges(ZI, self.chunk_ranges, self.comm),
                 allgather_ranges(ZK, self.chunk_ranges, self.comm))
 
-    def _vv_full(self, G):
-        """Σ_cP B~_P,ac G_P,ic for G (p, naux, no nv) over every occupied row,
-        (p, no nv): the B~_vv half of the Jᵀ and Lᵀ images, each auxiliary chunk by
-        its owner, the chunks summed in order."""
-        f, no, nv = self.f, self.no, self.nv
-        p = G.shape[0]
-        terms = {}
-        for c in self.my_chunks:
-            p0, p1 = self.chunks[c]
-            # [(q, i), (P, c)] @ [(P, c), a]
-            Gq = np.ascontiguousarray(G[:, p0:p1].reshape(p, p1 - p0, no, nv)
-                                      .transpose(0, 2, 1, 3)).reshape(p * no, -1)
-            Bc = f.bvv(c, p0, p1).reshape(nv, -1)
-            terms[c] = (Gq @ Bc.T).reshape(p, no * nv)
-        return ordered_chain_sum(terms, self.owners, self.comm, np.zeros((p, no * nv)))
-
     # ---- the doubles ------------------------------------------------------
 
     def _doubles(self, u, nodes, derivative):
-        """(F (p, n), nrm (p,)): Σ_A Aᵀ R_A of one channel vector at the nodes, the
-        folded doubles (or their ω-derivative), and the signed norm at each node."""
-        no, nv, n = self.no, self.nv, self.n
-        p = nodes.size
+        """(F (p, n), nrm (p,)): Iᵀ R_I + Kᵀ R_K of one channel vector at the nodes, the
+        folded doubles (or their ω-derivative), and the signed norm at each node. The
+        tiles' Iᵀ halves and norms are summed in tile order, the Kᵀ halves by the
+        auxiliary chunks' owners in chunk order; no collective inside the tile loop."""
+        n, p = self.n, nodes.size
         ZI, ZK = self._vertex_factors(u)
         parts, gams_K = [], {}
         for t, (k0, k1) in self.my_tiles:
-            gI, gK, gJ, gL, nrm = _tile_core(np, self.L2, self.f.eo, self.f.ev, k0, k1,
-                                             ZI, ZK, self.pair, self.spin, nodes,
-                                             derivative)
-            # Iᵀ: B~_oo on the tile's rows; Jᵀ: B~_oo over every row; Lᵀ: B~_vv over
-            # every row; Kᵀ (the B~_vv half on the tile's rows) by the chunks' owners
-            img = self._back_oo(gI, k0, k1)
-            img += self._back_oo(np.ascontiguousarray(gJ.transpose(0, 2, 1)), 0, no)
-            img += self._vv_full(gL)
-            parts.append((t, np.concatenate([img.ravel(), nrm])))
+            gI, gK, nrm = _tile_core(np, self.L2, self.f.eo, self.f.ev, k0, k1, ZI, ZK,
+                                     self.pair, self.spin, nodes, derivative)
+            parts.append((t, np.concatenate([self._back_oo(gI, k0, k1).ravel(), nrm])))
             gams_K[t] = gK
         tot = ordered_sum(parts, self.comm, shape=(p * n + p,),
                           onto=np.zeros(p * n + p))

@@ -12,18 +12,27 @@ Checks:
      compare zero with zero at 1e-14 absolute. Refusals: energies in eV, bare and
      dressed factors at different energies, an unknown kernel, singles or device, each
      ValueError naming the input.
+  2. solve_folded on the operator's pieces() against the explicit pieces, solvers
+     'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel, both
+     kernels: roots to 1e-8 Ha, T1 to 1e-8, every root converged (eq 71's triplet is M
+     alone on both routes).
+  3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
+     equal the serial run bit for bit: products and signed norms at two frequencies,
+     the diagonal, two Newton roots driven through ee_ri_fold.drive.
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
 import sys
+import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 from pyscf import gto, scf
 
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold
-from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors
+from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, drive
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 HARTREE_TO_EV = 27.211386245988
@@ -165,6 +174,64 @@ def check_refusals(eps, B, no):
     return ok
 
 
+def check_solves(eps, B, no):
+    """Check 2."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    tight = dict(dense_limit=0, tol_omega=1e-9, tol_residual=1e-8)
+    for kernel in KERNELS:
+        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel)
+        for spin in SPINS:
+            op = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo(eps_gw, eps, B, no, spin,
+                                                      kernel=kernel)
+            for solver in ('newton', 'davidson', 'block'):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    ref = ee_fold.solve_folded(P, 2, spin=spin, solver=solver, **tight)
+                    r = ee_fold.solve_folded(op.pieces(), 2, spin=spin, solver=solver,
+                                             **tight)
+                same_shape = r.omega.shape == ref.omega.shape
+                d = float(np.abs(r.omega - ref.omega).max()) if same_shape else np.inf
+                dt = float(np.abs(r.t1 - ref.t1).max()) if same_shape else np.inf
+                ok &= check(d < 1e-8 and dt < 1e-8 and r.converged.all(),
+                            f'{kernel} {spin} {solver}: roots and T1 on the operator '
+                            'equal the pieces', f'{d:.1e} Ha, {dt:.1e} on T1')
+    return ok
+
+
+def check_ranks(eps, B, no):
+    """Check 3."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
+    bare = RIFactors.from_full(eps_gw, B, no)
+    dressed = RIFactors.from_full(eps_gw, Bt, no)
+    u = np.random.default_rng(5).standard_normal((no * (eps.size - no), 2))
+
+    def solve(o):
+        r = ee_fold.solve_folded(o.pieces(), 2, spin='singlet', dense_limit=0,
+                                 solver='newton')
+        return dict(omega=r.omega, t1=r.t1)
+
+    def rank(comm):
+        op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
+                                          tile_gb=1e-9, threads=1, comm=comm)
+        prod = op.apply(u, [0.3, 0.5])
+        return drive(op, solve), op.diag, prod
+
+    ser = rank(None)
+    for size in (2, 3):
+        outs = run_simulated(rank, size)
+        same = all(np.array_equal(o['omega'], ser[0]['omega'])
+                   and np.array_equal(o['t1'], ser[0]['t1'])
+                   and np.array_equal(d, ser[1])
+                   and np.array_equal(p[0], ser[2][0])
+                   and np.array_equal(p[1], ser[2][1])
+                   for o, d, p in outs)
+        ok &= check(same, f'{size} simulated ranks equal the serial run bit for bit')
+    return ok
+
+
 def main():
     eps, B, no = water('6-31g')
     ok = True
@@ -172,6 +239,10 @@ def main():
     ok &= check_operator(eps, B, no)
     print('refusals')
     ok &= check_refusals(eps, B, no)
+    print('check 2: the three solvers on the operator against the pieces')
+    ok &= check_solves(eps, B, no)
+    print('check 3: simulated ranks')
+    ok &= check_ranks(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1
 
