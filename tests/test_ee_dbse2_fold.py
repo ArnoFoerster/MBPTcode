@@ -611,8 +611,11 @@ def check_fold_vs_unfolded(basis):
                    else ee_dbse2_pieces.KERNELS)
         for kernel in kernels:
             t0 = time.perf_counter()
+            # the level's singles block: eq 62 beside eq 61's set, whose doubles carry
+            # the static W; eq 62 plus eq 59 on eq 71's set alone
+            singles = 'eq62' if 'eq61' in sets else 'eq62+eq59'
             P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
-                                                   sets=sets, singles='eq62+eq59')
+                                                   sets=sets, singles=singles)
             H, ns_full, eta_full = dense_signed_supermatrix(P)
             perm = flip_partner(ns, P['D'].size)
             d_min = float(P['D'].min())
@@ -687,11 +690,21 @@ def check_fold_vs_unfolded(basis):
                                 'lowest newton roots equal the 64ff9c2 values',
                                 f'max |dw| {dg:.1e} Ha')
             if basis == 'sto-3g':
-                # the control: the Hermitian misfold [[M, V^T], [V, D]] has other roots
-                Hm = H.copy()
-                Hm[:ns_full, ns_full:] *= eta_full[ns_full:][None, :]
+                # the control: the Hermitian misfold [[M, V^T], [V, D]] has other roots,
+                # on the singles it was calibrated with (eq 62 plus eq 59 on every set,
+                # the nearest misfold root 5e-3 Ha or more away; the bare singles bring
+                # the printed two-set root within 1e-4 Ha of one of them)
+                if singles == 'eq62+eq59':
+                    Pc, Hc, nsc, etac = P, H, ns_full, eta_full
+                else:
+                    Pc = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no,
+                                                            kernel=kernel, sets=sets,
+                                                            singles='eq62+eq59')
+                    Hc, nsc, etac = dense_signed_supermatrix(Pc)
+                Hm = Hc.copy()
+                Hm[:nsc, nsc:] *= etac[nsc:][None, :]
                 wm = np.sort(np.linalg.eigvalsh(Hm))
-                res = ee_fold.solve_folded(P, 1, spin='singlet', tol_omega=1e-12)
+                res = ee_fold.solve_folded(Pc, 1, spin='singlet', tol_omega=1e-12)
                 d = float(np.min(np.abs(wm - res.omega[0])))
                 ok &= check(d > 1e-3, f'{tag} {kernel}: control, the Hermitian misfold '
                             'differs', f'nearest {d:.1e} Ha')
