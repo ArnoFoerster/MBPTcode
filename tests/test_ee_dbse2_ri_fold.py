@@ -125,6 +125,17 @@ def water(basis='6-31g'):
     return eps, B, mol.nelectron // 2
 
 
+def h2(basis='sto-3g'):
+    """(eps, B, no) of RHF H2: nocc = nvirt = 1, the smallest shapes of every layout."""
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis=basis, verbose=0)
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
+    B = DFIntegrals.from_scf(mol, mf).B_aa
+    return eps, B, 1
+
+
 def gw_like(eps, no):
     """A deterministic stand-in for the G0W0 energies: the HF gap closed by 0.08 Ha."""
     e = np.array(eps, float)
@@ -237,6 +248,7 @@ def check_refusals(eps, B, no):
     dressed_gw = RIFactors.from_full(eps_gw, Bt, no)
     om, rho = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
     bad_rho = np.vstack([rho, rho[:1]])
+    dressed_bad = RIFactors.from_full(eps_gw, np.vstack([Bt, Bt[:1]]), no)
     direct = ee_dbse2_ri_fold.RIFoldDBSE2
     cases = (
         ('eV', lambda: make(eps_gw * HARTREE_TO_EV, eps * HARTREE_TO_EV, B, no,
@@ -253,6 +265,9 @@ def check_refusals(eps, B, no):
                               sets=('eq61', 'eq71', 'x'))),
         ('form', lambda: make(eps_gw, eps, B, no, 'singlet', sets=('eq61',),
                               form='laplace')),
+        ('omega', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',),
+                                 modes=(om[:-1], rho))),
+        ('auxiliary', lambda: direct(bare_gw, dressed_bad, 'singlet')),
     )
     for word, build in cases:
         try:
@@ -328,6 +343,21 @@ def check_ranks(eps, B, no):
                    for o, d, p in outs)
         ok &= check(same, f'eq61+eq71 printed singlet: {size} simulated ranks equal '
                     'the serial run bit for bit')
+    # eq 66's level on two ranks: the mode tile's rank loop with its square flag
+    bare_hf = RIFactors.from_full(eps, B, no)
+
+    def rank66(comm):
+        op = ee_dbse2_ri_fold.RIFoldDBSE2(bare_hf, None, 'singlet', sets=('eq66',),
+                                          modes=modes, tile_gb=1e-9, threads=1,
+                                          comm=comm)
+        return op.diag, op.apply(u, [0.3, 0.5])
+
+    ser66 = rank66(None)
+    same = all(np.array_equal(d, ser66[0]) and np.array_equal(p[0], ser66[1][0])
+               and np.array_equal(p[1], ser66[1][1])
+               for d, p in run_simulated(rank66, 2))
+    ok &= check(same, 'eq66 singlet: 2 simulated ranks equal the serial run bit for '
+                'bit')
     return ok
 
 
@@ -359,6 +389,19 @@ def check_modes(eps, B, no):
                     and op.om.shape == (op.nm,) and op.L2b.shape == (B.shape[0], n),
                     f'eq61 {spin}: nm, om, rho and L2b carry the modes and the bare '
                     'factor', f'nm {op.nm}, rho {op.rho.shape}, L2b {op.L2b.shape}')
+        # the screening of the modes reaches both routes: 'tda' against the pieces
+        # at 'tda', apart from the 'rpa' modes
+        opt = make(eps_gw, eps, B, no, spin, sets=('eq61',), screening='tda')
+        Pt = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=('eq61',),
+                                                screening='tda')
+        mv = ee_fold.folded_operator(Pt, 0.3, spin)[0]
+        At = np.column_stack([mv(U[:, j]) for j in range(3)])
+        prod_t = opt.apply(U, np.full(3, 0.3))[0]
+        ok &= check(rel(prod_t, At) < 1e-12 and rel(prod_t, A) > 1e-6
+                    and opt.screening == 'tda',
+                    f"eq61 {spin}: screening='tda' reaches the operator's modes and "
+                    "the pieces' alike", f'pieces {rel(prod_t, At):.1e}, against rpa '
+                    f'{rel(prod_t, A):.1e}')
         ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'))
         opl = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), form='laplace')
         Ae, ne = ope.apply(U, np.full(3, 0.3))
@@ -368,6 +411,33 @@ def check_modes(eps, B, no):
                     f'eq61+eq71 {spin}: the Laplace form of eq 71 beside the exact '
                     'mode tile equals the exact form', f'{rel(Al, Ae):.1e}, norm '
                     f'{rel(nl, ne):.1e}, {opl.laplace_fallbacks} fallbacks')
+    return ok
+
+
+def check_minimal():
+    """Check 11: nocc = nvirt = nm = 1 (H2/STO-3G), every set, the operator's product
+    against the pieces route's at the smallest shapes of the flat layout and the
+    mode tile."""
+    ok = True
+    eps, B, no = h2()
+    eps_gw = gw_like(eps, no)
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    U = np.random.default_rng(11).standard_normal((1, 2))
+    for sets in SETS + (('eq66',),):
+        square = sets == ('eq66',)
+        if square:
+            P = ee_gw_pieces.build_pieces_gw(eps, B, no, screening='rpa', df=True)
+        else:
+            P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=sets)
+        for spin in SPINS:
+            op = make(eps if square else eps_gw, eps, B, no, spin, sets=sets)
+            for omega in (None, 0.3):
+                mv = ee_fold.folded_operator(P, omega, spin)[0]
+                A = np.column_stack([mv(U[:, j]) for j in range(2)])
+                Bm = op.apply(U, None if omega is None else np.full(2, omega))[0]
+                ok &= check(rel(Bm, A) < 1e-12 and Bm.shape == (1, 2),
+                            f"{'+'.join(sets)} {spin} w={omega}: H2/STO-3G product",
+                            f'{rel(Bm, A):.1e}')
     return ok
 
 
@@ -831,6 +901,8 @@ def main():
     ok &= check_modes(eps, B, no)
     print("check 10: sets=('eq66',), level gw through the operator")
     ok &= check_eq66(eps, B, no)
+    print('check 11: nocc = nvirt = nm = 1 (H2/STO-3G)')
+    ok &= check_minimal()
     print('check 4: the device memory pre-flight')
     ok &= check_memory()
     print('check 5: the device class on the numpy stand-in')
