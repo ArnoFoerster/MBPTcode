@@ -291,10 +291,12 @@ def _tile_overlap(xp, L2, eo, ev, k0, k1, Zr, wr, Zs, ws, pair, spin):
 
 
 def _mode_bytes(kt, nv, nm, naux, p=1):
-    """Bytes one occupied tile of kt rows of the mode set holds at its peak: six arrays
-    (kt nv, nm) (the two images, the denominator, its reciprocal and two products) and
-    the Gam pair (p, kt nv, naux) of _mode_tile at p nodes."""
-    return 8 * kt * nv * nm * 6 + 2 * 8 * p * kt * nv * naux
+    """Bytes one occupied tile of kt rows of the mode set holds at its peak: seven
+    arrays (kt nv, nm) (the two images, the denominator, its reciprocal, the norm's two
+    products and the denominator's broadcast temporary; the traced peak of check 9 of
+    tests/test_ee_dbse2_ri_fold.py) and the Gam pair (p, kt nv, naux) of _mode_tile at
+    p nodes."""
+    return 8 * kt * nv * nm * 7 + 2 * 8 * p * kt * nv * naux
 
 
 def _mode_denominator(xp, om, eo, ev, k0, k1):
@@ -371,9 +373,9 @@ def _mode_tile(xp, rho, om, eo, ev, k0, k1, ZI, ZK, nodes, derivative, square):
         if derivative[q]:
             # d/dω 1/(ω - D) = -1/(ω - D)²
             w = -w * w
-        # Γ_kc,P = Σ_m (w R)_kcm ρ_P,m with R_J = Y^K and R_K = Y^J
-        gam_J[q] = (w * YK) @ rho.T
-        gam_K[q] = (w * YJ) @ rho.T
+        # Γ_kc,P = Σ_m (w R)_kcm ρ_P,m with R_J = Y^K and R_K = Y^J, into the slab
+        xp.matmul(w * YK, rho.T, out=gam_J[q])
+        xp.matmul(w * YJ, rho.T, out=gam_K[q])
     return gam_J, gam_K, nrm
 
 
@@ -493,44 +495,67 @@ def _laplace_sums(xp, L2, Boo_i, Bvv_a, eo, ev, ZI, ZK, g, tau, wt, lo, coefs):
 
 class _DoublesDBSE2GPU:
     """The doubles of an RIFoldDBSE2 on this rank's device through the array module xp
-    (CuPy, FP64; numpy stands in for the host test of the same lines): the dressed
-    factor L2 and the GW energies resident, for form 'laplace' the dressed oo and vv
-    blocks too. A column's vertex factors go up once (upload); the exact form runs
+    (CuPy, FP64; numpy stands in for the host test of the same lines), the residents
+    by op.sets: for eq 71's set the dressed factor L2, for form 'laplace' the dressed oo
+    and vv blocks too; for a mode set the modes rho and om; the energies always. A
+    column's vertex factors go up once per factor set (upload); the exact form runs
     _tile_core and _tile_overlap on xp and hands the Gam halves and the norm back to
-    the host, the Laplace form runs _laplace_sums whole on xp. The arithmetic is the
-    host path's; the device sums in another order, so the two agree to rounding."""
+    the host, the Laplace form runs _laplace_sums whole on xp, the mode set runs
+    _mode_tile and _mode_overlap on xp. The arithmetic is the host path's; the device
+    sums in another order, so the two agree to rounding."""
 
     def __init__(self, op, xp=None):
         xp = cp if xp is None else xp
         if xp is None:
             raise ImportError("device='gpu' needs CuPy, which is not importable")
         self.xp = xp
-        self.pair, self.spin = op.pair, op.spin
+        self.pair, self.spin, self.square = op.pair, op.spin, op.square
         self.to_host = getattr(xp, 'asnumpy', np.asarray)
+        has71, mode_set = 'eq71' in op.sets, op.rho is not None
         laplace = op.form == 'laplace'
-        # the factor, one column's uploaded (ZI, ZK) and one tile at its peak; the
-        # Laplace form adds its residents and one node, and keeps the tile for the
-        # nodes that fall back to it
-        need = 3 * op.L2.nbytes + _tile_bytes(op.kt, op.no, op.nv, op.f.naux)
-        label = 'the dressed factor, the vertex factors and one tile'
-        if laplace:
-            need += (op.Boo_i.nbytes + op.Bvv_a.nbytes
-                     + _laplace_bytes(op.no, op.nv, op.f.naux))
-            label = ('the dressed factors, the vertex factors, one Laplace node and '
-                     'the fallback tile')
+        # per set: its residents, one column's uploaded (ZI, ZK) and one tile at its
+        # peak; the Laplace form adds its residents and one node, and keeps the tile
+        # for the nodes that fall back to it
+        need, parts = 0, []
+        if has71:
+            need += 3 * op.L2.nbytes + _tile_bytes(op.kt, op.no, op.nv, op.f.naux)
+            parts.append('the dressed factor, its vertex factors and one tile')
+            if laplace:
+                need += (op.Boo_i.nbytes + op.Bvv_a.nbytes
+                         + _laplace_bytes(op.no, op.nv, op.f.naux))
+                parts[-1] = ('the dressed factors, their vertex factors, one Laplace '
+                             'node and the fallback tile')
+        if mode_set:
+            need += (op.rho.nbytes + op.om.nbytes + 2 * op.L2b.nbytes
+                     + _mode_bytes(op.kt, op.nv, op.nm, op.m_op.f.naux))
+            parts.append('the modes, the bare vertex factors and one mode tile')
         self.need = need
         if hasattr(xp, 'cuda'):
             free = (xp.cuda.Device().mem_info[0]
                     + xp.get_default_memory_pool().free_bytes())
-            device_memory_check(need, free, label)
-        self.L2 = xp.asarray(op.L2)
+            device_memory_check(need, free, ' and '.join(parts))
         self.eo, self.ev = xp.asarray(op.f.eo), xp.asarray(op.f.ev)
+        if has71:
+            self.L2 = xp.asarray(op.L2)
         if laplace:
             self.Boo_i, self.Bvv_a = xp.asarray(op.Boo_i), xp.asarray(op.Bvv_a)
+        if mode_set:
+            self.rho, self.om = xp.asarray(op.rho), xp.asarray(op.om)
 
     def upload(self, Z):
         """The vertex factors (ZI, ZK) of one column on the device."""
         return tuple(self.xp.asarray(z) for z in Z)
+
+    def mode_tile(self, k0, k1, Zb, nodes, derivative):
+        """_mode_tile on the device: (gam_J, gam_K, nrm), the halves as host arrays."""
+        gJ, gK, nrm = _mode_tile(self.xp, self.rho, self.om, self.eo, self.ev, k0, k1,
+                                 Zb[0], Zb[1], nodes, derivative, self.square)
+        return self.to_host(gJ), self.to_host(gK), nrm
+
+    def mode_overlap(self, k0, k1, Zr, wr, Zs, ws):
+        """_mode_overlap on the device, a float."""
+        return _mode_overlap(self.xp, self.rho, self.om, self.eo, self.ev, k0, k1, Zr,
+                             wr, Zs, ws, self.square)
 
     def tile(self, k0, k1, Z, nodes, derivative):
         """_tile_core on the device: (gam_I, gam_K, nrm), the halves as host arrays."""
@@ -837,11 +862,16 @@ class RIFoldDBSE2(RIFoldADC2):
         collective inside the tile loop."""
         n, p = self.n, nodes.size
         fb = self.m_op.f
-        ZI, ZK = self._vertex_factors(u, fb)
+        Zb = self._vertex_factors(u, fb)
+        if self.gpu is not None:
+            Zb = self.gpu.upload(Zb)
         parts, gams_K = [], {}
         for t, (k0, k1) in self.my_tiles:
-            gJ, gK, nrm = _mode_tile(np, self.rho, self.om, fb.eo, fb.ev, k0, k1, ZI,
-                                     ZK, nodes, derivative, self.square)
+            if self.gpu is None:
+                gJ, gK, nrm = _mode_tile(np, self.rho, self.om, fb.eo, fb.ev, k0, k1,
+                                         Zb[0], Zb[1], nodes, derivative, self.square)
+            else:
+                gJ, gK, nrm = self.gpu.mode_tile(k0, k1, Zb, nodes, derivative)
             parts.append((t, np.concatenate([self.m_op._back_oo(gJ, k0, k1).ravel(),
                                              nrm])))
             gams_K[t] = gK
@@ -971,10 +1001,14 @@ class RIFoldDBSE2(RIFoldADC2):
         fb = self.m_op.f
         Zr = self._vertex_factors(ur, fb)
         Zs = Zr if same else self._vertex_factors(us, fb)
+        if self.gpu is not None:
+            Zr = self.gpu.upload(Zr)
+            Zs = Zr if same else self.gpu.upload(Zs)
         parts = []
         for t, (k0, k1) in self.my_tiles:
-            v = _mode_overlap(np, self.rho, self.om, fb.eo, fb.ev, k0, k1, Zr, wr, Zs,
-                              ws, self.square)
+            v = (_mode_overlap(np, self.rho, self.om, fb.eo, fb.ev, k0, k1, Zr, wr, Zs,
+                               ws, self.square) if self.gpu is None
+                 else self.gpu.mode_overlap(k0, k1, Zr, wr, Zs, ws))
             parts.append((t, np.array([v])))
         return float(ordered_sum(parts, self.comm, shape=(1,), onto=np.zeros(1))[0])
 
