@@ -37,6 +37,7 @@ from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
 from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.LinearResponse.linear_response import gram_product
 
 # (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
 # check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
@@ -155,7 +156,8 @@ def gw_modes_df(eps, B, nocc, screening='tda'):
     Bov = B[:, :no, no:].reshape(B.shape[0], -1)          # B_P,jb, (P, jb)
     d = (eps[no:][None, :] - eps[:no][:, None]).ravel()   # Δ_jb = ε_b - ε_j
     # (ia|jb) = sum_P B_P,ia B_P,jb, times 2 for A (TDA), 4 for A + B (RPA)
-    C = (2.0 if screening == 'tda' else 4.0) * (Bov.T @ Bov)
+    # gram_product, not Bov.T @ Bov: that shape is the wheel's faulty syrk (L-21)
+    C = (2.0 if screening == 'tda' else 4.0) * gram_product(Bov)
     C[np.diag_indices_from(C)] += d
     if screening == 'tda':
         # A U = U Ω; ρ_P,m = sum_I B_P,I U_I,m
