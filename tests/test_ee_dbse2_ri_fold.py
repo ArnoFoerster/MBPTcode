@@ -54,20 +54,26 @@ Checks:
      form's; an unknown form raises ValueError.
   9. the tile budget (_tile_bytes) bounds the peak traced by tracemalloc over one
      _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
-     budget (_laplace_bytes) the peak of one Laplace node, each within a factor two;
-     the device class's need carries both budgets and the residents.
+     budget (_laplace_bytes) the peak of one Laplace node, the mode budget
+     (_mode_bytes) the peak of one _mode_tile at two nodes and of one _mode_overlap of
+     two vectors (eq 61's cross and eq 66's square), each within a factor two; the
+     device class's need carries the budgets and the residents of the sets in use, both
+     budgets on sets=('eq61', 'eq71').
   4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
      device path: need above free raises ValueError naming the label and the GiB, need
      within free returns None.
   5. the device class on the numpy stand-in (_DoublesDBSE2GPU(op, xp=np)) against the
-     host path, both forms, both kernels, both channels: the product and the signed norm
-     at 0.3 Ha, fold_images at three nodes with a derivative node between, doubles_dot
-     of two vectors and of one, each to 1e-12 relative; the Laplace form's fallback
-     node through the device tile; two simulated ranks with the stand-in, one occupied
-     per tile, equal the serial run bit for bit; a device reporting one byte free is
-     refused before the upload (ValueError naming GiB), both forms; device='gpu'
-     without CuPy raises ImportError naming CuPy; the Laplace form on two ranks or
-     without the whole B~_vv raises NotImplementedError.
+     host path, both forms, both kernels, both channels on sets=('eq71',), and on the
+     mode sets (('eq61',), ('eq61', 'eq71') with both kernels and forms, ('eq66',) with
+     both screenings): the product and the signed norm at 0.3 Ha, fold_images at three
+     nodes with a derivative node between, doubles_dot of two vectors and of one, each
+     to 1e-12 relative; the Laplace form's fallback node through the device tile; two
+     simulated ranks with the stand-in, one occupied per tile, equal the serial run bit
+     for bit, on ('eq71',) and on ('eq61', 'eq71'); a device reporting one byte free is
+     refused before the upload (ValueError naming GiB), both forms and on ('eq61',
+     'eq71') with the label naming the modes; device='gpu' without CuPy raises
+     ImportError naming CuPy; the Laplace form on two ranks or without the whole B~_vv
+     raises NotImplementedError.
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
@@ -519,25 +525,75 @@ def check_device(eps, B, no):
         except ValueError as err:
             ok &= check('GiB' in str(err), f'{form}: a device with one byte free is '
                         'refused before the upload', str(err)[:70])
+    # the mode sets on the stand-in: eq 61 alone, both sets (both kernels and forms),
+    # eq 66 (both screenings)
+    cells = [(('eq61',), 'eq71', 'exact', None)]
+    cells += [(('eq61', 'eq71'), k, f, None) for k in KERNELS
+              for f in ee_dbse2_ri_fold.FORMS]
+    cells += [(('eq66',), 'eq71', 'exact', s) for s in ('tda', 'rpa')]
+    for sets, kernel, form, screening in cells:
+        for spin in SPINS:
+            tag = f"{'+'.join(sets)} {kernel} {form} {screening or ''} {spin} stand-in"
+            kw = dict(kernel=kernel, form=form, sets=sets)
+            if screening is None:
+                oph, opd = make(eps_gw, eps, B, no, spin, **kw), make(
+                    eps_gw, eps, B, no, spin, **kw)
+            else:
+                kw['screening'] = screening
+                oph, opd = make(eps, eps, B, no, spin, **kw), make(eps, eps, B, no,
+                                                                    spin, **kw)
+            opd.gpu = device(opd, xp=np)
+            Ah, nh = oph.apply(U, np.full(3, 0.3))
+            Ad, nd = opd.apply(U, np.full(3, 0.3))
+            ok &= check(close(Ad, Ah, False) and close(nd, nh, False),
+                        f'{tag}: product and signed norm at w=0.3',
+                        f'{rel(Ad, Ah):.1e}, {rel(nd, nh):.1e}')
+            Mh, Fh = oph.fold_images(U, nodes, derivative=deriv)
+            Md, Fd = opd.fold_images(U, nodes, derivative=deriv)
+            good = close(Md, Mh, False)
+            for q in range(3):
+                good &= close(Fd[q], Fh[q], False)
+            ok &= check(good, f'{tag}: fold_images, a derivative node between two '
+                        'plain ones', f'{rel(Fd, Fh):.1e}')
+            good, details = True, []
+            for r_, s_, wr, ws in ((0, 1, 0.3, 0.5), (0, 0, 0.3, 0.3)):
+                dh = oph.doubles_dot(U[:, r_], wr, U[:, s_], ws)
+                dd = opd.doubles_dot(U[:, r_], wr, U[:, s_], ws)
+                good &= close(dd, dh, False)
+                details.append(f'{rel(dd, dh):.1e}')
+            ok &= check(good, f'{tag}: doubles_dot of two vectors at (0.3, 0.5) and '
+                        'of one vector at (0.3, 0.3)', ', '.join(details))
+    op = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    try:
+        device(op, xp=_TinyDevice())
+        ok &= check(False, 'eq61+eq71: a device with one byte free is refused')
+    except ValueError as err:
+        ok &= check('GiB' in str(err) and 'modes' in str(err),
+                    'eq61+eq71: a device with one byte free is refused before the '
+                    'upload, the label naming the modes', str(err)[:70])
     # the exact form on two simulated ranks, one occupied per tile, each rank with the
-    # stand-in device, equals the serial stand-in run bit for bit (check 3's shape);
-    # the Laplace form refuses more than one rank and a streamed B~_vv
+    # stand-in device, equals the serial stand-in run bit for bit (check 3's shape), on
+    # eq 71's set and on both sets; the Laplace form refuses more than one rank and a
+    # streamed B~_vv
     Bt = ee_dbse2_pieces.dressed_factors(eps, B, no)[1]
     bare = RIFactors.from_full(eps_gw, B, no)
     dressed = RIFactors.from_full(eps_gw, Bt, no)
+    modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
 
-    def rank(comm, form='exact'):
+    def rank(comm, form='exact', sets=('eq71',)):
         op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
-                                          form=form, tile_gb=1e-9, threads=1, comm=comm)
+                                          form=form, sets=sets, modes=modes,
+                                          tile_gb=1e-9, threads=1, comm=comm)
         op.gpu = device(op, xp=np)
         return (op.apply(U[:, :2], [0.3, 0.5]),
                 op.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5))
 
-    ser = rank(None)
-    same = all(np.array_equal(p[0], ser[0][0]) and np.array_equal(p[1], ser[0][1])
-               and d == ser[1] for p, d in run_simulated(rank, 2))
-    ok &= check(same, 'exact stand-in: two simulated ranks, one occupied per tile, '
-                'equal the serial run bit for bit')
+    for sets in (('eq71',), ('eq61', 'eq71')):
+        ser = rank(None, sets=sets)
+        same = all(np.array_equal(p[0], ser[0][0]) and np.array_equal(p[1], ser[0][1])
+                   and d == ser[1] for p, d in run_simulated(rank, 2, sets=sets))
+        ok &= check(same, f"{'+'.join(sets)} exact stand-in: two simulated ranks, one "
+                    'occupied per tile, equal the serial run bit for bit')
     streamed = RIFactors.from_full(eps_gw, Bt, no)
     streamed.Bvv = None
     cases = (('two ranks', lambda: run_simulated(rank, 2, form='laplace')),
@@ -729,6 +785,33 @@ def check_budget(eps, B, no):
     ok &= check(ope.gpu.need >= 3 * ope.L2.nbytes + tile,
                 "the exact device's need carries the factor, the uploaded factors and "
                 'one tile', f'{ope.gpu.need / 1e6:.1f} MB')
+    # the mode tile: eq 61's cross and eq 66's square, the overlap of two vectors
+    for sets, square, args in ((('eq61',), False, (eps_gw, eps)),
+                               (('eq66',), True, (eps, eps))):
+        opm = make(*args, B, no, 'triplet', sets=sets)
+        fb = opm.m_op.f
+        (k0, k1), = opm.tiles
+        Zr = opm._vertex_factors(u[0], fb)
+        Zs = opm._vertex_factors(u[1], fb)
+        core = peak(lambda: ee_dbse2_ri_fold._mode_tile(
+            np, opm.rho, opm.om, fb.eo, fb.ev, k0, k1, Zr[0], Zr[1], nodes, deriv,
+            square))
+        ok &= bounded(core, ee_dbse2_ri_fold._mode_bytes(k1 - k0, nv, opm.nm, naux, 2),
+                      f"{'+'.join(sets)}: the mode budget bounds _mode_tile at two "
+                      'nodes')
+        overlap = peak(lambda: ee_dbse2_ri_fold._mode_overlap(
+            np, opm.rho, opm.om, fb.eo, fb.ev, k0, k1, Zr, 0.3, Zs, 0.5, square))
+        ok &= bounded(overlap, ee_dbse2_ri_fold._mode_bytes(k1 - k0, nv, opm.nm, naux),
+                      f"{'+'.join(sets)}: the mode budget bounds _mode_overlap of two "
+                      'vectors')
+    op2 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    op2.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op2, xp=np)
+    mode = ee_dbse2_ri_fold._mode_bytes(op2.kt, nv, op2.nm, naux)
+    ok &= check(op2.gpu.need >= (3 * op2.L2.nbytes + tile + op2.rho.nbytes
+                                 + op2.om.nbytes + 2 * op2.L2b.nbytes + mode),
+                "the two-set device's need carries the dressed factor, the modes, the "
+                'uploaded factors of both sets and both tiles',
+                f'{op2.gpu.need / 1e6:.1f} MB, mode tile {mode / 1e6:.1f} MB')
     return ok
 
 
