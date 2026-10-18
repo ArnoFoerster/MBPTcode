@@ -464,7 +464,9 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     sets : tuple of str, the doubles sets, one of SETS in any order: ('eq71',) eq 71's
         set alone, ('eq61',) eq 61's, ('eq61', 'eq71') both (the level dbse2)
     screening : {'tda', 'rpa'}, the screening of eq 61's modes
-    singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block)
+    singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block). Beside eq
+        61's set, whose doubles carry W(ω) whole, 'eq62+eq59' counts the static W a
+        second time; the level dbse2 takes 'eq62'
     modes : None or (omega, rho), gw_modes_df's modes at eps_hf, omega (nm,) and rho
         (naux, nm), index order (P, m); None builds them when 'eq61' is in sets. A rho
         of another row count than naux raises ValueError naming naux

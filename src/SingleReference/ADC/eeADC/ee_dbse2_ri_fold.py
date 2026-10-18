@@ -585,7 +585,8 @@ class RIFoldDBSE2(RIFoldADC2):
     dressed : RIFactors of the dressed factors B~ of ee_dbse2_pieces.dressed_factors at
     the same energies, for eq 71's doubles and eq 59, None when neither is asked (else
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
-    eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES); form : 'exact' or
+    eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES; beside eq 61's set
+    the latter counts the static W twice; dbse2 takes 'eq62'); form : 'exact' or
     'laplace' (FORMS, the module docstring), eq 71's set's, refused without it (naming
     form); sets : one of SETS in any order, ('eq66',) level gw at the HF energies (no
     dressed factors, singles 'eq62', kernel unread; another set beside it names sets);
@@ -593,7 +594,8 @@ class RIFoldDBSE2(RIFoldADC2):
     by a mode set, eq 61's or eq 66's (ValueError naming modes; a rho of another row
     count than bare.naux names naux). tile_gb, threads, comm,
     aux_chunk as RIFoldADC2 (threads reaches the inner operator and the
-    back-transformation; the tile's element-wise passes run on one core); device 'cpu',
+    back-transformation; the tile's element-wise passes run on one core; rho is held
+    whole on every rank, never chunked); device 'cpu',
     or 'gpu' for eq 71's doubles of both forms on this rank's GPU (_DoublesDBSE2GPU,
     CuPy). Attributes: sets, screening (from_mo's, else None), nm, om, rho, L2b (the
     bare factor as (naux, no nv)), d_min the lower of the sets' minima, kt from
