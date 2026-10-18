@@ -291,12 +291,13 @@ def _tile_overlap(xp, L2, eo, ev, k0, k1, Zr, wr, Zs, ws, pair, spin):
 
 
 def _mode_bytes(kt, nv, nm, naux, p=1):
-    """Bytes one occupied tile of kt rows of the mode set holds at its peak: seven
-    arrays (kt nv, nm) (the two images, the denominator, its reciprocal, the norm's two
-    products and the denominator's broadcast temporary; the traced peak of check 9 of
-    tests/test_ee_dbse2_ri_fold.py) and the Gam pair (p, kt nv, naux) of _mode_tile at
-    p nodes."""
-    return 8 * kt * nv * nm * 7 + 2 * 8 * p * kt * nv * naux
+    """Bytes one occupied tile of kt rows of the mode set holds at its peak: nine
+    arrays (kt nv, nm), the peak of _mode_overlap on two vectors (their four images,
+    the denominator, the weight product and three products; one _mode_tile at a node
+    holds six), one row's (1, nv, nm) broadcast temporary of the denominator (the
+    traced peaks of check 9 of tests/test_ee_dbse2_ri_fold.py) and the Gam pair
+    (p, kt nv, naux) of _mode_tile at p nodes."""
+    return 8 * nv * nm * (9 * kt + 1) + 2 * 8 * p * kt * nv * naux
 
 
 def _mode_denominator(xp, om, eo, ev, k0, k1):
@@ -513,22 +514,24 @@ class _DoublesDBSE2GPU:
         self.to_host = getattr(xp, 'asnumpy', np.asarray)
         has71, mode_set = 'eq71' in op.sets, op.rho is not None
         laplace = op.form == 'laplace'
-        # per set: its residents, one column's uploaded (ZI, ZK) and one tile at its
-        # peak; the Laplace form adds its residents and one node, and keeps the tile
-        # for the nodes that fall back to it
+        # per set: its residents, the uploaded (ZI, ZK) of two vectors (doubles_dot's
+        # four images) and one tile at its peak; the Laplace form adds its residents
+        # and one node, and keeps the tile for the nodes that fall back to it
         need, parts = 0, []
         if has71:
-            need += 3 * op.L2.nbytes + _tile_bytes(op.kt, op.no, op.nv, op.f.naux)
-            parts.append('the dressed factor, its vertex factors and one tile')
+            need += 5 * op.L2.nbytes + _tile_bytes(op.kt, op.no, op.nv, op.f.naux)
+            parts.append('the dressed factor, the vertex factors of two vectors and '
+                         'one tile')
             if laplace:
                 need += (op.Boo_i.nbytes + op.Bvv_a.nbytes
                          + _laplace_bytes(op.no, op.nv, op.f.naux))
                 parts[-1] = ('the dressed factors, their vertex factors, one Laplace '
                              'node and the fallback tile')
         if mode_set:
-            need += (op.rho.nbytes + op.om.nbytes + 2 * op.L2b.nbytes
+            need += (op.rho.nbytes + op.om.nbytes + 4 * op.L2b.nbytes
                      + _mode_bytes(op.kt, op.nv, op.nm, op.m_op.f.naux))
-            parts.append('the modes, the bare vertex factors and one mode tile')
+            parts.append('the modes, the bare vertex factors of two vectors and one '
+                         'mode tile')
         self.need = need
         if hasattr(xp, 'cuda'):
             free = (xp.cuda.Device().mem_info[0]
@@ -677,6 +680,9 @@ class RIFoldDBSE2(RIFoldADC2):
         self.L2b = self.m_op.LT.reshape(bare.naux, -1)
         self.om, self.rho, self.nm = om, rho, 0 if om is None else int(om.size)
         per_k = float(_tile_bytes(1, self.no, self.nv, self.f.naux)) if has71 else 0.0
+        # eq 71's own minimum, the Laplace grid's lower end and exponent shift (_grid);
+        # the level's d_min may fall below it through the mode set
+        self.d71_min = self.d_min if has71 else None
         if mode_set:
             fb = self.m_op.f
             # Ω_min + min ε_v - max ε_o, against eq 71's 2 (min ε_v - max ε_o)
@@ -774,14 +780,17 @@ class RIFoldDBSE2(RIFoldADC2):
         self.diag = diag
 
     def _grid(self, omega, omega2=None):
-        """(tau, wt, lo) of the minimax grid for 1/(D - ω) on [min D - max ω, max D -
-        min ω] over the one or two frequencies at LAPLACE_TARGET, lo its lower end, or
-        None where a frequency is at or above min D (no Laplace transform) or no
-        tabulated grid reaches the target: kernel_laplace's rule."""
+        """(tau, wt, lo) of the minimax grid for 1/(D - ω) over eq 71's doubles on
+        [min D71 - max ω, max D71 - min ω] over the one or two frequencies at
+        LAPLACE_TARGET, lo its lower end and the exponent shift of _laplace_sums, whose
+        split is against eq 71's own extremes, so lo is eq 71's minimum (d71_min), not
+        the level's, which a mode set can pull below it; None where a frequency is at
+        or above eq 71's min D (no Laplace transform) or no tabulated grid reaches the
+        target: kernel_laplace's rule."""
         omegas = (omega,) if omega2 is None else (omega, omega2)
-        if max(omegas) >= self.d_min:
+        if max(omegas) >= self.d71_min:
             return None
-        lo, hi = self.d_min - max(omegas), self.d_max - min(omegas)
+        lo, hi = self.d71_min - max(omegas), self.d_max - min(omegas)
         ntau, err = minimax_points_for_accuracy(lo, hi, LAPLACE_TARGET, relative=True)
         if ntau is None or err > LAPLACE_TARGET:
             return None
