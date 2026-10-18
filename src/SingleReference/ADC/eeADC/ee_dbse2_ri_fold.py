@@ -730,6 +730,12 @@ class RIFoldDBSE2(RIFoldADC2):
         """
         eps_gw, eps_hf, no, _ = _pieces.check_energies(eps_gw, eps_hf, B, nocc)
         sets = tuple(sorted(kw.get('sets', ('eq71',))))
+        # level gw sits at the reference energies throughout: GW energies on D and
+        # A-bar beside HF modes would be a level that exists nowhere
+        if 'eq66' in sets and not np.array_equal(eps_gw, eps_hf):
+            raise ValueError("sets=('eq66',) with eps_gw differing from eps_hf: level "
+                             'gw runs at the reference energies; pass the same '
+                             'energies twice')
         bare = RIFactors.from_full(eps_gw, B, no)
         dressed = None
         if 'eq71' in sets or kw.get('singles', 'eq62') == 'eq62+eq59':

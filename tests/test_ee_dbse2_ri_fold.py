@@ -503,6 +503,10 @@ def check_eq66(eps, B, no):
         ('singles', lambda: make(eps, eps, B, no, 'singlet', sets=('eq66',),
                                  singles='eq62+eq59')),
         ('sets', lambda: make(eps, eps, B, no, 'singlet', sets=('eq61', 'eq66'))),
+        # level gw runs at the reference energies: GW energies beside HF ones would
+        # build a hybrid level, D and A-bar at the GW energies with the HF modes
+        ('energies', lambda: make(gw_like(eps, no), eps, B, no, 'singlet',
+                                  sets=('eq66',))),
     )
     for word, build in cases:
         try:
