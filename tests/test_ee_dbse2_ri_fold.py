@@ -806,6 +806,76 @@ def check_laplace(eps, B, no):
     return ok
 
 
+def check_laplace_shifted(eps, B, no):
+    """Check 12: the Laplace form on the two-set level when eq 61's minimum lies below
+    eq 71's (the modes shifted down by 0.2 Ha, as at a reference whose Omega_min lies
+    below the GW gap): the exponent shift of the Laplace sums is eq 71's own minimum,
+    so the products, the signed norms and the two-vector overlap equal the exact
+    form's."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    n = no * (eps.size - no)
+    U = np.random.default_rng(23).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    om, rho = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
+    modes = (om - 0.2, rho)
+    d71 = 2.0 * float(eps_gw[no:].min() - eps_gw[:no].max())
+    for spin in SPINS:
+        ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), modes=modes)
+        opl = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), modes=modes,
+                   form='laplace')
+        ok &= check(ope.d_min < d71 - 1e-6, f'eq61+eq71 {spin}: the shifted modes put '
+                    "the level's minimum below eq 71's",
+                    f'd_min {ope.d_min:.4f}, eq 71 {d71:.4f} Ha')
+        for omega in (0.3, 0.5):
+            w = np.full(3, omega)
+            Ae, ne = ope.apply(U, w)
+            Al, nl = opl.apply(U, w)
+            ok &= check(rel(Al, Ae) < 1e-8 and rel(nl, ne) < 1e-8
+                        and opl.laplace_fallbacks == 0,
+                        f'eq61+eq71 {spin} w={omega}: Laplace equals exact with the '
+                        "level's minimum below eq 71's", f'{rel(Al, Ae):.1e}, norm '
+                        f'{rel(nl, ne):.1e}, {opl.laplace_fallbacks} fallbacks')
+        de = ope.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
+        dl = opl.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
+        ok &= check(abs(dl - de) < 1e-8 * max(abs(de), 1.0),
+                    f'eq61+eq71 {spin}: the two-vector overlap, Laplace against exact',
+                    f'{abs(dl - de):.1e}')
+    return ok
+
+
+def check_tiles(eps, B, no):
+    """Check 13: tiles of two occupied rows with an uneven last tile (water's five rows
+    as 2, 2, 1), DABNA-1's tiling, against one tile: products, signed norms and the
+    two-vector overlap on the two-set level."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    nv = eps.size - no
+    n = no * nv
+    U = np.random.default_rng(29).standard_normal((n, 2))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    one = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    per_k = (ee_dbse2_ri_fold._tile_bytes(1, no, nv, B.shape[0])
+             + ee_dbse2_ri_fold._mode_bytes(1, nv, one.nm, B.shape[0]))
+    two = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'),
+               tile_gb=2.5 * per_k / 1024 ** 3)
+    last = two.tiles[-1][1] - two.tiles[-1][0]
+    ok &= check(one.kt == no and two.kt == 2 and last == 1,
+                'kt 2 gives tiles of 2, 2, 1 rows against the one tile',
+                f'one {one.tiles}, two {two.tiles}')
+    A1, n1 = one.apply(U, np.array([0.3, 0.5]))
+    A2, n2 = two.apply(U, np.array([0.3, 0.5]))
+    ok &= check(rel(A2, A1) < 1e-12 and rel(n2, n1) < 1e-12,
+                'products and signed norms on three tiles equal one tile',
+                f'{rel(A2, A1):.1e}, norm {rel(n2, n1):.1e}')
+    d1 = one.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
+    d2 = two.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
+    ok &= check(abs(d2 - d1) < 1e-12 * max(abs(d1), 1.0),
+                'the two-vector overlap on three tiles equals one tile',
+                f'{abs(d2 - d1):.1e}')
+    return ok
+
+
 def check_budget(eps, B, no):
     """Check 9: the budgets bound the peaks tracemalloc traces over one call."""
     ok = True
@@ -875,9 +945,11 @@ def check_budget(eps, B, no):
                       'nodes')
         overlap = peak(lambda: ee_dbse2_ri_fold._mode_overlap(
             np, opm.rho, opm.om, fb.eo, fb.ev, k0, k1, Zr, 0.3, Zs, 0.5, square))
-        ok &= bounded(overlap, ee_dbse2_ri_fold._mode_bytes(k1 - k0, nv, opm.nm, naux),
-                      f"{'+'.join(sets)}: the mode budget bounds _mode_overlap of two "
-                      'vectors')
+        # without the Gam pair: at water naux exceeds nm, so the pair's share would
+        # cover an overlap that outgrows the tile arrays' budget at production sizes
+        ok &= bounded(overlap, ee_dbse2_ri_fold._mode_bytes(k1 - k0, nv, opm.nm, 0),
+                      f"{'+'.join(sets)}: the mode budget's tile arrays alone bound "
+                      '_mode_overlap of two vectors')
     op2 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
     op2.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op2, xp=np)
     mode = ee_dbse2_ri_fold._mode_bytes(op2.kt, nv, op2.nm, naux)
@@ -886,6 +958,19 @@ def check_budget(eps, B, no):
                 "the two-set device's need carries the dressed factor, the modes, the "
                 'uploaded factors of both sets and both tiles',
                 f'{op2.gpu.need / 1e6:.1f} MB, mode tile {mode / 1e6:.1f} MB')
+    # the two-vector dot uploads both vectors' factor images per set: counted on the
+    # stand-in, they bound need beside the residents and the tiles
+    uploaded = []
+    plain = op2.gpu.upload
+    op2.gpu.upload = lambda Z: (uploaded.append(sum(int(z.nbytes) for z in Z)),
+                                plain(Z))[1]
+    op2.doubles_dot(u[0], 0.3, u[1], 0.5)
+    op2.gpu.upload = plain
+    ok &= check(op2.gpu.need >= (sum(uploaded) + op2.L2.nbytes + op2.rho.nbytes
+                                 + op2.om.nbytes + tile + mode),
+                "need covers the two-vector dot's uploads beside the residents and "
+                'both tiles', f'uploaded {sum(uploaded) / 1e6:.1f} MB in '
+                f'{len(uploaded)} calls, need {op2.gpu.need / 1e6:.1f} MB')
     return ok
 
 
@@ -915,6 +1000,10 @@ def main():
     ok &= check_laplace(eps, B, no)
     print('check 9: the budgets against traced peaks')
     ok &= check_budget(eps, B, no)
+    print("check 12: the Laplace form with the level's minimum below eq 71's")
+    ok &= check_laplace_shifted(eps, B, no)
+    print('check 13: tiles of two rows with an uneven last tile')
+    ok &= check_tiles(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1
 
