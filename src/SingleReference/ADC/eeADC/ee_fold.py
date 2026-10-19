@@ -797,7 +797,7 @@ def _iterate(step, om, tol_omega, t_min, max_newton, max_fixed, label, verbose):
         k += 1
         if verbose:
             _say(label, f'step {k} ({mode}): omega = {om:.8f} '
-                        f'lambda = {lam:.8f} T1 = {t1:.4f}')
+                        f'lambda = {lam:.8f} w1 = {t1:.4f}')
         if abs(err) < tol_omega and exact:
             return lam, t1, state, k, mode, True, abs(err)
         # within tol_omega on a loose eigensolve: one tight step, off the budget
@@ -1073,7 +1073,7 @@ def _index_solve(pieces, spin, a, b, om, lo, hi, X, dense, tol_residual, tol_ome
         k += 1
         if verbose:
             _say(label, f'branch {a} step {k} (index): omega = {om:.8f} '
-                        f'lambda = {lam.mean():.8f} T1 = {t1.mean():.4f}')
+                        f'lambda = {lam.mean():.8f} w1 = {t1.mean():.4f}')
         if abs(err) < tol_omega or k >= max_steps:
             return lam, Z, t1, k, abs(err) < tol_omega, abs(err)
         lo, hi = (om, hi) if err > 0 else (lo, om)
