@@ -1190,8 +1190,9 @@ def _block_roots(pieces, spin, X0, nroots, k, lo, hi, fold, tol_residual, tol_om
     [lo, hi] widens the window to it (EE_FOLD_BLOCK_MARGIN beyond), and a
     root whose fold y_r F y_r needs more nodes than the window has raises
     their count; either restarts from the k Ritz vectors, at most
-    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there. Stops when the nroots
-    lowest have residual below tol_residual and ω moved less than tol_omega.
+    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there.
+    Stops when the nroots lowest have residual below tol_residual and ω moved
+    less than tol_omega.
     Returns ω (k,), Y (n, k), the iterations and ritz(ω, m), the m lowest
     eigenvectors of the subspace model at ω."""
     _, _, diag_s, _, _ = folded_operator(pieces, None, spin)
