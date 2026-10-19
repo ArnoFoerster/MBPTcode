@@ -50,7 +50,7 @@ Checks:
      counted), also between two grid nodes in one fold_images call with the derivative
      on it; one grid serves the image and its derivative at one frequency; fold_images
      counts its M columns in matvecs; two Newton roots within 1e-8 Ha of the exact
-     form's; an unknown form raises ValueError.
+     form's; an unknown form raises ValueError, and the default form is 'laplace'.
   9. the tile budget (_tile_bytes) bounds the peak traced by tracemalloc over one
      _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
      budget (_laplace_bytes) the peak of one Laplace node, the mode budget
@@ -186,7 +186,7 @@ def check_operator(eps, B, no, sets):
                 # zero with zero
                 zero = zero_doubles(kernel, spin, sets)
                 op = make(eps_gw, eps, B, no, spin, kernel=kernel, singles=singles,
-                          sets=sets)
+                          sets=sets, form='exact')
                 Bm03 = None
                 for omega in (None, 0.3, 0.5):
                     mv, dmv, diag_s, embed, _ = ee_fold.folded_operator(P, omega, spin)
@@ -241,7 +241,7 @@ def check_operator(eps, B, no, sets):
                 ok &= check(rel(Bm, A) < 1e-12, f'{tag} w=d_min+0.05: product inside '
                             "the lower set's continuum", f'{rel(Bm, A):.1e}')
                 tiny = make(eps_gw, eps, B, no, spin, kernel=kernel, singles=singles,
-                            tile_gb=1e-9, sets=sets)
+                            tile_gb=1e-9, sets=sets, form='exact')
                 e = rel(tiny.apply(U, np.full(3, 0.3))[0], Bm03)
                 ok &= check(tiny.kt == 1 and e < 1e-12,
                             f'{tag}: one occupied per tile gives the same products',
@@ -337,8 +337,9 @@ def check_ranks(eps, B, no):
 
     def rank(comm):
         op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
-                                          sets=('eq61', 'eq71'), modes=modes,
-                                          tile_gb=1e-9, threads=1, comm=comm)
+                                          form='exact', sets=('eq61', 'eq71'),
+                                          modes=modes, tile_gb=1e-9, threads=1,
+                                          comm=comm)
         prod = op.apply(u, [0.3, 0.5])
         return drive(op, solve), op.diag, prod
 
@@ -359,7 +360,7 @@ def check_ranks(eps, B, no):
     def rank66(comm):
         op = ee_dbse2_ri_fold.RIFoldDBSE2(bare_hf, None, 'singlet', sets=('eq66',),
                                           modes=modes, tile_gb=1e-9, threads=1,
-                                          comm=comm)
+                                          comm=comm, form='exact')
         return op.diag, op.apply(u, [0.3, 0.5])
 
     ser66 = rank66(None)
@@ -381,11 +382,13 @@ def check_modes(eps, B, no):
     make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
     bare = RIFactors.from_full(eps_gw, B, no)
     for spin in SPINS:
-        op = make(eps_gw, eps, B, no, spin, sets=('eq61',))
-        hf = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, sets=('eq61',),
+        op = make(eps_gw, eps, B, no, spin, sets=('eq61',), form='exact')
+        hf = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, form='exact',
+                                          sets=('eq61',),
                                           modes=ee_gw_pieces.gw_modes_df(eps, B, no,
                                                                          'rpa'))
-        gw = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, sets=('eq61',),
+        gw = ee_dbse2_ri_fold.RIFoldDBSE2(bare, None, spin, form='exact',
+                                          sets=('eq61',),
                                           modes=ee_gw_pieces.gw_modes_df(eps_gw, B, no,
                                                                          'rpa'))
         A = op.apply(U, np.full(3, 0.3))[0]
@@ -401,7 +404,8 @@ def check_modes(eps, B, no):
                     'factor', f'nm {op.nm}, rho {op.rho.shape}, L2b {op.L2b.shape}')
         # the screening of the modes reaches both routes: 'tda' against the pieces
         # at 'tda', apart from the 'rpa' modes
-        opt = make(eps_gw, eps, B, no, spin, sets=('eq61',), screening='tda')
+        opt = make(eps_gw, eps, B, no, spin, form='exact', sets=('eq61',),
+                   screening='tda')
         Pt = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=('eq61',),
                                                 screening='tda')
         mv = ee_fold.folded_operator(Pt, 0.3, spin)[0]
@@ -412,7 +416,7 @@ def check_modes(eps, B, no):
                     f"eq61 {spin}: screening='tda' reaches the operator's modes and "
                     "the pieces' alike", f'pieces {rel(prod_t, At):.1e}, against rpa '
                     f'{rel(prod_t, A):.1e}')
-        ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'))
+        ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), form='exact')
         opl = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), form='laplace')
         Ae, ne = ope.apply(U, np.full(3, 0.3))
         Al, nl = opl.apply(U, np.full(3, 0.3))
@@ -440,7 +444,8 @@ def check_minimal():
         else:
             P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=sets)
         for spin in SPINS:
-            op = make(eps if square else eps_gw, eps, B, no, spin, sets=sets)
+            op = make(eps if square else eps_gw, eps, B, no, spin, form='exact',
+                      sets=sets)
             for omega in (None, 0.3):
                 mv = ee_fold.folded_operator(P, omega, spin)[0]
                 A = np.column_stack([mv(U[:, j]) for j in range(2)])
@@ -464,7 +469,8 @@ def check_eq66(eps, B, no):
         Pw = ee_gw_pieces.build_pieces_gw(eps, B, no, screening=screening)
         for spin in SPINS:
             tag = f'eq66 {screening} {spin}'
-            op = make(eps, eps, B, no, spin, sets=('eq66',), screening=screening)
+            op = make(eps, eps, B, no, spin, form='exact', sets=('eq66',),
+                      screening=screening)
             for omega in (None, 0.3, 0.5):
                 mv, dmv, _, _, _ = ee_fold.folded_operator(P, omega, spin)
                 A = np.column_stack([mv(U[:, j]) for j in range(3)])
@@ -648,7 +654,7 @@ def check_device(eps, B, no):
                 details.append(f'{rel(dd, dh):.1e}')
             ok &= check(good, f'{tag}: doubles_dot of two vectors at (0.3, 0.5) and '
                         'of one vector at (0.3, 0.3)', ', '.join(details))
-    op = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    op = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='exact')
     try:
         device(op, xp=_TinyDevice())
         ok &= check(False, 'eq61+eq71: a device with one byte free is refused')
@@ -724,7 +730,7 @@ def check_laplace(eps, B, no):
         for spin in SPINS:
             tag = f'{kernel} {spin} laplace'
             zero = kernel == 'eq71' and spin == 'triplet'
-            ope = make(eps_gw, eps, B, no, spin, kernel=kernel)
+            ope = make(eps_gw, eps, B, no, spin, kernel=kernel, form='exact')
             opl = make(eps_gw, eps, B, no, spin, kernel=kernel, form='laplace')
             for omega in (0.3, 0.5):
                 om = np.full(3, omega)
@@ -814,6 +820,8 @@ def check_laplace(eps, B, no):
     except ValueError as err:
         ok &= check('form' in str(err), 'form: raises ValueError naming it',
                     str(err)[:70])
+    ok &= check(make(eps_gw, eps, B, no, 'singlet').form == 'laplace',
+                'form: laplace by default')
     return ok
 
 
@@ -832,7 +840,8 @@ def check_laplace_shifted(eps, B, no):
     modes = (om - 0.2, rho)
     d71 = 2.0 * float(eps_gw[no:].min() - eps_gw[:no].max())
     for spin in SPINS:
-        ope = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), modes=modes)
+        ope = make(eps_gw, eps, B, no, spin, form='exact', sets=('eq61', 'eq71'),
+                   modes=modes)
         opl = make(eps_gw, eps, B, no, spin, sets=('eq61', 'eq71'), modes=modes,
                    form='laplace')
         ok &= check(ope.d_min < d71 - 1e-6, f'eq61+eq71 {spin}: the shifted modes put '
@@ -878,7 +887,7 @@ def check_mode_laplace(eps, B, no):
             if screening is not None:
                 kw['screening'] = screening
                 energies = (eps, eps)
-            ope = make(*energies, B, no, spin, **kw)
+            ope = make(*energies, B, no, spin, **kw, form='exact')
             opl = make(*energies, B, no, spin, form='laplace', **kw)
             for omega in (0.3, 0.5):
                 om = np.full(3, omega)
@@ -950,11 +959,11 @@ def check_tiles(eps, B, no):
     n = no * nv
     U = np.random.default_rng(29).standard_normal((n, 2))
     make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
-    one = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    one = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='exact')
     per_k = (ee_dbse2_ri_fold._tile_bytes(1, no, nv, B.shape[0])
              + ee_dbse2_ri_fold._mode_bytes(1, nv, one.nm, B.shape[0]))
     two = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'),
-               tile_gb=2.5 * per_k / 1024 ** 3)
+               tile_gb=2.5 * per_k / 1024 ** 3, form='exact')
     last = two.tiles[-1][1] - two.tiles[-1][0]
     ok &= check(one.kt == no and two.kt == 2 and last == 1,
                 'kt 2 gives tiles of 2, 2, 1 rows against the one tile',
@@ -1020,7 +1029,7 @@ def check_budget(eps, B, no):
                 "the Laplace device's need carries the residents, the uploaded "
                 'factors, one Laplace node and the fallback tile',
                 f'{op.gpu.need / 1e6:.1f} MB')
-    ope = make(eps_gw, eps, B, no, 'triplet', kernel='printed')
+    ope = make(eps_gw, eps, B, no, 'triplet', kernel='printed', form='exact')
     ope.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(ope, xp=np)
     ok &= check(ope.gpu.need >= 3 * ope.L2.nbytes + tile,
                 "the exact device's need carries the factor, the uploaded factors and "
@@ -1028,7 +1037,7 @@ def check_budget(eps, B, no):
     # the mode tile: eq 61's cross and eq 66's square, the overlap of two vectors
     for sets, square, args in ((('eq61',), False, (eps_gw, eps)),
                                (('eq66',), True, (eps, eps))):
-        opm = make(*args, B, no, 'triplet', sets=sets)
+        opm = make(*args, B, no, 'triplet', sets=sets, form='exact')
         fb = opm.m_op.f
         (k0, k1), = opm.tiles
         Zr = opm._vertex_factors(u[0], fb)
@@ -1064,7 +1073,7 @@ def check_budget(eps, B, no):
     ok &= check(op3.gpu.need >= need3,
                 "the two-set Laplace device's need carries both sets' residents, "
                 'nodes and fallback tiles', f'{op3.gpu.need / 1e6:.1f} MB')
-    op2 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
+    op2 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='exact')
     op2.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op2, xp=np)
     mode = ee_dbse2_ri_fold._mode_bytes(op2.kt, nv, op2.nm, naux)
     ok &= check(op2.gpu.need >= (3 * op2.L2.nbytes + tile + op2.rho.nbytes

@@ -39,7 +39,7 @@ R is the same combination of the four images with the coefficients of I and J (K
 exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (_back_oo) and B~_vv
 (_back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact.
 
-form='laplace' (spec §2.6): 1/(D_K - ω) = Σ_t w_t exp(-τ_t (D_K - ω)) on
+form='laplace', the default (spec §2.6): 1/(D_K - ω) = Σ_t w_t exp(-τ_t (D_K - ω)) on
 [min D - ω, max D - ω], the minimax grid of grids.minimax_time_grid sized by
 minimax_points_for_accuracy at kernel_laplace's relative target, 1/(D_K - ω)² with
 the weights w_t τ_t. The exponential splits into one-index weights, and every product
@@ -701,9 +701,9 @@ class RIFoldDBSE2(RIFoldADC2):
     the same energies, for eq 71's doubles and eq 59, None when neither is asked (else
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
     eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES; beside eq 61's set
-    the latter counts the static W twice; dbse2 takes 'eq62'); form : 'exact' or
-    'laplace' (FORMS, the module docstring) for every set in `sets`; sets : one of
-    SETS in any order, ('eq66',) level gw at the HF energies (no
+    the latter counts the static W twice; dbse2 takes 'eq62'); form : 'laplace' (the
+    default) or 'exact' (FORMS, the module docstring) for every set in `sets`; sets :
+    one of SETS in any order, ('eq66',) level gw at the HF energies (no
     dressed factors, singles 'eq62', kernel unread; another set beside it names sets);
     modes : (omega (nm,), rho (naux, nm)) of gw_modes_df at the HF energies, required
     by a mode set, eq 61's or eq 66's (ValueError naming modes; a rho of another row
@@ -722,9 +722,9 @@ class RIFoldDBSE2(RIFoldADC2):
     exact tile of either set, plus one per set per doubles_dot call that did.
     """
 
-    def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62', form='exact',
-                 sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB, threads=None,
-                 comm=None, aux_chunk=None, device='cpu'):
+    def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62',
+                 form='laplace', sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB,
+                 threads=None, comm=None, aux_chunk=None, device='cpu'):
         sets = tuple(sorted(sets))
         if sets not in SETS:
             raise ValueError(f"sets={sets!r}; expected one of {SETS}")
