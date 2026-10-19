@@ -1305,3 +1305,80 @@ ISDF_RADII_MATCH_TOL = 1e-10
 # which the row-distributed transform keeps, so it is fixed by naux alone and
 # never by the rank count.
 SCREENED_CHUNK_BYTES = 2 << 30
+
+# Working set, in GB, of one occupied tile of the density-fitted folded
+# ADC(2) operator (`eeADC.ee_ri_fold`): the tile holds a handful of
+# (n_tile nvir, nocc nvir) doubles-shaped blocks, and its size moves only the
+# memory and the GEMM shapes, never a number beyond the summation order.
+EE_RI_TILE_GB = 8.0
+
+# Auxiliary functions per chunk while the occupied/virtual factors of the
+# folded ADC(2) operator are transformed from the AO three-index tensor; the
+# chunk holds (n_aux_chunk, nao, nao) doubles.
+EE_RI_AUX_CHUNK = 128
+
+# GB of MP1 amplitudes (one spin channel, this rank's occupied tiles) that the
+# folded ADC(2) operator keeps for the second-order singles block instead of
+# rebuilding (kc|ld) in every product; tiles past it are rebuilt each time.
+EE_RI_AMPLITUDE_CACHE_GB = 32.0
+
+# Auxiliary functions per chunk of the exchange terms of one folded ADC(2)
+# product (`eeADC.ee_ri_fold`), the chunks dealt over the MPI ranks and summed
+# in chunk order; never set by the rank count, so neither are the bits.
+EE_RI_EXCHANGE_CHUNK = 128
+
+# The configuration-dependent part of the folded doubles' diagonal, for the
+# block solver's seeds: a configuration (i, a) is pulled down by the
+# relaxation of its particle, sum_cld (ac|ld)^2 / (w + e_i + e_l - e_c - e_d),
+# and of its hole, sum_kld (ki|ld)^2 / (w - e_a + e_k + e_l - e_d). The weights
+# are fitted to the exact diagonal of small molecules, singlets and triplets:
+# exchange cancels most of the particle term, the hole term holds its weight.
+EE_RI_FOLD_DIAG_PARTICLE = 0.5
+EE_RI_FOLD_DIAG_HOLE = 1.5
+# 1/x = sum_j W_j exp(-t_j x) by the trapezoid rule in ln t (step below, error
+# ~exp(-pi^2 / step)), for x from EE_RI_FOLD_DIAG_GAP Hartree to the largest
+# doubles energy: the small-t tail is cut where it holds EE_RI_FOLD_DIAG_TAIL
+# of 1/x at the largest x, the large-t end where exp(-t x) at the smallest x
+# has fallen to exp(-EE_RI_FOLD_DIAG_EXPONENT)
+EE_RI_FOLD_DIAG_STEP = 0.75
+EE_RI_FOLD_DIAG_GAP = 1e-2
+EE_RI_FOLD_DIAG_TAIL = 1e-4
+EE_RI_FOLD_DIAG_EXPONENT = 30.0
+
+# The block solver of the folded ADC(2) roots (`eeADC.ee_fold`, method
+# 'block'): each trial vector's folded doubles are made at Chebyshev
+# frequencies spanning the roots, and A_eff(w) between them is their Lagrange
+# interpolant. For a doubles pole D above the window the interpolant's
+# relative error is |node_poly(w) / node_poly(D)| <= 2 (h/2)^p / (d - h)^p
+# (h the window's half-width, d the distance of its centre to min D); the
+# node count is the smallest that puts this times the fold |y A_fold y| under
+# EE_FOLD_BLOCK_NODE_TARGET times tol_omega, the fold taken as
+# EE_FOLD_BLOCK_FOLD_BOUND times the largest of the start vectors'. The bound
+# puts all doubles weight at min D and lies far above the actual error, so the
+# target is tol_omega itself; only an exact product at a root's own frequency
+# converges it, and that product sees any shortfall.
+EE_FOLD_BLOCK_FOLD_BOUND = 2.0
+EE_FOLD_BLOCK_NODE_TARGET = 1.0
+EE_FOLD_BLOCK_MAX_NODES = 12
+# Hartree added on both sides of the roots' first estimates to make the window
+EE_FOLD_BLOCK_MARGIN = 1e-2
+# Ritz pairs carried above nroots, so the highest asked root is not the edge
+EE_FOLD_BLOCK_BUFFER = 2
+# times the window may move to roots that left it, each a restart
+EE_FOLD_BLOCK_MAX_MOVES = 3
+# block iterations before the unconverged roots go to the per-root Newton
+EE_FOLD_BLOCK_MAX_ITER = 60
+# fraction of tol_residual the subspace model converges to; the rest is left
+# to the interpolation error that the exact product at the root sees
+EE_FOLD_BLOCK_MODEL_RESIDUAL = 0.5
+# A root's error goes as |r|^2 / delta, delta its distance to the eigenvalues
+# outside the subspace; the RI driver asks residual sqrt(tol_omega delta) of
+# the roots with this delta (Hartree), so their error stays under tol_omega
+EE_FOLD_RESIDUAL_GAP = 0.1
+# window half-widths beyond the nodes within which a model root is sought
+EE_FOLD_BLOCK_BRACKET = 3.0
+# norm below which an orthogonalized correction adds nothing to the subspace
+EE_FOLD_BLOCK_LINDEP = 1e-10
+# Newton/bisection on a model root: steps, and the relative step that ends it
+EE_FOLD_MODEL_ROOT_MAX_ITER = 100
+EE_FOLD_MODEL_ROOT_STEP = 1e-15

@@ -160,7 +160,8 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     operator -- or, with `pick`, the `nroots` it selects.
 
     matvec: callable (n,) -> (n,), or anything with a .matvec. ONE vector at a
-        time; davidson1 is handed a list wrapper.
+        time; davidson1 is handed a list wrapper. An object with a `.matmat`,
+        (n, m) -> (n, m), is handed each batch of trial vectors at once.
     diag: (n,) the operator's (approximate) diagonal. Used for the
         preconditioner AND, when x0 is None, for the seeds. It must be the
         diagonal of the operator `matvec` ACTUALLY applies -- if the caller
@@ -194,6 +195,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     Returns (e, X, conv): e (nroots,) ascending, X (n, nroots) columns
     matching e, conv (nroots,) bool. conv is a real flag -- check it.
     """
+    block = getattr(matvec, 'matmat', None)
     matvec = matvec.matvec if hasattr(matvec, 'matvec') else matvec
     diag = np.asarray(diag, float).ravel()
     n = diag.size
@@ -227,6 +229,11 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         precond = jacobi_davidson_precond(diag)
 
     def aop(xs):
+        if block is not None and len(xs) > 1:
+            # one product for the whole batch: an operator whose cost is
+            # dominated by vector-independent work shares it
+            Y = block(np.column_stack([np.asarray(x).ravel() for x in xs]))
+            return [Y[:, k] for k in range(Y.shape[1])]
         return [matvec(x) for x in xs]
 
     try:

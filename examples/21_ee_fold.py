@@ -43,3 +43,24 @@ for name, P in pieces.items():
 e_full, _ = solve_ee_adc(mf, level='adc2', df=True, nroots=3, spin='singlet')
 print('adc2, singlet, full solve: ' + '   '.join(
     f'{w * HARTREE_TO_EV:.3f} eV' for w in e_full))
+
+# fold=True: the same fold with every doubles-shaped quantity built a tile at a
+# time from the DF factors (ee_ri_fold), the route for molecules of a thousand
+# basis functions; here with the 1s core frozen and the correlation fit
+e_tiled, _ = solve_ee_adc(mf, level='adc2', fold=True, nroots=3, spin='singlet',
+                          frozen=1, auxbasis='cc-pvdz-ri')
+print('adc2, singlet, tiled fold, frozen 1s: ' + '   '.join(
+    f'{w * HARTREE_TO_EV:.3f} eV' for w in e_tiled))
+
+# in toluene: the SCF relaxes at the static dielectric constant, the singlet
+# singles block takes the optical reaction field of the transition density,
+# and the second-order terms keep the bare interaction
+from src.Base.solvent_screening import SolventScreening      # noqa: E402
+
+env = SolventScreening(mol, solvent='toluene')
+mf_tol = env.mean_field(mol, lambda m: scf.RHF(m).density_fit().run())
+e_tol, _ = solve_ee_adc(mf_tol, level='adc2', fold=True, nroots=3,
+                        spin='singlet', frozen=1, auxbasis='cc-pvdz-ri',
+                        environment=env)
+print('adc2, singlet, toluene: ' + '   '.join(
+    f'{w * HARTREE_TO_EV:.3f} eV' for w in e_tol))
