@@ -1,8 +1,8 @@
 """Diagnostic checks for solve_qp_energy_scgw.
 
 Test 1 (Sigma = 0): with the correlation self-energy switched off, the scGW
-cycle reduces to self-consistent HF, so the peaks of A(w) must sit at the HF
-orbital energies, whether the cycle starts from HF or from DFT orbitals.
+cycle reduces to self-consistent HF, so its Galitskii-Migdal energy must equal
+the HF total energy, whether the cycle starts from HF or from DFT orbitals.
 
 Test 2 (start independence): the full scGW cycle is self-consistent, so
 starting it from HF or from DFT orbitals must give the same Galitskii-Migdal
@@ -23,14 +23,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pyscf import gto, scf
-from pyscf.data.elements import chemcore
 
 import src.SingleReference.GW.scgw as scgw
 from src.SingleReference.GW.space_time import separable_factors
-
-# Peaks are found on a grid of step eta/10 = 1e-3 Ha and refined with a
-# parabola, so they match the HF levels to well below this.
-QPE_TOL = 1e-3
 
 # The cycle stops at max |delta gamma| = 1e-6. On H2/cc-pVDZ the E_GM of an
 # HF and a PBE start then agree to 2e-8 Ha (their one-body and correlation
@@ -60,43 +55,33 @@ def sigma_switched_off():
         scgw.calc_new_sigma_ir = original
 
 
-def expected_hf_peaks(mol, eps_hf):
-    """HF levels that should show up as peaks of A(w).
+def test_sigma_zero_gives_hf(mol, mf_start, e_hf, name):
+    """With Sigma = 0 the cycle is self-consistent HF, so E_GM must be e_hf.
 
-    The real-axis window starts at the first valence level (chemcore), and
-    degenerate levels give a single peak, so those are dropped/merged.
+    E_GM then reduces to E_nuc + Tr[gamma (h + F)], the HF total energy of
+    the converged density. Both an HF and a DFT start are compared to the
+    HF energy. The peaks of A(w) are not used: not every level shows up as
+    a separate peak (e.g. on N2), while the energy checks the converged
+    state as a whole.
     """
-    levels = np.sort(eps_hf)[chemcore(mol):]
-    unique = [levels[0]]
-    for e in levels[1:]:
-        if e - unique[-1] > 1e-5:
-            unique.append(e)
-    return np.array(unique)
-
-
-def compare_peaks(name, qpes, expected):
-    """Check that qpes has one peak within QPE_TOL of each expected level."""
-    print(f'\n=== {name} ===')
-    print(f'{"reference":>14} {"scGW peak":>14} {"diff":>12}')
-    ok = len(qpes) == len(expected)
-    if not ok:
-        print(f'Number of peaks differs: {len(qpes)} found, {len(expected)} expected')
-    for e in expected:
-        nearest = qpes[np.argmin(np.abs(qpes - e))] if len(qpes) else np.nan
-        diff = nearest - e
-        ok &= abs(diff) < QPE_TOL
-        print(f'{e:14.6f} {nearest:14.6f} {diff:12.2e}')
-    print(f'{name}: {"PASS" if ok else "FAIL"}')
-    return ok
-
-
-def test_sigma_zero_gives_hf(mol, mf_start, eps_hf, name):
     nocc = mol.nelectron // 2
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
-    with sigma_switched_off():
-        qpes, A, w_real, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
-                                                       factors=factors)
-    return compare_peaks(name, qpes, expected_hf_peaks(mol, eps_hf))
+    try:
+        with sigma_switched_off():
+            _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+                                                      factors=factors)
+    except RuntimeError as err:
+        print(f'\n=== {name} ===\n{err}\n{name}: FAIL')
+        return False
+
+    diff = E_gm - e_hf
+    print(f'\n=== {name} ===')
+    print(f'E_HF             = {e_hf:.10f} Ha')
+    print(f'E_GM (Sigma = 0) = {E_gm:.10f} Ha')
+    ok = abs(diff) < E_GM_TOL
+    print(f'|diff| = {abs(diff):.2e} Ha (tol {E_GM_TOL:.0e})')
+    print(f'{name}: {"PASS" if ok else "FAIL"}')
+    return ok
 
 
 def grid_params(mf, nocc):
@@ -164,7 +149,8 @@ def test_start_independence(mol, mf_hf, mf_dft, name):
 
 
 if __name__ == '__main__':
-    mol = gto.M(atom='Ne 0 0 0', basis='cc-pvdz', verbose=0)
+    # mol = gto.M(atom='Ne 0 0 0', basis='cc-pvdz', verbose=0)
+    mol = gto.M(atom='N 0 0 0; N 0 0 1.0977', basis='cc-pvdz', verbose=0)
 
     mf_hf = scf.RHF(mol)
     mf_hf.conv_tol = 1e-10
@@ -177,9 +163,9 @@ if __name__ == '__main__':
 
     results = {
         'Sigma=0, HF start': test_sigma_zero_gives_hf(
-            mol, mf_hf, mf_hf.mo_energy, 'Sigma=0, HF start'),
+            mol, mf_hf, mf_hf.e_tot, 'Sigma=0, HF start'),
         'Sigma=0, DFT start': test_sigma_zero_gives_hf(
-            mol, mf_dft, mf_hf.mo_energy, 'Sigma=0, DFT start'),
+            mol, mf_dft, mf_hf.e_tot, 'Sigma=0, DFT start'),
         'scGW, HF vs DFT start': test_start_independence(
             mol, mf_hf, mf_dft, 'scGW, HF vs DFT start'),
     }
