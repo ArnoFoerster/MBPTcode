@@ -76,8 +76,8 @@ _INNER_CAP = 1e-3       # loosest residual of a Newton step's eigensolve
 _INNER_RATIO = 0.1      # its residual: this times the previous |λ - ω|
 _CHECK_SHIFT = 0.1      # Hartree: the count check's correction r / (d - e + shift)
 _CHECK_RESIDUAL = 1e-4  # the count check decides μ against a window, no tighter
-_CHECK_SEEDS = 8        # unit vectors on the lowest lifted diagonal beside the random one
-_SPAN = 1e-8            # relative norm left off a span below which a start vector is in it
+_CHECK_SEEDS = 8        # unit vectors on the lowest lifted diagonal, and the random one
+_SPAN = 1e-8            # relative norm off a span below which a start vector lies in it
 _DUPLICATE = 0.5        # full-vector overlap above which two roots are one
 _COUNT_ROUNDS = 3       # rounds of the count check before it warns
 _HEARTBEAT = 600.0      # seconds: an eigensolve reports at most this often meanwhile
@@ -1177,8 +1177,9 @@ def _block_roots(pieces, spin, X0, nroots, k, lo, hi, fold, tol_residual, tol_om
     [lo, hi] widens the window to it (EE_FOLD_BLOCK_MARGIN beyond), and a
     root whose fold y_r F y_r needs more nodes than the window has raises
     their count; either restarts from the k Ritz vectors, at most
-    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there. Stops when the nroots
-    lowest have residual below tol_residual and ω moved less than tol_omega.
+    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there.
+    Stops when the nroots lowest have residual below tol_residual and ω moved
+    less than tol_omega.
     Returns ω (k,), Y (n, k), the iterations and ritz(ω, m), the m lowest
     eigenvectors of the subspace model at ω."""
     _, _, diag_s, _, _ = folded_operator(pieces, None, spin)
