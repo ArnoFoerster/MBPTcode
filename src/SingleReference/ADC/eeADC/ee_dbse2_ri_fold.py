@@ -47,7 +47,8 @@ A.B closes through an n_aux² intermediate at each τ, Π_QP = Σ_ld B~_Q,ld b_l
 with F one of B~, ZI, ZK (_laplace_sums' Notes), so no doubles-sized array exists.
 A node at or above min D, or one whose range no tabulated grid reaches at the target,
 goes through the exact tile (laplace_fallbacks counts them), kernel_laplace's rule. The
-form runs on one rank with the dressed B~_vv whole.
+form runs on one rank with the B_vv block whole, the dressed one for eq 71's set and
+the bare one for a mode set.
 
 Eq 61's set (k, c, m), the mode set (ee_dbse2_pieces' module docstring): the modes Ω_m,
 ρ_P,m of gw_modes_df at the HF energies, W^m_pq = √2 Σ_P B_P,pq ρ_P,m through the bare
@@ -63,8 +64,13 @@ V± = (J ± K)/√2 on η) closes as
 
 through the bare B_oo and B_vv: with Γ = R ρᵀ, Jᵀ R_J = -√2 _back_oo(Γ_J) and Kᵀ R_K =
 -√2 _back_vv(Γ_K) (the +√2 of Kᵀ against _back_vv's minus), the inner operator's
-back-transformation on this operator's tiles (_mode_tile, _mode_overlap). The mode tile
-runs exact whatever `form` says: `form` is eq 71's set's switch. The level's d_min is
+back-transformation on this operator's tiles (_mode_tile, _mode_overlap). With
+form='laplace' the mode set runs _mode_laplace instead: per τ one Π^τ_PQ = Σ_m exp(-τ
+(Ω_m - Ω_min)) ρ_P,m ρ_Q,m (n_aux² n_m), the screened interaction at imaginary time,
+then Jᵀ and Kᵀ close H = Π^τ Z through the bare B_oo and B_vv with the one-index
+weights of eq 71's form (its Notes), on a grid over the mode set's own [min D - ω,
+max D - ω]; a node at or above that minimum, or without a grid, goes through the mode
+tile (laplace_fallbacks counts it). The level's d_min is
 the lower of the sets' minima, 2 (min ε_v - max ε_o) for eq 71's and Ω_min + min ε_v -
 max ε_o for the mode set; the tile budget sums _tile_bytes and _mode_bytes.
 
@@ -73,10 +79,11 @@ mode tile with the square pairing: at the HF energies throughout (from_mo(eps_hf
 eps_hf, ...)), the singles block A^HF + Ā^GW with eq 70's Ā applied as u (P + Pᵀ) -
 (Q + Qᵀ) u from static_term_pq's two blocks, and the doubles Θ^66 = (J + K).(J + K),
 R_J = R_K = w (Y^J + Y^K), |Z|² = Σ w² (Y^J + Y^K)², the one copy on a positive metric;
-no dressed factors, kernel unread, singles 'eq62' only.
+no dressed factors, kernel unread, singles 'eq62' only; its Laplace form takes H =
+Π^τ (ZK - ZI) on both closures (_mode_laplace's Notes).
 
-The same cores run on numpy and on cupy (_tile_core, _mode_tile and _laplace_sums take
-the array module).
+The same cores run on numpy and on cupy (_tile_core, _mode_tile, _laplace_sums and
+_mode_laplace take the array module).
 
 References
 ----------
@@ -147,6 +154,15 @@ def _laplace_bytes(no, nv, naux):
     temporaries of the closures); traced on water at 7.1 naux² + 0 to 3 L2 for the
     printed singlet, the largest case."""
     return 6 * 8 * naux ** 2 + 7 * 8 * naux * no * nv
+
+
+def _mode_laplace_bytes(no, nv, naux, nm):
+    """Bytes one node of _mode_laplace holds at its peak beside the residents: Π^τ
+    (naux, naux), the weighted modes (naux, nm) while Π^τ forms, and six
+    factor-sized (naux, no nv) arrays (H, the temporaries of a closure and the
+    products' buffers; traced on water at 332 kB against 256 kB for three, check 9
+    of tests/test_ee_dbse2_ri_fold.py)."""
+    return 8 * (naux ** 2 + naux * nm + 6 * naux * no * nv)
 
 
 # ---- the exact tile -----------------------------------------------------------
@@ -494,15 +510,98 @@ def _laplace_sums(xp, L2, Boo_i, Bvv_a, eo, ev, ZI, ZK, g, tau, wt, lo, coefs):
     return [x.ravel() for x in sums]
 
 
+def _mode_laplace(xp, rho, om, Boo_i, Bvv_a, eo, ev, ZI, ZK, tau, wt, lo, coefs,
+                  square):
+    """Weighted Laplace sums of the mode set's closure vector of one channel vector.
+
+    Parameters
+    ----------
+    xp : the array module, numpy or cupy
+    rho : ndarray, shape (naux, nm), index order (P, m), the modes ρ_P,m
+    om : ndarray, shape (nm,), Ω_m on xp
+    Boo_i : ndarray, shape (no, naux no), index order (i, (Q, k)), the bare B_Q,ik
+    Bvv_a : ndarray, shape (naux nv, nv), index order ((Q, c), a), the bare B_Q,ac
+    eo, ev : ndarray, shape (no,), (nv,), the bare factors' energies on xp
+    ZI, ZK : ndarray, shape (naux, no nv), index order (P, (k, c)), the bare vertex
+        factors of _mode_images
+    tau, wt : ndarray, shape (ntau,), the minimax grid, 1/x = Σ_t wt_t exp(-τ_t x)
+    lo : float, min D_kcm - ω, the shift that keeps every exponent at or below zero
+    coefs : list of callables c(τ, w) -> float, the weight of the node τ in each sum
+    square : bool, False eq 61's cross J.K + K.J, True eq 66's square (J + K).(J + K)
+
+    Returns
+    -------
+    list of ndarray, shape (no nv,), Σ_t c(τ_t, w_t) v_t for each c in coefs, v_t the
+        closure vector of exp(-τ_t (D - ω)) in place of 1/(D - ω)
+
+    Notes
+    -----
+    exp(-τ (D_kcm - ω)) = s e_m b_k a_c with s = exp(-τ lo), e_m = exp(-τ (Ω_m -
+    Ω_min)), a_c = exp(-τ (ε_c - min ε_v)) and b_k = exp(-τ (max ε_o - ε_k)). The mode
+    sum is the screened interaction at imaginary time τ, Π^τ_PQ = Σ_m e_m ρ_P,m ρ_Q,m
+    (naux² nm), and with H = Π^τ Z (naux² no nv) the two closures of the cross,
+    Jᵀ(e Y^K) + Kᵀ(e Y^J) with J = -δ_ac W^m_ik and K = +δ_ik W^m_ac, read
+
+        oo_ia = a_a Σ_Qk B_Q,ik b_k (Π^τ ZK)_Q,ka,
+        vv_ia = b_i Σ_Qc B_Q,ac a_c (Π^τ ZI)_Q,ic,
+        v_t   = -2 s (oo + vv),
+
+    the minus J's; the square takes H = Π^τ (ZK - ZI) on both closures and v_t = -2 s
+    (oo - vv). The image at ω is Σ_t (-w_t) v_t, since 1/(ω - D) = -1/(D - ω), its
+    ω-derivative Σ_t (-w_t τ_t) v_t, and u . Σ_t (w_t τ_t) v_t is the signed norm,
+    2 Σ Y^J Y^K / (D - ω)² on the cross and Σ (Y^J + Y^K)² / (D - ω)² on the square.
+    """
+    no, nv = int(eo.size), int(ev.size)
+    ev_min, eo_max, om_min = float(ev.min()), float(eo.max()), float(om.min())
+    sums = [xp.zeros((no, nv)) for _ in coefs]
+    if square:
+        # one factor on both closures
+        ZK = ZK - ZI
+    for t, w in zip(tau, wt):
+        a = xp.exp(-t * (ev - ev_min))
+        b = xp.exp(-t * (eo_max - eo))
+        e = xp.exp(-t * (om - om_min))
+        s = float(np.exp(-t * lo))
+        # Π^τ_PQ = Σ_m e_m ρ_P,m ρ_Q,m
+        Pi = (rho * e[None, :]) @ rho.T
+        # oo_ia = a_a Σ_Qk B_Q,ik b_k H_Q,ka with H = Π^τ ZK
+        H = (Pi @ ZK).reshape(-1, no, nv)
+        oo = a[None, :] * (Boo_i @ (H * b[None, :, None]).reshape(-1, nv))
+        if not square:
+            # the first H dies before the second forms
+            H = None
+            H = (Pi @ ZI).reshape(-1, no, nv)
+        # vv_ia = b_i Σ_Qc B_Q,ac a_c H_Q,ic with H = Π^τ ZI, or Π^τ (ZK - ZI) again
+        Ha = (H * a[None, None, :]).transpose(1, 0, 2).reshape(no, -1)
+        vv = b[:, None] * (Ha @ Bvv_a)
+        v = (-2.0 * s) * ((oo - vv) if square else (oo + vv))
+        for k, c in enumerate(coefs):
+            sums[k] += c(t, w) * v
+    return [x.ravel() for x in sums]
+
+
+def _dot_weight(wr, ws):
+    """doubles_dot's Laplace weight over one grid for both frequencies: with x = D -
+    ω_a, ω_a = max(ω_r, ω_s), and Δ = |ω_r - ω_s|, 1/(x (x + Δ)) = Σ_t w_t e^{-τ_t x}
+    (1 - e^{-τ_t Δ})/Δ, the weights w_t τ_t at Δ = 0 (well conditioned at every Δ,
+    where the difference of two sums over Δ is not)."""
+    delta = abs(wr - ws)
+    if delta == 0.0:
+        return lambda t, w: w * t
+    return lambda t, w: -w * np.expm1(-t * delta) / delta
+
+
 class _DoublesDBSE2GPU:
     """The doubles of an RIFoldDBSE2 on this rank's device through the array module xp
     (CuPy, FP64; numpy stands in for the host test of the same lines), the residents
     by op.sets: for eq 71's set the dressed factor L2, for form 'laplace' the dressed oo
-    and vv blocks too; for a mode set the modes rho and om; the energies always. A
+    and vv blocks too; for a mode set the modes rho and om, and for form 'laplace' the
+    bare oo and vv blocks too; the energies always. A
     column's vertex factors go up once per factor set (upload); the exact form runs
     _tile_core and _tile_overlap on xp and hands the Gam halves and the norm back to
     the host, the Laplace form runs _laplace_sums whole on xp, the mode set runs
-    _mode_tile and _mode_overlap on xp. The arithmetic is the host path's; the device
+    _mode_tile and _mode_overlap, or _mode_laplace, on xp. The arithmetic is the host
+    path's; the device
     sums in another order, so the two agree to rounding."""
 
     def __init__(self, op, xp=None):
@@ -532,6 +631,11 @@ class _DoublesDBSE2GPU:
                      + _mode_bytes(op.kt, op.nv, op.nm, op.m_op.f.naux))
             parts.append('the modes, the bare vertex factors of two vectors and one '
                          'mode tile')
+            if laplace:
+                need += (op.Boo_ib.nbytes + op.Bvv_ab.nbytes
+                         + _mode_laplace_bytes(op.no, op.nv, op.m_op.f.naux, op.nm))
+                parts[-1] = ('the modes, the bare factors, their vertex factors, one '
+                             'mode node and the fallback mode tile')
         self.need = need
         if hasattr(xp, 'cuda'):
             free = (xp.cuda.Device().mem_info[0]
@@ -540,10 +644,12 @@ class _DoublesDBSE2GPU:
         self.eo, self.ev = xp.asarray(op.f.eo), xp.asarray(op.f.ev)
         if has71:
             self.L2 = xp.asarray(op.L2)
-        if laplace:
-            self.Boo_i, self.Bvv_a = xp.asarray(op.Boo_i), xp.asarray(op.Bvv_a)
+            if laplace:
+                self.Boo_i, self.Bvv_a = xp.asarray(op.Boo_i), xp.asarray(op.Bvv_a)
         if mode_set:
             self.rho, self.om = xp.asarray(op.rho), xp.asarray(op.om)
+            if laplace:
+                self.Boo_ib, self.Bvv_ab = xp.asarray(op.Boo_ib), xp.asarray(op.Bvv_ab)
 
     def upload(self, Z):
         """The vertex factors (ZI, ZK) of one column on the device."""
@@ -577,6 +683,12 @@ class _DoublesDBSE2GPU:
             self.xp, self.L2, self.Boo_i, self.Bvv_a, self.eo, self.ev, Z[0], Z[1], g,
             tau, wt, lo, coefs)]
 
+    def mode_laplace(self, Zb, tau, wt, lo, coefs):
+        """_mode_laplace on the device, the sums as host arrays."""
+        return [self.to_host(v) for v in _mode_laplace(
+            self.xp, self.rho, self.om, self.Boo_ib, self.Bvv_ab, self.eo, self.ev,
+            Zb[0], Zb[1], tau, wt, lo, coefs, self.square)]
+
 
 class RIFoldDBSE2(RIFoldADC2):
     """A_eff(ω) of one spin channel at level 'dbse2' on flat singles vectors u (no nv,),
@@ -590,8 +702,8 @@ class RIFoldDBSE2(RIFoldADC2):
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
     eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES; beside eq 61's set
     the latter counts the static W twice; dbse2 takes 'eq62'); form : 'exact' or
-    'laplace' (FORMS, the module docstring), eq 71's set's, refused without it (naming
-    form); sets : one of SETS in any order, ('eq66',) level gw at the HF energies (no
+    'laplace' (FORMS, the module docstring) for every set in `sets`; sets : one of
+    SETS in any order, ('eq66',) level gw at the HF energies (no
     dressed factors, singles 'eq62', kernel unread; another set beside it names sets);
     modes : (omega (nm,), rho (naux, nm)) of gw_modes_df at the HF energies, required
     by a mode set, eq 61's or eq 66's (ValueError naming modes; a rho of another row
@@ -599,13 +711,15 @@ class RIFoldDBSE2(RIFoldADC2):
     aux_chunk as RIFoldADC2 (threads reaches the inner operator and the
     back-transformation; the tile's element-wise passes run on one core; rho is held
     whole on every rank, never chunked); device 'cpu',
-    or 'gpu' for eq 71's doubles of both forms on this rank's GPU (_DoublesDBSE2GPU,
-    CuPy). Attributes: sets, screening (from_mo's, else None), nm, om, rho, L2b (the
+    or 'gpu' for the doubles of every set and both forms on this rank's GPU
+    (_DoublesDBSE2GPU, CuPy). Attributes: sets, screening (from_mo's, else None), nm,
+    om, rho, L2b (the
     bare factor as (naux, no nv)), d_min the lower of the sets' minima, kt from
-    _tile_bytes plus _mode_bytes. The inherited fold_diagonal returns zeros (no
-    second-order model at this level); pieces() hands the operator to
-    ee_fold.solve_folded; laplace_fallbacks counts the (column, node) pairs the Laplace
-    form handed to the exact tile, plus one per doubles_dot call that did.
+    _tile_bytes plus _mode_bytes, dm_min and dm_max the mode set's own extremes of D
+    (None without one). The inherited fold_diagonal returns zeros (no second-order
+    model at this level); pieces() hands the operator to ee_fold.solve_folded;
+    laplace_fallbacks counts the (column, node) pairs the Laplace form handed to the
+    exact tile of either set, plus one per set per doubles_dot call that did.
     """
 
     def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62', form='exact',
@@ -628,9 +742,6 @@ class RIFoldDBSE2(RIFoldADC2):
             raise ValueError(f"singles={singles!r}; expected one of {_pieces.SINGLES}")
         if form not in FORMS:
             raise ValueError(f"form={form!r}; expected one of {FORMS}")
-        if form == 'laplace' and not has71:
-            raise ValueError(f"form='laplace' with sets={sets!r}: the Laplace form is "
-                             "eq 71's set's; a mode set runs its exact tile")
         if device not in DEVICES:
             raise ValueError(f'device={device!r}; expected one of {DEVICES}')
         if device == 'gpu' and cp is None:
@@ -683,11 +794,14 @@ class RIFoldDBSE2(RIFoldADC2):
         # eq 71's own minimum, the Laplace grid's lower end and exponent shift (_grid);
         # the level's d_min may fall below it through the mode set
         self.d71_min = self.d_min if has71 else None
+        self.dm_min = self.dm_max = None
         if mode_set:
             fb = self.m_op.f
-            # Ω_min + min ε_v - max ε_o, against eq 71's 2 (min ε_v - max ε_o)
-            d_modes = float(om.min() + fb.ev.min() - fb.eo.max())
-            self.d_min = min(self.d_min, d_modes) if has71 else d_modes
+            # Ω_min + min ε_v - max ε_o, against eq 71's 2 (min ε_v - max ε_o); the
+            # mode set's extremes span its own Laplace grid
+            self.dm_min = float(om.min() + fb.ev.min() - fb.eo.max())
+            self.dm_max = float(om.max() + fb.ev.max() - fb.eo.min())
+            self.d_min = min(self.d_min, self.dm_min) if has71 else self.dm_min
             per_k += float(_mode_bytes(1, self.nv, self.nm, bare.naux))
         # the tile budget holds one tile of every set at its peak, per occupied row
         self.kt = int(max(1, min(-(-self.no // self.size),
@@ -701,16 +815,26 @@ class RIFoldDBSE2(RIFoldADC2):
         self.m_op.kt, self.m_op.tiles, self.m_op.my_tiles = (self.kt, self.tiles,
                                                              self.my_tiles)
         if form == 'laplace':
-            if self.size > 1 or self.f.Bvv is None:
+            if self.size > 1 or (has71 and self.f.Bvv is None):
                 raise NotImplementedError('the Laplace form runs on one rank with the '
                                           'dressed B_vv whole')
-            self.d_max = 2.0 * (self.f.ev.max() - self.f.eo.min())
-            self.g = _closure_coefficients(self.pair, spin)
-            # the closures' layouts: B~_Q,ik as [i, (Q, k)] (one copy) and B~_Q,ac as
-            # [(Q, c), a], a view of Bvv's [a, Q, c]
-            self.Boo_i = np.ascontiguousarray(self.f.BooP.transpose(1, 0, 2)).reshape(
-                self.no, -1)
-            self.Bvv_a = self.f.Bvv.reshape(self.nv, -1).T
+            if mode_set and self.m_op.f.Bvv is None:
+                raise NotImplementedError('the Laplace form runs on one rank with the '
+                                          'bare B_vv whole')
+            if has71:
+                self.d_max = 2.0 * (self.f.ev.max() - self.f.eo.min())
+                self.g = _closure_coefficients(self.pair, spin)
+                # the closures' layouts: B~_Q,ik as [i, (Q, k)] (one copy) and B~_Q,ac
+                # as [(Q, c), a], a view of Bvv's [a, Q, c]
+                self.Boo_i = np.ascontiguousarray(
+                    self.f.BooP.transpose(1, 0, 2)).reshape(self.no, -1)
+                self.Bvv_a = self.f.Bvv.reshape(self.nv, -1).T
+            if mode_set:
+                # the same layouts of the bare factors for the mode set's closures
+                fb = self.m_op.f
+                self.Boo_ib = np.ascontiguousarray(
+                    fb.BooP.transpose(1, 0, 2)).reshape(self.no, -1)
+                self.Bvv_ab = fb.Bvv.reshape(self.nv, -1).T
         self.gpu = _DoublesDBSE2GPU(self) if device == 'gpu' else None
 
     @classmethod
@@ -779,18 +903,20 @@ class RIFoldDBSE2(RIFoldADC2):
                            - 2.0 * np.diag(self.Q)[:, None]).ravel()
         self.diag = diag
 
-    def _grid(self, omega, omega2=None):
-        """(tau, wt, lo) of the minimax grid for 1/(D - ω) over eq 71's doubles on
-        [min D71 - max ω, max D71 - min ω] over the one or two frequencies at
-        LAPLACE_TARGET, lo its lower end and the exponent shift of _laplace_sums, whose
-        split is against eq 71's own extremes, so lo is eq 71's minimum (d71_min), not
-        the level's, which a mode set can pull below it; None where a frequency is at
-        or above eq 71's min D (no Laplace transform) or no tabulated grid reaches the
+    def _grid(self, omega, omega2=None, span=None):
+        """(tau, wt, lo) of the minimax grid for 1/(D - ω) over one set's doubles on
+        [min D - max ω, max D - min ω] over the one or two frequencies at
+        LAPLACE_TARGET, lo its lower end and the exponent shift of the set's sums; span
+        is the set's own (min D, max D), eq 71's (d71_min, d_max) by default and the
+        mode set's (dm_min, dm_max) for _mode_laplace, since each set's split is
+        against its own extremes and not the level's; None where a frequency is at or
+        above the set's min D (no Laplace transform) or no tabulated grid reaches the
         target: kernel_laplace's rule."""
+        d_lo, d_hi = (self.d71_min, self.d_max) if span is None else span
         omegas = (omega,) if omega2 is None else (omega, omega2)
-        if max(omegas) >= self.d71_min:
+        if max(omegas) >= d_lo:
             return None
-        lo, hi = self.d71_min - max(omegas), self.d_max - min(omegas)
+        lo, hi = d_lo - max(omegas), d_hi - min(omegas)
         ntau, err = minimax_points_for_accuracy(lo, hi, LAPLACE_TARGET, relative=True)
         if ntau is None or err > LAPLACE_TARGET:
             return None
@@ -871,17 +997,15 @@ class RIFoldDBSE2(RIFoldADC2):
         return _laplace_sums(np, self.L2, self.Boo_i, self.Bvv_a, self.f.eo, self.f.ev,
                              Z[0], Z[1], self.g, tau, wt, lo, coefs)
 
-    def _doubles_modes(self, u, nodes, derivative):
-        """(F (p, n), nrm (p,)) of the mode set: Jᵀ R_J + Kᵀ R_K of the channel vector
-        at the nodes (or the ω-derivative) and the signed norm, the tiles' Jᵀ halves and
-        norms summed in tile order, the Kᵀ halves by the auxiliary chunks' owners in
-        chunk order through the inner operator's _back_vv on this operator's tiles; no
-        collective inside the tile loop."""
+    def _modes_exact(self, Zb, nodes, derivative):
+        """(F (p, n), nrm (p,)) of the mode set's exact tile: Jᵀ R_J + Kᵀ R_K of the
+        channel vector with bare vertex factors Zb = (ZI, ZK) at the nodes (or the
+        ω-derivative) and the signed norm, the tiles' Jᵀ halves and norms summed in
+        tile order, the Kᵀ halves by the auxiliary chunks' owners in chunk order
+        through the inner operator's _back_vv on this operator's tiles; no collective
+        inside the tile loop."""
         n, p = self.n, nodes.size
         fb = self.m_op.f
-        Zb = self._vertex_factors(u, fb)
-        if self.gpu is not None:
-            Zb = self.gpu.upload(Zb)
         parts, gams_K = [], {}
         for t, (k0, k1) in self.my_tiles:
             if self.gpu is None:
@@ -899,10 +1023,30 @@ class RIFoldDBSE2(RIFoldADC2):
         F = -np.sqrt(2.0) * (tot[:p * n].reshape(p, n) + self.m_op._back_vv(gams_K, p))
         return F, tot[p * n:]
 
+    def _mode_laplace(self, Zb, grid, coefs):
+        """_mode_laplace at one grid, on the host or the device."""
+        tau, wt, lo = grid
+        if self.gpu is not None:
+            return self.gpu.mode_laplace(Zb, tau, wt, lo, coefs)
+        fb = self.m_op.f
+        return _mode_laplace(np, self.rho, self.om, self.Boo_ib, self.Bvv_ab, fb.eo,
+                             fb.ev, Zb[0], Zb[1], tau, wt, lo, coefs, self.square)
+
+    def _doubles_modes(self, u, nodes, derivative):
+        """(F (p, n), nrm (p,)) of the mode set by the operator's form; a Laplace node
+        without a grid goes through the mode tile."""
+        Zb = self._vertex_factors(u, self.m_op.f)
+        if self.gpu is not None:
+            Zb = self.gpu.upload(Zb)
+        if self.form == 'exact':
+            return self._modes_exact(Zb, nodes, derivative)
+        return self._laplace_nodes(u, Zb, nodes, derivative, (self.dm_min, self.dm_max),
+                                   self._mode_laplace, self._modes_exact)
+
     def _doubles(self, u, nodes, derivative):
         """(F (p, n), nrm (p,)): the folded doubles of one channel vector at the nodes
         (or their ω-derivative) and the signed norm at each node, summed over the
-        sets: eq 71's by the operator's form, the mode set's by its exact tile."""
+        sets, each by the operator's form."""
         p = nodes.size
         F, nrm = np.zeros((p, self.n)), np.zeros(p)
         if 'eq71' in self.sets:
@@ -923,33 +1067,40 @@ class RIFoldDBSE2(RIFoldADC2):
             Z = self.gpu.upload(Z)
         if self.form == 'exact':
             return self._doubles_exact(Z, nodes, derivative)
+        return self._laplace_nodes(u, Z, nodes, derivative, None, self._laplace,
+                                   self._doubles_exact)
+
+    def _laplace_nodes(self, u, Z, nodes, derivative, span, sums, exact):
+        """(F (p, n), nrm (p,)) of one set's Laplace form: the nodes at one frequency
+        (an image and its derivative) share one grid over the set's span (_grid) and
+        one pass of `sums` (Z, grid, coefs), a coefficient each; the nodes without a
+        grid go through `exact` (Z, nodes, derivative), counted in
+        laplace_fallbacks."""
         u = np.ravel(np.asarray(u, float))
         p = nodes.size
         F, nrm = np.zeros((p, self.n)), np.zeros(p)
-        exact, done = [], np.zeros(p, bool)
+        fall, done = [], np.zeros(p, bool)
         for q in range(p):
             if done[q]:
                 continue
-            # the nodes at this frequency (an image and its derivative) share one grid
-            # and one pass, a coefficient each
             group = [r for r in range(q, p) if nodes[r] == nodes[q]]
             done[group] = True
-            grid = self._grid(float(nodes[q]))
+            grid = self._grid(float(nodes[q]), None, span)
             if grid is None:
-                exact.extend(group)
+                fall.extend(group)
                 continue
             # the image with -w_t (1/(ω - D) = -1/(D - ω)), its derivative with
             # -w_t τ_t; the norm Σ_K Zx_K Zy_K = u . Θ^(2) u with +w_t τ_t
             coefs = [(lambda t, w: -w * t) if derivative[r] else (lambda t, w: -w)
                      for r in group] + [lambda t, w: w * t]
-            sums = self._laplace(Z, grid, coefs)
-            for r, v in zip(group, sums[:-1]):
+            parts = sums(Z, grid, coefs)
+            for r, v in zip(group, parts[:-1]):
                 F[r] = v
-            nrm[group] = float(np.dot(u, sums[-1]))
-        if exact:
-            self.laplace_fallbacks += len(exact)
-            Fe, ne = self._doubles_exact(Z, nodes[exact], derivative[exact])
-            F[exact], nrm[exact] = Fe, ne
+            nrm[group] = float(np.dot(u, parts[-1]))
+        if fall:
+            self.laplace_fallbacks += len(fall)
+            Fe, ne = exact(Z, nodes[fall], derivative[fall])
+            F[fall], nrm[fall] = Fe, ne
         return F, nrm
 
     # ---- the RIFoldADC2 interface -----------------------------------------
@@ -996,7 +1147,7 @@ class RIFoldDBSE2(RIFoldADC2):
     def doubles_dot(self, ur, wr, us, ws):
         """Σ_K Y_K(ur, wr)ᵀ η Y_K(us, ws), the signed overlap of two doubles images,
         summed over the sets: eq 71's Σ_AB m_AB Σ_K (A ur)_K (B us)_K / ((D_K - wr)(D_K
-        - ws)) by the operator's form, the mode set's by _mode_overlap on its tiles.
+        - ws)) and the mode set's, each by the operator's form.
         The Laplace form takes one grid over both frequencies and one pass over the
         factors of us with the weights of 1/((D - ω_a)(D - ω_b)), ω_a ≥ ω_b: with x = D
         - ω_a and Δ = ω_a - ω_b, 1/(x (x + Δ)) = Σ_t w_t e^{-τ_t x} (1 - e^{-τ_t Δ})/Δ,
@@ -1013,9 +1164,19 @@ class RIFoldDBSE2(RIFoldADC2):
         return v
 
     def _dot_modes(self, ur, wr, us, ws, same):
-        """The mode set's share of doubles_dot: _mode_overlap over this rank's tiles,
-        summed in tile order."""
+        """The mode set's share of doubles_dot by the operator's form: _mode_laplace
+        on one grid over both frequencies (_dot_weight), else _mode_overlap over this
+        rank's tiles, summed in tile order."""
         fb = self.m_op.f
+        if self.form == 'laplace':
+            grid = self._grid(wr, ws, (self.dm_min, self.dm_max))
+            if grid is not None:
+                Zs = self._vertex_factors(us, fb)
+                if self.gpu is not None:
+                    Zs = self.gpu.upload(Zs)
+                v, = self._mode_laplace(Zs, grid, [_dot_weight(wr, ws)])
+                return float(np.dot(ur, v))
+            self.laplace_fallbacks += 1
         Zr = self._vertex_factors(ur, fb)
         Zs = Zr if same else self._vertex_factors(us, fb)
         if self.gpu is not None:
@@ -1037,11 +1198,7 @@ class RIFoldDBSE2(RIFoldADC2):
                 Zs = self._vertex_factors(us)
                 if self.gpu is not None:
                     Zs = self.gpu.upload(Zs)
-                delta = abs(wr - ws)
-                # c_t = w_t (1 - e^{-τ_t Δ})/Δ -> w_t τ_t as Δ -> 0
-                weight = ((lambda t, w: w * t) if delta == 0.0
-                          else (lambda t, w: -w * np.expm1(-t * delta) / delta))
-                v, = self._laplace(Zs, grid, [weight])
+                v, = self._laplace(Zs, grid, [_dot_weight(wr, ws)])
                 return float(np.dot(ur, v))
             self.laplace_fallbacks += 1
         Zr = self._vertex_factors(ur)

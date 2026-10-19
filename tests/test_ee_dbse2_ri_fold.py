@@ -15,8 +15,8 @@ Checks:
      doubles rows compare zero with zero at 1e-14 absolute. Refusals: energies in eV,
      bare and dressed factors at different energies, an unknown kernel, singles or
      device, sets=('eq71',) without dressed factors, a mode set without modes, modes
-     whose rho has naux + 1 rows (naming naux), sets outside SETS, form='laplace' on a
-     set without eq 71's (naming form), each ValueError naming the input.
+     whose rho has naux + 1 rows (naming naux), sets outside SETS, each ValueError
+     naming the input.
   2. solve_folded on the operator's pieces() against the explicit pieces, every set,
      solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
      both kernels: roots to 1e-8 Ha, T1 to 1e-8, every root converged (eq 71's triplet
@@ -29,8 +29,7 @@ Checks:
      modes at the HF energies to 1e-12 on the product at 0.3 Ha and differs from the
      same with modes at the GW energies by more than 1e-6 relative (review focus 1);
      form='laplace' on sets=('eq61', 'eq71') equals form='exact' to 1e-8 relative on
-     the product at 0.3 Ha with no fallback (eq 71's set on the quadrature, the mode
-     set on its exact tile).
+     the product at 0.3 Ha with no fallback (both sets on the quadrature).
   10. sets=('eq66',), level gw through the operator (spec check 6's second clause):
      from_mo(eps, eps, B, no, spin, sets=('eq66',), screening=) against
      ee_fold.folded_operator on build_pieces_gw(eps, B, no, screening, df=True), both
@@ -56,16 +55,19 @@ Checks:
      _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
      budget (_laplace_bytes) the peak of one Laplace node, the mode budget
      (_mode_bytes) the peak of one _mode_tile at two nodes and of one _mode_overlap of
-     two vectors (eq 61's cross and eq 66's square), each within a factor two; the
-     device class's need carries the budgets and the residents of the sets in use, both
-     budgets on sets=('eq61', 'eq71').
+     two vectors (eq 61's cross and eq 66's square), the mode set's Laplace budget
+     (_mode_laplace_bytes) the peak of one of its nodes (eq 61, image and derivative),
+     each within a factor two; the device class's need carries the budgets and the
+     residents of the sets in use, both budgets on sets=('eq61', 'eq71'), and the mode
+     set's Laplace residents and node on that level's Laplace form.
   4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
      device path: need above free raises ValueError naming the label and the GiB, need
      within free returns None.
   5. the device class on the numpy stand-in (_DoublesDBSE2GPU(op, xp=np)) against the
      host path, both forms, both kernels, both channels on sets=('eq71',), and on the
-     mode sets (('eq61',), ('eq61', 'eq71') with both kernels and forms, ('eq66',) with
-     both screenings): the product and the signed norm at 0.3 Ha, fold_images at three
+     mode sets (('eq61',) with both forms, ('eq61', 'eq71') with both kernels and forms,
+     ('eq66',) with both screenings and forms): the product and the signed norm at 0.3
+     Ha, fold_images at three
      nodes with a derivative node between, doubles_dot of two vectors and of one, each
      to 1e-12 relative; the Laplace form's fallback node through the device tile; two
      simulated ranks with the stand-in, one occupied per tile, equal the serial run bit
@@ -74,6 +76,16 @@ Checks:
      'eq71') with the label naming the modes; device='gpu' without CuPy raises
      ImportError naming CuPy; the Laplace form on two ranks or without the whole B~_vv
      raises NotImplementedError.
+  14. the mode sets' Laplace form (Task 9): form='laplace' against form='exact' on
+     ('eq61',), ('eq61', 'eq71') with both kernels and ('eq66',) with both screenings,
+     both channels: products and signed norms at 0.3 and 0.5 Ha, fold_images at three
+     nodes with a derivative node between, doubles_dot at two frequencies and at one
+     and at 1e-2, 1e-5 and 1e-9 Ha apart, each to 1e-8 relative, the overlap of two
+     vectors against the largest of it and the two self-overlaps, since the signed
+     overlap of two random vectors cancels (both errors printed); two Davidson roots
+     within 1e-8 Ha; a node at the mode set's minimum + 0.05 Ha falls back to the mode
+     tile (equal to 1e-12, the fallbacks counted per set); the construction on a mode
+     set alone succeeds.
 Run: python tests/test_ee_dbse2_ri_fold.py
 """
 import os
@@ -263,8 +275,6 @@ def check_refusals(eps, B, no):
                                 modes=(om, bad_rho))),
         ('sets', lambda: make(eps_gw, eps, B, no, 'singlet',
                               sets=('eq61', 'eq71', 'x'))),
-        ('form', lambda: make(eps_gw, eps, B, no, 'singlet', sets=('eq61',),
-                              form='laplace')),
         ('omega', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',),
                                  modes=(om[:-1], rho))),
         ('auxiliary', lambda: direct(bare_gw, dressed_bad, 'singlet')),
@@ -601,10 +611,11 @@ def check_device(eps, B, no):
                         'refused before the upload', str(err)[:70])
     # the mode sets on the stand-in: eq 61 alone, both sets (both kernels and forms),
     # eq 66 (both screenings)
-    cells = [(('eq61',), 'eq71', 'exact', None)]
+    cells = [(('eq61',), 'eq71', f, None) for f in ee_dbse2_ri_fold.FORMS]
     cells += [(('eq61', 'eq71'), k, f, None) for k in KERNELS
               for f in ee_dbse2_ri_fold.FORMS]
-    cells += [(('eq66',), 'eq71', 'exact', s) for s in ('tda', 'rpa')]
+    cells += [(('eq66',), 'eq71', f, s) for s in ('tda', 'rpa')
+              for f in ee_dbse2_ri_fold.FORMS]
     for sets, kernel, form, screening in cells:
         for spin in SPINS:
             tag = f"{'+'.join(sets)} {kernel} {form} {screening or ''} {spin} stand-in"
@@ -844,6 +855,91 @@ def check_laplace_shifted(eps, B, no):
     return ok
 
 
+def check_mode_laplace(eps, B, no):
+    """Check 14: the mode sets' Laplace form against the exact mode tile."""
+    ok = True
+    eps_gw = gw_like(eps, no)
+    n = no * (eps.size - no)
+    U = np.random.default_rng(29).standard_normal((n, 3))
+    make = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo
+    tight = dict(dense_limit=0, tol_omega=1e-9, tol_residual=1e-8)
+
+    def within(a, b):
+        return rel(a, b) < 1e-8, f'{rel(a, b):.1e}'
+
+    cells = [(('eq61',), 'eq71', None)]
+    cells += [(('eq61', 'eq71'), k, None) for k in KERNELS]
+    cells += [(('eq66',), 'eq71', s) for s in ('tda', 'rpa')]
+    for sets, kernel, screening in cells:
+        for spin in SPINS:
+            tag = f"{'+'.join(sets)} {kernel} {screening or ''} {spin} mode laplace"
+            kw = dict(kernel=kernel, sets=sets)
+            energies = (eps_gw, eps)
+            if screening is not None:
+                kw['screening'] = screening
+                energies = (eps, eps)
+            ope = make(*energies, B, no, spin, **kw)
+            opl = make(*energies, B, no, spin, form='laplace', **kw)
+            for omega in (0.3, 0.5):
+                om = np.full(3, omega)
+                Ae, ne = ope.apply(U, om)
+                Al, nl = opl.apply(U, om)
+                good, detail = within(Al, Ae)
+                ok &= check(good, f'{tag} w={omega}: product', detail)
+                good, detail = within(nl, ne)
+                ok &= check(good, f'{tag} w={omega}: signed norm', detail)
+            nodes, deriv = [0.3, 0.4, 0.5], [False, True, False]
+            Me, Fe = ope.fold_images(U, nodes, derivative=deriv)
+            Ml, Fl = opl.fold_images(U, nodes, derivative=deriv)
+            good, details = rel(Ml, Me) < 1e-12, []
+            for q in range(3):
+                g, d = within(Fl[q], Fe[q])
+                good &= g
+                details.append(d)
+            ok &= check(good, f'{tag}: fold_images, a derivative node between two '
+                        'plain ones', ', '.join(details))
+            # the signed overlap of two random vectors cancels, so its error is read
+            # against the largest of it and the two self-overlaps
+            good, details = True, []
+            for wr, ws in ((0.3, 0.5), (0.3, 0.3), (0.3, 0.31), (0.3, 0.30001),
+                           (0.3, 0.300000001)):
+                de = ope.doubles_dot(U[:, 0], wr, U[:, 1], ws)
+                dl = opl.doubles_dot(U[:, 0], wr, U[:, 1], ws)
+                scale = max(abs(de), abs(ope.doubles_dot(U[:, 0], wr, U[:, 0], wr)),
+                            abs(ope.doubles_dot(U[:, 1], ws, U[:, 1], ws)))
+                err = abs(dl - de) / scale
+                good &= err < 1e-8
+                details.append(f'{err:.1e} ({rel(dl, de):.1e} plain)')
+            ok &= check(good, f'{tag}: doubles_dot at two frequencies, at one, and at '
+                        '1e-2, 1e-5 and 1e-9 Ha apart', ', '.join(details))
+            ok &= check(opl.laplace_fallbacks == 0, f'{tag}: no fallback so far',
+                        f'{opl.laplace_fallbacks}')
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                re_ = ee_fold.solve_folded(ope.pieces(), 2, spin=spin,
+                                           solver='davidson', **tight)
+                rl = ee_fold.solve_folded(opl.pieces(), 2, spin=spin,
+                                          solver='davidson', **tight)
+            d = (float(np.abs(rl.omega - re_.omega).max())
+                 if rl.omega.shape == re_.omega.shape else np.inf)
+            ok &= check(d < 1e-8 and rl.converged.all(),
+                        f'{tag}: two Davidson roots equal the exact form',
+                        f'{d:.1e} Ha')
+            # a node inside the mode set's continuum falls back to the mode tile; on
+            # the two-set level eq 71's set falls back too where its grid is None
+            inside = opl.dm_min + 0.05
+            expect = 3 * (1 + ('eq71' in sets and opl._grid(inside) is None))
+            before = opl.laplace_fallbacks
+            Ae = ope.apply(U, np.full(3, inside))[0]
+            Al = opl.apply(U, np.full(3, inside))[0]
+            fell = opl.laplace_fallbacks - before
+            ok &= check(rel(Al, Ae) < 1e-12 and fell == expect,
+                        f"{tag}: a node inside the mode set's continuum falls back to "
+                        'the mode tile',
+                        f'{rel(Al, Ae):.1e}, {fell} fallbacks, {expect} expected')
+    return ok
+
+
 def check_tiles(eps, B, no):
     """Check 13: tiles of two occupied rows with an uneven last tile (water's five rows
     as 2, 2, 1), DABNA-1's tiling, against one tile: products, signed norms and the
@@ -950,6 +1046,24 @@ def check_budget(eps, B, no):
         ok &= bounded(overlap, ee_dbse2_ri_fold._mode_bytes(k1 - k0, nv, opm.nm, 0),
                       f"{'+'.join(sets)}: the mode budget's tile arrays alone bound "
                       '_mode_overlap of two vectors')
+    # the mode set's Laplace node: eq 61's cross, image and derivative
+    opml = make(eps_gw, eps, B, no, 'singlet', sets=('eq61',), form='laplace')
+    Zb = opml._vertex_factors(u[0], opml.m_op.f)
+    grid = opml._grid(0.3, span=(opml.dm_min, opml.dm_max))
+    node = peak(lambda: opml._mode_laplace(Zb, grid, [lambda t, w: w,
+                                                  lambda t, w: w * t]))
+    mlap = ee_dbse2_ri_fold._mode_laplace_bytes(no, nv, naux, opml.nm)
+    ok &= bounded(node, mlap, "the mode set's Laplace budget bounds one of its "
+                  'nodes (eq 61, image and derivative)')
+    op3 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='laplace')
+    op3.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op3, xp=np)
+    need3 = (3 * op3.L2.nbytes + op3.Boo_i.nbytes + op3.Bvv_a.nbytes + lap + tile
+             + op3.rho.nbytes + op3.om.nbytes + 2 * op3.L2b.nbytes + op3.Boo_ib.nbytes
+             + op3.Bvv_ab.nbytes + mlap
+             + ee_dbse2_ri_fold._mode_bytes(op3.kt, nv, op3.nm, naux))
+    ok &= check(op3.gpu.need >= need3,
+                "the two-set Laplace device's need carries both sets' residents, "
+                'nodes and fallback tiles', f'{op3.gpu.need / 1e6:.1f} MB')
     op2 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'))
     op2.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op2, xp=np)
     mode = ee_dbse2_ri_fold._mode_bytes(op2.kt, nv, op2.nm, naux)
@@ -1004,6 +1118,8 @@ def main():
     ok &= check_laplace_shifted(eps, B, no)
     print('check 13: tiles of two rows with an uneven last tile')
     ok &= check_tiles(eps, B, no)
+    print("check 14: the mode sets' Laplace form against the exact mode tile")
+    ok &= check_mode_laplace(eps, B, no)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return 0 if ok else 1
 
