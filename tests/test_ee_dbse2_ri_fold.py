@@ -52,7 +52,7 @@ Checks:
      counts its M columns in matvecs; two Newton roots within 1e-8 Ha of the exact
      form's; an unknown form raises ValueError; the default form resolves to 'laplace'
      on one rank with every B_vv whole and to 'exact' with one UserWarning naming the
-     reason otherwise (a chunked bare B_vv; two simulated ranks through from_mo).
+     reason otherwise (a chunked bare B_vv; two simulated ranks).
   9. the tile budget (_tile_bytes) bounds the peak traced by tracemalloc over one
      _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
      budget (_laplace_bytes) the peak of one Laplace node, the mode budget
@@ -885,13 +885,15 @@ def check_laplace(eps, B, no):
                 "form: None with the bare B_vv in chunks resolves to 'exact' with one "
                 'warning naming it',
                 str(caught[0].message)[:70] if caught else 'no warning')
+    # the factors once, on the main thread: a from_mo build per simulated rank
+    # segfaults on Snellius's wheel stack
+    bare = RIFactors.from_full(eps_gw, B, no)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', UserWarning)  # emitted on the ranks' threads
-        forms = run_simulated(lambda comm: make(eps_gw, eps, B, no, 'singlet',
-                                                comm=comm).form, 2)
+        forms = run_simulated(lambda comm: ee_dbse2_ri_fold.RIFoldDBSE2(
+            bare, None, 'singlet', sets=('eq61',), modes=modes, comm=comm).form, 2)
     ok &= check(forms == ['exact', 'exact'],
-                "form: None on two simulated ranks resolves to 'exact' through from_mo",
-                str(forms))
+                "form: None on two simulated ranks resolves to 'exact'", str(forms))
     return ok
 
 
