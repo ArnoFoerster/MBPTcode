@@ -75,7 +75,8 @@ Checks:
      refused before the upload (ValueError naming GiB), both forms and on ('eq61',
      'eq71') with the label naming the modes; device='gpu' without CuPy raises
      ImportError naming CuPy; the Laplace form on two ranks or without the whole B~_vv
-     raises NotImplementedError.
+     raises NotImplementedError naming one rank, and on a mode set with the bare B_vv
+     in auxiliary chunks one naming the bare B_vv.
   14. the mode sets' Laplace form (Task 9): form='laplace' against form='exact' on
      ('eq61',), ('eq61', 'eq71') with both kernels and ('eq66',) with both screenings,
      both channels: products and signed norms at 0.3 and 0.5 Ha, fold_images at three
@@ -102,7 +103,7 @@ from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold,
                                            ee_gw_pieces)
-from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, drive
+from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, aux_chunks, drive
 from src.SingleReference.LinearResponse import linear_response
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
@@ -431,7 +432,7 @@ def check_modes(eps, B, no):
 def check_minimal():
     """Check 11: nocc = nvirt = nm = 1 (H2/STO-3G), every set, the operator's product
     against the pieces route's at the smallest shapes of the flat layout and the
-    mode tile."""
+    mode tile; the Laplace form there too, where each set's span is one point."""
     ok = True
     eps, B, no = h2()
     eps_gw = gw_like(eps, no)
@@ -446,6 +447,8 @@ def check_minimal():
         for spin in SPINS:
             op = make(eps if square else eps_gw, eps, B, no, spin, form='exact',
                       sets=sets)
+            opl = make(eps if square else eps_gw, eps, B, no, spin, form='laplace',
+                       sets=sets)
             for omega in (None, 0.3):
                 mv = ee_fold.folded_operator(P, omega, spin)[0]
                 A = np.column_stack([mv(U[:, j]) for j in range(2)])
@@ -453,6 +456,12 @@ def check_minimal():
                 ok &= check(rel(Bm, A) < 1e-12 and Bm.shape == (1, 2),
                             f"{'+'.join(sets)} {spin} w={omega}: H2/STO-3G product",
                             f'{rel(Bm, A):.1e}')
+                if omega is not None:
+                    Bl = opl.apply(U, np.full(2, omega))[0]
+                    ok &= check(rel(Bl, A) < 1e-8,
+                                f"{'+'.join(sets)} {spin} w={omega}: H2/STO-3G "
+                                'Laplace form against the pieces route',
+                                f'{rel(Bl, A):.1e}, {opl.laplace_fallbacks} fallbacks')
     return ok
 
 
@@ -687,16 +696,27 @@ def check_device(eps, B, no):
                     'occupied per tile, equal the serial run bit for bit')
     streamed = RIFactors.from_full(eps_gw, Bt, no)
     streamed.Bvv = None
-    cases = (('two ranks', lambda: run_simulated(rank, 2, form='laplace')),
-             ('no whole B~_vv', lambda: ee_dbse2_ri_fold.RIFoldDBSE2(
-                 bare, streamed, 'singlet', form='laplace')))
-    for word, build in cases:
+    # the bare factor in auxiliary chunks, as one rank holds it over MPI
+    chunked = RIFactors.from_full(eps_gw, B, no)
+    chunks = aux_chunks(chunked.naux, chunked.ev.size, 1)[0]
+    chunked.bvv_chunks = {c: np.ascontiguousarray(chunked.Bvv[:, p0:p1])
+                          for c, (p0, p1) in enumerate(chunks)}
+    chunked.Bvv = None
+    modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
+    cases = (('two ranks', 'one rank',
+              lambda: run_simulated(rank, 2, form='laplace')),
+             ('no whole B~_vv', 'one rank', lambda: ee_dbse2_ri_fold.RIFoldDBSE2(
+                 bare, streamed, 'singlet', form='laplace')),
+             ('no whole bare B_vv', 'bare B_vv', lambda: ee_dbse2_ri_fold.RIFoldDBSE2(
+                 chunked, None, 'singlet', sets=('eq61',), modes=modes,
+                 form='laplace')))
+    for word, named, build in cases:
         try:
             build()
             ok &= check(False, f'laplace with {word}: raises NotImplementedError')
         except NotImplementedError as err:
-            ok &= check('one rank' in str(err), f'laplace with {word}: raises '
-                        'NotImplementedError naming one rank', str(err)[:70])
+            ok &= check(named in str(err), f'laplace with {word}: raises '
+                        f'NotImplementedError naming {named}', str(err)[:70])
     if ee_dbse2_ri_fold.cp is None:
         try:
             make(eps_gw, eps, B, no, 'singlet', device='gpu')
