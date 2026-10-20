@@ -22,8 +22,8 @@ Checks:
      both kernels and both forms: roots to 1e-8 Ha, T1 to 1e-8, every root converged
      (eq 71's triplet is M alone on both routes).
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
-     equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, the
-     singlet: products and signed norms at two frequencies, the diagonal, two Newton
+     equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, both
+     spins: products and signed norms at two frequencies, the diagonal, two Newton
      roots driven through ee_ri_fold.drive.
   7. the modes: from_mo on sets=('eq61',) equals the constructor given gw_modes_df's
      modes at the HF energies to 1e-12 on the product at 0.3 Ha and differs from the
@@ -676,9 +676,15 @@ def check_device(eps, B, no):
                         'of one vector at (0.3, 0.3)', ', '.join(details))
             if form == 'laplace':
                 # a node inside the mode set's continuum falls back through the device
-                # mode tile; on the two-set level eq 71's set too where its grid is None
-                inside = opd.dm_min + 0.05
-                expect = 3 * (1 + ('eq71' in sets and opd._grid(inside) is None))
+                # mode tile; on the two-set level eq 71's set too at or above its own
+                # minimum; both minima read off the energies and the modes, not the
+                # operator under test
+                e_gw = eps_gw if screening is None else eps
+                om_min = float(ee_gw_pieces.gw_modes_df(eps, B, no,
+                                                        screening or 'rpa')[0].min())
+                gap = float(e_gw[no:].min() - e_gw[:no].max())
+                inside = om_min + gap + 0.05
+                expect = 3 * (1 + ('eq71' in sets and inside >= 2.0 * gap))
                 Ah = oph.apply(U, np.full(3, inside))[0]
                 Ad = opd.apply(U, np.full(3, inside))[0]
                 ok &= check(close(Ad, Ah, False) and opd.laplace_fallbacks == expect
@@ -868,7 +874,8 @@ def check_laplace(eps, B, no):
     ok &= check(make(eps_gw, eps, B, no, 'singlet').form == 'laplace',
                 'form: laplace by default')
     # form=None where the Laplace form cannot run: 'exact' with one UserWarning naming
-    # the reason; on simulated ranks the form alone (warnings are per thread there)
+    # the reason; on simulated ranks the form alone (the warning is raised on their
+    # threads and ignored there)
     chunked = RIFactors.from_full(eps_gw, B, no)
     chunks = aux_chunks(chunked.naux, chunked.ev.size, 1)[0]
     chunked.bvv_chunks = {c: np.ascontiguousarray(chunked.Bvv[:, p0:p1])
@@ -928,6 +935,19 @@ def check_laplace_shifted(eps, B, no):
                         f'eq61+eq71 {spin} w={omega}: Laplace equals exact with the '
                         "level's minimum below eq 71's", f'{rel(Al, Ae):.1e}, norm '
                         f'{rel(nl, ne):.1e}, {opl.laplace_fallbacks} fallbacks')
+        # between the two minima the mode set falls back to its tile and eq 71's set
+        # stays on its quadrature (the ordering check 14 cannot reach); the mode
+        # minimum off the shifted modes and the energies
+        dm_min = float(modes[0].min() + eps_gw[no:].min() - eps_gw[:no].max())
+        mid = 0.5 * (dm_min + d71)
+        before = opl.laplace_fallbacks
+        Ae = ope.apply(U, np.full(3, mid))[0]
+        Al = opl.apply(U, np.full(3, mid))[0]
+        fell = opl.laplace_fallbacks - before
+        ok &= check(rel(Al, Ae) < 1e-8 and fell == 3,
+                    f'eq61+eq71 {spin}: a node between the two minima falls back on '
+                    'the mode set alone',
+                    f'{rel(Al, Ae):.1e}, {fell} fallbacks, 3 expected')
         de = ope.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
         dl = opl.doubles_dot(U[:, 0], 0.3, U[:, 1], 0.5)
         ok &= check(abs(dl - de) < 1e-8 * max(abs(de), 1.0),
@@ -1008,10 +1028,17 @@ def check_mode_laplace(eps, B, no):
                         f'{d:.1e} Ha')
             # a node inside the mode set's continuum falls back to the mode tile; on
             # the two-set level eq 71's set falls back too where its grid is None
-            inside = opl.dm_min + 0.05
-            # eq 71 falls back too at or above its own minimum, 2 (min eps_v - max
-            # eps_o) at the GW energies, read off the energies and not the operator
-            d71 = 2.0 * (energies[0][no:].min() - energies[0][:no].max())
+            # both minima read off the energies and the modes, not the operator: the
+            # mode set's min Omega + min eps_v - max eps_o, eq 71's 2 (min eps_v - max
+            # eps_o), at the GW energies
+            om_min = float(ee_gw_pieces.gw_modes_df(energies[1], B, no,
+                                                    screening or 'rpa')[0].min())
+            gap = float(energies[0][no:].min() - energies[0][:no].max())
+            dm_min, d71 = om_min + gap, 2.0 * gap
+            ok &= check(abs(opl.dm_min - dm_min) < 1e-12, f"{tag}: the operator's mode"
+                        ' minimum equals min Omega + min eps_v - max eps_o',
+                        f'{abs(opl.dm_min - dm_min):.1e} Ha')
+            inside = dm_min + 0.05
             expect = 3 * (1 + ('eq71' in sets and inside >= d71))
             before = opl.laplace_fallbacks
             Ae = ope.apply(U, np.full(3, inside))[0]
@@ -1021,10 +1048,10 @@ def check_mode_laplace(eps, B, no):
                         f"{tag}: a node inside the mode set's continuum falls back to "
                         'the mode tile',
                         f'{rel(Al, Ae):.1e}, {fell} fallbacks, {expect} expected')
-            if 'eq71' in sets and d71 < opl.dm_min:
+            if 'eq71' in sets and d71 < dm_min:
                 # between the two minima: eq 71's set falls back, the mode set stays on
                 # its quadrature
-                mid = 0.5 * (d71 + opl.dm_min)
+                mid = 0.5 * (d71 + dm_min)
                 before = opl.laplace_fallbacks
                 Ae = ope.apply(U, np.full(3, mid))[0]
                 Al = opl.apply(U, np.full(3, mid))[0]

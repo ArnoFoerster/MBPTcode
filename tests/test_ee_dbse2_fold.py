@@ -34,7 +34,7 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      printed kernel's roots have T1 > 1, and since 2026-10-17 the model's bracket
      follows the rising branch); the count of complex eigenvalues and the lowest
      complex real part against min D are printed. Regression guard: on sets=('eq71',)
-     the two lowest newton roots per channel equal M0_ROOTS, measured at 64ff9c2
+     the two lowest newton roots per channel equal M0_ROOTS, measured on 2026-10-18
      (test_ee_dbse2_fold_m0_roots_64ff9c2.txt in the tooling repo), to 1e-8 Ha.
   3. eq 74 as printed (kernel 'printed', I.J + K.L - I.K - K.I) and Yamada's kernel
      ('eq71', I.J + K.L - I.L - L.I) transcribed on spin orbitals at omega = 0.3 Ha
@@ -47,7 +47,8 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      couplings); the two-set Theta is the sum of the two sets' to 1e-12. The builder's
      stored dressed factors equal dressed_factors' (check 5 pins those to W_aux). The
      product table is the spec's, pinned by the derivation (eq74_fold_identity.py,
-     eq74_vs_yamada.out.txt in the tooling repo), not re-derived here.
+     eq74_vs_yamada.out.txt in the tooling repo) and re-derived by
+     transcription_printed_eq74, eq 74's four printed terms as einsums, to 1e-11.
   4. the static limit of the pieces' terms (static_limit_pieces) against
      static_second_order_kernel_df(..., kernel=, channel=) at the GW energies, both
      kernels, both channels, 6-31G, to 1e-10 Ha; eq 71's triplet leg compares zero
@@ -87,9 +88,9 @@ from src.SingleReference.LinearResponse.linear_response import (
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 # the two lowest roots (Ha) of check 2's pieces on sets=('eq71',), singles='eq62+eq59',
-# gw_like_uniform's energies, solver newton at tol_omega 1e-12, measured at 64ff9c2
-# (milestone 2's close) on WSL: test_ee_dbse2_fold_m0_roots_64ff9c2.txt beside its
-# generator in the tooling repo
+# gw_like_uniform's energies, solver newton at tol_omega 1e-12, measured on 2026-10-18
+# (the lane's milestone 2 close) on WSL: test_ee_dbse2_fold_m0_roots_64ff9c2.txt
+# beside its generator in the tooling repo
 M0_ROOTS = {
     ('sto-3g', 'eq71', 'singlet'): (0.442968065932, 0.527190875894),
     ('sto-3g', 'eq71', 'triplet'): (0.370338072713, 0.445326163321),
@@ -133,7 +134,7 @@ def gw_like(eps, no):
 
 
 def gw_like_uniform(eps, no):
-    """The uniform shift M0_ROOTS was measured with at 64ff9c2 (the HF gap closed by
+    """The uniform shift M0_ROOTS was measured with on 2026-10-18 (the HF gap closed by
     0.08 Ha, no orbital-dependent part): the regression guard keeps its input."""
     e = np.array(eps, float)
     e[:no] += 0.03
@@ -734,11 +735,11 @@ def check_fold_vs_unfolded(basis):
                             f'{tag} {kernel} {basis} {spin}: newton and davidson agree',
                             f'max |dw| {dw:.1e} Ha, max |dT1| {dt:.1e}')
                 if sets == ('eq71',) and spin is not None:
-                    # the regression guard: milestone 2's roots at 64ff9c2
+                    # the regression guard: the roots recorded on 2026-10-18
                     ref = np.array(M0_ROOTS[basis, kernel, spin])
                     dg = float(np.max(np.abs(np.sort(a.omega)[:2] - ref)))
                     ok &= check(dg < 1e-8, f'{tag} {kernel} {basis} {spin}: the two '
-                                'lowest newton roots equal the 64ff9c2 values',
+                                'lowest newton roots equal the recorded values',
                                 f'max |dw| {dg:.1e} Ha')
             if basis == 'sto-3g':
                 # the control: the Hermitian misfold [[M, V^T], [V, D]] has other roots,

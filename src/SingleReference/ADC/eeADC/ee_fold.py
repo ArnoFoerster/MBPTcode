@@ -569,16 +569,18 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     signed fold, whose T1 exceeds 1). For s_max < 1, g(ω) = λ_j(ω) - ω falls with
     slope ≤ s_max - 1 < 0, the root is unique and lies between ω and
     ω + g(ω) / (1 - s_max) for every ω: Newton ω + g / (1 - c_j^T H1 c_j) inside
-    the bracket so narrowed, bisection where a step leaves it (a kink where two
+    the bracket so narrowed ([ω, ω + g] where s_max ≤ 0), bisection where a step
+    leaves it (a kink where two
     branches of H(ω) cross exactly). A model with s_max ≥ 1 keeps the bracket
     [ω, ω + g] and may drop its branches. λ_j ≤ λ_j+1 at every ω, so the roots rise
     with j: the first branch whose root reaches d_min ends the search. Returns oms
     (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the roots.
     """
     m = H0.shape[0]
-    # the bracket's reach, 1/(1 - s_max): g falls at least at that rate
+    # the bracket's reach on a rising branch (0 < s_max < 1), 1/(1 - s_max): g falls
+    # at least at that rate; [ω, ω + g] where the metric is positive, as before
     s_max = float(np.linalg.eigvalsh(H1).max())
-    reach = 1.0 / (1.0 - s_max) if s_max < 1.0 else 1.0
+    reach = 1.0 / (1.0 - s_max) if 0.0 < s_max < 1.0 else 1.0
     found = []
     for j in range(m):
         if len(found) == nroots:
@@ -823,7 +825,7 @@ def _iterate(step, om, tol_omega, t_min, max_newton, max_fixed, label, verbose):
         k += 1
         if verbose:
             _say(label, f'step {k} ({mode}): omega = {om:.8f} '
-                        f'lambda = {lam:.8f} w1 = {t1:.4f}')
+                        f'lambda = {lam:.8f} T1 = {t1:.4f}')
         if abs(err) < tol_omega and exact:
             return lam, t1, state, k, mode, True, abs(err)
         if tight and not exact:
@@ -1086,7 +1088,7 @@ def _index_solve(pieces, spin, a, b, om, lo, hi, X, dense, tol_residual, tol_ome
         k += 1
         if verbose:
             _say(label, f'branch {a} step {k} (index): omega = {om:.8f} '
-                        f'lambda = {lam.mean():.8f} w1 = {t1.mean():.4f}')
+                        f'lambda = {lam.mean():.8f} T1 = {t1.mean():.4f}')
         if abs(err) < tol_omega or k >= max_steps:
             return lam, Z, t1, k, abs(err) < tol_omega and inner, abs(err)
         lo, hi = (om, hi) if err > 0 else (lo, om)
@@ -1190,9 +1192,8 @@ def _block_roots(pieces, spin, X0, nroots, k, lo, hi, fold, tol_residual, tol_om
     [lo, hi] widens the window to it (EE_FOLD_BLOCK_MARGIN beyond), and a
     root whose fold y_r F y_r needs more nodes than the window has raises
     their count; either restarts from the k Ritz vectors, at most
-    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there.
-    Stops when the nroots lowest have residual below tol_residual and ω moved
-    less than tol_omega.
+    EE_FOLD_BLOCK_MAX_MOVES times; a window reaching min_K D_K stops there. Stops when the nroots
+    lowest have residual below tol_residual and ω moved less than tol_omega.
     Returns ω (k,), Y (n, k), the iterations and ritz(ω, m), the m lowest
     eigenvectors of the subspace model at ω."""
     _, _, diag_s, _, _ = folded_operator(pieces, None, spin)

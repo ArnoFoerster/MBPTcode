@@ -39,8 +39,8 @@ R is the same combination of the four images with the coefficients of I and J (K
 exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (_back_oo) and B~_vv
 (_back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact.
 
-form='laplace', the default where it runs (spec §2.6; form=None takes it on one rank
-with every B_vv whole and 'exact' with a warning otherwise): 1/(D_K - ω) =
+form='laplace', the default where it runs (form=None takes it on one rank with every
+B_vv whole and 'exact' with a warning otherwise): 1/(D_K - ω) =
 Σ_t w_t exp(-τ_t (D_K - ω)) on
 [min D - ω, max D - ω], the minimax grid of grids.minimax_time_grid sized by
 minimax_points_for_accuracy at kernel_laplace's relative target, 1/(D_K - ω)² with
