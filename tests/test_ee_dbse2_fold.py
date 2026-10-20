@@ -23,8 +23,9 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      otherwise, and a `modes` argument is taken as given.
   2. fold against unfolded: the dense signed supermatrix [[M, (eta V)^T], [V, D]] from
      the pieces by unit vectors, eig not eigh; STO-3G the whole matrix, 6-31G per
-     channel on the eigenspaces of the alpha<->beta flip; both kernels, every set of
-     SETS; every root of solver 'newton' and 'davidson' (singlet, triplet, and spin=None
+     channel on the eigenspaces of the alpha<->beta flip; both kernels on STO-3G and
+     the eq 71 kernel on 6-31G, every set of SETS;
+     every root of solver 'newton' and 'davidson' (singlet, triplet, and spin=None
      on STO-3G), and of 'block' on the mode sets, is a real eigenvalue to 3e-10 Ha
      (1e-8 eV) and its T1 the eigenvector's |y|^2 / (|y|^2 + |Z+|^2 - |Z-|^2) to 1e-8;
      at least six real eigenvalues lie below min D and the lowest six are the roots
@@ -302,6 +303,12 @@ def check_layout(P, eps_gw, no, nv, sets, om):
     ok &= check(abs(dn - ref) < 1e-12 * abs(ref),
                 f'{tag}: dnorm2 is sum_segments sign |Z[slice]|^2',
                 f'{dn:.6f} vs {ref:.6f}')
+    # the mutant: the unsigned sum |Z|^2 is not dnorm2 wherever a '-' segment holds
+    # a nonzero Z, as every segment of Zr does
+    unsigned = float(zf @ zf)
+    ok &= check(abs(dn - unsigned) > 1e-6 * unsigned,
+                f'{tag}: control, the unsigned |Z|^2 is not dnorm2',
+                f'{dn:.6f} vs {unsigned:.6f}')
     plus = SB({k: Zr.get(k) * (eta[:n_flat] > 0) for k in 'ab'})
     minus = SB({k: Zr.get(k) * (eta[:n_flat] < 0) for k in 'ab'})
     ok &= check(P['dnorm2'](plus) > 0 and P['dnorm2'](minus) < 0,
@@ -331,6 +338,14 @@ def check_pieces(eps, B, no):
             d = float(np.max(np.abs(Mch - np.asarray(A))))
             ok &= check(d < 1e-10, f'{singles} {spin}: M equals the Casida A at the GW '
                         'energies', f'max |d| {d:.1e} Ha')
+            # the control: the other metric (W_aux for eq 62, the identity for eq 62
+            # plus eq 59) builds a different A
+            other = W_aux if singles == 'eq62' else np.eye(B.shape[0])
+            Ao, _ = lr.build_casida_matrices(no, lBSE=True, W_aux=other,
+                                             triplet=triplet)
+            do = float(np.max(np.abs(Mch - np.asarray(Ao))))
+            ok &= check(do > 1e-4, f'{singles} {spin}: control, M differs from the '
+                        'Casida A on the other metric', f'max |d| {do:.1e} Ha')
     om, rho = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
     for sets in ee_dbse2_pieces.SETS:
         P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=sets)
@@ -553,6 +568,10 @@ def check_transcription(eps, B, no):
     ok &= check(d4 > 1e-3,
                 "control: eq71's pieces differ from the printed transcription",
                 f'max |d| {d4:.1e} Ha')
+    d4b = float(np.max(np.abs(got['printed', 'singlet'] - ref['eq71']['singlet'])))
+    ok &= check(d4b > 1e-3,
+                "control: the printed pieces differ from eq 71's transcription",
+                f'max |d| {d4b:.1e} Ha')
     # eq 61: the signed cross J.K + K.J of the modes, no cross-spin coupling
     T61 = transcription_eq61(eps, eps_gw, B, no, omega)
     P61 = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, sets=('eq61',))
@@ -657,10 +676,10 @@ def check_fold_vs_unfolded(basis):
                    ('default', 'davidson', None)]
         if sets in MODE_SETS:
             solvers.append(('block', 'block', 0))
-        # the two-set 6-31G supermatrix is 9640 per channel (an eig of minutes); its
-        # kernel axis is check 3's additivity row and the ('eq71',) rows here
-        kernels = (('eq71',) if (basis, sets) == ('6-31g', ('eq61', 'eq71'))
-                   else ee_dbse2_pieces.KERNELS)
+        # 6-31G runs the eq 71 kernel alone: its supermatrix is 6440 per channel (an
+        # eig of minutes per kernel and spin) and 9640 on the two-set level; the
+        # kernel axis is STO-3G's rows here and check 3's rows
+        kernels = ('eq71',) if basis == '6-31g' else ee_dbse2_pieces.KERNELS
         for kernel in kernels:
             t0 = time.perf_counter()
             # the level's singles block: eq 62 beside eq 61's set, whose doubles carry

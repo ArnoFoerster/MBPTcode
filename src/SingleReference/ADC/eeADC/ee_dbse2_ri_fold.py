@@ -734,8 +734,9 @@ class RIFoldDBSE2(RIFoldADC2):
     dressed : RIFactors of the dressed factors B~ of ee_dbse2_pieces.dressed_factors at
     the same energies, for eq 71's doubles and eq 59, None when neither is asked (else
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
-    eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES; beside eq 61's set
-    the latter counts the static W twice; dbse2 takes 'eq62'); form : None (the
+    eq 71's set's; singles : None (the default: the level's own, level_singles,
+    'eq62+eq59' on eq 71's set alone and 'eq62' beside eq 61's set, where the former
+    would count the static W twice) or one of SINGLES; form : None (the
     default: 'laplace' on one rank with every B_vv whole, else 'exact' with a
     UserWarning naming the reason), 'laplace' (NotImplementedError where it cannot
     run) or 'exact' (FORMS, the module docstring), for every set in `sets`; sets :
@@ -758,12 +759,14 @@ class RIFoldDBSE2(RIFoldADC2):
     to that set's exact tile, plus one per set per doubles_dot call that did.
     """
 
-    def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62',
+    def __init__(self, bare, dressed, spin, kernel='eq71', singles=None,
                  form=None, sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB,
                  threads=None, comm=None, aux_chunk=None, device='cpu'):
         sets = tuple(sorted(sets))
         if sets not in SETS:
             raise ValueError(f"sets={sets!r}; expected one of {SETS}")
+        if singles is None:
+            singles = _pieces.level_singles(sets)
         has71, square = 'eq71' in sets, sets == ('eq66',)
         mode_set = 'eq61' in sets or square
         if square and singles != 'eq62':
@@ -897,7 +900,8 @@ class RIFoldDBSE2(RIFoldADC2):
                              'energies twice')
         bare = RIFactors.from_full(eps_gw, B, no)
         dressed = None
-        if 'eq71' in sets or kw.get('singles', 'eq62') == 'eq62+eq59':
+        if 'eq71' in sets or (kw.get('singles')
+                              or _pieces.level_singles(sets)) == 'eq62+eq59':
             _, Bt = _pieces.dressed_factors(eps_hf, B, no)
             dressed = RIFactors.from_full(eps_gw, Bt, no)
         mode_set = 'eq61' in sets or 'eq66' in sets

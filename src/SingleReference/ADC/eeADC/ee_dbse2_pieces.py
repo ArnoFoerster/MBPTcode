@@ -27,7 +27,8 @@ pieces['dnorm2'] is |Z+|² - |Z-|²; T1 = 1/(1 - dλ/dω) may leave (0, 1] (the 
 guards it). M is eq 62 at the GW energies, the singlet
 A_ia,jb = (ε^GW_a - ε^GW_i) δ_ij δ_ab + 2 (ia|jb) - (ij|ab) and the triplet -(ij|ab);
 singles='eq62+eq59' puts eq 59's static w(ij|ab) in place of (ij|ab), the full static
-BSE@GW singles block (the comparison against BSE2@GW, not a level of ours).
+BSE@GW singles block: the level's own singles on eq 71's set alone (the default there,
+level_singles), and beside eq 61's set the comparison against BSE2@GW.
 
 Spin. Every W line conserves spin along itself, so for the singles block of spin s1 the
 vertices I and K put their image in the doubles blocks whose pair (k, c) carries s1, J
@@ -167,6 +168,12 @@ def coupling_pairs(kernel, channel):
         return []
     x, y = _PAIRS[kernel]
     return [(x.copy(), y.copy())]
+
+
+def level_singles(sets):
+    """The level's own singles block: eq 62 plus eq 59's static W on eq 71's set
+    alone; bare eq 62 beside eq 61's set or eq 66's, whose doubles carry the W."""
+    return 'eq62+eq59' if tuple(sorted(sets)) == ('eq71',) else 'eq62'
 
 
 def _check_names(kernel, sets, singles, screening):
@@ -446,7 +453,7 @@ def check_energies(eps_gw, eps_hf, B, nocc):
 
 
 def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
-                       screening='rpa', singles='eq62', modes=None):
+                       screening='rpa', singles=None, modes=None):
     """The pieces of ee_fold.folded_operator for the dBSE2 doubles on the signed fold.
 
     Parameters
@@ -464,9 +471,10 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     sets : tuple of str, the doubles sets, one of SETS in any order: ('eq71',) eq 71's
         set alone, ('eq61',) eq 61's, ('eq61', 'eq71') both (the level dbse2)
     screening : {'tda', 'rpa'}, the screening of eq 61's modes
-    singles : {'eq62', 'eq62+eq59'}, the singles block M (_singles_block). Beside eq
-        61's set, whose doubles carry W(ω) whole, 'eq62+eq59' counts the static W a
-        second time; the level dbse2 takes 'eq62'
+    singles : {'eq62', 'eq62+eq59'} or None, the singles block M (_singles_block);
+        None (the default) takes the level's own, level_singles: 'eq62+eq59' on eq
+        71's set alone, 'eq62' beside eq 61's set, whose doubles carry W(ω) whole, so
+        that 'eq62+eq59' there counts the static W a second time
     modes : None or (omega, rho), gw_modes_df's modes at eps_hf, omega (nm,) and rho
         (naux, nm), index order (P, m); None builds them when 'eq61' is in sets. A rho
         of another row count than naux raises ValueError naming naux
@@ -505,6 +513,8 @@ def build_pieces_dbse2(eps_gw, eps_hf, B, nocc, kernel='eq71', sets=('eq71',),
     Vt(Z) = J^T (Z+ - Z-)/sqrt2 + K^T (Z+ + Z-)/sqrt2 (_mode_images_t). The doubles
     exist inside one call only.
     """
+    if singles is None:
+        singles = level_singles(sets)
     _check_names(kernel, sets, singles, screening)
     sets = tuple(sorted(sets))
     eps_gw, eps_hf, no, nv = check_energies(eps_gw, eps_hf, B, nocc)
