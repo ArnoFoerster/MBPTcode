@@ -19,8 +19,8 @@ Checks:
      naming the input.
   2. solve_folded on the operator's pieces() against the explicit pieces, every set,
      solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
-     both kernels: roots to 1e-8 Ha, T1 to 1e-8, every root converged (eq 71's triplet
-     is M alone on both routes).
+     both kernels and both forms: roots to 1e-8 Ha, T1 to 1e-8, every root converged
+     (eq 71's triplet is M alone on both routes).
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
      equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, the
      singlet: products and signed norms at two frequencies, the diagonal, two Newton
@@ -59,7 +59,8 @@ Checks:
      (_mode_laplace_bytes) the peak of one of its nodes (eq 61, image and derivative),
      each within a factor two; the device class's need carries the budgets and the
      residents of the sets in use, both budgets on sets=('eq61', 'eq71'), and the mode
-     set's Laplace residents and node on that level's Laplace form.
+     set's Laplace residents and node on that level's Laplace form, the node traced as
+     eq 61's cross and as eq 66's square.
   4. linear_response.device_memory_check, the static kernel's pre-flight lifted for the
      device path: need above free raises ValueError naming the label and the GiB, need
      within free returns None.
@@ -69,7 +70,8 @@ Checks:
      ('eq66',) with both screenings and forms): the product and the signed norm at 0.3
      Ha, fold_images at three
      nodes with a derivative node between, doubles_dot of two vectors and of one, each
-     to 1e-12 relative; the Laplace form's fallback node through the device tile; two
+     to 1e-12 relative; the Laplace form's fallback node through the device tile and,
+     on the mode cells, through the device mode tile; two
      simulated ranks with the stand-in, one occupied per tile, equal the serial run bit
      for bit, on ('eq71',) and on ('eq61', 'eq71'); a device reporting one byte free is
      refused before the upload (ValueError naming GiB), both forms and on ('eq61',
@@ -299,9 +301,10 @@ def check_solves(eps, B, no):
         for kernel in KERNELS:
             P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
                                                    sets=sets)
-            for spin in SPINS:
+            for spin, form in ((s, f) for s in SPINS for f in ee_dbse2_ri_fold.FORMS):
                 op = ee_dbse2_ri_fold.RIFoldDBSE2.from_mo(eps_gw, eps, B, no, spin,
-                                                          kernel=kernel, sets=sets)
+                                                          kernel=kernel, sets=sets,
+                                                          form=form)
                 for solver in ('newton', 'davidson', 'block'):
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore', RuntimeWarning)
@@ -314,8 +317,8 @@ def check_solves(eps, B, no):
                          else np.inf)
                     dt = float(np.abs(r.t1 - ref.t1).max()) if same_shape else np.inf
                     ok &= check(d < 1e-8 and dt < 1e-8 and r.converged.all(),
-                                f"{'+'.join(sets)} {kernel} {spin} {solver}: roots and "
-                                'T1 on the operator equal the pieces',
+                                f"{'+'.join(sets)} {kernel} {form} {spin} {solver}: "
+                                'roots and T1 on the operator equal the pieces',
                                 f'{d:.1e} Ha, {dt:.1e} on T1, '
                                 + ' '.join(f'{w:.6f}' for w in r.omega))
     return ok
@@ -423,8 +426,8 @@ def check_modes(eps, B, no):
         Al, nl = opl.apply(U, np.full(3, 0.3))
         ok &= check(rel(Al, Ae) < 1e-8 and rel(nl, ne) < 1e-8
                     and opl.laplace_fallbacks == 0,
-                    f'eq61+eq71 {spin}: the Laplace form of eq 71 beside the exact '
-                    'mode tile equals the exact form', f'{rel(Al, Ae):.1e}, norm '
+                    f'eq61+eq71 {spin}: the Laplace form of both sets equals the '
+                    'exact form', f'{rel(Al, Ae):.1e}, norm '
                     f'{rel(nl, ne):.1e}, {opl.laplace_fallbacks} fallbacks')
     return ok
 
@@ -458,10 +461,13 @@ def check_minimal():
                             f'{rel(Bm, A):.1e}')
                 if omega is not None:
                     Bl = opl.apply(U, np.full(2, omega))[0]
-                    ok &= check(rel(Bl, A) < 1e-8,
+                    ok &= check(rel(Bl, A) < 1e-8
+                                and opl.laplace_fallbacks == 2 * len(sets),
                                 f"{'+'.join(sets)} {spin} w={omega}: H2/STO-3G "
-                                'Laplace form against the pieces route',
-                                f'{rel(Bl, A):.1e}, {opl.laplace_fallbacks} fallbacks')
+                                'Laplace form against the pieces route, every node '
+                                'a counted fallback',
+                                f'{rel(Bl, A):.1e}, {opl.laplace_fallbacks} fallbacks, '
+                                f'{2 * len(sets)} expected')
     return ok
 
 
@@ -663,14 +669,28 @@ def check_device(eps, B, no):
                 details.append(f'{rel(dd, dh):.1e}')
             ok &= check(good, f'{tag}: doubles_dot of two vectors at (0.3, 0.5) and '
                         'of one vector at (0.3, 0.3)', ', '.join(details))
-    op = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='exact')
-    try:
-        device(op, xp=_TinyDevice())
-        ok &= check(False, 'eq61+eq71: a device with one byte free is refused')
-    except ValueError as err:
-        ok &= check('GiB' in str(err) and 'modes' in str(err),
-                    'eq61+eq71: a device with one byte free is refused before the '
-                    'upload, the label naming the modes', str(err)[:70])
+            if form == 'laplace':
+                # a node inside the mode set's continuum falls back through the device
+                # mode tile; on the two-set level eq 71's set too where its grid is None
+                inside = opd.dm_min + 0.05
+                expect = 3 * (1 + ('eq71' in sets and opd._grid(inside) is None))
+                Ah = oph.apply(U, np.full(3, inside))[0]
+                Ad = opd.apply(U, np.full(3, inside))[0]
+                ok &= check(close(Ad, Ah, False) and opd.laplace_fallbacks == expect
+                            and oph.laplace_fallbacks == expect,
+                            f'{tag}: the fallback node through the device mode tile',
+                            f'{rel(Ad, Ah):.1e}, {opd.laplace_fallbacks} fallbacks, '
+                            f'{expect} expected')
+    for form in ee_dbse2_ri_fold.FORMS:
+        op = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form=form)
+        try:
+            device(op, xp=_TinyDevice())
+            ok &= check(False, f'eq61+eq71 {form}: a device with one byte free is '
+                        'refused')
+        except ValueError as err:
+            ok &= check('GiB' in str(err) and 'modes' in str(err),
+                        f'eq61+eq71 {form}: a device with one byte free is refused '
+                        'before the upload, the label naming the modes', str(err)[:70])
     # the exact form on two simulated ranks, one occupied per tile, each rank with the
     # stand-in device, equals the serial stand-in run bit for bit (check 3's shape), on
     # eq 71's set and on both sets; the Laplace form refuses more than one rank and a
@@ -848,9 +868,9 @@ def check_laplace(eps, B, no):
 def check_laplace_shifted(eps, B, no):
     """Check 12: the Laplace form on the two-set level when eq 61's minimum lies below
     eq 71's (the modes shifted down by 0.2 Ha, as at a reference whose Omega_min lies
-    below the GW gap): the exponent shift of the Laplace sums is eq 71's own minimum,
-    so the products, the signed norms and the two-vector overlap equal the exact
-    form's."""
+    below the GW gap): each set's Laplace sums take their own span and exponent shift
+    (eq 71's own minimum for eq 71's, the mode set's extremes for the modes'), so the
+    products, the signed norms and the two-vector overlap equal the exact form's."""
     ok = True
     eps_gw = gw_like(eps, no)
     n = no * (eps.size - no)
@@ -957,7 +977,10 @@ def check_mode_laplace(eps, B, no):
             # a node inside the mode set's continuum falls back to the mode tile; on
             # the two-set level eq 71's set falls back too where its grid is None
             inside = opl.dm_min + 0.05
-            expect = 3 * (1 + ('eq71' in sets and opl._grid(inside) is None))
+            # eq 71 falls back too at or above its own minimum, 2 (min eps_v - max
+            # eps_o) at the GW energies, read off the energies and not the operator
+            d71 = 2.0 * (energies[0][no:].min() - energies[0][:no].max())
+            expect = 3 * (1 + ('eq71' in sets and inside >= d71))
             before = opl.laplace_fallbacks
             Ae = ope.apply(U, np.full(3, inside))[0]
             Al = opl.apply(U, np.full(3, inside))[0]
@@ -966,6 +989,17 @@ def check_mode_laplace(eps, B, no):
                         f"{tag}: a node inside the mode set's continuum falls back to "
                         'the mode tile',
                         f'{rel(Al, Ae):.1e}, {fell} fallbacks, {expect} expected')
+            if 'eq71' in sets and d71 < opl.dm_min:
+                # between the two minima: eq 71's set falls back, the mode set stays on
+                # its quadrature
+                mid = 0.5 * (d71 + opl.dm_min)
+                before = opl.laplace_fallbacks
+                Ae = ope.apply(U, np.full(3, mid))[0]
+                Al = opl.apply(U, np.full(3, mid))[0]
+                fell = opl.laplace_fallbacks - before
+                ok &= check(rel(Al, Ae) < 1e-8 and fell == 3,
+                            f"{tag}: a node between the two minima falls back in eq "
+                            "71's set alone", f'{rel(Al, Ae):.1e}, {fell} fallbacks')
     return ok
 
 
@@ -1084,6 +1118,14 @@ def check_budget(eps, B, no):
     mlap = ee_dbse2_ri_fold._mode_laplace_bytes(no, nv, naux, opml.nm)
     ok &= bounded(node, mlap, "the mode set's Laplace budget bounds one of its "
                   'nodes (eq 61, image and derivative)')
+    opms = make(eps, eps, B, no, 'singlet', sets=('eq66',), form='laplace')
+    Zbs = opms._vertex_factors(u[0], opms.m_op.f)
+    grids = opms._grid(0.3, span=(opms.dm_min, opms.dm_max))
+    node_sq = peak(lambda: opms._mode_laplace(Zbs, grids, [lambda t, w: w,
+                                                           lambda t, w: w * t]))
+    ok &= bounded(node_sq, ee_dbse2_ri_fold._mode_laplace_bytes(no, nv, naux, opms.nm),
+                  "the mode set's Laplace budget bounds one of its nodes (eq 66, the "
+                  'square with its ZK - ZI copy)')
     op3 = make(eps_gw, eps, B, no, 'singlet', sets=('eq61', 'eq71'), form='laplace')
     op3.gpu = ee_dbse2_ri_fold._DoublesDBSE2GPU(op3, xp=np)
     need3 = (3 * op3.L2.nbytes + op3.Boo_i.nbytes + op3.Bvv_a.nbytes + lap + tile

@@ -1,7 +1,7 @@
 """The dBSE2 doubles as a tiled RI operator (level 'dbse2'): A_eff(ω) of one spin
 channel on flat singles vectors, in RIFoldADC2's interface, from the DF factors at the
-GW energies, on the host or a GPU; two sets of doubles selected by `sets` (SETS), eq
-71's in two forms.
+GW energies, on the host or a GPU; the doubles sets selected by `sets` (SETS, and
+('eq66',) for level gw), each in two forms (FORMS).
 
 Eq 71's set. The kernel is ee_dbse2_pieces' (its module docstring: the vertices I, J,
 K, L on the ordered doubles K = (k, l, c, d), D_K = ε_c + ε_d - ε_k - ε_l, the pair
@@ -159,9 +159,9 @@ def _laplace_bytes(no, nv, naux):
 def _mode_laplace_bytes(no, nv, naux, nm):
     """Bytes one node of _mode_laplace holds at its peak beside the residents: Π^τ
     (naux, naux), the weighted modes (naux, nm) while Π^τ forms, and six
-    factor-sized (naux, no nv) arrays (H, the temporaries of a closure and the
-    products' buffers; traced on water at 332 kB against 256 kB for three, check 9
-    of tests/test_ee_dbse2_ri_fold.py)."""
+    factor-sized (naux, no nv) arrays (H, Ha, the closures' temporaries and the
+    products' buffers; the previous node's arrays are freed before the next forms).
+    Check 9 of tests/test_ee_dbse2_ri_fold.py traces the cross and the square."""
     return 8 * (naux ** 2 + naux * nm + 6 * naux * no * nv)
 
 
@@ -577,6 +577,7 @@ def _mode_laplace(xp, rho, om, Boo_i, Bvv_a, eo, ev, ZI, ZK, tau, wt, lo, coefs,
         v = (-2.0 * s) * ((oo - vv) if square else (oo + vv))
         for k, c in enumerate(coefs):
             sums[k] += c(t, w) * v
+        Pi = H = Ha = None      # freed before the next node's arrays form
     return [x.ravel() for x in sums]
 
 
@@ -690,6 +691,25 @@ class _DoublesDBSE2GPU:
             Zb[0], Zb[1], tau, wt, lo, coefs, self.square)]
 
 
+def _laplace_guard(form, comm, has71, mode_set, bare, dressed):
+    """The Laplace form's refusals, raised before any factor, mode or inner operator
+    is built: one rank, and the B_vv of each set in use whole (bare_factors keeps it
+    in auxiliary chunks, on one rank too)."""
+    if form != 'laplace':
+        return
+    if (1 if comm is None else comm.Get_size()) > 1:
+        raise NotImplementedError('the Laplace form runs on one rank; pass '
+                                  "form='exact' on several ranks")
+    if has71 and dressed is not None and dressed.Bvv is None:
+        raise NotImplementedError('the Laplace form runs on one rank with the dressed '
+                                  'B_vv whole, not in auxiliary chunks; pass '
+                                  "form='exact'")
+    if mode_set and bare.Bvv is None:
+        raise NotImplementedError('the Laplace form runs on one rank with the bare '
+                                  'B_vv whole, not in auxiliary chunks; pass '
+                                  "form='exact'")
+
+
 class RIFoldDBSE2(RIFoldADC2):
     """A_eff(ω) of one spin channel at level 'dbse2' on flat singles vectors u (no nv,),
     (i, a) row-major: the singles block M of eq 62 at the GW energies plus the doubles
@@ -718,8 +738,8 @@ class RIFoldDBSE2(RIFoldADC2):
     _tile_bytes plus _mode_bytes, dm_min and dm_max the mode set's own extremes of D
     (None without one). The inherited fold_diagonal returns zeros (no second-order
     model at this level); pieces() hands the operator to ee_fold.solve_folded;
-    laplace_fallbacks counts the (column, node) pairs the Laplace form handed to the
-    exact tile of either set, plus one per set per doubles_dot call that did.
+    laplace_fallbacks counts, per set, the (column, node) pairs the Laplace form handed
+    to that set's exact tile, plus one per set per doubles_dot call that did.
     """
 
     def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62',
@@ -769,6 +789,7 @@ class RIFoldDBSE2(RIFoldADC2):
             if om.shape != (rho.shape[1],):
                 raise ValueError(f'modes: omega of shape {om.shape} against rho '
                                  f'{rho.shape}; expected (nm,) with nm = rho.shape[1]')
+        _laplace_guard(form, comm, has71, mode_set, bare, dressed)
         self.sets, self.kernel, self.singles, self.form = sets, kernel, singles, form
         self.screening = None
         self.pair = _pieces.coupling_pairs(kernel, 'singlet')[0]
@@ -815,12 +836,6 @@ class RIFoldDBSE2(RIFoldADC2):
         self.m_op.kt, self.m_op.tiles, self.m_op.my_tiles = (self.kt, self.tiles,
                                                              self.my_tiles)
         if form == 'laplace':
-            if self.size > 1 or (has71 and self.f.Bvv is None):
-                raise NotImplementedError('the Laplace form runs on one rank with the '
-                                          'dressed B_vv whole')
-            if mode_set and self.m_op.f.Bvv is None:
-                raise NotImplementedError('the Laplace form runs on one rank with the '
-                                          'bare B_vv whole')
             if has71:
                 self.d_max = 2.0 * (self.f.ev.max() - self.f.eo.min())
                 self.g = _closure_coefficients(self.pair, spin)
@@ -872,6 +887,8 @@ class RIFoldDBSE2(RIFoldADC2):
             _, Bt = _pieces.dressed_factors(eps_hf, B, no)
             dressed = RIFactors.from_full(eps_gw, Bt, no)
         mode_set = 'eq61' in sets or 'eq66' in sets
+        _laplace_guard(kw.get('form', 'laplace'), kw.get('comm'), 'eq71' in sets,
+                       mode_set, bare, dressed)
         if mode_set and kw.get('modes') is None:
             kw['modes'] = gw_modes_df(eps_hf, B, no, screening)
         op = cls(bare, dressed, spin, **kw)
