@@ -87,8 +87,9 @@ from src.SingleReference.LinearResponse.linear_response import (
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 # the two lowest roots (Ha) of check 2's pieces on sets=('eq71',), singles='eq62+eq59',
-# solver newton at tol_omega 1e-12, measured at 64ff9c2 (milestone 2's close) on WSL:
-# test_ee_dbse2_fold_m0_roots_64ff9c2.txt beside its generator in the tooling repo
+# gw_like_uniform's energies, solver newton at tol_omega 1e-12, measured at 64ff9c2
+# (milestone 2's close) on WSL: test_ee_dbse2_fold_m0_roots_64ff9c2.txt beside its
+# generator in the tooling repo
 M0_ROOTS = {
     ('sto-3g', 'eq71', 'singlet'): (0.442968065932, 0.527190875894),
     ('sto-3g', 'eq71', 'triplet'): (0.370338072713, 0.445326163321),
@@ -122,7 +123,18 @@ def water(basis='6-31g'):
 
 
 def gw_like(eps, no):
-    """A deterministic stand-in for the G0W0 energies: the HF gap closed by 0.08 Ha."""
+    """A deterministic stand-in for the G0W0 energies: the HF gap closed by 0.08 Ha,
+    with an orbital-dependent part, so that a route confusing per-orbital GW energies
+    with a shifted HF set cannot pass."""
+    e = np.array(eps, float)
+    e[:no] += 0.03 + 0.002 * np.arange(no)
+    e[no:] -= 0.05 - 0.001 * np.arange(e.size - no)
+    return e
+
+
+def gw_like_uniform(eps, no):
+    """The uniform shift M0_ROOTS was measured with at 64ff9c2 (the HF gap closed by
+    0.08 Ha, no orbital-dependent part): the regression guard keeps its input."""
     e = np.array(eps, float)
     e[:no] += 0.03
     e[no:] -= 0.05
@@ -429,6 +441,39 @@ def transcription(Bt, eps_gw, no, omega, kernel):
     return {'singlet': S.reshape(ns, ns), 'triplet': Tt.reshape(ns, ns)}
 
 
+def transcription_printed_eq74(Bt, eps_gw, no, omega):
+    """Theta(omega) of the printed kernel straight from eq 74 as printed, W_pq,rs =
+    w(pr|qs), the four terms of eq74_fold_identity.py's eq74() as einsums on spin
+    orbitals (the same spin-orbital w as transcription), as the singlet and triplet
+    blocks in (ia, jb): the vertex table's independent check."""
+    n_sp = eps_gw.size
+    w_sp = np.einsum('Ppq,Prs->pqrs', Bt, Bt, optimize=True)
+    n = 2 * n_sp
+    idx = np.arange(n)
+    sp, sg = idx // 2, idx % 2
+    same = sg[:, None] == sg[None, :]
+    w = w_sp[np.ix_(sp, sp, sp, sp)] * same[:, :, None, None] * same[None, None, :, :]
+    eps = eps_gw[sp]
+    no2 = 2 * no
+    o, v = slice(0, no2), slice(no2, n)
+    eo, ev = eps[o], eps[v]
+    # - W_ac,bk W_jk,ic / (w - (e_a + e_c - e_k - e_j))
+    R1 = 1.0 / (omega - (ev[:, None, None, None] + ev[None, :, None, None]
+                         - eo[None, None, :, None] - eo[None, None, None, :]))
+    t1 = -np.einsum('abck,jikc,ackj->iajb', w[v, v, v, o], w[o, o, o, v], R1)
+    # - W_ak,bc W_ki,cj / (w - (e_c + e_b - e_i - e_k))
+    t2 = -np.einsum('abkc,kcij,cbik->iajb', w[v, v, o, v], w[o, v, o, o], R1)
+    # + W_aj,cd W_cd,ib / (w - (e_c + e_d - e_j - e_i))
+    t3 = np.einsum('acjd,cidb,cdji->iajb', w[v, v, o, v], w[v, o, v, v], R1)
+    # + W_aj,kl W_kl,ib / (w - (e_a + e_b - e_k - e_l))
+    t4 = np.einsum('akjl,kilb,abkl->iajb', w[v, o, o, o], w[o, o, o, v], R1)
+    T = t1 + t2 + t3 + t4
+    S = T[::2, ::2, ::2, ::2] + T[::2, ::2, 1::2, 1::2]
+    Tt = T[::2, ::2, ::2, ::2] - T[::2, ::2, 1::2, 1::2]
+    ns = S.shape[0] * S.shape[1]
+    return {'singlet': S.reshape(ns, ns), 'triplet': Tt.reshape(ns, ns)}
+
+
 def transcription_eq61(eps, eps_gw, B, no, omega):
     """Theta^61(omega) = J.K + K.J on one spin block, (ns, ns) in (ia, jb), from
     gw_modes' dense W at the HF energies: J_ia,kcm = -delta_ac W^m_ik, K_ia,kcm =
@@ -490,6 +535,12 @@ def check_transcription(eps, B, no):
             ok &= check(d < 1e-11 and d0 < 1e-12,
                         f'{kernel} {spin}: Theta(omega) from the pieces equals the '
                         'transcription', f'max |d| {d:.1e} Ha, M {d0:.1e}')
+    # the vertex table against eq 74 as printed, term by term (tests I1 of milestone 1)
+    paper = transcription_printed_eq74(Bt, eps_gw, no, omega)
+    for spin in ('singlet', 'triplet'):
+        d = float(np.max(np.abs(ref['printed'][spin] - paper[spin])))
+        ok &= check(d < 1e-11, f"printed {spin}: the vertex table's Theta equals eq "
+                    "74's four terms as printed", f'max |d| {d:.1e} Ha')
     d1 = float(np.max(np.abs(ref['eq71']['triplet'])))
     d2 = float(np.max(np.abs(got['eq71', 'triplet'])))
     ok &= check(d1 < 1e-12 and d2 < 1e-12, "eq71: Theta has no triplet part",
@@ -598,7 +649,7 @@ def check_fold_vs_unfolded(basis):
     eps, B, no = water(basis)
     nv = len(eps) - no
     ns = no * nv
-    eps_gw = gw_like(eps, no)
+    eps_gw = gw_like_uniform(eps, no)
     for sets in ee_dbse2_pieces.SETS:
         tag = '+'.join(sets)
         solvers = [('newton', 'newton', 0), ('davidson', 'davidson', 0),
