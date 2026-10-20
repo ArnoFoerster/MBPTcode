@@ -24,6 +24,7 @@ import scipy.signal
 import resource
 
 from pyscf.data.elements import chemcore
+from src.SingleReference.CC.diis import DIIS
 from src.Base.pyscf_interface import (get_orbital_energies,
                                       get_two_electron_integrals_chemist)
 from src.Base.utils.time_frequency import (TimeFrequencyGrid)
@@ -34,16 +35,16 @@ from src.Base.utils.analyticalContinuation import pade_continue_elementwise
 
 # --- Convergence parameters ---
 # Outer scGW cycle
-GAMMA_CONVERGENCE = 1e-6    # max |gamma - gamma_old| at which the cycle stops
-GAMMA_MIXING = 0.3          # fraction of the new gamma kept in each iteration
-F_MIXING = 0.1
-MU_CONVERGENCE = 1e-3       # max change of mu between repeated mu searches
-MAX_SCF_ITER = 100          # cap on scGW iterations
-MAX_MU_ITER = 50            # cap on repeated mu searches per scGW iteration
+RESIDUAL_CONVERGENCE = 1e-7 # max |Sigma_out - Sigma_in|, |F_out - F_in| at which the cycle stops
+LINEAR_MIXING = 1.0         # fraction of the new (Sigma, F) kept in linear-mixing steps
+DIIS_SIZE = 8               # DIIS subspace; 0 mixes linearly throughout
+DIIS_START = 3              # linear-mixing iterations before DIIS takes over
+MAX_SCF_ITER = 150          # cap on scGW iterations
 
 # mu search (mu_cycle)
 MU_STEP = 1e-6              # first step away from the starting mu
 TRACE_TOL = 1e-8            # |Tr[gamma] - nocc| at which mu is converged
+MU_KEEP_TOL = 1e-6          # |Tr[gamma] - nocc| at the incoming mu below which no search is done
 MU_TOL = 1e-10              # smallest bisection bracket width
 STALL_TRACE_TOL = 1e-4      # |Tr[gamma] - nocc| still accepted at that width
 MAX_BRACKET_ITER = 50
@@ -150,8 +151,14 @@ def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
         return G, G_hf
 
 def build_Greal_from_F(freq_points, sigma_real, F, eta):
-    """Dyson equation on the real axis:
-    G(omega) = [(omega + i.eta) I - F - Sigma(omega)]^-1.
+    """Dyson equation just above the real axis, at z = omega + i.eta:
+    G(z) = [z I - F - Sigma(z)]^-1.
+
+    sigma_real must be Sigma evaluated at the same z = omega + i.eta, so eta
+    enters both terms. This is not double broadening: it is G at one complex
+    point, so every pole of G becomes a Lorentzian of half-width eta and height
+    Z / (pi * eta). Taking Sigma at omega + i0 instead would give widths Z * eta
+    and the same height 1 / (pi * eta) for every peak, whatever its weight.
 
     No mu here: sigma_real is expected on absolute real frequencies.
     """
@@ -175,37 +182,44 @@ def _mu_cycle_find_trace(mu, F, sigma_mo, grid_f, grid_kind='IR'):
 
     return np.trace(gamma), gamma, G
 
-def mu_cycle(mu, G, gamma, nocc, sigma_mo, V, h_mo,
-            mu_step=MU_STEP, trace_tol=TRACE_TOL, mu_tol=MU_TOL,
+def mu_cycle(mu, F, nocc, sigma_mo,
+            mu_step=MU_STEP, trace_tol=TRACE_TOL, keep_tol=MU_KEEP_TOL, mu_tol=MU_TOL,
             max_bracket_iter=MAX_BRACKET_ITER, max_bisect_iter=MAX_BISECT_ITER,
             grid_f=None, grid_kind='IR', stall_trace_tol=STALL_TRACE_TOL):
     """Find the mu for which Tr[gamma(mu)] = nocc.
 
-    F is built once from the incoming gamma and, like Sigma, kept fixed
-    during the search. Only then is Tr[gamma(mu)] monotonic in mu, which
-    bisection needs; rebuilding F at every trial mu made the trace jump.
-    The caller rebuilds F from the returned gamma.
+    F and Sigma are given by the caller and kept fixed during the search.
+    Only then is Tr[gamma(mu)] monotonic in mu, which bisection needs;
+    rebuilding F at every trial mu made the trace jump. Taking F as input
+    lets the caller mix F before the search, so the returned G is the Dyson
+    solution of the mixed F with the right particle number.
 
     Two phases:
       1. Step away from the starting mu, growing the step by 1.5x each time,
          until the trace crosses nocc.
       2. Bisect inside that bracket.
 
-    Converged when |trace - nocc| < trace_tol. If the bracket shrinks below
+    If the trace at the incoming mu is already within keep_tol of nocc, mu
+    is kept and no search is done. In a gapped system at large beta the
+    trace is nearly flat in mu inside the gap, so a trace error at the
+    1e-8 level of the IR density moves mu by ~1e-6 each search; mu then
+    drifts every scGW iteration and G(i.omega), which depends on mu
+    explicitly, never converges (seen on Ne/cc-pVDZ).
+
+    Once searching, converged when |trace - nocc| < trace_tol. If the bracket shrinks below
     mu_tol first, the result is still accepted when
     |trace - nocc| < stall_trace_tol; otherwise a RuntimeError is raised.
 
-    Returns (mu, G, gamma, F).
+    Returns (mu, G, gamma).
     """
-    F = build_new_F(gamma, V, h_mo)
     trace_old, gamma, G = _mu_cycle_find_trace(
         mu, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind,)
 
     # print(f'Trace before mu-cycle: {trace_old}')
 
-    if abs(trace_old - nocc) < trace_tol:
-        print('mu-cycle already converged within trace tolerance')
-        return mu, G, gamma, F
+    if abs(trace_old - nocc) < keep_tol:
+        print(f'mu_cycle: mu kept, |trace - nocc| = {abs(trace_old - nocc):.2e}')
+        return mu, G, gamma
 
     # --- Phase 1: bracket the root ---
     step = mu_step
@@ -236,13 +250,13 @@ def mu_cycle(mu, G, gamma, nocc, sigma_mo, V, h_mo,
 
         if abs(trace_mid - nocc) < trace_tol:
             print(f'mu_cycle converged: mu={mu_mid}, trace={trace_mid}')
-            return mu_mid, G_mid, gamma_mid, F
+            return mu_mid, G_mid, gamma_mid
 
         if abs(mu_hi - mu_lo) < mu_tol:
             if abs(trace_mid - nocc) < stall_trace_tol:
                 print(f'mu_cycle converged (bracket collapsed, trace within '
                      f'stall_trace_tol): mu={mu_mid}, trace={trace_mid}')
-                return mu_mid, G_mid, gamma_mid, F
+                return mu_mid, G_mid, gamma_mid
             raise RuntimeError(
                 f'mu_cycle: bisection bracket collapsed to width '
                 f'{abs(mu_hi - mu_lo):.2e} (< mu_tol={mu_tol:.1e}) with '
@@ -358,11 +372,43 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
     # that routine for the bare G0: agreement to 8e-9.
     return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, -0.5 * sigma_new
 
+def pack_sigma_F(sigma, F, sigma_weight=1.0):
+    """(Sigma, F) as one real vector, for DIIS.
+
+    Real and imaginary parts of Sigma are stored separately, so the plain
+    dot product of two such vectors is Re<e1|e2>, the DIIS inner product.
+    sigma_weight scales the Sigma block: it has nfreq times more entries
+    than F and would otherwise dominate the DIIS B-matrix. It is applied to
+    the error vectors only; the iterates are packed unweighted, so DIIS
+    combines them without unpacking the weight again.
+
+    sigma: (nfreq, nmo, nmo) complex. F: (nmo, nmo) real.
+    """
+    return np.concatenate([sigma_weight * sigma.real.ravel(),
+                           sigma_weight * sigma.imag.ravel(),
+                           F.ravel()])
+
+def unpack_sigma_F(x, sigma_shape):
+    """Inverse of `pack_sigma_F` (for sigma_weight = 1)."""
+    n = int(np.prod(sigma_shape))
+    sigma = (x[:n] + 1j * x[n:2 * n]).reshape(sigma_shape)
+    F = x[2 * n:].reshape(sigma_shape[1:])
+    return sigma, F
+
+def pack_G(G):
+    """G as one real vector for DIIS (real and imaginary parts, as in `pack_sigma_F`)."""
+    return np.concatenate([G.real.ravel(), G.imag.ravel()])
+
+def unpack_G(x, G_shape):
+    """Inverse of `pack_G`."""
+    n = int(np.prod(G_shape))
+    return (x[:n] + 1j * x[n:]).reshape(G_shape)
+
 def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_file=None, **kwargs):
     """Self-consistent GW quasiparticle energies on IR grids.
 
-    Starts from the mean-field G0, iterates Sigma, mu, the density and F to
-    self-consistency (convergence is on the density matrix), then continues
+    Starts from the mean-field G0, iterates Sigma and F to self-consistency
+    (DIIS on (Sigma, F), convergence on their residual), then continues
     Sigma to the real axis with Pade and takes the quasiparticle energies
     from the peaks of the spectral function A(omega) = -Tr[Im G(omega)] / pi.
     The total energy is the Galitskii-Migdal energy of the converged G and
@@ -376,7 +422,10 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     kwargs: `factors` (precomputed output of `separable_factors`) or
         `auxbasis` (used to build them); `beta` and `omega_max` override
         the IR grid parameters that are otherwise derived from mf's
-        orbital energies (e.g. to run different starts on the same grid).
+        orbital energies (e.g. to run different starts on the same grid);
+        `diis_size`, `diis_start` and `mixing` override DIIS_SIZE,
+        DIIS_START and LINEAR_MIXING; `mix` picks what is mixed, 'sigma_F'
+        (default) or 'G' (see the comment at the cycle).
 
     Returns (qpes, A, w_real, E_gm): the peak positions, the spectral
     function, the real frequency axis it is on, and the Galitskii-Migdal
@@ -472,76 +521,124 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         return G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D
 
     # --- Self-consistency cycle ---
-    # Per iteration: new Sigma from G, then repeat the mu search (which also
-    # rebuilds F, G and gamma) until mu stops moving, then mix gamma with the
-    # previous one (fraction alpha of the new).
-    delta_gamma = 999
-    gamma_convergence = GAMMA_CONVERGENCE
+    # mix='sigma_F': the iterate is the Dyson input x_in = (Sigma_in, F_in).
+    #   1. x_out = (Sigma[G], F[gamma[G]]) from the current G
+    #   2. residual r = x_out - x_in; stop when it is below tolerance
+    #   3. new x_in by linear mixing (first diis_start iterations, or when
+    #      the DIIS B-matrix is singular) or DIIS
+    #   4. mu search with x_in fixed -> G, gamma
+    # The mu search comes last, so every G is the Dyson solution of x_in with
+    # Tr[gamma] = nocc, and its GM energy is meaningful at every iteration.
+    #
+    # mix='G': the iterate is G_in (gamma_in = gamma[G_in] is linear in G,
+    # so mixing G mixes gamma as well).
+    #   1. Sigma[G_in], F[gamma_in], mu search -> G_out
+    #   2. residual r = G_out - G_in; stop when it is below tolerance
+    #   3. new G_in by linear mixing or DIIS
+    # Every G_out has Tr[gamma] = nocc and the mixing coefficients sum to 1,
+    # so G_in keeps the right particle number, but it is not the Dyson
+    # solution of any Sigma; the GM energy is that of G_out.
+    #
+    # mu itself is not mixed in either: the search fixes it from Sigma and F.
+    mix = kwargs.get('mix', 'sigma_F')
+    if mix not in ('sigma_F', 'G'):
+        raise ValueError(f"mix={mix!r}: choose 'sigma_F' or 'G'")
+    alpha = kwargs.get('mixing', LINEAR_MIXING)
+    diis_size = kwargs.get('diis_size', DIIS_SIZE)
+    diis_start = kwargs.get('diis_start', DIIS_START)
+    diis = DIIS(diis_size, start_iter=0) if diis_size > 0 else None
 
-    alpha = GAMMA_MIXING
-    alpha_F = F_MIXING
+    # Weight of the Sigma block in the DIIS error, see pack_sigma_F.
+    sigma_weight = 1.0 / np.sqrt(len(freq_points))
+    sigma_shape = sigma_new.shape
 
-    gamma = density_matrix_ir(G, grid_f)
+    sigma_in, F_in = sigma_new, F
+    mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                            grid_f=grid_f, grid_kind='IR')
 
-    print('\n----SCF----\n')
+    print(f'\n----SCF (mixing {mix})----\n')
 
-    for _ in range(MAX_SCF_ITER):
-        if delta_gamma <= gamma_convergence:
-            break
+    residual = np.inf
+    for it in range(MAX_SCF_ITER):
+        mu_old = mu
+        if mix == 'sigma_F':
+            # 1. Outputs from the current G
+            _, _, _, sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            F_out = build_new_F(gamma, V, h_mo)
 
-        gamma_old = gamma
-        sigma_old = sigma_new
+            # 2. Residual
+            r_sigma = sigma_out - sigma_in
+            r_F = F_out - F_in
+            res_sigma = np.max(np.abs(r_sigma))
+            res_F = np.max(np.abs(r_F))
+            residual = max(res_sigma, res_F)
+            print(f'Iteration {it}: residual Sigma: {res_sigma:.3e}, F: {res_F:.3e}')
+            if residual <= RESIDUAL_CONVERGENCE:
+                break
 
-        _, _, _, sigma_new = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            x_in = pack_sigma_F(sigma_in, F_in)
+            x_out = pack_sigma_F(sigma_out, F_out)
+            error = pack_sigma_F(r_sigma, r_F, sigma_weight)
+        else:
+            # 1. G_out from the current G_in
+            sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)[3]
+            F_in = build_new_F(gamma, V, h_mo)
+            mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                                            grid_f=grid_f, grid_kind='IR')
 
-        delta_sigma = np.max(np.abs(sigma_old - sigma_new))
+            # 2. Residual
+            res_G = np.max(np.abs(G_out - G))
+            res_gamma = np.max(np.abs(gamma_out - gamma))
+            residual = res_G
+            print(f'Iteration {it}: residual G: {res_G:.3e}, gamma: {res_gamma:.3e}')
+            if residual <= RESIDUAL_CONVERGENCE:
+                G, gamma = G_out, gamma_out
+                break
 
-        mu_pre_scf = mu
+            x_in = pack_G(G)
+            x_out = pack_G(G_out)
+            error = x_out - x_in
 
-        mu_convergence = MU_CONVERGENCE
+        # 3. Mix
+        x_new = None
+        if diis is not None and it >= diis_start:
+            try:
+                x_new = diis.compute_new_vec(x_out, error)
+                step = 'DIIS'
+            except np.linalg.LinAlgError:
+                # Near convergence the error vectors can become linearly
+                # dependent; take a linear step instead.
+                pass
+        if x_new is None:
+            x_new = x_in + alpha * (x_out - x_in)
+            step = f'linear (alpha = {alpha})'
 
-        # for _ in range(MAX_MU_ITER):
-        #     mu_old = mu
+        if mix == 'sigma_F':
+            sigma_in, F_in = unpack_sigma_F(x_new, sigma_shape)
 
-        #     mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
-        #                     sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+            # 4. Dyson + particle number
+            mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                                    grid_f=grid_f, grid_kind='IR')
+            G_dyson = G
+        else:
+            G = unpack_G(x_new, sigma_shape)
+            gamma = density_matrix_ir(G, grid_f)
+            G_dyson = G_out
 
-        #     if abs(mu_old - mu) <= mu_convergence:
-        #         break
-        # else:
-        #     raise RuntimeError(f'scGW: mu did not settle within {MAX_MU_ITER} '
-        #                        f'mu searches (last change {abs(mu_old - mu):.2e})')
-
-
-        # TESTING ONE MU CYCLE INSTEAD OF CONVERGING MU
-        mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
-                                   sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
-
-        # add mixing of F
-        F_old = F
-        F = build_new_F(gamma, V, h_mo)
-
-        F = alpha_F * F + (1 - alpha_F) * F_old
-
-        
-        print(f'Mu post mu_scf: {mu}')
-
-        gamma = alpha * gamma + (1 - alpha) * gamma_old
-
-        delta_gamma = np.max(np.abs(gamma - gamma_old))
-        delta_mu = abs(mu - mu_pre_scf)
-
-        # G is the Dyson solution for sigma_new, so this is the GM energy of
-        # the current iterate; it converges with the cycle.
-        E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
-        print(f'Delta gamma: {delta_gamma}\nDelta mu: {delta_mu}\nDelta Sigma: {delta_sigma}\n'
+        # G_dyson is the Dyson solution for sigma_in, so this is the GM
+        # energy of the current iterate; it converges with the cycle.
+        E_gm, E_c = galitskii_migdal_energy(G_dyson, sigma_in, V, h_mo, grid_f, e_nuc)
+        print(f'Step: {step}\nmu: {mu} (delta mu: {abs(mu - mu_old):.3e})\n'
               f'E_GM: {E_gm} (E_c: {E_c})\n\n')
     else:
-        if delta_gamma > gamma_convergence:
-            raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
-                               f'(delta gamma = {delta_gamma:.2e})')
+        raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
+                           f'(residual = {residual:.2e})')
 
     print('\n----END SCF----\n')
+
+    # G is the Dyson solution of (sigma_in, F_in); continue those to the real
+    # axis so G, F and Sigma below stay consistent.
+    sigma_new, F = sigma_in, F_in
 
     E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')

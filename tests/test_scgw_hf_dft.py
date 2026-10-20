@@ -115,6 +115,8 @@ def converged_gm_energy(mol, mf_start, **grid):
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
     _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
                                               factors=factors, **grid)
+    # _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+    #                                           factors=factors)
     return E_gm
 
 
@@ -151,6 +153,8 @@ def test_start_independence(mol, mf_hf, mf_dft, name):
 if __name__ == '__main__':
     # mol = gto.M(atom='Ne 0 0 0', basis='cc-pvdz', verbose=0)
     mol = gto.M(atom='N 0 0 0; N 0 0 1.0977', basis='cc-pvdz', verbose=0)
+    # mol = gto.M(atom='C 0 0 0; H 0.6276 0.6276 0.6276; H -0.6276 -0.6276 0.6276; H -0.6276 0.6276 -0.6276; H 0.6276 -0.6276 -0.6276',
+    #              basis = 'cc-pvdz', verbose = 0)
 
     mf_hf = scf.RHF(mol)
     mf_hf.conv_tol = 1e-10
