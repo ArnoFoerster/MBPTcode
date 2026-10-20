@@ -39,7 +39,9 @@ R is the same combination of the four images with the coefficients of I and J (K
 exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (_back_oo) and B~_vv
 (_back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact.
 
-form='laplace', the default (spec §2.6): 1/(D_K - ω) = Σ_t w_t exp(-τ_t (D_K - ω)) on
+form='laplace', the default where it runs (spec §2.6; form=None takes it on one rank
+with every B_vv whole and 'exact' with a warning otherwise): 1/(D_K - ω) =
+Σ_t w_t exp(-τ_t (D_K - ω)) on
 [min D - ω, max D - ω], the minimax grid of grids.minimax_time_grid sized by
 minimax_points_for_accuracy at kernel_laplace's relative target, 1/(D_K - ω)² with
 the weights w_t τ_t. The exponential splits into one-index weights, and every product
@@ -90,6 +92,8 @@ References
 E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eqs 59, 61, 62, 64, 71 to
 74.
 """
+import warnings
+
 import numpy as np
 
 from src.Base.constants import EE_RI_TILE_GB
@@ -691,23 +695,33 @@ class _DoublesDBSE2GPU:
             Zb[0], Zb[1], tau, wt, lo, coefs, self.square)]
 
 
-def _laplace_guard(form, comm, has71, mode_set, bare, dressed):
-    """The Laplace form's refusals, raised before any factor, mode or inner operator
-    is built: one rank, and the B_vv of each set in use whole (bare_factors keeps it
-    in auxiliary chunks, on one rank too)."""
-    if form != 'laplace':
-        return
+def _resolve_form(form, comm, has71, mode_set, bare, dressed):
+    """The form the operator runs: `form` as given (an unknown one raises
+    ValueError), or for None 'laplace' where it runs and 'exact' with a UserWarning
+    naming the reason otherwise. The Laplace closures run on one rank with the B_vv
+    of each set in use whole (bare_factors keeps it in auxiliary chunks, on one rank
+    too); an explicit 'laplace' that cannot run raises here, before any factor, mode
+    or inner operator is built."""
+    if form is not None and form not in FORMS:
+        raise ValueError(f"form={form!r}; expected one of {FORMS} or None")
+    if form == 'exact':
+        return form
+    reason = None
     if (1 if comm is None else comm.Get_size()) > 1:
-        raise NotImplementedError('the Laplace form runs on one rank; pass '
-                                  "form='exact' on several ranks")
-    if has71 and dressed is not None and dressed.Bvv is None:
-        raise NotImplementedError('the Laplace form runs on one rank with the dressed '
-                                  'B_vv whole, not in auxiliary chunks; pass '
-                                  "form='exact'")
-    if mode_set and bare.Bvv is None:
-        raise NotImplementedError('the Laplace form runs on one rank with the bare '
-                                  'B_vv whole, not in auxiliary chunks; pass '
-                                  "form='exact'")
+        reason = 'several ranks'
+    elif has71 and dressed is not None and dressed.Bvv is None:
+        reason = "eq 71's dressed B_vv in auxiliary chunks"
+    elif mode_set and bare.Bvv is None:
+        reason = "the mode set's bare B_vv in auxiliary chunks"
+    if reason is None:
+        return 'laplace'
+    if form == 'laplace':
+        raise NotImplementedError('the Laplace form runs on one rank with every B_vv '
+                                  f"whole, not with {reason}; pass form='exact'")
+    warnings.warn(f'form=None with {reason}: the Laplace form runs on one rank with '
+                  "every B_vv whole, so this operator takes form='exact'",
+                  UserWarning, stacklevel=3)
+    return 'exact'
 
 
 class RIFoldDBSE2(RIFoldADC2):
@@ -721,8 +735,10 @@ class RIFoldDBSE2(RIFoldADC2):
     the same energies, for eq 71's doubles and eq 59, None when neither is asked (else
     ValueError naming dressed). kernel : 'eq71' or 'printed' (ee_dbse2_pieces.KERNELS),
     eq 71's set's; singles : 'eq62' or 'eq62+eq59' (its SINGLES; beside eq 61's set
-    the latter counts the static W twice; dbse2 takes 'eq62'); form : 'laplace' (the
-    default) or 'exact' (FORMS, the module docstring) for every set in `sets`; sets :
+    the latter counts the static W twice; dbse2 takes 'eq62'); form : None (the
+    default: 'laplace' on one rank with every B_vv whole, else 'exact' with a
+    UserWarning naming the reason), 'laplace' (NotImplementedError where it cannot
+    run) or 'exact' (FORMS, the module docstring), for every set in `sets`; sets :
     one of SETS in any order, ('eq66',) level gw at the HF energies (no
     dressed factors, singles 'eq62', kernel unread; another set beside it names sets);
     modes : (omega (nm,), rho (naux, nm)) of gw_modes_df at the HF energies, required
@@ -743,7 +759,7 @@ class RIFoldDBSE2(RIFoldADC2):
     """
 
     def __init__(self, bare, dressed, spin, kernel='eq71', singles='eq62',
-                 form='laplace', sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB,
+                 form=None, sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB,
                  threads=None, comm=None, aux_chunk=None, device='cpu'):
         sets = tuple(sorted(sets))
         if sets not in SETS:
@@ -760,8 +776,6 @@ class RIFoldDBSE2(RIFoldADC2):
             raise ValueError(f"kernel={kernel!r}; expected one of {_pieces.KERNELS}")
         if singles not in _pieces.SINGLES:
             raise ValueError(f"singles={singles!r}; expected one of {_pieces.SINGLES}")
-        if form not in FORMS:
-            raise ValueError(f"form={form!r}; expected one of {FORMS}")
         if device not in DEVICES:
             raise ValueError(f'device={device!r}; expected one of {DEVICES}')
         if device == 'gpu' and cp is None:
@@ -789,7 +803,7 @@ class RIFoldDBSE2(RIFoldADC2):
             if om.shape != (rho.shape[1],):
                 raise ValueError(f'modes: omega of shape {om.shape} against rho '
                                  f'{rho.shape}; expected (nm,) with nm = rho.shape[1]')
-        _laplace_guard(form, comm, has71, mode_set, bare, dressed)
+        form = _resolve_form(form, comm, has71, mode_set, bare, dressed)
         self.sets, self.kernel, self.singles, self.form = sets, kernel, singles, form
         self.screening = None
         self.pair = _pieces.coupling_pairs(kernel, 'singlet')[0]
@@ -887,8 +901,8 @@ class RIFoldDBSE2(RIFoldADC2):
             _, Bt = _pieces.dressed_factors(eps_hf, B, no)
             dressed = RIFactors.from_full(eps_gw, Bt, no)
         mode_set = 'eq61' in sets or 'eq66' in sets
-        _laplace_guard(kw.get('form', 'laplace'), kw.get('comm'), 'eq71' in sets,
-                       mode_set, bare, dressed)
+        kw['form'] = _resolve_form(kw.get('form'), kw.get('comm'), 'eq71' in sets,
+                                   mode_set, bare, dressed)
         if mode_set and kw.get('modes') is None:
             kw['modes'] = gw_modes_df(eps_hf, B, no, screening)
         op = cls(bare, dressed, spin, **kw)

@@ -50,7 +50,9 @@ Checks:
      counted), also between two grid nodes in one fold_images call with the derivative
      on it; one grid serves the image and its derivative at one frequency; fold_images
      counts its M columns in matvecs; two Newton roots within 1e-8 Ha of the exact
-     form's; an unknown form raises ValueError, and the default form is 'laplace'.
+     form's; an unknown form raises ValueError; the default form resolves to 'laplace'
+     on one rank with every B_vv whole and to 'exact' with one UserWarning naming the
+     reason otherwise (a chunked bare B_vv; two simulated ranks through from_mo).
   9. the tile budget (_tile_bytes) bounds the peak traced by tracemalloc over one
      _tile_core call at two nodes and one _tile_overlap of two vectors, the Laplace
      budget (_laplace_bytes) the peak of one Laplace node, the mode budget
@@ -152,10 +154,12 @@ def h2(basis='sto-3g'):
 
 
 def gw_like(eps, no):
-    """A deterministic stand-in for the G0W0 energies: the HF gap closed by 0.08 Ha."""
+    """A deterministic stand-in for the G0W0 energies: the HF gap closed by 0.08 Ha,
+    with an orbital-dependent part, so that a route confusing per-orbital GW energies
+    with a shifted HF set cannot pass."""
     e = np.array(eps, float)
-    e[:no] += 0.03
-    e[no:] -= 0.05
+    e[:no] += 0.03 + 0.002 * np.arange(no)
+    e[no:] -= 0.05 - 0.001 * np.arange(e.size - no)
     return e
 
 
@@ -334,30 +338,31 @@ def check_ranks(eps, B, no):
     modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
     u = np.random.default_rng(5).standard_normal((no * (eps.size - no), 2))
 
-    def solve(o):
-        r = ee_fold.solve_folded(o.pieces(), 2, spin='singlet', dense_limit=0,
-                                 solver='newton')
-        return dict(omega=r.omega, t1=r.t1)
+    for spin in SPINS:
+        def solve(o, spin=spin):
+            r = ee_fold.solve_folded(o.pieces(), 2, spin=spin, dense_limit=0,
+                                     solver='newton')
+            return dict(omega=r.omega, t1=r.t1)
 
-    def rank(comm):
-        op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, 'singlet', kernel='printed',
-                                          form='exact', sets=('eq61', 'eq71'),
-                                          modes=modes, tile_gb=1e-9, threads=1,
-                                          comm=comm)
-        prod = op.apply(u, [0.3, 0.5])
-        return drive(op, solve), op.diag, prod
+        def rank(comm, spin=spin, solve=solve):
+            op = ee_dbse2_ri_fold.RIFoldDBSE2(bare, dressed, spin, kernel='printed',
+                                              form='exact', sets=('eq61', 'eq71'),
+                                              modes=modes, tile_gb=1e-9, threads=1,
+                                              comm=comm)
+            prod = op.apply(u, [0.3, 0.5])
+            return drive(op, solve), op.diag, prod
 
-    ser = rank(None)
-    for size in (2, 3):
-        outs = run_simulated(rank, size)
-        same = all(np.array_equal(o['omega'], ser[0]['omega'])
-                   and np.array_equal(o['t1'], ser[0]['t1'])
-                   and np.array_equal(d, ser[1])
-                   and np.array_equal(p[0], ser[2][0])
-                   and np.array_equal(p[1], ser[2][1])
-                   for o, d, p in outs)
-        ok &= check(same, f'eq61+eq71 printed singlet: {size} simulated ranks equal '
-                    'the serial run bit for bit')
+        ser = rank(None)
+        for size in (2, 3):
+            outs = run_simulated(rank, size)
+            same = all(np.array_equal(o['omega'], ser[0]['omega'])
+                       and np.array_equal(o['t1'], ser[0]['t1'])
+                       and np.array_equal(d, ser[1])
+                       and np.array_equal(p[0], ser[2][0])
+                       and np.array_equal(p[1], ser[2][1])
+                       for o, d, p in outs)
+            ok &= check(same, f'eq61+eq71 printed {spin}: {size} simulated ranks '
+                        'equal the serial run bit for bit')
     # eq 66's level on two ranks: the mode tile's rank loop with its square flag
     bare_hf = RIFactors.from_full(eps, B, no)
 
@@ -862,6 +867,31 @@ def check_laplace(eps, B, no):
                     str(err)[:70])
     ok &= check(make(eps_gw, eps, B, no, 'singlet').form == 'laplace',
                 'form: laplace by default')
+    # form=None where the Laplace form cannot run: 'exact' with one UserWarning naming
+    # the reason; on simulated ranks the form alone (warnings are per thread there)
+    chunked = RIFactors.from_full(eps_gw, B, no)
+    chunks = aux_chunks(chunked.naux, chunked.ev.size, 1)[0]
+    chunked.bvv_chunks = {c: np.ascontiguousarray(chunked.Bvv[:, p0:p1])
+                          for c, (p0, p1) in enumerate(chunks)}
+    chunked.Bvv = None
+    modes = ee_gw_pieces.gw_modes_df(eps, B, no, 'rpa')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        opc = ee_dbse2_ri_fold.RIFoldDBSE2(chunked, None, 'singlet', sets=('eq61',),
+                                           modes=modes)
+    ok &= check(opc.form == 'exact' and len(caught) == 1
+                and issubclass(caught[0].category, UserWarning)
+                and 'bare B_vv' in str(caught[0].message),
+                "form: None with the bare B_vv in chunks resolves to 'exact' with one "
+                'warning naming it',
+                str(caught[0].message)[:70] if caught else 'no warning')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)  # emitted on the ranks' threads
+        forms = run_simulated(lambda comm: make(eps_gw, eps, B, no, 'singlet',
+                                                comm=comm).form, 2)
+    ok &= check(forms == ['exact', 'exact'],
+                "form: None on two simulated ranks resolves to 'exact' through from_mo",
+                str(forms))
     return ok
 
 
