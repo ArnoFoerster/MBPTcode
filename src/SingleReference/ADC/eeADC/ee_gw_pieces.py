@@ -156,7 +156,7 @@ def gw_modes_df(eps, B, nocc, screening='tda'):
     Bov = B[:, :no, no:].reshape(B.shape[0], -1)          # B_P,jb, (P, jb)
     d = (eps[no:][None, :] - eps[:no][:, None]).ravel()   # Δ_jb = ε_b - ε_j
     # (ia|jb) = sum_P B_P,ia B_P,jb, times 2 for A (TDA), 4 for A + B (RPA)
-    # gram_product, not Bov.T @ Bov: that shape is the wheel's faulty syrk (L-21)
+    # gram_product, not Bov.T @ Bov: that shape is the wheel's faulty syrk
     C = (2.0 if screening == 'tda' else 4.0) * gram_product(Bov)
     C[np.diag_indices_from(C)] += d
     if screening == 'tda':
