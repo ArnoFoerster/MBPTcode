@@ -45,8 +45,7 @@ def sigma_switched_off():
     original = scgw.calc_new_sigma_ir
 
     def zero_sigma(G, grid_f, grid_b, X_mo, D):
-        G_tau, chi_omega, W_omega, sigma = original(G, grid_f, grid_b, X_mo, D)
-        return G_tau, chi_omega, W_omega, np.zeros_like(sigma)
+        return np.zeros_like(original(G, grid_f, grid_b, X_mo, D))
 
     scgw.calc_new_sigma_ir = zero_sigma
     try:

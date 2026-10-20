@@ -150,7 +150,7 @@ def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
             G_hf[k] = np.linalg.inv((G_hf_inv))
         return G, G_hf
 
-def build_Greal_from_F(freq_points, sigma_real, F, eta):
+def build_Greal_from_F(freq_points, sigma_real, F, eta, trace_only=False):
     """Dyson equation just above the real axis, at z = omega + i.eta:
     G(z) = [z I - F - Sigma(z)]^-1.
 
@@ -161,11 +161,20 @@ def build_Greal_from_F(freq_points, sigma_real, F, eta):
     and the same height 1 / (pi * eta) for every peak, whatever its weight.
 
     No mu here: sigma_real is expected on absolute real frequencies.
+
+    trace_only: return Tr[G(z)] per frequency instead of the full G, so the
+    (nfreq, nmo, nmo) array is never stored.
     """
 
-    G_w = np.empty_like(sigma_real)
     eye = np.eye(F.shape[0])
 
+    if trace_only:
+        tr_G = np.empty(len(freq_points), dtype=complex)
+        for i, w in enumerate(freq_points):
+            tr_G[i] = np.trace(np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i]))
+        return tr_G
+
+    G_w = np.empty_like(sigma_real)
     for i,w in enumerate(freq_points):
         G_w[i] = np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i])
 
@@ -220,6 +229,7 @@ def mu_cycle(mu, F, nocc, sigma_mo,
     if abs(trace_old - nocc) < keep_tol:
         print(f'mu_cycle: mu kept, |trace - nocc| = {abs(trace_old - nocc):.2e}')
         return mu, G, gamma
+    del G, gamma
 
     # --- Phase 1: bracket the root ---
     step = mu_step
@@ -236,15 +246,17 @@ def mu_cycle(mu, F, nocc, sigma_mo,
             break
         mu_a, trace_a = mu_b, trace_b
         step *= 1.5
+        del G_b, gamma_b
     else:
         raise RuntimeError(f'mu_cycle: failed to bracket nocc={nocc} '
                            f'within {max_bracket_iter} probes')
 
     # --- Phase 2: bisection ---
     mu_lo, mu_hi, trace_lo = mu_a, mu_b, trace_a
-    gamma_mid, G_mid = gamma_b, G_b
+    del G_b, gamma_b
     for _ in range(max_bisect_iter):
         mu_mid = 0.5 * (mu_lo + mu_hi)
+        G_mid = gamma_mid = None  # free the previous trial before building the next
         trace_mid, gamma_mid, G_mid = _mu_cycle_find_trace(
             mu_mid, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind)
 
@@ -287,7 +299,7 @@ def project_tau_cross(src_grid, dst_grid, f_src, dim, parity):
     flat = f_src.reshape(ntau_src, dim * dim).T               # (dim*dim, ntau_src)
     return src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T.reshape(-1, dim, dim)
 
-def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
+def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
 
     Steps: G -> chi = G*G -> W = [I - chi]^-1 -> Sigma = G*W. The products
@@ -298,8 +310,10 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
 
     G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
     X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
+    return_all: also return the intermediates; otherwise only sigma_new is
+        returned and chi, W and G(tau) are freed as soon as they are used.
 
-    Returns (G_tau, chi_omega, W_omega, sigma_new):
+    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new):
       G_tau      G_lesser + 1j*G_greater, on grid_f.tau_points
       chi_omega  on grid_b.omega_points, auxiliary basis
       W_omega    on grid_b.omega_points, auxiliary basis
@@ -314,18 +328,18 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
     # chi lives on the boson grid, so move G onto the boson tau points.
     G_even_b = project_tau_cross(grid_f, grid_b, G_even_f, nmo, 'even')
     G_odd_b = project_tau_cross(grid_f, grid_b, G_odd_f, nmo, 'odd')
-    G_lesser_b = G_even_b - G_odd_b
-    G_greater_b = G_even_b + G_odd_b
 
-    # MO basis -> ISDF/THC grid.
-    Ghat_lesser_b = np.einsum('pi,tij,qj->tpq', X_mo, G_lesser_b, X_mo, optimize=True)
-    Ghat_greater_b = np.einsum('pi,tij,qj->tpq', X_mo, G_greater_b, X_mo, optimize=True)
+    # MO basis -> ISDF/THC grid (lesser = even - odd, greater = even + odd).
+    Ghat_lesser_b = np.einsum('pi,tij,qj->tpq', X_mo, G_even_b - G_odd_b, X_mo, optimize=True)
+    Ghat_greater_b = np.einsum('pi,tij,qj->tpq', X_mo, G_even_b + G_odd_b, X_mo, optimize=True)
+    del G_even_b, G_odd_b
 
     # chi(i.omega) from the dressed G. The minus on Gv matches the sign
     # convention chi0_imaginary_frequency uses for its bare Go/Gv. eps and
     # nocc are not needed when Go/Gv are passed, hence None.
     chi_omega = chi0_imaginary_frequency(X_mo, D, None, None, grid_b,
                                          Go=Ghat_greater_b, Gv=-Ghat_lesser_b)
+    del Ghat_lesser_b, Ghat_greater_b
 
     # W = [I - chi]^-1 at each frequency.
     naux = chi_omega.shape[-1]
@@ -333,44 +347,56 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
     W_omega = np.empty_like(chi_omega)
     for k in range(chi_omega.shape[0]):
         W_omega[k] = np.linalg.inv(eye_aux - chi_omega[k])
+    if not return_all:
+        del chi_omega
 
     # W(i.omega) -> W(tau). Only the correlation part W - I is transformed
     # (the constant does not decay), and it is even, so cosine only.
     Wt_tau_b = np.einsum('tk,kab->tab', grid_b.cosft_tw, W_omega - eye_aux, optimize=True)
+    if not return_all:
+        del W_omega
 
     # Sigma lives on the fermion grid, so move W onto the fermion tau points.
     Wt_tau_f = project_tau_cross(grid_b, grid_f, Wt_tau_b, naux, 'even')
+    del Wt_tau_b
 
     # Auxiliary basis -> ISDF/THC grid.
     Zt_tau = np.einsum('Pa,tab,Qb->tPQ', D, Wt_tau_f, D, optimize=True)
-
-    # G on the ISDF/THC grid at the fermion tau points, straight from the
-    # fermion-grid G rather than projecting the boson-grid copy back.
-    Ghat_lesser_f = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f - G_odd_f, X_mo, optimize=True)
-    Ghat_greater_f = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f + G_odd_f, X_mo, optimize=True)
+    del Wt_tau_f
 
     # Sigma(tau) = G(tau) * W(tau), elementwise on the ISDF/THC grid. Unlike
-    # chi, no extra sign is needed here.
-    sig_lesser_thc = Zt_tau * Ghat_lesser_f
-    sig_greater_thc = Zt_tau * Ghat_greater_f
+    # chi, no extra sign is needed here. G is taken on the ISDF/THC grid at
+    # the fermion tau points straight from the fermion-grid G rather than
+    # projecting the boson-grid copy back. Lesser and greater are done one
+    # after the other and multiplied in place, so at most two
+    # (ntau, ngrid, ngrid) arrays are alive at once.
+    sig_thc = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f - G_odd_f, X_mo, optimize=True)
+    sig_thc *= Zt_tau
+    sig_lesser = np.einsum('pi,tpq,qj->tij', X_mo, sig_thc, X_mo, optimize=True)
+    del sig_thc
 
-    # ISDF/THC grid -> MO basis.
-    sig_lesser = np.einsum('pi,tpq,qj->tij', X_mo, sig_lesser_thc, X_mo, optimize=True)
-    sig_greater = np.einsum('pi,tpq,qj->tij', X_mo, sig_greater_thc, X_mo, optimize=True)
+    sig_thc = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f + G_odd_f, X_mo, optimize=True)
+    sig_thc *= Zt_tau
+    sig_greater = np.einsum('pi,tpq,qj->tij', X_mo, sig_thc, X_mo, optimize=True)
+    del sig_thc, Zt_tau
 
     even = sig_greater + sig_lesser
     odd = sig_greater - sig_lesser
+    del sig_lesser, sig_greater
 
     # Sigma(tau) -> Sigma(i.omega) on the fermion grid.
-    sigma_new = (np.einsum('wt,tij->wij', grid_f.cosft_wt, even, optimize=True)
-                + 1j * np.einsum('wt,tij->wij', grid_f.sinft_wt, odd, optimize=True))
-
-    G_lesser_f = G_even_f - G_odd_f
-    G_greater_f = G_even_f + G_odd_f
     # Overall prefactor -0.5, the same normalization as
     # self_energy_matrix_imaginary_time (imaginary_time.py). Checked against
     # that routine for the bare G0: agreement to 8e-9.
-    return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, -0.5 * sigma_new
+    sigma_new = -0.5 * (np.einsum('wt,tij->wij', grid_f.cosft_wt, even, optimize=True)
+                        + 1j * np.einsum('wt,tij->wij', grid_f.sinft_wt, odd, optimize=True))
+
+    if not return_all:
+        return sigma_new
+
+    G_lesser_f = G_even_f - G_odd_f
+    G_greater_f = G_even_f + G_odd_f
+    return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, sigma_new
 
 def pack_sigma_F(sigma, F, sigma_weight=1.0):
     """(Sigma, F) as one real vector, for DIIS.
@@ -392,7 +418,8 @@ def unpack_sigma_F(x, sigma_shape):
     """Inverse of `pack_sigma_F` (for sigma_weight = 1)."""
     n = int(np.prod(sigma_shape))
     sigma = (x[:n] + 1j * x[n:2 * n]).reshape(sigma_shape)
-    F = x[2 * n:].reshape(sigma_shape[1:])
+    # Copy, so F does not keep the whole packed vector x alive as a view.
+    F = x[2 * n:].reshape(sigma_shape[1:]).copy()
     return sigma, F
 
 def pack_G(G):
@@ -492,7 +519,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     print(f'boson   duality_error (even/odd) = '
             f'{grid_b.duality_error("even"):.2e} / {grid_b.duality_error("odd"):.2e}\n')
 
-    X_mo, D, X_ao, coords = (kwargs.get('factors') if kwargs.get('factors') is not None
+    X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
                                 else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis')))
 
     # --- First iteration: G0 -> gamma, Sigma -> F -> G ---
@@ -507,8 +534,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     gamma = density_matrix_ir(G0, grid_f)
     print(f'Trace gamma_G0: {np.trace(gamma)}, expected nocc: {nocc}\n')
 
-    _, _, _, sigma_new = calc_new_sigma_ir(
-        G0, grid_f, grid_b, X_mo, D)
+    sigma_new = calc_new_sigma_ir(G0, grid_f, grid_b, X_mo, D)
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
     V = get_two_electron_integrals_chemist(mol,mf)
@@ -519,6 +545,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     if skip_scf:
         return G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D
+    del G0
 
     # --- Self-consistency cycle ---
     # mix='sigma_F': the iterate is the Dyson input x_in = (Sigma_in, F_in).
@@ -553,6 +580,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     sigma_shape = sigma_new.shape
 
     sigma_in, F_in = sigma_new, F
+    del sigma_new, F, G, gamma
     mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                             grid_f=grid_f, grid_kind='IR')
 
@@ -563,7 +591,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         mu_old = mu
         if mix == 'sigma_F':
             # 1. Outputs from the current G
-            _, _, _, sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
             F_out = build_new_F(gamma, V, h_mo)
 
             # 2. Residual
@@ -574,14 +602,16 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
             residual = max(res_sigma, res_F)
             print(f'Iteration {it}: residual Sigma: {res_sigma:.3e}, F: {res_F:.3e}')
             if residual <= RESIDUAL_CONVERGENCE:
+                del sigma_out, F_out, r_sigma, r_F
                 break
 
             x_in = pack_sigma_F(sigma_in, F_in)
             x_out = pack_sigma_F(sigma_out, F_out)
             error = pack_sigma_F(r_sigma, r_F, sigma_weight)
+            del sigma_out, F_out, r_sigma, r_F
         else:
             # 1. G_out from the current G_in
-            sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)[3]
+            sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
             F_in = build_new_F(gamma, V, h_mo)
             mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                                             grid_f=grid_f, grid_kind='IR')
@@ -593,6 +623,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
             print(f'Iteration {it}: residual G: {res_G:.3e}, gamma: {res_gamma:.3e}')
             if residual <= RESIDUAL_CONVERGENCE:
                 G, gamma = G_out, gamma_out
+                del G_out, gamma_out
                 break
 
             x_in = pack_G(G)
@@ -612,9 +643,11 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         if x_new is None:
             x_new = x_in + alpha * (x_out - x_in)
             step = f'linear (alpha = {alpha})'
+        del x_in, x_out, error
 
         if mix == 'sigma_F':
             sigma_in, F_in = unpack_sigma_F(x_new, sigma_shape)
+            del x_new, G, gamma
 
             # 4. Dyson + particle number
             mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
@@ -624,12 +657,14 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
             G = unpack_G(x_new, sigma_shape)
             gamma = density_matrix_ir(G, grid_f)
             G_dyson = G_out
+            del x_new, G_out, gamma_out
 
         # G_dyson is the Dyson solution for sigma_in, so this is the GM
         # energy of the current iterate; it converges with the cycle.
         E_gm, E_c = galitskii_migdal_energy(G_dyson, sigma_in, V, h_mo, grid_f, e_nuc)
         print(f'Step: {step}\nmu: {mu} (delta mu: {abs(mu - mu_old):.3e})\n'
               f'E_GM: {E_gm} (E_c: {E_c})\n\n')
+        del G_dyson
     else:
         raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
                            f'(residual = {residual:.2e})')
@@ -642,6 +677,10 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
+
+    # Nothing from the cycle is needed on the real axis; free it before the
+    # (large) real-frequency arrays are allocated.
+    del V, h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
@@ -665,8 +704,9 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
         f'{np.max(np.abs(pade_continue_elementwise(z_fit, sigma_new, z_fit, symmetric=True, max_order=pade_max_order) - sigma_new))}\n')
 
-    G_w = build_Greal_from_F(w_real, sigma_real, F, eta)
-    A = -1/np.pi * np.trace(G_w, axis1=1, axis2=2).imag
+    tr_G_w = build_Greal_from_F(w_real, sigma_real, F, eta, trace_only=True)
+    del sigma_real
+    A = -1/np.pi * tr_G_w.imag
 
     if save_file is not None:
         np.savetxt(save_file, (w_real, A), delimiter=',')
