@@ -95,6 +95,7 @@ GPU_SYSTEMS = {'h2': ('H 0 0 0; H 0 0 0.74', 'sto-3g', False),
 
 
 def check(ok, label, detail=''):
+    """Print one verdict line and return `ok` as a bool."""
     print(f"  [{'ok' if ok else 'FAIL'}] {label}"
           + (f'   ({detail})' if detail else ''))
     return bool(ok)

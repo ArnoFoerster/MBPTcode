@@ -1219,6 +1219,7 @@ def check_budget(eps, B, no):
 
 
 def main():
+    """Run the checks in order on water/6-31G and print the file's verdict."""
     eps, B, no = water('6-31g')
     ok = True
     print('check 1: the operator against the pieces route (6-31G)')
