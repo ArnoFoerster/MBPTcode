@@ -34,8 +34,8 @@ by Newton, or per root by Newton alone (solver='newton'),
 with a fixed-point fallback ω_{k+1} = λ(ω_k), DIIS-accelerated, when T1 falls
 under t_min (a doubles element near ω makes the derivative unreliable). This
 is the shape of Turbomole's RI-CC2 solver on the ADC operator; the doubles
-vector exists only inside one matvec. fold_step takes this step once from a static
-start with the vector frozen (Monino and Loos eqs 40 to 43).
+vector exists only inside one matvec. fold_step takes the Newton step once from a
+static start with the vector frozen (Monino and Loos eqs 40 to 43).
 
 Flat singles vectors here are the singles segments of ee_r_sigma's layout,
 length 2 no nv (aa block then bb block); with a spin channel, the channel basis
@@ -44,7 +44,7 @@ of ee_spin_adapt.channel_basis at the singles layout (level 'adc1').
 References
 ----------
 E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eq 53 (gf2), eq 66
-(gw).
+(gw), eqs 40 to 43 (fold_step).
 C. Hättig and F. Weigend, J. Chem. Phys. (2000), doi:10.1063/1.1290013 (the
 folded-doubles solver of RI-CC2).
 """
@@ -539,12 +539,13 @@ def fold_step(pieces, omega0, spin, x, static=None):
         ζ = 1 / (1 − x·(dA_eff/dω)(ω0)·x)
           = 1 / (1 + sum_K (sum_jb V_K,jb x_jb)² / (D_K − ω0)²),
 
-    the Newton step of λ(ω) = ω with the vector held at x (ζ is _eig_at's T1 at
-    (ω0, x)), QuAcK's dynamical-TDA correction; x enters as given, so a unit TDA
-    eigenvector gives the TDA step and QuAcK's Casida X in the metric
-    X·X − Y·Y = 1 the ABBA step, its factor X·X = 1 + Y·Y the caller's to report;
-    on a signed level ζ is not confined to (0, 1]: each term of the sum over K
-    carries the sign of its doubles copy, as T1 does.
+    QuAcK's dynamical-TDA correction (ζ is _eig_at's T1 at (ω0, x)); for x a unit
+    eigenvector of A_static and static = ω0 it is the Newton step of λ(ω) = ω with
+    the vector held at x. x enters as given, so a unit TDA eigenvector gives the TDA
+    step and QuAcK's Casida X in the metric X·X − Y·Y = 1 the ABBA step (QuAcK's
+    first-order formula, not a Newton step), its factor X·X = 1 + Y·Y the caller's
+    to report; on a signed level ζ is not confined to (0, 1]: each term of the sum
+    over K carries the sign of its doubles copy, as T1 does.
 
     Parameters
     ----------
@@ -558,7 +559,8 @@ def fold_step(pieces, omega0, spin, x, static=None):
         Start vector x_jb in the channel basis (folded_operator's), n = 2 no nv or
         the channel's size; not normalised here.
     static : float or None
-        x·A_static·x in Hartree; None means ω0, x an eigenpair of A_static.
+        x·A_static·x in Hartree; None means ω0, x a unit eigenvector of A_static
+        with eigenvalue ω0.
 
     Returns
     -------
@@ -573,6 +575,18 @@ def fold_step(pieces, omega0, spin, x, static=None):
     ------
     ValueError
         omega0 at or above min_K D_K, or x of another length than n.
+
+    Warns
+    -----
+    RuntimeWarning
+        1 − x·(dA_eff/dω)(ω0)·x ≤ 0, possible on a signed level: ζ is infinite
+        (at exactly 0) or negative and the step points away from the root.
+
+    Notes
+    -----
+    A_eff(ω) of the module docstring; A_static_ia,jb the matrix x was solved from:
+        δ = sum_ia,jb x_ia (A_eff(ω0)_ia,jb − A_static_ia,jb) x_jb ,
+        ζ = 1 / (1 + sum_K (sum_jb V_K,jb x_jb)² / (D_K − ω0)²) .
     """
     d_min = _d_min(pieces)
     if omega0 >= d_min:
@@ -585,8 +599,13 @@ def fold_step(pieces, omega0, spin, x, static=None):
         static = omega0
     # δ = sum_ia,jb x_ia A_eff(ω0)_ia,jb x_jb − x·A_static·x
     delta = float(x @ matvec(x)) - static
-    # the scalar dmatvec is -x·(dA_eff/dω)·x, the vector form's x @ dmatvec(x, True)
-    zeta = 1.0 / (1.0 + dmatvec(x))
+    # the scalar dmatvec is -x·(dA_eff/dω)·x, the negative of x @ dmatvec(x, True)
+    g = 1.0 + dmatvec(x)
+    if g <= 0.0:
+        warnings.warn(f'1 + dmatvec(x) = {g:.3e} <= 0 at omega0 = {omega0:.6f} Ha: '
+                      'zeta is infinite or negative, the step points away from the '
+                      'root', RuntimeWarning, stacklevel=2)
+    zeta = np.inf if g == 0.0 else 1.0 / g
     return omega0 + zeta * delta, zeta, delta
 
 

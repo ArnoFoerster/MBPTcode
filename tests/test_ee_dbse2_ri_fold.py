@@ -21,8 +21,9 @@ Checks:
      solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
      both kernels and both forms: roots to 1e-8 Ha, T1 to 1e-8, every root converged
      (eq 71's triplet is M alone on both routes), and fold_step from the newton root's
-     vector at 0.9 of its frequency gives the same step, zeta and delta on both routes
-     to 1e-10, delta moving with omega0.
+     vector at 0.9 of its frequency and 0.05 Ha above, static that frequency on every
+     call, gives the same step, zeta and delta on both routes to 1e-10, delta moving
+     by more than DELTA_MOVE between the two (exactly zero without doubles).
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
      equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, both
      spins: products and signed norms at two frequencies, the diagonal, two Newton
@@ -123,6 +124,10 @@ SINGLES = ('eq62', 'eq62+eq59')
 SPINS = ('singlet', 'triplet')
 # the sets of the pieces route, the operator's SETS without eq 66's level
 SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'))
+# Ha: check 2's control, |delta(omega0) - delta(omega0 + 0.05)| at static=omega0, one
+# decade below the smallest row with doubles, 7.59e-5 on eq71 eq71 singlet (WSL,
+# 2026-10-21)
+DELTA_MOVE = 7.5e-6
 
 
 def zero_doubles(kernel, spin, sets):
@@ -336,19 +341,25 @@ def check_solves(eps, B, no):
                                 + ' '.join(f'{w:.6f}' for w in r.omega))
                     if solver == 'newton':
                         om0, x = 0.9 * float(ref.omega[0]), ref.y[:, 0]
-                        a = ee_fold.fold_step(P, om0, spin, x)
-                        b = ee_fold.fold_step(op.pieces(), om0, spin, x)
-                        c = ee_fold.fold_step(P, om0 + 0.05, spin, x)
-                        ok &= check(abs(a[0] - b[0]) < 1e-10
-                                    and abs(a[1] - b[1]) < 1e-10
-                                    and abs(a[2] - b[2]) < 1e-10
-                                    and abs(a[2] - c[2]) > 1e-3,
+                        # static=om0 throughout: a[2] - c[2] is the doubles'
+                        # omega-dependence of x.A_eff(omega).x alone
+                        a, b, c, e = (ee_fold.fold_step(Q, w, spin, x, static=om0)
+                                      for w in (om0, om0 + 0.05)
+                                      for Q in (P, op.pieces()))
+                        d3 = [max(abs(a[k] - b[k]), abs(c[k] - e[k])) for k in range(3)]
+                        moved = abs(a[2] - c[2])
+                        if zero_doubles(kernel, spin, sets):
+                            moves = moved == 0.0
+                        else:
+                            moves = moved > DELTA_MOVE
+                        ok &= check(max(d3) < 1e-10 and moves,
                                     f"{'+'.join(sets)} {kernel} {form} {spin}: "
-                                    'fold_step on the operator equals the pieces and '
-                                    'its delta moves with omega0',
-                                    f'{a[0] - b[0]:.1e} Ha, {a[1] - b[1]:.1e} on zeta, '
-                                    f'{a[2] - b[2]:.1e} on delta, '
-                                    f'{a[2] - c[2]:.1e} Ha per 0.05')
+                                    'fold_step on the operator equals the pieces at '
+                                    'omega0 and omega0 + 0.05 Ha, its delta moves '
+                                    'with omega0 (zero without doubles)',
+                                    f'{d3[0]:.1e} Ha, {d3[1]:.1e} on zeta, '
+                                    f'{d3[2]:.1e} on delta, |a[2] - c[2]| '
+                                    f'{moved:.3e} Ha per 0.05')
     return ok
 
 

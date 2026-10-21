@@ -66,17 +66,20 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
   6. fold_step, H2O/cc-pVDZ at QuAcK's G0W0 energies, printed kernel: static, step,
      correction (eV) and zeta equal QuAcK's TDA dBSE2 singlet and (QuAcK's triplet
      carries the singlet's Theta) the 2026-10-18 triplet record to 1e-5; control: eq
-     71's step is not QuAcK's; identities in static and |x|; stationary at the root.
+     71's step is not QuAcK's; identities in static and |x|; stationary at the root;
+     on hand-built signed pieces with 1 + dmatvec(x) < 0 one RuntimeWarning, no raise.
 
 Run: python tests/test_ee_dbse2_fold.py
 """
 import collections
 import contextlib
 import io
+import math
 import os
 import re
 import sys
 import time
+import warnings
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -847,8 +850,9 @@ def check_step():
                 "QuAcK's", f'{dc:.1e} eV away')
     P, om0, x, om, zeta, delta = rows['printed', 'singlet']
     same = ee_fold.fold_step(P, om0, 'singlet', x, static=om0)
-    ok &= check(same == (om, zeta, delta), 'printed singlet: static=omega0 is the '
-                'default, exactly')
+    ok &= check(all(math.isclose(s, r, rel_tol=1e-15, abs_tol=0.0)
+                    for s, r in zip(same, (om, zeta, delta))),
+                'printed singlet: static=omega0 is the default, to 1e-15 relative')
     d = abs(ee_fold.fold_step(P, om0, 'singlet', x, static=om0 + 0.01)[0]
             - (om - zeta * 0.01))
     ok &= check(d < 1e-12, 'printed singlet: static raised by 0.01 Ha moves the step '
@@ -877,7 +881,48 @@ def check_step():
         ok &= check(False, 'x of another length raises ValueError')
     except ValueError as exc:
         ok &= check(True, 'x of another length raises ValueError', str(exc)[:70])
-    return ok
+    return ok & check_step_signed()
+
+
+def check_step_signed():
+    """fold_step on hand-built signed pieces, no = nv = 1, one '-' copy of one double
+    with V_K,jb = 1 and D_K = 1 Ha: at omega0 = 0.5 Ha, x = (1, 0),
+    1 + dmatvec(x) = 1 - 1 / (1 - 0.5)^2 = -3, so exactly one RuntimeWarning and no
+    exception."""
+    from src.SingleReference.ADC.eeADC import ee_equations
+    Ma = np.full((1, 1, 1, 1), 0.4)
+    M = SB({'aaaa': Ma, 'bbbb': Ma.copy(), 'aabb': np.zeros_like(Ma),
+            'bbaa': np.zeros_like(Ma)})
+
+    def V(y1):
+        # Z_K = sum_jb V_K,jb y_jb on each spin block, V = 1
+        return SB({s: y1.get(s).ravel().copy() for s in ('aa', 'bb')})
+
+    def Vt(Z):
+        # the eta-transpose of the '-' copy: w_jb = -sum_K V_K,jb Z_K
+        return SB({s: -Z.get(s).reshape(1, 1) for s in ('aa', 'bb')})
+
+    def dnorm2(Z):
+        # the signed norm -|Z-|^2 of the '-' copy
+        return -float(sum(Z.get(s) @ Z.get(s) for s in ('aa', 'bb')))
+
+    P = {'M': M, 'V': V, 'Vt': Vt, 'D': np.array([1.0]), 'dnorm2': dnorm2,
+         'level': 'dbse2', 'no': 1, 'nv': 1, 'be': ee_equations.SPIN_BLOCKED}
+    x = np.array([1.0, 0.0])
+    g = 1.0 + ee_fold.folded_operator(P, 0.5, None)[1](x)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            om, zeta, delta = ee_fold.fold_step(P, 0.5, None, x)
+            err = ''
+        except Exception as exc:      # the row reports any raise
+            om = zeta = delta = None
+            err = f'{type(exc).__name__}: {exc}'
+    n_rt = sum(issubclass(w.category, RuntimeWarning) for w in caught)
+    return check(g <= 0.0 and not err and len(caught) == 1 and n_rt == 1,
+                 'signed pieces, 1 + dmatvec(x) <= 0: one RuntimeWarning, no '
+                 'exception', f'1 + dmatvec {g:+.6f}, {len(caught)} warnings, '
+                 f'zeta {zeta}, step {om}' + (f', {err}' if err else ''))
 
 
 def main():
