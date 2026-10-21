@@ -34,7 +34,8 @@ by Newton, or per root by Newton alone (solver='newton'),
 with a fixed-point fallback ω_{k+1} = λ(ω_k), DIIS-accelerated, when T1 falls
 under t_min (a doubles element near ω makes the derivative unreliable). This
 is the shape of Turbomole's RI-CC2 solver on the ADC operator; the doubles
-vector exists only inside one matvec.
+vector exists only inside one matvec. fold_step takes this step once from a static
+start with the vector frozen (Monino and Loos eqs 40 to 43).
 
 Flat singles vectors here are the singles segments of ee_r_sigma's layout,
 length 2 no nv (aa block then bb block); with a spin channel, the channel basis
@@ -529,6 +530,64 @@ def _eig_at(pieces, omega, spin, ref, dense, tol_residual, label):
               stacklevel=3)
     t1 = 1.0 / (1.0 + dmatvec(y))
     return lam, y, t1, embed, conv
+
+
+def fold_step(pieces, omega0, spin, x, static=None):
+    """The first-order dynamical step of Monino and Loos (eqs 40 to 43),
+
+        ω = ω0 + ζ (x·A_eff(ω0)·x − x·A_static·x),
+        ζ = 1 / (1 − x·(dA_eff/dω)(ω0)·x)
+          = 1 / (1 + sum_K (sum_jb V_K,jb x_jb)² / (D_K − ω0)²),
+
+    the Newton step of λ(ω) = ω with the vector held at x (ζ is _eig_at's T1 at
+    (ω0, x)), QuAcK's dynamical-TDA correction; x enters as given, so a unit TDA
+    eigenvector gives the TDA step and QuAcK's Casida X in the metric
+    X·X − Y·Y = 1 the ABBA step, its factor X·X = 1 + Y·Y the caller's to report;
+    on a signed level ζ is not confined to (0, 1]: each term of the sum over K
+    carries the sign of its doubles copy, as T1 does.
+
+    Parameters
+    ----------
+    pieces : dict
+        folded_operator's pieces, any level.
+    omega0 : float
+        Start frequency in Hartree, below min_K D_K.
+    spin : {'singlet', 'triplet', None}
+        The channel x lives in.
+    x : ndarray, shape (n,)
+        Start vector x_jb in the channel basis (folded_operator's), n = 2 no nv or
+        the channel's size; not normalised here.
+    static : float or None
+        x·A_static·x in Hartree; None means ω0, x an eigenpair of A_static.
+
+    Returns
+    -------
+    omega : float
+        ω, Hartree.
+    zeta : float
+        ζ, dimensionless.
+    delta : float
+        x·A_eff(ω0)·x − static, Hartree, so that omega = omega0 + zeta delta.
+
+    Raises
+    ------
+    ValueError
+        omega0 at or above min_K D_K, or x of another length than n.
+    """
+    d_min = _d_min(pieces)
+    if omega0 >= d_min:
+        msg = (f'omega0 = {omega0:.6f} Ha at or above min D = {d_min:.6f} Ha; the '
+               'step needs omega0 below the doubles')
+        raise ValueError(msg)
+    matvec, dmatvec, diag_s, embed, restrict = folded_operator(pieces, omega0, spin)
+    x = _check_vector(x, diag_s.size)
+    if static is None:
+        static = omega0
+    # δ = sum_ia,jb x_ia A_eff(ω0)_ia,jb x_jb − x·A_static·x
+    delta = float(x @ matvec(x)) - static
+    # the scalar dmatvec is -x·(dA_eff/dω)·x, the vector form's x @ dmatvec(x, True)
+    zeta = 1.0 / (1.0 + dmatvec(x))
+    return omega0 + zeta * delta, zeta, delta
 
 
 def _subspace_pick(Y):

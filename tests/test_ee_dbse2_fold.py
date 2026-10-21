@@ -63,6 +63,10 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      HF gap), eps_gw of another length than B and nocc = norb raise ValueError naming
      the input; pieces at level 'dbse2' without dnorm2 raise ValueError in
      folded_operator.
+  6. fold_step, H2O/cc-pVDZ at QuAcK's G0W0 energies, printed kernel: static, step,
+     correction (eV) and zeta equal QuAcK's TDA dBSE2 singlet and (QuAcK's triplet
+     carries the singlet's Theta) the 2026-10-18 triplet record to 1e-5; control: eq
+     71's step is not QuAcK's; identities in static and |x|; stationary at the root.
 
 Run: python tests/test_ee_dbse2_fold.py
 """
@@ -80,6 +84,7 @@ import numpy as np
 import scipy.linalg
 from pyscf import gto, scf
 
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_fold, ee_gw_pieces
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
@@ -99,6 +104,24 @@ M0_ROOTS = {
     ('6-31g', 'printed', 'singlet'): (0.313226018723, 0.392848106734),
     ('6-31g', 'printed', 'triplet'): (0.286815570557, 0.347614467992),
 }
+# QuAcK mol/H2O.xyz, Angstrom; QuAcK's G0W0@RHF e_QP, eV, all 24 orbitals, full_bse.log
+# of 2026-09-25_quack-xcheck-h2o (the constant of test_bse2_static_kernel.py)
+QUACK_H2O = 'O 0.0000 0.0000 0.0000; H 0.7571 0.0000 0.5861; H -0.7571 0.0000 0.5861'
+QUACK_QP_EV = np.array([
+    -547.096903359, -33.376695376, -18.558315280, -14.436803319, -12.158825764,
+    4.708293937, 6.656989854, 20.360279319, 21.783506682, 30.406097434,
+    31.317121452, 32.403102704, 38.226762239, 39.069729540, 44.458840280,
+    49.498548274, 50.876928601, 65.959485567, 67.738625861, 88.744413957,
+    90.503059309, 95.157864951, 103.217832913, 112.841177294])
+# QuAcK's TDA dBSE2 on those energies (tda T, tda_w F, bse2 T, dbse T, dynamical TDA),
+# singlet row 1 of 'First-order dynamical correction' in
+# 2026-10-17_quack-xcheck-h2o-bse2dyn/tda_fullw_bse2_dyn.log: static, dynamic,
+# correction (eV), renormalisation factor
+QUACK_STEP_S1 = (8.759333, 8.616588, -0.142745, 1.012870)
+# the triplet with its own kernel, the inline formula's record of 2026-10-18
+# (2026-10-18_dbse2dyn-vs-quack-h2o-ccpvdz-eq61eq71-printed/result.json; QuAcK's triplet
+# carries the singlet's Theta, the recorded convention mismatch): the same four
+RECORD_STEP_T1 = (8.131480, 7.927939, -0.203541, 1.015818)
 # the mode sets: the ones that take the 'block' solver in check 2 and have no M0 row
 MODE_SETS = (('eq61',), ('eq61', 'eq71'))
 
@@ -780,6 +803,83 @@ def check_fold_vs_unfolded(basis):
     return ok
 
 
+def check_step():
+    """fold_step on H2O/cc-pVDZ at QuAcK's G0W0 energies, eqs 61 and 71 with the bare
+    singles: the printed kernel's step against QuAcK's singlet and the 2026-10-18
+    triplet record; the eq 71 kernel's step as the control; the identities in static
+    and in the norm of x; stationarity at the fold's root; the refusals."""
+    ev = HARTREE_TO_EV
+    mol = gto.M(atom=QUACK_H2O, basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-12
+    mf.kernel()
+    eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
+    no = mol.nelectron // 2
+    B = DFIntegrals.from_scf(mol, mf, exact=True).B_aa
+    eps_gw = QUACK_QP_EV / HARTREE_TO_EV
+    w_aux = static_screened_coulomb_aux(eps, B, no)
+    lr = LinearResponseSolver(eps_gw, coeff_df=B, spin_mode='restricted')
+    pins = {'singlet': QUACK_STEP_S1, 'triplet': RECORD_STEP_T1}
+    ok = True
+    rows = {}
+    for kernel in ('printed', 'eq71'):
+        P = ee_dbse2_pieces.build_pieces_dbse2(eps_gw, eps, B, no, kernel=kernel,
+                                               sets=('eq61', 'eq71'), singles='eq62')
+        for spin in ('singlet', 'triplet'):
+            A = lr.build_casida_matrices(no, lBSE=True, W_aux=w_aux,
+                                         triplet=spin == 'triplet')[0]
+            # the static Theta at the HF energies: QuAcK master's static convention
+            theta = static_second_order_kernel_df(eps, B, w_aux, no, eta=0.0,
+                                                  channel=spin, kernel=kernel)[0]
+            w0, X0 = np.linalg.eigh(A + theta)
+            om0, x = float(w0[0]), X0[:, 0]
+            om, zeta, delta = ee_fold.fold_step(P, om0, spin, x)
+            rows[kernel, spin] = (P, om0, x, om, zeta, delta)
+            if kernel != 'printed':
+                continue
+            got = (om0 * ev, om * ev, zeta * delta * ev, zeta)
+            d = max(abs(g - r) for g, r in zip(got, pins[spin]))
+            ok &= check(d < 1e-5, f'printed {spin}: static, step, correction (eV) and '
+                        'zeta equal the record', f'max |d| {d:.1e}, step '
+                        f'{om * ev:.6f} eV, zeta {zeta:.6f}')
+    dc = abs(rows['eq71', 'singlet'][3] * ev - QUACK_STEP_S1[1])
+    ok &= check(dc > 1e-3, "eq71 singlet: control, the crossed kernel's step is not "
+                "QuAcK's", f'{dc:.1e} eV away')
+    P, om0, x, om, zeta, delta = rows['printed', 'singlet']
+    same = ee_fold.fold_step(P, om0, 'singlet', x, static=om0)
+    ok &= check(same == (om, zeta, delta), 'printed singlet: static=omega0 is the '
+                'default, exactly')
+    d = abs(ee_fold.fold_step(P, om0, 'singlet', x, static=om0 + 0.01)[0]
+            - (om - zeta * 0.01))
+    ok &= check(d < 1e-12, 'printed singlet: static raised by 0.01 Ha moves the step '
+                'by -zeta 0.01', f'{d:.1e} Ha')
+    om2, z2, d2 = ee_fold.fold_step(P, om0, 'singlet', 2.0 * x, static=4.0 * om0)
+    r1 = abs(d2 - 4.0 * delta) / abs(4.0 * delta)
+    g4 = 4.0 * (1.0 / zeta - 1.0)
+    r2 = abs((1.0 / z2 - 1.0) - g4) / abs(g4)
+    ok &= check(max(r1, r2) < 1e-12, 'printed singlet: x doubled, static times 4: '
+                'delta and 1/zeta - 1 scale by 4', f'relative {r1:.1e}, {r2:.1e}')
+    res = ee_fold.solve_folded(P, 1, spin='singlet', tol_omega=1e-10)
+    om_f, y = float(res.omega[0]), res.y[:, 0]
+    om_n, z_n, d_n = ee_fold.fold_step(P, om_f, 'singlet', y)
+    dw, dz = abs(om_n - om_f), abs(z_n - res.t1[0])
+    ok &= check(dw < 1e-9 and abs(d_n) < 1e-9 and dz < 1e-10, 'printed singlet: '
+                "the step is stationary at the fold's root, zeta its T1",
+                f'|dw| {dw:.1e} Ha, |delta| {abs(d_n):.1e} Ha, |dzeta| {dz:.1e}')
+    try:
+        ee_fold.fold_step(P, float(P['D'].min()) + 0.1, 'singlet', x)
+        ok &= check(False, 'omega0 above min D raises ValueError')
+    except ValueError as exc:
+        ok &= check('omega0' in str(exc), 'omega0 above min D raises ValueError '
+                    'naming omega0', str(exc)[:70])
+    try:
+        ee_fold.fold_step(P, om0, 'singlet', np.ones(x.size + 1))
+        ok &= check(False, 'x of another length raises ValueError')
+    except ValueError as exc:
+        ok &= check(True, 'x of another length raises ValueError', str(exc)[:70])
+    return ok
+
+
 def main():
     """Run every check; print ALL PASSED or FAILURES DETECTED; exit 0 or 1."""
     all_ok = True
@@ -790,6 +890,7 @@ def main():
     all_ok &= check_static_limit(eps, B, no)
     all_ok &= check_fold_vs_unfolded('sto-3g')
     all_ok &= check_fold_vs_unfolded('6-31g')
+    all_ok &= check_step()
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return 0 if all_ok else 1
 
