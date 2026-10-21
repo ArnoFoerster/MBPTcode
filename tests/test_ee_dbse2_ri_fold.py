@@ -20,7 +20,9 @@ Checks:
   2. solve_folded on the operator's pieces() against the explicit pieces, every set,
      solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
      both kernels and both forms: roots to 1e-8 Ha, T1 to 1e-8, every root converged
-     (eq 71's triplet is M alone on both routes).
+     (eq 71's triplet is M alone on both routes), and fold_step from the newton root's
+     vector at 0.9 of its frequency gives the same step, zeta and delta on both routes
+     to 1e-10, delta moving with omega0.
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
      equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, both
      spins: products and signed norms at two frequencies, the diagonal, two Newton
@@ -332,6 +334,21 @@ def check_solves(eps, B, no):
                                 'roots and T1 on the operator equal the pieces',
                                 f'{d:.1e} Ha, {dt:.1e} on T1, '
                                 + ' '.join(f'{w:.6f}' for w in r.omega))
+                    if solver == 'newton':
+                        om0, x = 0.9 * float(ref.omega[0]), ref.y[:, 0]
+                        a = ee_fold.fold_step(P, om0, spin, x)
+                        b = ee_fold.fold_step(op.pieces(), om0, spin, x)
+                        c = ee_fold.fold_step(P, om0 + 0.05, spin, x)
+                        ok &= check(abs(a[0] - b[0]) < 1e-10
+                                    and abs(a[1] - b[1]) < 1e-10
+                                    and abs(a[2] - b[2]) < 1e-10
+                                    and abs(a[2] - c[2]) > 1e-3,
+                                    f"{'+'.join(sets)} {kernel} {form} {spin}: "
+                                    'fold_step on the operator equals the pieces and '
+                                    'its delta moves with omega0',
+                                    f'{a[0] - b[0]:.1e} Ha, {a[1] - b[1]:.1e} on zeta, '
+                                    f'{a[2] - b[2]:.1e} on delta, '
+                                    f'{a[2] - c[2]:.1e} Ha per 0.05')
     return ok
 
 
