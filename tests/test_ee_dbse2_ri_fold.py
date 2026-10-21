@@ -21,9 +21,9 @@ Checks:
      solvers 'newton', 'davidson' and 'block' at tol_omega 1e-9, two roots per channel,
      both kernels and both forms: roots to 1e-8 Ha, T1 to 1e-8, every root converged
      (eq 71's triplet is M alone on both routes), and fold_step from the newton root's
-     vector at 0.9 of its frequency and 0.05 Ha above, static that frequency on every
-     call, gives the same step, zeta and delta on both routes to 1e-10, delta moving
-     by more than DELTA_MOVE between the two (exactly zero without doubles).
+     vector at 0.9 of its frequency and 0.05 Ha above, static fixed at the 0.9 value
+     on every call, gives the same step, zeta and delta on both routes to 1e-10, delta
+     moving by more than DELTA_MOVE between the two (exactly zero without doubles).
   3. two and three simulated ranks (mpi_grid.run_simulated, one occupied per tile)
      equal the serial run bit for bit on sets=('eq61', 'eq71'), kernel printed, both
      spins: products and signed norms at two frequencies, the diagonal, two Newton

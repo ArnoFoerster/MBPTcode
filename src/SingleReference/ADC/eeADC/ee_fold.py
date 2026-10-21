@@ -34,8 +34,9 @@ by Newton, or per root by Newton alone (solver='newton'),
 with a fixed-point fallback ω_{k+1} = λ(ω_k), DIIS-accelerated, when T1 falls
 under t_min (a doubles element near ω makes the derivative unreliable). This
 is the shape of Turbomole's RI-CC2 solver on the ADC operator; the doubles
-vector exists only inside one matvec. fold_step takes the Newton step once from a
-static start with the vector frozen (Monino and Loos eqs 40 to 43).
+vector exists only inside one matvec. fold_step takes the first-order step of Monino
+and Loos eqs 40 to 43 once from a static start with the vector frozen; for a unit
+eigenvector of A_static it is that Newton step.
 
 Flat singles vectors here are the singles segments of ee_r_sigma's layout,
 length 2 no nv (aa block then bb block); with a spin channel, the channel basis

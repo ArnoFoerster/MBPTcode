@@ -89,7 +89,8 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_fold, ee_gw_pieces
+from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_equations, ee_fold,
+                                           ee_gw_pieces)
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_screened_coulomb_aux, static_second_order_kernel_df)
@@ -889,7 +890,6 @@ def check_step_signed():
     with V_K,jb = 1 and D_K = 1 Ha: at omega0 = 0.5 Ha, x = (1, 0),
     1 + dmatvec(x) = 1 - 1 / (1 - 0.5)^2 = -3, so exactly one RuntimeWarning and no
     exception."""
-    from src.SingleReference.ADC.eeADC import ee_equations
     Ma = np.full((1, 1, 1, 1), 0.4)
     M = SB({'aaaa': Ma, 'bbbb': Ma.copy(), 'aabb': np.zeros_like(Ma),
             'bbaa': np.zeros_like(Ma)})
