@@ -37,6 +37,7 @@ from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
 from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.LinearResponse.linear_response import gram_product
 
 # (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
 # check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
@@ -155,7 +156,8 @@ def gw_modes_df(eps, B, nocc, screening='tda'):
     Bov = B[:, :no, no:].reshape(B.shape[0], -1)          # B_P,jb, (P, jb)
     d = (eps[no:][None, :] - eps[:no][:, None]).ravel()   # Δ_jb = ε_b - ε_j
     # (ia|jb) = sum_P B_P,ia B_P,jb, times 2 for A (TDA), 4 for A + B (RPA)
-    C = (2.0 if screening == 'tda' else 4.0) * (Bov.T @ Bov)
+    # gram_product, not Bov.T @ Bov: that shape is the wheel's faulty syrk
+    C = (2.0 if screening == 'tda' else 4.0) * gram_product(Bov)
     C[np.diag_indices_from(C)] += d
     if screening == 'tda':
         # A U = U Ω; ρ_P,m = sum_I B_P,I U_I,m
@@ -176,30 +178,34 @@ def gw_modes_df(eps, B, nocc, screening='tda'):
     return omega, ((Bov * sd) @ Z) / np.sqrt(omega)
 
 
-def static_term_df(eps, B, rho, omega, nocc):
-    """static_term's Ā^GW of eq 70 from gw_modes_df's ρ_P,m.
+def static_term_pq(eps, Bov, rho, omega, nocc):
+    """The two blocks of static_term's Ā^GW of eq 70 from gw_modes_df's ρ_P,m.
 
     Parameters
     ----------
     eps : ndarray, shape (norb,), HF orbital energies
-    B : ndarray, shape (naux, norb, norb), index order (P, p, q), B_P,pq = B_P,qp
+    Bov : ndarray, shape (naux, no, nv), index order (P, k, c), the occupied-virtual
+        block of the DF factors, B_P,kc
     rho : ndarray, shape (naux, nm), index order (P, m)
     omega : ndarray, shape (nm,)
     nocc : int
 
     Returns
     -------
-    ndarray, shape (no, nv, no, nv), index order (i, a, j, b): static_term's Ā,
-
-        P_ab = sum_km ρ^m_ka ρ^m_kb / D_kam,   Q_ij = - sum_cm ρ^m_ic ρ^m_jc / D_icm,
+    P : ndarray, shape (nv, nv), index order (a, b),
+        P_ab = sum_km ρ^m_ka ρ^m_kb / D_kam
+    Q : ndarray, shape (no, no), index order (i, j),
+        Q_ij = - sum_cm ρ^m_ic ρ^m_jc / D_icm
 
     with ρ^m_kc = sum_P B_P,kc ρ_P,m (= ρ^m_ck) and D_kcm = Ω_m + ε_c - ε_k, formed
-    in slabs of m that _sb._slab_plan sizes, two (m, k, c) slab blocks each.
+    in slabs of m that _sb._slab_plan sizes, two (m, k, c) slab blocks each; Ā_ia,jb =
+    δ_ij (P_ab + P_ba) - δ_ab (Q_ij + Q_ji), which static_term_df assembles and an
+    operator applies as u (P + Pᵀ) - (Q + Qᵀ) u without the (no nv)² array.
     """
     no = nocc
     nv = len(eps) - no
     eo, ev = eps[:no], eps[no:]
-    Bov = B[:, :no, no:].reshape(B.shape[0], no * nv)     # B_P,kc, (P, kc)
+    Bov = np.asarray(Bov).reshape(Bov.shape[0], no * nv)  # B_P,kc, (P, kc)
 
     def slab(m0, m1):
         # ρ^m_kc = sum_P ρ_P,m B_P,kc, (m, k, c)
@@ -215,6 +221,28 @@ def static_term_df(eps, B, rho, omega, nocc):
 
     width, workers = _sb._slab_plan(omega.size, no * nv, 2)
     (P, Q), _ = _stream(slab, omega.size, width, workers)
+    return P, Q
+
+
+def static_term_df(eps, B, rho, omega, nocc):
+    """static_term's Ā^GW of eq 70 from gw_modes_df's ρ_P,m.
+
+    Parameters
+    ----------
+    eps : ndarray, shape (norb,), HF orbital energies
+    B : ndarray, shape (naux, norb, norb), index order (P, p, q), B_P,pq = B_P,qp
+    rho : ndarray, shape (naux, nm), index order (P, m)
+    omega : ndarray, shape (nm,)
+    nocc : int
+
+    Returns
+    -------
+    ndarray, shape (no, nv, no, nv), index order (i, a, j, b): static_term's Ā from
+        the blocks of static_term_pq, δ_ij (P_ab + P_ba) - δ_ab (Q_ij + Q_ji)
+    """
+    no = nocc
+    nv = len(eps) - no
+    P, Q = static_term_pq(eps, B[:, :no, no:], rho, omega, no)
     # δ_ij (P_ab + P_ba) - δ_ab (Q_ij + Q_ji)
     return (np.einsum('ij,ab->iajb', np.eye(no), P + P.T, optimize=True)
             - np.einsum('ab,ij->iajb', np.eye(nv), Q + Q.T, optimize=True))

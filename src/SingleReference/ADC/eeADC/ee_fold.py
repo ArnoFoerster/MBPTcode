@@ -16,7 +16,10 @@ metric the supermatrix is symmetric (K is a spin-resolved (k, l, c, d)). Level
 gw (ee_gw_pieces, eq 66: BSE@GW with one doubles set) has the same shape with
 K = (k, c, m) per spin block, a particle-hole pair times a screening mode,
 D_kcm = Ω_m + ε_c - ε_k, and the plain sum over its blocks as the doubles norm
-(pieces['dnorm2']).
+(pieces['dnorm2']). Level dbse2 (ee_dbse2_pieces, eq 71 of Monino and Loos) puts
+two copies of its doubles on one diagonal with the metric η = diag(+1, -1): its
+'Vt' is the η-transpose of V and its dnorm2 the signed norm |Z+|² - |Z-|², so the
+derivative below carries both signs and T1 may exceed 1.
 For the eigenpair (λ(ω), y) of A_eff(ω) with sum_ia y_ia² = 1,
 
     dλ/dω = -sum_K (sum_jb V_K,jb y_jb)² / (D_K - ω)²,
@@ -62,7 +65,7 @@ from src.Base.constants import (EE_FOLD_BLOCK_BRACKET, EE_FOLD_BLOCK_BUFFER,
 from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
                                   overlap_pick, solve_symmetric)
 
-FOLD_LEVELS = ('adc2', 'gf2', 'gw')
+FOLD_LEVELS = ('adc2', 'gf2', 'gw', 'dbse2')
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 _DEGENERATE = 1e-8      # Hartree: seeds spread by at most this are one level
 _SEED_RESIDUAL = 1e-9   # tight seeds: Ritz error |r|²/gap far below _DEGENERATE
@@ -73,8 +76,8 @@ _INNER_CAP = 1e-3       # loosest residual of a Newton step's eigensolve
 _INNER_RATIO = 0.1      # its residual: this times the previous |λ - ω|
 _CHECK_SHIFT = 0.1      # Hartree: the count check's correction r / (d - e + shift)
 _CHECK_RESIDUAL = 1e-4  # the count check decides μ against a window, no tighter
-_CHECK_SEEDS = 8        # unit vectors on the lowest lifted diagonal beside the random one
-_SPAN = 1e-8            # relative norm left off a span below which a start vector is in it
+_CHECK_SEEDS = 8        # unit vectors on the lowest lifted diagonal, and the random one
+_SPAN = 1e-8            # relative norm off a span below which a start vector lies in it
 _DUPLICATE = 0.5        # full-vector overlap above which two roots are one
 _COUNT_ROUNDS = 3       # rounds of the count check before it warns
 _HEARTBEAT = 600.0      # seconds: an eigensolve reports at most this often meanwhile
@@ -176,10 +179,10 @@ def _check_level(pieces):
     if pieces['level'] not in FOLD_LEVELS:
         raise ValueError(f"the fold needs a bare-diagonal doubles block; level="
                          f"{pieces['level']!r} is not one of {FOLD_LEVELS}")
-    if pieces['level'] == 'gw' and pieces.get('dnorm2') is None:
-        # the adc2 flat layout would read none of the (k, c, m) blocks
-        raise ValueError("level='gw' needs pieces['dnorm2'], the norm of its "
-                         "(k, c, m) doubles")
+    if pieces['level'] in ('gw', 'dbse2') and pieces.get('dnorm2') is None:
+        # the adc2 flat layout would read none of these doubles blocks
+        raise ValueError(f"level={pieces['level']!r} needs pieces['dnorm2'], the norm "
+                         "of its own doubles layout")
 
 
 def _check_vector(u, n):
@@ -205,7 +208,8 @@ def folded_operator(pieces, omega, spin=None):
         'Vt' (the reverse map), 'D' (ndarray, shape (no, no, nv, nv), index
         order (i, j, a, b), or, at level gw, shape (no, nv, nm), index order
         (k, c, m)), 'level', 'no', 'nv', 'be'; 'dnorm2' (optional: SB doubles
-        -> float sum_K Y_K², for a doubles layout other than adc2's);
+        -> float sum_K Y_K², for a doubles layout other than adc2's; the signed
+        |Z+|² - |Z-|² at level dbse2);
         'dense_limit' (optional int, default 0: solve_folded's dense_limit when
         the caller passes None); 'K' (optional: the fused kernel
         K(y1, omega, powers) -> (ws, dn2) with y1 an SB singles vector, ws[i]
@@ -222,8 +226,9 @@ def folded_operator(pieces, omega, spin=None):
     matvec : callable
         u (n,) -> A_eff(ω) u (n,), n = 2 no nv or the channel's size.
     dmatvec : callable
-        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float), so that
-        dλ/dω = -dmatvec(y) for a unit eigenvector y; 0.0 when omega is None.
+        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float; the pieces'
+        signed dnorm2 at level dbse2), so that dλ/dω = -dmatvec(y) for a unit
+        eigenvector y; 0.0 when omega is None.
         dmatvec(u, vector=True) -> dA_eff/dω u = -V^T (D - ω)^-2 V u (n,), so
         that u @ dmatvec(u, vector=True) == -dmatvec(u); zeros when omega is
         None.
@@ -350,7 +355,8 @@ class FoldResult:
     y : ndarray, shape (n, nout), unit singles vectors in the channel basis
     x1 : ndarray, shape (n, nout), sqrt(T1) y, the singles part of the unit full
         eigenvector; embed(x1[:, r]) is the full flat spin-orbital singles vector
-    t1 : ndarray, shape (nout,), singles weights in (0, 1]
+    t1 : ndarray, shape (nout,), singles weights in (0, 1], above 1 at level dbse2 on
+        a rising branch (dnorm2 < 0)
     level : ndarray, shape (nout,), int, the level of each root; the partners of a
         degenerate level share its index and its omega, and a seed level that
         A_eff splits gives each of its roots a level of its own
@@ -542,15 +548,23 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
     tol : float, a root is accepted where |λ_j(ω) - ω| < tol
 
     Every branch λ_j(ω) of H(ω), j the sorted index, is followed from om0. Its
-    slope c_j^T H1 c_j is ≤ 0, so g(ω) = λ_j(ω) - ω falls with slope ≤ -1, the
-    root is unique and lies between ω and ω + g(ω) for every ω: Newton
-    ω + g / (1 - c_j^T H1 c_j) inside the bracket so narrowed, bisection where a
-    step leaves it (a kink where two branches of H(ω) cross exactly). λ_j ≤ λ_j+1
-    at every ω, so the roots rise with j: the first branch whose root reaches d_min
-    ends the search. Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the
-    subspace eigenvectors at the roots.
+    slope c_j^T H1 c_j is at most s_max, the largest eigenvalue of H1 (≤ 0 where the
+    doubles carry a positive metric; small and positive on a rising branch of the
+    signed fold, whose T1 exceeds 1). For s_max < 1, g(ω) = λ_j(ω) - ω falls with
+    slope ≤ s_max - 1 < 0, the root is unique and lies between ω and
+    ω + g(ω) / (1 - s_max) for every ω: Newton ω + g / (1 - c_j^T H1 c_j) inside
+    the bracket so narrowed ([ω, ω + g] where s_max ≤ 0), bisection where a step
+    leaves it (a kink where two
+    branches of H(ω) cross exactly). A model with s_max ≥ 1 keeps the bracket
+    [ω, ω + g] and may drop its branches. λ_j ≤ λ_j+1 at every ω, so the roots rise
+    with j: the first branch whose root reaches d_min ends the search. Returns oms
+    (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the roots.
     """
     m = H0.shape[0]
+    # the bracket's reach on a rising branch (0 < s_max < 1), 1/(1 - s_max): g falls
+    # at least at that rate; [ω, ω + g] where the metric is positive, as before
+    s_max = float(np.linalg.eigvalsh(H1).max())
+    reach = 1.0 / (1.0 - s_max) if 0.0 < s_max < 1.0 else 1.0
     found = []
     for j in range(m):
         om, lo, hi = om0, -np.inf, np.inf
@@ -560,8 +574,10 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
             g = float(w[j]) - om
             if abs(g) < tol:
                 break
-            # the root lies in [ω, ω + g] for g > 0, in [ω + g, ω] for g < 0
-            lo, hi = (max(lo, min(om, om + g)), min(hi, max(om, om + g)))
+            # the root lies in [ω, ω + g reach] for g > 0, in [ω + g reach, ω] for
+            # g < 0
+            lo, hi = (max(lo, min(om, om + g * reach)),
+                      min(hi, max(om, om + g * reach)))
             nxt = om + g / (1.0 - float(c @ H1 @ c))      # Newton on λ_j(ω) - ω
             om = nxt if lo < nxt < hi else 0.5 * (lo + hi)
         if abs(g) >= tol:
@@ -1334,8 +1350,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
 
     Completeness (solvers 'davidson' and 'newton'): below min_K D_K each
     eigenvalue λ_j(ω) of
-    A_eff(ω), counted from the lowest, falls with ω (dλ/dω ≤ 0), so λ_j(ω) = ω
-    has one root ω_j, and
+    A_eff(ω), counted from the lowest, has slope dλ/dω < 1 (≤ 0 for a positive
+    metric), so λ_j(ω) = ω has one root ω_j, and
     ω_1 ≤ ω_2 ≤ ...: the folded roots at or below ω number the λ_j(ω) ≤ ω, and
     the nroots lowest roots are those of branches 1 to nroots. The fold can
     reorder the seeds of M, so at ω_c, the nroots-th lowest root found, the

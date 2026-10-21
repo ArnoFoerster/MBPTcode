@@ -50,6 +50,63 @@ def _try_init_mpi():
         HAS_MPI = False
     return HAS_MPI
 
+
+# CuPy is imported on the first solve that may use it, as mpi4py is above.
+# MBPT_EIGH_DEVICE picks the device of a dense solve: 'auto' (the default) uses a
+# visible GPU at or above the threshold and the host below it, or when the
+# device runs out of memory or cuSOLVER refuses the size; 'cpu' never uses the
+# GPU; 'gpu' always does, at any size, and raises where it cannot.
+EIGH_DEVICES = ('auto', 'cpu', 'gpu')
+_CP = None
+_CP_TRIED = False
+
+
+def _cupy():
+    """CuPy when it imports and sees a GPU, else None; tried once."""
+    global _CP, _CP_TRIED
+    if not _CP_TRIED:
+        _CP_TRIED = True
+        try:
+            import cupy
+            _CP = cupy if cupy.is_available() else None
+        except ImportError:
+            _CP = None
+    return _CP
+
+
+def _eigh_device():
+    """MBPT_EIGH_DEVICE, checked; unset or empty is 'auto'."""
+    device = (os.environ.get('MBPT_EIGH_DEVICE') or 'auto').lower()
+    if device not in EIGH_DEVICES:
+        raise ValueError(f'MBPT_EIGH_DEVICE={device!r}; expected one of '
+                         f'{EIGH_DEVICES}')
+    return device
+
+
+def _eigh_gpu(M, required):
+    """(w, Z) of Hermitian M from the GPU as host arrays; None to solve on the host.
+
+    required: raise where the device cannot take M, instead of returning None.
+    """
+    cp = _cupy()
+    if cp is None:
+        if required:
+            raise RuntimeError('MBPT_EIGH_DEVICE=gpu needs CuPy and a visible GPU')
+        return None
+    try:
+        w, Z = cp.linalg.eigh(cp.asarray(M))
+        return cp.asnumpy(w), cp.asnumpy(Z)
+    # Xsyevd's workspace query rejects a size it cannot take with INVALID_VALUE
+    except (cp.cuda.memory.OutOfMemoryError, cp.cuda.cusolver.CUSOLVERError) as exc:
+        if required:
+            raise
+        reason = f'{type(exc).__name__}: {exc}'
+    # outside the except, so the failed solve's arrays are released first
+    cp.get_default_memory_pool().free_all_blocks()
+    warnings.warn(f'GPU diagonalization failed at N={M.shape[0]} ({reason}); '
+                  f'solving on the host', RuntimeWarning, stacklevel=3)
+    return None
+
 def get_global_indices_1d(local_size, block_size, grid_dim, process_coord):
     """Generates global coordinates mapping for 2D block-cyclic layout."""
     local_indices = np.arange(local_size)
@@ -172,13 +229,23 @@ def _warn_elpa_unavailable(global_N):
 
 
 def diagonalize_matrix(M, threshold=5000):
-    """Diagonalize symmetric M: distributed ELPA if dim >= threshold and MPI available, else local scipy.linalg.eigh.
+    """Diagonalize symmetric M: on the GPU as MBPT_EIGH_DEVICE selects, else
+    distributed ELPA if dim >= threshold and MPI available, else local
+    scipy.linalg.eigh.
 
     Returns (eigenvalues, Z, is_distributed, solver, comm). Distributed, M is
     read on rank 0 only, scattered in block-cyclic chunks, and Z comes back whole
     on rank 0 and None on every other rank; the eigenvalues are on all ranks.
+    From the GPU, both are host arrays and the solve is local.
     """
     global_N = M.shape[0] if M is not None else 0
+
+    device = _eigh_device()
+    if M is not None and (device == 'gpu'
+                          or (device == 'auto' and global_N >= threshold)):
+        out = _eigh_gpu(M, required=device == 'gpu')
+        if out is not None:
+            return out[0], out[1], False, None, None
 
     # size check FIRST, so MPI is never initialized for small matrices; elpa.py
     # solves real matrices only, so a complex Hermitian M stays local
