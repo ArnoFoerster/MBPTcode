@@ -725,6 +725,6 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         qpes[i] = w_real[peak] + shift * w_step
 
     peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
-    print(f'\nPeak memory usage: {peak_gib} GB\n')
+    print(f'\nPeak memory usage: {peak_gib} GiB\n')
 
-    return qpes, A, w_real, E_gm
+    return qpes, A, w_real, E_gm, mu
