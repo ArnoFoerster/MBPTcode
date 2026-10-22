@@ -32,9 +32,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.gradients.isdf_derivatives import exx_double_counting
+from src.Base.numerics import Numerics
+from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import MeanFieldSurface
+from tests.isdf_test_grid import g1
+from tests.pins import assert_pin, recorded_blas
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 GATES = REPO / 'tools' / 'refactor_gates'
@@ -47,10 +50,11 @@ FULL_ENV = 'REFACTOR_BASELINE_FULL'
 #: The E_0 terms as this tree's ISDF fit computes them.
 PINS = json.loads((REPO / 'tests' / 'one_fit_pins.json').read_text())[
     'e0_terms']
-#: Hartree the dRPA correlation energy may sit from the record: the fit's
-#: realization (every pair kept, Gram over every product pair) moves
-#: E_c^dRPA at the last-bit level.
-E0_FIT_MOVE_HA = 1e-14
+PINS_BLAS = recorded_blas(REPO / 'tests' / 'one_fit_pins.json')
+#: Hartree the dRPA correlation energy may sit from the record: the record
+#: was taken on an earlier ISDF grid, whose E_c^dRPA sits 4.0e-5 above the
+#: current one's.
+E0_FIT_MOVE_HA = 1e-4
 
 #: Sections a record must carry to be a gate at all.
 REQUIRED_SECTIONS = ('qp_routes', 'bse', 'e0_terms', 'surfaces',
@@ -229,15 +233,19 @@ def test_mean_field_surface_is_bitwise_what_was_recorded(baseline, water):
     recorded = baseline['surfaces']['water']['MeanFieldSurface']
     assert recorded['status'] == 'ok'
     surface = MeanFieldSurface(water, lambda mol: scf_factory(mol, baseline))
+    blas = baseline['blas']
     for label, entry in recorded['geometries'].items():
         mol = at_coords(water, entry['atom_coords_bohr'])
         _, mf = surface.mean_field(mol)
-        assert float(mf.e_tot) == entry['e_scf'], label
-        assert float(surface.total_energy(mol, mf)) == entry['total_energy'], \
-            label
+        assert_pin(mf.e_tot, entry['e_scf'], blas, quantity='energy',
+                   label=label)
+        assert_pin(surface.total_energy(mol, mf), entry['total_energy'], blas,
+                   quantity='energy', label=label)
         grad, energy, _ = surface.total_gradient(mol, mf)
-        assert float(energy) == entry['gradient_energy'], label
-        assert np.asarray(grad, float).tolist() == entry['gradient'], label
+        assert_pin(energy, entry['gradient_energy'], blas, quantity='energy',
+                   label=label)
+        assert_pin(grad, entry['gradient'], blas, quantity='gradient',
+                   label=label)
 
 
 def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
@@ -246,15 +254,17 @@ def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
     surface is built from these three. E_c^dRPA reads the chain's ISDF
     factors: `==` its pin, the record within `E0_FIT_MOVE_HA`."""
     recorded = baseline['e0_terms']['water_HF']
-    chain = RPAGroundStateChain(water, lambda mol: scf_factory(mol, baseline))
+    chain = RPAGroundStateChain(water, lambda mol: scf_factory(mol, baseline), numerics=Numerics(isdf={'counts': g1(water)}))
     mf = chain.mf0
-    assert float(mf.e_tot) == recorded['e_scf']
-    assert float(chain.reference_energy(water, mf)) \
-        == recorded['reference_energy']
-    assert float(exx_double_counting(mf, water)) \
-        == recorded['exx_double_counting']
+    blas = baseline['blas']
+    assert_pin(mf.e_tot, recorded['e_scf'], blas, quantity='energy')
+    assert_pin(chain.reference_energy(water, mf),
+               recorded['reference_energy'], blas, quantity='energy')
+    assert_pin(exx_double_counting(mf, water),
+               recorded['exx_double_counting'], blas, quantity='energy')
     e_corr = float(chain.correlation_energy(water, mf))
-    assert e_corr == PINS['water_HF']['e_corr_dRPA']
+    assert_pin(e_corr, PINS['water_HF']['e_corr_dRPA'], PINS_BLAS,
+               quantity='energy')
     assert abs(e_corr - recorded['e_corr_dRPA']) <= E0_FIT_MOVE_HA
 
 

@@ -1,4 +1,5 @@
-"""Internal coordinates of a molecule, and one way to displace along them.
+"""Internal coordinates of a molecule, one way to displace along them, and
+the molecule moved to given Cartesian coordinates (`molecule_at`).
 
 Structural comparisons are made in these, not in Cartesians: a relaxed geometry
 is reported as bond lengths and angles, two methods are compared by the same,
@@ -11,9 +12,22 @@ import numpy as np
 from src.Base.constants import BOHR_TO_ANGSTROM
 
 
+def molecule_at(template, coords):
+    """`template` moved to `coords` (natm, 3) in Bohr, rebuilt."""
+    mol = template.copy()
+    mol.set_geom_(np.asarray(coords, float).reshape(-1, 3), unit='Bohr')
+    mol.build(False, False)
+    return mol
+
+
 def coordinates(mol):
     """(natm, 3) in Angstrom; pyscf holds them in Bohr."""
     return np.asarray(mol.atom_coords()) * BOHR_TO_ANGSTROM
+
+
+def elements_of(mol):
+    """The element symbols of `mol`, sorted, each once."""
+    return sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
 
 
 def bond(mol, i, j):
@@ -74,7 +88,4 @@ def pyramidalize(mol, c, m, s1, s2, degrees):
     v_rot = (v * np.cos(th) + np.cross(axis, v) * np.sin(th)
              + axis * (axis @ v) * (1.0 - np.cos(th)))
     x[m] = x[c] + v_rot
-    out = mol.copy()
-    out.set_geom_(x, unit='Bohr')
-    out.build(False, False)
-    return out
+    return molecule_at(mol, x)

@@ -25,12 +25,12 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.evGW import evgw_eigenvalues
 from src.SingleReference.LinearResponse.bse import solve_bse
 from src.SingleReference.LinearResponse.davidson import (solve_casida_davidson,
-                                                        solve_bse_isdf,
-                                                        solve_bse_df,
-                                                        isdf_bse_factors,
-                                                        isdf_df_coefficients,
-                                                        lowest_amb_eigenvalue,
-                                                        oscillator_strengths)
+                                                         solve_bse_isdf,
+                                                         solve_bse_df,
+                                                         isdf_bse_factors,
+                                                         isdf_df_coefficients,
+                                                         oscillator_strengths)
+from src.SingleReference.LinearResponse.probe import lowest_amb_eigenvalue
 from src.SingleReference.DensityMatrix.density_matrix import (GWDensityMatrixSolver,
                                                  compute_gw_density_matrix,
                                                  MP2DensityMatrixSolver,

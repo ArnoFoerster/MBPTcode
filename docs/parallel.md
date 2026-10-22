@@ -138,6 +138,16 @@ cores each rank may use (see [Threads](#threads)). Without `mpi4py`, or with
 bit for bit the serial code.
 `mpi4py` is imported on first use, never at module import.
 
+A solvent continuum works the same way. `SolventScreening.mean_field`
+converges the solvated SCF through `distributed_mean_field`; the reaction
+field of the cavity is cheap, so every rank computes it from the shared
+density, and the code checks that it matches rank 0's. A gradient chain in a
+continuum also runs on sliced factors (`sliced=True`) and on the
+row-distributed fit (`fit='rows'`): every interaction it reads (the dressed
+one, the bare one the self-energy screens with, and the static one of a split
+equilibrium) is built from the same fit as grid rows, so no rank holds a
+factor whole.
+
 Two ranks need not agree in the last bits of an orbital energy or a Davidson
 residual, and a decision taken from such a number -- a grid size, when to stop
 -- would then differ between them. So every kernel copies rank 0's version of

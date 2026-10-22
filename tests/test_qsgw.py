@@ -20,8 +20,9 @@ import numpy as np
 import scipy.linalg
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, QSGW_DM_TOL,
-                                QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL, get_method_info)
+from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, HARTREE_TO_MEV,
+                                QSGW_DM_TOL, QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL,
+                                get_method_info)
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.SingleReference.GW.evGW import evgw_eigenvalues, rotated_mean_field
@@ -334,7 +335,7 @@ def check_the_two_mixings_land_on_one_fixed_point(mf):
         delta = np.abs(e_d[[nocc - 1, nocc]] - e_l[[nocc - 1, nocc]]).max()
         ok &= check(d['converged'] and l['converged'] and delta < 10 * EVGW_TOL,
                     f"{screening}: DIIS and linear mixing agree on HOMO and LUMO",
-                    f"{delta * HARTREE_TO_EV * 1e3:.3f} meV, "
+                    f"{delta * HARTREE_TO_MEV:.3f} meV, "
                     f"{d['cycles']} vs {l['cycles']} cycles")
     return ok
 
@@ -504,8 +505,12 @@ def check_calc_qp_energy_drives_the_loop(mf):
         try:
             qpe.calc_qp_energy(mf, mode='casida', self_consistency='qsGW', **kw)
             ok &= check(False, f'{label} under qsGW is refused')
-        except NotImplementedError as e:
-            ok &= check(text in str(e), f'{label} under qsGW is refused')
+        except (NotImplementedError, TypeError) as e:
+            # an anchor is a keyword the loop cannot take (TypeError, as
+            # under evGW); the others are settings the loop does not build
+            ok &= check(text in str(e) and isinstance(
+                e, TypeError if text == 'eps_anchor' else NotImplementedError),
+                f'{label} under qsGW is refused')
     return ok
 
 
@@ -562,14 +567,14 @@ def check_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
         label = 'qsGW' if screening == 'updated' else 'qsGW0'
         ok &= check(info['converged'] and d_front < EVGW_TOL,
                     f'{label}: one step of the evGW0 map returns the fixed point',
-                    f'HOMO/LUMO {d_front * HARTREE_TO_EV * 1e3:.3f} meV, '
-                    f'all states {d_all * HARTREE_TO_EV * 1e3:.3f} meV')
+                    f'HOMO/LUMO {d_front * HARTREE_TO_MEV:.3f} meV, '
+                    f'all states {d_all * HARTREE_TO_MEV:.3f} meV')
         _, loop = evgw_eigenvalues(view, mf.mol, mode='casida', screening=screening,
                                    eps_init=eps_qs, **step_kw)
         ok &= check(loop['converged'] and loop['cycles'] == 1,
                     f'{label}: the evGW0 loop started there stops at cycle 1',
                     f"{loop['cycles']} cycles, residual "
-                    f"{loop['history'][-1] * HARTREE_TO_EV * 1e3:.3f} meV")
+                    f"{loop['history'][-1] * HARTREE_TO_MEV:.3f} meV")
     return ok
 
 
@@ -627,9 +632,9 @@ def check_qsgw_forgets_its_starting_point():
                'qsGW from PBE and from PBE0 converges at tol 1e-7, dm_tol 1e-8',
                f"{i_pbe['cycles']} and {i_pbe0['cycles']} cycles")
     ok &= check(d_qs < EVGW_TOL, 'the two agree on HOMO and LUMO',
-                f'{d_qs * HARTREE_TO_EV * 1e3:.4f} meV, |dD|/nmo {d_dm:.1e}')
+                f'{d_qs * HARTREE_TO_MEV:.4f} meV, |dD|/nmo {d_dm:.1e}')
     ok &= check(d_all * HARTREE_TO_EV < 1e-3, 'and on every state, one branch',
-                f'{d_all * HARTREE_TO_EV * 1e3:.3f} meV')
+                f'{d_all * HARTREE_TO_MEV:.3f} meV')
     e0_pbe = ends['pbe']['fixed'][0]
     e0_pbe0 = ends['pbe0']['fixed'][0]
     d_qs0 = np.abs(e0_pbe[front] - e0_pbe0[front]).max()
@@ -662,7 +667,7 @@ def check_the_boundaries(mf):
     d_sym = np.abs(e_sym[[nocc - 1, nocc]] - e_full[[nocc - 1, nocc]]).max()
     ok &= check(i_sym['converged'] and d_sym < 10 * EVGW_TOL,
                 'point-group symmetry on reaches the same fixed point',
-                f'{d_sym * HARTREE_TO_EV * 1e3:.4f} meV')
+                f'{d_sym * HARTREE_TO_MEV:.4f} meV')
     for label, atom, basis in (('H2, nocc = 1', 'H 0 0 0; H 0 0 0.74', 'cc-pvdz'),
                                ('HF in STO-3G, nvirt = 1', 'F 0 0 0; H 0 0 0.917',
                                 'sto-3g')):
@@ -682,7 +687,7 @@ def check_the_boundaries(mf):
                         f'{label}, {screening}: converges with a positive gap, '
                         f'blocking-independent, mean field kept',
                         f"{info['cycles']} cycles, gap {gap_ev(e, n):.3f} eV, "
-                        f'one-element blocks {d_one * HARTREE_TO_EV * 1e3:.4f} meV')
+                        f'one-element blocks {d_one * HARTREE_TO_MEV:.4f} meV')
     return ok
 
 

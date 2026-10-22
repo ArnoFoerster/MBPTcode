@@ -5,8 +5,7 @@ import numpy as np
 from pyscf import scf
 
 from src.Base.constants import DEFAULT_BROADENING_ETA
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid, minimax_supported_sizes
-from src.Base.utils.analyticalContinuation import greedy_pade_order, thiele_coefficients, pade_eval
+from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
 from src.Base.utils.matsubara import (beta_from_mf, ir_continuation_order,
                                       self_energy_range, thermal_e_min)
 from src.Base.pyscf_interface import (get_orbital_energies,
@@ -16,10 +15,10 @@ from src.Base.pyscf_interface import (get_orbital_energies,
                                      spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.base import get_occ_virt_indices, transition_range
-from src.Solvers.qp_equation import solve_qp_equation
 from src.SingleReference.GW.reaction_field import (
-    bare_self_energy, environment_quasiparticle_shift)
-from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
+    bare_self_energy, environment_quasiparticle_shift, shift_after_solve)
+from src.SingleReference.GW.qp_solve import (add_reaction_field,
+                                             static_exchange_diagonal,
                                              solve_qp_from_imaginary_axis,
                                              imaginary_axis_sample_points)
 
@@ -98,7 +97,8 @@ def _unrestricted_screening(mol, mf, nocc, states, spin):
 def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
                                     solver_mode='pole_strength', greedy=True,
                                     dm_correction=None, timings=None, beta=None,
-                                    eps_anchor=None, spin_channel='alpha'):
+                                    eps_anchor=None, spin_channel='alpha',
+                                    with_z=False, pade_freq=None):
     """
     GW@RPA quasiparticle energy via the imaginary-frequency-axis route:
     RPA W(i*omega) -> convolution -> Pade continuation.
@@ -127,6 +127,13 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     channel's own mid-gap. The frequency grid spans the transitions of both
     spins, since both build the W it integrates. An `eps_anchor` of shape
     (2, nmo) is read at the channel's row.
+
+    with_z: also return Z = 1/(1 - dRe Sigma_c/dw) of the continued fraction
+    at each root, as the space-time route's Pade does: (roots, z).
+
+    pade_freq: the imaginary frequencies Sigma_c is sampled at for the Pade
+    continuation. None takes this route's own W nodes; `analyticalContinuation.
+    pade_nodes()` is the space-time route's node rule.
     """
 
     require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_imaginary_axis',
@@ -188,8 +195,8 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
     elif grid == 'gauss_legendre':
         if w0 is None:
-            w0 = (0.5 * e_min if beta is not None or unrestricted
-                  else gap_scaled_w0(eps, nocc))
+            w0 = gap_scaled_w0(eps, nocc, gap=e_min if beta is not None
+                               or unrestricted else None)
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     else:
         raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
@@ -216,21 +223,30 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         anchor = anchor[spin]
 
     _t = _time.time()
-    xc_diag = static_exchange_diagonal(mf, mol, states,
-                                       dm_correction=dm_correction,
-                                       reaction_field=reaction_field,
-                                       spin=spin)
+    # Eq. (18) after the solve in G0W0, in the static term on an evGW cycle
+    after = reaction_field is not None and shift_after_solve(eps_anchor)
+    xc_diag = static_exchange_diagonal(
+        mf, mol, states, dm_correction=dm_correction,
+        reaction_field=None if after else reaction_field, spin=spin,
+        reaction_field_after_solve=after)
     out = []
     for i, p in enumerate(states):
-        z_fit, iw_query = imaginary_axis_sample_points(freq_points, nocc,
-                                                       int(p), mu)
+        z_fit, iw_query = imaginary_axis_sample_points(
+            freq_points if pade_freq is None else pade_freq, nocc, int(p), mu)
         sigma_iw = self_energy_imaginary_axis(C_row[:, [i], :], eps - mu, nocc,
                                               0, freq_points, freq_weights,
                                               W_grid, iw_query)
         out.append(solve_qp_from_imaginary_axis(
             anchor, int(p), float(xc_diag[i]), z_fit, sigma_iw, greedy=greedy,
-            solver_mode=solver_mode, max_order=pade_order))
+            solver_mode=solver_mode, max_order=pade_order, with_z=with_z))
     if timings is not None:
         timings['t_qp'] = _time.time() - _t
-    return out[0] if scalar else np.asarray(out)
+    shift = reaction_field if after else None
+    if with_z:
+        roots = add_reaction_field(np.array([r for r, _ in out], float),
+                                   shift, states, spin)
+        z = np.array([zz for _, zz in out], float)
+        return (roots[0], z[0]) if scalar else (roots, z)
+    roots = add_reaction_field(np.asarray(out, float), shift, states, spin)
+    return roots[0] if scalar else roots
 

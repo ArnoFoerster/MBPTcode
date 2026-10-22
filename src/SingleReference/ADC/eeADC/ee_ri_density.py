@@ -54,26 +54,26 @@ c, k and the tile's d. Four passes in all (amplitudes; amplitudes and
 doubles; the T products of r and p2_ov; the virtual tiles), each about one
 folded product's work, the tiles dealt over the operator's ranks and summed
 in tile order (ordered_sum), so the density is the same bits at every rank
-count. tests/test_ee_adc_state_specific.py pins every term against
-ee_density on the dense spin-free route's full eigenvector.
+count.
 """
 import numpy as np
 
-from src.Base.constants import EE_RI_TILE_GB
+from src.Base.constants import (EE_RI_DENSITY_OCC_TILE_ARRAYS,
+                                EE_RI_DENSITY_VIRT_TILE_ARRAYS, EE_RI_TILE_GB)
+from src.Base.numerics import Numerics
+from src.Base.utils.memory import tile_width
 from src.Base.utils.mpi_grid import ordered_sum
 from src.SingleReference.ADC.eeADC.ee_density import assemble
 
-_GB = 1024.0 ** 3
 
-
-def _tiles(n, per, tile_gb, ranks):
+def tile_ranges(n, per, tile_gb, ranks):
     """(start, stop) tiles of an axis of n, each holding at most tile_gb at
     `per` bytes per index and no more than gives every rank one."""
-    k = int(max(1, min(-(-n // ranks), tile_gb * _GB // per)))
+    k = tile_width(per, -(-n // ranks), Numerics(layout={'tile_gb': tile_gb}))
     return [(k0, min(k0 + k, n)) for k0 in range(0, n, k)]
 
 
-class _Pass:
+class Pass:
     """Addends of one pass, one flat array per tile, summed in tile order."""
 
     def __init__(self, op, shapes):
@@ -134,7 +134,7 @@ def _doubles(op, BtT, k0, k1, omega, scale, s):
     return Z, W
 
 
-def _oo(A, B):
+def oo_contract(A, B):
     """sum_{k in tile} sum_ab A[k,b,i,a] B[k,b,j,a] -> (i, j)."""
     no = A.shape[2]
     a = A.transpose(2, 0, 1, 3).reshape(no, -1)
@@ -142,7 +142,7 @@ def _oo(A, B):
     return a @ b.T
 
 
-def _vv(A, B):
+def vv_contract(A, B):
     """sum_{i in tile} sum_jc A[i,a,j,c] B[i,b,j,c] -> (a, b)."""
     nv = A.shape[1]
     out = np.zeros((nv, nv))
@@ -151,32 +151,12 @@ def _vv(A, B):
     return out
 
 
-def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
-    """Delta rho (no + nv square, active spatial orbitals, both spins) of one
-    root of the tiled operator `op` (ee_ri_fold.RIFoldADC2): y its unit
-    singles in the channel basis, omega its frequency (Hartree), t1 its
-    singles weight. terms=True returns {term: spatial block} (ee_density's
-    names) instead. A collective over op's ranks: every rank calls it with
-    the same arguments and gets the same bits."""
+def _pass_amplitudes(op, x, s, p1_oo, p1_vv):
+    """Pass 1 (amplitudes alone, on the operator's own tiles): ({term: block},
+    r)."""
     f, no, nv = op.f, op.no, op.nv
-    s = 1.0 if op.spin == 'singlet' else -1.0
-    y = np.asarray(y, float).ravel()
-    x = (np.sqrt(t1 / 2.0) * y).reshape(no, nv)
-    p1_oo = -x @ x.T
-    p1_vv = x.T @ x
-    out = {'oo_ss0': p1_oo, 'vv_ss0': p1_vv}
-    if op.level == 'adc1':
-        return _finish(out, no, nv, terms)
-    ranks = 1 if op.comm is None else op.comm.Get_size()
-    rank = 0 if op.comm is None else op.comm.Get_rank()
-    # occupied tiles: about nine (kt, nv, no, nv) arrays live in the doubles
-    # pass (tau, ts, Z, W and their temporaries)
-    otiles = _tiles(no, 8.0 * nv * no * nv * 9, tile_gb, ranks)
-    mine = [(t, kk) for t, kk in enumerate(otiles) if t % ranks == rank]
-
-    # ---- pass 1: amplitudes alone ------------------------------------------
     # on the operator's own tiles, whose G the B_vv chunk owners contract
-    p1 = _Pass(op, {'r': (no, nv), 'p0_oo': (no, no), 'p0_vv': (nv, nv),
+    p1 = Pass(op, {'r': (no, nv), 'p0_oo': (no, no), 'p0_vv': (nv, nv),
                     'p0_ov': (no, nv), 'oo_tt_v': (no, no),
                     'vv_tt_v': (nv, nv), 'vv_tt_o': (nv, nv)})
     gams = {}
@@ -190,18 +170,18 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
         gams[t] = G[None]
         del G
         blocks = {'r': r, 'p0_ov': num,
-                  'p0_oo': -0.5 * (_oo(ts, ts) + 2.0 * _oo(tau, tau)),
-                  'p0_vv': 0.5 * (_vv(ts, ts) + 2.0 * _vv(tau, tau))}
+                  'p0_oo': -0.5 * (oo_contract(ts, ts) + 2.0 * oo_contract(tau, tau)),
+                  'p0_vv': 0.5 * (vv_contract(ts, ts) + 2.0 * vv_contract(tau, tau))}
         # oo_tt_v: k is the tile; R[k,d,j,c] = sum_b p1vv_db X[k,b,j,c]
         Rs = np.einsum('db,kbjc->kdjc', p1_vv, ts, optimize=True)
         Rt = np.einsum('db,kbjc->kdjc', p1_vv, tau, optimize=True)
         Rx = np.einsum('kcjb,db->kcjd', tau, p1_vv, optimize=True)
-        blocks['oo_tt_v'] = _oo(ts, Rs) + _oo(tau, Rt) + \
+        blocks['oo_tt_v'] = oo_contract(ts, Rs) + oo_contract(tau, Rt) + \
             np.einsum('kcid,kcjd->ij', tau, Rx, optimize=True)
         # vv_tt_v: R[k,a,l,c] = sum_d X[k,a,l,d] p1vv_cd
         Rs = np.einsum('kald,cd->kalc', ts, p1_vv, optimize=True)
         Rt = np.einsum('kald,cd->kalc', tau, p1_vv, optimize=True)
-        blocks['vv_tt_v'] = -0.5 * (_vv(Rs, ts) + 2.0 * _vv(Rt, tau))
+        blocks['vv_tt_v'] = -0.5 * (vv_contract(Rs, ts) + 2.0 * vv_contract(Rt, tau))
         # vv_tt_o: l is the tile; R[l,c,j,b] = sum_k p1_jk X[l,c,k,b]
         Rs = np.einsum('jk,lckb->lcjb', p1_oo, ts, optimize=True)
         Rt = np.einsum('jk,lckb->lcjb', p1_oo, tau, optimize=True)
@@ -217,17 +197,20 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
     r = a['r']
     d_ia = f.eo[:, None] - f.ev[None, :]
     p0_ov = num / (2.0 * d_ia)
-    sym = _sym
-    out.update({
+    return {
         'oo_ru': -r @ r.T, 'vv_ru': r.T @ r,
-        'oo_p0': sym(p1_oo @ a['p0_oo']), 'vv_p0': -sym(p1_vv @ a['p0_vv']),
-        'oo_tt_v': sym(a['oo_tt_v']), 'vv_tt_v': sym(a['vv_tt_v']),
-        'vv_tt_o': sym(a['vv_tt_o']),
+        'oo_p0': _sym(p1_oo @ a['p0_oo']), 'vv_p0': -_sym(p1_vv @ a['p0_vv']),
+        'oo_tt_v': _sym(a['oo_tt_v']), 'vv_tt_v': _sym(a['vv_tt_v']),
+        'vv_tt_o': _sym(a['vv_tt_o']),
         'ov_p0v': -p0_ov @ p1_vv, 'ov_p0o': p1_oo @ p0_ov,
-    })
+    }, r
 
-    # ---- pass 2: amplitudes and the doubles ---------------------------------
-    p2 = _Pass(op, {'oo_dd': (no, no), 'vv_dd': (nv, nv), 'p2_ov': (no, nv),
+
+def _pass_doubles(op, y, x, omega, t1, s, mine):
+    """Pass 2 (amplitudes and the doubles of this rank's tiles): ({term: block},
+    p2_ov)."""
+    no, nv = op.no, op.nv
+    p2 = Pass(op, {'oo_dd': (no, no), 'vv_dd': (nv, nv), 'p2_ov': (no, nv),
                     'tu_oo': (no, no), 'tu_vv': (nv, nv)})
     BtT = op._dressed(y)
     scale = np.sqrt(t1) / (2.0 * np.sqrt(2.0))
@@ -237,22 +220,25 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
         p2_ov = np.zeros((no, nv))
         p2_ov[k0:k1] = -2.0 * ((W + s * Z).reshape(kt * nv, -1) @ x.ravel()
                                ).reshape(kt, nv)
-        blocks = {'oo_dd': -2.0 * (_oo(W, W) + 2.0 * _oo(Z, Z)),
-                  'vv_dd': 2.0 * (_vv(W, W) + 2.0 * _vv(Z, Z)),
+        blocks = {'oo_dd': -2.0 * (oo_contract(W, W) + 2.0 * oo_contract(Z, Z)),
+                  'vv_dd': 2.0 * (vv_contract(W, W) + 2.0 * vv_contract(Z, Z)),
                   'p2_ov': p2_ov}
         tau, ts = _amplitudes(op, k0, k1)
-        blocks['tu_oo'] = _oo(ts, W) + 2.0 * s * _oo(tau, Z)
-        blocks['tu_vv'] = _vv(ts, W) + 2.0 * _vv(tau, Z)
+        blocks['tu_oo'] = oo_contract(ts, W) + 2.0 * s * oo_contract(tau, Z)
+        blocks['tu_vv'] = vv_contract(ts, W) + 2.0 * vv_contract(tau, Z)
         del Z, W, tau, ts
         p2.add(t, blocks)
     del BtT
     b = p2.total()
     p2_ov = b['p2_ov']
-    out.update({'oo_dd': b['oo_dd'], 'vv_dd': b['vv_dd'], 'ov_sd': p2_ov,
-                'ov_tdv': -x @ b['tu_vv'].T, 'ov_tdo': -b['tu_oo'] @ x})
+    return {'oo_dd': b['oo_dd'], 'vv_dd': b['vv_dd'], 'ov_sd': p2_ov,
+            'ov_tdv': -x @ b['tu_vv'].T, 'ov_tdo': -b['tu_oo'] @ x}, p2_ov
 
-    # ---- pass 3: T_s r and T_+ p2_ov -----------------------------------------
-    p3 = _Pass(op, {'tr': (no, nv), 'tp': (no, nv)})
+
+def _pass_t_products(op, x, s, r, p2_ov, mine):
+    """Pass 3: {term: block} of T_s r and T_+ p2_ov."""
+    no, nv = op.no, op.nv
+    p3 = Pass(op, {'tr': (no, nv), 'tp': (no, nv)})
     for t, (k0, k1) in mine:
         kt = k1 - k0
         tau, ts = _amplitudes(op, k0, k1)
@@ -262,12 +248,16 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
         del tau, ts
         p3.add(t, {'tr': tr, 'tp': tp})
     c = p3.total()
-    out.update({'oo_tru': -sym(x @ c['tr'].T), 'vv_tru': sym(c['tr'].T @ x),
-                'ov_tsd': -c['tp']})
+    return {'oo_tru': -_sym(x @ c['tr'].T), 'vv_tru': _sym(c['tr'].T @ x),
+            'ov_tsd': -c['tp']}
 
-    # ---- pass 4: oo_tt_o on virtual tiles -----------------------------------
-    vtiles = _tiles(nv, 8.0 * no * nv * no * 6, tile_gb, ranks)
-    p4 = _Pass(op, {'s': (no, no)})
+
+def _pass_virtual_tiles(op, p1_oo, tile_gb, ranks, rank):
+    """Pass 4: the oo_tt_o block, summed over virtual tiles."""
+    f, no, nv = op.f, op.no, op.nv
+    vtiles = tile_ranges(nv, 8.0 * no * nv * no * EE_RI_DENSITY_VIRT_TILE_ARRAYS, tile_gb,
+                         ranks)
+    p4 = Pass(op, {'s': (no, no)})
     L3 = f.L.reshape(no, nv, -1)
     for t, (d0, d1) in enumerate(vtiles):
         if t % ranks != rank:
@@ -286,7 +276,38 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
             S += wgt * (X.reshape(no, -1) @ R.reshape(no, -1).T)
         del tau, ts
         p4.add(t, {'s': S})
-    out['oo_tt_o'] = -0.5 * sym(p4.total()['s'])
+    return -0.5 * _sym(p4.total()['s'])
+
+
+def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
+    """Delta rho (no + nv square, active spatial orbitals, both spins) of one
+    root of the tiled operator `op` (ee_ri_fold.RIFoldADC2): y its unit
+    singles in the channel basis, omega its frequency (Hartree), t1 its
+    singles weight. terms=True returns {term: spatial block} (ee_density's
+    names) instead. A collective over op's ranks: every rank calls it with
+    the same arguments and gets the same bits."""
+    no, nv = op.no, op.nv
+    s = 1.0 if op.spin == 'singlet' else -1.0
+    y = np.asarray(y, float).ravel()
+    x = (np.sqrt(t1 / 2.0) * y).reshape(no, nv)
+    p1_oo = -x @ x.T
+    p1_vv = x.T @ x
+    out = {'oo_ss0': p1_oo, 'vv_ss0': p1_vv}
+    if op.level == 'adc1':
+        return _finish(out, no, nv, terms)
+    ranks = 1 if op.comm is None else op.comm.Get_size()
+    rank = 0 if op.comm is None else op.comm.Get_rank()
+    # occupied tiles: about nine (kt, nv, no, nv) arrays live in the doubles
+    # pass (tau, ts, Z, W and their temporaries)
+    otiles = tile_ranges(no, 8.0 * nv * no * nv * EE_RI_DENSITY_OCC_TILE_ARRAYS, tile_gb,
+                         ranks)
+    mine = [(t, kk) for t, kk in enumerate(otiles) if t % ranks == rank]
+    terms1, r = _pass_amplitudes(op, x, s, p1_oo, p1_vv)
+    out.update(terms1)
+    terms2, p2_ov = _pass_doubles(op, y, x, omega, t1, s, mine)
+    out.update(terms2)
+    out.update(_pass_t_products(op, x, s, r, p2_ov, mine))
+    out['oo_tt_o'] = _pass_virtual_tiles(op, p1_oo, tile_gb, ranks, rank)
     return _finish(out, no, nv, terms)
 
 

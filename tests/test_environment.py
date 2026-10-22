@@ -34,6 +34,7 @@ from src.Base.constants import HARTREE_TO_EV
 from src.Base.environment import (Environment, NoEnvironment, PointCharges,
                                   attach_environment, attached_environment,
                                   dresses_interaction, environment_of)
+from src.Base.numerics import Numerics
 from src.Base.polarizable_sites import PolarizableSites
 from src.Base.separable_ri import aux_metric_sqrt
 from src.Base.solvent_screening import (SolventScreening,
@@ -42,6 +43,8 @@ from src.Base.solvent_screening import (SolventScreening,
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.gradients.rpa_ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
@@ -264,9 +267,11 @@ def check_the_static_term_production_adds_is_the_environment_own(small):
     attach_solvent_screening(mf, solvent='water')
     try:
         env = environment_of(mf)
+        # two calls build the term twice: to a few ulp, not bitwise
         ok &= check(isinstance(env, SolventScreening)
-                    and np.array_equal(solvent_static_selfenergy(mf, mol),
-                                       env.static_self_energy(mf, mol))
+                    and matches(solvent_static_selfenergy(mf, mol),
+                                env.static_self_energy(mf, mol),
+                                RECORDING_BLAS, quantity='root')
                     and env.static_self_energy(mf, mol).shape
                     == (mol.nao, mol.nao),
                     "the static term production adds is the continuum's own")
@@ -353,7 +358,8 @@ def check_rpa_gradient_with_point_charges_vs_finite_difference():
     """
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     chain = RPAGroundStateChain(mol, rhf,
-                                environment=PointCharges(CHARGE_COORDS, CHARGES))
+                                environment=PointCharges(CHARGE_COORDS, CHARGES),
+                                numerics=Numerics(isdf={'counts': g1(mol)}))
     ok = check(isinstance(chain.mf0, qmmm.itrf.QMMM),
                'the chain converges its mean field inside the charges')
     g, e, diags = chain.total_gradient()
@@ -361,7 +367,8 @@ def check_rpa_gradient_with_point_charges_vs_finite_difference():
                 and diags['stationarity'] < 1e-9,
                 'the gradient reports the energy it differentiates, stationary',
                 f"stationarity {diags['stationarity']:.1e}")
-    gas = RPAGroundStateChain(mol, rhf, mf=rhf(mol)).total_gradient()[0]
+    gas = RPAGroundStateChain(mol, rhf, mf=rhf(mol),
+                                numerics=Numerics(isdf={'counts': g1(mol)})).total_gradient()[0]
     ok &= check(np.abs(g - gas).max() > 1e-3, 'the field is felt',
                 f'{np.abs(g - gas).max():.1e} Ha/Bohr')
     h, worst = 1e-4, 0.0

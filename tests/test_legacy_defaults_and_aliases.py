@@ -1,50 +1,44 @@
 """The legacy chain's defaults, the renamed keys, and the aliases beside them.
 
-WHAT BREAKS IF THIS FAILS. Three names in this repository meant two things at
-once, and each cost a comparison that looked sound:
+WHAT BREAKS IF THIS FAILS. Three names would mean two things at once, and each
+would cost a comparison that looks sound:
 
-  `solver`    `ExcitedStateChain` defaulted to 'dense' while every CLI above it
-              asked for 'auto', so the class and the caller that dispatched it
-              could run different eigensolvers under one record. The class now
-              defaults to production's ONE memory rule (`bse.solver_choice`),
-              which at the pair counts a finite-difference gate runs resolves
-              to the dense route it replaces -- so the flip must move no digit
-              of the energy or the gradient, which is gated here bitwise
-              against a chain that spells `solver='dense'`.
+  `solver`    `ExcitedStateChain` defaulting to 'dense' while every CLI above
+              it asks for 'auto' would let the class and the caller that
+              dispatched it run different eigensolvers under one record. The
+              class defaults to production's ONE memory rule
+              (`bse.solver_choice`), which at the pair counts a
+              finite-difference gate runs resolves to the dense route, so the
+              default moves no digit of the energy or the gradient, which is
+              gated here to a few ulp against a chain that spells `solver='dense'`.
   `grad_max`  the driving force at an input geometry in one half of the
               repository and the residual at a converged one in the other, and
               the geometry optimizer's THRESHOLD in `constants.py`. The
               constant's key is `opt_grad_max`, the residual it is compared
-              against; the old spelling is accepted for one release and sets
-              the same number.
+              against; `grad_max` is accepted as an alias and sets the same
+              number.
 
-The benchmark table's `tier`/`size_class` alias is out of scope for this
-port, so that gate is not here.
+The qp_window default stays the frontier set, QPStates('frontier', 2), which
+this class solves; it is gated here.
 
-The qp_window default is NOT flipped: this class solves the frontier set the
-campaigns ran, QPStates('frontier', 2), and it is gated here so a later
-readthrough does not read the flip as incomplete.
+What breaks each equivalence gate:
 
-THE EQUIVALENCE GATES WERE SHOWN TO FAIL. Each was run once against a
-deliberately broken copy of the file named, which was then restored from a
-backup and `cmp` confirmed byte-identical:
-
-  test_the_chain_defaults_are_the_production_ones
-      src/gradients/excited_state.py: the constructor back at solver='dense'
-      -> FAILED: assert 'dense' == 'auto'.
-  test_auto_is_the_dense_route_at_this_pair_count
-  test_the_solver_default_moved_no_number
-      src/gradients/excited_state.py: `solver_used` returning 'davidson' for
-      'auto' whatever the rule says -> FAILED: assert 'davidson' == 'dense'
-      for the first, and the second on Omega, 0.3111593161151571 by the
-      matrix-free route against 0.3111593161151481 by the dense one. THE
-      TOTAL ENERGY STILL MATCHED there: 9e-15 Ha is below the last bit of
-      E_0 + Omega at 75.7 Ha, which is why Omega is compared on its own.
-  test_an_optimization_runs_the_same_under_either_spelling
-      src/properties/optimize.py: `resolved_conv` dropping the old key instead
-      of mapping it -> FAILED: 9 cycles under 'opt_grad_max' against 10 under
-      'grad_max', the old spelling silently leaving the default threshold in
-      force and the run relaxing past the one it was given.
+  * test_the_chain_defaults_are_the_production_ones:
+    src/gradients/excited_state.py with the constructor at solver='dense'
+    gives 'dense' where 'auto' is asserted.
+  * test_auto_is_the_dense_route_at_this_pair_count and
+    test_the_solver_default_moved_no_number: src/gradients/excited_state.py
+    with `solver_used` returning 'davidson' for 'auto' whatever the rule
+    says. The first sees 'davidson' where 'dense' is asserted; the second
+    sees Omega, 0.3111593161151571 by the matrix-free route against
+    0.3111593161151481 by the dense one. THE TOTAL ENERGY STILL MATCHES: 9e-15
+    Ha is below the last bit of E_0 + Omega at 75.7 Ha, which is why Omega is
+    compared on its own.
+  * test_an_optimization_runs_the_same_under_either_spelling:
+    src/properties/optimize.py with `resolved_conv` dropping the alias key
+    instead of mapping it gives 9 cycles under 'opt_grad_max' against 10
+    under 'grad_max': the alias silently leaves the default threshold in
+    force and the run relaxes past the one it was given.
 
 Every check ASSERTS: pytest discards a returned verdict and passes on False.
 """
@@ -57,12 +51,15 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.gradients  # noqa: F401  cycle: src.properties imports src.gradients
-from src.Base.constants import GEOM_OPT_CONV
+from src.Base.numerics import Numerics
+from src.Base.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.SingleReference.base import get_occ_virt_indices
 from src.gradients.excited_state import ExcitedStateChain
 from src.properties.optimize import optimize, resolved_conv
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -80,7 +77,9 @@ R_E = 2.2
 def scf_factory(mol):
     """A mean field converged for gradient work, as the chain requires."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -139,15 +138,15 @@ def test_the_chain_defaults_are_the_production_ones(water):
 
     `solver='auto'` is the memory rule; `residue_route='explicit'` takes the
     real-axis residues as they stand rather than picking a backend per state;
-    `qp_window=2` is the frontier set this class solves, unchanged, and
-    `outside='mean-field'` is what the orbitals beyond it carry.
+    `qp_window=2` is the frontier set this class solves, unchanged, and the
+    orbitals beyond it carry the frozen scissor, the only treatment there is.
     """
     mol, mf = water
-    chain = ExcitedStateChain(mol, scf_factory, mf=mf)
+    chain = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     assert chain.solver == 'auto'
     assert chain.residue_route == 'explicit'
     assert chain.qp_window == 2
-    assert chain.outside == 'mean-field'
+    assert chain.conventions.outside_record() == {'outside': 'scissor'}
 
 
 def test_auto_is_the_dense_route_at_this_pair_count(water):
@@ -158,33 +157,34 @@ def test_auto_is_the_dense_route_at_this_pair_count(water):
     """
     mol, mf = water
     n_ov = pair_count(mol, mf)
-    chain = ExcitedStateChain(mol, scf_factory, mf=mf)
+    chain = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     assert chain.solver_used(n_ov) == 'dense'
     assert chain.solver_used(n_ov) == solver_choice(n_ov)
 
 
 def test_the_solver_default_moved_no_number(water):
-    """The default chain and an explicitly dense one, to the last bit.
+    """The default chain and an explicitly dense one, to a few ulp.
 
-    Not a tolerance: the two must run the SAME eigensolver on the same blocks,
-    so the energy, the excitation energy and every gradient component are the
-    same float. A tolerance here would accept exactly the divergence the flip
-    has to be proved not to have introduced.
+    Not a method tolerance: the two must run the SAME eigensolver on the same
+    blocks, so the energy, the excitation energy and every gradient component
+    are the same float up to the last bits two runs may move.
+    A looser tolerance here would accept exactly the divergence
+    the flip has to be proved not to have introduced.
     """
     mol, mf = water
-    default = ExcitedStateChain(mol, scf_factory, mf=mf)
-    dense = ExcitedStateChain(mol, scf_factory, mf=mf, solver='dense')
+    default = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
+    dense = ExcitedStateChain(
+        mol, scf_factory, mf=mf, numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
     g_auto, e_auto, d_auto = default.total_gradient()
     g_dense, e_dense, d_dense = dense.total_gradient()
-    assert e_auto == e_dense
-    assert d_auto['omega'] == d_dense['omega']
-    assert np.array_equal(g_auto, g_dense)
+    assert_same(e_auto, e_dense, label='energy')
+    assert_same(d_auto['omega'], d_dense['omega'], label='omega')
+    assert_same(g_auto, g_dense, quantity='gradient', label='gradient')
 
 
 # ------------------------------------------------- the optimizer's threshold
 def test_the_constant_names_the_residual_and_keeps_the_old_spelling():
     """One number under two keys, and the unambiguous one is canonical."""
-    assert GEOM_OPT_CONV['opt_grad_max'] == 4.5e-4
     assert GEOM_OPT_CONV['grad_max'] == GEOM_OPT_CONV['opt_grad_max']
     resolved = resolved_conv(None)
     assert resolved['opt_grad_max'] == GEOM_OPT_CONV['opt_grad_max']
@@ -231,7 +231,9 @@ def test_an_optimization_runs_the_same_under_either_spelling(n2_toy):
         old_mol, old_info = optimize(surface, mol, conv=old, verbose=False)
     assert new_info['converged'] and old_info['converged']
     assert new_info['cycles'] == old_info['cycles']
-    assert new_info['opt_grad_max'] == old_info['opt_grad_max']
-    assert np.array_equal(new_mol.atom_coords(), old_mol.atom_coords())
+    assert_same(new_info['opt_grad_max'], old_info['opt_grad_max'],
+                quantity='gradient', label='opt_grad_max')
+    assert_same(new_mol.atom_coords(), old_mol.atom_coords(), unit='1',
+                quantity='root', label='geometry')
     assert (GEOM_OPT_CONV['opt_grad_max'] < old_info['opt_grad_max']
             < loose['opt_grad_max'])

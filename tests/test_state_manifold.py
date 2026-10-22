@@ -8,7 +8,7 @@ be shared (otherwise the class is an expensive alias). Both are asserted below,
 the second by counting forward passes rather than by timing, which is the only
 form of that measurement that does not flake.
 
-`ExcitedStateChain` exercises the pinned path (`bse` fixture below).
+`ExcitedStateChain` exercises the shared path (`bse` fixture below).
 
 A COMPOSED surface is the third case and the one that failed silently: it keeps
 a root index of its own and reads the energy off the chain in `excited`, so a
@@ -17,21 +17,15 @@ on water's S1, with nothing raised anywhere.
 """
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto
 
 from src.Base.constants import HARTREE_TO_EV, ISDF_GRADIENT_FLOOR
 from src.gradients.rpa_bse_surface import RPABSESurface
 from src.gradients.state_manifold import (StateManifold, driven_chain,
-                                          own_root_attribute, pinned_forward,
-                                          root_attribute)
-
-
-def rhf(mol):
-    mf = scf.RHF(mol)
-    mf.conv_tol = 1e-13
-    mf.conv_tol_grad = 1e-11
-    mf.kernel()
-    return mf
+                                          own_root_attribute, root_attribute)
+from tests.blas_bar import assert_same
+from tests.isdf_test_grid import g1_numerics
+from tests.reference_scf import rhf_tight_default_cycles
 
 
 @pytest.fixture(scope='module')
@@ -67,70 +61,17 @@ def test_a_declaration_that_does_not_exist_is_refused():
 
 
 # ------------------------------------------------------- the shared pass
-def test_the_forward_pass_is_pinned_and_then_released():
-    """Counted, not timed. A chain whose `_forward` is called once per root has
-    no reason to exist as a manifold."""
-    class Fake:
-        ROOT_ATTR = 'state'
-        mol0 = 'MOL'
-
-        def __init__(self):
-            self.state, self.calls = 0, 0
-
-        def mean_field(self, mol=None, mf=None):
-            return (mol or self.mol0), mf
-
-        def _forward(self, mol, mf):
-            self.calls += 1
-            return np.array([1.0, 2.0, 3.0]), {'pass': self.calls}
-
-        def total_energy(self, mol=None, mf=None):
-            return float(self._forward(mol, mf)[0][self.state])
-
-        def total_gradient(self, mol=None, mf=None):
-            om, pieces = self._forward(mol, mf)
-            return np.zeros((1, 3)), float(om[self.state]), pieces
-
-    fake = Fake()
-    man = StateManifold(fake, states=(0, 1, 2))
-    assert man.energies() == {0: 1.0, 1: 2.0, 2: 3.0}
-    assert man.chain.calls == 1, 'one forward pass must serve every root'
-
-    man.gradients()
-    assert man.chain.calls == 2, 'one more pass for the gradients, not three'
-
-    # released afterwards: an unpinned call recomputes
-    man.chain.total_energy()
-    assert man.chain.calls == 3
-    assert '_forward' not in man.chain.__dict__
+# One forward pass for every root of a chain without a split forward is the
+# chain's evaluation cache's, read highest root first: test_one_evaluate_once.
 
 
-def test_a_pinned_pass_refuses_a_different_geometry():
-    """Otherwise a displaced geometry would silently get the reference
-    spectrum, which is a finite difference of exactly zero."""
-    class Fake:
-        ROOT_ATTR = 'state'
-
-        def __init__(self):
-            self.state = 0
-
-        def _forward(self, mol, mf):
-            return np.zeros(2), {}
-
-    fake = Fake()
-    with pinned_forward(fake, 'MOL_A', None) as pinned:
-        assert pinned
-        with pytest.raises(RuntimeError, match='different geometry'):
-            fake._forward('MOL_B', None)
-
-
-# ------------------------------------------- the real chain the plan aims at
+# ------------------------------------------- the real chains
 @pytest.fixture(scope='module')
 def bse(mol):
     """One mean field shared, so the manifold's saving is the forward pass and
     not an SCF it avoided."""
     from src.gradients.excited_state import ExcitedStateChain
-    return ExcitedStateChain(mol, rhf, spin='singlet', state=0, mf=rhf(mol))
+    return ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=0, mf=rhf_tight_default_cycles(mol), numerics=g1_numerics(mol))
 
 
 def test_the_bse_chains_root_attribute_is_inferred(bse):
@@ -162,9 +103,12 @@ def test_bse_roots_off_one_pass_equal_independent_surfaces(bse, mol):
         type(bse)._shared_forward = orig
 
     for n in (0, 1, 2):
-        ref = ExcitedStateChain(mol, rhf, spin='singlet', state=n,
-                                mf=bse.mf0).total_energy()
-        assert got[n] == ref
+        ref = ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=n,
+                                mf=bse.mf0, numerics=g1_numerics(mol)).total_energy()
+        # the manifold and the single chain are two SCF-free passes over one
+        # mean field but different call shapes: bitwise on the recording
+        # BLAS, energy class bar on another
+        assert_same(got[n], ref, label=f'state {n}')
 
 
 def test_bse_gradients_off_one_pass_equal_independent_surfaces(bse, mol):
@@ -172,8 +116,8 @@ def test_bse_gradients_off_one_pass_equal_independent_surfaces(bse, mol):
     man = StateManifold(bse, states=(0, 1))
     got = man.gradients()
     for n in (0, 1):
-        ref = ExcitedStateChain(mol, rhf, spin='singlet', state=n,
-                                mf=bse.mf0).total_gradient()
+        ref = ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=n,
+                                mf=bse.mf0, numerics=g1_numerics(mol)).total_gradient()
         # E_0 + Omega: two chains' gradients, so two reproducibility floors
         assert np.abs(got[n][0] - ref[0]).max() < 2 * ISDF_GRADIENT_FLOOR
         # the seeded Newton root sits one ulp from the unseeded one
@@ -187,14 +131,14 @@ def test_bse_gradients_off_one_pass_equal_independent_surfaces(bse, mol):
 def composed(mol):
     """E_HF + E_c^dRPA + Omega. The root index on the outer object is a copy;
     the excitation is read off the chain in `excited`."""
-    return RPABSESurface(mol, rhf, state=0, mf=rhf(mol))
+    return RPABSESurface(mol, rhf_tight_default_cycles, state=0, mf=rhf_tight_default_cycles(mol), numerics=g1_numerics(mol))
 
 
 @pytest.fixture(scope='module')
 def root1(mol, composed):
     """An INDEPENDENT surface at root 1, sharing only the mean field, so what
     the manifold saves is the forward pass and not an SCF."""
-    return RPABSESurface(mol, rhf, state=1, mf=composed.ground.mf0)
+    return RPABSESurface(mol, rhf_tight_default_cycles, state=1, mf=composed.ground.mf0, numerics=g1_numerics(mol))
 
 
 @pytest.fixture(scope='module')
@@ -214,8 +158,8 @@ def test_the_driven_half_holds_the_spectrum(composed):
 
 
 def test_a_composed_root_is_that_root_and_not_root_zero(composed, root1_reference):
-    """The defect, on the single-root entry points: `energy(n)` returned root
-    0's energy for every state and raised nothing."""
+    """On the single-root entry points `energy(n)` must not return root 0's
+    energy for every state without raising."""
     e_ref, _ = root1_reference
     man = StateManifold(composed, states=(0, 1))
     e1, e0 = man.energy(1), man.energy(0)
@@ -225,8 +169,8 @@ def test_a_composed_root_is_that_root_and_not_root_zero(composed, root1_referenc
 
 
 def test_composed_energies_come_off_one_forward_pass(composed, root1_reference):
-    """Counted on the EXCITED half, which is where the pass has to be
-    pinned; pinning the outer object would leave one pass per root."""
+    """Counted on the EXCITED half, which is where the pass is shared;
+    sharing it on the outer object would leave one pass per root."""
     e_ref, _ = root1_reference
     calls, orig = {'n': 0}, type(composed.excited)._shared_forward
 

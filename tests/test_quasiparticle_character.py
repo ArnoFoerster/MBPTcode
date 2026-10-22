@@ -32,11 +32,15 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.declaration import ChargedExcitation
+from src.gradients.conventions import ConventionsWriteRefused
 from src.gradients.rpa_bse_surface import MeanFieldQPSurface
 from src.properties.characters import (orbital_fingerprint,
                                        quasiparticle_character,
                                        quasiparticle_order, surface_order,
                                        track_orbital)
+from src.Base.numerics import numerics_of
+from tests.blas_bar import assert_same
+from tests.isdf_test_grid import g1
 
 #: Li+ bound to the carbonyl oxygen of a planar ethylene carbonate
 EC_LI = '''C 0 0 0; O 0 0 1.195; O 1.09 0 -0.763; O -1.09 0 -0.763;
@@ -98,14 +102,14 @@ def test_order_audit():
     nocc = mol.nelectron // 2
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        lumo = quasiparticle_order(mf, nocc)
-        homo = quasiparticle_order(mf, nocc - 1)
+        lumo = quasiparticle_order(mf, nocc, counts=g1(mf))
+        homo = quasiparticle_order(mf, nocc - 1, counts=g1(mf))
     assert not lumo['reordered'] and not homo['reordered']
     with pytest.warns(RuntimeWarning, match='not the lowest-energy attachment'):
-        second = quasiparticle_order(mf, nocc + 1)
+        second = quasiparticle_order(mf, nocc + 1, counts=g1(mf))
     assert second['reordered'] and second['lowest_process'] == nocc
     with pytest.warns(RuntimeWarning, match='not the lowest-energy removal'):
-        quasiparticle_order(mf, nocc - 2)
+        quasiparticle_order(mf, nocc - 2, counts=g1(mf))
 
     class Surface:
         """The two things `surface_order` reads of a charged surface."""
@@ -115,7 +119,7 @@ def test_order_audit():
             return mol, mf
 
     with pytest.warns(RuntimeWarning, match='not the lowest-energy attachment'):
-        assert surface_order(Surface())['lowest_process'] == nocc
+        assert surface_order(Surface(), counts=g1(mf))['lowest_process'] == nocc
 
 
 def test_unrestricted_and_refusals():
@@ -143,10 +147,13 @@ def test_a_tracked_surface_follows_its_orbital():
         mf.kernel()
         return mf
 
+    numerics = numerics_of({'solver': 'dense', 'counts': g1(mol)})
     tracked = MeanFieldQPSurface(mol, factory, state=1, track=True,
-                                 solver='dense')
-    plain = MeanFieldQPSurface(mol, factory, state=1, solver='dense')
-    assert tracked.total_energy(mol) == plain.total_energy(mol)
+                                 numerics=numerics)
+    plain = MeanFieldQPSurface(mol, factory, state=1, numerics=numerics)
+    # two surfaces, two SCF solves: bitwise on the recording BLAS, energy class
+    # bar on another
+    assert_same(tracked.total_energy(mol), plain.total_energy(mol))
     moved = mol.copy()
     moved.set_geom_(mol.atom_coords() + np.array([[0, 0, 0.02], [0, 0.01, 0],
                                                   [0, 0, 0]]), unit='Bohr')
@@ -160,7 +167,10 @@ def test_a_tracked_surface_follows_its_orbital():
     right = plain.total_energy(moved, mf)
     assert abs(tracked.total_energy(moved, swapped) - right) < 1e-10
     assert tracked.follow_log[-1]['orbital'] == nocc + 1
-    assert abs(plain.total_energy(moved, swapped) - right) > 1e-2
+    # following the index lands on another orbital, whose Newton branch was
+    # never frozen at the reference: refused rather than reported
+    with pytest.raises(ConventionsWriteRefused):
+        plain.total_energy(moved, swapped)
 
 
 TESTS = [test_li_ec_character, test_track_follows_a_planted_crossing,

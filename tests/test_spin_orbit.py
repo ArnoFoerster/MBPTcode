@@ -26,7 +26,9 @@ import pytest
 from pyscf import gto, scf, tdscf
 from pyscf.x2c import sfx2c1e, x2c
 
-from src.Base.constants import HARTREE_TO_CM
+from src.Base.constants import (HARTREE_TO_CM, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics import Numerics
 from src.gradients.excited_state import ExcitedStateChain
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_two_electron_integrals_chemist)
@@ -40,6 +42,8 @@ from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR, chain_manifolds,
                                        qdpt_spectrum, soc_operator,
                                        soc_operator_mo, socme_table,
                                        spin_orbit_couplings, sublevel_elements)
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
 CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
@@ -50,7 +54,9 @@ H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 def scf_factory(mol):
     """Converged for gradient work, as the chain's Lagrangian requires."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -163,7 +169,9 @@ def test_koseki_route_leaves_the_rinv_origin_where_it_found_it(formaldehyde):
     with mol.with_rinv_origin((0.3, -0.2, 0.7)):
         before = mol.intor('int1e_rinv')
         soc_operator(mol, two_electron=None, one_electron='koseki')
-        assert np.array_equal(mol.intor('int1e_rinv'), before)
+        # the integrals again, at the caller's origin: a few ulp
+        assert_same(mol.intor('int1e_rinv'), before, quantity='root',
+                    label='int1e_rinv')
 
 
 # ------------------------------------------------- structure of the density
@@ -344,8 +352,7 @@ def water_bse_modes(water):
     manifolds = []
     for spin in ('singlet', 'triplet'):
         manifolds.append(_sorted(*solve_casida_davidson(
-            lr_df, nocc, nroots=4, polarizability='BSE', W_aux=w_df,
-            conv_tol=1e-9, spin=spin)))
+            lr_df, nocc, numerics=Numerics(bse={'nroots': 4, 'conv_tol': 1e-9}), polarizability='BSE', W_aux=w_df, spin=spin)))
     out['davidson/df'] = manifolds
     return mol, mf, nocc, out
 
@@ -388,7 +395,7 @@ def test_isdf_manifolds_run_the_whole_bse_at_gw_route(water):
     channels, and a finite table out."""
     mol, mf = water
     nocc = mol.nelectron // 2
-    singlet, triplet = isdf_manifolds(mf, mol, nocc, nroots=3, n_start=4)
+    singlet, triplet = isdf_manifolds(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), n_start=4, counts=g1(mol))
     out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=2)
     v = out['socme'] * HARTREE_TO_CM
     assert v.shape == (3, 2)
@@ -402,9 +409,9 @@ def test_shared_pass_reproduces_an_independent_triplet_chain(water):
     triplet chain, which redoes the quasiparticle set and the screening.
     """
     mol, mf = water
-    chain = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf)
+    chain = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     _, (om_t, _, _) = chain_manifolds(chain)
-    independent = ExcitedStateChain(mol, scf_factory, spin='triplet', mf=mf)
+    independent = ExcitedStateChain(mol, scf_factory, spin='triplet', mf=mf, numerics=g1_numerics(mol))
     assert abs(np.asarray(om_t) - independent.spectrum()).max() < 1e-10
 
 
@@ -415,7 +422,7 @@ def test_socme_on_bse_at_gw_chain_roots(water):
     and both manifolds ordered -- which is what makes the table interpretable.
     """
     mol, mf = water
-    chain = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf)
+    chain = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     singlet, triplet = chain_manifolds(chain)
     out = spin_orbit_couplings(mf, mol, mol.nelectron // 2, singlet, triplet,
                                nroots=3)

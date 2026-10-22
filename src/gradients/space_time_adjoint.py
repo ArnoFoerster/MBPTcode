@@ -61,19 +61,15 @@ factors' bit for bit. The adjoints come back whole (all-reduced sums over the
 tau partition).
 
 The chain is differentiable up to Sigma_c(i.omega) and no further: the Pade
-continuation to the real axis has a derivative of order 1e11
-(`pade_continuation_jvp`), so a quasiparticle gradient needs a
-continuation-free equation; `contour_deformation` supplies it and
+continuation to the real axis has a derivative of order 1e11 (water/cc-pVDZ,
+a unit-norm perturbation of Sigma(i.omega) at 8 to 24 Thiele nodes: the
+inverse differences divide by near-zero differences), so a quasiparticle
+gradient needs a continuation-free equation; `contour_deformation` supplies it and
 `qp_space_time` wires the two.
 
-Re-exported here: the self-energy's transform pair (`sigma_fit_ranges`,
-`sigma_transforms`, `sigma_transform_error`, from
-`Base/utils/time_frequency.py`); the self-energy's forward halves
-(`SingleReference.GW.imaginary_time`), so the reverse passes differentiate the
-routine the energy routes evaluate; and the real-frequency screening below the
-particle-hole gap (`real_frequency_weights` from
-`SingleReference.GW.real_screening`, and `LaplaceRealScreening`, its adjoint
-subclass).
+The reverse passes differentiate the forward routines the energy routes
+evaluate (`SingleReference.GW.imaginary_time`, `LinearResponse.space_time`,
+the transforms of `Base/utils/time_frequency.py`), imported from there.
 """
 from dataclasses import dataclass
 
@@ -84,25 +80,17 @@ from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
                                      whole_factor)
 from src.Base.utils.analyticalContinuation import (greedy_pade_order, pade_eval,
                                                    thiele_coefficients)
-from src.Base.utils.time_frequency import (sigma_fit_ranges,  # noqa: F401
-                                           sigma_transform_error,
-                                           sigma_transforms)
+from src.Base.utils.time_frequency import sigma_transforms
 from src.Base.utils.mpi_grid import (agreement, allgather_ranges,
                                      current_comm, partition, reduce_sum)
 from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.GW.real_screening import \
-    real_frequency_weights  # noqa: F401
-from src.SingleReference.LinearResponse.space_time import (  # noqa: F401
+from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_imaginary_frequency, frequency_blocks,
-    laplace_representation_error, owned_frequency_blocks,
-    polarizability_projected_sweep, rpa_correlation_energy_space_time,
-    split_branches, three_index_ov, three_index_slice, tile_rows)
-from src.SingleReference.GW.imaginary_time import (  # noqa: F401
-    screened_interaction_tau, selfenergy_block, selfenergy_diag)
+    owned_frequency_blocks, polarizability_projected_sweep,
+    rpa_correlation_energy_space_time, split_branches, tile_rows)
+from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.SingleReference.GW.qp_solve import imaginary_axis_sample_points
 from src.Solvers.qp_equation import solve_qp_equation
-from src.gradients.contour_deformation_adjoint import \
-    LaplaceRealScreeningAdjoint as LaplaceRealScreening  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +531,7 @@ def rpa_frequency_traces(X, D, eps, nocc, grid, mat, mu=None,
 # ---------------------------------------------------------------------------
 # the three-index tensor: never whole, one slice or one block at a time.
 # The forward halves are `LinearResponse.space_time.three_index_slice` and
-# `three_index_ov`, imported above and re-exported under the same names.
+# `three_index_ov`.
 # ---------------------------------------------------------------------------
 
 def three_index_slice_backward(X, D, p, Bp_bar, tile_gb=ISDF_TILE_GB,
@@ -602,8 +590,7 @@ def three_index_ov_backward(X, D, eps, nocc, Cov_bar, tile_gb=ISDF_TILE_GB):
 # ---------------------------------------------------------------------------
 # the self-energy on the imaginary axis, in the auxiliary basis. Its forward
 # halves (`screened_interaction_tau`, `selfenergy_block`, `selfenergy_diag`)
-# are `GW.imaginary_time`'s, imported above and re-exported; only the reverse
-# passes live here.
+# are `GW.imaginary_time`'s; only the reverse passes live here.
 # ---------------------------------------------------------------------------
 
 def screened_interaction_tau_backward(Wt_bar, proj_tau, grid, Ctw,
@@ -835,48 +822,6 @@ def selfenergy_diag_backward(a_re, a_im, X, D, eps, nocc, grid, states,
 # the continuation: forward only, and why
 # ---------------------------------------------------------------------------
 
-def thiele_jvp(z, f, df):
-    """Thiele coefficients and their exact directional derivative along df.
-
-    The recursion is complex add/divide, so forward mode carries it twice. No
-    finite difference can measure this map's derivative (see
-    `pade_continuation_jvp`).
-    """
-    n = len(z)
-    g = np.zeros((n, n), dtype=complex)
-    dg = np.zeros((n, n), dtype=complex)
-    g[:, 0], dg[:, 0] = f, df
-    for i in range(1, n):
-        num = g[i - 1, i - 1] - g[i:, i - 1]
-        den = (z[i:] - z[i - 1]) * g[i:, i - 1]
-        dnum = dg[i - 1, i - 1] - dg[i:, i - 1]
-        dden = (z[i:] - z[i - 1]) * dg[i:, i - 1]
-        g[i:, i] = num / den
-        dg[i:, i] = dnum / den - num * dden / den ** 2
-    return g.diagonal().copy(), dg.diagonal().copy()
-
-
-def pade_continuation_jvp(z_ord, data, direction, w):
-    """d[Pade(data)(w)]/d[data] along `direction`, exactly, at fixed nodes.
-
-    A diagnostic, not a gradient link. On water/cc-pVDZ the result is of order
-    1e11 for a unit-norm perturbation of Sigma(i.omega) at 8 to 24 Thiele
-    nodes: the inverse-difference recursion divides by differences that come
-    arbitrarily close to zero, so the quasiparticle energy is not a usefully
-    differentiable function of the self-energy, and finite differences of it
-    are noise. A space-time GW nuclear gradient therefore needs a
-    continuation-free quasiparticle equation (contour deformation, or the
-    algebraic eta = 0 root of the quasi-boson route).
-    """
-    a, da = thiele_jvp(z_ord, data, direction)
-    r, dr = a[-1] + 0j, da[-1] + 0j
-    for i in range(len(a) - 2, -1, -1):
-        den = 1.0 + (w - z_ord[i]) * r
-        dr = da[i] / den - a[i] * ((w - z_ord[i]) * dr) / den ** 2
-        r = a[i] / den
-    return r, dr
-
-
 def qp_energy_space_time(X, D, eps, nocc, grid, p, mu, pade_freq,
                          xc_correction=0.0, solver_mode='pole_strength',
                          tile_gb=ISDF_TILE_GB, fd_rel=1e-6):
@@ -884,8 +829,8 @@ def qp_energy_space_time(X, D, eps, nocc, grid, p, mu, pade_freq,
 
     No adjoint is returned. The chain up to Sigma_c(i.omega) is differentiable
     and `selfenergy_diag_backward` handles it; the Pade continuation that turns
-    Sigma_c(i.omega) into a real-axis root is not (see `pade_continuation_jvp`),
-    so a QP gradient assembled through it would be a number with no meaning.
+    Sigma_c(i.omega) into a real-axis root is not (module docstring), so a QP
+    gradient assembled through it would be a number with no meaning.
 
     xc_correction is <Sigma_x - v_xc>_pp, zero on a Hartree-Fock reference.
     `SlicedFactors` are gathered whole, X_mo and D once each.

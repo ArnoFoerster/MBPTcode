@@ -26,7 +26,9 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_CM, HARTREE_TO_EV
+from src.Base.constants import (HARTREE_TO_CM, HARTREE_TO_EV,
+                                SURFACE_GRID_ACCURACY)
+from src.Base.separable_ri import resolve_isdf_grid
 from src.gradients.excited_state import ExcitedStateChain
 from src.properties.band_shape import (band_grid, band_shape,
                                        gaussian_limit_fwhm)
@@ -55,7 +57,9 @@ mol0 = gto.M(atom=CH2O, basis=BASIS, verbose=0)
 s0 = relax_state(MeanFieldSurface(mol0, scf_factory), mol0, engine='cartesian',
                  verbose=False)
 mol_gs, mf_gs = s0['mol'], s0['mf']
-chain = ExcitedStateChain(mol_gs, scf_factory, spin='singlet', mf=mf_gs)
+chain = ExcitedStateChain(mol_gs, scf_factory, spin='singlet', mf=mf_gs,
+                          counts=resolve_isdf_grid(SURFACE_GRID_ACCURACY,
+                                                   BASIS)[0])
 s1 = relax_state(chain, mol_gs, engine='cartesian', verbose=False)
 print(f'S0 relaxed: {s0["info"].get("status")}, S1 relaxed: '
       f'{s1["info"].get("status")}')

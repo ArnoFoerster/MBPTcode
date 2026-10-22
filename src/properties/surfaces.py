@@ -21,24 +21,36 @@ The call returns the realizing class's own instance (`RPABSESurface`,
 `ExcitedStateChain`, `DenseBSESurface`, ...), not a wrapper.
 """
 import functools
-import inspect
 from dataclasses import dataclass, fields
 from typing import Optional, Tuple
 
 import numpy as np
 
-from src.Base.constants import OUTSIDE_TREATMENTS, SURFACE_GRID_ACCURACY
+from src.Base.basis.ri_fallback import paired_auxbasis
+from src.Base.constants import (BSE_SOLVERS,
+                                OUTSIDE_TREATMENTS, ROOT_FOLLOWING,
+                                SURFACE_GRID_ACCURACY)
+from src.Base.numerics import Numerics, numerics_of, require_same_section
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   PhysicsMismatch, QPStates, SurfacePhysics)
 from src.Base.environment import (NoEnvironment, environment_label,
                                   resolve_environment)
-from src.Base.separable_ri import default_auxbasis, resolve_isdf_grid
+from src.Base.geometry import elements_of
+from src.Base.pyscf_interface import occupied_count
+from src.Base.separable_ri import resolve_isdf_grid
 from src.Base.utils.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.sum_over_poles import compressible
 from src.SingleReference.LinearResponse.bse import solver_choice
 from src.SingleReference.LinearResponse.rpa_energy import (declared_ground_state,
                                                            ground_state_energy)
+from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+                                          QuasiparticleSurface)
+from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.reference_mean_field import converged_factory
+from src.gradients.rpa_bse_surface import (MeanFieldQPSurface, RPABSESurface,
+                                           RPAQPSurface)
+from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import MeanFieldSurface
 
 #: How the polarizability is built. 'space-time' is the cubic imaginary-time
@@ -48,13 +60,9 @@ from src.properties.optimize import MeanFieldSurface
 CHI0_ROUTES = ('casida', 'imagfrequency', 'space-time', 'dense-qb')
 
 #: How the real-axis residues of Sigma^c are taken on the space-time route.
-#: 'auto' picks per orbital and records what it picked; it is never a default,
-#: because a surface whose residue backend is decided per geometry is not one
-#: surface.
-RESIDUE_ROUTES = ('explicit', 'laplace', 'sop', 'auto')
-
-#: The Casida/BSE eigensolver. 'auto' is resolved through `solver_choice`.
-SOLVERS = ('auto', 'dense', 'davidson')
+#: A backend picked per orbital at every geometry ('auto') is refused: a
+#: surface whose residue backend can change along a walk is not one surface.
+RESIDUE_ROUTES = ('explicit', 'laplace', 'sop')
 
 #: How the four-index integral is represented.
 FACTORIZATIONS = ('isdf', 'df', 'four-index')
@@ -67,25 +75,25 @@ NO_EXCITATION = 'none'
 #: rank its grid rows; the numbers are the whole layout's bit for bit), and
 #: `fit` and `fit_block`, how the fit is realized ('rows': by grid rows, no
 #: rank forming it whole, bitwise across rank counts and not the replicated
-#: fit's bits). Shared by every space-time/ISDF row, because they all reach
-#: the same `FrozenFactorization`.
+#: fit's bits). Shared by every
+#: space-time/ISDF row, because they all reach the same `FrozenFactorization`.
 GRID_NUMERICS = frozenset({'basis', 'auxbasis', 'counts', 'radii', 'n_start',
                            'grid_accuracy', 'sliced', 'fit', 'fit_block'})
 
 #: Numeric keywords `ExcitedStateChain` reads: the two imaginary-time grids,
-#: the contour-deformation quadrature, the pole model, the Casida step, and
-#: `bse_adjoint`, how the root's adjoint is realized (the same surface either
-#: way; 'grid' forms no three-index block).
+#: the contour-deformation quadrature, the pole model, the Casida step and its
+#: (A - B) `probe`, and `bse_adjoint`, how the root's adjoint is realized (the
+#: same surface either way; 'grid' forms no three-index block).
 EXCITED_NUMERICS = frozenset({'ntau_gw', 'ntau_w', 'nfreq_cd', 'n_poles',
-                              'sop_stride', 'bse_conv_tol', 'degeneracy_tol',
-                              'dense_max_nov', 'nroots', 'e_min_below_gap',
-                              'tile_gb', 'bse_adjoint', 'qp_partition'})
+                              'sop_stride', 'bse_conv_tol', 'probe',
+                              'degeneracy_tol', 'nroots', 'e_min_below_gap',
+                              'tile_gb', 'bse_adjoint',
+                              'qp_partition', 'outside_scissor',
+                              'qp_hamiltonian'})
 
-#: How a BSE state is followed from geometry to geometry: `track` absent (or
-#: None) follows the root INDEX, 'overlap' the state, by the overlap of its
-#: Casida vector with the previous step's in the moving orbital basis
-#: (`ExcitedStateChain.tracked_state`). Read by the two BSE rows alone.
-ROOT_FOLLOWING = ('overlap',)
+#: `track` absent (None) follows a BSE state's root INDEX, a mode of
+#: ROOT_FOLLOWING the state (`ExcitedStateChain.tracked_state`). Read by the
+#: two BSE rows alone.
 TRACK_NUMERICS = frozenset({'track'})
 
 #: Numeric keywords `RPAGroundStateChain` reads. Its imaginary-time count and
@@ -176,6 +184,9 @@ class Row:
     #: False for a surface with no response function at all, whose chi0 and
     #: factorization are recorded as None rather than as what was asked for.
     post_scf: bool = True
+    #: True where the class can stand on another surface's `Numerics`
+    #: (`potential_energy_surface(settings=)`): E_0's chain of a record.
+    reads_settings: bool = False
 
     def key(self):
         """The four-part table key, with '*' where the row takes any value."""
@@ -198,18 +209,12 @@ class Setup:
     solver: Optional[str]
     residues: Optional[str]
     qp_states: Optional[QPStates] = None
+    settings: Optional[Numerics] = None
 
 
 @functools.lru_cache(maxsize=1)
 def realizing_classes():
     """The classes the table dispatches to."""
-    # cycle: src.gradients -> src.properties.__init__ -> this module
-    from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
-                                              QuasiparticleSurface)
-    from src.gradients.excited_state import ExcitedStateChain
-    from src.gradients.rpa_bse_surface import (MeanFieldQPSurface,
-                                               RPABSESurface, RPAQPSurface)
-    from src.gradients.rpa_ground_state import RPAGroundStateChain
     return {'DenseBSESurface': DenseBSESurface,
             'DenseRPASurface': DenseRPASurface,
             'ExcitedStateChain': ExcitedStateChain,
@@ -224,15 +229,12 @@ def realizing_classes():
 def qp_set_degeneracy_tol(numerics):
     """The orbital-energy separation two orbitals count as one degenerate block at.
 
-    Read off `ExcitedStateChain`'s own default rather than respelled, so the
+    The chain's own default (`Numerics`) rather than respelled, so the
     set this entry point resolves and the set the chain would have chosen
     cannot be two different sets.
     """
-    if 'degeneracy_tol' in numerics:
-        return float(numerics['degeneracy_tol'])
-    chain = realizing_classes()['ExcitedStateChain']
-    return float(inspect.signature(chain.__init__)
-                 .parameters['degeneracy_tol'].default)
+    return float(numerics.get('degeneracy_tol',
+                              Numerics().qp.degeneracy_tol))
 
 
 def _shell_counts(counts):
@@ -265,9 +267,9 @@ def resolve_grid(mol, numerics):
     a `counts` that contradicts a named level is refused rather than resolved
     to either side (`separable_factors`' rule).
     """
-    basis = numerics.get('basis') or mol.basis
-    auxbasis = numerics.get('auxbasis') or default_auxbasis(basis)
-    elements = {mol.atom_pure_symbol(i) for i in range(mol.natm)}
+    basis = numerics.get('basis') or str(mol.basis)
+    auxbasis = numerics.get('auxbasis') or paired_auxbasis(basis)
+    elements = elements_of(mol)
     counts, n_start = numerics.get('counts'), numerics.get('n_start')
     radii, level = numerics.get('radii'), numerics.get('grid_accuracy')
     if level is None and counts is None and radii is None:
@@ -303,47 +305,58 @@ def factorization_kwargs(setup):
 
 
 def excited_kwargs(setup, row):
-    """The keywords `ExcitedStateChain` takes this entry point's realization through.
+    """The keywords `ExcitedStateChain` takes this entry point's realization
+    through: its one `Numerics`, and a partition an earlier stage froze.
 
     The explicit quasiparticle set goes in as `qp_window`, which accepts a
-    sequence of orbital indices; with `scissor='calibrate'` the states inside
-    that set whose pole model is inadmissible take a frozen shift built at the
-    reference geometry instead of a real-axis solve, and `outside` (the row's
-    own `outside_treatment`, so the record and the chain cannot disagree)
-    decides what the orbitals outside it carry.
+    sequence of orbital indices: the declaration resolved once, on the
+    reference geometry's spectrum, and kept as those indices by every
+    `refreeze` of the chain; `scissor='calibrate'` is what makes the states
+    INSIDE that set whose pole model is inadmissible take a frozen shift built
+    at the reference geometry instead of a real-axis solve. The orbitals
+    outside the set carry the chain's frozen scissor, the row's
+    `outside_treatment`.
     """
-    kw = {'residue_route': setup.residues}
-    # A row with no Casida eigenproblem (the charged surface) resolves no
+    numerics = setup.numerics
+    route = {'residue_route': setup.residues}
+    # A row with no Casida eigenproblem -- the charged surface -- resolves no
     # solver, and handing the chain None is not the same as not asking.
     if setup.solver is not None:
-        kw['solver'] = setup.solver
+        route['solver'] = setup.solver
     if row.qp_keyword is not None:
-        kw['qp_window'] = setup.qp_explicit
-        kw['scissor'] = 'calibrate'
+        route['qp_window'] = setup.qp_explicit
+        route['scissor'] = 'calibrate'
     if setup.qp_states is not None and setup.qp_states.kind == 'adaptive':
         # qp_window is then the candidates; the chain selects among them
-        kw['qp_select'] = setup.qp_states
-    if row.outside_treatment == 'scissor':
-        kw['outside'] = 'scissor'
-    for name in sorted(EXCITED_NUMERICS | TRACK_NUMERICS):
-        if name in setup.numerics:
-            kw[name] = setup.numerics[name]
+        route['qp_select'] = setup.qp_states
+    route.update(factorization_kwargs(setup))
+    read = (EXCITED_NUMERICS | TRACK_NUMERICS) - {'qp_partition'}
+    choices = {name: numerics[name] for name in read if name in numerics}
+    choices.update(route)
+    kw = {'numerics': numerics_of(choices)}
+    if 'qp_partition' in numerics:
+        kw['qp_partition'] = numerics['qp_partition']
     return kw
 
 
 def excited_numerics(chain):
     """The grids and caps an `ExcitedStateChain` resolved, as numbers, and
     the realization of its adjoint; `track` where the state is followed by
-    overlap."""
+    overlap, and the (A - B) probe where it is not the default."""
     out = {'ntau_gw': int(chain.ntau_gw), 'ntau_w': int(chain.ntau_w),
-           'nfreq_cd': int(chain.nfreq_cd), 'n_poles': int(chain.n_poles),
+           'nfreq_cd': int(chain.conventions.nfreq_cd), 'n_poles': int(chain.n_poles),
            'sop_stride': chain.sop_stride, 'nroots': int(chain.nroots),
-           'dense_max_nov': int(chain.dense_max_nov),
            'bse_conv_tol': float(chain.bse_conv_tol),
            'degeneracy_tol': float(chain.degeneracy_tol),
            'bse_adjoint': chain.bse_adjoint}
     if chain.track is not None:
         out['track'] = chain.track
+    if chain.probe is not True:
+        out['probe'] = chain.probe
+    if getattr(chain, 'outside_scissor', 'tiers') != 'tiers':
+        out['outside_scissor'] = chain.outside_scissor
+    if getattr(chain, 'qp_hamiltonian', False):
+        out['qp_hamiltonian'] = True
     return out
 
 
@@ -356,14 +369,21 @@ def refuse_unknown_track(numerics):
 
 
 def build_rpa_ground(row, setup):
-    """E_HF + E_c^dRPA on the space-time/ISDF chain."""
-    kw = factorization_kwargs(setup)
-    for named, own in (('ntau_rpa', 'ntau'), ('nfreq_rpa', 'nfreq'),
-                       ('tile_gb', 'tile_gb')):
-        if named in setup.numerics:
-            kw[own] = setup.numerics[named]
+    """E_HF + E_c^dRPA on the space-time/ISDF chain.
+
+    With `setup.settings` the chain stands on that object (E_0 of a record:
+    the excited surface's), whose grid must be the one the keywords resolve to.
+    """
+    choices = factorization_kwargs(setup)
+    choices.update({name: setup.numerics[name] for name in RPA_GROUND_NUMERICS
+                    if name in setup.numerics})
+    numerics = numerics_of(choices)
+    if setup.settings is not None:
+        require_same_section(numerics, setup.settings, 'isdf',
+                             'the ground surface against the excited one')
+        numerics = setup.settings
     chain = row.cls(setup.mol, setup.scf_factory, mf=setup.mf,
-                    environment=setup.environment, **kw)
+                    environment=setup.environment, numerics=numerics)
     return chain, {'ntau_rpa': int(chain.ntau),
                    'nfreq_rpa': int(len(chain.grid.omega_points))}
 
@@ -375,7 +395,7 @@ def build_rpa_bse(row, setup):
                       state=setup.excitation.root - 1,
                       spin=setup.excitation.spin,
                       bse_tda=setup.excitation.kernel == 'bse-tda',
-                      **factorization_kwargs(setup), **excited_kwargs(setup, row))
+                      **excited_kwargs(setup, row))
     return surface, excited_numerics(surface.excited)
 
 
@@ -386,7 +406,7 @@ def build_rpa_qp(row, setup):
                       environment=setup.environment,
                       state=setup.excitation.orbital - (nocc - 1),
                       equilibrium=setup.excitation.equilibrium,
-                      **factorization_kwargs(setup), **excited_kwargs(setup, row))
+                      **excited_kwargs(setup, row))
     return surface, excited_numerics(surface.excited)
 
 
@@ -397,7 +417,7 @@ def build_dft_qp(row, setup):
                       environment=setup.environment,
                       state=setup.excitation.orbital - (nocc - 1),
                       equilibrium=setup.excitation.equilibrium,
-                      **factorization_kwargs(setup), **excited_kwargs(setup, row))
+                      **excited_kwargs(setup, row))
     return surface, excited_numerics(surface.excited)
 
 
@@ -408,7 +428,7 @@ def build_excited_chain(row, setup):
                     state=setup.excitation.root - 1,
                     spin=setup.excitation.spin,
                     bse_tda=setup.excitation.kernel == 'bse-tda',
-                    **factorization_kwargs(setup), **excited_kwargs(setup, row))
+                    **excited_kwargs(setup, row))
     return chain, excited_numerics(chain)
 
 
@@ -423,9 +443,9 @@ def build_dense_bse(row, setup):
     `filter_z=False` keeps the set this entry point resolved: the
     surface's own Z > 0.5 filter would re-decide it and the two routes would
     then be compared on two different quasiparticle sets. qp_root='weight':
-    every orbital of it carries the root of largest pole strength, decided at
-    each geometry, never a satellite nearer the mean-field level and never
-    the mean-field level itself.
+    every orbital of it carries the root of largest pole strength at the
+    reference geometry, followed by Newton everywhere else, never a satellite
+    nearer the mean-field level and never the mean-field level itself.
     """
     variant = 'BSEtda@GW' if setup.excitation.kernel == 'bse-tda' else 'BSE@GW'
     kw = {} if 'eri_blocks' not in setup.numerics else {
@@ -477,7 +497,7 @@ def dispatch_table():
     return (
         Row('rpa', NO_EXCITATION, 'space-time', 'isdf',
             cls['RPAGroundStateChain'], GRID_NUMERICS | RPA_GROUND_NUMERICS,
-            build_rpa_ground, isdf_grid=True),
+            build_rpa_ground, isdf_grid=True, reads_settings=True),
         Row('rpa', NO_EXCITATION, 'dense-qb', 'four-index',
             cls['DenseRPASurface'], frozenset(), build_dense_rpa),
         Row('rpa', NO_EXCITATION, 'dense-qb', 'df',
@@ -671,8 +691,8 @@ def resolve_solver(solver, row, mf, excitation):
     BSE_DENSE_MAX_GB. A row with no eigenproblem records None and refuses to be
     told one.
     """
-    if solver not in SOLVERS:
-        raise ValueError(f'solver {solver!r} not in {SOLVERS}')
+    if solver not in BSE_SOLVERS:
+        raise ValueError(f'solver {solver!r} not in {BSE_SOLVERS}')
     if not row.reads_solver:
         if solver != 'auto':
             raise TypeError(
@@ -681,7 +701,7 @@ def resolve_solver(solver, row, mf, excitation):
                 f'choose a solver for.')
         return None
     eps = np.asarray(mf.mo_energy, float)
-    nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
+    nocc = occupied_count(mf)
     n_ov = nocc * (len(eps) - nocc)
     tda = isinstance(excitation, Excitation) and excitation.kernel == 'bse-tda'
     return solver_choice(n_ov, tda) if solver == 'auto' else solver
@@ -726,7 +746,7 @@ def resolve_states(qp_states, row, mol, mf, numerics, excitation):
             f'({row.key()}) is a reference route, and the reference solves '
             f'every state of its set explicitly.')
     eps = np.asarray(mf.mo_energy, float)
-    nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
+    nocc = occupied_count(mf)
     resolved = resolve_qp_states(qp_states, eps, nocc, mol=mol,
                                  degeneracy_tol=qp_set_degeneracy_tol(numerics))
     return qp_states, resolved.explicit
@@ -745,9 +765,6 @@ def reference_mean_field(mol, scf_factory, environment):
     locked to rank 0's before anything is decided from it, since a factory
     that converges its own does so on each rank alone.
     """
-    # cycle: src.gradients.excited_state imports src.properties.nonadiabatic
-    from src.gradients.factor_chain import converged_factory
-
     mf = resolve_environment(environment, None).mean_field(
         mol, converged_factory(scf_factory))
     return lockstep_mean_field(mf)
@@ -834,7 +851,7 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
                              environment=None, chi0='space-time',
                              residues='explicit', solver='auto',
                              factorization='isdf', qp_states=QPStates(),
-                             mf=None, **numerics):
+                             mf=None, settings=None, **numerics):
     """The one way to build a potential-energy surface with its physics declared.
 
     ground_state/excitation/environment are the physics
@@ -851,6 +868,10 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     mf: the reference mean field of `mol` in `environment` where another
         surface of the same declaration already converged it (the excited
         chain's `mf0` for the ground surface of a record); None converges it.
+    settings: the `Numerics` of the excited surface E_0 is differenced with,
+        for a ground row that has a chain (`Row.reads_settings`); the chain
+        stands on that object and not on one rebuilt from keywords. Any other
+        row is a TypeError.
 
     Returns the realizing class's own instance, carrying `physics`,
     `realization`, `numerics` and `describe()`. It carries no communicator:
@@ -867,6 +888,9 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     refuse_undeclared_state(excitation, mol)
     row = find_row(ground_state, excitation, chi0, factorization)
     refuse_foreign_numerics(row, numerics)
+    if settings is not None and not row.reads_settings:
+        raise TypeError(f'{row.cls.__name__} does not stand on a given '
+                        f'Numerics: only the dRPA ground chain does')
     refuse_unknown_track(numerics)
     if mf is None:
         mf = reference_mean_field(mol, scf_factory, environment)
@@ -876,12 +900,12 @@ def potential_energy_surface(mol, scf_factory, *, ground_state, excitation=None,
     spec, explicit = resolve_states(qp_states, row, mol, mf, numerics, excitation)
     refuse_residues_outside_validity(used_residues, explicit or (),
                                      mf.mo_energy,
-                                     int(np.count_nonzero(np.asarray(mf.mo_occ) > 0)))
+                                     occupied_count(mf))
     counts, n_start, grid = (resolve_grid(mol, numerics) if row.isdf_grid
                              else (None, None, None))
     setup = Setup(mol, scf_factory, mf, environment, excitation, numerics,
                   counts, n_start, explicit, used_solver, used_residues,
-                  qp_states=spec)
+                  qp_states=spec, settings=settings)
     surface, resolved = row.build(row, setup)
     declare_physics(surface, physics)
     surface.realization = Realization(

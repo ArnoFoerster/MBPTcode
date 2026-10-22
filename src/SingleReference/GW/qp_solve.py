@@ -18,9 +18,9 @@ import numpy as np
 from pyscf import df as _pyscf_df, scf as _pyscf_scf
 from pyscf.df import incore as _df_incore
 
+from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.distributed_df import distributed_fock
-from src.Base.separable_ri import default_auxbasis
-from src.Base.solvent_screening import solvent_static_selfenergy
+from src.Base.environment import environment_of
 from src.Base.utils.analyticalContinuation import (greedy_pade_order,
                                                    thiele_coefficients,
                                                    pade_eval)
@@ -59,7 +59,27 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
         alone must do so under `distributed(None)`.
 
     The environment's static term is NOT included, so one cached matrix serves
-    every environment; `static_exchange_matrix` adds it.
+    every environment; `static_exchange_matrix` adds the Eq. (18) shift it is
+    handed.
+
+    THE ONE BUILDER of the static term: the Casida, imaginary-frequency and
+    space-time routes, the BSE diagonal and the gradient chain's forward all
+    read it. Every piece is the mean field's own operator -- its J, its K
+    (fitted or ISDF on a fitted reference), its v_xc -- so the Hartree term
+    cancels exactly and the eigenvalues' own fitting error cancels against
+    v_xc. Exact J and K against the fitted v_eff would instead leave
+    (J_exact - J_fit) - (K_exact - K_fit)/2 in every quasiparticle energy.
+
+    dm_correction: an AO 1RDM gamma' (a CCSD, MP2 or GW density) at which
+        Sigma_Hx is taken, against v_Hxc at the mean-field density gamma:
+
+            <p| J[gamma'] - J[gamma] - K[gamma']/2 - (v_eff[gamma] - J[gamma]) |q>,
+
+        Hartree AND exchange, the static self-energy Sigma(infinity) of the
+        correlated density. Unrestricted: (alpha, beta), each spin's K of its
+        own block.
+
+    Unrestricted mean fields return (2, nmo, nmo), one matrix per spin.
 
     `exchange` selects the K; see `static_exchange_matrix`.
     """
@@ -81,6 +101,13 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
     return lockstep(out, comm)
 
 
+def hartree_shift(mf, mol, dm_new, j_ref):
+    """J[dm'] - J[dm]: how Sigma_H moves with the density, through the mean
+    field's own Coulomb so that it vanishes at dm' = dm (`j_ref` = J[dm],
+    total densities)."""
+    return mf.get_j(mol, dm_new) - j_ref
+
+
 def _local_static_exchange(mf, mol, dm_correction, exchange):
     """The matrix from this rank's own pyscf calls: K and v_xc built whole
     on the AO basis, then projected onto the MO basis.
@@ -91,21 +118,65 @@ def _local_static_exchange(mf, mol, dm_correction, exchange):
     UNRESTRICTED: (2, nmo, nmo), each spin in its own orbitals. The exchange
     of a spin orbital is -K[D_s] of its own spin density alone, against
     -K[D]/2 of the total density when the two spins coincide, and v_xc_s is
-    veff_s less the Coulomb potential of BOTH spin densities.
+    v_eff_s less the Coulomb potential of BOTH spin densities.
     """
     dm = mf.make_rdm1()
-    if isinstance(mf, _pyscf_scf.uhf.UHF):
-        return _local_static_exchange_unrestricted(mf, mol, dm, dm_correction,
-                                                   exchange)
-    dm_for_hx = dm if dm_correction is None else dm_correction
+    unrestricted = np.ndim(dm) == 3
+    dm_for_hx = dm if dm_correction is None else np.asarray(dm_correction)
+    if unrestricted and np.shape(dm_for_hx) != np.shape(dm):
+        raise ValueError(
+            f'an unrestricted mean field needs dm_correction as (alpha, beta) '
+            f'of shape {np.shape(dm)}, got {np.shape(dm_for_hx)}')
     # K and the exchange-correlation potential are pyscf's own OpenMP -- the
     # fit's contraction and `nr_rks` on the DFT grid -- so BLAS is held at one
     # thread across them and the two pools stop spinning against each other.
     with blas_single_threaded():
-        sig_x = -0.5 * _exchange_k(mf, mol, dm_for_hx, exchange)
-        v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
+        K = _exchange_k(mf, mol, dm_for_hx, exchange)
+        sig_x = -K if unrestricted else -0.5 * K
+        dm_total = dm[0] + dm[1] if unrestricted else dm
+        v_eff = mf.get_veff(mol, dm)
+        j_mf = mf.get_j(mol, dm_total)
+        op = sig_x - (v_eff - j_mf)
+        if dm_correction is not None:
+            dm_x_total = (dm_for_hx[0] + dm_for_hx[1] if unrestricted
+                          else dm_for_hx)
+            op = op + hartree_shift(mf, mol, dm_x_total, j_mf)
     mo = mf.mo_coeff
-    return mo.T @ (sig_x - v_xc) @ mo                    # a GEMM: BLAS wide
+    if unrestricted:
+        return np.stack([mo[s].T @ op[s] @ mo[s] for s in (0, 1)])
+    return mo.T @ op @ mo                                # a GEMM: BLAS wide
+
+
+def refuse_unshifted_environment(mf, mol, where):
+    """Refuse an environment on `mf` that reached the static term without its
+    Eq. (18) shift, unless the caller adds that shift to the root itself.
+
+    Every route into `static_exchange_matrix` screens Sigma_c bare and carries
+    the reaction field as Eq. (18) (Duchemin, Guido, Jacquemin, Blase, Chem.
+    Sci. 9, 4430 (2018)): inside the static term on an evGW cycle, after the
+    solve in G0W0 (`reaction_field.shift_after_solve`). Without either the
+    only static term left is the COHSEX operator, which is a different one.
+    Either kind of environment is refused: one that dresses the interaction,
+    and one that offers a COHSEX operator without dressing it.
+    """
+    environment = environment_of(mf)
+    if not (getattr(environment, 'screens', True)
+            or environment.static_self_energy(mf, mol) is not None):
+        return
+    raise ValueError(
+        f'{where} was reached with reaction_field=None on a mean field '
+        f'carrying {environment!r}. A GW route that builds W screens Sigma_c '
+        f'with the bare interaction and passes the continuum as Eq. (18) of '
+        f'Duchemin et al., Chem. Sci. 9, 4430 (2018): '
+        f'`reaction_field.environment_quasiparticle_shift`, or '
+        f'`separable_quasiparticle_shift` on the route\'s own factors, inside '
+        f'the static term on an evGW cycle, or added to the root after a '
+        f'G0W0 solve (reaction_field_after_solve=True, `add_reaction_field`). '
+        f'The '
+        f'static COHSEX operator `cohsex_correction` is not that shift and is '
+        f'not added here. A route that forms no W reads '
+        f'`solvent_static_selfenergy` itself; the environment-free matrix is '
+        f'`static_exchange_mean_field_matrix`.')
 
 
 def _exchange_k(mf, mol, dm, exchange):
@@ -115,7 +186,7 @@ def _exchange_k(mf, mol, dm, exchange):
     if exchange == 'exact':
         return _pyscf_scf.hf.get_jk(mol, dm, hermi=1, with_j=False)[1]
     if exchange == 'df':
-        aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
+        aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
         return _pyscf_df.DF(mol, auxbasis=aux).get_jk(dm, hermi=1,
                                                       with_j=False)[1]
     raise ValueError(f"exchange must be 'mf', 'exact' or 'df', got {exchange!r}")
@@ -129,28 +200,51 @@ def _unrestricted_xc_potential(mf, mol, dm):
     return np.asarray(mf.get_veff(mol, dm)) - (vj[0] + vj[1])[None]
 
 
-def _local_static_exchange_unrestricted(mf, mol, dm, dm_correction, exchange):
-    """(2, nmo, nmo) <p_s| Sigma_x,s - v_xc,s |q_s>; see `_local_static_exchange`."""
-    dm_for_hx = dm if dm_correction is None else np.asarray(dm_correction)
-    if dm_for_hx.shape != dm.shape:
+def _refuse_both_placements(reaction_field, after_solve):
+    """Eq. (18) enters a quasiparticle energy once: in the static term or
+    after the solve, never both."""
+    if after_solve and reaction_field is not None:
         raise ValueError(
-            f'an unrestricted dm_correction is one density per spin, shape '
-            f'{dm.shape}; got {dm_for_hx.shape}')
-    with blas_single_threaded():
-        K = np.asarray(_exchange_k(mf, mol, dm_for_hx, exchange))
-        v_xc = _unrestricted_xc_potential(mf, mol, dm)
-    return np.array([c.T @ (-K[s] - v_xc[s]) @ c
-                     for s, c in enumerate(mf.mo_coeff)])
+            'reaction_field_after_solve=True says the caller adds Eq. (18) to '
+            'the root after the solve, so a reaction_field handed in as well '
+            'would enter the quasiparticle energy twice')
+
+
+def add_reaction_field(roots, reaction_field, states, spin=None):
+    """G0W0 roots with Duchemin's Eq. (18) added WHOLE, after the solve.
+
+    roots: one quasiparticle energy per state of `states` (or a scalar for a
+        scalar state), solved from the static term WITHOUT the shift.
+    reaction_field: the Eq. (18) array, (nmo,) or (2, nmo) with `spin`
+        naming the channel; None (gas phase) returns `roots` unchanged.
+
+    Eq. (18) is a static potential on the added charge, nearly the same for
+    every occupied (+1/2 <ii|Delta W|ii>) and every virtual orbital, and a
+    constant potential moves a level by its full value. Inside the G0W0
+    equation w = eps_p + <Sigma_x - v_xc>_pp + shift_p + Sigma_c(w) the
+    fixed Sigma_c(w) renormalizes it to Z_p x shift_p, and the (1 - Z)(P_e
+    + P_h) left over is the 130-550 meV spurious blue shift of the solvated
+    BSE (Duchemin's Eqs. (18)-(20) need the full shift to cancel the reaction
+    field of the direct kernel). An evGW cycle keeps it in the equation,
+    where G and W are built on levels that carry it.
+    """
+    if reaction_field is None:
+        return roots
+    shift = np.asarray(reaction_field, float)
+    if spin is not None:
+        shift = shift[spin]
+    return roots + shift[np.atleast_1d(states).astype(int)].reshape(
+        np.shape(roots))
 
 
 def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
                            reaction_field=None, sigma_x_matrix=None,
-                           comm=None):
+                           comm=None, reaction_field_after_solve=False):
     """
     <p| Sigma_x - v_xc |q> over the whole MO basis.
     Zero by construction on a Hartree-Fock reference
-    dm_correction: optional AO 1RDM used in place of the
-    mean-field density for Sigma_x only (a CCSD or GW density, say).
+    dm_correction: an AO 1RDM at which Sigma_Hx is taken (Hartree and
+        exchange); see `static_exchange_mean_field_matrix`.
     exchange: which K builds Sigma_x. 'mf' is the mean field's own, which on
         an ISDF mean field carries the grid's K error into the QP energy at
         FIRST order -- the v_xc part of that error cancels against the
@@ -163,26 +257,24 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
         such tensor. v_xc is always the SCF's own operator: the eigenvalues
         came from it, and replacing it would break that cancellation.
 
-    An attached solvent screening adds its first-order reaction-field
-    (static COHSEX) operator here: the static self-energy is where the Born
-    polarization energy lives, and this matrix is the one static object every
-    imaginary-axis route shares. None attached (gas phase) adds nothing.
+    reaction_field: the continuum's Eq. (18) shift of Duchemin, Guido,
+        Jacquemin and Blase, Chem. Sci. 9, 4430 (2018), one value per
+        orbital, added on the diagonal. Every route that reaches this matrix
+        builds W and screens Sigma_c with the BARE interaction, so this is the
+        whole of the reaction field it sees. It belongs here only on an evGW
+        cycle; a G0W0 solve adds it to the root (`add_reaction_field`) and
+        says so with reaction_field_after_solve=True, which builds the matrix
+        without it. An environment attached to `mf` with reaction_field=None
+        and no such declaration is REFUSED (`refuse_unshifted_environment`):
+        the static COHSEX operator `SolventScreening.cohsex_correction` sums
+        the bare vtilde over every orbital and is not Eq. (18), so it is never
+        added here. The gas phase adds nothing.
 
-    Sigma_c is NOT negligible next to it. Its leading vtilde dependence is
-    v chi0 vtilde, first order in each and not second order in vtilde, and it
-    OPPOSES the Born term: on pyridine/cc-pVDZ in toluene it gives back 0.75 eV
-    of the 3.08 eV that Sigma^solv closes the quasiparticle gap by, off a B3LYP
-    starting point, and less off Hartree-Fock, since the size of the term
-    follows chi0. Nothing double counts -- Sigma_c is built from W - (v +
-    vtilde), so the instantaneous reaction field is counted once, here -- but
-    the split is not a large term plus a small one.
-
-    reaction_field REPLACES that operator when given; see
-    `static_exchange_diagonal`. Unrestricted, it is the (2, nmo) Eq. (18)
-    array and the matrix is (2, nmo, nmo), one per spin.
+    Unrestricted, reaction_field is the (2, nmo) Eq. (18) array and the
+    matrix is (2, nmo, nmo), one per spin.
 
     sigma_x_matrix: a `static_exchange_mean_field_matrix` built earlier for
-        this mean field, in place of rebuilding K and v_xc. The environment
+        this mean field, in place of rebuilding K and v_xc. The Eq. (18)
         term is still applied here, so the cached matrix stays environment-free
         and one of them serves the gas phase and every continuum alike.
 
@@ -193,23 +285,25 @@ def static_exchange_matrix(mf, mol, dm_correction=None, exchange='mf',
         collective at all.
     """
     comm = current_comm() if comm is None else comm
+    _refuse_both_placements(reaction_field, reaction_field_after_solve)
+    if reaction_field is None and not reaction_field_after_solve:
+        refuse_unshifted_environment(mf, mol, 'static_exchange_matrix')
     if sigma_x_matrix is None:
         out = static_exchange_mean_field_matrix(mf, mol,
                                                 dm_correction=dm_correction,
                                                 exchange=exchange, comm=comm)
     else:
         out = np.asarray(sigma_x_matrix, float)
-    if reaction_field is not None:
-        shift = np.asarray(reaction_field, float)
-        if shift.ndim == 2:
-            return out + np.array([np.diag(s) for s in shift])
-        return out + np.diag(shift)
-    sigma_solvent = solvent_static_selfenergy(mf, mol)
-    if sigma_solvent is not None:
-        # one (nmo, nmo) operator per spin when unrestricted
-        out = out + (np.array(sigma_solvent) if isinstance(sigma_solvent, tuple)
-                     else sigma_solvent)
-    return out
+    if reaction_field is None:
+        return out
+    shift = np.asarray(reaction_field, float)
+    if out.ndim == 3:
+        if shift.shape != out.shape[:2]:
+            raise ValueError(
+                f'an unrestricted static term takes one Eq. (18) value per '
+                f'spin orbital, shape {out.shape[:2]}; got {shift.shape}')
+        return out + np.array([np.diag(s) for s in shift])
+    return out + np.diag(shift)
 
 
 def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
@@ -257,7 +351,8 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
 
 def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
                              block_memory_gb=None, reaction_field=None,
-                             sigma_x_matrix=None, comm=None, spin=None):
+                             sigma_x_matrix=None, comm=None, spin=None,
+                             reaction_field_after_solve=False):
     """<p| Sigma_x - v_xc |p> for the requested states only.
 
     spin: on an unrestricted reference, the channel (0 alpha, 1 beta) the
@@ -265,14 +360,17 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
         `reaction_field` and `sigma_x_matrix` are then the whole (2, ...)
         arrays and are indexed here.
 
-    reaction_field REPLACES the continuum's static term, it does not add to it.
-    A route that has built W can form Duchemin et al.'s Eq. (18) shift, the
-    self-polarization of the orbital carrying the added charge in the SCREENED
-    reaction field; a route that has not (ADC, whose secular matrix starts at
-    Sigma^(2) and never forms W) falls back to `cohsex_correction`, which is
-    the same physics with the BARE vtilde summed over every orbital. Passing
-    one while the other is also applied counts the polarization energy twice --
-    on acrolein in water that is 2.65 + 2.35 eV of gap closure where 2.3 is
+    reaction_field is the continuum's whole static term: Duchemin et al.'s
+    Eq. (18) shift, the self-polarization of the orbital carrying the added
+    charge in the SCREENED reaction field, which every route here can form
+    because it has built W. With an environment attached it is required
+    (`refuse_unshifted_environment`), here on an evGW cycle or after the
+    solve in G0W0 (reaction_field_after_solve=True: the diagonal without it,
+    `add_reaction_field` on the root). A route that never forms W (ADC, whose
+    secular matrix starts at Sigma^(2)) reads `cohsex_correction`, the same
+    physics with the BARE vtilde summed over every orbital, itself and does
+    not come here; applying both counts the polarization energy twice -- on
+    acrolein in water that is 2.65 + 2.35 eV of gap closure where 2.3 is
     right, which reads as plausible over-screening rather than as a bug.
 
     Every consumer of the static exchange on the QP routes needs diagonals for
@@ -314,30 +412,31 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
         matrix = static_exchange_matrix(
             mf, mol, dm_correction=dm_correction, exchange=exchange,
             reaction_field=reaction_field,
-            sigma_x_matrix=sigma_x_matrix, comm=comm)
+            sigma_x_matrix=sigma_x_matrix, comm=comm,
+            reaction_field_after_solve=reaction_field_after_solve)
         return np.diag(matrix[spin] if unrestricted else matrix)[states]
+    _refuse_both_placements(reaction_field, reaction_field_after_solve)
+    if reaction_field is None and not reaction_field_after_solve:
+        refuse_unshifted_environment(mf, mol, 'static_exchange_diagonal')
     if unrestricted:
         return _df_direct_unrestricted(mf, mol, states, dm_correction,
                                        block_memory_gb, reaction_field, spin)
     dm = mf.make_rdm1()
     dm_for_hx = dm if dm_correction is None else dm_correction
     mo = mf.mo_coeff[:, states]
-    aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
+    aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
     if block_memory_gb is None:
         block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx, block_memory_gb)
-    v_xc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
+    v_eff = mf.get_veff(mol, dm)
+    j_mf = mf.get_j(mol, dm)
+    v_xc = v_eff - j_mf
+    if dm_correction is not None:
+        v_xc = v_xc - hartree_shift(mf, mol, dm_correction, j_mf)
     out = -0.5 * k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
-    if reaction_field is not None:
-        return out + np.asarray(reaction_field, float)[states]
-    sigma_solvent = solvent_static_selfenergy(mf, mol)
-    if sigma_solvent is not None:
-        if isinstance(sigma_solvent, tuple):
-            raise NotImplementedError(
-                "solvent screening through static_exchange_diagonal is "
-                "restricted-only, like its consumers")
-        out = out + np.diag(sigma_solvent)[states]
-    return out
+    if reaction_field is None:
+        return out
+    return out + np.asarray(reaction_field, float)[states]
 
 
 def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
@@ -346,32 +445,24 @@ def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
     the channel's own state vectors, less v_xc,s."""
     dm = mf.make_rdm1()
     dm_for_hx = dm if dm_correction is None else np.asarray(dm_correction)
+    if dm_for_hx.shape != dm.shape:
+        raise ValueError(
+            f'an unrestricted dm_correction is one density per spin, shape '
+            f'{dm.shape}; got {dm_for_hx.shape}')
     mo = mf.mo_coeff[spin][:, states]
-    aux = getattr(mf.with_df, 'auxbasis', None) or default_auxbasis(mol.basis)
+    aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
     if block_memory_gb is None:
         block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx[spin],
                                         block_memory_gb)
     v_xc = _unrestricted_xc_potential(mf, mol, dm)[spin]
+    if dm_correction is not None:
+        vj = mf.get_j(mol, dm[0] + dm[1])
+        v_xc = v_xc - hartree_shift(mf, mol, dm_for_hx[0] + dm_for_hx[1], vj)
     out = -k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
-    if reaction_field is not None:
-        return out + np.asarray(reaction_field, float)[spin][states]
-    sigma_solvent = solvent_static_selfenergy(mf, mol)
-    if sigma_solvent is not None:
-        out = out + np.diag(sigma_solvent[spin])[states]
-    return out
-
-
-def static_exchange_correction(mf, mol, p_state, dm_correction=None,
-                               exchange='mf', spin=None):
-    """
-    <p| Sigma_x - v_xc |p>:
-    static_exchange_diagonal for a single state.
-    If you want several states, rather call static_exchange_diagonal directly
-    """
-    return float(static_exchange_diagonal(mf, mol, [p_state],
-                                          dm_correction=dm_correction,
-                                          exchange=exchange, spin=spin)[0])
+    if reaction_field is None:
+        return out
+    return out + np.asarray(reaction_field, float)[spin][states]
 
 
 def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,

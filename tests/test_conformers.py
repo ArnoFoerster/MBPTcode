@@ -34,6 +34,8 @@ from src.properties.conformers import (Conformer, Torsion, bond_in_ring,
                                        rotatable_bonds, rotate_torsion,
                                        search_conformers, split_bond,
                                        torsion_starts, torsion_values)
+from src.Base.step_failed import StepFailed
+from src.properties import conformers
 from src.properties.optimize import MeanFieldSurface
 
 # s-trans 1,3-butadiene, idealized and planar: C=C 1.34, C-C 1.46, CCC 122.8 deg.
@@ -262,3 +264,43 @@ def test_conformer_average_reruns_a_routine_on_refrozen_surfaces(butadiene_searc
     torsion = conformer_average(confs, lambda c: abs(float(c.torsions[0])))
     assert torsion['average'] == pytest.approx(
         sum(c.weight * abs(float(c.torsions[0])) for c in confs), abs=1e-10)
+
+
+class Labelled:
+    """A surface the planted relaxations below never evaluate."""
+
+    def __init__(self, mol):
+        self.mol0 = mol
+
+    def label(self):
+        return 'planted'
+
+
+def planted_relax(monkeypatch, failure, at=0):
+    """`_relax_start` returning the start itself, except the `at`-th call,
+    which raises `failure`."""
+    calls = []
+
+    def relax_start(surface, mol, engine, loose, relax_kw):
+        calls.append(mol)
+        if len(calls) - 1 == at:
+            raise failure
+        return mol, {'energy': -1.0 - 0.01 * len(calls), 'converged': True}
+    monkeypatch.setattr(conformers, '_relax_start', relax_start)
+
+
+def test_a_start_whose_walk_fails_a_step_is_dropped(monkeypatch, butadiene):
+    """A StepFailed start is recorded as failed; the others relax."""
+    planted_relax(monkeypatch, StepFailed('the followed state was lost'))
+    found = search_conformers(Labelled(butadiene), engine='cartesian',
+                              refine=False, verbose=False)
+    assert found
+
+
+def test_a_defect_in_a_start_propagates(monkeypatch, butadiene):
+    """Anything but StepFailed is a defect: it ends the search instead of
+    being recorded as a start that did not relax."""
+    planted_relax(monkeypatch, NotImplementedError('a planted defect'))
+    with pytest.raises(NotImplementedError, match='planted defect'):
+        search_conformers(Labelled(butadiene), engine='cartesian',
+                          refine=False, verbose=False)

@@ -78,20 +78,24 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.linalg import eigh, null_space
 
-from src.Base.constants import (FRAGMENT_DAVIDSON_EXTRA_ROOTS,
+from src.Base.constants import (DAVIDSON_LINDEP,
+                                FRAGMENT_DAVIDSON_EXTRA_ROOTS,
                                 FRAGMENT_DAVIDSON_MIN_SPACE,
+                                FRAGMENT_DAVIDSON_NEW_DIRECTION_TOL,
                                 FRAGMENT_GUARD_MAX_CYCLE,
                                 FRAGMENT_GUARD_NEWTON_TOL,
                                 FRAGMENT_GUARD_TOL,
                                 FRAGMENT_PHASE_SEED,
-                                FRAGMENT_POLE_MARGIN, FRAGMENT_SOLVE_TOL,
+                                FRAGMENT_POLE_MARGIN,
+                                FRAGMENT_PRECONDITIONER_FLOOR,
+                                FRAGMENT_SOLVE_TOL,
                                 FRAGMENT_DENSE_MAX,
                                 FRAGMENT_MATRIX_FREE_DENSE_MAX)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.krylov import root_driven_solve
 from src.Base.utils.mpi_grid import lockstep
 from src.gradients.bse_isdf import bse_blocks, bse_solve
-from src.SingleReference.LinearResponse.davidson import isdf_block_action
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.Solvers.davidson import solve_symmetric
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
@@ -410,7 +414,9 @@ def _casida_davidson(apply, diag, n, m, tol, max_cycle=500):
     restart: the diagonal is the quasiparticle one only (the kernel's diagonal
     is not at hand matrix-free), and a root just above the last one asked
     for otherwise leaves the subspace at each restart and the iteration
-    stalls.
+    stalls. That is also why this is not the shared Casida Davidson
+    (`davidson._run_davidson`), which preconditions with the screened pair
+    diagonal of a whole BSE and has none for a projected local partition.
     """
     diag = np.asarray(diag, float)
     nwork = min(m, n + FRAGMENT_DAVIDSON_EXTRA_ROOTS)
@@ -443,17 +449,20 @@ def _casida_davidson(apply, diag, n, m, tol, max_cycle=500):
         new = []
         for j in np.flatnonzero(res >= tol):
             for r, den in ((r_x[:, j], diag - om[j]), (r_y[:, j], diag + om[j])):
-                den = np.where(np.abs(den) < 1e-3, np.copysign(1e-3, den), den)
+                den = np.where(np.abs(den) < FRAGMENT_PRECONDITIONER_FLOOR,
+                               np.copysign(FRAGMENT_PRECONDITIONER_FLOOR, den),
+                               den)
                 new.append(-r / den)
         new = np.array(new).T
         if v.shape[1] + new.shape[1] > max_space:
             q, rr = np.linalg.qr(np.hstack([t, s]))
-            q = q[:, np.abs(np.diag(rr)) > 1e-12]
+            q = q[:, np.abs(np.diag(rr)) > DAVIDSON_LINDEP]
             v, apb, amb = v @ q, apb @ q, amb @ q
         for _ in range(2):
             new -= v @ (v.T @ new)
         q, rr = np.linalg.qr(new)
-        q = q[:, np.abs(np.diag(rr)) > 1e-10 * max(1.0, np.abs(new).max())]
+        q = q[:, np.abs(np.diag(rr)) > FRAGMENT_DAVIDSON_NEW_DIRECTION_TOL
+              * max(1.0, np.abs(new).max())]
         if q.shape[1] == 0:
             break
         kp, km = act(q)
@@ -485,6 +494,10 @@ class FragmentPartition:
     block_energies: list = field(default_factory=list)
     gaps: np.ndarray = None        # each diabat's gap to its block neighbours
     block_rows: list = field(default_factory=list)   # each diabat's block rows
+    # the pole guard's numerical events (refuse
+    # inputs, warn numerics): 'q_lowest_unconverged', the residual and
+    # tolerance of a Davidson on Q that stopped short and still decided
+    guard_flags: dict = field(default_factory=dict)
 
     @property
     def tda(self):
@@ -603,9 +616,11 @@ class FragmentPartition:
             return proj_t(k_loc(px) - om * sig[:, None] * px)
 
         say(f'pole guard on Q ({dim} rows), Omega_0 = {omega0:.6f} Ha')
+        guard_flags = {}
         q_low = lockstep(float(cls._q_lowest(k_loc, shifted, proj, sig, sp,
                                              diag, dim, tda, omega0, margin,
-                                             tol, dense_max, say=say)))
+                                             tol, dense_max, say=say,
+                                             flags=guard_flags)))
         say(f'lowest positive eigenvalue on Q {q_low:.6f} Ha')
         if not omega0 < q_low - margin:
             raise ValueError(
@@ -621,7 +636,8 @@ class FragmentPartition:
             m = shifted(np.eye(dim), omega0) + p @ p.T
             y = proj(np.linalg.solve(0.5 * (m + m.T), rhs))
         else:
-            prec_d = np.maximum(diag - omega0 * sig, 1e-3)
+            prec_d = np.maximum(diag - omega0 * sig,
+                                FRAGMENT_PRECONDITIONER_FLOOR)
             say(f'resolvent: {rhs.shape[1]} columns, batched conjugate gradients')
             # Pi D^-1 Pi^T: symmetric, and positive on the range the
             # residuals live in
@@ -637,11 +653,12 @@ class FragmentPartition:
                    labels=labels, p_local=p, y_local=y, a_pp=a_pp,
                    sigma=sigma, dsigma=dsigma, q_lowest=q_low,
                    block_energies=block_energies, gaps=np.array(gaps),
-                   block_rows=block_rows)
+                   block_rows=block_rows, guard_flags=guard_flags)
 
     @staticmethod
     def _q_lowest(k_loc, shifted, proj, sig, sp, diag, dim, tda, omega0,
-                  margin, tol, dense_max=FRAGMENT_DENSE_MAX, say=None):
+                  margin, tol, dense_max=FRAGMENT_DENSE_MAX, say=None,
+                  flags=None):
         """The lowest positive eigenvalue of the pencil on Q.
 
         Through H(om) = Pi^T (K - om S) Pi + c (S p)(S p)^T, whose lowest
@@ -657,6 +674,8 @@ class FragmentPartition:
         residual |r| allow it: theta below the test point is a refusal, theta
         above it by more than |r| a pass, with a warning, and the returned
         value is the estimate from that one solve. Otherwise it raises.
+        `flags`, a dict, receives such a pass as 'q_lowest_unconverged'
+        (FragmentPartition.guard_flags).
         """
         say = say if say is not None else (lambda msg: None)
         if not tda and dim <= dense_max:
@@ -682,6 +701,10 @@ class FragmentPartition:
             if theta < test:
                 return 'below'
             if theta - rnorm > test:
+                if flags is not None:
+                    flags['q_lowest_unconverged'] = {
+                        'residual': float(rnorm),
+                        'tol': float(max(tol, FRAGMENT_GUARD_TOL))}
                 warnings.warn(
                     f'pole guard: the Davidson on Q stopped at |r| = '
                     f'{rnorm:.1e} above {max(tol, FRAGMENT_GUARD_TOL):.0e}; '

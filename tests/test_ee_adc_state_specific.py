@@ -26,10 +26,11 @@ energy (1/2) dV Q dV added to a root. Checks:
      equilibrium one the larger; a triplet's SS shift is non-zero while its
      LR term is zero (the eigenvalues equal those without the reaction
      field to 1e-10); the singlet's LR term is not.
-  5. off is the default bit for bit, in the gas phase and in the continuum;
+  5. off is the default (two solves: to a few ulp), in the gas phase and
+     in the continuum;
      refusals (no continuum, not fold, a bad mode).
   6. over simulated MPI ranks (2 and 3, one tile per orbital) the density is
-     the serial one bit for bit, on every rank.
+     the serial one to a few ulp, on every rank.
   7. ADC(2) in a continuum, end to end and independently of this code: in the
      PTE scheme the ground state's reaction field is a FIXED set of surface
      charges q0. Formaldehyde cc-pVDZ in toluene: the fold (LR and SS off) on
@@ -53,6 +54,7 @@ from pyscf.adc import radc, uadc
 from pyscf.solvent import pcm
 from pyscf.solvent._attach_solvent import _for_tdscf
 
+from src.Base.constants import HARTREE_TO_EV
 from src.Base.environment import NoEnvironment
 from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                       get_two_electron_integrals_chemist)
@@ -61,17 +63,10 @@ from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_density, ee_fold, ee_ri_density,
                                            ee_ri_fold, ee_state_specific)
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from tests.adc_common import H2CO, WATER_C2V, check, df_rhf_converged
+from tests.pins import RECORDING_BLAS, matches
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
-H2CO = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.587; H 0 -0.94 -0.587'
 PARITY = {'singlet': +1, 'triplet': -1}
-
-
-def check(ok, label, detail=''):
-    """Print one verdict line and return `ok` as a bool."""
-    tail = f'   ({detail})' if detail else ''
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
-    return bool(ok)
 
 
 def rhf(atom, basis, df=False):
@@ -111,7 +106,7 @@ def pyscf_targets(mf, nroots):
 def check_against_pyscf():
     """Check 1."""
     ok = True
-    mf = rhf(WATER, '6-31g')
+    mf = rhf(WATER_C2V, '6-31g')
     mol = mf.mol
     no = mol.nelectron // 2
     eps = np.asarray(mf.mo_energy, float)
@@ -207,14 +202,7 @@ def toluene(atom, basis):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     env = SolventScreening(mol, solvent='toluene')
 
-    def factory(m):
-        mf = scf.RHF(m).density_fit()
-        mf.conv_tol = 1e-12
-        mf.conv_tol_grad = 1e-8
-        mf.kernel()
-        return mf
-
-    return mol, env, env.mean_field(mol, factory)
+    return mol, env, env.mean_field(mol, df_rhf_converged)
 
 
 def check_energy_formula():
@@ -285,9 +273,9 @@ def check_driver():
                     f'{spin}: e = omega + the equilibrium shift')
         ok &= check(np.all(sv < -1e-6) and np.all(se < sv),
                     f'{spin}: SS shifts negative, equilibrium the larger',
-                    'vertical ' + ', '.join(f'{x * 27.211386:+.4f}' for x in sv)
+                    'vertical ' + ', '.join(f'{x * HARTREE_TO_EV:+.4f}' for x in sv)
                     + ' eV; equilibrium '
-                    + ', '.join(f'{x * 27.211386:+.4f}' for x in se) + ' eV')
+                    + ', '.join(f'{x * HARTREE_TO_EV:+.4f}' for x in se) + ' eV')
         e_off, _ = solve_ee_adc(mf, spin=spin, environment=env,
                                 **dict(kw, return_fold=False))
         e_no, _ = solve_ee_adc(mf, spin=spin, environment=NoEnvironment(),
@@ -298,24 +286,32 @@ def check_driver():
                         'term is not', f'LR {lr:.1e} Ha')
         else:
             ok &= check(lr > 1e-6, 'singlet: the LR term is not zero',
-                        f'{lr * 27.211386:.4f} eV')
-        ok &= check(np.array_equal(e_off, res.omega),
-                    f'{spin}: off is the eigenvalue itself')
+                        f'{lr * HARTREE_TO_EV:.4f} eV')
+        # two Davidson solves of one problem: to a few ulp, not bitwise
+        d = float(np.abs(e_off - res.omega).max())
+        ok &= check(matches(e_off, res.omega, RECORDING_BLAS, quantity='root'),
+                    f'{spin}: off is the eigenvalue itself', f'{d:.1e} Ha')
     return ok
 
 
 def check_default_and_refusals():
     """Check 5."""
     ok = True
-    gas = rhf(WATER, 'cc-pvdz', df=True)
+    gas = rhf(WATER_C2V, 'cc-pvdz', df=True)
     kw = dict(level='adc2', spin='singlet', nroots=2, fold=True, conv_tol=1e-8)
+    # each pair is two Davidson solves of one problem: to a few ulp, not
+    # bitwise
     a, _ = solve_ee_adc(gas, **kw)
     b, _ = solve_ee_adc(gas, state_specific='off', **kw)
-    ok &= check(np.array_equal(a, b), 'gas phase: off is the default bit for bit')
-    _, env, mf = toluene(WATER, 'cc-pvdz')
+    d = float(np.abs(a - b).max())
+    ok &= check(matches(a, b, RECORDING_BLAS, quantity='root'),
+                'gas phase: off is the default', f'{d:.1e} Ha')
+    _, env, mf = toluene(WATER_C2V, 'cc-pvdz')
     a, _ = solve_ee_adc(mf, environment=env, **kw)
     b, _ = solve_ee_adc(mf, environment=env, state_specific='off', **kw)
-    ok &= check(np.array_equal(a, b), 'continuum: off is the default bit for bit')
+    d = float(np.abs(a - b).max())
+    ok &= check(matches(a, b, RECORDING_BLAS, quantity='root'),
+                'continuum: off is the default', f'{d:.1e} Ha')
     cases = [('state_specific in the gas phase', ValueError,
               dict(kw, state_specific='vertical'), gas),
              ('state_specific off the fold', NotImplementedError,
@@ -334,7 +330,7 @@ def check_default_and_refusals():
 
 def check_ranks():
     """Check 6."""
-    mf = rhf(WATER, 'cc-pvdz', df=True)
+    mf = rhf(WATER_C2V, 'cc-pvdz', df=True)
     mol = mf.mol
     no = mol.nelectron // 2
     eps = np.asarray(get_orbital_energies(mf), float)
@@ -353,8 +349,9 @@ def check_ranks():
     ok = True
     for size in (2, 3):
         outs = run_simulated(rank, size)
-        ok &= check(all(np.array_equal(o, ser) for o in outs),
-                    f'{size} simulated ranks: the serial density bit for bit')
+        ok &= check(all(matches(o, ser, RECORDING_BLAS, quantity='root')
+                        for o in outs),
+                    f'{size} simulated ranks: the serial density to a few ulp')
     return ok
 
 
@@ -408,7 +405,7 @@ def run():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         all_ok &= check_against_pyscf()
-        all_ok &= check_ri_against_dense(WATER)
+        all_ok &= check_ri_against_dense(WATER_C2V)
         all_ok &= check_ri_against_dense(H2CO)
         all_ok &= check_energy_formula()
         all_ok &= check_driver()

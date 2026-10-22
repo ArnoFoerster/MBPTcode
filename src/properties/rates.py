@@ -26,15 +26,103 @@ Every energy in and out of this module is in Hartree, the temperature in Kelvin
 and the rate in s^-1.
 """
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 
 from src.Base.constants import (ATOMIC_TIME_SECONDS,
                                 BOLTZMANN_HARTREE_PER_KELVIN,
-                                FC_UNDERFLOW_EXPONENT, SPEED_OF_LIGHT_AU)
+                                FC_UNDERFLOW_EXPONENT, HARTREE_TO_CM,
+                                HARTREE_TO_EV, HARTREE_TO_MEV,
+                                RATE_FC_LAMBDA_RATIO_MAX,
+                                RATE_LAMBDA_REMAINDER_MIN_MEV, RATE_MLJ_N_MAX,
+                                RATE_THERMAL_WINDOW_KT, SPEED_OF_LIGHT_AU,
+                                TRIPLET_SUBLEVELS, VIBRONIC_MODE_FLOOR_CM)
 
 #: `np.trapezoid` on numpy >= 2.0, `np.trapz` below it.
 TRAPEZOID = getattr(np, 'trapezoid', None) or np.trapz
+
+
+def require_vibrational_modes(omega, where):
+    """Refuse normal-mode frequencies (Hartree) that are not all
+    vibrations of at least VIBRONIC_MODE_FLOOR_CM: an imaginary mode
+    (negative from `vibronic.normal_modes`) is a saddle, where no
+    displaced-oscillator quantity is defined, and a mode below the floor is a
+    rigid-body remnant or a flat direction, whose Huang-Rhys factor has no
+    bound. Dropping either would change the sum rule unseen."""
+    w = np.atleast_1d(np.asarray(omega, float))
+    low = w * HARTREE_TO_CM < VIBRONIC_MODE_FLOOR_CM
+    if low.any():
+        raise ValueError(
+            f'{where}: modes {np.flatnonzero(low).tolist()} at '
+            f'{np.round(w[low] * HARTREE_TO_CM, 2).tolist()} cm^-1 (negative = '
+            f'imaginary) are below VIBRONIC_MODE_FLOOR_CM = '
+            f'{VIBRONIC_MODE_FLOOR_CM} cm^-1: relax to a minimum, and pass the '
+            f'vibrations only (rigid-body modes projected out)')
+
+
+@dataclass(frozen=True)
+class Minimum:
+    """What the evaluation at one relaxed excited minimum hands the rate table.
+
+    emitter, reservoir: the singlet and triplet labels ('S1', 'T2') this
+        evaluation reported; a walk that followed its root off the starting
+        index names it differently at the other minimum.
+    energy: label -> total energy E_0 + Omega in Hartree at this geometry; at
+        least the emitter and the reservoir, and T(n+1) above the reservoir for
+        the T2 channel.
+    socme: the spin-orbit table here, rows S0, S1, S2, ..., columns T1, T2, ...
+    dv_dq, omega_promoting: |d<emitter|H_SO|reservoir>/dq_k| on dimensionless
+        modes at this geometry and those modes' frequencies, both Hartree;
+        None for a Condon-only crossing.
+    dv_dq_paths: name -> |dV/dq_k| of each contribution, for the record only.
+    emission, dipole, f_osc: the emitter's energy, transition dipole and
+        oscillator strength here (the S1 minimum's are the emission's).
+    e_ground: the ground state's total energy here, Hartree, on the surface
+        of the rate table's e0; E_S0(here) - e0 is the energy lambda that
+        guards the decay to S0 from this minimum (`fc_lambda_guard`). None
+        refuses that decay.
+    """
+    emitter: str
+    reservoir: str
+    energy: dict
+    socme: np.ndarray
+    dv_dq: np.ndarray = None
+    omega_promoting: np.ndarray = None
+    dv_dq_paths: dict = None
+    emission: float = None
+    dipole: np.ndarray = None
+    f_osc: float = None
+    e_ground: float = None
+
+
+#: How the state manifold's pairs take their gaps (`state_levels`).
+MANIFOLD_GAP_RULES = ('stacked', 'adiabatic')
+
+
+@dataclass(frozen=True)
+class ManifoldGaps:
+    """The declared gap rule of the rate table's state manifold.
+
+    rule: 'stacked', every state at its spin's adiabatic energy plus its
+        vertical splitting at the crossing's initial minimum; or 'adiabatic',
+        every state at the energy of its own relaxed minimum.
+    minima: label -> total energy at that state's own minimum, Hartree, for
+        'adiabatic' (the S1 and T1 references come from the table's minima);
+        None for 'stacked'. Neither field has a default.
+    """
+    rule: str
+    minima: dict
+
+    def __post_init__(self):
+        if self.rule not in MANIFOLD_GAP_RULES:
+            raise ValueError(f'gap rule {self.rule!r} not in '
+                             f'{MANIFOLD_GAP_RULES}')
+        if self.rule == 'stacked' and self.minima is not None:
+            raise ValueError('the stacked rule reads no other minima')
+        if self.rule == 'adiabatic' and not isinstance(self.minima, dict):
+            raise ValueError('the adiabatic rule needs label -> energy of '
+                             'each state\'s own minimum')
 
 
 def _thermal_energy(lambda_reorg, temperature):
@@ -224,6 +312,13 @@ def _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
     return phi - 1j * lam_cl * z - gauss * z ** 2
 
 
+class FCIntegrandNotDecayed(RuntimeWarning):
+    """A Franck-Condon time integrand that had not decayed at the longest
+    time `fc_weighted_dos` integrates to: rho may be truncated. The rate
+    table names the densities it happened on ('fc_integrand_not_decayed' in
+    its `numerical_flags`)."""
+
+
 def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
                        dt_per_period, t_decay, max_points):
     """rho(dE) for every dE off ONE real-axis grid, with e^{-gamma |t|}.
@@ -250,7 +345,7 @@ def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
     else:
         warnings.warn(f'the Franck-Condon integrand had not decayed at t_max '
                       f'= {t_max:.3g} a.u.; rho may be truncated.',
-                      RuntimeWarning)
+                      FCIntegrandNotDecayed)
     h = t[1] - t[0]
     gw = g * h
     gw[0] *= 0.5
@@ -386,7 +481,8 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
                 f'the Franck-Condon integrand had not decayed at t_max = '
                 f'{t_max:.3g} a.u. for dE = {e:.6g} Ha; rho may be truncated. '
                 f'A spectrum of one or two modes recurs forever without a '
-                f'bath -- give lambda_classical or broadening.', RuntimeWarning)
+                f'bath -- give lambda_classical or broadening.',
+                FCIntegrandNotDecayed)
         rho.ravel()[i] = np.exp(f0) * value
     rho = np.maximum(rho, 0.0)          # a density of states is non-negative
     return rho if np.ndim(delta_e) else float(rho[0])
@@ -455,9 +551,9 @@ def internal_conversion_rate(delta_e, d_modes, omega, rho_fc, temperature):
 
     d_modes: the coupling projected on the ground-state mass-weighted modes,
         `vibronic.project_coupling` of an (natm, 3) array in 1/Bohr.
-    omega: those modes' frequencies in Hartree. Imaginary ones come back
-        negative from `vibronic.normal_modes` and are dropped here; nothing in
-        this model is meaningful at a saddle point.
+    omega: those modes' frequencies in Hartree, every one a vibration
+        (`require_vibrational_modes`); nothing in this model is meaningful at
+        a saddle point.
     rho_fc: callable dE -> Hartree^-1, `fc_weighted_dos` bound to the
         Huang-Rhys spectrum. The promoting mode is NOT removed from the
         accepting bath, which is the usual approximation and is good while its
@@ -473,9 +569,9 @@ def internal_conversion_rate(delta_e, d_modes, omega, rho_fc, temperature):
     if d.shape != w.shape:
         raise ValueError(f'{d.shape} couplings against {w.shape} frequencies; '
                          f'one per mode')
-    real = w > 0
+    require_vibrational_modes(w, 'internal_conversion_rate')
     k_per_mode = np.zeros_like(w)
-    for k in np.flatnonzero(real):
+    for k in range(len(w)):
         k_per_mode[k] = spin_vibronic_rate(delta_e, 0.0,
                                            [np.sqrt(w[k]) * d[k]], [w[k]],
                                            rho_fc, temperature)[0]
@@ -627,3 +723,449 @@ def photoluminescence(k_r, k_isc, k_risc, k_nr_s=0.0, k_nr_t=0.0,
             'phi_prompt': k_r * a_p / lam_p,
             'phi_delayed': k_r * a_d / lam_d,
             'phi_total': k_r * k_t / det, **channel}
+
+
+def marcus_rows(v, delta_e, lam, s_sum, omega_eff, temperature):
+    """The Marcus (A1) and Marcus-Levich-Jortner (A2) rates of one crossing in
+    s^-1, and `marcus_mlj`, the record of the lambdas they stand on.
+
+    The classical remainder lambda - S omega_eff is what MLJ treats
+    classically. Below RATE_LAMBDA_REMAINDER_MIN_MEV the Huang-Rhys sum rule
+    disagrees with the energy-based lambda, the displacement model does not
+    describe the crossing, and both rows are None with the record saying
+    'refused' rather than run on a clamped remainder.
+    """
+    lam_rule = s_sum * omega_eff
+    remainder = lam - lam_rule
+    record = {'lambda_energy_eV': lam * HARTREE_TO_EV,
+              'lambda_sum_rule_eV': lam_rule * HARTREE_TO_EV,
+              'lambda_classical_eV': remainder * HARTREE_TO_EV,
+              'remainder_min_meV': RATE_LAMBDA_REMAINDER_MIN_MEV}
+    if remainder * HARTREE_TO_MEV < RATE_LAMBDA_REMAINDER_MIN_MEV:
+        record['status'] = 'refused'
+        return {'A1_marcus': None, 'A2_mlj': None, 'marcus_mlj': record}
+    record['status'] = 'computed'
+    return {'A1_marcus': marcus_rate(v, delta_e, lam, temperature),
+            'A2_mlj': marcus_levich_jortner_rate(v, delta_e, remainder, s_sum,
+                                                 omega_eff, temperature,
+                                                 n_max=RATE_MLJ_N_MAX),
+            'marcus_mlj': record}
+
+
+def _root_number(name):
+    """'S2' -> 2, 'T1' -> 1: the 1-based root of a state label."""
+    return int(name[1:])
+
+
+def _rms_cm(dv):
+    """Root mean square of |dV/dq_k| over the modes, in cm^-1."""
+    return float(np.sqrt((np.asarray(dv, float) ** 2).mean()) * HARTREE_TO_CM)
+
+
+def fc_lambda_guard(lam_rule, lam):
+    """Whether the shared Franck-Condon density describes a crossing: its
+    harmonic sum rule `lam_rule` against the crossing's energy-based `lam`,
+    both Hartree. 'refused' when they differ by more than
+    RATE_FC_LAMBDA_RATIO_MAX either way, or when `lam` is None (no energy
+    to check the density against)."""
+    if lam is None:
+        return {'status': 'refused', 'lambda_energy_eV': None,
+                'lambda_sum_rule_eV': lam_rule * HARTREE_TO_EV,
+                'ratio': None, 'ratio_max': RATE_FC_LAMBDA_RATIO_MAX,
+                'reason': 'no ground-state energy at the minimum'}
+    if lam > 0:
+        ratio = lam_rule / lam
+    elif lam == 0 and lam_rule == 0:
+        ratio = 1.0          # no relaxation and no displacement agree
+    else:
+        ratio = float('inf')  # a negative lambda is no minimum to expand at
+    ok = 1.0 / RATE_FC_LAMBDA_RATIO_MAX <= ratio <= RATE_FC_LAMBDA_RATIO_MAX
+    return {'status': 'computed' if ok else 'refused',
+            'lambda_energy_eV': lam * HARTREE_TO_EV,
+            'lambda_sum_rule_eV': lam_rule * HARTREE_TO_EV,
+            'ratio': ratio, 'ratio_max': RATE_FC_LAMBDA_RATIO_MAX}
+
+
+def ground_lambda(at, e0):
+    """E_S0 at the minimum `at` less e0 at R0, Hartree; None without the
+    minimum's ground-state energy."""
+    return None if at.e_ground is None else float(at.e_ground) - float(e0)
+
+
+def manifold_crossings(at, initial, final, e_initial, e_final, rho,
+                       temperature, average, k_reference, gaps):
+    """Every crossing between the thermally reachable states of two spin
+    manifolds, read at the initial state's minimum `at`, in s^-1.
+
+    initial, final: the labels at `at` of the two states the adiabatic gap is
+        taken between (its emitter and reservoir); e_initial, e_final: those
+        states' energies at their own minima, Hartree. average: the initial
+        sublevel average (TRIPLET_SUBLEVELS out of a triplet, else 1).
+    k_reference: the rate of the initial -> final pair itself, which carries
+        the Herzberg-Teller term the others lack. gaps: the declared
+        `ManifoldGaps`, where each state stands (`state_levels`).
+
+    The shared density `rho` holds the reorganization once. The initial
+    states within RATE_THERMAL_WINDOW_KT k_B T of the lowest are Boltzmann
+    populated; every final state up to that window above the higher of
+    e_initial and e_final is a channel, Condon only with its own
+    <S_n|H_SO|T_m> at `at`. 'complete' is False where a computed root of that
+    spin lies within its window bound and the next, uncomputed one could too,
+    or where a state has no level under the rule: the sum is then a lower
+    bound.
+    """
+    kt = BOLTZMANN_HARTREE_PER_KELVIN * float(temperature)
+    window = RATE_THERMAL_WINDOW_KT * kt
+    socme = np.asarray(at.socme)
+
+    def coupling(a, b):
+        sing, trip = (a, b) if a[0] == 'S' else (b, a)
+        row, col = _root_number(sing), _root_number(trip) - 1
+        if row >= socme.shape[0] or col >= socme.shape[1]:
+            return None
+        return abs(float(socme[row, col]))
+
+    lev_i, skip_i = state_levels(at, initial, e_initial, gaps)
+    lev_f, skip_f = state_levels(at, final, e_final, gaps)
+    up_i = {lab: e - e_initial for lab, e in lev_i.items()}
+    up_f = {lab: e - e_final for lab, e in lev_f.items()}
+    low = min(up_i.values())
+    # the reference state stays in even when a lower root lies below it
+    starts = {lab: x for lab, x in up_i.items()
+              if x - low <= window or lab == initial}
+    bound = max(0.0, e_initial - e_final) + window
+    ends = {lab: x for lab, x in up_f.items() if x <= bound}
+    weight = {lab: np.exp(-(x - low) / kt) for lab, x in starts.items()}
+    z = sum(weight.values())
+    pairs, k_eff, missing = [], 0.0, []
+    for a in starts:
+        for b in ends:
+            de = lev_f[b] - lev_i[a]
+            v = coupling(a, b)
+            if v is None:
+                missing.append(f'{a}->{b}')
+                continue
+            if (a, b) == (initial, final):
+                k = k_reference
+            else:
+                k = spin_vibronic_rate(de, v / np.sqrt(average), [], [], rho,
+                                       temperature)[0]
+            pairs.append({'pair': f'{a}->{b}', 'p_initial': weight[a] / z,
+                          'dE_eV': de * HARTREE_TO_EV,
+                          'v_cm': v * HARTREE_TO_CM,
+                          'herzberg_teller': (a, b) == (initial, final),
+                          'k': k})
+            k_eff += weight[a] / z * k
+    return {'window_kT': RATE_THERMAL_WINDOW_KT, 'gap_rule': gaps.rule,
+            'populations': {lab: w / z for lab, w in weight.items()},
+            'levels': {lab: lev_i[lab] for lab in starts},
+            'complete': {
+                'initial': max(up_i.values()) - low > window and not skip_i,
+                'final': (max(up_f.values()) > bound and not missing
+                          and not skip_f)},
+            'without_level': skip_i + skip_f,
+            'missing_couplings': missing, 'pairs': pairs, 'k_eff': k_eff}
+
+
+def state_levels(at, ref, e_ref, gaps):
+    """Each state of `ref`'s spin computed at `at`, with the energy it stands
+    at under `gaps`, Hartree, and the labels left without one.
+
+    'stacked': its reference state's own-minimum energy `e_ref` plus its
+    vertical splitting from `ref` at `at`. 'adiabatic': the energy of its own
+    relaxed minimum, `gaps.minima`, `ref` at `e_ref`; a state with no minimum
+    there is left out. The adiabatic rule reads the labels as the same states
+    at every minimum; a root that swaps character between them is the
+    caller's to map.
+    """
+    labels = [lab for lab in at.energy
+              if lab[0] == ref[0] and _root_number(lab) > 0]
+    if gaps.rule == 'stacked':
+        return {lab: e_ref + at.energy[lab] - at.energy[ref]
+                for lab in labels}, []
+    level = {lab: float(gaps.minima[lab]) for lab in labels
+             if lab in gaps.minima and lab != ref}
+    level[ref] = e_ref
+    return level, [lab for lab in labels if lab not in level]
+
+
+def rate_table(s1, t1, e0, omega, s_isc, temperature, lambda_env, s_ic=None,
+               d_ic=None, s_t=None, manifold_gaps=None):
+    """Every rate of an emitter from its two relaxed minima, in s^-1.
+
+    s1, t1: the `Minimum` of the emitting singlet and of the triplet
+        reservoir. e0: E_0 at the ground-state minimum, Hartree.
+    omega: the ground-state modes' frequencies, every one a vibration
+        (`require_vibrational_modes`). s_isc: the Huang-Rhys factors of the
+        S1 <-> T1 displacement on those modes, the bath of both crossings and
+        of the T2 channel. lambda_env: the classical reorganization of the
+        surroundings, Hartree.
+    s_ic, d_ic: S1 -> S0 internal conversion, the S0 <-> S1 Huang-Rhys factors
+        and the derivative coupling at the S1 minimum on the mass-weighted
+        modes (`vibronic.project_coupling`). s_t: the S0 <-> T1 factors of the
+        triplet's decay through <S0|H_SO|T1>. A channel left None is not
+        computed; its rate is None and the kinetics omit it (`pl_omits`).
+
+    Delta_E = E_final - E_initial throughout. A CROSSING READS ITS SPIN-ORBIT
+    COUPLING AND ITS DERIVATIVE AT ITS INITIAL STATE'S MINIMUM: ISC (S1 -> T1,
+    T2) at the S1 minimum, RISC (T1, T2 -> S1) at the T1 minimum. Its
+    reorganization energy is its ACCEPTING state's, one way: lambda_T =
+    E_T1(R_S1) - E_T1(R_T1) for ISC and lambda_S = E_S1(R_T1) - E_S1(R_S1)
+    for RISC. Each minimum is read at the labels its own evaluation reported.
+
+    |V| is the sum over the three triplet sublevels. A crossing out of a
+    triplet (RISC from T1 and T2, T1 -> S0) averages over its thermalized
+    initial sublevels and takes |V|^2 / TRIPLET_SUBLEVELS, |dV/dq|^2 alike;
+    ISC sums over the final ones and takes |V|^2. 'v_condon_cm' records the
+    summed |V| of every channel.
+
+    The Franck-Condon rows (A3, A4) of a crossing are None where its
+    'fc_lambda' record says 'refused' (`fc_lambda_guard`), and so is every
+    kinetics built on them. k_ic and k_nr_t1 are guarded alike against
+    S0's own relaxation, E_S0 at the S1 or T1 minimum (`Minimum.e_ground`)
+    less e0 ('ic_fc_lambda', 't1_s0_fc_lambda'); a refused one is None and
+    refuses the kinetics ('pl_refused_by'), while one not asked for (s_ic,
+    d_ic or s_t None) is omitted from them ('pl_omits').
+
+    'manifold' (`state_manifold`) holds ISC and RISC between every thermally
+    reachable singlet and triplet under the declared `manifold_gaps`
+    (`ManifoldGaps`), and 'pl_manifold' the kinetics on its effective rates;
+    with no declaration it is 'not declared' and pl_manifold None.
+    'pl_with_t2' is the T1/T2 special case on the old reading (T2's splitting
+    at the T1 minimum for both directions); 'pl' and 'pl_with_t2' stand next
+    to 'pl_manifold' whatever the rule. 'pl_manifold_complete' (None without
+    pl_manifold) says whether that manifold was complete (`manifold_complete`):
+    under 'adiabatic' with only S1 and T1 relaxed it is not, and pl_manifold is
+    the two-state kinetics at best.
+
+    The T2 channels (k_risc_t2, k_isc_t2, pl_with_t2) read the S1 <-> T1
+    density as ISC and RISC do, and are None where either channel's
+    Franck-Condon row is refused ('t2_status' 'refused', 't2_refused_by').
+
+    'numerical_flags' names the numerical events the table stands on:
+    'fc_integrand_not_decayed', the densities ('S1-T1', 'S0-S1', 'S0-T1')
+    whose time integrand had not decayed (`FCIntegrandNotDecayed`, warned
+    about; the rates are computed on the truncated density). Empty when
+    clean (refuse inputs, warn numerics).
+    """
+    omega = np.asarray(omega, float)
+    require_vibrational_modes(omega, 'rate_table')
+    w = omega
+    not_decayed = []
+
+    def rho_of(s, name='S1-T1'):
+        s = np.asarray(s, float)
+
+        def rho(e):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always', FCIntegrandNotDecayed)
+                value = fc_weighted_dos(e, s, w, temperature,
+                                        lambda_classical=lambda_env)
+            for caveat in caught:
+                if (issubclass(caveat.category, FCIntegrandNotDecayed)
+                        and name not in not_decayed):
+                    not_decayed.append(name)
+                warnings.warn_explicit(caveat.message, caveat.category,
+                                       caveat.filename, caveat.lineno)
+            return value
+        return rho
+
+    def sum_rule(s):
+        # the harmonic reorganization sum_k S_k omega_k of one displacement
+        return float((np.asarray(s, float) * w).sum())
+
+    s_name, t_name = s1.emitter, t1.reservoir
+    # the singlet row and the triplet column of each minimum's own table
+    row_s, col_s = _root_number(s_name), _root_number(s1.reservoir) - 1
+    row_t, col_t = _root_number(t1.emitter), _root_number(t_name) - 1
+    e_s1, e_t1 = s1.energy[s_name], t1.energy[t_name]
+    de_st = e_s1 - e_t1
+    lam_t = s1.energy[s1.reservoir] - e_t1
+    lam_s = t1.energy[t1.emitter] - e_s1
+    s_k = np.asarray(s_isc, float)
+    rho = rho_of(s_k)
+    s_sum = float(s_k.sum())
+    lam_rule = sum_rule(s_k)
+    om_eff = float((s_k * w).sum() / max(s_sum, 1e-30))
+    out = {'temperature_K': temperature,
+           'lambda_env_eV': lambda_env * HARTREE_TO_EV,
+           'emitter': s_name, 'reservoir': t_name,
+           'dE_ST_adiabatic_eV': de_st * HARTREE_TO_EV,
+           'labels': {'S1_minimum': [s_name, s1.reservoir],
+                      'T1_minimum': [t1.emitter, t_name]},
+           'S1_adiabatic_eV': (e_s1 - e0) * HARTREE_TO_EV,
+           'T1_adiabatic_eV': (e_t1 - e0) * HARTREE_TO_EV,
+           'lambda_T_eV': lam_t * HARTREE_TO_EV,
+           'lambda_S_eV': lam_s * HARTREE_TO_EV,
+           'huang_rhys_S1T1_sum': s_sum,
+           'lambda_sum_rule_eV': lam_rule * HARTREE_TO_EV,
+           'channels': {}}
+    for name, at, de, lam, row, col, average in (
+            ('ISC S1->T1', s1, -de_st, lam_t, row_s, col_s, 1),
+            ('RISC T1->S1', t1, de_st, lam_s, row_t, col_t,
+             TRIPLET_SUBLEVELS)):
+        v = abs(float(np.asarray(at.socme)[row, col]))
+        condon = at.dv_dq is None
+        dv = [] if condon else np.asarray(at.dv_dq, float)
+        k_ht, k_c, k_h = spin_vibronic_rate(
+            de, v / np.sqrt(average), dv / np.sqrt(average),
+            [] if condon else at.omega_promoting, rho, temperature)
+        fc = fc_lambda_guard(lam_rule, lam)
+        if fc['status'] == 'refused':
+            k_ht = k_c = k_h = None
+        out['channels'][name] = {
+            'v_condon_cm': v * HARTREE_TO_CM,
+            'initial_sublevel_average': average,
+            'dv_dq_rms_by_path_cm': {path: _rms_cm(x) for path, x in
+                                     (at.dv_dq_paths or {}).items()},
+            'dv_dq_rms_cm': None if condon else _rms_cm(dv),
+            **marcus_rows(v / np.sqrt(average), de, lam, s_sum, om_eff,
+                          temperature),
+            'fc_lambda': fc,
+            'A3_fc_condon': k_c, 'A4_fc_condon_ht': k_ht, 'A4_ht_part': k_h}
+    # emission at the S1 minimum, the gap there and its transition dipole
+    k_r = None
+    if s1.emission is not None:
+        k_r = radiative_rate(s1.emission, s1.dipole)
+    out.update(emission_eV=(None if s1.emission is None
+                            else s1.emission * HARTREE_TO_EV),
+               f_emission=s1.f_osc, k_r=k_r)
+    # S1 -> S0 internal conversion on the S0 <-> S1 displacement, guarded by
+    # S0's own relaxation E_S0(R_S1) - E_S0(R0)
+    k_ic, top, ic_fc = None, None, None
+    if s_ic is not None and d_ic is not None:
+        ic_fc = fc_lambda_guard(sum_rule(s_ic), ground_lambda(s1, e0))
+        if ic_fc['status'] == 'computed':
+            k_ic, per_mode = internal_conversion_rate(
+                e0 - e_s1, d_ic, omega, rho_of(s_ic, 'S0-S1'), temperature)
+            top = [float(omega[k] * HARTREE_TO_CM)
+                   for k in np.argsort(-per_mode)[:3]]
+    # T1 -> S0 through <S0|H_SO|T1> on the S0 <-> T1 displacement, guarded
+    # by E_S0(R_T1) - E_S0(R0)
+    v_t0 = abs(float(np.asarray(t1.socme)[0, col_t]))
+    k_nr_t, t0_fc = None, None
+    if s_t is not None:
+        t0_fc = fc_lambda_guard(sum_rule(s_t), ground_lambda(t1, e0))
+        if t0_fc['status'] == 'computed':
+            k_nr_t = spin_vibronic_rate(
+                e0 - e_t1, v_t0 / np.sqrt(TRIPLET_SUBLEVELS), [], [],
+                rho_of(s_t, 'S0-T1'), temperature)[0]
+    out.update(k_ic=k_ic, k_ic_modes_cm=top, ic_fc_lambda=ic_fc,
+               k_nr_t1=k_nr_t, t1_s0_fc_lambda=t0_fc,
+               v_s0t1_cm=v_t0 * HARTREE_TO_CM)
+    out['manifold'] = manifold = state_manifold(
+        s1, t1, e0, e_s1, e_t1, out['channels'], rho, rho_of(s_t, 'S0-T1')
+        if k_nr_t is not None else None, temperature, manifold_gaps)
+    # T2 at the T1 minimum (vertically above T1 there), on the S1 <-> T1
+    # Franck-Condon spectrum: the thermally activated channel
+    t2_name = f'T{col_t + 2}'
+    de_t2t1 = v_s1t2_t = k_risc_t2 = k_isc_t2 = None
+    # both T2 channels stand on the S1 <-> T1 density, refused with either
+    # side's Franck-Condon row
+    t2_refused = [name for name, ch in out['channels'].items()
+                  if ch['fc_lambda']['status'] == 'refused']
+    if t2_name in t1.energy:
+        de_t2t1 = t1.energy[t2_name] - e_t1
+        e_t2 = e_t1 + de_t2t1
+        v_s1t2_t = abs(float(np.asarray(t1.socme)[row_t, col_t + 1]))
+        v_s1t2_s = abs(float(np.asarray(s1.socme)[row_s, col_s + 1]))
+    if t2_name in t1.energy and not t2_refused:
+        k_risc_t2 = spin_vibronic_rate(
+            e_s1 - e_t2, v_s1t2_t / np.sqrt(TRIPLET_SUBLEVELS), [], [], rho,
+            temperature)[0]
+        k_isc_t2 = spin_vibronic_rate(e_t2 - e_s1, v_s1t2_s, [], [], rho,
+                                      temperature)[0]
+    out.update(
+        dE_T2T1_vertical_eV=(None if de_t2t1 is None
+                             else de_t2t1 * HARTREE_TO_EV),
+        v_s1t2_cm=None if v_s1t2_t is None else v_s1t2_t * HARTREE_TO_CM,
+        k_risc_t2=k_risc_t2, k_isc_t2=k_isc_t2,
+        t2_status=('absent' if t2_name not in t1.energy
+                   else 'refused' if t2_refused else 'computed'),
+        t2_refused_by=t2_refused)
+    # the kinetics a PL experiment reads, with every channel computed above
+    # a channel not asked for is omitted; a refused one refuses the kinetics
+    omits = [k for k, fc in (('k_ic', ic_fc), ('k_nr_t1', t0_fc))
+             if fc is None]
+    refused = [k for k, fc in (('k_ic', ic_fc), ('k_nr_t1', t0_fc))
+               if fc is not None and fc['status'] == 'refused']
+    pl = pl_t2 = pl_all = None
+    isc = out['channels']['ISC S1->T1']['A4_fc_condon_ht']
+    risc = out['channels']['RISC T1->S1']['A4_fc_condon_ht']
+    if (k_r is not None and isc is not None and risc is not None
+            and not refused):
+        nr = {'k_nr_s': 0.0 if k_ic is None else k_ic,
+              'k_nr_t': 0.0 if k_nr_t is None else k_nr_t}
+        pl = photoluminescence(k_r, isc, risc, **nr)
+        if k_risc_t2 is not None:
+            pl_t2 = photoluminescence(k_r, isc, risc, **nr,
+                                      delta_e_t2t1=de_t2t1,
+                                      temperature=temperature,
+                                      k_risc_t2=k_risc_t2, k_isc_t2=k_isc_t2)
+    if pl is not None and manifold['status'] == 'computed':
+        # the thermalized manifolds: k_r and k_IC are the emitter's alone
+        p_s = manifold['ISC']['populations'][s_name]
+        pl_all = photoluminescence(
+            p_s * k_r, manifold['ISC']['k_eff'], manifold['RISC']['k_eff'],
+            k_nr_s=p_s * nr['k_nr_s'],
+            k_nr_t=(nr['k_nr_t'] if manifold['k_nr_t_eff'] is None
+                    else manifold['k_nr_t_eff']))
+    out.update(pl=pl, pl_with_t2=pl_t2, pl_manifold=pl_all,
+               pl_manifold_complete=(None if pl_all is None
+                                     else manifold_complete(manifold)),
+               pl_omits=omits, pl_refused_by=refused)
+    out['numerical_flags'] = ({'fc_integrand_not_decayed': not_decayed}
+                              if not_decayed else {})
+    return out
+
+
+def manifold_complete(manifold):
+    """Whether every side of a computed `state_manifold` reached past its
+    thermal window with every level and coupling it needs (`complete` of
+    each side's `manifold_crossings`); False makes its kinetics a lower
+    bound on the crossings, not the manifold's."""
+    return all(all(manifold[side]['complete'].values())
+               for side in ('ISC', 'RISC'))
+
+
+def state_manifold(s1, t1, e0, e_s1, e_t1, channels, rho, rho_t0,
+                   temperature, gaps):
+    """ISC from every thermally populated singlet at the S1 minimum and RISC
+    from every populated triplet at the T1 minimum, each into every final
+    state within reach (`manifold_crossings`), and the populated triplets'
+    decay to S0 through <S0|H_SO|T_m> on the S0 <-> T1 density `rho_t0`.
+
+    A side whose S1-T1 channel is refused by `fc_lambda_guard` is refused
+    whole: every pair stands on the same density. The emitter-reservoir pair
+    is the channel's own A4 rate, the others are Condon. `gaps` is the
+    declared `ManifoldGaps`; None computes no manifold.
+    """
+    if gaps is None:
+        return {'status': 'not declared', 'k_nr_t_eff': None}
+    out = {'status': 'computed'}
+    for side, at, initial, final, e_i, e_f, name, average in (
+            ('ISC', s1, s1.emitter, s1.reservoir, e_s1, e_t1, 'ISC S1->T1',
+             1),
+            ('RISC', t1, t1.reservoir, t1.emitter, e_t1, e_s1, 'RISC T1->S1',
+             TRIPLET_SUBLEVELS)):
+        k_ref = channels[name]['A4_fc_condon_ht']
+        if k_ref is None:
+            out[side] = {'status': 'refused', 'k_eff': None,
+                         'populations': {initial: 1.0}}
+            continue
+        out[side] = {'status': 'computed', **manifold_crossings(
+            at, initial, final, e_i, e_f, rho, temperature, average, k_ref,
+            gaps)}
+    k_t0 = None
+    if rho_t0 is not None and out['RISC']['status'] == 'computed':
+        socme = np.asarray(t1.socme)
+        k_t0 = 0.0
+        for lab, p in out['RISC']['populations'].items():
+            col = _root_number(lab) - 1
+            e_m = out['RISC']['levels'][lab]
+            v = abs(float(socme[0, col]))
+            k_t0 += p * spin_vibronic_rate(
+                e0 - e_m, v / np.sqrt(TRIPLET_SUBLEVELS), [], [], rho_t0,
+                temperature)[0]
+    out['k_nr_t_eff'] = k_t0
+    return out

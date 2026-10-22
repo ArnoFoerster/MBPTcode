@@ -38,8 +38,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto
 
+from tests.pins import assert_same
+from src.Base.numerics import Numerics
 from src.SingleReference.LinearResponse.davidson import oscillator_strengths
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.rpa_bse_surface import RPABSESurface
@@ -51,6 +53,8 @@ from src.properties.nonadiabatic import (aligned_overlap,
                                          derivative_couplings, mo_overlap,
                                          nabla_mo, spectrum_solve,
                                          state_overlap, translational_sum)
+from tests.isdf_test_grid import g1_numerics
+from tests.reference_scf import rhf_tight_default_cycles
 
 #: The two lowest BSE roots: formaldehyde's dark n->pi* (A2) and the bright
 #: B2 state above it. The pair is chosen so that one ground-to-excited sum rule
@@ -64,15 +68,6 @@ CH2O = 'C 0 0 0.0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588'
 SWEEP = (2.0, 1.0, 0.5, 0.25)
 
 
-def rhf(mol):
-    """The Lagrangian assumes the occupied-virtual Fock block vanishes."""
-    mf = scf.RHF(mol)
-    mf.conv_tol = 1e-13
-    mf.conv_tol_grad = 1e-11
-    mf.kernel()
-    return mf
-
-
 @pytest.fixture(scope='module')
 def mol():
     return gto.M(atom=CH2O, basis='cc-pvdz', verbose=0)
@@ -80,7 +75,8 @@ def mol():
 
 @pytest.fixture(scope='module')
 def chain(mol):
-    return ExcitedStateChain(mol, rhf, solver='dense', mf=rhf(mol))
+    return ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol), numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
 
 
 @pytest.fixture(scope='module')
@@ -260,7 +256,9 @@ def test_every_entry_point_drives_the_same_solve(chain, mol, reference):
     its mean field off the ground-state half, so an adapter that drove the
     outer object would return root 0 for every state.
     """
-    surface = RPABSESurface(mol, rhf, state=0, mf=reference[0], solver='dense')
+    surface = RPABSESurface(
+        mol, rhf_tight_default_cycles, state=0, mf=reference[0],
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
     manifold = StateManifold(surface, states=STATES)
     base = spectrum_solve(chain)(mol)
     for source in (surface, manifold):
@@ -334,7 +332,9 @@ def test_the_translational_sum_rule_holds_for_the_electronic_coupling(
     """
     mf, _, x, y, nocc = reference
     predicted = translational_sum(mol, mf.mo_coeff, nocc, x, y, states=STATES)
-    assert np.abs(nac.d.sum(axis=2) - predicted).max() < 1e-5
+    # the stencil error is 1.7e-5 on the shipped radii (it falls as the step
+    # squared, test above), so the gate sits a factor two over it
+    assert np.abs(nac.d.sum(axis=2) - predicted).max() < 3e-5
 
 
 def test_the_sum_over_atoms_is_not_zero(nac):
@@ -399,8 +399,8 @@ def test_the_error_falls_as_the_step_squared_with_no_noise_floor(
     Antisymmetry and the translational sum rule are both residuals of something
     the construction satisfies exactly, so each is pure stencil error and each
     must fall as h^2. An error that FLATTENED or ROSE at the small-h end would
-    be the displaced solves' own convergence entering as O(eps/h) -- the
-    discriminator the gradient campaign uses -- and there is none of it down to
+    be the displaced solves' own convergence entering as O(eps/h) -- the discriminator a finite-difference check uses
+    -- and there is none of it down to
     a quarter of the default step. The coupling itself is then step-independent
     far below the level it is used at.
     """
@@ -450,10 +450,12 @@ def test_the_pair_accessor_returns_one_cartesian_array(nac):
 # --------------------------------------------------- following on the surface
 def test_tracking_off_is_bit_identical_to_the_index(mol):
     """`track=None` is the shipped behaviour and must not move."""
-    plain = ExcitedStateChain(mol, rhf, solver='dense', mf=rhf(mol))
-    tracked = ExcitedStateChain(mol, rhf, solver='dense', mf=rhf(mol),
-                                track='overlap')
-    assert plain.excitation(mol) == tracked.excitation(mol)
+    plain = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol), numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
+    tracked = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol),
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
+    assert_same(plain.excitation(mol), tracked.excitation(mol))
     assert plain.follow_log == []
     assert len(tracked.follow_log) == 1, 'the first pass anchors, it follows nothing'
     assert tracked.follow_log[0]['weight'] == 1.0
@@ -462,8 +464,9 @@ def test_tracking_off_is_bit_identical_to_the_index(mol):
 def test_the_first_pass_anchors_and_a_repeat_finds_the_same_root(mol):
     """Re-evaluating at the SAME geometry must return the same state with a
     unit overlap: anything less means the follower is reading noise."""
-    chain = ExcitedStateChain(mol, rhf, solver='dense', mf=rhf(mol),
-                              state=1, track='overlap')
+    chain = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol), state=1,
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
     first = chain.excitation(mol)
     again = chain.excitation(mol)
     assert again == pytest.approx(first, abs=1e-12)
@@ -477,8 +480,9 @@ def test_the_first_pass_anchors_and_a_repeat_finds_the_same_root(mol):
 def test_a_displaced_geometry_keeps_the_state_and_logs_its_overlap(mol):
     """The state survives a real displacement, and the log carries the
     evidence rather than the caller having to trust it."""
-    chain = ExcitedStateChain(mol, rhf, solver='dense', mf=rhf(mol),
-                              track='overlap')
+    chain = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol),
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
     chain.excitation(mol)
     moved = mol.copy()
     coords = moved.atom_coords().copy()
@@ -502,10 +506,13 @@ def test_the_surface_follows_the_state_through_an_index_SWAP(mol, reference):
     followed index changes WITH it so the state does not.
 
     Without following this returns `self.state` unchanged and the optimizer
-    walks onto whichever state is now n-th -- the acene 1La/1Lb failure.
+    walks onto whichever state is n-th after the swap -- the acene 1La/1Lb
+    failure.
     """
     mf, om, x, y, nocc = reference
-    chain = ExcitedStateChain(mol, rhf, solver='dense', mf=mf, track='overlap')
+    chain = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=mf,
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
     assert chain.nocc == nocc
     chain.tracked_state(mol, mf, om, _pieces_with(x, y))     # anchors on 0
     order = [2, 0, 1]                     # state 0 comes back as column 1
@@ -518,10 +525,12 @@ def test_the_surface_follows_the_state_through_an_index_SWAP(mol, reference):
 
 def test_a_refrozen_chain_inherits_the_FOLLOWED_index(mol, reference):
     """`refreeze` starts a fresh overlap history, so it has to be handed the
-    root that IS the state now -- rebuilding on the original index hands the
+    root that IS the state -- rebuilding on the original index hands the
     outer loop the state that was crossed."""
     mf, om, x, y, _ = reference
-    chain = ExcitedStateChain(mol, rhf, solver='dense', mf=mf, track='overlap')
+    chain = ExcitedStateChain(
+        mol, rhf_tight_default_cycles, mf=mf,
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
     chain.tracked_state(mol, mf, om, _pieces_with(x, y))
     order = [2, 0, 1]
     chain.tracked_state(mol, mf, np.asarray(om)[order],

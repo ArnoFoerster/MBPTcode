@@ -28,13 +28,29 @@ says there is nothing else left in them.
 
 ON THE INTERPOLATED ROUTE THE GRID DECIDES. The force is the exact derivative
 of the ISDF energy at every grid, but that energy depends on the orientation
-of each atom's interpolation cloud, and the covariant atomic frames turn the
-clouds as the atoms move. On a coarse grid the surface is then rough on a
-1e-3 Bohr scale: the step falls outside its Taylor radius, the asymmetry grows
-with h, and even the h -> 0 force constants are wrong (formaldehyde at 148
-points per atom: a 1421 cm^-1 mode at 2646). Below `ISDF_HESSIAN_MIN_GRID` the
-Hessian is refused; at it formaldehyde's frequencies sit within 11 cm^-1 of
-the density-fitted route's, and the asymmetry falls as h^2.
+of each atom's interpolation cloud. On a coarse grid the surface is rough on
+a 1e-3 Bohr scale: the step falls outside its Taylor radius, the asymmetry
+grows with h, and even the h -> 0 force constants are wrong (formaldehyde at
+148 points per atom: a 1421 cm^-1 mode at 2646). Below `ISDF_HESSIAN_MIN_GRID`
+the Hessian is refused.
+
+AND THE FRAMES ARE FROZEN AT THE REFERENCE. The covariant atomic frames turn
+each cloud with its atom's environment, at 1/gap of the neighbour tensor's
+eigenvalues, and an sp2 atom with three similar neighbours turns its cloud
+fast even on the floor grid: formaldehyde's carbon at 18.9 rad/Bohr, DMABN's
+planar amine nitrogen at 16.2. Turning the orientation dependence that fast
+puts it into the curvature: formaldehyde LRC-wPBEh/cc-pVDZ on GH, h = 1e-3
+Bohr, is asymmetric by 2.85e-2 Ha/Bohr^2 (2.7 percent, 2.3 percent 0.02 Bohr
+off the symmetric geometry: it is the tensor gap, not the symmetry), planar
+DMABN by 3.46 percent. Every displaced mean field therefore places its clouds
+on the reference geometry's frames turned with the whole molecule
+(`isdf_jk.frozen_frames`, `FrozenFrames`), the way it fits on the
+reference's pair layout: the same Hessian is then asymmetric by 2.4e-7, the
+force noise, and its frequencies are within 4.1 cm^-1 of density fitting's,
+where the turning frames' put an imaginary 1610 cm^-1 mode. At the reference
+the points are the turning frames' bit for bit; the force constants are
+those of the energy with the frames held, not of the orientation artifact's
+turning.
 
 EVERY DISPLACED MEAN FIELD FITS ON THE REFERENCE GEOMETRY'S PAIR LAYOUT. The
 ISDF-K fit screens its AO pairs against `pair_tol`, a discrete choice. If
@@ -45,9 +61,14 @@ error in that column of the Hessian. `numerical_hessian` therefore takes the
 layout of the factory's mean field at R0 (`reference_pair_layout`) and builds
 every displaced mean field inside `frozen_pair_layout`, the way a walk does.
 """
+import json
+import os
+import pathlib
+
 import numpy as np
 
 from src.Base.constants import (BOHR_TO_ANGSTROM,
+                                HESSIAN_ASYMMETRY_WORST,
                                 HESSIAN_FD_ASYMMETRY_TOL,
                                 HESSIAN_FD_NOISE_REL,
                                 HESSIAN_FD_STEP_RATIO,
@@ -55,8 +76,15 @@ from src.Base.constants import (BOHR_TO_ANGSTROM,
                                 ISDF_HESSIAN_MIN_GRID,
                                 NUCLEAR_FD_STEP)
 from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import ISDFJK, frozen_pair_layout
-from src.Base.separable_ri import _SHELL_ORDER
+from src.Base.isdf_jk import (ISDFJK, FrozenFrames, frozen_frames,
+                              frozen_pair_layout)
+from src.Base.record_io import record_hash
+from src.Base.geometry import molecule_at
+from src.Base.separable_ri import (_SHELL_ORDER, frame_turning_record,
+                                   shell_tuple)
+from src.Base.utils.mpi_grid import current_comm, lockstep
+from src.Base.numerics import numerics_identity
+from src.gradients.surface_identity import force_identity
 from src.properties.optimize import mean_field_force
 from src.properties.surface import evaluate
 
@@ -64,13 +92,104 @@ from src.properties.surface import evaluate
 #: mean field at the reference geometry (`reference_pair_layout`).
 REFERENCE_LAYOUT = 'reference'
 
+#: `numerical_hessian`'s and `surface_hessian`'s default `frames`: every
+#: displaced ISDF-K mean field places its points on the atomic frames of the
+#: reference geometry, turned with the molecule (`isdf_jk.FrozenFrames`).
+REFERENCE_FRAMES = 'reference'
+
 #: Why a finite-difference Hessian of an ISDF-K mean field has a grid floor.
 ROUGH_GRID = ('the ISDF energy depends on the orientation of each atom\'s '
-              'interpolation cloud and the atomic frames turn the clouds as '
-              'the atoms move, so on a coarse grid the surface is rough on '
+              'interpolation cloud, so on a coarse grid the surface is rough on '
               'the step\'s scale and its force constants are wrong even though '
-              'the force is exact (formaldehyde/cc-pVDZ/B3LYP: 1362 cm^-1 off '
-              'at 148 points per atom, 405 at G2, 11 at G3)')
+              'the force is exact (formaldehyde/cc-pVDZ/B3LYP on frames turning '
+              'with each geometry: 1362 cm^-1 off at 148 points per atom, 405 '
+              'at (16, 10, 6, 2), 11 at (32, 20, 12, 4), 1.6 there on frames '
+              'frozen at the reference)')
+
+
+def fd_hessian_stamp(numerics=None):
+    """What a finite-difference Hessian froze, the one stamp every checkpoint
+    of one writes and compares: the pair layout and the frames of the
+    reference, and -- for a Hessian of a surface -- the identity of the
+    `Numerics` it was taken on."""
+    stamp = {'pair_layout': REFERENCE_LAYOUT, 'frames': REFERENCE_FRAMES}
+    if numerics is not None:
+        stamp['numerics'] = numerics.identity()
+    return stamp
+
+
+def stencil_frames(mol, frames):
+    """The `FrozenFrames` of a stencil about `mol` for `frames`
+    (`REFERENCE_FRAMES`, a `FrozenFrames`, or None for each geometry's own
+    covariant frames)."""
+    if isinstance(frames, str):
+        if frames != REFERENCE_FRAMES:
+            raise ValueError(f'frames={frames!r}: pass {REFERENCE_FRAMES!r}, '
+                             f'a FrozenFrames or None')
+        return FrozenFrames(mol)
+    return frames
+
+
+class ForceCache:
+    """The displaced forces of one finite-difference Hessian on disk, one
+    file per displacement, each carrying what it is a force of: the
+    geometry the Hessian is taken at (Bohr), the step and the hash of the
+    surface's conventions (`cached_conventions`). A file whose header
+    differs is refused, not overwritten: it is a force of another Hessian."""
+
+    def __init__(self, directory, mol, step, surface, frames=None):
+        self.dir = pathlib.Path(directory)
+        record = cached_conventions(surface)
+        self.header = {'coords': np.array(mol.atom_coords(), float),
+                       'step': np.array(float(step)),
+                       'conventions': np.array(
+                           '' if record is None else record_hash(record)),
+                       # a force on the turning frames is a force of another
+                       # surface, and a file written before frames were frozen
+                       # carries no such key
+                       'frames': np.array(
+                           'turning' if frames is None
+                           else frames.to_record()['convention'])}
+        if writes():
+            self.dir.mkdir(parents=True, exist_ok=True)
+
+    def path(self, ia, x, sign):
+        return self.dir / f'{ia}_{"xyz"[x]}_{"+" if sign > 0 else "-"}.npz'
+
+    def get(self, ia, x, sign):
+        """The force kept for this displacement, or None."""
+        path = self.path(ia, x, sign)
+        # rank 0 decides, so every rank computes or reads the same forces
+        if not lockstep(np.array([path.exists()]))[0]:
+            return None
+        with np.load(path) as held:
+            for key, want in self.header.items():
+                if key not in held or not np.array_equal(held[key], want):
+                    raise RuntimeError(
+                        f'{path} holds a force of another Hessian (its {key} '
+                        f'differs from this one\'s): move the directory '
+                        f'aside or point the cache elsewhere')
+            return np.array(held['gradient'])
+
+    def put(self, ia, x, sign, gradient):
+        """Keep one force, atomically, from rank 0."""
+        if not writes():
+            return
+        path = self.path(ia, x, sign)
+        tmp = path.with_name(path.name + '.tmp')
+        with open(tmp, 'wb') as handle:
+            np.savez(handle, gradient=np.asarray(gradient, float),
+                     **self.header)
+        os.replace(tmp, path)
+
+
+def cached_conventions(surface):
+    """What a cached force is a force of: `force_identity`, the one answer
+    the walk's first point and checkpoint give too -- each half's
+    conventions, grid, settings, environment, mean field, SCF layout, frames
+    and span, not the walk's history; None for a surface that freezes
+    nothing and writes no record, which a dense surface is."""
+    return force_identity(surface)
 
 
 def displacement_list(natm, step=NUCLEAR_FD_STEP):
@@ -85,12 +204,9 @@ def displacement_list(natm, step=NUCLEAR_FD_STEP):
 
 def displaced(mol, ia, x, sign, step=NUCLEAR_FD_STEP):
     """`mol` with atom `ia` moved by `sign * step` Bohr along axis `x`."""
-    out = mol.copy()
     coords = np.asarray(mol.atom_coords()).copy()
     coords[ia, x] += sign * step
-    out.set_geom_(coords, unit='Bohr')
-    out.build(False, False)
-    return out
+    return molecule_at(mol, coords)
 
 
 def isdf_grid_counts(with_df):
@@ -103,7 +219,7 @@ def isdf_grid_counts(with_df):
     if with_df.coords is not None:
         return None
     mol = with_df.mol
-    counts = tuple(int(with_df.counts[sh]) for sh in _SHELL_ORDER)
+    counts = shell_tuple(with_df.counts)
     return {mol.atom_pure_symbol(i): counts for i in range(mol.natm)}
 
 
@@ -201,6 +317,7 @@ def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
     flat = h.transpose(0, 2, 1, 3).reshape(3 * natm, 3 * natm)
     if info is not None:
         info['asymmetry'] = float(np.abs(flat - flat.T).max())
+        info['asymmetry_worst'] = worst_asymmetry(flat)
         # THE SUM RULE MUST BE READ BEFORE SYMMETRIZING, and over the DISPLACED
         # index. Summing over the first index is identically zero here whatever
         # the forces do -- it is d(sum_i g_i)/dR_j and sum_i g_i vanishes at
@@ -211,6 +328,22 @@ def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
         info['translation'] = float(np.abs(h.sum(axis=1)).max())
     flat = 0.5 * (flat + flat.T)
     return flat.reshape(natm, 3, natm, 3).transpose(0, 2, 1, 3)
+
+
+def worst_asymmetry(flat, count=HESSIAN_ASYMMETRY_WORST):
+    """The `count` largest |H_ixjy - H_jyix| of a raw (3N, 3N) Hessian, each
+    as {'i': [atom, axis], 'j': [atom, axis], 'h_ij', 'h_ji', 'difference'}
+    in Ha/Bohr^2, largest first; each pair once."""
+    diff = np.triu(np.abs(flat - flat.T), 1)
+    order = np.argsort(diff, axis=None)[::-1][:count]
+    out = []
+    for k in order:
+        a, b = np.unravel_index(k, diff.shape)
+        out.append({'i': [int(a // 3), 'xyz'[a % 3]],
+                    'j': [int(b // 3), 'xyz'[b % 3]],
+                    'h_ij': float(flat[a, b]), 'h_ji': float(flat[b, a]),
+                    'difference': float(diff[a, b])})
+    return out
 
 
 def translation_residual(h):
@@ -233,7 +366,7 @@ def translation_residual(h):
 def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
                       verbose=False, info=None,
                       asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL,
-                      pair_layout=REFERENCE_LAYOUT):
+                      pair_layout=REFERENCE_LAYOUT, frames=REFERENCE_FRAMES):
     """(natm, natm, 3, 3) Hessian by central differences of analytic forces.
 
     map_fn: anything with `map`'s signature, so the 6N independent displaced
@@ -246,6 +379,13 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
         displaced mean field screen its own pairs, which puts an O(1/h) error
         into every column across which a pair crosses `pair_tol`. Recorded in
         `info` as `frozen_pairs` (None where no ISDF-K fit was frozen).
+    frames: the atomic frames every displaced ISDF-K mean field places its
+        points on: by default the reference geometry's, turned with the
+        molecule (`isdf_jk.FrozenFrames`); None lets each turn its own, which
+        puts the orientation dependence of the ISDF energy into the force
+        constants wherever a frame turns fast. Recorded in `info` as
+        `frozen_frames`, with the covariant frames' turning at the reference
+        as `frame_turning` (`separable_ri.frame_turning_record`).
 
     The step is the property layer's `NUCLEAR_FD_STEP`. Differencing a GRADIENT
     rather than an energy is what makes 1e-3 Bohr comfortable here: the noise
@@ -263,6 +403,7 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
     runner = map if map_fn is None else map_fn
     if isinstance(pair_layout, str) and pair_layout == REFERENCE_LAYOUT:
         pair_layout = reference_pair_layout(mol, scf_factory, map_fn)
+    frames = stencil_frames(mol, frames)
 
     def forces_at(h):
         jobs = displacement_list(natm, h)
@@ -271,7 +412,7 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
             k, (ia, x, sign) = item
             # inside the job, so the block holds on whichever thread or rank
             # runs it
-            with frozen_pair_layout(pair_layout):
+            with frozen_pair_layout(pair_layout), frozen_frames(frames):
                 g = gradient_at(mol, scf_factory, ia, x, sign, h)
             if verbose:
                 print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
@@ -289,6 +430,7 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
     seen['gradients'] = len(gradients)
     seen['frozen_pairs'] = (None if pair_layout is None
                             else int(len(pair_layout[0])))
+    record_frames(seen, frames, mol)
     check_hessian_noise(h, seen, tol=asymmetry_tol)
     if seen['asymmetry_rel'] > HESSIAN_FD_NOISE_REL:
         twice = {}
@@ -301,20 +443,44 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
 
 
 def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
-                    info=None, asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL):
+                    info=None, asymmetry_tol=HESSIAN_FD_ASYMMETRY_TOL,
+                    cache_dir=None, frames=REFERENCE_FRAMES):
     """(natm, natm, 3, 3) Hessian of a surface's total energy at `mol` by
     central differences of its force, on the conventions the surface froze.
 
     The 6N displaced forces go through `evaluate`, one after another, each
     over every rank of the region it runs in. `info` takes the asymmetry
     and the sum rule (`hessian_from_gradients`), refused above
-    `asymmetry_tol` (`check_hessian_noise`).
+    `asymmetry_tol` (`check_hessian_noise`, which writes `asymmetry.json`
+    into `cache_dir` first).
+
+    cache_dir: each displaced force is kept there as it is computed
+    (`ForceCache`: `<atom>_<axis>_<sign>.npz`, with the geometry, the step
+    and a hash of the surface's conventions), and one already there is read
+    instead of computed; one written for another geometry, step or surface
+    is refused. Rank 0 writes; every rank reads. `info['forces_reused']`
+    counts what was read.
+    frames: the atomic frames the surface's ISDF-K mean field places its
+        points on at each displaced geometry, as `numerical_hessian`'s, and in
+        the cache's header; the surface's own factors keep the frames they
+        froze.
     """
     jobs = displacement_list(mol.natm, step)
-    gradients = {}
+    frames = stencil_frames(mol, frames)
+    cache = (None if cache_dir is None
+             else ForceCache(cache_dir, mol, step, surface, frames))
+    gradients, reused = {}, 0
     for k, (ia, x, sign) in enumerate(jobs):
-        g, _, _ = evaluate(surface, displaced(mol, ia, x, sign, step))
-        gradients[(ia, x, sign)] = np.asarray(g)
+        g = None if cache is None else cache.get(ia, x, sign)
+        if g is None:
+            with frozen_frames(frames):
+                g, _, _ = evaluate(surface, displaced(mol, ia, x, sign, step))
+            g = np.asarray(g)
+            if cache is not None:
+                cache.put(ia, x, sign, g)
+        else:
+            reused += 1
+        gradients[(ia, x, sign)] = g
         if verbose:
             print(f'  [hess {k + 1:4d}/{len(jobs)}] atom {ia:3d} '
                   f'{"xyz"[x]} {"+" if sign > 0 else "-"} |g|max '
@@ -323,12 +489,28 @@ def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
     h = hessian_from_gradients(gradients, mol.natm, step, info=seen)
     seen['step'] = step
     seen['gradients'] = len(gradients)
-    check_hessian_noise(h, seen, tol=asymmetry_tol)
+    seen['forces_reused'] = reused
+    record_frames(seen, frames, mol)
+    seen['fd_hessian'] = dict(fd_hessian_stamp(),
+                              numerics=numerics_identity(surface))
+    check_hessian_noise(h, seen, tol=asymmetry_tol, dump_dir=cache_dir)
     return h
 
 
-def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL):
+def record_frames(info, frames, mol):
+    """Write into `info` the frozen atomic frames (None where none were
+    frozen) and the covariant frames' turning at the reference, which
+    freezing them takes out of the force constants."""
+    info['frozen_frames'] = None if frames is None else frames.to_record()
+    info['frame_turning'] = frame_turning_record(mol)
+
+
+def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL, dump_dir=None):
     """Raise if the asymmetry is too large for the difference to mean anything.
+
+    dump_dir: where `asymmetry.json` is written before the refusal (rank 0):
+    the asymmetry, absolute and relative, the step and the worst elements
+    with their atom/axis pairs (`worst_asymmetry`).
 
     A SYMMETRIC MATRIX IS NOT EVIDENCE: `hessian_from_gradients` symmetrizes,
     so the asymmetry it measured beforehand is the only record of how far the
@@ -342,6 +524,14 @@ def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL):
     info['asymmetry_rel'] = rel
     if rel <= tol:
         return
+    if dump_dir is not None and writes():
+        dump = pathlib.Path(dump_dir)
+        dump.mkdir(parents=True, exist_ok=True)
+        (dump / 'asymmetry.json').write_text(json.dumps({
+            'asymmetry': info['asymmetry'], 'asymmetry_rel': rel,
+            'tolerance': tol, 'step': info.get('step'),
+            'largest_force_constant': scale,
+            'worst': info.get('asymmetry_worst')}, indent=1))
     raise RuntimeError(
         f'the finite-difference Hessian is asymmetric by {info["asymmetry"]:.2e} '
         f'Ha/Bohr^2 ({rel:.2e} of the largest force constant), above '
@@ -351,6 +541,12 @@ def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL):
         f'the scale of the step, which on an ISDF-K mean field means its grid '
         f'is too coarse. A Hessian built from them puts imaginary modes at '
         f'real minima.')
+
+
+def writes():
+    """Whether this rank writes files: rank 0, or a serial run."""
+    comm = current_comm()
+    return comm is None or comm.Get_rank() == 0
 
 
 def check_step_scaling(info, ratio=HESSIAN_FD_STEP_RATIO):

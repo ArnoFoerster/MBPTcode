@@ -1,4 +1,15 @@
+"""Thiele-Pade continuation of imaginary-axis data to the real axis: one node
+rule (`pade_nodes`), greedy ordering and the continued fraction."""
 import numpy as np
+
+from src.Base.constants import PADE_NPADE, PADE_W0
+from src.Base.utils.grids import gauss_legendre_grid
+
+
+def pade_nodes(npade=PADE_NPADE, w0=PADE_W0):
+    """The imaginary frequencies Sigma_c(i omega) is sampled at for its Pade
+    continuation: npade Gauss-Legendre nodes of the half axis scaled by w0."""
+    return gauss_legendre_grid(npade, w0=w0)[0]
 
 
 def thiele_coefficients(z, f):
@@ -44,6 +55,11 @@ def greedy_pade_order(z, f):
             score = abs(g[-1, -1])
             if np.isfinite(score) and score < best_score:
                 best_score, best_j = score, j
+        if best_j is None:
+            raise FloatingPointError(
+                f'greedy Pade ordering: every next Thiele coefficient of the '
+                f'{len(remaining)} points left is non-finite after '
+                f'{len(order)} nodes')
         order.append(best_j)
         remaining.remove(best_j)
 

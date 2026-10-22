@@ -12,8 +12,9 @@ different system.
      RPA-screened beside a CC-screened Sigma.
   3. A pyscf PCM ground state and the optical screening attached to it must
      share one cavity; a different Lebedev order is refused.
-  4. `SolventScreening.mean_field` without eps_static warns that the ground
-     state stays in the gas phase (the frozen-polarization limit).
+  4. `SolventScreening.mean_field` without eps_static refuses (it
+     warned before) unless the frozen-polarization limit is declared, and
+     then hands back the gas-phase SCF.
   5. The Eq. (18) cache distinguishes calls that differ in anything but the
      environment -- here, the occupation the orbitals are split by.
 
@@ -101,11 +102,16 @@ def test_ground_state_and_screening_share_one_cavity():
     detach_solvent_screening(matched)
 
 
-def test_missing_eps_static_warns():
+def test_missing_eps_static_refuses():
     mol, _ = _water()
     screening = SolventScreening(mol, eps=1.78)
-    with pytest.warns(RuntimeWarning, match='frozen-polarization'):
+    with pytest.raises(ValueError, match='frozen-polarization'):
         screening.mean_field(mol, lambda m: scf.RHF(m).run())
+    declared = SolventScreening(mol, eps=1.78, frozen_polarization=True)
+    mf = declared.mean_field(mol, lambda m: scf.RHF(m).run())
+    assert not hasattr(mf, 'with_solvent')
+    with pytest.raises(ValueError, match='frozen_polarization'):
+        SolventScreening(mol, solvent='water', frozen_polarization=True)
 
 
 def test_shift_cache_keys_on_the_occupation():
@@ -123,7 +129,7 @@ def test_shift_cache_keys_on_the_occupation():
 
 TESTS = [test_rohf_is_refused_uhf_passes, test_cc_refuses_a_continuum,
          test_ground_state_and_screening_share_one_cavity,
-         test_missing_eps_static_warns, test_shift_cache_keys_on_the_occupation]
+         test_missing_eps_static_refuses, test_shift_cache_keys_on_the_occupation]
 
 
 if __name__ == '__main__':

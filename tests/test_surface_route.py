@@ -11,28 +11,24 @@ check that declaring it changed no number.
 
 Water/cc-pVDZ throughout, RHF for the rpa rows and PBE0 for the dft one.
 
-THE EQUIVALENCE GATES WERE SHOWN TO FAIL. Each was run once against a
-deliberately broken copy of `src/properties/surfaces.py`, then the file was
-restored from a backup and `cmp` confirmed it byte-identical:
+What breaks each equivalence gate, in `src/properties/surfaces.py`:
 
-  test_every_dispatch_row_builds_its_class
-      the ('rpa', 'Excitation', 'space-time', 'isdf') row given the charged
-      row's class -> FAILED: RPAQPSurface where RPABSESurface is declared.
-  test_the_dispatcher_adds_nothing_to_the_excited_state_energy
-      `build_excited_chain` handed `state=root` instead of `state=root - 1`
-      -> FAILED: -75.99627708 Ha against the chain's -76.06219971 Ha, the
-      dispatched surface sitting one root above it.
-  test_the_default_grid_is_the_validated_level
-      `resolve_grid` falling back to the 148-point counts instead of
-      `SURFACE_GRID_ACCURACY` -> FAILED at A1 = 8 against G2's 16.
-  test_the_default_quasiparticle_set_is_the_admitted_one
-      `resolve_states` resolving `QPStates('frontier')` instead of the spec it
-      was given -> FAILED: (3, 4, 5, 6) where the pole condition admits
-      (2, 3, 4, 5, 6, 7, 8).
-  test_comparing_two_ground_states_is_refused
-      `comparable_with` replaced by agreement on the environment alone
-      -> FAILED: DID NOT RAISE PhysicsMismatch, E_HF differenced against
-      E_HF + E_c^dRPA.
+  * test_every_dispatch_row_builds_its_class: the ('rpa', 'Excitation',
+    'space-time', 'isdf') row given the charged row's class yields
+    RPAQPSurface where RPABSESurface is declared.
+  * test_the_dispatcher_adds_nothing_to_the_excited_state_energy:
+    `build_excited_chain` handed `state=root` instead of `state=root - 1`
+    yields -75.99627708 Ha against the chain's -76.06219971 Ha, the
+    dispatched surface sitting one root above it.
+  * test_the_default_grid_is_the_validated_level: `resolve_grid` falling back
+    to the 148-point counts instead of `SURFACE_GRID_ACCURACY` gives A1 = 8
+    against G2's 16.
+  * test_the_default_quasiparticle_set_is_the_admitted_one: `resolve_states`
+    resolving `QPStates('frontier')` instead of the spec it was given gives
+    (3, 4, 5, 6) where the pole condition admits (2, 3, 4, 5, 6, 7, 8).
+  * test_comparing_two_ground_states_is_refused: `comparable_with` replaced
+    by agreement on the environment alone does not raise PhysicsMismatch, and
+    E_HF is differenced against E_HF + E_c^dRPA.
 """
 import os
 import sys
@@ -41,8 +37,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import dft, gto, scf
+from pyscf import dft, gto
 
+from tests.pins import assert_same
+from src.Base.numerics import Numerics
 from src.Base.constants import BSE_DENSE_MAX_GB, ISDF_GRID_ACCURACY
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   PhysicsMismatch, QPStates)
@@ -56,6 +54,8 @@ from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import MeanFieldSurface
 from src.properties.surfaces import (compare_surfaces, potential_energy_surface,
                                      qp_set_degeneracy_tol)
+from tests.isdf_test_grid import g1_numerics
+from tests.reference_scf import rhf_tight
 
 #: The G2 counts water/cc-pVDZ must resolve to, read off the validated table
 #: rather than respelled here.
@@ -72,14 +72,6 @@ def water():
                  basis='cc-pvdz', verbose=0)
 
 
-def rhf(mol):
-    """A reference converged tightly enough to differentiate."""
-    mf = scf.RHF(mol)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-11, 200
-    mf.kernel()
-    return mf
-
-
 def pbe0(mol):
     """The Kohn-Sham starting point of the dft row."""
     mf = dft.RKS(mol)
@@ -93,20 +85,20 @@ def pbe0(mol):
 #: (name, class, the keywords that select the row) for every row of the table.
 #: The charged rows name the water HOMO, orbital 4 of 5 occupied.
 ROWS = [
-    ('rpa/none/space-time/isdf', RPAGroundStateChain, rhf,
+    ('rpa/none/space-time/isdf', RPAGroundStateChain, rhf_tight,
      dict(ground_state=RPA_HF)),
-    ('rpa/none/dense-qb/four-index', DenseRPASurface, rhf,
+    ('rpa/none/dense-qb/four-index', DenseRPASurface, rhf_tight,
      dict(ground_state=RPA_HF, chi0='dense-qb', factorization='four-index')),
-    ('rpa/none/dense-qb/df', DenseRPASurface, rhf,
+    ('rpa/none/dense-qb/df', DenseRPASurface, rhf_tight,
      dict(ground_state=RPA_HF, chi0='dense-qb', factorization='df')),
-    ('rpa/Excitation/space-time/isdf', RPABSESurface, rhf,
+    ('rpa/Excitation/space-time/isdf', RPABSESurface, rhf_tight,
      dict(ground_state=RPA_HF, excitation=Excitation('singlet'))),
-    ('rpa/Excitation/dense-qb', DenseBSESurface, rhf,
+    ('rpa/Excitation/dense-qb', DenseBSESurface, rhf_tight,
      dict(ground_state=RPA_HF, excitation=Excitation('singlet'),
           chi0='dense-qb', factorization='four-index')),
-    ('rpa/ChargedExcitation/space-time/isdf', RPAQPSurface, rhf,
+    ('rpa/ChargedExcitation/space-time/isdf', RPAQPSurface, rhf_tight,
      dict(ground_state=RPA_HF, excitation=ChargedExcitation(4, -1))),
-    ('rpa/ChargedExcitation/dense-qb', QuasiparticleSurface, rhf,
+    ('rpa/ChargedExcitation/dense-qb', QuasiparticleSurface, rhf_tight,
      dict(ground_state=RPA_HF, excitation=ChargedExcitation(4, -1),
           chi0='dense-qb', factorization='four-index')),
     ('dft/none', MeanFieldSurface, pbe0, dict(ground_state=DFT_PBE0)),
@@ -142,7 +134,7 @@ def test_a_combination_with_no_class_lists_the_ones_that_have_one(mol):
     route only (`MeanFieldQPSurface`); the dense quasi-boson route has none.
     """
     with pytest.raises(ValueError) as exc:
-        potential_energy_surface(mol, rhf, ground_state=DFT_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=DFT_HF,
                                  excitation=ChargedExcitation(4, -1),
                                  chi0='dense-qb', factorization='four-index')
     assert 'RPAQPSurface' in str(exc.value)
@@ -157,7 +149,7 @@ def test_the_dense_bse_surface_refuses_a_mean_field_ground_state(mol):
     surface 6.3 eV of E_c away from the one asked for.
     """
     with pytest.raises(ValueError, match='refused'):
-        potential_energy_surface(mol, rhf, ground_state=DFT_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=DFT_HF,
                                  excitation=Excitation('singlet'),
                                  chi0='dense-qb', factorization='four-index')
 
@@ -170,9 +162,9 @@ def test_the_physics_survives_a_change_of_realization(mol):
     state is what makes their difference a route error rather than two
     different answers.
     """
-    cubic = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    cubic = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                      excitation=Excitation('singlet'))
-    dense = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    dense = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                      excitation=Excitation('singlet'),
                                      chi0='dense-qb', factorization='four-index')
     assert cubic.physics == dense.physics
@@ -181,8 +173,8 @@ def test_the_physics_survives_a_change_of_realization(mol):
 
 def test_comparing_two_ground_states_is_refused(mol):
     """E_HF and E_HF + E_c^dRPA are not differenceable, whatever else agrees."""
-    mean_field = potential_energy_surface(mol, rhf, ground_state=DFT_HF)
-    drpa = potential_energy_surface(mol, rhf, ground_state=RPA_HF)
+    mean_field = potential_energy_surface(mol, rhf_tight, ground_state=DFT_HF)
+    drpa = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF)
     with pytest.raises(PhysicsMismatch):
         compare_surfaces(mean_field, drpa)
 
@@ -208,9 +200,9 @@ def test_comparing_a_singlet_with_a_triplet_is_what_a_gap_is(mol):
     the same declaration on the same reference spectrum, which is the point of
     resolving it in one place.
     """
-    singlet = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    singlet = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'))
-    triplet = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    triplet = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('triplet'),
                                        chi0='dense-qb', factorization='four-index')
     report = compare_surfaces(singlet, triplet)
@@ -227,9 +219,9 @@ def test_two_realizations_of_one_route_differ_in_nothing(mol):
 
     The gate on the one above -- a list that is never empty reports noise.
     """
-    singlet = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    singlet = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'))
-    triplet = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    triplet = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('triplet'))
     assert compare_surfaces(singlet, triplet)['realization_differs'] == []
 
@@ -243,11 +235,11 @@ def test_a_numeric_keyword_the_realization_does_not_read_is_refused(mol):
     everything.
     """
     with pytest.raises(TypeError) as exc:
-        potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                  excitation=Excitation('singlet'), ntau_rpa=12)
     assert 'RPABSESurface' in str(exc.value)
     assert 'ntau_rpa' in str(exc.value)
-    surface = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'),
                                        ntau_gw=20)
     assert surface.numerics['ntau_gw'] == 20
@@ -261,13 +253,13 @@ def test_the_pole_model_refuses_a_core_state_by_its_reach(mol):
     gap, so the message says by how much the state misses.
     """
     with pytest.raises(ValueError) as exc:
-        potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                  excitation=ChargedExcitation(0, -1),
                                  residues='sop')
     assert 'orbital 0' in str(exc.value) and 'reach' in str(exc.value)
     # the HOMO is inside the wall, so the refusal is of the state and not of
     # the route
-    potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                              excitation=ChargedExcitation(4, -1), residues='sop')
 
 
@@ -278,13 +270,13 @@ def test_a_route_with_no_adjoint_refuses_rather_than_differencing(mol):
     missing adjoint and not of the surface.
     """
     with pytest.raises(NotImplementedError, match='adjoint'):
-        potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                  excitation=Excitation('singlet', qp='evgw'))
     with pytest.raises(NotImplementedError, match='adjoint'):
-        potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+        potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                  excitation=Excitation('singlet'),
                                  chi0='imagfrequency')
-    potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                              excitation=Excitation('singlet', qp='g0w0'),
                              chi0='space-time')
 
@@ -296,7 +288,7 @@ def test_describe_prints_every_term_of_e_0(mol):
     printing either number, so `describe` evaluates the terms rather than
     naming them.
     """
-    drpa = potential_energy_surface(mol, rhf, ground_state=RPA_HF).describe()
+    drpa = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF).describe()
     for term in ('E_ref', 'E_x^HF - E_xc', 'E_c^dRPA'):
         assert term in drpa
     mean_field = potential_energy_surface(mol, pbe0,
@@ -307,27 +299,27 @@ def test_describe_prints_every_term_of_e_0(mol):
 
 def test_the_default_grid_is_the_validated_level(mol):
     """The default is G2's counts, never the 148-point silent fallback."""
-    surface = potential_energy_surface(mol, rhf, ground_state=RPA_HF)
+    surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF)
     assert surface.counts == G2_COUNTS
     assert 'G2' in surface.realization.grid
 
 
 def test_a_basis_with_no_validated_level_is_refused(mol):
-    """cc-pVQZ has no row at any accuracy, and nothing is substituted for it.
+    """aug-cc-pVQZ has no row at any accuracy, and nothing is substituted for it.
 
     A missing level was never measured, so the nearest one is a guess dressed
     as an answer; the refusal is `resolve_isdf_grid`'s own message. Paired with
     cc-pVDZ, which does have the row, so the refusal is of the basis.
     """
-    qz = gto.M(atom=mol.atom, basis='cc-pvqz', verbose=0)
+    qz = gto.M(atom=mol.atom, basis='aug-cc-pvqz', verbose=0)
     with pytest.raises(ValueError, match='grid does not exist'):
-        potential_energy_surface(qz, rhf, ground_state=RPA_HF)
-    potential_energy_surface(mol, rhf, ground_state=RPA_HF)
+        potential_energy_surface(qz, rhf_tight, ground_state=RPA_HF)
+    potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF)
 
 
 def test_the_solver_is_resolved_and_recorded(mol):
     """Water's pair space fits the dense Casida pair, so 'auto' is 'dense'."""
-    surface = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'))
     assert surface.realization.solver == 'dense'
     n_ov = 5 * (mol.nao - 5)
@@ -340,14 +332,14 @@ def test_the_default_quasiparticle_set_is_the_admitted_one(mol):
     Two incompatible windows under one name is half of what this entry point
     cures, so the set is compared against a direct call on the same spectrum.
     """
-    surface = potential_energy_surface(mol, rhf, ground_state=RPA_HF,
+    surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'))
-    mf = rhf(mol)
+    mf = rhf_tight(mol)
     direct = resolve_qp_states(QPStates(), mf.mo_energy, mol.nelectron // 2,
                                mol=mol,
                                degeneracy_tol=qp_set_degeneracy_tol({}))
     assert surface.realization.qp_explicit == direct.explicit
-    assert tuple(np.asarray(surface.excited.qp_set)) == direct.explicit
+    assert tuple(np.asarray(surface.excited.resolved.qp_set)) == direct.explicit
 
 
 def test_an_integer_window_still_gives_the_set_it_always_gave(mol):
@@ -356,7 +348,7 @@ def test_an_integer_window_still_gives_the_set_it_always_gave(mol):
     `_qp_set` is the frozen convention every existing surface was built on, so
     a sequence being accepted has to leave a half-width bitwise where it was.
     """
-    eps = np.asarray(rhf(mol).mo_energy, float)
+    eps = np.asarray(rhf_tight(mol).mo_energy, float)
     by_width = ExcitedStateChain._qp_set(eps, 5, 2, 1e-4)
     assert np.array_equal(by_width, np.arange(3, 7))
     by_sequence = ExcitedStateChain._qp_set(eps, 5, (6, 3, 5, 4), 1e-4)
@@ -366,23 +358,27 @@ def test_an_integer_window_still_gives_the_set_it_always_gave(mol):
 
 
 def test_the_dispatcher_adds_nothing_to_the_excited_state_energy(mol):
-    """E_KS + Omega through the entry point is BITWISE the chain's own.
+    """E_KS + Omega through the entry point is the chain's own to a few ulp.
 
-    The entry point declares and records; it may not move a number. Bitwise,
-    not `approx`: a dispatcher that resolved one grid point or one tau
-    differently would pass a tolerance and still be a different functional.
+    The entry point declares and records; it may not move a number. A few
+    ulp, not a method tolerance: a dispatcher that resolved one grid point or
+    one tau differently would pass a tolerance and still be a different
+    functional.
     """
     surface = potential_energy_surface(mol, pbe0, ground_state=DFT_PBE0,
                                        excitation=Excitation('singlet'))
     direct = ExcitedStateChain(
-        mol, pbe0, spin='singlet', state=0, counts=G2_COUNTS, n_start=8,
-        qp_window=surface.realization.qp_explicit, scissor='calibrate',
-        outside='scissor', residue_route='explicit', solver='dense')
-    assert surface.total_energy() == direct.total_energy()
+        mol, pbe0, spin='singlet', state=0,
+        numerics=g1_numerics(mol, Numerics(isdf={'counts': G2_COUNTS, 'n_start': 8},
+                                           qp={'window': surface.realization.qp_explicit, 'scissor': 'calibrate', 'residue_route': 'explicit'},
+                                           bse={'solver': 'dense'})))
+    # two independent SCF solves: a few ulp on the recording BLAS, energy class
+    # bar on another
+    assert_same(surface.total_energy(), direct.total_energy())
 
 
 def test_the_dispatcher_adds_nothing_to_the_drpa_ground_state(mol):
-    """E_HF + E_c^dRPA through the entry point is BITWISE the chain's own."""
-    surface = potential_energy_surface(mol, rhf, ground_state=RPA_HF)
-    direct = RPAGroundStateChain(mol, rhf, counts=G2_COUNTS, n_start=8)
-    assert surface.total_energy() == direct.total_energy()
+    """E_HF + E_c^dRPA through the entry point is the chain's own to a few ulp."""
+    surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF)
+    direct = RPAGroundStateChain(mol, rhf_tight, numerics=Numerics(isdf={'counts': G2_COUNTS, 'n_start': 8}))
+    assert_same(surface.total_energy(), direct.total_energy())  # as above

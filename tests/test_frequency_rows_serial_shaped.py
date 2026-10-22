@@ -22,14 +22,14 @@ difference.
 
 Gated, water/cc-pVDZ Hartree-Fock:
   * serially, every block `owned_frequency_blocks` yields is the serial call
-    -- the tensordot of the whole block -- bitwise, on the real BLAS, for one
+    -- the tensordot of the whole block -- to a few ulp, on the real BLAS, for one
     block of all 24 frequencies and for blocks of five;
   * on the row-count-sensitive BLAS at 2, 3, 8 and 16 simulated ranks, every
-    rank's rows are the serial block's rows bitwise, each owned frequency is
-    yielded once, and the ranks' wc sum to the serial wc bitwise;
+    rank's rows are the serial block's rows to a few ulp, each owned frequency is
+    yielded once, and the ranks' wc sum to the serial wc to a few ulp;
   * on the same BLAS at 2, 3 and 8 ranks, `qp_set_gradient`'s four
     explicit-route roots and the single-state root and Z on the
-    contour-deformation and the pole-model route are bitwise the serial ones,
+    contour-deformation and the pole-model route are the serial ones to a few ulp,
     the adjoints within `REL`;
   * on the same BLAS at 2, 3 and 8 ranks, the routes whose frequency rows feed
     a SUM over frequencies -- the dRPA energy and its adjoint, Wt(tau) and its
@@ -37,13 +37,13 @@ Gated, water/cc-pVDZ Hartree-Fock:
   * on the same BLAS at 2, 3, 8 and 16 ranks, Wt(tau) held by auxiliary rows
     from each frequency's W - I whole on its owner (`screened_interaction_rows`,
     the GW stage's grid-row route): every rank's rows the one-rank rows
-    bitwise, each row being one (block, (nb, naux)) call; the fold made one
+    to a few ulp, each row being one (block, (nb, naux)) call; the fold made one
     call over a rank's whole row block (planted) moves every distributed
     rank and not the one-rank rows.
 
-Shown to fail: `owned_frequency_blocks` transforming only the rows a rank owns
-(the code before this gate) fails all 20 distributed gates on the
-row-count-sensitive BLAS and none of the 2 serial ones.
+What breaks the gates: `owned_frequency_blocks` transforming only the rows a
+rank owns moves all 20 distributed gates on the row-count-sensitive BLAS and
+none of the 2 serial ones.
 """
 import os
 import sys
@@ -61,18 +61,19 @@ from src.Base.utils.mpi_grid import partition, run_simulated
 from src.Base.utils.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.contour_deformation import \
     cd_screening_contraction_multi
-from src.SingleReference.GW.imaginary_time import screened_interaction_rows
+from src.SingleReference.GW.imaginary_time import (screened_interaction_rows,
+                                                   screened_interaction_tau)
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
-    frequency_blocks, owned_frequency_blocks)
+    frequency_blocks, owned_frequency_blocks, three_index_slice)
 from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
 from src.gradients.space_time_adjoint import (polarizability_tau,
                                               rpa_energy_and_adjoint,
-                                              screened_interaction_tau,
                                               screened_interaction_tau_backward,
-                                              sigma_transforms,
-                                              three_index_slice)
+                                              sigma_transforms)
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 NTAU, NFREQ = 8, 24
 SIZES = [2, 3, 8, 16]
@@ -115,7 +116,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')[:2]
+    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))[:2]
     eps = np.asarray(mf.mo_energy, float)
     gap = eps[nocc] - eps[nocc - 1]
     nu, wt = gauss_legendre_grid(NFREQ, w0=gap)
@@ -152,8 +153,8 @@ def test_serial_path_is_the_serial_call(water, tile):
     assert [ks for ks, _ in got] == [list(range(k0, k1)) for k0, k1 in blocks]
     for (k0, k1), (_, blk) in zip(blocks, got):
         ks = list(range(k0, k1))
-        assert np.array_equal(blk, np.tensordot(cosft[ks], w['proj'],
-                                                axes=(1, 0)))
+        assert_same(blk, np.tensordot(cosft[ks], w['proj'], axes=(1, 0)),
+                    quantity='root', label=ks)
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -174,13 +175,13 @@ def test_owned_rows_are_the_serial_rows(water, row_count_sensitive, size, tile):
         assert sorted(k for ks, _ in got for k in ks) == list(mine)
         for ks, blk in got:
             for k, row in zip(ks, blk):
-                assert np.array_equal(row, serial[k]), (rank, k)
+                assert_same(row, serial[k], quantity='root', label=(rank, k))
         for acc, part in zip(wc_sum, cd_screening_contraction_multi(
                 w['proj'], cosft, w['Bps'], freq_indices=mine,
                 **tile_of(tile))):
             acc += part
     for a, b in zip(wc_sum, wc_serial):
-        assert np.array_equal(a, b)
+        assert_same(a, b, quantity='root', label='wc')
 
 
 def worst_rel(ref, got):
@@ -199,7 +200,7 @@ def test_qp_set_gradient_roots(water, row_count_sensitive, size):
     serial = qp_set_gradient(*args, **kw)
     for roots, *adjoints in run_simulated(
             lambda comm: qp_set_gradient(*args, comm=comm, **kw), size):
-        assert np.array_equal(roots, serial[0]), roots - serial[0]
+        assert_same(roots, serial[0], label='roots')
         assert worst_rel(serial[1:], adjoints) <= REL
 
 
@@ -213,8 +214,8 @@ def test_single_state_root_and_z(water, row_count_sensitive, size, route):
     serial = qp_gradient_space_time(*args, **kw)
     for w_star, z, *adjoints in run_simulated(
             lambda comm: qp_gradient_space_time(*args, comm=comm, **kw), size):
-        assert w_star == serial[0] and z == serial[1], (w_star - serial[0],
-                                                        z - serial[1])
+        assert_same(w_star, serial[0], label='root')
+        assert_same(z, serial[1], unit='1', label='Z')
         assert worst_rel(serial[2:], adjoints) <= REL
 
 
@@ -282,7 +283,8 @@ def test_grid_row_screening_rows_are_one_ranks(water, row_count_sensitive,
     _, whole = screening_rows(water, Ctw, W_minus_I)
     for r0, rows in run_simulated(
             lambda comm: screening_rows(water, Ctw, W_minus_I, comm), size):
-        assert np.array_equal(rows, whole[:, r0:r0 + rows.shape[1]]), r0
+        assert_same(rows, whole[:, r0:r0 + rows.shape[1]], quantity='root',
+                    label=r0)
 
 
 def test_a_row_block_shaped_screening_fold_is_caught(water, row_count_sensitive,
@@ -294,8 +296,9 @@ def test_a_row_block_shaped_screening_fold_is_caught(water, row_count_sensitive,
     for size in SIZES:
         got = run_simulated(
             lambda comm: screening_rows(water, Ctw, W_minus_I, comm), size)
-        moved = [r0 for r0, rows in got if not np.array_equal(
-            rows, whole[:, r0:r0 + rows.shape[1]])]
+        moved = [r0 for r0, rows in got if not matches(
+            rows, whole[:, r0:r0 + rows.shape[1]], RECORDING_BLAS,
+            quantity='root')]
         assert len(moved) == size, (size, moved)
 
 

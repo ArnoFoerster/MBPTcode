@@ -4,9 +4,10 @@ The two-electron interaction is dressed on
 the auxiliary metric, v -> v + vtilde with vtilde = v chi v (Duchemin,
 Jacquemin and Blase, J. Chem. Phys. 144, 164106 (2016), Eq. 16), which
 `separable_ri.aux_metric_sqrt` applies to every separable factorization; and
-the static one-body term of the quasiparticle equation gains the first-order
-reaction-field operator, the static COHSEX Sigma^solv of their Eqs. (20)-(22),
-which `qp_solve.static_exchange_diagonal` adds.
+the static one-body term of the quasiparticle equation gains the reaction
+field: on a GW route the Eq. (18) self-element of Delta W the dressing
+implies, on a route that forms no W the static COHSEX Sigma^solv of their
+Eqs. (20)-(22), which `qp_solve.static_exchange_diagonal` adds.
 
 `Environment` is structural: `SolventScreening` satisfies it without inheriting
 from anything. An environment that does not screen returns None from
@@ -24,6 +25,9 @@ from pyscf import qmmm
 from pyscf.qmmm import itrf as qmmm_itrf
 
 from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.split_equilibrium import (SOLVENT_SCHEMES,
+                                         ClassicalStateSpecific,
+                                         SplitEquilibrium)
 from src.Base.utils.threads import blas_single_threaded
 
 
@@ -45,8 +49,13 @@ class Environment(Protocol):
 
     `static_self_energy` is the other channel the
     static COHSEX Sigma^solv of Duchemin, Jacquemin and Blase, J. Chem. Phys.
-    144, 164106 (2016) Eqs. (20)-(22), summed over every orbital
-    What the concrete environments do:
+    144, 164106 (2016) Eqs. (20)-(22), summed over every orbital rather than
+    taken on the self-element, for the routes that never form Delta W -- the ADC
+    self-energies and an unrestricted reference. It
+    may legitimately be None while the interaction is dressed, and an
+    environment that offers it does not thereby gain or lose the shift.
+
+    What the three concrete environments do:
 
     - `NoEnvironment`: neither channel. The gas phase.
     - `PointCharges`: neither. A permanent charge does not respond, so it
@@ -311,6 +320,73 @@ def environment_label(environment):
     if environment is None or isinstance(environment, NoEnvironment):
         return 'gas'
     return repr(environment)
+
+
+def equilibrium_environment(environment, mode='split'):
+    """`environment` as a relaxed excited state stands in it.
+
+    mode 'split' (default): the state-specific response -- Eq. (18) and the
+    direct W -- at eps_static, the transition-density exchange at eps_inf
+    (`split_equilibrium`, which argues the partition). 'full': the whole
+    response at eps_static, the equilibrium LR-PCM convention
+    (`SolventScreening(equilibrium=True)`). The gas phase and fixed charges
+    have no slow polarization to relax and come back as they are. A composite
+    holding a continuum is refused: which of its members relaxes is a physics
+    choice it does not declare.
+    """
+    if mode not in ('split', 'full'):
+        raise ValueError(f"mode={mode!r}: 'split' or 'full'")
+    if environment is None:
+        return None
+    if hasattr(environment, 'equilibrium_partner'):
+        kind = getattr(environment, 'equilibrium', False)
+        if isinstance(environment, ClassicalStateSpecific):
+            raise ValueError('scheme B already fixes its partition; build it '
+                             'from the non-equilibrium continuum instead')
+        if kind == 'split':
+            return (environment if mode == 'split'
+                    else environment.static_response())
+        if kind:
+            if mode == 'full':
+                return environment
+            raise ValueError('a split equilibrium wraps the NON-equilibrium '
+                             'continuum; pass that one')
+        return (SplitEquilibrium(environment) if mode == 'split'
+                else environment.equilibrium_partner())
+    if any(hasattr(m, 'equilibrium_partner')
+           for m in getattr(environment, 'members', ())):
+        raise ValueError(
+            f'{type(environment).__name__} holds a continuum; equilibrium '
+            f'solvation is defined for a continuum on its own')
+    return environment
+
+
+def solvent_scheme(environment, scheme='duchemin', ss_density='relaxed',
+                   ss_equilibrium=False):
+    """`environment` as a solvated excitation reads it, by scheme.
+
+    'duchemin': the solvated BSE of Duchemin et al. as it is -- the split
+    equilibrium (`equilibrium_environment`). 'classical-ss': scheme B
+    (`split_equilibrium.ClassicalStateSpecific`), the state-specific part on
+    the bare interaction and the classical E_SS of the `ss_density`
+    ('relaxed' or 'unrelaxed') density difference added, vertical or at
+    `ss_equilibrium`. The gas phase comes back as it is; scheme B needs a
+    continuum with eps_static.
+    """
+    if scheme not in SOLVENT_SCHEMES:
+        raise ValueError(f'scheme={scheme!r}: one of {SOLVENT_SCHEMES}')
+    if scheme == 'duchemin':
+        return equilibrium_environment(environment, 'split')
+    if environment is None or isinstance(environment, NoEnvironment):
+        return environment
+    if not hasattr(environment, 'equilibrium_partner'):
+        raise ValueError(f'scheme B needs a polarizable continuum; '
+                         f'{type(environment).__name__} has no surface')
+    if getattr(environment, 'equilibrium', False):
+        raise ValueError('scheme B wraps the NON-equilibrium continuum; pass '
+                         'that one')
+    return ClassicalStateSpecific(environment, ss_density=ss_density,
+                                  ss_equilibrium=ss_equilibrium)
 
 
 def resolve_environment(environment=None, mf=None):

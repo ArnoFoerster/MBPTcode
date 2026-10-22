@@ -50,11 +50,50 @@ with the doubles stored as [l, d, k, c]: the OUTER particle-hole pair (l, d)
 carries the quasiparticle energies, the INNER pair (k, c) is the screening
 excitation that S acts on.
 """
-import numpy as np
+import warnings
 
-from src.Base.constants import HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DENSE_LIMIT
+import numpy as np
+from pyscf import scf
+from scipy import linalg
+
+from src.Base.constants import (HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
+                                UPFOLDED_BSE_DAVIDSON_TOL, UPFOLDED_BSE_DENSE_LIMIT,
+                                UPFOLDED_BSE_IMAG_TOL, UPFOLDED_BSE_LINDEP_TOL,
+                                UPFOLDED_BSE_PRECOND_FLOOR)
+from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                      get_two_electron_integrals_chemist)
+from src.Base.step_failed import StepFailed
+from src.Base.utils.linearAlgebra.orthogonalization import extend_orthonormal
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 
 SQRT2 = np.sqrt(2.0)
+
+
+class UpfoldedBSERefusal(StepFailed):
+    """The upfolded-BSE Davidson ended without converged roots
+    (refuse_unconverged=True)."""
+
+
+def _complex_roots(theta, imag, imag_tol, scale, X, flags, what):
+    """Set the roots whose imaginary part exceeds imag_tol * scale to NaN
+    (value and vector), warn and flag 'upfolded_bse_complex_roots':
+    the dynamical BSE has no real root there, and the
+    real part is not one, so no number is returned in its place."""
+    theta = np.array(theta, float)
+    bad = np.abs(np.asarray(imag)) > imag_tol * scale
+    if bad.any():
+        message = (f'{int(bad.sum())} of the {len(theta)} lowest upfolded-BSE '
+                   f'{what} are complex (max |Im| = {np.abs(imag).max():.2e} Ha, '
+                   f'above {imag_tol:.0e} relative): the dynamical BSE has no real '
+                   f'solution there; root(s) {np.flatnonzero(bad).tolist()} are '
+                   'returned as NaN')
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+        if flags is not None:
+            flags.append({'flag': 'upfolded_bse_complex_roots', 'message': message})
+        X = np.array(X, float)
+        theta[bad] = np.nan
+        X[:, bad] = np.nan
+    return theta, X
 
 
 def dimensions(no, nv):
@@ -78,6 +117,17 @@ def eri_blocks(eri_chemist, no, norb):
         'ooov': eri_chemist[o, o, o, v],      # (il|kc)
         'ovvv': eri_chemist[o, v, v, v],      # (kc|ad)
     }
+
+
+def df_eri_blocks(B, no, norb):
+    """The same four blocks from a three-index factor, (pq|rs) = sum_P B[P,p,q] B[P,r,s]."""
+    o, v = slice(0, no), slice(no, norb)
+
+    def blk(a, b, c, d):
+        return np.einsum('Ppq,Prs->pqrs', B[:, a, b], B[:, c, d], optimize=True)
+
+    return {'ovov': blk(o, v, o, v), 'oovv': blk(o, o, v, v),
+            'ooov': blk(o, o, o, v), 'ovvv': blk(o, v, v, v)}
 
 
 def to_blocks(vec, no, nv):
@@ -357,17 +407,17 @@ def doubles_weight(vec, no, nv):
 
 
 def solve_dense(eps, e_qp, gb, no, nv, spin='singlet', nroots=5,
-                imag_tol=1e-6):
+                imag_tol=UPFOLDED_BSE_IMAG_TOL, flags=None):
     """Lowest `nroots` positive eigenvalues of H and their right eigenvectors.
 
     H is NOT symmetric, so this is scipy.linalg.eig, not eigh, and the
     eigenvalues are complex in general. The physical ones are real; a
     significant imaginary part means the upfolded problem has gone unstable
-    (it can, just as the underlying dynamical BSE can) and is reported rather
-    than silently discarded."""
-    from scipy import linalg as _sla
+    (it can, just as the underlying dynamical BSE can): such a root is
+    returned as NaN, warned about and flagged 'upfolded_bse_complex_roots' in
+    `flags` (a list, when given), never reported by its real part."""
     H = build_hamiltonian(eps, e_qp, gb, no, nv, spin)
-    w, vr = _sla.eig(H)
+    w, vr = linalg.eig(H)
     keep = np.argsort(w.real)
     keep = [k for k in keep if w.real[k] > 0][:nroots]
     # Complex eigenvalues DO occur, in conjugate pairs, high in the doubles
@@ -375,22 +425,16 @@ def solve_dense(eps, e_qp, gb, no, nv, spin='singlet', nroots=5,
     # encodes has no theorem forcing every root real. They are not an error,
     # and warning about roots the caller never sees is noise; warn only if a
     # RETURNED root has a significant imaginary part, because that one is
-    # being reported as a physical excitation.
+    # being reported as a physical excitation, and return it as NaN, flagged.
     scale = max(1.0, np.abs(w.real).max())
-    bad = [k for k in keep if abs(w.imag[k]) > imag_tol * scale]
-    if bad:
-        import warnings
-        worst = max(abs(w.imag[k]) for k in bad)
-        warnings.warn(
-            f'{len(bad)} of the {len(keep)} returned upfolded-BSE roots have '
-            f'a non-negligible imaginary part (max |Im| = {worst:.2e} Ha); '
-            'the dynamical BSE has no real solution there. Reporting the '
-            'real parts.', RuntimeWarning, stacklevel=2)
-    return w.real[keep], vr[:, keep].real
+    return _complex_roots(w.real[keep], w.imag[keep], imag_tol, scale,
+                          vr[:, keep].real, flags, 'roots')
 
 
-def davidson_nonsymmetric(aop, diag, nroots=5, tol=1e-7, max_space=None,
-                          max_cycle=100, imag_tol=1e-6):
+def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
+                          max_space=None, max_cycle=UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
+                          imag_tol=UPFOLDED_BSE_IMAG_TOL, refuse_unconverged=False,
+                          flags=None):
     """Davidson for a NON-symmetric operator with (expected) real spectrum.
 
     The only structural difference from the symmetric Davidson the ADC side
@@ -400,58 +444,68 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=1e-7, max_space=None,
     collapse on overflow -- is the usual algorithm.
 
     Returns (energies, right eigenvectors). Left eigenvectors are not
-    computed; nothing here needs them, and %R2 is defined on the right one."""
-    from scipy import linalg as _sla
+    computed; nothing here needs them, and %R2 is defined on the right one.
+    A returned Ritz value with relative imaginary part above imag_tol is
+    returned as NaN (value and vector), warned about and flagged
+    'upfolded_bse_complex_roots': the dynamical BSE has no real root there, so
+    no number stands in its place. A loop that ends on max_cycle or on
+    a linearly dependent correction above tol is a numerical event
+    (refuse inputs, warn numerics): its Ritz pairs are
+    returned with a RuntimeWarning and the flag 'upfolded_bse_not_converged'
+    appended to `flags` (a list, when given); refuse_unconverged=True refuses
+    instead."""
     n = len(diag)
     nroots = min(nroots, n)
     max_space = max_space or max(4 * nroots + 10, 20)
     order = np.argsort(diag)
     V = np.zeros((n, 0))
     guess = np.eye(n)[:, order[:2 * nroots]]
-    V = _orthonormalize(V, guess)
+    V = extend_orthonormal(V, guess, atol=UPFOLDED_BSE_LINDEP_TOL)
     W = np.column_stack([aop(V[:, k]) for k in range(V.shape[1])])
     theta = None
+    converged, stop = False, f'{max_cycle} cycles'
     for _ in range(max_cycle):
         Hs = V.T @ W
-        w, y = _sla.eig(Hs)
+        w, y = linalg.eig(Hs)
         idx = np.argsort(w.real)
         idx = [k for k in idx if w.real[k] > 0][:nroots] or list(idx[:nroots])
-        theta, Y = w[idx].real, y[:, idx].real
+        theta_c = w[idx]
+        theta, Y = theta_c.real, y[:, idx].real
         X = V @ Y
         R = W @ Y - X * theta[None, :]
         if np.linalg.norm(R) < tol:
+            converged = True
             break
         if V.shape[1] + len(idx) > max_space:            # collapse
-            V = _orthonormalize(np.zeros((n, 0)), X)
+            V = extend_orthonormal(np.zeros((n, 0)), X, atol=UPFOLDED_BSE_LINDEP_TOL)
             W = np.column_stack([aop(V[:, k]) for k in range(V.shape[1])])
             continue
         prec = []
         for k in range(len(idx)):
             denom = theta[k] - diag
-            denom = np.where(np.abs(denom) < 1e-8, 1e-8, denom)
+            denom = np.where(np.abs(denom) < UPFOLDED_BSE_PRECOND_FLOOR,
+                             UPFOLDED_BSE_PRECOND_FLOOR, denom)
             prec.append(R[:, k] / denom)
-        new = _orthonormalize(V, np.column_stack(prec))[:, V.shape[1]:]
+        new = extend_orthonormal(V, np.column_stack(prec), atol=UPFOLDED_BSE_LINDEP_TOL)
         if new.shape[1] == 0:
+            stop = 'a correction already spanned by the subspace'
             break
         V = np.hstack([V, new])
         W = np.hstack([W, np.column_stack([aop(new[:, k])
                                            for k in range(new.shape[1])])])
+    scale = max(1.0, float(np.abs(theta).max()))
+    theta, X = _complex_roots(theta, theta_c.imag, imag_tol, scale, X, flags,
+                              'Ritz values')
+    if not converged:
+        message = (f'the upfolded-BSE Davidson stopped on {stop} with residual '
+                   f'norm {np.linalg.norm(R):.2e} above {tol:.0e}; its Ritz '
+                   f'values are not converged roots.')
+        if refuse_unconverged:
+            raise UpfoldedBSERefusal(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        if flags is not None:
+            flags.append({'flag': 'upfolded_bse_not_converged', 'message': message})
     return theta, X
-
-
-def _orthonormalize(V, new, tol=1e-8):
-    """Append the columns of `new` to the orthonormal basis V, dropping any
-    that are already spanned."""
-    cols = [V[:, k] for k in range(V.shape[1])]
-    for k in range(new.shape[1]):
-        v = new[:, k].copy()
-        for _ in range(2):                       # twice is enough, and needed
-            for u in cols:
-                v -= (u @ v) * u
-        nrm = np.linalg.norm(v)
-        if nrm > tol:
-            cols.append(v / nrm)
-    return np.column_stack(cols) if cols else np.zeros((new.shape[0], 0))
 
 
 # ----------------------------------------------------------------------
@@ -497,7 +551,6 @@ def qp_energies(mf, states=None, tda=True, df=True, selfenergy='GW'):
 
     This calls the existing GW module once per orbital, which is the honest
     cost: O(N) quasiparticle solves. Pass `states` to restrict it."""
-    from src.SingleReference.GW.qp_energy import calc_qp_energy
     norb = mf.mo_coeff.shape[1]
     states = list(range(norb)) if states is None else list(states)
     res = calc_qp_energy(mf, selfenergy=selfenergy, state=states, tda=tda,
@@ -508,27 +561,32 @@ def qp_energies(mf, states=None, tda=True, df=True, selfenergy='GW'):
 
 def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
                        df=True, auxbasis=None, matrix_free=True,
-                       conv_tol=1e-7, frozen=0):
+                       conv_tol=UPFOLDED_BSE_DAVIDSON_TOL, frozen=0,
+                       refuse_unconverged=False, flags=None):
     """(energies in Hartree, right eigenvectors) of the upfolded BSE.
+
+    df: every integral block from the density-fitting factor (True) or from
+    the exact four-index ERI (False), on the dense and the matrix-free path
+    alike, so the system size picks the solver and never the integrals.
 
     e_qp: GW quasiparticle energies (Hartree), length norb. `None` falls back
     to the mean-field eigenvalues, which is NOT GW/BSE -- it is the same
     matrix with an uncorrelated one-particle spectrum, useful for testing the
     algebra and nothing else. Use `qp_energies(mf)` for the real thing.
+
+    flags: a list that receives the solve's named numerical events
+    ('upfolded_bse_complex_roots', NaN roots; davidson_nonsymmetric:
+    'upfolded_bse_not_converged'); refuse_unconverged
+    refuses an unconverged Davidson instead.
     """
-    from src.Base.pyscf_interface import (get_orbital_energies,
-                                          get_two_electron_integrals_chemist,
-                                          DFIntegrals)
-    from pyscf import scf as _scf
     mol = mol if mol is not None else mf.mol
-    if isinstance(mf, _scf.uhf.UHF):
+    if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError(
             'the upfolded BSE here is closed-shell (kappa = 2/0 for '
             'singlet/triplet assumes a spin-restricted reference)')
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
     act = slice(frozen, len(eps))
     if e_qp is None:
-        import warnings
         warnings.warn(
             'no GW quasiparticle energies given; falling back to mean-field '
             'eigenvalues. That is not GW/BSE -- pass e_qp=qp_energies(mf).',
@@ -540,19 +598,22 @@ def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
     no = mol.nelectron // 2 - frozen
     nv = norb - no
 
-    eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-    eri = eri[act, act, act, act]
-    gb = eri_blocks(eri, no, norb)
-    d = dimensions(no, nv)
-
-    if not matrix_free or d['nH'] <= UPFOLDED_BSE_DENSE_LIMIT:
-        return solve_dense(eps, e_qp, gb, no, nv, spin, nroots)
     if df:
         src = mf if (auxbasis is None and getattr(mf, 'with_df', None)) \
             else mf.density_fit(auxbasis=auxbasis)
         B = DFIntegrals.from_scf(mol, src).B_aa[:, act, act]
+        gb = df_eri_blocks(B, no, norb)
+    else:
+        eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+        gb = eri_blocks(eri[act, act, act, act], no, norb)
+    d = dimensions(no, nv)
+
+    if not matrix_free or d['nH'] <= UPFOLDED_BSE_DENSE_LIMIT:
+        return solve_dense(eps, e_qp, gb, no, nv, spin, nroots, flags=flags)
+    if df:
         aop = lambda v: sigma_df(v, eps, e_qp, gb, B, no, nv, spin)
     else:
         aop = lambda v: sigma(v, eps, e_qp, gb, no, nv, spin)
     diag = diagonal(eps, e_qp, gb, no, nv, spin)
-    return davidson_nonsymmetric(aop, diag, nroots=nroots, tol=conv_tol)
+    return davidson_nonsymmetric(aop, diag, nroots=nroots, tol=conv_tol,
+                                 refuse_unconverged=refuse_unconverged, flags=flags)

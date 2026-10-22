@@ -25,7 +25,7 @@ as d/dR_A = -grad, so every nuclear derivative built from them carries a minus.
 import numpy as np
 from pyscf import df as pyscf_df
 
-from src.Base.eri_blocks import df_eri_mo, df_integrals  # noqa: F401
+from src.Base.eri_blocks import df_integrals
 
 
 def df_densities(Gamma4, C, mol, auxmol):

@@ -31,39 +31,43 @@ cut from the replicated fit or built by the row fit (`fit='rows'`).
 """
 import numpy as np
 
+from src.Base.numerics import (Numerics, numerics_or_default,
+                               require_same_numerics)
 from src.Base.declaration import ChargedExcitation, SurfacePhysics
 from src.Base.environment import environment_label
-from src.gradients.excited_state import (ExcitedStateChain,
+from src.gradients.excited_state import (ExcitedStateChain, HandedOverPoint,
                                          replayed_first_point)
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.characters import orbital_fingerprint, track_orbital
 
 
-def _one_factorization(mol, shared, ground, excited, given):
-    """The single FrozenFactorization both halves of a composed surface use.
+def _halves(mol, scf_factory, mf, environment, numerics, ground,
+            excited, factorization):
+    """(numerics, factorization, ground half) of a composed surface: ONE
+    `Numerics`, ONE FrozenFactorization both halves read and ONE mean field.
 
     `separable_factors` is deterministic given its settings, so two chains
-    handed matching keywords produce bitwise identical factors and merely pay
-    for the fit twice. One object makes the sharing structural rather than a
-    property of this constructor passing the same keywords to both.
-
-    An explicitly given one wins; otherwise an already-built half's is adopted,
-    so a surface reassembled from existing chains does not manufacture a second
-    factorization behind them.
+    handed matching settings produce bitwise identical factors and merely pay
+    for the fit twice. One object makes the sharing structural. An explicitly
+    given factorization wins; otherwise an already-built half's is adopted,
+    so a surface reassembled from existing chains does not manufacture a
+    second factorization behind them. Two SCFs at one geometry would be two
+    solutions, and every energy of the surface is a difference of them.
     """
-    if given is not None:
-        return given
-    for half in (ground, excited):
-        if half is not None and getattr(half, 'factorization', None) is not None:
-            return half.factorization
-    return FrozenFactorization(
-        mol, basis=shared.get('basis'), auxbasis=shared.get('auxbasis'),
-        counts=shared.get('counts'), n_start=shared.get('n_start', 1),
-        frames=shared.get('frames', 'frozen'), radii=shared.get('radii'),
-        sliced=bool(shared.get('sliced')),
-        fit=shared.get('fit') or 'replicated',
-        fit_block=shared.get('fit_block'))
+    numerics = numerics_or_default(numerics)
+    if factorization is None:
+        held = [h.factorization for h in (ground, excited)
+                if h is not None and getattr(h, 'factorization', None)
+                is not None]
+        factorization = held[0] if held else FrozenFactorization(mol, numerics)
+    # the ground half reads the same object: its factorization settings, its
+    # tile cap and fold, and the quadrature derived from the excited half's
+    # where it ran on its own defaults before
+    ground = ground or RPAGroundStateChain(
+        mol, scf_factory, numerics=numerics, mf=mf, environment=environment,
+        factorization=factorization)
+    return numerics, factorization, ground
 
 
 class _FollowsOrbital:
@@ -75,7 +79,9 @@ class _FollowsOrbital:
     cross-geometry overlap (`properties.characters.track_orbital`). An index
     is the wrong label near a crossing: the canonical orbitals reorder and a
     surface following the index steps onto the other state. Each followed
-    orbital is logged in `follow_log`; the declaration stays the reference's.
+    orbital is logged in `follow_log`, a match two candidates nearly tie for
+    with its 'ambiguous' entry (`track_orbital(out=)`); the declaration stays
+    the reference's.
     """
 
     def offset_at(self, mol, mf):
@@ -88,9 +94,15 @@ class _FollowsOrbital:
             self._fingerprint = orbital_fingerprint(mf0, reference)
         if mol is self.mol0:
             return self.state
-        orbital, score = track_orbital(self._fingerprint, mf)
-        self.follow_log.append({'orbital': int(orbital), 'reference': reference,
-                                'similarity': float(score[orbital])})
+        # an ambiguous match is warned about by track_orbital and flagged in
+        # the entry (refuse inputs, warn numerics)
+        seen = {}
+        orbital, score = track_orbital(self._fingerprint, mf, out=seen)
+        entry = {'orbital': int(orbital), 'reference': reference,
+                 'similarity': float(score[orbital])}
+        if 'ambiguous' in seen:
+            entry['ambiguous'] = seen['ambiguous']
+        self.follow_log.append(entry)
         return int(orbital) - (self.nocc - 1)
 
     def _level(self, mol, mf, offset):
@@ -109,8 +121,80 @@ class _FollowsOrbital:
         return np.asarray(g_qp), diagnostics
 
 
-class RPAQPSurface(_FollowsOrbital):
-    """E^{N-/+1} = E_0^dRPA -/+ eps_p^QP: the same E_0, for a QUASIPARTICLE.
+def require_one_numerics(ground, excited):
+    """Refuse halves that hold different `Numerics`: E_0 and the excitation
+    are differenced and added, so a half on another grid or tolerance makes
+    the sum a number of two surfaces. A half that holds none (a stub) is not
+    checked."""
+    held = [h.__dict__.get('settings') for h in (ground, excited)]
+    if all(isinstance(n, Numerics) for n in held):
+        require_same_numerics(*held, 'the halves of a composed surface')
+
+
+class ComposedSurface:
+    """The refreeze and the record of a surface composed of a dRPA
+    ground-state half and an excited half on one factorization: ONE body for
+    every composed surface, which says only what it carries besides its
+    halves (`carried`)."""
+
+    def to_record(self):
+        """Both halves' records and what the surface carries besides them,
+        for `from_record`: a walk's checkpoint restores the composed surface
+        with the excited half's committed root following."""
+        return {'class': f'{type(self).__module__}:{type(self).__qualname__}',
+                'carried': self.carried(),
+                'ground': self.ground.to_record(),
+                'excited': self.excited.to_record()}
+
+    @classmethod
+    def from_record(cls, record, mol, scf_factory, environment=None, mf=None):
+        """The surface `to_record` wrote: the ground half read back on one SCF
+        at its reference geometry, the excited half on that mean field and on
+        the SAME factorization, as `_halves` builds them."""
+        ground = RPAGroundStateChain.from_record(
+            record['ground'], mol, scf_factory, environment=environment,
+            mf=mf)
+        excited = ExcitedStateChain.from_record(
+            record['excited'], mol, scf_factory, environment=environment,
+            mf=ground.mf0, factorization=ground.factorization)
+        return cls(ground.mol0, scf_factory, factorization=ground.factorization,
+                   ground=ground, excited=excited, **record['carried'])
+
+    def refreeze(self, mol):
+        """Both halves rebuilt at `mol` on ONE NEW factorization.
+
+        A factorization is frozen AT a geometry, so refreezing must build a new
+        one -- carrying the old object forward would keep the old geometry's
+        radii, points and frames, which is the discontinuity refreeze exists to
+        remove. But both halves must get the SAME new one, or the surface
+        silently reverts to two factorizations after the first refreeze and the
+        sharing quietly stops holding for the rest of the optimization.
+
+        The settings are read off the existing factorization, which is
+        exactly what it owns -- no chain's own keyword list is duplicated here,
+        so adding one upstream cannot make this drift.
+
+        ONE new SCF: the ground half converges it and the excited half is
+        built on it (`_halves`), and the excited half carries its conventions
+        over on the mean field the walk evaluated at `mol`, which the ground
+        half holds. Each half refreezes through `FactorChain.refreeze`.
+        """
+        fac = self.ground.factorization.rebuilt_at(mol)
+        walked = self.ground.mean_field(mol)[1]
+        ground = self.ground.refreeze(mol, factorization=fac)
+        excited = self.excited.refreeze(mol, factorization=fac, mf=ground.mf0,
+                                        walked=walked)
+        return type(self)(mol, self._scf, factorization=fac, ground=ground,
+                          excited=excited, **self.carried_at(mol))
+
+    def carried_at(self, mol):
+        """What the surface refrozen at `mol` carries: `carried`, unless a
+        subclass follows something that moves with the geometry."""
+        return self.carried()
+
+
+class RPAQPSurface(ComposedSurface, _FollowsOrbital):
+    """E^{N-/+1} = E_0^dRPA -/+ eps_p^QP: the same rule, for a QUASIPARTICLE.
 
     A G0W0 ionization or attachment geometry optimization has exactly the
     ground-state problem the BSE one has -- the total energy of the N-/+1
@@ -130,9 +214,9 @@ class RPAQPSurface(_FollowsOrbital):
     AN ABSOLUTE TOTAL ENERGY IN A CONTINUUM IS NOT TRUSTWORTHY. The exact block
     fold of the ACFDT log-determinant keeps the BARE interaction in the linear
     counter-term while this code dresses it, and the dressing throws away the
-    leading solute-solvent dispersion term. Quasiparticle levels, excitation
-    energies and any difference taken at a FIXED geometry are free of it, as is
-    every gas-phase total energy.
+    leading solute-solvent dispersion term -- about 29.6 kcal/mol for water in
+    water. Quasiparticle levels, excitation energies and any difference taken
+    at a FIXED geometry are free of it, as is every gas-phase total energy.
 
     equilibrium=True puts the ion in equilibrium with its solvent: the level
     carries the chain's `equilibrium_shift`, Eq18(eps_s) - Eq18(eps_inf) on
@@ -146,24 +230,16 @@ class RPAQPSurface(_FollowsOrbital):
     (`_FollowsOrbital`).
     """
 
-    def __init__(self, mol, scf_factory, state=0, mf=None, ground=None,
-                 excited=None, factorization=None, equilibrium=False,
-                 track=False, **kw):
-        # `radii`, `sliced`, `fit` and `fit_block` are SHARED, not
-        # excited-only: they decide the factorization both halves read, so
-        # leaving one in kw builds the factorization without it and the chain
-        # then refuses the mismatch.
-        shared = {k: kw.pop(k) for k in
-                  ('basis', 'auxbasis', 'counts', 'n_start', 'frames',
-                   'environment', 'radii', 'sliced', 'fit', 'fit_block')
-                  if k in kw}
+    def __init__(self, mol, scf_factory, state=0, mf=None, environment=None,
+                 ground=None, excited=None, factorization=None, numerics=None,
+                 equilibrium=False, track=False):
         self.mol0, self._scf, self.state = mol, scf_factory, state
-        shared['factorization'] = _one_factorization(mol, shared, ground,
-                                                     excited, factorization)
-        self.ground = ground or RPAGroundStateChain(mol, scf_factory, mf=mf,
-                                                    **shared)
+        numerics, factorization, self.ground = _halves(
+            mol, scf_factory, mf, environment, numerics, ground, excited,
+            factorization)
         self.excited = excited or ExcitedStateChain(
-            mol, scf_factory, mf=self.ground.mf0, **shared, **kw)
+            mol, scf_factory, mf=self.ground.mf0, environment=environment,
+            numerics=numerics, factorization=factorization)
         self.equilibrium = bool(equilibrium)
         if self.equilibrium:
             environment = self.excited.environment
@@ -173,6 +249,7 @@ class RPAQPSurface(_FollowsOrbital):
                     f'response; this surface carries {environment!r}')
             environment.static_partner()     # raises without eps_static
         self.track, self._fingerprint, self.follow_log = bool(track), None, []
+        require_one_numerics(self.ground, self.excited)
 
     @property
     def nocc(self):
@@ -226,8 +303,7 @@ class RPAQPSurface(_FollowsOrbital):
         return -1.0 if self.charge_change == -1 else +1.0
 
     def energy(self, mol=None, mf=None):
-        """(E^{N-/+1}, E_0, the level it takes) in Hartree; the level is
-        eps^QP, or eps^QP + Delta eps^eq with the solvent in equilibrium."""
+        """(E^{N-/+1}, E_0, eps^QP) in Hartree."""
         mol, mf = self.ground.mean_field(mol, mf)
         e_0 = self.ground.total_energy(mol, mf)
         qp = self._level(mol, mf, self.offset_at(mol, mf))
@@ -239,36 +315,27 @@ class RPAQPSurface(_FollowsOrbital):
     def total_gradient(self, mol=None, mf=None):
         mol, mf = self.ground.mean_field(mol, mf)
         g_0, e_0, d0 = self.ground.total_gradient(mol, mf)
+        # the solve the gradient took carries the energy: one Newton per force
         offset = self.offset_at(mol, mf)
         g_qp, d1 = self._level_gradient(mol, mf, offset)
-        qp = self._level(mol, mf, offset)
+        qp = float(d1['qp_energy'])
+        if self.equilibrium:
+            qp += self.excited.equilibrium_shift(offset, mol, mf)
         sign = self.sign
         return (np.asarray(g_0) + sign * np.asarray(g_qp), e_0 + sign * qp,
                 dict(d1, e_0=e_0, e_c=d0.get('e_c'), qp=qp,
                      e0_terms=d0.get('e0_terms'),
                      charge_change=self.charge_change))
 
-    def refreeze(self, mol):
-        """Both halves rebuilt at `mol` on ONE NEW factorization.
+    def carried(self):
+        """What the refrozen surface is built with besides its halves."""
+        return {'state': self.state, 'equilibrium': self.equilibrium,
+                'track': self.track}
 
-        A factorization is frozen AT a geometry, so refreezing must build a new
-        one -- carrying the old object forward would keep the old geometry's
-        radii, points and frames, which is the discontinuity refreeze exists to
-        remove. But both halves must get the SAME new one, or the surface
-        silently reverts to two factorizations after the first refreeze and the
-        sharing quietly stops holding for the rest of the optimization.
-
-        The settings are read off the existing factorization, which is
-        exactly what it owns -- no chain's own keyword list is duplicated here,
-        so adding one upstream cannot make this drift.
-        """
-        # the followed orbital, not the constructor's, is the state here
-        state = self.offset_at(*self.mean_field(mol))
-        fac = self.ground.factorization.rebuilt_at(mol)
-        return type(self)(mol, self._scf, state=state, factorization=fac,
-                          ground=self.ground.refreeze(mol, factorization=fac),
-                          excited=self.excited.refreeze(mol, factorization=fac),
-                          equilibrium=self.equilibrium, track=self.track)
+    def carried_at(self, mol):
+        """`carried`, with the followed orbital at `mol` as the state."""
+        return dict(self.carried(),
+                    state=self.offset_at(*self.mean_field(mol)))
 
     def label(self):
         kind = 'E^(N-1)' if self.charge_change == -1 else 'E^(N+1)'
@@ -378,54 +445,68 @@ class MeanFieldQPSurface(_FollowsOrbital):
                           excited=self.excited.refreeze(mol),
                           equilibrium=self.equilibrium, track=self.track)
 
+    def carried(self):
+        """What the surface is built with besides its chain."""
+        return {'state': self.state, 'equilibrium': self.equilibrium,
+                'track': self.track}
+
+    def to_record(self):
+        """The chain's record and what the surface carries besides it, for
+        `from_record`."""
+        return {'class': f'{type(self).__module__}:{type(self).__qualname__}',
+                'carried': self.carried(),
+                'excited': self.excited.to_record()}
+
+    @classmethod
+    def from_record(cls, record, mol, scf_factory, environment=None, mf=None):
+        """The surface `to_record` wrote, on its chain read back."""
+        excited = ExcitedStateChain.from_record(
+            record['excited'], mol, scf_factory, environment=environment,
+            mf=mf)
+        return cls(excited.mol0, scf_factory, excited=excited,
+                   **record['carried'])
+
     def label(self):
         kind = 'E^(N-1)' if self.charge_change == -1 else 'E^(N+1)'
         solvent = ', solvent in equilibrium' if self.equilibrium else ''
         return f'{kind} G0W0 state {self.state} on E_KS{solvent}'
 
 
-class RPABSESurface:
+
+
+class RPABSESurface(ComposedSurface):
     """A `PotentialEnergySurface` whose ground state is dRPA, not the mean field.
 
     AN ABSOLUTE TOTAL ENERGY IN A CONTINUUM IS NOT TRUSTWORTHY. The exact block
     fold of the ACFDT log-determinant keeps the BARE interaction in the linear
     counter-term while this code dresses it, and the dressing throws away the
-    leading solute-solvent dispersion term. Excitation energies, quasiparticle
-    levels and any difference taken at a FIXED geometry are free of it, as is
-    every gas-phase total energy.
+    leading solute-solvent dispersion term -- about 29.6 kcal/mol for water in
+    water. Excitation energies, quasiparticle levels and any difference taken
+    at a FIXED geometry are free of it, as is every gas-phase total energy.
+
+    In an EQUILIBRIUM continuum (`environment.equilibrium_environment`) only
+    Omega relaxes in the slow field: E_0 and its force stay the
+    non-equilibrium ones (`RPAGroundStateChain.environment_at`), because the
+    ground state already relaxes in eps_static and its correlation energy is
+    screened by the solvent's electrons alone. The surface declares the
+    equilibrium environment it was given.
     """
 
-    def __init__(self, mol, scf_factory, state=0, spin='singlet', mf=None,
-                 basis=None, auxbasis=None, counts=None, n_start=1,
-                 frames='frozen', environment=None, ground=None, excited=None,
-                 factorization=None, radii=None, outside='mean-field',
-                 sliced=None, fit=None, fit_block=None, **excited_kw):
-        # `radii`, `sliced`, `fit` and `fit_block` are named rather than left
-        # to **excited_kw: they decide the factorization BOTH halves read, so
-        # they have to reach the shared one.
-        shared = dict(basis=basis, auxbasis=auxbasis, counts=counts,
-                      n_start=n_start, frames=frames, environment=environment,
-                      radii=radii, sliced=sliced, fit=fit, fit_block=fit_block)
-        self.mol0, self._scf = mol, scf_factory
-        shared['factorization'] = _one_factorization(mol, shared, ground,
-                                                     excited, factorization)
-        # ONE mean field for both chains: two SCFs at the same geometry would
-        # be two solutions, and every energy below is a difference of them.
-        self.ground = ground or RPAGroundStateChain(mol, scf_factory, mf=mf,
-                                                    **shared)
-        # `outside` is named rather than left to **excited_kw so that what
-        # the orbitals outside the quasiparticle set carry is part of this
-        # surface's own signature: it is a different surface, not a tuning.
-        self.excited = excited or ExcitedStateChain(
-            mol, scf_factory, state=state, spin=spin, mf=self.ground.mf0,
-            outside=outside, **shared, **excited_kw)
-        self.state, self.spin = state, spin
+    first_point = HandedOverPoint()
 
-    @property
-    def outside(self):
-        """What the orbitals outside the quasiparticle set carry, which is the
-        excited half's own choice: the BSE diagonal lives there."""
-        return self.excited.outside
+    def __init__(self, mol, scf_factory, state=0, spin='singlet',
+                 bse_tda=False, mf=None, environment=None, ground=None,
+                 excited=None, factorization=None, numerics=None):
+        self.mol0, self._scf = mol, scf_factory
+        numerics, factorization, self.ground = _halves(
+            mol, scf_factory, mf, environment, numerics, ground, excited,
+            factorization)
+        self.excited = excited or ExcitedStateChain(
+            mol, scf_factory, state=state, spin=spin, bse_tda=bse_tda,
+            mf=self.ground.mf0, environment=environment, numerics=numerics,
+            factorization=factorization)
+        require_one_numerics(self.ground, self.excited)
+        self.state, self.spin = state, spin
 
     # ---------------------------------------------------- the surface protocol
     def scf_factory(self, mol):
@@ -507,27 +588,9 @@ class RPABSESurface:
                      grad_ground_max=float(np.abs(g_0).max()),
                      grad_omega_max=float(np.abs(g_om).max())))
 
-    def refreeze(self, mol):
-        """Both halves rebuilt at `mol` on ONE NEW factorization.
-
-        A factorization is frozen AT a geometry, so refreezing must build a new
-        one -- carrying the old object forward would keep the old geometry's
-        radii, points and frames, which is the discontinuity refreeze exists to
-        remove. But both halves must get the SAME new one, or the surface
-        silently reverts to two factorizations after the first refreeze and the
-        sharing quietly stops holding for the rest of the optimization.
-
-        The settings are read off the existing factorization, which is
-        exactly what it owns -- no chain's own keyword list is duplicated here,
-        so adding one upstream cannot make this drift.
-        """
-        fac = self.ground.factorization.rebuilt_at(mol)
-        # The outside treatment travels with the refrozen excited half, which
-        # recalibrates its scissor at `mol` like every other frozen convention.
-        return type(self)(mol, self._scf, state=self.state, spin=self.spin,
-                          factorization=fac, outside=self.outside,
-                          ground=self.ground.refreeze(mol, factorization=fac),
-                          excited=self.excited.refreeze(mol, factorization=fac))
+    def carried(self):
+        """What the refrozen surface is built with besides its halves."""
+        return {'state': self.state, 'spin': self.spin}
 
     def label(self):
         return f'{self.excited.label()} on E_HF + E_c^dRPA'

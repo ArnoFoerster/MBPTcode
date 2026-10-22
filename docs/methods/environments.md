@@ -30,6 +30,34 @@ the same on the charged surfaces, with its analytic gradient, and
 `vibronic.reorganization_four_point` turns the vertical and equilibrium
 surfaces into the outer-sphere λ_s beside the four-point inner one.
 
+A neutral excited state that lives long enough to relax (an emitting
+minimum, either end of an adiabatic gap) also lets the solvent nuclei
+reorient around its own density. `equilibrium_environment(env)` returns the
+continuum such a state stands in. By default it is split: the parts of the
+response built from orbital densities (the Eq. (18) shift and the direct
+screened attraction) relax at ε_static, while the exchange term, built from
+the transition density, stays at ε∞ because the slow polarization cannot
+follow an oscillating density. `equilibrium_environment(env, 'full')` puts the
+whole response at ε_static instead, the convention of equilibrium LR-PCM
+geometry optimizations. In both modes the ground state stays in
+PCM(ε_static), a direct-RPA correlation energy keeps reading the electronic
+response at ε∞, and the force needs no extra input:
+
+```python
+from pyscf import gto
+
+from src.Base.declaration import GroundState
+from src.Base.environment import equilibrium_environment
+from src.Base.solvent_screening import SolventScreening
+from src.properties.excitations import SurfaceSpec
+
+mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+            basis='cc-pvdz')
+env = SolventScreening(mol, solvent='dichloromethane')
+relaxed = equilibrium_environment(env)      # split: the default
+spec = SurfaceSpec(GroundState('dft', 'pbe0'), environment=relaxed)
+```
+
 An explicit polarizable first shell inside the continuum is
 `ContinuumWithSites(SolventScreening(mol, ..., cavity_atoms=shell),
 PolarizableSites(...))`: the cavity encloses the solute and the shell for the

@@ -42,8 +42,9 @@ bit.
 import numpy as np
 
 from src.Base.constants import ISDF_TILE_GB, KAPPA
-from src.SingleReference.LinearResponse.davidson import bse_pair_diagonal
-from src.SingleReference.LinearResponse.space_time import b_block  # noqa: F401
+from src.SingleReference.LinearResponse.casida import CasidaInstability
+from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
+from src.SingleReference.LinearResponse.space_time import b_block
 from src.SingleReference.base import get_occ_virt_indices
 from src.Base.sliced_factors import whole_factor
 
@@ -157,14 +158,19 @@ def bse_solve(A, Bb, nroots=None):
         w, Z = np.linalg.eigh(0.5 * (A + A.T))
         return w, Z, np.zeros_like(Z)
     AmB = 0.5 * ((A - Bb) + (A - Bb).T)
-    L = np.linalg.cholesky(AmB)
+    try:
+        L = np.linalg.cholesky(AmB)
+    except np.linalg.LinAlgError as exc:
+        raise CasidaInstability('BSE instability: (A - B) is not positive '
+                                'definite; the reference is singlet/triplet '
+                                'unstable at this geometry.') from exc
     Mh = L.T @ (A + Bb) @ L
     w2, Z = np.linalg.eigh(0.5 * (Mh + Mh.T))
     if w2.min() <= 0:
-        raise ValueError(f"BSE instability: min Omega^2 = {w2.min():.3e}; the "
-                         f"reference is singlet/triplet unstable at this "
-                         f"geometry (triplets are the usual culprit -- use the "
-                         f"Tamm-Dancoff form).")
+        raise CasidaInstability(
+            f'BSE instability: min Omega^2 = {w2.min():.3e}; the reference is '
+            f'singlet/triplet unstable at this geometry (triplets are the '
+            f'usual culprit -- use the Tamm-Dancoff form).')
     Om = np.sqrt(w2)
     XpY = (L @ Z) / np.sqrt(Om)[None, :]
     XmY = np.linalg.solve(L.T, Z) * np.sqrt(Om)[None, :]

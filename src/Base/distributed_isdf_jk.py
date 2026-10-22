@@ -56,6 +56,17 @@ libcint passes inside it (the metric slabs, the fit's three-centre integrals)
 drop to one again. `scf_isdf_blas_fit`, `scf_isdf_blas_kernel` and
 `scf_isdf_blas_k` record the counts they ran on.
 
+Timings. Beside the DF SCF's keys it fills the same way (`scf_build_slices`
+is this build, `scf_fock_jk` this rank's partials, `scf_reduce` their
+reduction), the handle adds to `mf._distributed_timings`: `scf_isdf_fit`, the
+row fit inside the build; `scf_isdf_kernel`, the interaction's rows (G, and
+Z's rows where they are held), per operator; `scf_fock_j` and `scf_fock_k`,
+the two partials; `scf_isdf_stream`, the column tiles' broadcasts inside the K
+builds; `scf_isdf_collocation`, the other ranks' X tiles evaluated inside
+them; `scf_requests_k`, the K builds this rank contributed to;
+`scf_isdf_k_passes`, the passes of the column tiles that made them (one serves
+both operators of a range-separated functional); and `ISDF_BLAS_KEYS`.
+
 The row fit is another realization of the serial fit's estimator (not its
 bits), and the reductions re-associate J and K, so the distributed SCF lands
 on the serial ISDF-K SCF within the SCF's own convergence threshold, the same
@@ -78,7 +89,7 @@ from src.Base.distributed_df import (_counted, _lockstep_density,
                                      _reduce_parts, _spent,
                                      distributed_handles)
 from src.Base.isdf_jk import ISDFJK, isdf_grid, range_coulomb
-from src.Base.separable_ri import (DEFAULT_PAIR_TOL, FitTiles,
+from src.Base.separable_ri import (FitTiles, fit_settings,
                                    fit_M_streaming, screened_layout)
 from src.Base.utils import memory
 from src.Base.utils.mpi_grid import (allgather_ranges, broadcast,
@@ -91,20 +102,6 @@ from src.Base.utils.threads import blas_full_pool, blas_single_threaded
 #: count cannot be read.
 ISDF_BLAS_KEYS = ('scf_isdf_blas_fit', 'scf_isdf_blas_kernel',
                   'scf_isdf_blas_k')
-#: What the ISDF handle adds to `mf._distributed_timings`, beside the DF
-#: SCF's keys it fills the same way (`scf_build_slices` is this build,
-#: `scf_fock_jk` this rank's partials, `scf_reduce` their reduction):
-#: `scf_isdf_fit`, the row fit inside the build; `scf_isdf_kernel`, the
-#: interaction's rows (G, and Z's rows where they are held), per operator;
-#: `scf_fock_j` and `scf_fock_k`, the two partials; `scf_isdf_stream`, the
-#: column tiles' broadcasts inside the K builds; `scf_isdf_collocation`, the
-#: other ranks' X tiles evaluated inside them; `scf_requests_k`, the K
-#: builds this rank contributed to; `scf_isdf_k_passes`, the passes of the
-#: column tiles that made them (one serves both operators of a
-#: range-separated functional); and `ISDF_BLAS_KEYS`.
-ISDF_TIMING_KEYS = ('scf_isdf_fit', 'scf_isdf_kernel', 'scf_fock_j',
-                    'scf_fock_k', 'scf_isdf_stream', 'scf_isdf_collocation',
-                    'scf_requests_k', 'scf_isdf_k_passes') + ISDF_BLAS_KEYS
 
 
 class _DirectCoulomb:
@@ -289,7 +286,8 @@ class DistributedISDFJK(df.df.DF):
                 counts = source.counts if source._named_counts else None
                 coords = isdf_grid(mol, counts=counts, radii=source.radii,
                                    auxbasis=source.auxbasis,
-                                   n_start=source.n_start)
+                                   n_start=source.n_start,
+                                   frames=source.fit_frames())
             coords = lockstep(np.array(coords, dtype=float, order='C'), comm,
                               check=True)
             self.coords = coords
@@ -300,9 +298,7 @@ class DistributedISDFJK(df.df.DF):
                                                    size)]
             t_fit = time.time()
             fit = fit_M_streaming(mol, self.auxmol, coords,
-                                  l_max_second=source.l_max_second,
-                                  regularization=source.regularization,
-                                  block_memory_gb=source.block_memory_gb,
+                                  numerics=source.numerics,
                                   progress=source.progress, comm=comm,
                                   fit='rows', block=self.tile,
                                   layout=source.fit_layout())
@@ -604,10 +600,9 @@ class DistributedISDFJK(df.df.DF):
         source = self.source
         return FitTiles(self.mol, self.auxmol, self.coords, self.tile,
                         self.MT, self.comm, self.fit_held,
-                        l_max_second=source.l_max_second,
-                        pair_tol=DEFAULT_PAIR_TOL,
-                        regularization=source.regularization,
-                        block_memory_gb=source.block_memory_gb,
+                        fit_settings(source.numerics, 'l_max_second',
+                                     'pair_tol', 'regularization',
+                                     'block_memory_gb'),
                         kept=self.fit_kept)
 
     def held_bytes(self):
@@ -791,9 +786,9 @@ def scf_pair_layout(mf):
         return source.pair_layout
     if handle is not None and handle.coords is not None:
         return screened_layout(source.mol, handle.coords,
-                               l_max_second=source.l_max_second,
+                               numerics=source.numerics,
                                comm=handle.comm, block=handle.tile)
     if not source._built:
         return None
     return screened_layout(source.mol, source.coords,
-                           l_max_second=source.l_max_second)
+                           numerics=source.numerics)

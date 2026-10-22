@@ -7,17 +7,20 @@ V), nearly all of the per-geometry cost, and each chain applies its own
 `aux_metric_sqrt`.
 
 The cost and retention of that cache are gated in test_frozen_factorization.py.
-Here: the split fit is bitwise the fit assembled in one piece, and two
+Here: the split fit is the fit assembled in one piece to a few ulp, and two
 environments on one factorization keep separate gauges.
 """
 import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.numerics import Numerics
 from src.Base.separable_ri import aux_metric_sqrt, fit_M_streaming
 from src.Base.solvent_screening import SolventScreening
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.rpa_ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
 
@@ -46,21 +49,23 @@ def _fit_the_old_way(chain, mol, auxmol, crd, layout):
 
 
 def test_the_split_is_bitwise(mol):
-    """The fit split at the gauge is bitwise the fit in one piece."""
-    ch = RPAGroundStateChain(mol, rhf)
+    """Splitting the fit at the gauge must not move it past a few ulp (the
+    two are separate computations)."""
+    ch = RPAGroundStateChain(mol, rhf, numerics=Numerics(isdf={'counts': g1(mol)}))
     fac = ch.factorization
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     ox, od = _fit_the_old_way(ch, mol, auxmol, crd, fac.layout)
     nx, nd = ch.factors(mol, auxmol, crd)
-    assert np.array_equal(ox, nx)
-    assert np.array_equal(od, nd)
+    assert_same(nx, ox, unit='1', quantity='root', label='X_ao')
+    assert_same(nd, od, unit='1', quantity='root', label='D')
 
 
 def test_two_environments_do_not_share_a_gauge(mol):
-    """Two chains on one factorization with different environments get
-    different D, each equal to what it gets standing alone, so a solvated
-    calculation never uses another chain's screening."""
-    shared = FrozenFactorization(mol, basis=BASIS, auxbasis=BASIS + '-ri')
+    """THE GATE THIS SPLIT EXISTS FOR. Two chains on ONE factorization with
+    DIFFERENT environments must get different D, and each must equal what it
+    would get standing alone. If this ever fails, a solvated calculation is
+    silently using someone else's screening."""
+    shared = FrozenFactorization(mol, Numerics(isdf={'basis': BASIS, 'auxbasis': BASIS + '-ri', 'counts': g1(mol)}))
     auxmol, crd = shared.auxmol(mol), shared.coords(mol)
     gas = RPAGroundStateChain(mol, rhf, factorization=shared)
     sol = RPAGroundStateChain(mol, rhf, factorization=shared,
@@ -70,9 +75,10 @@ def test_two_environments_do_not_share_a_gauge(mol):
     assert not np.allclose(d_gas, d_sol), 'the environment did not reach D'
 
     alone = RPAGroundStateChain(mol, rhf,
-                                environment=SolventScreening(mol, solvent='toluene'))
+                                environment=SolventScreening(mol, solvent='toluene'), numerics=Numerics(isdf={'counts': g1(mol)}))
     _, d_alone = alone.factors(mol, alone.factorization.auxmol(mol),
                                alone.factorization.coords(mol))
-    assert np.array_equal(d_sol, d_alone), 'sharing changed the solvated gauge'
+    assert_same(d_sol, d_alone, unit='1', quantity='root',
+                label='sharing changed the solvated gauge')
 
 

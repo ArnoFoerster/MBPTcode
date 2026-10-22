@@ -2,6 +2,31 @@ import numpy as np
 import scipy.linalg as la
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
 from src.Base.constants import CASIDA_NUMERICAL_EPS
+from src.Base.step_failed import StepFailed
+
+
+class CasidaInstability(StepFailed, ValueError):
+    """The Casida problem has (A - B), (A + B) or omega^2 not positive
+    definite: the reference is unstable there and the omega^2 reduction is
+    invalid. A ValueError as the dense BSE's instability always was, and a
+    `StepFailed` as the Davidson's `_CasidaBreakdown` is, so a geometry walk
+    answers it with a shorter step."""
+
+
+def _refuse_nonpositive(omega2):
+    """Raise `CasidaInstability` where an omega^2 is not positive.
+
+    `eigh_symmetric` returns the eigenvalues whole on every rank of a
+    distributed solve, after releasing the solver, so every rank raises
+    together.
+    """
+    if omega2.min() > 0.0:
+        return
+    raise CasidaInstability(
+        f'Casida problem has omega^2 = {omega2.min():.3e} <= 0 Ha^2: the '
+        f'mean-field reference is unstable and the omega^2 reduction is '
+        f'invalid there.')
+
 
 class CasidaResult(tuple):
     """3-tuple (omega, X, Y) that also carries an is_distributed flag for MPI post-processing."""
@@ -129,6 +154,13 @@ class CasidaSolver:
         if is_AmB_diag:
             # A-B is Hermitian, so its diagonal is real (orbital energy differences).
             diag_AmB = np.diag(AmB).real
+            if diag_AmB.min() <= 0.0:
+                raise CasidaInstability(
+                    f'Casida problem: (A - B) is diagonal with min '
+                    f'{diag_AmB.min():.3e} <= 0 Ha, so it is not positive '
+                    f'definite; the mean-field reference is unstable and the '
+                    f'omega^2 reduction is invalid there.')
+            # a floor for a numerically zero transition, not a sign repair
             diag_AmB = np.clip(diag_AmB, self.eta, None)
             del AmB
             sqrt_AmB_diag = np.sqrt(diag_AmB)
@@ -146,7 +178,7 @@ class CasidaSolver:
             # Perform diagonalization via backend
             omega2, Z_res, is_distributed = eigh_symmetric(M, threshold=threshold)
             del M
-
+            _refuse_nonpositive(omega2)
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
 
@@ -166,12 +198,12 @@ class CasidaSolver:
         else:
             try:
                 L = la.cholesky(ApB, lower=True)
-                del ApB
-            except la.LinAlgError:
-                eigvals = la.eigvalsh(ApB)
-                shift = max(0, -eigvals[0] + self.eta)
-                L = la.cholesky(ApB + shift * np.eye(self.ndim), lower=True)
-                del ApB
+            except la.LinAlgError as exc:
+                raise CasidaInstability(
+                    'Casida problem: (A + B) is not positive definite; the '
+                    'mean-field reference is unstable and the omega^2 '
+                    'reduction is invalid there.') from exc
+            del ApB
 
             M = L.conj().T @ (AmB @ L)
             del AmB
@@ -179,7 +211,7 @@ class CasidaSolver:
             # Perform diagonalization via backend
             omega2, Z_res, is_distributed = eigh_symmetric(M, threshold=threshold)
             del M
-
+            _refuse_nonpositive(omega2)
             omega2 = np.clip(omega2, self.eta**2, None)
             omega = np.sqrt(omega2)
 

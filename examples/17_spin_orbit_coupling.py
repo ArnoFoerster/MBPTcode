@@ -20,9 +20,8 @@ from src.Base.constants import HARTREE_TO_CM
 from src.Base.declaration import Excitation, GroundState
 from src.properties.excitations import SurfaceSpec, calc_adiabatic_gap
 from src.properties.optimize import relax_ground_state
-from src.properties.spin_orbit import (promoting_mode_couplings,
-                                       spin_orbit_couplings)
-from src.properties.vibronic import normal_modes
+from src.properties.spin_orbit import spin_orbit_couplings
+from src.properties.vibronic import normal_modes, promoting_mode_couplings
 from src.SingleReference.LinearResponse.bse import solve_bse
 
 mol = gto.M(atom='C 0 0 0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588',

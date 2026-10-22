@@ -42,7 +42,6 @@ state's slow polarization frozen (vertical), or at eps_static (equilibrium);
 the LR term stays at eps_inf either way. Triplets, which have no LR term,
 take their whole response to the excitation from it.
 """
-import warnings
 
 import numpy as np
 from pyscf import scf as _scf
@@ -55,7 +54,9 @@ from src.Base.pyscf_interface import (
 from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_r_sigma, ee_r_sigma_df, ee_utils,
                                      ee_ri_density, ee_state_specific)
-from src.Base.constants import EE_FOLD_RESIDUAL_GAP, EE_RI_TILE_GB
+from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
+from src.Base.constants import (ADC2_SPIN_SCALING, EE_ADC_CONV_TOL,
+                                EE_FOLD_RESIDUAL_GAP, EE_RI_TILE_GB)
 from src.Base.environment import attached_environment, resolve_environment
 from src.Base.utils import memory
 from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
@@ -99,12 +100,13 @@ def spin_orbital_arrays(mf, mol=None):
 
 
 def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
-                 df=False, spin=None, matrix_free=True, conv_tol=1e-8,
+                 df=False, spin=None, matrix_free=True, conv_tol=EE_ADC_CONV_TOL,
                  en_dress=None, frozen=0, auxbasis=None,
                  ms_sector='auto', max_subspace=None, return_parity=False,
                  dense_limit=None, threshold=5000, fold=False,
                  environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
-                 device='cpu', state_specific='off'):
+                 device='cpu', state_specific='off', ss_density='unrelaxed',
+                 spin_scaling=None, relaxed_density=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors.
 
     en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
@@ -147,8 +149,35 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     eigenvalues in .omega, the shifts of both modes in .ss_shifts
     ({'vertical', 'equilibrium'}, Hartree; equilibrium needs eps_static),
     the one added in .ss_shift, and each root's active-space spatial
-    difference density in .delta_density."""
+    difference density in .delta_density.
+
+    ss_density: the difference density the state-specific term is built from.
+    'unrelaxed' (default) is the ISR-ADC(2) expectation value; 'relaxed' the
+    derivative of omega with the orbital response, the ground-state surface
+    charges frozen (PTE; ee_relaxed_density); 'relaxed+pcm' the same with the
+    continuum responding inside the orbital response, a bound on that choice.
+    With a relaxed density the FoldResult also holds .delta_density_relaxed
+    (full MO basis, frozen core included), .ss_shifts_unrelaxed, and
+    .delta_dipole {'unrelaxed', 'relaxed'} (nroots, 3) in atomic units, the
+    electronic dipole change -Tr(Delta rho r).
+
+    spin_scaling: None (ADC(2)), 'scs', 'sos' (ADC2_SPIN_SCALING) or factors
+    (c_os, c_ss): spin-component scaled ADC(2) (ee_ri_fold), fold=True at
+    level 'adc2' without state_specific (its densities are ADC(2)'s).
+
+    relaxed_density (fold=True, return_fold=True): each root's orbital-relaxed
+    difference density d omega / d h in the FoldResult's
+    .delta_density_relaxed (full MO basis, spin-summed), in the gas phase or
+    in any environment, without the state-specific term; the orbitals respond
+    with the mean field's own (gas-like) kernel. What a solvation loop
+    (src.Base.solvation_loop) reads."""
     mol = mol if mol is not None else mf.mol
+    scaling = _spin_scaling(spin_scaling)
+    if scaling is not None and not (fold and level == 'adc2'):
+        raise ValueError("spin_scaling is wired on fold=True at level 'adc2'")
+    if scaling is not None and state_specific != 'off':
+        raise NotImplementedError('spin_scaling with state_specific: the '
+                                  'difference densities are unscaled ADC(2)')
     if spin is not None and spin not in _CHANNEL:
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
     if return_fold and not fold:
@@ -156,17 +185,29 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if dense_limit is None:
         dense_limit = FOLD_DENSE_LIMIT if fold else DENSE_LIMIT
     env = _reaction_field_environment(mf, mol, environment, route)
+    if ss_density not in SS_DENSITIES:
+        raise ValueError(f'ss_density={ss_density!r}; expected one of '
+                         f'{SS_DENSITIES}')
+    if ss_density != 'unrelaxed' and state_specific == 'off':
+        raise ValueError(f'ss_density={ss_density!r} needs state_specific')
+    if relaxed_density and not (fold and return_fold and level in ('adc1', 'adc2')
+                                and scaling is None):
+        raise ValueError('relaxed_density needs fold=True, return_fold=True, '
+                         "level 'adc1' or 'adc2' and no spin_scaling")
     if ee_state_specific.check_mode(state_specific) != 'off':
         if not fold:
             raise NotImplementedError('state_specific is wired on fold=True')
         if env is None:
             raise ValueError(f'state_specific={state_specific!r} needs a '
                              'continuum (environment)')
+        # 'equilibrium' without eps_static: refused before the solve
+        ee_state_specific.shift_modes(env, state_specific)
     if fold:
         return _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol,
                                 en_dress, frozen, auxbasis, dense_limit,
                                 return_fold, env, tile_gb, route, device,
-                                state_specific)
+                                state_specific, ss_density, scaling,
+                                relaxed_density)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
@@ -201,6 +242,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     return _solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                             conv_tol, en_dress, frozen, auxbasis, max_subspace,
                             return_parity, dense_limit, threshold, env)
+
+
+SS_DENSITIES = ('unrelaxed', 'relaxed', 'relaxed+pcm')
 
 
 def _reaction_field_environment(mf, mol, environment, route):
@@ -243,9 +287,23 @@ def _bare(mf):
     return attached_environment(mf, None)
 
 
+def _spin_scaling(spin_scaling):
+    """(c_os, c_ss) of a spin_scaling argument, or None for ADC(2)."""
+    if spin_scaling is None:
+        return None
+    if isinstance(spin_scaling, str):
+        if spin_scaling not in ADC2_SPIN_SCALING:
+            raise ValueError(f'spin_scaling={spin_scaling!r}; expected one of '
+                             f'{sorted(ADC2_SPIN_SCALING)} or (c_os, c_ss)')
+        return ADC2_SPIN_SCALING[spin_scaling]
+    c_os, c_ss = (float(c) for c in spin_scaling)
+    return c_os, c_ss
+
+
 def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                      auxbasis, dense_limit, return_fold, env, tile_gb, route,
-                     device='cpu', state_specific='off'):
+                     device='cpu', state_specific='off', ss_density='unrelaxed',
+                     scaling=None, relaxed_density=False):
     """fold=True: the density-fitted tiled fold of ee_ri_fold."""
     from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
@@ -270,7 +328,7 @@ def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
     # over MPI ranks the operator's tiles are shared out and rank 0 alone
     # iterates (ee_ri_fold.drive); serially this is the plain solve
     op = ee_ri_fold.RIFoldADC2(factors, spin, level=level, reaction_field=rf,
-                               tile_gb=tile_gb, device=device)
+                               tile_gb=tile_gb, device=device, scaling=scaling)
 
     def solve(o):
         if level == 'adc2':
@@ -283,23 +341,53 @@ def _solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
         else:
             r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
         return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,
-                    loop=list(r.loop), converged=r.converged, level=r.level)
+                    loop=list(r.loop), converged=r.converged, level=r.level,
+                    flags=list(getattr(r, 'flags', [])))
 
     out = ee_ri_fold.drive(op, solve)
     embed, _, _ = _channel_basis(2 * op.n, op.no, op.nv, 'adc1',
                                  _CHANNEL[spin])
     res = ee_fold.FoldResult(out['omega'], out['y'], out['t1'], out['steps'],
-                             out['loop'], out['converged'], embed, out['level'])
+                             out['loop'], out['converged'], embed, out['level'],
+                             out.get('flags'))
     Z = np.column_stack([embed(res.x1[:, k]) for k in range(res.omega.size)])
     res.operator = op
     e = res.omega
     if state_specific != 'off':
-        _state_specific(res, op, env, mol, mf, frozen, state_specific, tile_gb)
+        _state_specific(res, op, env, mol, mf, frozen, state_specific, tile_gb,
+                        ss_density, auxbasis)
         e = res.omega_ss
+    elif relaxed_density:
+        res.delta_density_relaxed = _relaxed_densities(res, op, env, mol, mf,
+                                                       frozen, tile_gb, False,
+                                                       auxbasis)
     return (e, Z, res) if return_fold else (e, Z)
 
 
-def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb):
+def _relaxed_densities(res, op, env, mol, mf, frozen, tile_gb, pcm_response,
+                       auxbasis):
+    """Each root's orbital-relaxed difference density (ee_relaxed_density),
+    full MO basis; a collective over op's ranks."""
+    with _bare(mf):
+        Bc = erd.core_factors(mol, mf, frozen, auxbasis) if frozen else None
+        return [erd.relaxed_density(
+                    erd.tiled_pieces(op, res.y[:, k], res.omega[k], tile_gb),
+                    op, mf, mol, frozen, res.t1[k], Bc=Bc, env=env,
+                    pcm_response=pcm_response)
+                for k in range(res.omega.size)]
+
+
+def _active_orbitals(mol, mf, frozen, op):
+    """The active MO coefficients (nao, no + nv), checked against the operator."""
+    nocc = mol.nelectron // 2
+    mo_act = np.asarray(mf.mo_coeff)[:, frozen:]
+    if mo_act.shape[1] != op.no + op.nv or nocc - frozen != op.no:
+        raise RuntimeError('the active orbitals do not match the operator')
+    return mo_act
+
+
+def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb,
+                    ss_density='unrelaxed', auxbasis=None):
     """res with the roots' difference densities and state-specific shifts
     (ee_state_specific); a collective over op's ranks, every rank holding the
     same roots after ee_ri_fold.drive."""
@@ -307,17 +395,21 @@ def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb):
         ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
                                          res.t1[k], tile_gb=tile_gb)
         for k in range(res.omega.size)]
-    modes = ('vertical',) if getattr(env, 'eps_static', None) is None else \
-        ('vertical', 'equilibrium')
-    if mode not in modes:
-        raise ValueError(f'state_specific={mode!r} needs the continuum\'s '
-                         'eps_static')
-    nocc = mol.nelectron // 2
-    mo_act = np.asarray(mf.mo_coeff)[:, frozen:]
-    if mo_act.shape[1] != op.no + op.nv or nocc - frozen != op.no:
-        raise RuntimeError('the active orbitals do not match the operator')
+    modes = ee_state_specific.shift_modes(env, mode)
+    mo_act = _active_orbitals(mol, mf, frozen, op)
     res.ss_shifts = ee_state_specific.state_specific_energies(
         env, mol, mo_act, res.delta_density, modes)
+    res.ss_density = ss_density
+    if ss_density != 'unrelaxed':
+        res.delta_density_relaxed = _relaxed_densities(
+            res, op, env, mol, mf, frozen, tile_gb,
+            ss_density == 'relaxed+pcm', auxbasis)
+        C = np.asarray(mf.mo_coeff)
+        res.delta_dipole = ee_state_specific.delta_dipoles(
+            mol, mo_act, C, res.delta_density, res.delta_density_relaxed)
+        res.ss_shifts_unrelaxed = res.ss_shifts
+        res.ss_shifts = ee_state_specific.state_specific_energies(
+            env, mol, C, res.delta_density_relaxed, modes)
     res.ss_mode = mode
     res.ss_shift = res.ss_shifts[mode]
     res.omega_ss = res.omega + res.ss_shift
@@ -502,9 +594,8 @@ def _spin_free_solve(aop, diag, dims, no, nv, level, nroots, spin,
 
         diag, n = diag[reps], len(reps)
         if n < nroots:
-            warnings.warn(f"the {spin} channel holds {n} states, fewer than "
-                          f"nroots={nroots}; returning {n}", RuntimeWarning,
-                          stacklevel=3)
+            raise ValueError(f'the {spin} channel holds {n} states, fewer than '
+                             f'nroots={nroots}: lower nroots')
 
     if not matrix_free or n <= dense_limit:
         H = np.column_stack([aop(np.eye(n)[:, k]) for k in range(n)])

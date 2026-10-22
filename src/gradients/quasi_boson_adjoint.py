@@ -43,28 +43,6 @@ class RPAAdjoint(RPA):
         """dE_c/dB_IJ = [sinh t cosh t]_IJ."""
         return self.sinh_t @ self.cosh_t
 
-    # -- Frechet helpers in the t eigenbasis ------------------------------
-    def d_expt(self, D, sign=+1):
-        """Frechet derivative of e^{sign*t} at t in direction D."""
-        f = (lambda w: np.exp(sign * w))
-        df = (lambda w: sign * np.exp(sign * w))
-        return frechet_funm_sym(self.t, f, df, D, eig=(self.wt, self.Vt))
-
-    def dJ_dt(self, D):
-        """Directional derivative of the residual J w.r.t. t (A, B fixed)."""
-        P = self.A + self.B
-        Mm = self.A - self.B
-        dep = self.d_expt(D, +1)
-        dem = self.d_expt(D, -1)
-        r = (dep @ P @ self.exp_t + self.exp_t @ P @ dep
-             - dem @ Mm @ self.exp_mt - self.exp_mt @ Mm @ dem)
-        return 0.5 * r
-
-    def dJ_dAB(self, dA, dB):
-        """Directional derivative of J w.r.t. (A, B) at fixed t."""
-        return 0.5 * (self.exp_t @ (dA + dB) @ self.exp_t
-                      - self.exp_mt @ (dA - dB) @ self.exp_mt)
-
     def dJ_dAB_adjoint(self, Z):
         """Adjoint: d(sum_IJ Z_IJ J_IJ)/dA and /dB at fixed t (Z symmetric)."""
         Zs = 0.5 * (Z + Z.T)
@@ -72,25 +50,12 @@ class RPAAdjoint(RPA):
         em = self.exp_mt @ Zs @ self.exp_mt
         return 0.5 * (ep - em), 0.5 * (ep + em)
 
+    # -- Frechet helpers in the t eigenbasis ------------------------------
     def _L_exp(self, S, sign=+1):
         """Self-adjoint Frechet map L_{e^{sign t}}(S), symmetric S."""
         return frechet_funm_sym(self.t, lambda w: np.exp(sign * w),
                                 lambda w: sign * np.exp(sign * w),
                                 S, eig=(self.wt, self.Vt))
-
-    def dJ_dt_adjoint(self, Z):
-        """t-gradient of sum_IJ Z_IJ J_IJ (A, B fixed; symmetric output).
-
-        Tr[Z dJ(D)] = Tr[D {L_e^t(sym(P e^t Z))} - D {L_e^-t(sym(M e^-t Z))}]
-        with P = A+B, M = A-B.
-        """
-        Zs = 0.5 * (Z + Z.T)
-        P = self.A + self.B
-        Mm = self.A - self.B
-        Q1 = P @ self.exp_t @ Zs
-        Q2 = Mm @ self.exp_mt @ Zs
-        return (self._L_exp(0.5 * (Q1 + Q1.T), +1)
-                - self._L_exp(0.5 * (Q2 + Q2.T), -1))
 
     def abar_t_gradient(self, T):
         """t-gradient of Tr[T Abar(t)], Abar = [e^t P e^t + e^-t M e^-t]/2."""
@@ -172,6 +137,13 @@ class BSEqbAdjoint(BSEqb):
         c = np.zeros(norb)
         c[nocc:] = dCA.sum(axis=0)
         c[:nocc] = -dCA.sum(axis=1)
+        # a block's shared correction eps_p + mean_q (w_q - eps_q): its roots
+        # take the mean weight, its F_pp the remainder
+        for b in self.qp_blocks:
+            b = list(b)
+            mean = c[b].mean()
+            gammaF[b, b] += c[b] - mean
+            c[b] = mean
         shift_weights = self._qp_chain(c, gammaF, Gamma4, t_grad)
 
         # (ii) bare exchange kappa (ia|jb) in A (CA) and B (CB); absent for a

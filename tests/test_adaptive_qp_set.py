@@ -6,18 +6,19 @@ Formaldehyde/cc-pVDZ, HF, G1 ISDF factors, sum-over-poles residues, the
 admitted window (11 candidates) and a 1 meV budget per target (S1 and T1):
 
   * the adaptive Omega sits within its recorded budget of the admitted one,
-    and tol 0 is the admitted surface bit for bit;
+    and tol 0 is the admitted surface (two chains solved apart: to a few
+    ulp, `assert_same` of tests/pins.py, not bitwise);
   * the force is the derivative of the energy on a partition with holes;
   * the partition is frozen over a walk and shared by spin views, `refreeze`
     selects it again at its geometry, grow-only (a state explicit on the
     surface it refreezes stays explicit, even where a fresh selection drops
     it, the record names what each pass carried and added, and a set grown
-    to the whole window is the admitted surface bit for bit), and a JSON
+    to the whole window is the admitted surface to rounding), and a JSON
     round trip of it rebuilds the same surface;
   * THE GRADIENT NEVER READS AC: no continuation runs once the partition is
     frozen (a raising stand-in changes no bit), AC shifts offset by 0.05 eV
-    give the same bits, and the reverse chain's modules do not import the
-    selection.
+    give the same surface to rounding, and the reverse chain's modules do
+    not import the selection.
 """
 import ast
 import json
@@ -26,9 +27,10 @@ import warnings
 
 import numpy as np
 import pytest
-from pyscf import dft, gto, scf
+from pyscf import dft, gto
 
-import src.gradients.excited_state as excited_state
+import src.gradients.qp_set as qp_set_module
+from src.Base.numerics import Numerics
 from src.Base.constants import (ADAPTIVE_HOLE_MAX_EV, ADAPTIVE_QP_TOL_MEV,
                                 HARTREE_TO_EV)
 from src.Base.declaration import Excitation, GroundState, QPStates
@@ -38,6 +40,9 @@ from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.state_manifold import StateManifold
 from src.properties.surfaces import potential_energy_surface
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import assert_same
+from tests.reference_scf import rhf_df_jkfit
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ATOM = ('C 0 0 0; O 0 0 1.205; H 0 0.9429 -0.5876; H 0 -0.9429 -0.5876')
@@ -72,11 +77,14 @@ SINGLE_EXCITATION_WEIGHT = 2.2
 AC_OFFSET_EV = 0.05
 
 
-def factory(mol):
-    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit')
-    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
-    mf.kernel()
-    return mf
+def assert_same_surface(got, want, key):
+    """Omega and the force of `key` from two chains solved apart: one surface
+    to a few ulp (`assert_same` of tests/pins.py; two solves are not
+    bitwise: a reduction in another order moves the last bit)."""
+    assert_same(got.omega[key], want.omega[key], quantity='energy',
+                label=key)
+    assert_same(got.gradient[key], want.gradient[key],
+                quantity='gradient', label=key)
 
 
 def pbe0_factory(mol):
@@ -90,7 +98,7 @@ def pbe0_factory(mol):
 def system():
     warnings.simplefilter('ignore')
     mol = gto.M(atom=ATOM, basis='cc-pvdz', verbose=0)
-    mf = factory(mol)
+    mf = rhf_df_jkfit(mol)
     eps = np.asarray(mf.mo_energy, float)
     nocc = mol.nelectron // 2
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
@@ -108,10 +116,11 @@ def system():
 
 def chain(system, select=None, partition=None, spin='singlet'):
     return ExcitedStateChain(
-        system['mol'], factory, spin=spin, state=0, qp_window=system['window'],
-        residue_route='sop', scissor='calibrate', outside='scissor',
-        solver='dense', counts=system['counts'], n_start=system['n_start'],
-        mf=system['mf'], qp_select=select, qp_partition=partition)
+        system['mol'], rhf_df_jkfit, spin=spin, state=0, mf=system['mf'],
+        qp_partition=partition,
+        numerics=g1_numerics(system['mol'], Numerics(isdf={'counts': system['counts'], 'n_start': system['n_start']},
+                                                     qp={'window': system['window'], 'residue_route': 'sop', 'scissor': 'calibrate', 'select': select},
+                                                     bse={'solver': 'dense'})))
 
 
 def adaptive(tol=None):
@@ -154,10 +163,10 @@ def test_an_unstable_window_bse_selects_on_tamm_dancoff_weights(system):
     out = []
     for select in (None, adaptive()):
         ch = ExcitedStateChain(
-            mol, pbe0_factory, spin='singlet', state=0, qp_window=window,
-            residue_route='sop', scissor='calibrate', outside='scissor',
-            solver='dense', counts=system['counts'],
-            n_start=system['n_start'], mf=mf, qp_select=select)
+            mol, pbe0_factory, spin='singlet', state=0, mf=mf,
+            numerics=g1_numerics(mol, Numerics(isdf={'counts': system['counts'], 'n_start': system['n_start']},
+                                               qp={'window': window, 'residue_route': 'sop', 'scissor': 'calibrate', 'select': select},
+                                               bse={'solver': 'dense'})))
         man = StateManifold(ch, states=TARGETS)
         out.append((man, man.evaluate(mol, mf)))
     (_, ev0), (man, ev) = out
@@ -176,7 +185,7 @@ def test_an_unstable_window_bse_selects_on_tamm_dancoff_weights(system):
 def test_the_selection_leaves_holes(selected, system):
     """The gates below differentiate a partition that has holes."""
     man, _ = selected
-    part = man.driven.qp_partition
+    part = man.driven.resolved.qp_partition
     assert part is not None and part.candidates == tuple(system['window'])
     assert 0 < len(part.holes) < len(part.candidates)
     record = man.driven.selection_record()
@@ -196,14 +205,13 @@ def test_adaptive_is_within_its_budget_of_admitted(selected, admitted):
             key, actual, row)
 
 
-def test_tol_zero_is_bitwise_admitted(system, admitted):
+def test_tol_zero_is_the_admitted_surface(system, admitted):
     man, ev = evaluated(system, adaptive(tol=0.0))
     _, ev0 = admitted
-    assert tuple(man.driven.qp_set) == tuple(admitted[0].driven.qp_set)
-    assert man.driven.qp_partition.tier_of == {}
+    assert tuple(man.driven.resolved.qp_set) == tuple(admitted[0].driven.resolved.qp_set)
+    assert man.driven.resolved.qp_partition.tier_of == {}
     for k in TARGETS:
-        assert ev.omega[k] == ev0.omega[k]
-        assert np.array_equal(ev.gradient[k], ev0.gradient[k])
+        assert_same_surface(ev, ev0, k)
 
 
 def test_the_adaptive_force_is_the_derivative_of_its_energy(selected):
@@ -229,14 +237,14 @@ def test_the_adaptive_force_is_the_derivative_of_its_energy(selected):
 
 def counting(monkeypatch, raising=False):
     """A list that grows by one per continuation the chain runs."""
-    calls, real = [], excited_state.ac_quasiparticle_shifts
+    calls, real = [], qp_set_module.ac_quasiparticle_shifts
 
     def ac(*args, **kwargs):
         calls.append(1)
         if raising:
             raise AssertionError('a continuation ran after the freeze')
         return real(*args, **kwargs)
-    monkeypatch.setattr(excited_state, 'ac_quasiparticle_shifts', ac)
+    monkeypatch.setattr(qp_set_module, 'ac_quasiparticle_shifts', ac)
     return calls
 
 
@@ -254,40 +262,41 @@ def test_no_ac_call_after_the_partition_is_frozen(system, monkeypatch):
     calls = counting(monkeypatch, raising=True)
     assert ch.energy(m) == e1
     assert np.array_equal(ch.excitation_gradient(m)[0], g1)
-    assert np.array_equal(ch.spin_view('triplet').excitation_gradient(m)[0],
-                          gt)
+    # a second spin view holds no evaluation of the first one's: its triplet
+    # force is solved again
+    assert_same(ch.spin_view('triplet').excitation_gradient(m)[0], gt,
+                quantity='gradient', label='triplet')
     assert not calls
 
 
 def test_ac_values_never_reach_the_surface(system, selected, monkeypatch):
     """The same partition reached three ways -- selected, adopted with no
     continuation at all, and selected on AC shifts offset by 0.05 eV -- is
-    one surface, bit for bit, at R0 and displaced."""
+    one surface, to rounding (three chains solved apart), at R0 and
+    displaced."""
     man, ev = selected
-    part = man.driven.qp_partition
+    part = man.driven.resolved.qp_partition
     adopted = evaluated(system, partition=AdaptivePartition.from_record(
         json.loads(json.dumps(part.as_record()))))
-    real = excited_state.ac_quasiparticle_shifts
+    real = qp_set_module.ac_quasiparticle_shifts
 
     def offset(*args, **kwargs):
         a, z = real(*args, **kwargs)
         return {p: v + AC_OFFSET_EV / HARTREE_TO_EV for p, v in a.items()}, z
-    monkeypatch.setattr(excited_state, 'ac_quasiparticle_shifts', offset)
+    monkeypatch.setattr(qp_set_module, 'ac_quasiparticle_shifts', offset)
     shifted = evaluated(system, adaptive())
     monkeypatch.undo()
     for other_man, other_ev in (adopted, shifted):
-        got = other_man.driven.qp_partition
+        got = other_man.driven.resolved.qp_partition
         assert got.explicit == part.explicit and got.tier_of == part.tier_of
         for k in TARGETS:
-            assert other_ev.omega[k] == ev.omega[k]
-            assert np.array_equal(other_ev.gradient[k], ev.gradient[k])
+            assert_same_surface(other_ev, ev, k)
     m = system['displaced']
     ref = man.evaluate(m, gradients=TARGETS)
     for other_man, _ in (adopted, shifted):
         got = other_man.evaluate(m, gradients=TARGETS)
         for k in TARGETS:
-            assert got.omega[k] == ref.omega[k]
-            assert np.array_equal(got.gradient[k], ref.gradient[k])
+            assert_same_surface(got, ref, k)
 
 
 def test_partition_is_frozen_over_the_walk_and_selected_again_by_refreeze(
@@ -298,26 +307,26 @@ def test_partition_is_frozen_over_the_walk_and_selected_again_by_refreeze(
     selection travels through `refreeze` as it is."""
     ch = chain(system, adaptive())
     ch.energy(system['mol'], system['mf'])
-    part, shift0 = ch.qp_partition, dict(ch.outside_shift)
+    part, shift0 = ch.resolved.qp_partition, dict(ch.resolved.outside_shift)
     m = system['displaced']
     ch.energy(m)
-    assert ch.qp_partition is part and ch.outside_shift == shift0
+    assert ch.resolved.qp_partition is part and ch.resolved.outside_shift == shift0
     calls = counting(monkeypatch)
     fresh = ch.refreeze(m)
     fresh.energy(m)
     assert calls, 'refreeze carried the partition instead of selecting'
-    again = fresh.qp_partition
+    again = fresh.resolved.qp_partition
     assert again is not part and again.candidates == part.candidates
     record = fresh.selection_record()
     assert record['verified']
     for p, d in record['holes_detail'].items():
         assert abs(d['delta_eV']) + d['u_eV'] <= ADAPTIVE_HOLE_MAX_EV, (p, d)
-    assert tuple(int(p) for p in fresh.qp_set) == again.explicit
-    assert fresh.outside_shift_before == shift0
+    assert tuple(int(p) for p in fresh.resolved.qp_set) == again.explicit
+    assert fresh.conventions.outside_shift_before == shift0
     calls.clear()
     carried = chain(system, partition=part).refreeze(m)
     carried.energy(m)
-    assert not calls and carried.qp_partition is part
+    assert not calls and carried.resolved.qp_partition is part
 
 
 def with_extra(part, extra):
@@ -337,18 +346,18 @@ def test_refreeze_is_grow_only(system, selected):
     names what each pass carried and added. Negative control: with the
     floor removed from `_select_qp_set` the carried hole is dropped."""
     m = system['displaced']
-    part = selected[0].driven.qp_partition
+    part = selected[0].driven.resolved.qp_partition
     fresh = chain(system, adaptive()).refreeze(m)
-    assert fresh.qp_floor is None, 'nothing was selected to carry'
+    assert fresh.resolved.qp_floor is None, 'nothing was selected to carry'
     fresh.energy(m)
-    dropped = [p for p in fresh.qp_partition.holes if p not in part.explicit]
+    dropped = [p for p in fresh.resolved.qp_partition.holes if p not in part.explicit]
     assert dropped, 'the gate needs a state a fresh selection drops'
     x = dropped[0]
     floor = with_extra(part, [x])
     first = chain(system, adaptive(), partition=floor).refreeze(m)
-    assert first.qp_floor == floor.explicit
+    assert first.resolved.qp_floor == floor.explicit
     first.energy(m)
-    explicit1 = first.qp_partition.explicit
+    explicit1 = first.resolved.qp_partition.explicit
     assert set(floor.explicit) <= set(explicit1) and x in explicit1
     growth = first.qp_growth
     assert growth == {'carried': list(floor.explicit),
@@ -359,19 +368,19 @@ def test_refreeze_is_grow_only(system, selected):
     assert record['why'][x] == 'carried'
     assert record['verified']
     second = first.refreeze(system['mol'])
-    assert second.qp_floor == explicit1
+    assert second.resolved.qp_floor == explicit1
     second.energy(system['mol'])
-    assert set(explicit1) <= set(second.qp_partition.explicit)
+    assert set(explicit1) <= set(second.resolved.qp_partition.explicit)
     assert second.qp_growth['carried'] == list(explicit1)
 
 
-class DemoteOne:
+class FlagOne:
     """`qp_set_gradient` reading a pole strength outside (0, 1] for one
-    orbital, so its root is rejected (`qp_demoted`), as a LUMO+3 at Z
-    1.04-1.05 is along a formaldehyde T1 walk."""
+    orbital, so its root is flagged and kept (`qp_z_outside`), as a LUMO+3
+    at Z 1.04-1.05 is along a formaldehyde T1 walk."""
 
     def __init__(self, orbital):
-        self.orbital, self.real = int(orbital), excited_state.qp_set_gradient
+        self.orbital, self.real = int(orbital), qp_set_module.qp_set_gradient
 
     def __call__(self, *args, **kw):
         out = self.real(*args, **kw)
@@ -383,22 +392,21 @@ class DemoteOne:
         return out
 
 
-@pytest.mark.parametrize('demote', [None, 1], ids=['none', 'lumo+1'])
-def test_a_set_grown_to_the_window_is_the_admitted_surface(system, demote,
+@pytest.mark.filterwarnings('ignore:quasiparticle roots with a pole strength')
+@pytest.mark.parametrize('flag', [None, 1], ids=['none', 'lumo+1'])
+def test_a_set_grown_to_the_window_is_the_admitted_surface(system, flag,
                                                            monkeypatch):
     """The admitted window is the outer bound: a refreeze that carries the
     whole window solves the admitted set, and the surface is the admitted
-    one refrozen at the same geometry, bit for bit, energy and force. Also
-    where a root is rejected: the admitted window gives that orbital the
-    shift of the explicit orbital nearest in energy, and so does the
-    adaptive set (an AC-matched probe would put it 0.58 meV apart on
-    formaldehyde T1)."""
+    one refrozen at the same geometry, to rounding, energy and force. Also
+    where a root has a pole strength outside (0, 1]: both keep it as solved
+    and flag it (it was demoted to a probe's shift)."""
     m = system['displaced']
     cands = tuple(system['window'])
-    if demote is not None:
-        orbital = system['mol'].nelectron // 2 + demote
-        monkeypatch.setattr(excited_state, 'qp_set_gradient',
-                            DemoteOne(orbital))
+    if flag is not None:
+        orbital = system['mol'].nelectron // 2 + flag
+        monkeypatch.setattr(qp_set_module, 'qp_set_gradient',
+                            FlagOne(orbital))
     whole = AdaptivePartition(explicit=cands, tier_of={}, candidates=cands,
                               targets=TARGETS, tol_meV=ADAPTIVE_QP_TOL_MEV)
     grown = chain(system, adaptive(), partition=whole).refreeze(m)
@@ -406,35 +414,24 @@ def test_a_set_grown_to_the_window_is_the_admitted_surface(system, demote,
     ev = man.evaluate(m, gradients=TARGETS)
     ref_man = StateManifold(chain(system).refreeze(m), states=TARGETS)
     ref = ref_man.evaluate(m, gradients=TARGETS)
-    assert tuple(man.driven.qp_set) == tuple(ref_man.driven.qp_set)
+    assert tuple(man.driven.resolved.qp_set) == tuple(ref_man.driven.resolved.qp_set)
     assert man.driven.qp_growth['added'] == []
-    if demote is None:
-        assert man.driven.qp_partition.tier_of == {}
-    else:
-        assert sorted(man.driven.qp_demoted) == [orbital]
-        assert man.driven.qp_growth['not_explicit'] == [orbital]
-        assert list(man.driven.qp_partition.tier_of) == [orbital]
-        assert (man.driven.outside_shift[orbital]
-                == ref_man.driven.outside_shift[orbital])
+    assert man.driven.resolved.qp_partition.tier_of == {}
+    assert man.driven.qp_growth['not_explicit'] == []
+    if flag is not None:
+        assert orbital in man.driven.resolved.qp_set
+        assert sorted(man.driven.resolved.qp_z_outside) == [orbital]
+        assert sorted(ref_man.driven.resolved.qp_z_outside) == [orbital]
     for k in TARGETS:
-        assert ev.omega[k] == ref.omega[k]
-        assert ev.energy[k] == ref.energy[k]
-        assert np.array_equal(ev.gradient[k], ref.gradient[k])
+        assert_same_surface(ev, ref, k)
+        assert_same(ev.energy[k], ref.energy[k], quantity='energy', label=k)
 
 
 def test_spin_views_share_one_partition(selected):
     man, _ = selected
     view = man.driven.spin_view('triplet')
-    assert view.qp_partition is man.driven.qp_partition
-    assert np.array_equal(view.qp_set, man.driven.qp_set)
-
-
-def test_adaptive_is_refused_where_it_cannot_scissor(system):
-    with pytest.raises(ValueError):
-        ExcitedStateChain(system['mol'], factory, qp_window=system['window'],
-                          outside='mean-field', mf=system['mf'],
-                          counts=system['counts'], n_start=system['n_start'],
-                          qp_select=adaptive())
+    assert view.resolved.qp_partition is man.driven.resolved.qp_partition
+    assert np.array_equal(view.resolved.qp_set, man.driven.resolved.qp_set)
 
 
 def import_closure(path, seen=None):
@@ -475,14 +472,14 @@ def test_the_entry_point_selects_and_refuses_the_reference(system):
     dense quasi-boson reference, which solves every state of its set."""
     mol, mf = system['mol'], system['mf']
     surface = potential_energy_surface(
-        mol, factory, ground_state=GroundState('dft', 'hf'),
+        mol, rhf_df_jkfit, ground_state=GroundState('dft', 'hf'),
         excitation=Excitation('singlet'), residues='sop',
         qp_states=adaptive(), mf=mf, grid_accuracy='G1')
     assert surface.qp_select == adaptive()
     assert surface.realization.qp_explicit == tuple(system['window'])
     with pytest.raises(ValueError, match='reference'):
         potential_energy_surface(
-            mol, factory, ground_state=GroundState('rpa', 'hf'),
+            mol, rhf_df_jkfit, ground_state=GroundState('rpa', 'hf'),
             excitation=Excitation('singlet'), chi0='dense-qb',
             factorization='df', qp_states=adaptive(), mf=mf)
 
@@ -494,7 +491,7 @@ def test_the_hole_cap_solves_a_hole_no_target_reaches():
     ADAPTIVE_HOLE_MAX_EV of its own root, so every root the check reads, not
     only the targets, has a first-order error within its weight times it."""
     mol = gto.M(atom=THIO_ATOM, basis='cc-pvdz', verbose=0)
-    mf = factory(mol)
+    mf = rhf_df_jkfit(mol)
     eps = np.asarray(mf.mo_energy, float)
     nocc = mol.nelectron // 2
     assert THIO_PI == nocc - 2
@@ -505,13 +502,13 @@ def test_the_hole_cap_solves_a_hole_no_target_reaches():
                                     degeneracy_tol=1e-4).explicit)
     assert THIO_PI in window
     ch = ExcitedStateChain(
-        mol, factory, spin='singlet', state=0, qp_window=window,
-        residue_route='sop', scissor='calibrate', outside='scissor',
-        solver='dense', counts=counts, n_start=n_start, mf=mf,
-        qp_select=adaptive())
+        mol, rhf_df_jkfit, spin='singlet', state=0, mf=mf,
+        numerics=g1_numerics(mol, Numerics(isdf={'counts': counts, 'n_start': n_start},
+                                           qp={'window': window, 'residue_route': 'sop', 'scissor': 'calibrate', 'select': adaptive()},
+                                           bse={'solver': 'dense'})))
     man = StateManifold(ch, states=TARGETS)
     man.evaluate(mol, mf)
-    part = man.driven.qp_partition
+    part = man.driven.resolved.qp_partition
     record = man.driven.selection_record()
     assert THIO_PI in part.explicit and THIO_PI not in part.holes
     assert THIO_PI in record['hole_cap']['kept_explicit']

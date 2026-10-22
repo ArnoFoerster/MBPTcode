@@ -23,7 +23,8 @@ from pyscf import gto, scf
 from pyscf.hessian import thermo
 
 from src.Base.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_CM,
-                                HARTREE_TO_EV)
+                                HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.gradients.excited_state import ExcitedStateChain
 from src.properties.optimize import optimize, translation_rotation_basis
 from src.properties.rates import marcus_levich_jortner_rate, marcus_rate
@@ -34,6 +35,7 @@ from src.properties.vibronic import (adiabatic_gap, align_to,
                                      huang_rhys_from_gradient, normal_modes,
                                      relax_state,
                                      reorganization_from_huang_rhys)
+from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
 CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
@@ -86,7 +88,9 @@ def scf_factory(mol):
     """A mean field converged for GRADIENT work: conv_tol_grad 1e-11, because
     the Lagrangian assumes the occupied-virtual Fock block vanishes."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -321,7 +325,7 @@ def test_huang_rhys_routes_bracket_the_relaxation_energy(ch2o):
     Measured on formaldehyde S1: 0.326 / 0.398 / 0.592 eV.
     """
     mol, mf = ch2o
-    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     w, modes, masses, _ = normal_modes(mf, mol)
     g_fc, e_vert, _ = ch.total_gradient()
     s_g, _ = huang_rhys_from_gradient(g_fc, w, modes, masses)
@@ -344,7 +348,7 @@ def test_huang_rhys_routes_bracket_the_relaxation_energy(ch2o):
 def test_optimizer_relaxes_and_lowers_the_energy(ch2o):
     """Formaldehyde S1: converges, lengthens C=O, never raises the energy."""
     mol, mf = ch2o
-    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     opt, info = optimize(ch, max_cycle=30, verbose=False)
     assert info['converged'] and info['status'] == 'ok'
     assert info['grad_max'] < GEOM_OPT_CONV['grad_max']
@@ -361,7 +365,7 @@ def test_optimizer_reports_a_state_it_cannot_follow(water):
     """Water's S1 is DISSOCIATIVE; the run must end with a diagnosis, not a
     traceback, and must not claim convergence."""
     mol, mf = water
-    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     _, info = optimize(ch, max_cycle=12, trust=0.5, trust_max=0.8,
                        verbose=False)
     assert not info['converged']

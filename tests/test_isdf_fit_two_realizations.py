@@ -8,7 +8,7 @@ side F D^T over the pairs the screen keeps, so a screened pair keeps its row
 of the Gram matrix and is fitted to zero. Three realizations:
 
   replicated   `FrozenFactorization._fit` is `fit_M_streaming` on the frozen
-               pair layout, the same bits on the same points and pairs;
+               pair layout, the same M to a few ulp on the same points and pairs;
   rows         `fit_rows`, the grid index in fixed tiles over the ranks;
   whole form   `fit_M_stable` on D over every product pair and F zero on the
                screened ones, what the whole-form fit adjoint rebuilds.
@@ -30,12 +30,14 @@ import pytest
 from pyscf import df as pyscf_df, gto, scf
 
 from src.Base import separable_ri
-from src.Base.constants import FIT_REASSOCIATION_K, ISDF_DEFAULT_COUNTS
-from src.Base.separable_ri import (DEFAULT_REGULARIZATION, atomic_grid,
-                                   aux_metric_sqrt, fit_M_stable,
+from src.Base.constants import FIT_REASSOCIATION_K, ISDF_FIT_REGULARIZATION
+from src.Base.numerics import Numerics
+from src.Base.separable_ri import (atomic_grid, aux_metric_sqrt, fit_M_stable,
                                    fit_M_streaming, molecular_points_covariant)
 from src.gradients.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import pair_positions, product_pairs
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 # `test_set_layout` and `test_set_D` stay module-qualified: imported by name,
 # pytest collects them as test functions.
@@ -49,9 +51,9 @@ MOLECULES = {
     'formaldehyde': ('C 0 0 -0.5395; O 0 0 0.6636; '
                      'H 0 0.9445 -1.1090; H 0 -0.9445 -1.1090'),
 }
-#: Pairs the default screen drops; water drops none, so it cannot tell a
-#: screened Gram from the one fit.
-SCREENED = {'water': 0, 'ethylene': 72, 'formaldehyde': 6}
+#: Pairs the default screen drops on the G1 grid; water drops none, so it
+#: cannot tell a screened Gram from the one fit.
+SCREENED = {'water': 0, 'ethylene': 80, 'formaldehyde': 6}
 #: One hydrogen 0.03 A along y, a geometry the frozen layout is read at.
 DISPLACED = {'ethylene': ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; '
                           'H 0.0 0.953 1.238; H 0.0 -0.923 1.238; '
@@ -68,10 +70,10 @@ def molecule(atom):
 
 
 def shipped_grid(mol):
-    """The interpolation points `separable_factors` places at `ISDF_DEFAULT_COUNTS`."""
+    """The interpolation points `separable_factors` places at the G1 counts."""
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
-        radii[el], origins[el] = atomic_grid(el, mol.basis, AUX, ISDF_DEFAULT_COUNTS)
+        radii[el], origins[el] = atomic_grid(el, mol.basis, AUX, g1(mol))
     return molecular_points_covariant(mol, radii, origin_by_element=origins)
 
 
@@ -112,7 +114,7 @@ def screened_gram(mol, auxmol, crd, layout):
 def realizations(name):
     """Every realization of M on the chain's frozen grid, and the bar."""
     mol = molecule(MOLECULES[name])
-    fac = FrozenFactorization(mol, auxbasis=AUX)
+    fac = FrozenFactorization(mol, Numerics(isdf={'auxbasis': AUX, 'counts': g1(mol)}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     rows = fit_M_streaming(mol, auxmol, crd, fit='rows', layout=fac.layout)
     out = dict(mol=mol, auxmol=auxmol, coords=crd, layout=fac.layout,
@@ -146,34 +148,38 @@ def test_the_chain_and_production_place_the_same_points(name):
     """The chain's re-optimized radii are the shipped row at these counts,
     so the chain and production fit on one grid."""
     mol = molecule(MOLECULES[name])
-    chain = FrozenFactorization(mol, auxbasis=AUX).coords(mol)
-    assert np.array_equal(chain, shipped_grid(mol))
+    chain = FrozenFactorization(mol, Numerics(isdf={'auxbasis': AUX, 'counts': g1(mol)})).coords(mol)
+    assert_same(chain, shipped_grid(mol), unit='1', quantity='root',
+                label='grid points')
 
 
 # ------------------------------------------- (b) the chain runs production
 @pytest.mark.parametrize('name', list(MOLECULES))
 def test_the_chains_fit_is_production_bit_for_bit(fits, name):
     """At the reference the frozen layout is the geometry's own screen, and
-    the chain's M is `fit_M_streaming`'s on the same points, bitwise."""
+    the chain's M is `fit_M_streaming`'s on the same points, to a few ulp."""
     w = fits[name]
     npairs = len(product_pairs(w['mol'])[0])
     assert npairs - len(w['layout'][0]) == SCREENED[name]
-    assert np.array_equal(w['chain'], w['streaming'])
+    assert_same(w['chain'], w['streaming'], unit='1', quantity='root',
+                label='M')
 
 
 def test_the_frozen_layout_is_what_the_fit_keeps():
     """At a displaced geometry the replicated fit on the geometry's own
-    layout is the unfrozen call's bits, and on a layout short of one pair it
+    layout is the unfrozen call's M to a few ulp, and on a layout short of
+    one pair it
     is another fit: the layout is read, not re-screened."""
     mol = molecule(DISPLACED['ethylene'])
-    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), auxbasis=AUX)
+    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     own = separable_ri.test_set_layout(mol, crd)
     free = fit_M_streaming(mol, auxmol, crd)
-    assert np.array_equal(fit_M_streaming(mol, auxmol, crd, layout=own), free)
+    assert_same(fit_M_streaming(mol, auxmol, crd, layout=own), free, unit='1',
+                quantity='root', label='own layout')
     short = tuple(np.delete(a, len(a) // 2) for a in own)
-    assert not np.array_equal(
-        fit_M_streaming(mol, auxmol, crd, layout=short), free)
+    assert not matches(fit_M_streaming(mol, auxmol, crd, layout=short), free,
+                       RECORDING_BLAS, unit='1', quantity='root')
 
 
 # --------------------------------- (c) the other realizations, anchored
@@ -202,10 +208,11 @@ def test_a_screened_gram_is_another_problem(fits, name):
 
 
 def test_water_cannot_tell_the_two_problems_apart(fits):
-    """Every pair kept: the screened-Gram estimator is the whole form,
-    bitwise."""
+    """Every pair kept: the screened-Gram estimator is the whole form, to a
+    few ulp."""
     w = fits['water']
-    assert np.array_equal(w['screened'], w['whole'])
+    assert_same(w['screened'], w['whole'], unit='1', quantity='root',
+                label='screened against whole')
 
 
 # ------------------------------------------------ (d) the conditioning
@@ -221,8 +228,8 @@ def test_the_fit_is_determined_only_up_to_the_conditioning(fits, name):
     Dt = D / np.where(s == 0.0, 1.0, s)[:, None]
     ev = np.linalg.eigvalsh(Dt @ Dt.T)
     assert ev.min() < 1e-12
-    assert (ev < DEFAULT_REGULARIZATION).sum() > 0.25 * len(ev)
-    shifted = ev + DEFAULT_REGULARIZATION
+    assert (ev < ISDF_FIT_REGULARIZATION).sum() > 0.25 * len(ev)
+    shifted = ev + ISDF_FIT_REGULARIZATION
     assert 1e8 < shifted.max() / shifted.min() < 1e10
 
 

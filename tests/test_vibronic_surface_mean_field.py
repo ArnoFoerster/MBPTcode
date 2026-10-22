@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.gradients  # noqa: F401  cycle: src.properties imports src.gradients
 from src.Base.constants import GEOM_OPT_CONV
 from src.Base.solvent_screening import SolventScreening
 from src.properties.optimize import MeanFieldSurface, relax_ground_state
@@ -64,7 +63,8 @@ def test_lambda_relaxation_is_on_the_surfaces_own_mean_field(water, solvated):
     omega, modes, masses, _ = normal_modes(mf_gas, water)
     g_own = solvated.total_gradient(water, own)[0]
     _, gk = huang_rhys_from_gradient(g_own, omega, modes, masses)
-    assert np.allclose(out['gk'], gk, atol=1e-8)
+    # a mode's sign is the eigensolver's choice: the couplings agree in size
+    assert np.allclose(np.abs(out['gk']), np.abs(gk), atol=1e-8)
 
 
 def test_relax_ground_state_in_an_environment(water):

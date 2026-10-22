@@ -1,41 +1,33 @@
-"""A quasiparticle root with a pole strength outside (0, 1] never reaches the BSE.
+"""A quasiparticle root with a pole strength outside (0, 1] is kept, warned
+about and flagged; it is neither refused nor demoted (it
+can happen, rarely, and is often harmless -- the one exception to refusing every shortfall).
 
 The declaration `QPStates()` (kind='admitted', threshold='gap') names its
 orbitals from the mean-field spectrum by Eq. (27) before anything is solved,
 so it cannot know whether the root the solve converges on is a quasiparticle.
 On ethylene/cc-pVDZ, Hartree-Fock, the sum-over-poles route at M = 24 on the
-G3 grid and the 64-point contour grid, it admits orbitals 3..17. Orbital 17
-sits at reach 0.9989, and six of its fitted poles are clipped onto the fit's
-lower bound E_g = 14.742 eV, which puts a pole of weight -5.6e-5 Ha into the
-LUMO term of its Sigma at eps_LUMO + E_g = 19.308 eV, 15.7 meV above
-eps_17 = 19.293 eV. The Newton from eps_17 climbs the falling flank of that
-negative-weight pole to 19.286 eV with Z = -0.012; the same model's
+G3 grid and the 64-point contour grid, it admits orbitals 3..17. With the
+coalesced poles of an unmerged fit, the Newton from eps_17 climbs the falling
+flank of a negative-weight pole to 19.286 eV with Z = -0.012; the same model's
 quasiparticle is at 17.653 eV with Z = 0.947, where the explicit-residue route
-puts it (17.652 eV). Accepted, the spurious root moves S1 by +17.0 meV, T1 by
-+23.6 meV and the forces by 3-4e-4 Ha/Bohr.
+puts it (17.652 eV).
 
-The surface settles the set on its first solve (`_settle_qp_set`): an
-orbital whose root has Z outside (0, 1] leaves the explicit set, carries the
-outside scissor of the nearest explicit probe, and is recorded with its
-reason. Here:
+NO FIT PRODUCES THE DEFECT. Coalesced poles are merged (`SOP_POLE_MERGE_TOL`)
+and the pole model's quasiparticle is the largest-weight root of the pole-sum
+equation, so the production fit places orbital 17 at its quasiparticle with
+nothing flagged (`test_merged_poles_place_no_spurious_root`). The other gates
+plant the Newton root (19.286 eV, Z = -0.0122) for orbital 17 and check:
 
-- every explicitly solved root has 0 < Z <= 1, and orbital 17, which the
-  declaration made explicit, is demoted with its rejected root and Z on file,
-  in `qp_bookkeeping` and in the scissor tier of probe 16;
-- a displaced geometry evaluates on the settled set and demotes nothing;
-- after settling, a rejected root is refused rather than demoted;
-- under ranks every rank keeps rank 0's decision.
+- orbital 17 stays explicit with the planted root as solved, flagged in
+  `qp_z_outside` with its Z, root and route, and in `qp_bookkeeping`'s
+  'z_outside'; the reference warns;
+- a displaced geometry keeps the set and the flags, and warns on its own
+  roots without refusing;
+- under ranks every rank keeps rank 0's verdict.
 
-That a rejected root is demoted on the one fixed grid is gated in
-tests/test_cd_grid_sizing.py.
-
-The production fit merges coalesced poles (`SOP_POLE_MERGE_TOL`): the six
-clipped poles are one, and the same case places orbital 17's root at its
-quasiparticle with nothing demoted (`test_merged_poles_place_no_spurious_root`).
-The demotion gates run on the fit that keeps coalesced poles
-(`fit_poles(merge_tol=None)`), the case that exercises the safety net.
+The demotion this replaced moved orbital 17 to the scissor of probe 16; the
+number that moves with the change is recorded in
 """
-import copy
 import functools
 import os
 import sys
@@ -54,6 +46,8 @@ from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW import sum_over_poles
 from src.SingleReference.GW.qp_states import (is_quasiparticle_root,
                                               resolve_qp_states)
+from src.gradients import qp_space_time
+from src.gradients.conventions import FrozenConventions
 from src.gradients.excited_state import ExcitedStateChain
 from src.properties.excitations import (SurfaceSpec, driven_chain,
                                         qp_bookkeeping, surface_of)
@@ -70,10 +64,8 @@ N_POLES = 24
 #: The contour grid that fit is made on, asked for explicitly: the fixed
 #: pole-model grid (`CD_NFREQ_SOP`) fits poles that place no spurious root.
 NFREQ_CD = CD_NFREQ
-#: The orbital whose root was no quasiparticle, and the explicit probe whose
-#: shift it takes once outside: the nearest explicit orbital in energy.
-DEMOTED = 17
-PROBE = 16
+#: The orbital whose planted root is no quasiparticle.
+FLAGGED = 17
 #: Orbital 17's quasiparticle on the explicit-residue route, in eV, and how
 #: far the merged pole model may put it (the spurious root is 1.6 eV away).
 QP_17_EV = 17.652
@@ -102,13 +94,28 @@ def ethylene_case():
     return mol, surface, driven_chain(surface)
 
 
+#: The root the Newton from eps_17 found on the unmerged fit, and its Z.
+SPURIOUS_ROOT_HA = 19.286 / HARTREE_TO_EV
+SPURIOUS_Z = -0.0122
+
+
+def plant_spurious_root(real):
+    """`qp_energy_sop` returning the spurious root and Z for orbital 17 alone."""
+    @functools.wraps(real)
+    def planted(p, *args, **kwargs):
+        out = real(p, *args, **kwargs)
+        return (SPURIOUS_ROOT_HA, SPURIOUS_Z) if p == FLAGGED else out
+    return planted
+
+
 @pytest.fixture(scope='module')
 def ethylene():
-    """The case evaluated once at the reference geometry on the fit that
-    keeps coalesced poles, the fit that places the spurious root."""
-    keep = functools.partial(sum_over_poles.fit_poles, merge_tol=None)
+    """The case evaluated once at the reference geometry with the spurious
+    root planted for orbital 17."""
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(sum_over_poles, 'fit_poles', keep)
+        planted = plant_spurious_root(sum_over_poles.qp_energy_sop)
+        patch.setattr(sum_over_poles, 'qp_energy_sop', planted)
+        patch.setattr(qp_space_time, 'qp_energy_sop', planted)
         mol, surface, chain = ethylene_case()
         with pytest.warns(RuntimeWarning, match='outside \\(0, 1\\]'):
             chain.excitation(mol, chain.mf0)
@@ -117,13 +124,13 @@ def ethylene():
 
 def test_merged_poles_place_no_spurious_root():
     """The production fit, coalesced poles merged: orbital 17 stays explicit
-    with its quasiparticle root, and nothing is demoted."""
+    with its quasiparticle root, and nothing is flagged."""
     mol, _, chain = ethylene_case()
     chain.excitation(mol, chain.mf0)
     z = chain.qp_diagnostics['z']
-    assert DEMOTED in chain.qp_set and not chain.qp_demoted
+    assert FLAGGED in chain.resolved.qp_set and not chain.resolved.qp_z_outside
     assert all(is_quasiparticle_root(v) for v in z.values()), z
-    root = chain.qp_seeds[DEMOTED] * HARTREE_TO_EV
+    root = chain.resolved.qp_seeds[FLAGGED] * HARTREE_TO_EV
     assert abs(root - QP_17_EV) < QP_17_TOL_EV, root
 
 
@@ -133,95 +140,80 @@ def test_the_bounds_are_the_definition():
         assert not is_quasiparticle_root(z), z
 
 
-def test_every_explicit_root_is_a_quasiparticle(ethylene):
-    _, _, chain = ethylene
-    z = chain.qp_diagnostics['z']
-    assert sorted(z) == sorted(int(p) for p in chain.qp_set)
-    bad = {p: v for p, v in z.items() if not is_quasiparticle_root(v)}
-    assert not bad, f'roots with Z outside (0, 1] on the BSE diagonal: {bad}'
-
-
-def test_the_declared_orbital_is_demoted_and_recorded(ethylene):
+def test_the_flagged_root_is_kept_and_recorded(ethylene):
     mol, surface, chain = ethylene
     eps = np.asarray(chain.mf0.mo_energy, float)
     declared = resolve_qp_states(QPStates(), eps, mol.nelectron // 2,
                                  degeneracy_tol=chain.degeneracy_tol).explicit
-    assert DEMOTED in declared, 'the case does not declare the orbital'
-    assert DEMOTED not in chain.qp_set
-    assert sorted(chain.qp_set) == [p for p in declared if p != DEMOTED]
-    entry = chain.qp_demoted[DEMOTED]
-    assert entry['z'] <= 0.0 and entry['route'] == 'sop', entry
-    # a demoted orbital leaves nothing of its branch on the chain
-    assert DEMOTED not in chain.qp_seeds and DEMOTED not in chain.sop_poles
-    assert chain.outside_shift[DEMOTED] == chain.qp_seeds[PROBE] - eps[PROBE]
+    assert FLAGGED in declared, 'the case does not declare the orbital'
+    assert sorted(chain.resolved.qp_set) == sorted(declared)
+    z = chain.qp_diagnostics['z']
+    assert z[FLAGGED] == SPURIOUS_Z
+    assert all(is_quasiparticle_root(v) for p, v in z.items() if p != FLAGGED)
+    entry = chain.resolved.qp_z_outside[FLAGGED]
+    assert entry['z'] == SPURIOUS_Z and entry['route'] == 'sop', entry
+    assert entry['root'] == SPURIOUS_ROOT_HA
+    # the root is kept as solved: no scissor for the orbital
+    assert chain.resolved.qp_seeds[FLAGGED] == SPURIOUS_ROOT_HA
+    assert FLAGGED not in chain.resolved.outside_shift
     record = qp_bookkeeping(surface, mol)
-    assert list(record['demoted']) == [DEMOTED]
-    assert record['demoted'][DEMOTED]['z'] == entry['z']
-    assert DEMOTED in record['outside'] and DEMOTED not in record['explicit']
-    tier = [t for t in record['scissor_tiers'] if DEMOTED in t['orbitals']]
-    assert len(tier) == 1 and tier[0]['probe'] == PROBE, tier
+    assert list(record['z_outside']) == [FLAGGED]
+    assert record['z_outside'][FLAGGED]['z'] == SPURIOUS_Z
+    assert FLAGGED in record['explicit'] and FLAGGED not in record['outside']
 
 
-def test_a_displaced_geometry_keeps_the_settled_set(ethylene):
+def test_a_displaced_geometry_keeps_the_set_and_warns(ethylene):
     mol, _, chain = ethylene
-    settled, demoted = list(chain.qp_set), dict(chain.qp_demoted)
+    settled, flags = list(chain.resolved.qp_set), dict(chain.resolved.qp_z_outside)
     crd = mol.atom_coords().copy()
     crd[0, 2] += 1e-2
-    chain.excitation(mol.set_geom_(crd, unit='Bohr', inplace=False))
-    assert list(chain.qp_set) == settled and chain.qp_demoted == demoted
-    assert all(is_quasiparticle_root(v)
-               for v in chain.qp_diagnostics['z'].values())
+    with pytest.warns(RuntimeWarning, match='displaced geometry'):
+        chain.excitation(mol.set_geom_(crd, unit='Bohr', inplace=False))
+    assert list(chain.resolved.qp_set) == settled
+    assert chain.resolved.qp_z_outside == flags
 
 
-def test_a_rejected_root_after_settling_is_refused(ethylene):
+def test_a_root_outside_the_bounds_after_settling_is_not_refused(ethylene):
     _, _, chain = ethylene
-    view = copy.copy(chain)
-    view.qp_demoted = dict(chain.qp_demoted)
-    states = np.asarray(chain.qp_set)
+    states = np.asarray(chain.resolved.qp_set)
     z = np.full(len(states), 0.95)
-    z[-1] = -0.5
+    z[-2] = -0.5
     route_out = {'z': z, 'roots': {int(p): 0.0 for p in states},
                  'routes': {int(p): 'sop' for p in states}}
-    with pytest.raises(RuntimeError, match='displaced geometry'):
-        view._settle_qp_set(route_out, states)
-    assert list(view.qp_set) == list(chain.qp_set)
+    flags = dict(chain.resolved.qp_z_outside)
+    with pytest.warns(RuntimeWarning, match='displaced geometry'):
+        chain._flag_z_outside(route_out, states)
+    # the frozen conventions are not written at a displaced geometry
+    assert chain.resolved.qp_z_outside == flags
 
 
 def bare_chain(states):
-    """An unsettled chain with only what `_settle_qp_set` reads."""
+    """An unsettled chain with only what `_flag_z_outside` reads."""
     chain = object.__new__(ExcitedStateChain)
-    chain.qp_set = np.asarray(states)
-    chain.qp_demoted = {}
-    chain.qp_set_settled = False
-    chain.outside = 'scissor'
+    chain.conventions = FrozenConventions(qp_set=np.asarray(states))
     return chain
 
 
-def settle_on_rank(comm, states, z_by_rank):
+def flag_on_rank(comm, states, z_by_rank):
     chain = bare_chain(states)
     z = np.asarray(z_by_rank[comm.Get_rank()], float)
     route_out = {'z': z, 'roots': {int(p): 0.0 for p in states},
                  'routes': {int(p): 'sop' for p in states}}
-    keep = chain._settle_qp_set(route_out, states)
-    return (None if keep is None else keep.tolist(), list(chain.qp_set),
-            sorted(chain.qp_demoted))
+    chain._flag_z_outside(route_out, states)
+    return list(chain.resolved.qp_set), sorted(chain.resolved.qp_z_outside)
 
 
 @pytest.mark.filterwarnings('ignore:quasiparticle roots with a pole strength')
-@pytest.mark.parametrize('rank0_rejects', (True, False))
-def test_every_rank_keeps_rank_zeros_set(rank0_rejects):
+@pytest.mark.parametrize('rank0_flags', (True, False))
+def test_every_rank_keeps_rank_zeros_verdict(rank0_flags):
     """Rank 1's copy of Z disagrees with rank 0's on the last state; both
-    ranks keep the set rank 0's copy decides."""
+    ranks keep the set whole and the flags rank 0's copy decides."""
     states = [15, 16, 17]
-    rejected, accepted = [0.96, 0.95, -0.01], [0.96, 0.95, 0.93]
-    z_by_rank = ([rejected, accepted] if rank0_rejects
-                 else [accepted, rejected])
-    out = run_simulated(settle_on_rank, 2, states, z_by_rank)
+    outside, inside = [0.96, 0.95, -0.01], [0.96, 0.95, 0.93]
+    z_by_rank = [outside, inside] if rank0_flags else [inside, outside]
+    out = run_simulated(flag_on_rank, 2, states, z_by_rank)
     assert out[0] == out[1], out
-    if rank0_rejects:
-        assert out[0] == ([True, True, False], [15, 16], [17])
-    else:
-        assert out[0] == (None, states, [])
+    assert out[0] == (states, [17] if rank0_flags else [])
 
 
 if __name__ == '__main__':

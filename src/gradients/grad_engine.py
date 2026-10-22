@@ -38,6 +38,7 @@ from src.gradients.df_assembly import df_densities, two_electron_skeleton_df
 from src.gradients.isdf_derivatives import (fock_partial_Y,
                                             fock_partial_skeleton, solve_lambda)
 from src.gradients.multipliers import solve_orbital_multipliers
+from src.gradients.one_electron import one_electron_skeleton
 
 
 # ---------------------------------------------------------------------------
@@ -173,25 +174,6 @@ def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
     return out
 
 
-def one_electron_skeleton(mol, mf, gamma_ao_list, M_ao_list):
-    """sum_ab gamma_ab dh_ab/dR_A + sum_ab M_ab dS_ab/dR_A for every target."""
-    hgen = mf.Gradients().hcore_generator(mol)
-    s1 = -mol.intor('int1e_ipovlp', comp=3)
-    aoslices = mol.aoslice_by_atom()
-    out = np.zeros((len(gamma_ao_list), mol.natm, 3))
-    for iatm in range(mol.natm):
-        p0, p1 = aoslices[iatm, 2:]
-        dh_all = hgen(iatm)
-        for xyz in range(3):
-            dS = np.zeros((mol.nao, mol.nao))
-            dS[p0:p1, :] += s1[xyz, p0:p1, :]
-            dS[:, p0:p1] += s1[xyz, p0:p1, :].T
-            for k, (g_ao, M_ao) in enumerate(zip(gamma_ao_list, M_ao_list)):
-                out[k, iatm, xyz] = (np.einsum('ab,ab->', g_ao, dh_all[xyz])
-                                     + np.einsum('ab,ab->', M_ao, dS))
-    return out
-
-
 # ---------------------------------------------------------------------------
 # top-level correlation-gradient driver
 # ---------------------------------------------------------------------------
@@ -315,7 +297,7 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
                       'Lambda': Lam, 'M': Mmat})
 
     # Back-transform ONCE per target and contract the derivative integrals in
-    # the AO basis: the MO transform is what used to run per atom and direction.
+    # the AO basis, not an MO transform per atom and direction.
     gam_ao = [C @ g @ C.T for g, _, _ in dens]
     M_ao = [C @ m @ C.T for _, _, m in dens]
     if auxmol is None:

@@ -72,6 +72,7 @@ per-geometry Z > 0.5 filter makes the surface discontinuous. And converge the
 SCF orbital gradient to 1e-11 -- the Lagrangian assumes F_offdiag = 0, and
 symmetry hides the contamination on symmetric molecules.
 """
+from src.Base.eri_blocks import df_eri_mo
 from src.Base.utils.time_frequency import sigma_transforms
 from src.SingleReference.GW.contour_deformation import (
     cd_screening_contraction, qp_energy_cd, residue_pole_distance,
@@ -91,8 +92,7 @@ from src.gradients.contour_deformation_adjoint import (
     ExplicitRealScreeningAdjoint as ExplicitRealScreening,
     LaplaceRealScreeningAdjoint as LaplaceRealScreening, qp_energy_cd_backward,
     sigma_cd_backward)
-from src.gradients.df_assembly import (df_densities, df_eri_mo,
-                                       two_electron_skeleton_df)
+from src.gradients.df_assembly import df_densities, two_electron_skeleton_df
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain
 from src.gradients.grad_engine import correlation_gradient, correlation_gradients
@@ -123,6 +123,6 @@ from src.gradients.targets import (add_z_contribution, chain_AB, qp_partials,
                                    qp_partials_with_shift, rpa_partials, solve_Z)
 
 # `derivative_coupling`, `state_manifold` and `fragment_diabatic` (the gradient
-# of the fragment-diabatic BSE matrix of `src.properties.fragment_bse`) depend
-# on `src.properties`, not present in this package, so those modules are
-# reached by importing them directly rather than through this namespace.
+# of the fragment-diabatic BSE matrix of `src.properties.fragment_bse`) read
+# `src.properties` modules that import this package, so they are imported
+# directly rather than through this namespace.

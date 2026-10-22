@@ -33,6 +33,8 @@ from src.Base.protein_environment import (LINK_BOND_LENGTH, embed, read_pqr)
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.fragment_diabatic import DiabaticGradient
 from src.properties.diabatic import diabatic_derivative
+from src.Base.numerics import numerics_of
+from tests.isdf_test_grid import g1
 
 ETHYLENE = [('C1', 0, 0, 0.667), ('C2', 0, 0, -0.667),
             ('H1', 0, 0.923, 1.238), ('H2', 0, -0.923, 1.238),
@@ -153,9 +155,7 @@ def test_diabatic_gradient_in_charges_and_polarizable_sites(tmp_path):
     emb = embed(read_pqr(path), [('A', 1, 'ETH'), ('A', 2, 'ETH')], 'cc-pvdz',
                 cutoff=10.0, polarizabilities={'O': 5.0, 'H': 1.5})
     assert emb.report['n_sites'] > 0 and not emb.report['dropped_sites']
-    chain = ExcitedStateChain(emb.mol, factory, bse_tda=True,
-                              auxbasis='cc-pvdz-ri',
-                              environment=emb.environment)
+    chain = ExcitedStateChain(emb.mol, factory, bse_tda=True, environment=emb.environment, numerics=numerics_of({'auxbasis': 'cc-pvdz-ri', 'counts': g1(emb.mol)}))
     sites, ct = {0: 1, 1: 1}, {(0, 1): 1, (1, 0): 1}
     grad = DiabaticGradient(chain, emb.fragments, sites, ct, omega0=0.31)
     rng = np.random.default_rng(23)

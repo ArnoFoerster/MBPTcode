@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
+from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics import Numerics
 from src.gradients.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -24,7 +27,9 @@ def scf_factory(mol):
     """A mean field converged for GRADIENT work: conv_tol_grad 1e-11, because
     the Lagrangian assumes the occupied-virtual Fock block vanishes."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -36,7 +41,9 @@ def ks_scf_factory(mol):
     reference is the only one that exercises it and its two derivative pieces
     at all."""
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -63,7 +70,7 @@ def test_total_gradient_vs_finite_difference(water, spin, tda):
     this is what proves the split: the reference differences the SUM.
     """
     mol, mf = water
-    ch = ExcitedStateChain(mol, scf_factory, spin=spin, bse_tda=tda, mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, spin=spin, bse_tda=tda, mf=mf, numerics=g1_numerics(mol))
     g, _, _ = ch.total_gradient()
     h, worst = 1e-4, 0.0
     for ia in range(mol.natm):
@@ -84,7 +91,7 @@ def test_total_gradient_vs_finite_difference(water, spin, tda):
 def test_energy_decomposition_is_consistent(water):
     """E_ex = E_0 + Omega exactly, and E_0 is the mean field's own energy."""
     mol, mf = water
-    ch = ExcitedStateChain(mol, scf_factory, mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     e_ex, e_0, om = ch.energy()
     assert e_0 == pytest.approx(mf.e_tot, abs=1e-12)
     assert e_ex == pytest.approx(e_0 + om, abs=1e-12)
@@ -110,9 +117,10 @@ def test_the_davidson_route_gives_the_dense_gradient(water):
     the fit adjoint's own reproducibility floor, not the eigensolver.
     """
     mol, mf = water
-    dense = ExcitedStateChain(mol, scf_factory, mf=mf, solver='dense')
-    davidson = ExcitedStateChain(mol, scf_factory, mf=mf, solver='davidson',
-                                 nroots=5)
+    dense = ExcitedStateChain(mol, scf_factory, mf=mf,
+                              numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
+    davidson = ExcitedStateChain(
+        mol, scf_factory, mf=mf, numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'nroots': 5})))
     assert davidson.solver_used(10 ** 6) == 'davidson'
     om_d, om_v = dense.excitation(), davidson.excitation()
     assert om_d == pytest.approx(om_v, abs=1e-8)
@@ -126,7 +134,7 @@ def test_quasiparticle_gradient_vs_finite_difference(water):
     """d eps^QP/dR for the HOMO -- a different chain from the excitation one:
     no BSE adjoint, no screening adjoint, one state instead of a set."""
     mol, mf = water
-    ch = ExcitedStateChain(mol, scf_factory, mf=mf)
+    ch = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     g, d = ch.quasiparticle_gradient(0)
     h, worst = 1e-4, 0.0
     for ia in range(mol.natm):
@@ -162,7 +170,7 @@ def test_quasiparticle_gradient_vs_finite_difference_on_pbe0(water_pbe0):
     tolerance five orders looser than the defect it guards against.
     """
     mol, mf = water_pbe0
-    ch = ExcitedStateChain(mol, ks_scf_factory, mf=mf)
+    ch = ExcitedStateChain(mol, ks_scf_factory, mf=mf, numerics=g1_numerics(mol))
     g, _ = ch.quasiparticle_gradient(0)
     ia, x, h = 0, 2, 1e-4                       # the oxygen along the C2 axis
     v = []

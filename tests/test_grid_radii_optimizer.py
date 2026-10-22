@@ -88,7 +88,7 @@ if __name__ == '__main__':
     all_ok &= ok1
     print(f'   smallest gain {worst_gain:.1f}x   {"OK" if ok1 else "FAIL"}')
 
-    # 2. n_start=1 must BE the old single geometric descent, or every cached and
+    # 2. n_start=1 must BE the single geometric descent, or every cached and
     #    shipped grid silently changes meaning.
     print('\n2. n_start=1 is the plain geometric ladder:')
     s0 = _start_radii(COUNTS_148, 0.05, 5.0, 0)
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     #    documented bypass of both, since a caller that wants the runners-up
     #    has to run the search. The table holds ONE grid per physical request,
     #    so a lookup answers n_start=1 and n_start=4 with the same row and the
-    #    comparison measures nothing (it reported 1.0x before the bypass); a
+    #    comparison measures nothing (it reports 1.0x); a
     #    stale cache silently reports its own thread count's minimum (see
     #    optimize_atomic_radii). One BLAS thread, since the objective is a
     #    numerically differentiated descent under threaded BLAS and a

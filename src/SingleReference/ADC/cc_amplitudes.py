@@ -43,18 +43,36 @@ def _ccd_class(base):
     return _CCD
 
 
-def ccd_t2_restricted(mf, return_energy=False, **cc_opts):
-    """t2[i,j,a,b], the alpha-beta amplitude of a converged all-electron CCD
-    on an RHF mean field (DF-CCD for a density-fitted mf); cc_opts are set on
-    the pyscf CC object."""
+CC_METHODS = ('ccsd', 'ccd')
+
+
+def _run_cc(mf, method, frozen, **cc_opts):
+    """Converged pyscf RHF-based CCSD or CCD object; cc_opts are set on it.
+    The CC class is the one pyscf.cc.CCSD dispatches to for this mean field,
+    so a density-fitted mf gives DF-CCSD/DF-CCD. t1 is exactly zero for CCD."""
+    if method not in CC_METHODS:
+        raise ValueError(f"method={method!r}; expected one of {CC_METHODS}")
     if isinstance(mf, _pyscf_scf.uhf.UHF):
-        raise NotImplementedError("ccd_t2_restricted is RHF-only")
-    mycc = _ccd_class(type(_pyscf_cc.CCSD(mf)))(mf)
+        raise NotImplementedError(
+            "the CC amplitudes here are RHF-only; an open-shell route would take "
+            "UCCSD amplitudes through pyscf.cc.addons.spatial2spin's "
+            "(t1a, t1b)/(t2aa, t2ab, t2bb) form instead.")
+    base = type(_pyscf_cc.CCSD(mf, frozen=frozen))     # pyscf's own dispatch
+    cls = _ccd_class(base) if method == 'ccd' else base
+    mycc = cls(mf, frozen=frozen)
     for key, val in cc_opts.items():
         setattr(mycc, key, val)
     mycc.run()
     if not mycc.converged:
-        raise RuntimeError("CCD did not converge")
+        raise RuntimeError(f"{method.upper()} did not converge")
+    return mycc
+
+
+def ccd_t2_restricted(mf, return_energy=False, **cc_opts):
+    """t2[i,j,a,b], the alpha-beta amplitude of a converged all-electron CCD
+    on an RHF mean field (DF-CCD for a density-fitted mf); cc_opts are set on
+    the pyscf CC object."""
+    mycc = _run_cc(mf, 'ccd', None, **cc_opts)
     t2 = np.asarray(mycc.t2)
     return (t2, mycc.e_corr) if return_energy else t2
 

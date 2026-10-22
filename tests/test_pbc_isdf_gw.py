@@ -32,6 +32,7 @@ from src.SingleReference.Periodic.pbc_integrals import (PBCDFIntegrals,
                                                         get_momentum_transfer_map)
 from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts, kpoint_minus_map
 from src.Base.constants import HARTREE_TO_EV
+from tests.pins import assert_same
 
 KMESH = [2, 2, 1]
 ALPHA = 12       # alpha = 8 is 18 meV off; 12 and 16 both land inside 1 meV
@@ -189,7 +190,10 @@ def test_pi_may_be_a_callable_and_gives_the_same_answer(gwfix):
     from_list = gw.sigma_c_diag_thc(f['X'], f['V'], f['Pi'], *args, **kw)
     from_call = gw.sigma_c_diag_thc(f['X'], f['V'], lambda q: f['Pi'][q],
                                     *args, **kw)
-    assert np.array_equal(from_list, from_call)
+    # two calls of one kernel: a few ulp
+    for part in (np.real, np.imag):
+        assert_same(part(from_list), part(from_call), quantity='root',
+                    label='Pi as a list and as a call')
 
 
 def test_driver_defaults_to_homo_and_lumo(gwfix):

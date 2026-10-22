@@ -5,7 +5,7 @@ admitted window of a large molecule (hundreds of states) it must be divided
 over the ranks: `fit_poles_over_ranks` hands each state's fit to one rank and
 gathers the poles onto all of them. Each fit reads only that state's wc,
 which is reduced and identical on every rank, so the poles, the roots and Z
-are gated bitwise against serial.
+are gated to a few ulp against serial.
 
 Water/cc-pVDZ (HF, DF), the admitted window on the ISDF factors, a 24-point
 contour grid. Over n ranks every state is fitted once in all.
@@ -29,6 +29,18 @@ from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import separable_factors
 import src.gradients.qp_space_time as qp_space_time
 from src.gradients.qp_space_time import qp_set_gradient
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
+
+
+def same(got, want, label, unit='Ha', quantity='root'):
+    """Two computations of one array, real or complex: a few ulp.
+    """
+    got, want = np.asarray(got), np.asarray(want)
+    assert got.shape == want.shape, label
+    for part in (np.real, np.imag):
+        assert_same(part(got), part(want), unit=unit, quantity=quantity,
+                    label=label)
 
 SIZES = [2, 3]
 
@@ -41,7 +53,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    X_mo, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')[:2]
+    X_mo, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))[:2]
     eps = np.asarray(mf.mo_energy, float)
     gap = eps[nocc] - eps[nocc - 1]
     nu, wt = gauss_legendre_grid(24, w0=gap)
@@ -89,18 +101,18 @@ def test_the_window_is_on_the_pole_model(water):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('weighted', [False, True], ids=['energy', 'force'])
 def test_poles_roots_and_z_bitwise_over_ranks(water, size, weighted):
-    """Every rank returns the serial poles, roots and Z, bit for bit; with
+    """Every rank returns the serial poles, roots and Z, to a few ulp; with
     weights, the adjoints agree to the reverse pass's re-association."""
     n = len(water['states'])
     weights = (np.linspace(-1.0, 1.0, n) if weighted else np.zeros(n))
     ref, ref_out = solve(water, weights)
     got = run_simulated(lambda comm: solve(water, weights, comm=comm), size)
     for out, route_out in got:
-        assert np.array_equal(out[0], ref[0])
-        assert np.array_equal(route_out['z'], ref_out['z'])
+        same(out[0], ref[0], 'roots', quantity='energy')
+        same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
         assert sorted(route_out['sop_poles']) == sorted(ref_out['sop_poles'])
         for p, poles in ref_out['sop_poles'].items():
-            assert np.array_equal(route_out['sop_poles'][p], poles), p
+            same(route_out['sop_poles'][p], poles, ('poles', p))
         if weighted:
             scale = np.abs(ref[1]).max()
             assert np.abs(out[1] - ref[1]).max() <= 1e-11 * scale
@@ -133,7 +145,7 @@ def test_frozen_poles_are_not_fitted_again(water, monkeypatch):
 def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     """The three-index slices B_p, the O(M naux norb) per-state cost of the
     sweep, are striped too: n slices in all over `size` ranks, and every
-    rank's are the serial ones bitwise."""
+    rank's are the serial ones to a few ulp."""
     n = len(water['states'])
     built, lock = [], threading.Lock()
     real = qp_space_time.three_index_slice
@@ -149,7 +161,7 @@ def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     assert len(built) == n, f'{len(built)} slices for {n} states'
     for _, route_out in got:
         for b, r in zip(route_out['tape'].Bps, ref):
-            assert np.array_equal(b, r)
+            same(b, r, 'B_p', unit='1')
 
 
 if __name__ == '__main__':

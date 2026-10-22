@@ -1,21 +1,26 @@
 """The Casida Davidson's trial space cut by pair rows over ranks.
 
-Over more than one rank `_davidson_root` runs `trial_space.real_eig_rows`,
-pyscf's real_eig owned: V, W, U1 and U2 are held as fixed tiles of pair rows,
+`_davidson_root` runs the Casida loop `trial_space.casida_rows`, pyscf's
+real_eig owned, on every path: over more than one rank V, W, U1 and U2 are
+held as fixed tiles of pair rows,
 each sum over the pair index is formed per tile, added in tile order and
 reduced once, the row products are computed on a rank's own tiles, and the
 batch and the result are gathered whole. Gated here:
 
-  * ONE TILE is real_eig's arithmetic: on one rank with a tile as long as the
-    pair space the loop returns real_eig's roots and vectors bitwise, on a
-    Casida model, on a symmetry-blocked one and on water BSE@HF;
+  * ONE TILE is real_eig's iteration: tracking no pair beyond the requested
+    ones the loop on one tile takes pyscf's real_eig's decisions every cycle
+    and meets its roots and vectors to rounding, and tracking pairs that
+    settle where the requested roots converge moves its numbers by no more
+    than a few ulp; the serial solve is the one-tile pair-row solve to a few
+    ulp (two computations, `assert_same` of tests/pins.py)
+    on a Casida model, on a symmetry-blocked one and on water BSE@HF;
   * ONE RANK, MANY TILES against real_eig: benzene/cc-pVDZ BSE@HF, 12 roots at
     1e-5, on a one-rank communicator at the default tile and at BENZENE_TILE,
     roots within ONE_RANK_ROOT_TOL and vectors within ONE_RANK_VECTOR_TOL once
     each root's sign is fixed;
   * the OUTPUT PARTITIONS -- Ritz vectors, residuals, the preconditioner step,
     the Gram-Schmidt projection and combination, the gathered batch -- are
-    the same bits at 1 to 64 simulated ranks for the same coefficients;
+    the same to a few ulp at 1 to 64 simulated ranks for the same coefficients;
   * every JOINED SUM -- the projected blocks, the residual norms, the
     correction norms, the Gram-Schmidt overlaps and Gram matrices -- is the
     one-rank sum bitwise on every rank (`ordered_sum`), and a rank handing
@@ -28,37 +33,47 @@ batch and the result are gathered whole. Gated here:
     water and benzene on the ISDF action;
   * the HOLDERS of a rank take 32 bytes per pair row it owns per trial pair,
     and the ranks' together what one rank held;
-  * the SERIAL path, and a one-rank communicator, stay pyscf's real_eig;
+  * every path -- serial, a one-rank communicator, two ranks -- runs the
+    one loop, serially on one tile;
   * RESTARTS take the Ritz vectors' products from the stored ones and apply
     no action, and still converge to the dense roots;
   * one rank's subspace solution moved one ulp is repaired by the loop's
     checked lockstep, every rank returning the unperturbed solve;
-  * the subspace time is split into its pieces under a comm.
+  * the subspace time is split into its pieces, serially and under a comm.
 """
+import io
 import os
+import re
 import sys
 import warnings
 
 import numpy as np
 import pytest
 from pyscf import gto, scf
+from pyscf.lib import logger
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import DAVIDSON_PAIR_TILE
+from pyscf.tdscf._lr_eig import real_eig
+
+from src.Base.constants import DAVIDSON_LINDEP, DAVIDSON_PAIR_TILE
 from src.Base.utils.mpi_grid import (current_comm, distributed,
                                      lockstep_stats, run_simulated,
                                      simulated_world)
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse import davidson, trial_space
-from src.SingleReference.LinearResponse.davidson import (bse_pair_diagonal,
-                                                         isdf_bse_factors,
-                                                         isdf_block_action)
+from src.SingleReference.LinearResponse import (davidson, davidson_shared,
+                                                trial_space)
+from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+from src.SingleReference.LinearResponse.block_actions import (bse_pair_diagonal,
+                                                              isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.trial_space import (
-    SUBSPACE_PIECES, PairRows, combine_rows, gram_addend, overlap_addend,
+    SUBSPACE_PIECES, PairRows, casida_rows, combine_rows, gram_addend,
+    overlap_addend,
     project_rows, projection_addend, ritz_rows)
 from tests.test_distributed_fit_mpi import relative, roots_resolution
+from tests.isdf_test_grid import counts_at
+from tests.pins import assert_same, bitwise
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BENZENE = ('C 1.396 0 0; C 0.698 1.209 0; C -0.698 1.209 0; C -1.396 0 0; '
@@ -70,6 +85,9 @@ NOCC, NVIR, NAUX, NROOTS, CONV_TOL = 8, 150, 40, 12, 1e-6
 BSE_CONV_TOL = 1e-5
 #: Ha. The owned loop on one rank against real_eig, many tiles.
 ONE_RANK_ROOT_TOL = 1e-10
+#: Ha. The loop on one tile against real_eig: the converged cycle's sums
+#: round apart in the last bits.
+ONE_TILE_ROOT_TOL = 1e-13
 #: The vectors to the same, each root's sign fixed.
 ONE_RANK_VECTOR_TOL = 1e-6
 #: Pair rows per tile where a gate splits a small pair space: the model's
@@ -88,6 +106,20 @@ FORCED_MAX_CYCLE = 200
 PLANT_AT = 3
 #: s. The pieces are read with time.time() around the loop's phases.
 TIMER_SLACK = 1e-3
+
+
+#: What makes `_run_davidson` read a SLURM allocation for its budget
+#: (`allocation_max_memory_mb`) in place of the DAVIDSON_SPACE_GB fallback the
+#: forced caps below patch; inside a SLURM allocation the budget is the
+#: allocation's share and the bound never binds on these small problems, so
+#: every test starts outside one.
+SLURM_BUDGET_KEYS = ('SLURM_JOB_ID', 'SLURM_MEM_PER_NODE', 'SLURM_MEM_PER_CPU')
+
+
+@pytest.fixture(autouse=True)
+def outside_slurm(monkeypatch):
+    for key in SLURM_BUDGET_KEYS:
+        monkeypatch.delenv(key, raising=False)
 
 
 def model_problem(seed=11):
@@ -145,13 +177,6 @@ def root(apply_AB, diag, comm=None, nroots=NROOTS, conv_tol=CONV_TOL,
     return out[:5] + (counters,)
 
 
-def bitwise(a, b):
-    """True when two arrays agree bit for bit, shape and dtype included."""
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
-
-
 def sign_fixed(X, Y):
     """(X, Y) with each root's sign taken from the largest component of X:
     the Davidson fixes no phase."""
@@ -171,7 +196,9 @@ def _system(geometry):
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+    # G1 leaves orbital densities unrepresented here (UnrepresentedOrbitals)
+    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
+                                counts=counts_at(mol, 'G2'))
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(nocc=nocc, factors=factors, W_aux=W_aux,
                 eps=np.asarray(mf.mo_energy, float))
@@ -213,21 +240,29 @@ def benzene_serial(benzene):
     return bse_root(benzene, 12)
 
 
+def same_solve(got, want, label):
+    """Roots, X and Y of two solves to a few ulp (`assert_same`)."""
+    for name, a, b in zip(('roots', 'X', 'Y'), got, want):
+        if name == 'roots':
+            assert_same(a, b, quantity='root', label=(label, name))
+        else:
+            assert_same(a, b, unit='1', quantity='vector', label=(label, name))
+
+
 def test_one_tile_is_real_eigs_bits(model, model_serial, water):
-    """One rank, one tile: every expression the loop evaluates is real_eig's."""
+    """One rank, one tile: every expression the loop evaluates is real_eig's
+    (two solves: to a few ulp)."""
     om_s, X_s, Y_s = model_serial[:3]
     om, X, Y = root(*model[:2], pair_rows=True, pair_tile=model[1].size)[:3]
-    assert bitwise(om, om_s) and bitwise(X, X_s) and bitwise(Y, Y_s)
+    same_solve((om, X, Y), (om_s, X_s, Y_s), 'model')
     act, diag, labels = symmetric_problem()
     ref = root(act, diag, x_sym=labels)
     got = root(act, diag, x_sym=labels, pair_rows=True, pair_tile=diag.size)
-    for a, b in zip(ref[:3], got[:3]):
-        assert bitwise(a, b)
+    same_solve(got[:3], ref[:3], 'symmetry-blocked')
     ref = bse_root(water, 3)
     got = bse_root(water, 3, pair_rows=True, pair_tile=DAVIDSON_PAIR_TILE)
     assert water['nocc'] * (len(water['eps']) - water['nocc']) <= DAVIDSON_PAIR_TILE
-    for a, b in zip(ref[:3], got[:3]):
-        assert bitwise(a, b)
+    same_solve(got[:3], ref[:3], 'water')
 
 
 @pytest.mark.parametrize('tile', [None, BENZENE_TILE])
@@ -281,7 +316,7 @@ def rank_products(comm, g, tile):
         X, Y, R_x, R_y, r2 = ritz_rows(Vh[i], Wh[i], U1h[i], U2h[i], M_GATE,
                                        g['x'], g['y'], g['w'])
         dx = np.vstack([R_x, R_y]).T
-        t = davidson._correction(dx, np.hstack([g['d'][p0:p1],
+        t = davidson_shared._correction(dx, np.hstack([g['d'][p0:p1],
                                                 -g['d'][p0:p1]]), g['w'])
         x_new, y_new = g['X_new'][p0:p1].copy(), g['Y_new'][p0:p1].copy()
         project_rows(Vh[i], Wh[i], x_new, y_new, g['ox'], g['oy'])
@@ -293,8 +328,9 @@ def rank_products(comm, g, tile):
 
 
 def test_output_partitions_are_bitwise_across_ranks():
-    """Every row a rank computes on its own tiles is the one-rank row, bit
-    for bit, at 1 to 64 ranks, and the gathered batch is one rank's."""
+    """Every row a rank computes on its own tiles is the one-rank row, to a
+    few ulp (two rank splits), at 1 to 64 ranks, and the gathered batch is
+    one rank's."""
     g = gate_arrays()
     ref, batch_1 = rank_products(None, g, TILE_GATE)
     assert len(ref) == -(-N_GATE // TILE_GATE)
@@ -302,12 +338,13 @@ def test_output_partitions_are_bitwise_across_ranks():
         out = run_simulated(rank_products, size, g, TILE_GATE)
         seen = {}
         for mine, batch in out:
-            assert bitwise(batch, batch_1)
+            assert_same(batch, batch_1, unit='1', quantity='root',
+                        label=(size, 'batch'))
             seen.update(mine)
         assert sorted(seen) == sorted(ref)
         for key, arrays in ref.items():
             for a, b in zip(arrays, seen[key]):
-                assert bitwise(a, b), (size, key)
+                assert_same(b, a, unit='1', quantity='root', label=(size, key))
 
 
 def reduced_sums(comm, g, tile):
@@ -331,7 +368,7 @@ def reduced_sums(comm, g, tile):
         'overlaps': [overlap_addend(V[i], W[i], Xn[i], Yn[i])
                      for i in range(len(tiles))],
         'gram': [gram_addend(Xn[i], Yn[i]) for i in range(len(tiles))]}
-    shapes = {'projection': (4, k, M_GATE), 'residual norms': (k,),
+    shapes = {'projection': (6, k, M_GATE), 'residual norms': (k,),
               'correction norms': (k,), 'overlaps': (2, M_GATE, k),
               'gram': (2, k, k)}
     return {name: (a, rows.join(a, shapes[name])) for name, a in addends.items()}
@@ -453,8 +490,8 @@ def test_holders_take_their_rows_alone(model, size):
     rank's worth over all of them."""
     tile = 64
     n_pair = model[1].size
-    bound = davidson._real_eig_space(
-        davidson._trial_space_memory(NROOTS, n_pair), NROOTS, n_pair)[1]
+    bound = davidson_shared._real_eig_space(
+        davidson_shared._trial_space_memory(NROOTS, n_pair), NROOTS, n_pair)[1]
 
     def one_rank(comm):
         t = {}
@@ -480,38 +517,102 @@ def test_holders_take_their_rows_alone(model, size):
     assert t_serial['davidson_trial_space_mb'] * 1e6 == 32 * n_pair * bound
 
 
-def test_the_serial_path_is_pyscfs_real_eig(model, monkeypatch):
-    """No comm, and a one-rank comm, run pyscf's real_eig and never the
-    pair-row loop; two ranks run the loop and never real_eig."""
-    calls = {'real_eig': 0, 'rows': 0}
-    real, rows = davidson.real_eig, davidson.real_eig_rows
+def test_every_path_runs_the_one_loop(model, monkeypatch):
+    """No comm and a one-rank comm run the loop on one tile, two ranks on
+    their tiles; nothing else iterates."""
+    tiles = []
+    loop = davidson.casida_rows
 
-    def counted(name, fn):
-        def wrapped(*args, **kwargs):
-            calls[name] += 1
-            return fn(*args, **kwargs)
-        return wrapped
+    def counted(*args, **kwargs):
+        tiles.append(len(args[3].all_tiles))
+        return loop(*args, **kwargs)
 
-    monkeypatch.setattr(davidson, 'real_eig', counted('real_eig', real))
-    monkeypatch.setattr(davidson, 'real_eig_rows', counted('rows', rows))
+    monkeypatch.setattr(davidson, 'casida_rows', counted)
     root(*model[:2])
     comm = simulated_world(1)[0]
     with distributed(comm):
         root(*model[:2], comm)
-    assert calls == {'real_eig': 2, 'rows': 0}
-    run_simulated(lambda comm: root(*model[:2], comm), 2)
-    assert calls == {'real_eig': 2, 'rows': 2}
+    assert tiles == [1, 1]
+    run_simulated(lambda comm: root(*model[:2], comm, pair_tile=MODEL_TILE),
+                  2)
+    assert tiles[2:] == [len(trial_space.pair_tiles(model[1].size,
+                                                    MODEL_TILE))] * 2
+
+
+def test_one_tile_is_pyscfs_real_eig():
+    """The loop on one tile against pyscf's real_eig on the same action,
+    guess and corrections: the same decisions every cycle -- directions
+    kept, roots converged -- and the roots and vectors to rounding; tracking
+    the default extra pairs, which settle where the requested roots
+    converge, moves no bit of the untracked loop's."""
+    apply_AB, diag, _, _ = model_problem()
+    n = diag.size
+    d = diag.ravel()
+    hdiag = np.hstack([d, -d])
+    order = davidson_shared._guess_indices(diag, NROOTS)
+    x0 = np.zeros((len(order), 2 * n))
+    x0[np.arange(len(order)), order] = 1.0
+    max_memory = 4000
+    space_inc, max_space = davidson_shared._real_eig_space(max_memory, NROOTS, n)
+
+    def products(xys):
+        xys = np.asarray(xys).reshape(-1, 2, *diag.shape)
+        Ax, Bx = apply_AB(xys[:, 0])
+        Ay, By = apply_AB(xys[:, 1])
+        k = len(xys)
+        return (Ax + By).reshape(k, -1), (Bx + Ay).reshape(k, -1)
+
+    def vind(xys):
+        top, bot = products(xys)
+        return np.hstack([top, -bot])
+
+    def precond(dx, e):
+        e = np.atleast_1d(e)
+        return davidson_shared._correction(dx, hdiag, e).reshape(dx.shape)
+
+    log = io.StringIO()
+    conv, e, xy = real_eig(vind, x0, precond, tol_residual=CONV_TOL,
+                           nroots=NROOTS, max_cycle=100,
+                           max_memory=max_memory, lindep=DAVIDSON_LINDEP,
+                           verbose=logger.Logger(log, logger.DEBUG1))
+    kept = [int(k) for k in re.findall(r'Generate (\d+) trial', log.getvalue())]
+    out = {}
+    for ntrack in (NROOTS, davidson_shared._tracked_roots(NROOTS, n)):
+        trace = []
+        out[ntrack] = casida_rows(
+            products, x0, lambda dx, e: [precond(b, e) for b in dx],
+            PairRows(n, None, n), tol_residual=CONV_TOL, nroots=NROOTS,
+            ntrack=ntrack, max_cycle=100, space_inc=space_inc,
+            max_space=max_space,
+            verbose=logger.Logger(sys.stdout, 0), trace=trace) + (trace,)
+    (conv1, e1, xy1, lower1, trace1), (conv2, e2, xy2, lower2, trace2) = (
+        out.values())
+    assert np.all(conv) and np.all(conv1) and lower1 == lower2 == np.inf
+    assert [s['kept'] for s in trace1[:-1]] == kept
+    assert np.abs(e - e1).max() <= ONE_TILE_ROOT_TOL
+    assert np.abs(xy - xy1).max() <= ONE_RANK_VECTOR_TOL
+    assert len(trace2) == len(trace1) and all(trace2[-1]['settled'])
+    assert len(e2) == davidson_shared._tracked_roots(NROOTS, n)
+    # two solves: to a few ulp
+    assert_same(e2[:NROOTS], e1, quantity='root', label='tracked roots')
+    assert_same(xy2[:NROOTS], xy1, unit='1', quantity='vector',
+                label='tracked vectors')
 
 
 @pytest.mark.parametrize('size', [1, 3])
 def test_restarts_apply_no_action(model, monkeypatch, size):
-    """A bound forced small: every restart takes the Ritz vectors' products
-    from the stored ones, so no action is applied on a restart cycle, and the
-    roots are the dense ones."""
+    """A bound forced small: every restart takes the lowest max(2 nroots,
+    tracked) Ritz vectors' products from the stored ones, so no action is
+    applied on a restart cycle, and the roots are the dense ones."""
     n_pair = model[1].size
     monkeypatch.setattr(davidson.param, 'MAX_MEMORY', 1)
-    monkeypatch.setattr(davidson, 'DAVIDSON_SPACE_GB',
+    monkeypatch.setattr(davidson_shared, 'DAVIDSON_SPACE_GB',
                         (FORCED_SPACE + 0.5) * 32 * n_pair / 1e9)
+    # the bound off any allocation: inside a SLURM job the allocation's
+    # memory sizes the space instead of DAVIDSON_SPACE_GB, and the space
+    # forced small here would hold the whole solve without a restart
+    monkeypatch.setattr(davidson, 'allocation_max_memory_mb',
+                        lambda *a, **k: None)
 
     def one_rank(comm):
         return root(*model[:2], comm, max_cycle=FORCED_MAX_CYCLE,
@@ -523,8 +624,11 @@ def test_restarts_apply_no_action(model, monkeypatch, size):
     restarts = [s for s in trace[1:] if s['fresh']]
     assert conv.all() and restarts
     assert counters['collapses'] == len(restarts)
-    assert all(s['applied'] == 0 and s['new'] == NROOTS for s in restarts)
-    assert counters['vectors'] == 2 * sum(s['applied'] for s in trace)
+    keep = min(max(2 * NROOTS, davidson_shared._tracked_roots(NROOTS, n_pair)),
+               davidson_shared._real_eig_space(1, NROOTS, n_pair)[0])
+    assert all(s['applied'] == 0 and s['new'] == keep for s in restarts)
+    assert counters['vectors'] == 2 * sum(s['applied'] + s['intervals']
+                                          for s in trace)
     assert max(s['m1'] for s in trace) <= FORCED_SPACE
     assert np.abs(om - model[3][:NROOTS]).max() <= CONV_TOL
 
@@ -559,13 +663,14 @@ def test_a_drifted_subspace_solution_is_rank_zeros(model, monkeypatch, size):
 
     moved = run_simulated(one_rank, size)
     for r, (out, stats) in enumerate(moved):
-        for a, b in zip(out[:3], clean[0][:3]):
-            assert bitwise(a, b)
+        # the repaired run against a clean one: two runs, to a few ulp
+        same_solve(out[:3], clean[0][:3], ('repaired', r))
         assert stats['mismatched_calls'] == (1 if r == target else 0)
 
 
 def test_the_subspace_time_is_split_into_its_pieces(model):
-    """Under a comm the pieces are the subspace work's; serially zero."""
+    """Under a comm and serially, on one tile, the pieces are the subspace
+    work's."""
     def one_rank(comm):
         t = {}
         with warnings.catch_warnings():
@@ -574,15 +679,12 @@ def test_the_subspace_time_is_split_into_its_pieces(model):
                                    comm=comm, timings=t, pair_tile=MODEL_TILE)
         return t
 
-    for t in run_simulated(one_rank, 2):
+    for t in run_simulated(one_rank, 2) + [one_rank(None)]:
         pieces = [t[f'davidson_subspace_{piece}'] for piece in SUBSPACE_PIECES]
         assert min(pieces) >= 0.0 and t['davidson_subspace_rows'] > 0.0
         assert t['davidson_subspace_reduce'] > 0.0
         assert t['davidson_subspace_gather'] > 0.0
         assert sum(pieces) <= t['davidson_subspace'] + TIMER_SLACK
-    t = one_rank(None)
-    assert all(t[f'davidson_subspace_{piece}'] == 0.0
-               for piece in SUBSPACE_PIECES)
 
 
 if __name__ == '__main__':

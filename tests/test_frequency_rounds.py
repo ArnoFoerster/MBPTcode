@@ -36,6 +36,9 @@ from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     polarizability_projected_rows)
 from src.gradients.qp_space_time import qp_set_gradient
+from src.SingleReference.GW.real_screening import ResidueRefused
+from src.Solvers.qp_equation import QPRootNotConverged
+from tests.isdf_test_grid import g1
 
 NTAU, NFREQ = 8, 24
 SIZES = [1, 2, 3, 5, 8]
@@ -54,7 +57,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')[:2]
+    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))[:2]
     eps = np.asarray(mf.mo_energy, float)
     gap = eps[nocc] - eps[nocc - 1]
     nu, wt = gauss_legendre_grid(NFREQ, w0=gap)
@@ -182,11 +185,17 @@ def wrong_owner(ranges_of):
     ('frequency_rounds', skip_one), ('frequency_rounds', twice),
     ('round_ranges', wrong_owner)])
 def test_a_planted_round_defect_fails(water, monkeypatch, name, plant):
-    """The forward's roots and wc move; the force either moves or refuses
-    (a frequency's adjoint handed back twice, or never)."""
+    """The forward's roots and wc move, or the root search refuses the
+    screening it was handed (`ResidueRefused`, `QPRootNotConverged`: no
+    quasiparticle where the corrupted Sigma can be evaluated); the force
+    either moves or refuses (a frequency's adjoint handed back twice, or
+    never)."""
     monkeypatch.setattr(ls_space_time, name,
                         plant(getattr(ls_space_time, name)))
-    out, _ = moved(water, TILES['five'], 3, forward=True)
+    try:
+        out, _ = moved(water, TILES['five'], 3, forward=True)
+    except (ResidueRefused, QPRootNotConverged):
+        return
     assert {n.split('.')[1] for n, _ in out} >= {'w', 'wc'}, plant.__name__
     try:
         out, _ = moved(water, TILES['five'], 3)

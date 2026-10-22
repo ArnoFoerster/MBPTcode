@@ -64,6 +64,7 @@ from src.Base.utils.threads import blas_threads
 from tests.reduction_bounds import (ULP, exact_offset, regrouped,
                                     rounding_bound)
 from tests.test_distributed_fit_mpi import Gate, serial
+from tests.isdf_test_grid import g1
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
@@ -80,7 +81,7 @@ OMEGA = 0.2
 def fresh(xc):
     """An unrun ISDF mean field on water/cc-pVDZ, the default grid."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS)
+    mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc)))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
 

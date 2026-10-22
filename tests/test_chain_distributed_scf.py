@@ -39,15 +39,15 @@ What that costs in agreement, and why none of it is a tuned tolerance:
     bit. The run is compared with itself rather than with a second factory's
     SCF, which a threaded pyscf would not repeat.
 
-THE GATE WAS SHOWN TO FAIL. Two threads of one process compute bitwise the
+WHAT BREAKS THE GATE. Two threads of one process compute bitwise the
 same thing from the same inputs, so a rank left to converge alone cannot be
 caught here (tests/test_simulated_ranks.py documents that blind spot at
 length) -- what this file catches is a distributed SCF that is not the serial
-one. With `DistributedDF._reduce_jk` made a no-op (the collective still
-called, on a copy) every rank iterates against its own auxiliary rows alone,
-the ranks' energies part, and the run raises rather than returning: at two
-ranks they stop at different cycles and the next lockstep refuses on every
-rank, at three one rank's DIIS meets a singular matrix.
+one. With `DistributedDF._reduce_jk` a no-op (the collective still called, on
+a copy) every rank iterates against its own auxiliary rows alone, the ranks'
+energies part, and the run raises rather than returning: at two ranks they
+stop at different cycles and the next lockstep refuses on every rank, at
+three one rank's DIIS meets a singular matrix.
 
 ONE MOLE PER RANK, for the reason tests/test_simulated_ranks.py gives: the
 nuclear gradient evaluates the nuclear-attraction derivative inside
@@ -63,10 +63,14 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import CONVERGED_SCF_FORCE_TOL
+from src.Base.constants import (CONVERGED_SCF_FORCE_TOL,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics import Numerics
 from src.Base.utils.mpi_grid import run_simulated
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from tests.test_mpi_routes import recorded
+from tests.isdf_test_grid import g1
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -89,7 +93,9 @@ def built(mol):
     object rather than to whoever calls `kernel`.
     """
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     return mf
 
 
@@ -109,7 +115,7 @@ def own_chain(factory):
     reaches `converged_factory` through `distributed_mean_field`.
     """
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
-    return RPAGroundStateChain(mol, factory, mf=converged(mol))
+    return RPAGroundStateChain(mol, factory, mf=converged(mol), numerics=Numerics(isdf={'counts': g1(mol)}))
 
 
 def own_displaced():

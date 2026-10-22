@@ -13,7 +13,6 @@ every step, so every step is rejected and the walk returns its start.
 import numpy as np
 from pyscf import gto
 
-import src.gradients  # noqa: F401  cycle: src.properties imports src.gradients
 from src.properties.optimize import optimize
 from src.properties.surface import followed_root
 

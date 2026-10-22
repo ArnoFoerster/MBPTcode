@@ -17,16 +17,21 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.constants import BSE_DENSE_MAX_GB, BSE_DENSE_MAX_NOV
+from src.Base.numerics import Numerics
 from src.SingleReference.LinearResponse import bse as bse_module
 from src.SingleReference.LinearResponse.bse import (_check_route_kwargs,
                                                     solve_bse, solver_choice)
+from tests.pins import assert_same
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-jkfit'
 NROOTS = 3
 #: Hartree. BSE@G0W0 on water/cc-pVDZ RHF, integrals='df' in the Coulomb-fitting
-#: auxiliary basis, probe off -- the three lowest roots of the front end before
-#: `solver_choice` existed, and what both explicit solvers must still return.
+#: auxiliary basis, probe off -- the three lowest roots of the front end, and
+#: what both explicit solvers must still return, recorded on the workstation
+#: under the shared bracket-and-refine quasiparticle finder (largest valid Z on
+#: every route). Dense and Davidson agree to 1e-12, so a move of these roots is
+#: the GW step's, not the solver choice's.
 REFERENCE_OMEGA = np.array([0.310309502912, 0.385855109783, 0.407478088639])
 #: Hartree. The Davidson stops on a residual of 1e-5 (its default `conv_tol`),
 #: which lands the roots this far from the dense eigh; measured here at 1.6e-13.
@@ -77,26 +82,27 @@ def test_water_is_dense(water):
 
 def test_auto_resolves_to_dense_and_records_what_it_ran(water):
     """'auto' is resolved before any route runs, so info reports the route that
-    actually ran and the numbers are the dense route's to the last bit."""
+    actually ran and the numbers are the dense route's: two solves, so the
+    same to a few ulp (`assert_same` of tests/pins.py), not bitwise."""
     mol, mf, nocc = water
     om_auto, x_auto, y_auto, info_auto = solve_bse(
-        mf, mol, nocc, nroots=NROOTS, solver='auto', integrals='df', probe=False)
+        mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), solver='auto', integrals='df', probe=False)
     om_dense, x_dense, y_dense, _ = solve_bse(
-        mf, mol, nocc, nroots=NROOTS, solver='dense', integrals='df', probe=False)
+        mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), solver='dense', integrals='df', probe=False)
     assert info_auto['solver'] == 'dense'
-    assert np.array_equal(om_auto, om_dense)
-    assert np.array_equal(x_auto, x_dense)
-    assert np.array_equal(y_auto, y_dense)
+    assert_same(om_auto, om_dense, quantity='root', label='omega')
+    assert_same(x_auto, x_dense, unit='1', quantity='vector', label='X')
+    assert_same(y_auto, y_dense, unit='1', quantity='vector', label='Y')
 
 
 def test_both_explicit_solvers_return_the_reference_roots(water):
-    """The regression the one-rule change had to leave untouched: the two
-    explicit routes on one mean field, agreeing with each other to the
+    """The two explicit routes on one mean field, agreeing with each other to
+    the
     Davidson's convergence and with the recorded roots."""
     mol, mf, nocc = water
-    om_dense = solve_bse(mf, mol, nocc, nroots=NROOTS, solver='dense',
+    om_dense = solve_bse(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), solver='dense',
                          integrals='df', probe=False)[0]
-    om_dav = solve_bse(mf, mol, nocc, nroots=NROOTS, solver='davidson',
+    om_dav = solve_bse(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), solver='davidson',
                        integrals='df', probe=False)[0]
     assert np.abs(np.sort(om_dense) - REFERENCE_OMEGA).max() < DENSE_TOL
     assert np.abs(np.sort(om_dav) - np.sort(om_dense)).max() < DAVIDSON_TOL
@@ -134,6 +140,6 @@ def test_grid_accuracy_reaches_the_isdf_route(water, monkeypatch):
         return np.zeros(1), np.zeros((1, 1)), np.zeros((1, 1)), {}
 
     monkeypatch.setattr(bse_module, 'solve_bse_isdf', spy)
-    solve_bse(mf, mol, nocc, nroots=NROOTS, solver='davidson', integrals='isdf',
+    solve_bse(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), solver='davidson', integrals='isdf',
               grid_accuracy='G2')
     assert seen['grid_accuracy'] == 'G2'

@@ -43,6 +43,8 @@ from src.Base.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
                                 CONFORMER_SINGLE_BOND_RATIO,
                                 CONFORMER_TEMPERATURE, CONFORMER_TORSION_GRID,
                                 HARTREE_TO_EV)
+from src.Base.geometry import molecule_at
+from src.Base.step_failed import StepFailed
 from src.properties.optimize import relax
 
 # Weisfeiler-Lehman refinement rounds behind the symmetry-aware RMSD. Three
@@ -466,14 +468,6 @@ def _relax_start(surface, mol, engine, loose, relax_kw):
     return relax(surface, mol, engine=engine, **kw)
 
 
-def _mol_at(mol, coords):
-    """`mol` rebuilt at `coords` (Bohr)."""
-    out = mol.copy()
-    out.set_geom_(np.asarray(coords), unit='Bohr')
-    out.build(False, False)
-    return out
-
-
 def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
                       max_starts=CONFORMER_MAX_STARTS,
                       temperature=CONFORMER_TEMPERATURE, engine='auto',
@@ -501,9 +495,10 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
     resolve gaps; `refine=False` reports minima whose ENERGY ORDERING is only
     good to that much, and their populations with it.
 
-    A start that fails to evaluate -- a torsion rotated into a clash, a state
-    that stops existing there -- is dropped with its status recorded rather than
-    raised: the conformers that did relax are still the useful output.
+    A start whose walk fails a step it cannot shorten (`StepFailed`: a state
+    lost, a broken Casida solve, conventions that cannot be matched) is dropped
+    with its status recorded: the conformers that did relax are still the
+    useful output. Any other exception is a defect and propagates.
     """
     mol = surface.mol0 if mol is None else mol
     adj = molecular_graph(mol)
@@ -523,9 +518,9 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
     def relax_loose(item):
         n, (crd, offsets) = item
         try:
-            mol_opt, info = _relax_start(surface, _mol_at(mol, crd), engine,
+            mol_opt, info = _relax_start(surface, molecule_at(mol, crd), engine,
                                          True, relax_kw)
-        except Exception as exc:                      # a start that dissociates
+        except StepFailed as exc:
             return n, offsets, None, None, f'{type(exc).__name__}: {exc}'
         if info.get('energy') is None:
             return n, offsets, None, None, info.get('status', 'no energy')
@@ -537,7 +532,7 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
         if crd_opt is None:
             failed.append((offsets, why))
             continue
-        records.append({'mol': _mol_at(mol, crd_opt), 'energy': float(info['energy']),
+        records.append({'mol': molecule_at(mol, crd_opt), 'energy': float(info['energy']),
                         'offsets': offsets, 'index': n,
                         'converged': bool(info.get('converged')), 'info': info})
     if not records:
@@ -554,7 +549,7 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
             try:
                 mol_opt, info = _relax_start(surface, rep['mol'], engine, False,
                                              relax_kw)
-            except Exception as exc:
+            except StepFailed as exc:
                 return None, None, f'{type(exc).__name__}: {exc}'
             if info.get('energy') is None:
                 return None, None, info.get('status', 'no energy')
@@ -566,7 +561,7 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
             if crd_opt is None:
                 failed.append((rep['offsets'], why))
                 continue
-            refined.append(dict(rep, mol=_mol_at(mol, crd_opt),
+            refined.append(dict(rep, mol=molecule_at(mol, crd_opt),
                                 energy=float(info['energy']),
                                 converged=bool(info.get('converged')),
                                 info=info,

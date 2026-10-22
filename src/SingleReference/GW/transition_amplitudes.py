@@ -498,149 +498,64 @@ class AmplitudeGenerator:
             
         return chiXYb
 
-    def get_chi_b_vertex_sf_df(self, nocc, X, Y, spin_channel='alpha', channel='ba', eri_w=None, p_state=None):
-        """Computes the spin-flip vertex correction transition amplitude chiXYb using density fitting."""
+    def _spin_flip_vertex(self, nocc, X, Y, spin_channel, p_state, integral):
+        """Spin-flip vertex amplitude M[n, r] of the spin-orbital eh pair, r of the spin opposite to p.
+
+        X, Y: the coupled spin-flip solution, ab pairs (occ_a -> virt_b) then ba
+        pairs (occ_b -> virt_a). A spin-flip exciton carries only the exchange
+        part of <pr||..>. With p of spin s and r of spin t, the st pairs
+        (occ_s -> virt_t) and ts pairs (occ_t -> virt_s) give
+            virtual r:  M[n, r] = sum_ia X^ts_ia (p a|i r) + sum_jc Y^st_jc (p j|c r),
+            occupied r: M[n, r] = sum_ia X^st_ia (p i|a r) + sum_kc Y^ts_kc (c p|r k).
+        `integral(i1, i2, i3, i4)` is (i1 i2|i3 i4) with the first pair of spin s,
+        the second of spin t. Every exciton enters Sigma with weight one; the
+        solution holds the M_s = +-1 components, the M_s = 0 one sits in the
+        spin-conserving sum.
+        """
+        if p_state is None:
+            raise ValueError("the spin-flip vertex is built for one p_state at a time")
         nocc_a, nocc_b = nocc
-        
-        # Helper to get the correct density fitting block
-        def get_df_block(spin1, spin2, idx1, idx2):
-            if spin1 == 'a' and spin2 == 'a':
-                return self.df_a[:, idx1[:, None], idx2]
-            elif spin1 == 'b' and spin2 == 'b':
-                return self.df_b[:, idx1[:, None], idx2]
-            elif spin1 == 'b' and spin2 == 'a':
-                return self.df_ab[:, idx1[:, None], idx2]
-            else: # 'a' and 'b'
-                return self.df_ab[:, idx2[:, None], idx1].transpose(0, 2, 1)
-                
-        # Determine excitation spins
-        s_i = 'b' if channel == 'ba' else 'a'
-        s_a = 'a' if channel == 'ba' else 'b'
-        s_p = 'a' if spin_channel == 'alpha' else 'b'
-        
-        if channel == 'ba':
-            occ = np.arange(nocc_b)
-            virt = np.arange(nocc_a, self.norb_a)
-            virt_target = np.arange(nocc_b, self.norb_b)
-        else:
-            occ = np.arange(nocc_a)
-            virt = np.arange(nocc_b, self.norb_b)
-            virt_target = np.arange(nocc_a, self.norb_a)
-            
-        nocc_val = len(occ)
-        nvirt_val = len(virt)
-        nvirt_target = len(virt_target)
+        n_ab = nocc_a * (self.norb_b - nocc_b)
         nexciton = X.shape[1]
-        
-        X_spin = X
-        Y_spin = Y
-        X_3d = X_spin.reshape(nocc_val, nvirt_val, -1)
-        Y_3d = Y_spin.reshape(nocc_val, nvirt_val, -1)
-        X_flat = X_3d.reshape(-1, nexciton)
-        Y_flat = Y_3d.reshape(-1, nexciton)
-        
-        W = np.eye(self.naux) if eri_w is None else np.asarray(eri_w)
-        w_key = self._identity_key(eri_w) if eri_w is not None else ('eye', self.naux)
-
-        # Set up density fitting coefficients
-        C_vo = get_df_block(s_a, s_i, virt, occ)
-        C_oo = get_df_block(s_i, s_i, occ, occ)
-        C_ko = get_df_block(s_i, s_i, virt_target, occ)
-        C_vp_slice = get_df_block(s_a, s_p, virt, np.array([p_state]))[:, :, 0]
-        C_op_slice = get_df_block(s_i, s_p, occ, np.array([p_state]))[:, :, 0]
-        C_op_slice_v = get_df_block(s_i, s_p, virt_target, np.array([p_state]))[:, :, 0]
-
-        C_vo_flat = C_vo.reshape(self.naux, -1)
-        C_oo_flat = C_oo.reshape(self.naux, -1)
-        C_ko_flat = C_ko.reshape(self.naux, -1)
-
-        # Sliced occupied block (intermediate is occupied)
-        tmp_1 = W @ C_op_slice
-        res_1 = C_vo_flat.T @ tmp_1
-        integs1_iak = res_1.reshape(nvirt_val, nocc_val, nocc_val).transpose(2, 0, 1)
-
-        # tmp_2/tmp_2_v depend only on (nocc, channel, eri_w) -- independent of
-        # spin_channel and p_state -- so cached across the p_state loop, same
-        # rationale as get_chi_b_vertex_df.
-        tmp_2 = self._amp_cache(('chi_b_sf_tmp2', nocc, channel, w_key),
-                                 lambda: W @ C_oo_flat)
-        res_2 = C_vp_slice.T @ tmp_2
-        integs2_iak = res_2.reshape(nvirt_val, nocc_val, nocc_val).transpose(1, 0, 2)
-
-        integs1_flat_o = integs1_iak.reshape(nocc_val * nvirt_val, nocc_val)
-        integs2_flat_o = integs2_iak.reshape(nocc_val * nvirt_val, nocc_val)
-
-        chi_occ = self._blocked_contract(X_flat, integs1_flat_o, Y_flat, integs2_flat_o)
-
-        # Sliced virtual block (intermediate is virtual)
-        tmp_1_v = W @ C_op_slice_v
-        res_1_v = C_vo_flat.T @ tmp_1_v
-        integs1_iac = res_1_v.reshape(nvirt_val, nocc_val, nvirt_target).transpose(1, 0, 2)
-
-        tmp_2_v = self._amp_cache(('chi_b_sf_tmp2v', nocc, channel, w_key),
-                                   lambda: W @ C_ko_flat)
-        res_2_v = C_vp_slice.T @ tmp_2_v
-        integs2_iac = res_2_v.reshape(nvirt_val, nvirt_target, nocc_val).transpose(2, 0, 1)
-
-        integs1_flat_v = integs1_iac.reshape(nocc_val * nvirt_val, nvirt_target)
-        integs2_flat_v = integs2_iac.reshape(nocc_val * nvirt_val, nvirt_target)
-
-        chi_virt = self._blocked_contract(X_flat, integs1_flat_v, Y_flat, integs2_flat_v)
-
-        chiXYb = np.concatenate([chi_occ, chi_virt], axis=1)
-        return chiXYb
-
-    def get_chi_b_vertex_sf_full(self, nocc, X, Y, spin_channel='alpha', channel='ba', eri_w=None, p_state=None):
-        """Computes the spin-flip vertex correction transition amplitude chiXYb using full ERIs."""
-        nocc_a, nocc_b = nocc
-        
-        if channel == 'ba':
-            occ = np.arange(nocc_b)
-            virt = np.arange(nocc_a, self.norb_a)
-        else:
-            occ = np.arange(nocc_a)
-            virt = np.arange(nocc_b, self.norb_b)
-            
-        nocc_val = len(occ)
-        nvirt_val = len(virt)
-        nexciton = X.shape[1]
-        
-        X_spin = X
-        Y_spin = Y
-        X_3d = X_spin.reshape(nocc_val, nvirt_val, -1)
-        Y_3d = Y_spin.reshape(nocc_val, nvirt_val, -1)
-        X_flat = X_3d.reshape(-1, nexciton)
-        Y_flat = Y_3d.reshape(-1, nexciton)
-        
-        if eri_w is None:
-            eri_w = self.eri_ab
-            
+        blocks = {'ab': (nocc_a, self.norb_b - nocc_b), 'ba': (nocc_b, self.norb_a - nocc_a)}
+        X_ab, X_ba = X[:n_ab].reshape(*blocks['ab'], nexciton), X[n_ab:].reshape(*blocks['ba'], nexciton)
+        Y_ab, Y_ba = Y[:n_ab].reshape(*blocks['ab'], nexciton), Y[n_ab:].reshape(*blocks['ba'], nexciton)
         if spin_channel == 'alpha':
-            norb_target = len(self.eps_b)
-            if channel == 'ba':
-                integs1 = eri_w[np.ix_(virt, occ, np.array([p_state]), np.arange(norb_target))].transpose(1, 0, 3, 2)[:, :, :, 0]
-                integs2 = eri_w[np.ix_(virt, np.arange(norb_target), np.array([p_state]), occ)].transpose(3, 0, 1, 2)[:, :, :, 0]
-            else:
-                integs1 = eri_w[np.ix_(np.array([p_state]), np.arange(norb_target), occ, virt)].transpose(2, 3, 1, 0)[:, :, :, 0]
-                integs2 = eri_w[np.ix_(np.array([p_state]), virt, occ, np.arange(norb_target))].transpose(2, 1, 3, 0)[:, :, :, 0]
+            nocc_s, norb_s, nocc_t, norb_t = nocc_a, self.norb_a, nocc_b, self.norb_b
+            X_st, Y_st, X_ts, Y_ts = X_ab, Y_ab, X_ba, Y_ba
         else:
-            norb_target = len(self.eps_a)
-            if channel == 'ba':
-                integs1 = eri_w[np.ix_(np.arange(norb_target), np.array([p_state]), virt, occ)].transpose(3, 2, 0, 1)[:, :, :, 0]
-                integs2 = eri_w[np.ix_(np.arange(norb_target), np.array([p_state]), occ, virt)].transpose(2, 3, 0, 1)[:, :, :, 0]
-            else:
-                integs1 = eri_w[np.ix_(np.arange(norb_target), np.array([p_state]), occ, virt)].transpose(2, 3, 0, 1)[:, :, :, 0]
-                integs2 = eri_w[np.ix_(occ, np.array([p_state]), np.arange(norb_target), virt)].transpose(0, 3, 2, 1)[:, :, :, 0]
-                
-        integs1_flat_o = integs1[:, :, :nocc_val].reshape(nocc_val * nvirt_val, nocc_val)
-        integs2_flat_o = integs2[:, :, :nocc_val].reshape(nocc_val * nvirt_val, nocc_val)
-        
-        chi_occ = self._blocked_contract(X_flat, integs1_flat_o, Y_flat, integs2_flat_o)
+            nocc_s, norb_s, nocc_t, norb_t = nocc_b, self.norb_b, nocc_a, self.norb_a
+            X_st, Y_st, X_ts, Y_ts = X_ba, Y_ba, X_ab, Y_ab
+        occ_s, virt_s = np.arange(nocc_s), np.arange(nocc_s, norb_s)
+        occ_t, virt_t = np.arange(nocc_t), np.arange(nocc_t, norb_t)
+        p = np.array([p_state])
+        chi = np.zeros((nexciton, norb_t))
+        chi[:, virt_t] = (np.einsum('ian,air->nr', X_ts, integral(p, virt_s, occ_t, virt_t)[0], optimize=True)
+                          + np.einsum('jcn,jcr->nr', Y_st, integral(p, occ_s, virt_t, virt_t)[0], optimize=True))
+        chi[:, occ_t] = (np.einsum('ian,iar->nr', X_st, integral(p, occ_s, virt_t, occ_t)[0], optimize=True)
+                         + np.einsum('kcn,crk->nr', Y_ts, integral(virt_s, p, occ_t, occ_t)[:, 0], optimize=True))
+        return chi
 
-        integs1_flat_v = integs1[:, :, nocc_val:].reshape(nocc_val * nvirt_val, nvirt_val)
-        integs2_flat_v = integs2[:, :, nocc_val:].reshape(nocc_val * nvirt_val, nvirt_val)
+    def get_chi_b_vertex_sf_df(self, nocc, X, Y, spin_channel='alpha', eri_w=None, p_state=None):
+        """Spin-flip vertex amplitude (see _spin_flip_vertex) with density fitting; eri_w is W_aux."""
+        coeff_s, coeff_t = ((self.df_a, self.df_b) if spin_channel == 'alpha'
+                            else (self.df_b, self.df_a))
+        W = np.eye(self.naux) if eri_w is None else np.asarray(eri_w)
 
-        chi_virt = self._blocked_contract(X_flat, integs1_flat_v, Y_flat, integs2_flat_v)
+        def integral(i1, i2, i3, i4):
+            left = coeff_s[:, i1[:, None], i2].reshape(self.naux, -1)
+            right = coeff_t[:, i3[:, None], i4].reshape(self.naux, -1)
+            return (left.T @ (W @ right)).reshape(len(i1), len(i2), len(i3), len(i4))
 
-        chiXYb = np.concatenate([chi_occ, chi_virt], axis=1)
-        return chiXYb
+        return self._spin_flip_vertex(nocc, X, Y, spin_channel, p_state, integral)
+
+    def get_chi_b_vertex_sf_full(self, nocc, X, Y, spin_channel='alpha', eri_w=None, p_state=None):
+        """Spin-flip vertex amplitude (see _spin_flip_vertex) with full ERIs; eri_w is the (aa|bb) block of W."""
+        eri = self.eri_ab if eri_w is None else eri_w
+
+        def integral(i1, i2, i3, i4):
+            if spin_channel == 'alpha':
+                return eri[np.ix_(i1, i2, i3, i4)]
+            return eri[np.ix_(i3, i4, i1, i2)].transpose(2, 3, 0, 1)
+
+        return self._spin_flip_vertex(nocc, X, Y, spin_channel, p_state, integral)

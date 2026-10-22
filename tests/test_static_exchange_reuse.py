@@ -5,7 +5,7 @@ The static term of every imaginary-axis quasiparticle route is
 potential on the DFT grid. It carries NO state index and NO spectrum -- K and
 v_xc are functionals of the converged density and the orbitals -- so a
 two-state window costs exactly what the whole BSE diagonal costs, and a driver
-that runs a GW window and then a BSE used to pay for it twice. On
+that runs a GW window and then a BSE must not pay for it twice. On
 naphthalene/cc-pVDZ/PBE0 at two threads one build is 1.23 s, split 1.00 s for
 `nr_rks` on the DFT grid, 0.08 s for K and 0.004 s for J; on
 anthracene/cc-pVTZ/PBE0 it is the ~22 s of `t_qp_static` that no rank count
@@ -17,7 +17,7 @@ with it, so the gates here are BITWISE, not on a tolerance.
 
 What is gated:
 
-  * the handed-in matrix reproduces the built diagonal exactly, on HF and on
+  * the handed-in matrix reproduces the built diagonal to a few ulp, on HF and on
     PBE0, for a two-state window and for the whole diagonal;
   * `shifted_mean_field` -- the view each evGW cycle screens with -- builds the
     same matrix as the mean field it copies, which is why one build may serve
@@ -26,54 +26,41 @@ What is gated:
     still lands on top of it exactly as it lands on a freshly built one;
   * `solve_bse_isdf` builds it ONCE for a whole BSE@G0W0 and once for a whole
     evGW loop, and not at all when the caller hands one in, with the roots
-    bitwise either way;
-  * the window's quasiparticle energies are bitwise the built ones, serially
-    and under simulated ranks;
+    the same to a few ulp either way;
+  * the window's quasiparticle energies are the built ones to a few ulp,
+    serially and under simulated ranks (two computations,
+    the few-ulp bar is floored at one Ha, so the HF diagonal
+    cases below, whose whole term is 1e-16 Ha, no longer see a 1e-6
+    relative perturbation);
   * `exchange='df-direct'` forms no such matrix and refuses a handed-in one.
 
-EVERY GATE HERE WAS SHOWN TO FAIL, each perturbation applied to a backup of
-the file, restored and `cmp`-verified afterwards:
+What breaks each gate:
 
-  perturbation                           gates that then fail
-  the handed-in matrix scaled by         9 of 14: the four
-  1 + 1e-6, at the call sites in this    test_handed_matrix_is_the_built
-  file (`sigma_x_matrix=(1 + 1e-6) *     _diagonal cases (2.7e-22 and 4.5e-21
-  matrix`) and nowhere else, so the      Ha on HF, where the whole term is
-  built side stays put                   1e-16; 1.9e-07 and 1.3e-06 Ha on
-                                         PBE0), the PBE0 reaction-field case
-                                         (1.9e-07 Ha), the window
-                                         (1.7e-07 Ha) and the BSE roots
-                                         (3.0e-07 Ha). At
-                                         1 + 1e-12 instead, only the five
-                                         diagonal gates fail: a 5e-13 Ha
-                                         shift is below what a converged
-                                         Newton root and a conv_tol=1e-5
-                                         Davidson resolve, so the solved
-                                         quantities need a perturbation above
-                                         their own solver tolerance before a
-                                         bitwise gate on them can see it
-  `static_exchange_matrix` ignores its   test_bse_builds_the_static_matrix
-  `sigma_x_matrix` and rebuilds          _once, 2 builds where 1 is expected.
-  (`if True:` on the branch)             The value gates do NOT fail, and
-                                         cannot: both sides then rebuild the
-                                         same matrix. Counting the builds is
-                                         what catches a hand-in silently
-                                         dropped, and comparing the values is
-                                         what catches a wrong one
-  `solve_bse_isdf` drops the             test_bse_builds_the_static_matrix
-  `gw_kw['sigma_x_matrix']` hand-off     _once, 2 builds where 1 is expected,
-                                         and test_evgw_builds_the_static
-                                         _matrix_once, 4 builds for 3 cycles.
-                                         The evGW roots are the same to every
-                                         printed digit either way, which is
-                                         the point: the rebuild was pure cost
-  `static_exchange_diagonal` accepts     test_df_direct_refuses_a_matrix
-  a matrix on 'df-direct' (the raise
-  removed)
+  * The handed-in matrix scaled by 1 + 1e-6 at the call sites in this file
+    (`sigma_x_matrix=(1 + 1e-6) * matrix`), the built side untouched: the four
+    test_handed_matrix_is_the_built_diagonal cases (2.7e-22 and 4.5e-21 Ha on
+    HF, where the whole term is 1e-16; 1.9e-07 and 1.3e-06 Ha on PBE0), the
+    PBE0 reaction-field case (1.9e-07 Ha), the window (1.7e-07 Ha) and the BSE
+    roots (3.0e-07 Ha). At 1 + 1e-12 only the five diagonal gates see it: a
+    5e-13 Ha shift is below what a converged Newton root and a conv_tol=1e-5
+    Davidson resolve, so the solved quantities need a perturbation above their
+    own solver tolerance before a few-ulp gate on them can see it.
+  * `static_exchange_matrix` ignoring its `sigma_x_matrix` and rebuilding:
+    test_bse_builds_the_static_matrix_once, 2 builds where 1 is expected. The
+    value gates cannot see it, since both sides then rebuild the same matrix.
+    Counting the builds catches a hand-in silently dropped, comparing the
+    values catches a wrong one.
+  * `solve_bse_isdf` dropping the `gw_kw['sigma_x_matrix']` hand-off:
+    test_bse_builds_the_static_matrix_once, 2 builds where 1 is expected, and
+    test_evgw_builds_the_static_matrix_once, 4 builds for 3 cycles. The evGW
+    roots are the same to every printed digit either way: the rebuild is pure
+    cost.
+  * `static_exchange_diagonal` accepting a matrix on 'df-direct' (the raise
+    removed): test_df_direct_refuses_a_matrix.
 
-The PBE0 reference of the shared fixture is itself a perturbation finding: on
-Hartree-Fock the scaled hand-in moved the window and the BSE roots by nothing
-at all, because <Sigma_x - v_xc> vanishes there by construction and the
+The PBE0 reference of the shared fixture matters: on Hartree-Fock the scaled
+hand-in moves the window and the BSE roots by nothing at all, because <Sigma_x
+- v_xc> vanishes there by construction and the
 quasiparticle energy never reads it.
 
 Run as a script, this file hands itself to pytest and exits with its verdict.
@@ -88,6 +75,7 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
+from src.Base.numerics import Numerics
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW import qp_solve
 from src.SingleReference.GW.evGW import shifted_mean_field
@@ -97,6 +85,8 @@ from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: Both references the routes serve: on Hartree-Fock the static term is zero by
@@ -125,13 +115,13 @@ def water():
     quasiparticle energy there and every gate below would pass blind."""
     mf, mol, nocc = mean_field('pbe0')
     return dict(mf=mf, mol=mol, nocc=nocc,
-                factors=separable_factors(mf, mol, auxbasis='cc-pvdz-ri'))
+                factors=separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol)))
 
 
 @pytest.mark.parametrize('xc', REFERENCES)
 @pytest.mark.parametrize('window', ['window', 'full'])
 def test_handed_matrix_is_the_built_diagonal(xc, window):
-    """Handing the matrix in leaves the diagonal bit for bit where it was."""
+    """Handing the matrix in leaves the diagonal where it was, to a few ulp."""
     mf, mol, nocc = mean_field(xc)
     nmo = mf.mo_coeff.shape[1]
     states = (np.asarray([nocc - 1, nocc]) if window == 'window'
@@ -139,10 +129,12 @@ def test_handed_matrix_is_the_built_diagonal(xc, window):
     built = static_exchange_diagonal(mf, mol, states)
     matrix = static_exchange_mean_field_matrix(mf, mol)
     handed = static_exchange_diagonal(mf, mol, states, sigma_x_matrix=matrix)
-    assert np.array_equal(handed, built), 'the cached static term moved'
+    assert_same(handed, built, quantity='root',
+                label='the cached static term moved')
     # The full matrix route agrees with itself too, so a caller may keep either.
-    assert np.array_equal(np.diag(static_exchange_matrix(
-        mf, mol, sigma_x_matrix=matrix))[states], built)
+    assert_same(np.diag(static_exchange_matrix(
+        mf, mol, sigma_x_matrix=matrix))[states], built, quantity='root',
+        label='the full matrix route')
 
 
 @pytest.mark.parametrize('xc', REFERENCES)
@@ -152,8 +144,9 @@ def test_the_shifted_mean_field_builds_the_same_matrix(xc):
     mf, mol, _ = mean_field(xc)
     eps = np.asarray(mf.mo_energy, float)
     view = shifted_mean_field(mf, eps + 0.1)
-    assert np.array_equal(static_exchange_mean_field_matrix(view, mol),
-                          static_exchange_mean_field_matrix(mf, mol))
+    assert_same(static_exchange_mean_field_matrix(view, mol),
+                static_exchange_mean_field_matrix(mf, mol), quantity='root',
+                label='shifted view')
 
 
 @pytest.mark.parametrize('xc', REFERENCES)
@@ -168,7 +161,7 @@ def test_the_reaction_field_stays_outside_the_cached_matrix(xc):
     matrix = static_exchange_mean_field_matrix(mf, mol)
     handed = static_exchange_diagonal(mf, mol, states, reaction_field=shift,
                                       sigma_x_matrix=matrix)
-    assert np.array_equal(handed, built)
+    assert_same(handed, built, quantity='root', label='with a reaction field')
     assert not np.array_equal(built, static_exchange_diagonal(mf, mol, states))
 
 
@@ -192,7 +185,7 @@ def test_window_is_bitwise_with_a_handed_matrix(water):
     handed = solve_qp_energy_space_time(w['mf'], w['mol'], w['nocc'], window,
                                         factors=w['factors'],
                                         sigma_x_matrix=matrix)
-    assert np.array_equal(handed, ref)
+    assert_same(handed, ref, quantity='continued', label='window')
 
 
 def test_window_times_the_static_term_apart(water):
@@ -207,7 +200,7 @@ def test_window_times_the_static_term_apart(water):
                                        factors=w['factors'], timings=timings)
     plain = solve_qp_energy_space_time(w['mf'], w['mol'], w['nocc'], window,
                                        factors=w['factors'])
-    assert np.array_equal(timed, plain)
+    assert_same(timed, plain, quantity='continued', label='timed window')
     for key in ('t_qp_static', 't_qp_states', 't_qp'):
         assert key in timings and timings[key] >= 0.0, key
     assert timings['t_qp_static'] + timings['t_qp_states'] <= timings['t_qp'] + 1e-3
@@ -229,7 +222,7 @@ def test_simulated_ranks_take_the_handed_matrix(water, size):
                                           distribute=True, comm=comm)
 
     for qp in run_simulated(one_rank, size):
-        assert np.array_equal(qp, ref)
+        assert_same(qp, ref, quantity='continued', label='ranks')
 
 
 def count_builds(monkeypatch):
@@ -253,13 +246,13 @@ def test_bse_builds_the_static_matrix_once(water, monkeypatch):
     caller hands one in."""
     w = water
     calls, built = count_builds(monkeypatch)
-    solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=2,
+    solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
                    factors=w['factors'], probe=False, progress=False)
     assert len(calls) == 1, f'{len(calls)} static builds for one BSE@G0W0'
 
     matrix = built(w['mf'], w['mol'])
     calls.clear()
-    solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=2,
+    solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
                    factors=w['factors'], probe=False, progress=False,
                    sigma_x_matrix=matrix)
     assert not calls, 'a handed-in matrix was rebuilt anyway'
@@ -271,10 +264,10 @@ def test_evgw_builds_the_static_matrix_once(water, monkeypatch):
     not one per cycle."""
     w = water
     calls, _ = count_builds(monkeypatch)
-    _, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=2,
+    _, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
                                    factors=w['factors'], probe=False,
                                    progress=False, self_consistency='evGW',
-                                   gw_kwargs={'max_cycle': 3})
+                                   gw_kwargs={'max_cycle': 3, 'tol': 1e-2})
     cycles = info['evgw']['cycles']
     assert cycles > 1, 'one cycle cannot show a per-cycle rebuild'
     assert len(calls) == 1, f'{len(calls)} static builds for {cycles} cycles'
@@ -283,14 +276,14 @@ def test_evgw_builds_the_static_matrix_once(water, monkeypatch):
 def test_bse_roots_are_bitwise_with_a_handed_matrix(water):
     """The roots do not care where the static term came from."""
     w = water
-    ref, _, _, _ = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=2,
+    ref, _, _, _ = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
                                   factors=w['factors'], probe=False,
                                   progress=False)
     matrix = static_exchange_mean_field_matrix(w['mf'], w['mol'])
-    handed, _, _, _ = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=2,
+    handed, _, _, _ = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
                                      factors=w['factors'], probe=False,
                                      progress=False, sigma_x_matrix=matrix)
-    assert np.array_equal(handed, ref)
+    assert_same(handed, ref, quantity='root', label='BSE roots')
 
 
 if __name__ == '__main__':

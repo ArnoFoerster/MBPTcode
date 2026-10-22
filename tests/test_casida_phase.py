@@ -20,7 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.gradients.excited_state import casida_phase
+from src.gradients.state_following import casida_phase
+from tests.pins import assert_same
 from tests.test_shared_evaluation_consumers import (fresh, molecule,
                                                     prototype)
 
@@ -84,7 +85,10 @@ def test_the_first_interstate_gradient_on_a_fresh_chain_is_the_second():
     chain = fresh(prototype('hf-davidson-grid', molecule()), ('singlet', 0))
     first, _ = chain.interstate_gradient(0, 1)
     second, _ = chain.interstate_gradient(0, 1)
-    assert np.array_equal(first, second)
+    # the second is computed again on the held forward pass: the same to a
+    # few ulp (a flipped sign would move it by its own size)
+    assert_same(second, first, quantity='gradient',
+                label='second interstate gradient')
 
 
 if __name__ == '__main__':

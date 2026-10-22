@@ -1,12 +1,10 @@
 """`rsh_split` and `xc_hybrid_coeff`, the two coefficient readers.
 
-WHAT THESE ARE NOT ANY MORE: a pin on a refusal. The skeleton derivatives
-CARRY a range-separated hybrid now, channel by channel -- see
-`test_range_separated_exchange.py`, which gates that, and
+The skeleton derivatives CARRY a range-separated hybrid, channel by channel --
+see `test_range_separated_exchange.py`, which gates that, and
 `isdf_derivatives.exchange_channels`, which is what they are built from. What
-survives here is the reading of the coefficients themselves, and the fact that
-`xc_hybrid_coeff` returns ALPHA and so is not a weight: that is the trap the
-refusal was really guarding, and it outlived the refusal.
+is gated here is the reading of the coefficients themselves, and the fact that
+`xc_hybrid_coeff` returns ALPHA and so is not a weight.
 """
 import numpy as np
 import pytest

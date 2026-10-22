@@ -9,18 +9,15 @@ calls `isdf_grid` for every mean field it fits, so a dropped keyword changes
 the exchange matrix and, through it, every energy and gradient built on top,
 while looking like an ordinary run.
 
-THE SWEEP WAS SHOWN TO FAIL ONCE. `isdf_grid` never checked its explicit-radii
-branch against the shipped table: it set `origins = {el: False for el in
-radii}` unconditionally, so a caller who passed the published carbon radii
-alongside their own counts got a grid with the nuclear point silently
-dropped. Reinstating that branch on a backup copy of `isdf_jk.py` (`cp`,
-overwrite the fixed `isdf_grid` with the old one, `pytest`, restore, `cmp`
-against the backup to confirm the restore) makes
-`test_a_matching_row_brings_its_nuclear_point` fail: the counts-only lookup
+What breaks the sweep: an explicit-radii branch of `isdf_grid` that does not
+check the shipped table and sets `origins = {el: False for el in radii}`
+unconditionally. A caller who passes the published carbon radii alongside
+their own counts then gets a grid with the nuclear point silently dropped, and
+`test_a_matching_row_brings_its_nuclear_point` fails: the counts-only lookup
 returns 307 points (the published row carries `origin`) while the explicit-
-radii call returns 306, one point short at the nucleus. The same reinstated
-copy also has no `grid_accuracy` keyword at all, so every `grid_accuracy` test
-below fails with `TypeError: unexpected keyword argument`.
+radii call returns 306, one point short at the nucleus. An `isdf_grid` without
+the `grid_accuracy` keyword fails every `grid_accuracy` test below with
+`TypeError: unexpected keyword argument`.
 
 Each refusal is paired with the request it must NOT refuse, because a check
 that fires on everything is not a check either.
@@ -36,11 +33,12 @@ import pytest
 from pyscf import gto
 
 from src.Base import isdf_jk
-from src.Base.constants import (ISDF_DEFAULT_COUNTS, ISDF_GRID_ACCURACY,
+from src.Base.constants import (ISDF_GRID_ACCURACY,
                                 ISDF_RADII_MATCH_TOL)
 from src.Base.isdf_jk import isdf_grid
 from src.Base.separable_ri import (PUBLISHED_COUNTS, _SHELL_ORDER, atomic_grid,
-                                   shipped_radii_lookup)
+                                   UntabulatedISDFGrid, shipped_radii_lookup)
+from tests.pins import assert_same
 
 BASIS = 'cc-pvtz'
 AUXBASIS = BASIS + '-ri'
@@ -48,9 +46,10 @@ ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 # Three sizes the shipped table holds for BOTH C and H at this basis, so the
 # sweep exercises the lookup and never the run-time optimizer.
+G1_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G1']))
 G2_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
 G3_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
-SWEEP = (ISDF_DEFAULT_COUNTS, G2_COUNTS, G3_COUNTS)
+SWEEP = (G1_COUNTS, G2_COUNTS, G3_COUNTS)
 # The published carbon grid is the one row that carries `origin`, and its
 # counts appear nowhere else in the table.
 CARBON_PUBLISHED_COUNTS = dict(zip(_SHELL_ORDER, PUBLISHED_COUNTS['C']))
@@ -75,7 +74,7 @@ def untabulated_counts(elements):
     Derived rather than spelled out so the control cannot quietly become a
     tabulated row when the table grows.
     """
-    counts = dict(ISDF_DEFAULT_COUNTS)
+    counts = dict(G1_COUNTS)
     while any(shipped_radii_lookup(el, BASIS, AUXBASIS, counts) is not None
               for el in elements):
         counts['A1'] += 1
@@ -108,21 +107,19 @@ def test_a_counts_sweep_moves_the_grid(ethylene):
                 pts_i, pts_j), f'{counts_i} and {counts_j} share a grid'
 
 
-def test_nothing_asked_for_is_the_default_counts_lookup(ethylene):
-    """A caller with no opinion gets `ISDF_DEFAULT_COUNTS`, through the same path
-    as a caller who names them -- the bitwise anchor for every bare call."""
-    bare = isdf_grid(ethylene)
-    named = isdf_grid(ethylene, counts=ISDF_DEFAULT_COUNTS)
-    assert np.array_equal(bare, named)
+def test_nothing_asked_for_is_refused(ethylene):
+    """A caller with no grid is refused (`require_grid`): no grid is a default."""
+    with pytest.raises(ValueError, match='no ISDF grid asked for'):
+        isdf_grid(ethylene)
 
 
 def test_grid_accuracy_agreeing_with_counts_proceeds(ethylene):
-    """Two spellings of ONE grid are not a contradiction. Bitwise, because an
+    """Two spellings of ONE grid are not a contradiction. To a few ulp, because an
     accuracy level resolves to counts and must then take exactly the path
     those counts take."""
     level = isdf_grid(ethylene, grid_accuracy='G2')
     both = isdf_grid(ethylene, grid_accuracy='G2', counts=G2_COUNTS)
-    assert np.array_equal(level, both)
+    assert_same(level, both, unit='1', quantity='root', label='level and counts')
 
 
 def test_grid_accuracy_contradicting_counts_is_refused(ethylene):
@@ -137,12 +134,12 @@ def test_grid_accuracy_contradicting_counts_is_refused(ethylene):
 
 def test_explicit_radii_equal_to_the_row_are_the_row(ethylene):
     """Handing over the row's own radii with the row's own counts is one
-    request, not two, and must reproduce the lookup path bitwise."""
+    request, not two, and must reproduce the lookup path to a few ulp."""
     radii = {el: atomic_grid(el, BASIS, AUXBASIS, G2_COUNTS)[0]
              for el in ('C', 'H')}
     lookup = isdf_grid(ethylene, counts=G2_COUNTS)
     explicit = isdf_grid(ethylene, radii=radii, counts=G2_COUNTS)
-    assert np.array_equal(lookup, explicit)
+    assert_same(lookup, explicit, unit='1', quantity='root', label='row radii')
 
 
 def test_a_matching_row_brings_its_nuclear_point(carbon):
@@ -151,14 +148,15 @@ def test_a_matching_row_brings_its_nuclear_point(carbon):
     The published carbon row places one point at the nucleus, so honouring its
     radii while dropping the flag builds 306 points where the row describes
     307 -- a different grid, reported under the published grid's name. This is
-    the defect the sweep was shown to fail on; see the module docstring.
+    the defect the sweep catches; see the module docstring.
     """
     radii, origin = atomic_grid('C', BASIS, AUXBASIS, CARBON_PUBLISHED_COUNTS)
     assert origin, 'the published carbon row is the case this test exists for'
     lookup = isdf_grid(carbon, counts=CARBON_PUBLISHED_COUNTS)
     explicit = isdf_grid(carbon, radii={'C': radii},
                          counts=CARBON_PUBLISHED_COUNTS)
-    assert np.array_equal(lookup, explicit)
+    assert_same(lookup, explicit, unit='1', quantity='root',
+                label='published carbon row')
     assert len(lookup) == 307
     # The same radii where no row claims them: the nuclear point is the
     # caller's to add, so the grid is one point smaller.
@@ -208,19 +206,39 @@ def test_explicit_radii_at_untabulated_counts_proceed(ethylene):
         explicit = isdf_grid(ethylene, radii=radii, counts=counts)
     assert not reoptimization_warnings(caught)
     alone = isdf_grid(ethylene, radii=radii)
-    assert np.array_equal(explicit, alone)
+    assert_same(explicit, alone, unit='1', quantity='root',
+                label='radii with and without counts')
 
 
 def test_untabulated_counts_without_radii_name_what_the_table_holds(ethylene,
                                                                      monkeypatch):
-    """Honouring the request means re-optimizing, and saying so: the miss is
-    almost always a tuple nobody ever optimized, so the warning carries the
-    element, the counts asked for and the sizes the table does hold.
+    """A grid the table holds no row for is refused, before any search, and
+    the refusal carries the element, the counts asked for and the sizes the
+    table does hold: the miss is almost always a tuple nobody optimized."""
+    counts = untabulated_counts(('C', 'H'))
+    asked = []
+
+    def stub(element, basis, auxbasis, counts=None, n_start=1, **kwargs):
+        asked.append(element)
+        return atomic_grid(element, basis, auxbasis, G2_COUNTS)[0], 0.0
+
+    monkeypatch.setattr(isdf_jk, 'optimize_atomic_radii', stub)
+    with pytest.raises(UntabulatedISDFGrid) as refused:
+        isdf_grid(ethylene, counts=counts)
+    assert asked == [], 'searched before refusing'
+    said = str(refused.value)
+    assert 'C' in said and str(sorted(counts.items())) in said
+    assert 'pts' in said, 'the tabulated alternatives are missing'
+    assert 'runtime_radii' in said, 'the declaration is not named'
+
+
+def test_declared_untabulated_counts_are_searched_at_those_counts(
+        ethylene, monkeypatch):
+    """Declared (`runtime_radii`), the request reaches the optimizer at the
+    counts asked for, per element, without a warning.
 
     The optimizer is stubbed because it is minutes of multi-start descent and
-    not what is under test; what is under test is that the request reaches it
-    at the counts asked for, and that the caller is told.
-    """
+    not what is under test."""
     counts = untabulated_counts(('C', 'H'))
     asked = []
 
@@ -229,17 +247,11 @@ def test_untabulated_counts_without_radii_name_what_the_table_holds(ethylene,
         return atomic_grid(element, basis, auxbasis, G2_COUNTS)[0], 0.0
 
     monkeypatch.setattr(isdf_jk, 'optimize_atomic_radii', stub)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        isdf_grid(ethylene, counts=counts)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        isdf_grid(ethylene, counts=counts, runtime_radii=True)
     assert sorted(el for el, _ in asked) == ['C', 'H']
     assert all(c == counts for _, c in asked)
-    said = reoptimization_warnings(caught)
-    assert said, 'a run-time re-optimization went unannounced'
-    joined = ' '.join(str(w.message) for w in said)
-    assert 'C' in joined and 'H' in joined
-    assert str(sorted(counts.items())) in joined
-    assert 'pts' in joined, 'the tabulated alternatives are missing'
 
 
 if __name__ == '__main__':

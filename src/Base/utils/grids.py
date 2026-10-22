@@ -170,13 +170,16 @@ def gauss_legendre_grid(nfreq, w0=0.5):
     return freq_point, freq_weight
 
 
-def gap_scaled_w0(eps, nocc, scale=0.5):
+def gap_scaled_w0(eps, nocc, scale=0.5, gap=None):
     """w0 = scale * (eps_LUMO - eps_HOMO): scales the grid to the gap instead of using one fixed w0 for every system.
+
+    gap: a gap to scale instead, such as the thermally floored one of
+    `matsubara.thermal_e_min`.
 
     Raises for a vanishing or inverted gap rather than returning a w0 that
     would silently collapse the grid -- see _require_positive_e_min, and
     utils.matsubara for the finite-temperature replacement.
     """
-    w0 = scale * (eps[nocc] - eps[nocc - 1])
+    w0 = scale * (eps[nocc] - eps[nocc - 1] if gap is None else gap)
     _require_positive_e_min(w0, None, 'gap_scaled_w0')
     return w0

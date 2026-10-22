@@ -1,6 +1,6 @@
 """Validates the DF/RI variant of MPnDensityDriverRestricted/Unrestricted's
 compute_delta_gamma2 against the existing dense pipeline,
-at both validation tiers section 4 of that plan calls for:
+at two validation tiers:
 
 1. DFIntegrals.from_scf(..., exact=True) forces the
    naux=norb^2 eigh-decomposition fallback (not real DF), so the DF driver
@@ -10,7 +10,7 @@ at both validation tiers section 4 of that plan calls for:
    basis.
 2. Realistic-RI check: a real published JK-fit auxiliary basis
    (density_fit()'s default), compared to the dense pipeline at the
-   RI-approximation-level tolerance the plan's section 4 anticipates
+   RI-approximation-level tolerance
    (~1e-4 relative on a density-matrix element scale).
 
 Covers both RHF (MPnDensityDriverRestricted) and UHF

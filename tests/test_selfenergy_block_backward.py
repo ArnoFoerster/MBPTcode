@@ -23,9 +23,9 @@ import pytest
 
 from src.Base.utils.grids import gauss_legendre_grid
 from src.Base.utils.time_frequency import TimeFrequencyGrid
-from src.gradients.space_time_adjoint import (selfenergy_block,
-                                              selfenergy_block_backward,
+from src.gradients.space_time_adjoint import (selfenergy_block_backward,
                                               sigma_transforms)
+from src.SingleReference.GW.imaginary_time import selfenergy_block
 
 NORB, NOCC, NAUX, NTAU, NFREQ = 8, 3, 6, 6, 6
 STATES = [2, 3, 4]

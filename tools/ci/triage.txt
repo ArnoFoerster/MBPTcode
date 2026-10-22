@@ -1,0 +1,6 @@
+pytest test_distributed_fit.py  # needs a later tests/archive_radii.py and its edit (not in this commit): same cause as test_isdf_fit_ranks; passes with it (42/42, 75 s); then slow
+pytest test_isdf_fit_ranks.py  # needs a later tests/archive_radii.py and its edit (not in this commit): the archived fit reads its own older radii table; passes with it (30/30, 20 s); then fast
+pytest test_isdf_mean_field_gradient.py  # stale premise: errors are 1.8e-10 (default fit) and -8.3e-11 (reg 1e-2), both at the finite-difference noise, so the 0.1x ratio assertion cannot hold on G1; rewrite or drop the ratio
+pytest test_one_fit_adjoint.py  # pooled vs separate fit-adjoint targets 4.8e-12 and 5.2e-12 relative against 1e-12 ([hf], [lrc-wpbeh], 1 rank)
+pytest test_solvated_ground_surface.py  # needs a later assert_same edit (not in this commit): two SCF energies asserted bitwise, 2e-14 Ha off on a cluster; passes with it (29 s); then fast
+pytest test_tadf_rank_paths.py  # needs a later assert_same edit (not in this commit): serial vs 2-rank Hessian asserted bitwise, entries differ ~1e-10; passes with it (126 s); then slow

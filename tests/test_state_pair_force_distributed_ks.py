@@ -12,7 +12,7 @@ mismatch.
 Gated, water/cc-pVDZ, PBE0 and LRC-wPBEh, at 2 and 3 simulated ranks: the
 record completes, the mean field's serial ISDFJK is never built on any rank
 (the orbital response runs on the distributed SCF's handle), every rank's
-force is rank 0's bitwise, and the force lies within CONVERGED_SCF_FORCE_TOL
+force is rank 0's to a few ulp, and the force lies within CONVERGED_SCF_FORCE_TOL
 of the serial record's: the distributed SCF converges to a mean field its
 convergence tolerance away from the serial one, and the rest of the record
 re-associates its reductions over the ranks, which moves a force by far
@@ -38,6 +38,7 @@ from src.Base.separable_ri import resolve_isdf_grid
 from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
 from src.properties import excitations
 from src.properties.excitations import SurfaceSpec, calc_vertical_excitation
+from tests.pins import assert_same
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
 BASIS = 'cc-pvdz'
@@ -115,8 +116,10 @@ def test_record_over_ranks_is_the_serial_one(xc, forces):
         # the orbital response ran on the distributed SCF's handle
         assert [built for _, _, built in out] == [False] * size
         for om, force, _ in out[1:]:
-            assert om == out[0][0]
-            assert np.array_equal(force, out[0][1])
+            assert om == out[0][0]          # rank 0's lockstepped root
+            # each rank assembles its own force: rank 0's to a few ulp
+            assert_same(force, out[0][1], quantity='gradient',
+                        label='rank force')
         d = float(np.abs(out[0][1] - ref).max())
         lines.append(f'{size} ranks: omega {out[0][0]:.8f} eV, |d| {d:.2e} '
                      f'= {d / bar:.4f} of CONVERGED_SCF_FORCE_TOL')

@@ -24,8 +24,9 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.reaction_field_adjoint import (reaction_field_backward,
                                                   reaction_field_shift,
                                                   static_grid)
+from tests.isdf_test_grid import g1
 
-BASIS, AUXBASIS = 'sto-3g', 'cc-pvdz-ri'
+BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 STEP = 1e-4
 
 
@@ -41,9 +42,9 @@ def setup():
     env = SolventScreening(mol, eps=1.78)
 
     detach_solvent_screening(mf)
-    x_mo, d_bare, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    x_mo, d_bare, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     attach_environment(mf, env)
-    x_dr, d_dressed, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    x_dr, d_dressed, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     detach_solvent_screening(mf)
     assert np.abs(x_dr - x_mo).max() < 1e-12, 'the fit must not see the cavity'
 

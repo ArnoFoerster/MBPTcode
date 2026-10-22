@@ -27,6 +27,37 @@ _SYMBOLS = ('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe
 _registered = {}
 
 
+def element_basis_name(basis, element):
+    """The name of the basis one element carries, lower-cased, for a table key.
+
+    A basis is a name for every element or a dict of per-element names (pyscf
+    accepts both; a lithium-containing molecule in an augmented set needs the
+    dict, since the auxiliary sets that cover Li differ from the rest). A dict
+    gives this element's entry, or its 'default'. Lower-cased because the
+    table's keys are and pyscf's names are case-insensitive: 'cc-pVDZ' and
+    'cc-pvdz' are one basis and must be one row. An explicit basis definition
+    (shells, not a name) has no row to look up and is refused by name.
+    """
+    name = basis.get(element, basis.get('default')) if isinstance(basis, dict) \
+        else basis
+    if not isinstance(name, str):
+        raise TypeError(f'the basis for {element} is not a named set '
+                        f'({type(name).__name__}); the radii table is keyed on '
+                        f'basis names, so pass a name or explicit radii.')
+    return name.strip().lower()
+
+
+def paired_auxbasis(basis):
+    """The auxiliary basis a route fits `basis` in where none is named:
+    `<basis>-ri`. THE pairing rule, spelled once; an element whose shipped
+    set lacks the partner takes its substitute (`element_auxbasis`). A
+    per-element basis pairs element by element."""
+    if isinstance(basis, dict):
+        return {el: paired_auxbasis(element_basis_name(basis, el))
+                for el in basis}
+    return f'{basis}-ri'
+
+
 def fallback_elements(basis):
     """Elements with a substitute auxiliary set at `basis`."""
     return [el for (el, b) in ISDF_AUX_FALLBACK if b == str(basis).lower()]
@@ -49,13 +80,13 @@ def element_auxbasis(element, basis, auxbasis):
     if auxbasis is None or not fallback_elements(basis) \
             or str(auxbasis) != fallback_name(basis):
         return auxbasis
-    return ISDF_AUX_FALLBACK.get((element, basis), f'{basis}-ri')
+    return ISDF_AUX_FALLBACK.get((element, basis), paired_auxbasis(basis))
 
 
 def atomic_auxbasis(element, basis):
     """Auxiliary set `element`'s atomic grid is fitted in at `basis`: the substitute or `<basis>-ri`."""
     basis = str(basis).lower()
-    return ISDF_AUX_FALLBACK.get((element, basis), f'{basis}-ri')
+    return ISDF_AUX_FALLBACK.get((element, basis), paired_auxbasis(basis))
 
 
 def fallback_auxbasis(basis):
@@ -72,7 +103,7 @@ def fallback_auxbasis(basis):
     for el in _SYMBOLS:
         sub = ISDF_AUX_FALLBACK.get((el, basis))
         try:
-            table[el] = pyscf_basis.load(sub or f'{basis}-ri', el)
+            table[el] = pyscf_basis.load(sub or paired_auxbasis(basis), el)
         except pyscf_basis.BasisNotFoundError:
             if sub:
                 raise
@@ -105,7 +136,7 @@ def check_fallback(basis):
 def auxbasis_for(basis, elements, fallback=False):
     """`<basis>-ri` if it covers every element; else the named fallback if `fallback`; else raise."""
     basis = str(basis).lower()
-    plain = f'{basis}-ri'
+    plain = paired_auxbasis(basis)
     missing = []
     for el in sorted(set(elements)):
         try:

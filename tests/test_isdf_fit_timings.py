@@ -36,7 +36,6 @@ import json
 import os
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -45,10 +44,14 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import ISDF_DEFAULT_COUNTS
+from tests.archived_tree import require_commit, unpack_commit
+from tests.pins import THREAD_CAPS, assert_archive_same, assert_same
+from src.Base.numerics import Numerics
+from tests.archive_radii import install_current_radii
 from src.Base.separable_ri import atomic_grid
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
+from tests.isdf_test_grid import g1
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -79,11 +82,6 @@ REPO = Path(__file__).resolve().parents[1]
 #: change lands, `HEAD` would include it and the comparison would stop
 #: meaning anything.
 BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
-#: A shared machine: the archived probe is capped rather than left to size
-#: itself against the whole node.
-THREAD_CAPS = {name: '2' for name in
-               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
 #: Built fresh in its own process against the extracted tree. The archived
 #: tree has no `timings=` keyword at all, so this calls `separable_factors`
 #: exactly as it always could. The grid goes in as explicit radii: the
@@ -107,8 +105,15 @@ warnings.simplefilter('ignore')
 mol = gto.M(atom={atom!r}, basis={basis!r}, verbose=0)
 auxbasis = {basis!r} + '-ri'
 mf = scf.RHF(mol)
-mf.conv_tol = 1e-12
-mf.kernel()
+# the orbitals are the current tree's, not a second SCF's: an SCF run in a
+# process of its own differs from another's in its last bits on MKL, and the
+# fit amplifies that by its conditioning (8.3e-9 on ethylene/cc-pVTZ on a
+# cluster against 0 on the workstation), which is the SCF's noise and not the
+# fit's
+with np.load({orbitals!r}) as orbitals:
+    mf.mo_coeff, mf.mo_occ = orbitals['mo_coeff'], orbitals['mo_occ']
+    mf.mo_energy = orbitals['mo_energy']
+mf.converged = True
 radii = {{el: {{shell: np.array(r) for shell, r in shells.items()}}
          for el, shells in {radii!r}.items()}}
 X_mo, D, X_ao, coords = separable_factors(mf, mol, auxbasis=auxbasis,
@@ -134,31 +139,28 @@ def case(request):
 def _factors(case, comm=None, timings=None, radii=None):
     return separable_factors(case['mf'], case['mol'], auxbasis=case['auxbasis'],
                              radii=radii,
-                             block_memory_gb=case['block_memory_gb'],
-                             comm=comm, timings=timings)
+                             numerics=Numerics(layout={'fit_gb': case['block_memory_gb']}),
+                             comm=comm, timings=timings, counts=g1(case['mol']))
 
 
 def _table_radii(case):
-    """The shipped rows at `ISDF_DEFAULT_COUNTS`, as plain lists of floats (repr
+    """The shipped rows at the G1 counts the factors are built on, as plain lists of floats (repr
     round-trips a float64 exactly) for the archived probe to rebuild."""
     mol = case['mol']
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     return {el: {shell: [float(x) for x in np.atleast_1d(r)]
                  for shell, r in atomic_grid(el, str(mol.basis), case['auxbasis'],
-                                             ISDF_DEFAULT_COUNTS)[0].items()}
+                                             g1(mol))[0].items()}
             for el in elements}
 
 
-def _bitwise(a, b):
-    """True when two arrays agree bit for bit, shape and dtype included."""
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
-
-
 def _assert_factors_equal(old, new, where):
+    """Two calls: the same factors to a few ulp under the recording BLAS
+    (`assert_same`), within the vector class bar under another."""
     for name, a, b in zip(('X_mo', 'D', 'X_ao', 'coords'), old, new):
-        assert _bitwise(a, b), f'{name} moved {where}'
+        assert np.asarray(a).dtype == np.asarray(b).dtype, (name, where)
+        assert_same(b, a, unit='1', quantity='vector',
+                    label=f'{name} moved {where}')
 
 
 def test_serial_timings_move_no_bits(case):
@@ -228,23 +230,26 @@ def archive(tmp_path_factory):
     into a temporary directory."""
     out = tmp_path_factory.mktemp('isdf_fit_timings_baseline')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
-    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
-                           '-o', str(tar), BASELINE_COMMIT],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    with tarfile.open(tar) as fh:
-        fh.extractall(out)
+    require_commit(REPO, BASELINE_COMMIT)
+    unpack_commit(REPO, BASELINE_COMMIT, tar, out)
+    install_current_radii(out)
     assert (out / 'src' / 'Base' / 'separable_ri.py').is_file()
     return out
 
 
-def _archived_factors(archive_dir, tmp_path, case_name, radii):
-    """(X_mo, D, X_ao, coords) from the pre-instrumentation code, its own process."""
+def _archived_factors(archive_dir, tmp_path, case, radii):
+    """(X_mo, D, X_ao, coords) from the pre-instrumentation code, its own
+    process, on this tree's orbitals."""
+    case_name = case['name']
     atom, basis, block_memory_gb = CASES[case_name]
     script = tmp_path / f'probe_{case_name}.py'
     out = tmp_path / f'factors_{case_name}.npz'
+    orbitals = tmp_path / f'orbitals_{case_name}.npz'
+    np.savez(orbitals, mo_coeff=case['mf'].mo_coeff, mo_occ=case['mf'].mo_occ,
+             mo_energy=case['mf'].mo_energy)
     script.write_text(BITWISE_PROBE.format(archive=str(archive_dir), atom=atom,
                                            basis=basis, radii=radii,
+                                           orbitals=str(orbitals),
                                            block_memory_gb=block_memory_gb,
                                            out=str(out)))
     env = dict(os.environ, **THREAD_CAPS)
@@ -264,16 +269,20 @@ def test_timings_move_no_bits_against_the_archive(case, tmp_path_factory,
 
     Nothing between the two trees touches the arithmetic of the fit: the only
     change is a clock read and a dict write at phase boundaries that were
-    already there as code, so this is bitwise. Both sides get the same
-    explicit radii (see `BITWISE_PROBE`).
+    already there as code, so this is bitwise under the recording BLAS and
+    within the vector class bar under another (`assert_archive_same`). Both
+    sides get the same explicit radii and this tree's orbitals (see
+    `BITWISE_PROBE`).
     """
     tmp = tmp_path_factory.mktemp(f'isdf_fit_timings_bitwise_{case["name"]}')
     radii = _table_radii(case)
-    old = _archived_factors(archive, tmp, case['name'], radii)
+    old = _archived_factors(archive, tmp, case, radii)
     new = _factors(case, timings={},
                    radii={el: {shell: np.array(r) for shell, r in shells.items()}
                           for el, shells in radii.items()})
-    _assert_factors_equal(old, new, f'relative to {BASELINE_COMMIT[:12]}')
+    for name, a, b in zip(('X_mo', 'D', 'X_ao', 'coords'), old, new):
+        assert_archive_same(b, a, unit='1', quantity='vector',
+                            label=f'{name} relative to {BASELINE_COMMIT[:12]}')
 
 
 if __name__ == '__main__':

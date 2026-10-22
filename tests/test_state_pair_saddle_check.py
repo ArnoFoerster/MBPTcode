@@ -17,8 +17,8 @@ import pytest
 import src.properties.excitations as excitations
 from src.properties.excitations import saddle_checked_state
 from src.properties.vibronic import relax_state
-from tests.test_walk_nudge import (PLANAR, DoubleWell, molecule,
-                                   pyramidalization)
+from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
+                                      pyramidalization)
 
 WALK = {'engine': 'cartesian', 'max_cycle': 200, 'verbose': False,
         'refreeze': 1}
@@ -90,3 +90,18 @@ def test_a_second_saddle_is_refused(at_saddle, monkeypatch):
     with pytest.raises(RuntimeError, match='second saddle'):
         saddle_checked_state(at_saddle, **WALK)
 
+
+def test_an_unconverged_walk_is_refused_before_its_hessian(monkeypatch):
+    x = PLANAR.copy()
+    x[0, 2] = 0.4
+    surface = Relaxable(molecule(x))
+    relaxed = relax_state(surface, surface.mol0, nudge=0,
+                          **dict(WALK, max_cycle=1))
+    assert not relaxed['info']['converged']
+    calls = []
+    monkeypatch.setattr(excitations, 'surface_hessian',
+                        lambda *a, **kw: calls.append(a))
+    with pytest.raises(RuntimeError, match='the walk did not converge'):
+        saddle_checked_state(relaxed, **WALK)
+    # refused at the walk's status: none of the 6N forces were spent
+    assert calls == []

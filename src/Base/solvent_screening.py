@@ -48,6 +48,31 @@ water puts on acrolein's n->pi*.  It is small for a charged excitation (water
 moves its own HOMO by 2.4 meV), which is why an IP is insensitive to it and a
 neutral excitation is not.
 
+Equilibrium
+-----------
+A RELAXED excited state -- a charge-transfer minimum, the state that emits,
+either end of an adiabatic gap -- has lived long enough for the solvent nuclei
+to reorient around its own density. `equilibrium=True` (or
+`equilibrium_partner()`) builds the excitation's whole response at eps_static:
+the dressed kernel and the Eq. (18) shift alike, the ground state unchanged in
+PCM(eps_static), so E_0 is one function in both modes. In Duchemin et al.'s
+reading the Eq. (18) shifts of electron and hole and the dressed direct term
+together are the reaction field of the excitation's density difference -- the
+state-specific term the slow polarization equilibrates with -- so this is the
+neutral counterpart of a charged state's equilibrium level, Eq18(eps_static)
+in place of Eq18(eps_inf). The dressed EXCHANGE term, the reaction field of the
+transition density, moves to eps_static with it: the equilibrium convention of
+linear-response PCM excited-state optimizations (Scalmani, Frisch, Mennucci,
+Tomasi, Cammi and Barone, J. Chem. Phys. 124, 094107 (2006)). That term
+vanishes for a triplet and is small for a charge-transfer singlet; for a
+bright local singlet it overstates the equilibrium shift by its own
+(f(eps_static) - f(eps_inf)) share. That makes this the 'full' mode; the
+default of `environment.equilibrium_environment` is the 'split' one, which
+keeps the exchange optical (`split_equilibrium`). eps_static = eps_inf
+reproduces the non-equilibrium object exactly. A vertical EMISSION from the
+relaxed state would want the ground state in the excited state's slow field,
+which no mode builds.
+
 Discretization
 --------------
 vtilde is evaluated with pyscf's PCM apparent-surface-charge machinery: a
@@ -89,7 +114,6 @@ Limitations
     orbital's own shift. Their nuclear gradients and the BSE remain
     restricted-only.
 """
-import warnings
 
 import numpy as np
 import scipy.linalg
@@ -100,8 +124,12 @@ from pyscf import solvent as pyscf_solvent
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
+from src.Base.basis.ri_fallback import auxbasis_for
 from src.Base.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
-                                PCM_LEBEDEV_ORDER, SOLVENT_PLASMON_EV)
+                                PCM_LEBEDEV_ORDER, SOLVENT_PLASMON_EV,
+                                SOLVENT_RI_PROBE_ORBITALS,
+                                SOLVENT_RI_RESIDUAL_MAX)
+from src.Base.distributed_df import distributed_mean_field
 from src.Base.environment import attach_environment, environment_of
 from src.Base.pcm_derivatives import (bound_pyscf_pcm_blocks, by_atom,
                                       cavity_blocks,
@@ -211,8 +239,9 @@ class CavitySpheres:
     """The sphere set of a cavity: the solute's atoms, then the shell's.
 
     What pyscf's `gen_surface` and `PCM.build` read of a molecule -- the
-    centres, the element of each for its radius, and the integral suffix --
-    and nothing else: no basis functions, no electrons.
+    centres, the element of each for its radius (`atom_symbol` up to pyscf
+    2.12, `elements` from 2.13), and the integral suffix -- and nothing else:
+    no basis functions, no electrons.
     """
 
     def __init__(self, mol, cavity_atoms):
@@ -226,6 +255,12 @@ class CavitySpheres:
 
     def atom_symbol(self, ia):
         return self._symbols[ia]
+
+    @property
+    def elements(self):
+        """The element of every sphere (pyscf's `Mole.elements`, which its
+        PCM reads for the radii from 2.13 on)."""
+        return [gto.mole._std_symbol(s) for s in self._symbols]
 
     def atom_coords(self, unit='Bohr'):
         if str(unit).upper() not in ('B', 'BOHR', 'AU'):
@@ -302,7 +337,8 @@ class SolventScreening:
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
                  lebedev_order=PCM_LEBEDEV_ORDER, vdw_scale=1.2, r_probe=0.0,
                  radii_table=None, allow_static_eps=False, eps_static=None,
-                 omega_p=None, cavity_atoms=None, cavity_unit='Angstrom'):
+                 omega_p=None, cavity_atoms=None, cavity_unit='Angstrom',
+                 equilibrium=False, frozen_polarization=False):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
         pyscf's SMD table, whose refractive index sets eps = n^2), not both.
         method/lebedev_order/vdw_scale/r_probe/radii_table are handed straight
@@ -312,8 +348,18 @@ class SolventScreening:
 
         eps_static: the constant the ground state relaxes in, which `mean_field`
         puts the SCF inside. A solvent name supplies it; an explicit optical eps
-        needs it explicitly, and without one the ground state stays bare (the
-        frozen-polarization limit rather than a solvated calculation).
+        needs it explicitly.
+
+        frozen_polarization: declares the frozen-polarization limit, a bare
+        ground state with only the optical response modelled, rather than a
+        solvated calculation; it takes an explicit eps and no eps_static.
+        Without eps_static and without this declaration `mean_field` refuses.
+
+        equilibrium: the excitation's response at eps_static as well (see
+        Equilibrium in the module docstring): a relaxed excited state, its
+        minimum and the adiabatic gap. `eps` stays the optical constant and is
+        kept as `eps_optical`; `self.eps` is the constant the response is
+        built at. Needs eps_static.
 
         omega_p: the solvent's single-pole energy in Hartree, which sets how
         fast its reaction field dies with imaginary frequency through
@@ -350,6 +396,20 @@ class SolventScreening:
                 f"eps_static = {eps_static} below the optical eps = {eps}: the "
                 f"static constant contains the solvent's nuclear reorientation "
                 f"on top of its electronic response and cannot be the smaller.")
+        self.frozen_polarization = bool(frozen_polarization)
+        if self.frozen_polarization and eps_static is not None:
+            raise ValueError(
+                f'frozen_polarization keeps the ground state bare, and this '
+                f'continuum has eps_static = {eps_static} to relax it in (a '
+                f'named solvent supplies one): declare one or the other')
+        self.equilibrium = bool(equilibrium)
+        self.eps_optical = eps
+        if self.equilibrium:
+            if eps_static is None:
+                raise ValueError(
+                    'equilibrium solvation puts the response at eps_static, '
+                    'and none was given: pass eps_static or a solvent name')
+            eps = eps_static
 
         self.mol = mol
         self.eps = eps
@@ -420,10 +480,7 @@ class SolventScreening:
         surface charge, so the reaction potential screens.
         """
         if self._response is None:
-            K = self._pcm._intermediates['K']
-            R = self._pcm._intermediates['R']
-            KiR = np.linalg.solve(K, R)
-            self._response = 0.5 * (KiR + KiR.T)
+            self._response = symmetrized_response(self._pcm)
         return self._response
 
     def _fakemol(self, grids=None):
@@ -509,6 +566,33 @@ class SolventScreening:
             out[:, :, k0:k1] = np.tensordot(half, mo_vir, axes=(1, 0)
                                             ).transpose(0, 2, 1)
         return out
+
+    def density_grid_potential(self, mol, density, budget_gb=ISDF_TILE_GB):
+        """v_k[rho] = sum_mn rho_mn v_k[phi_m phi_n] of an AO density on the
+        surface grid, shape (ngrids,), streamed over grid blocks."""
+        density = np.asarray(density, float)
+        out = np.empty(self.ngrids)
+        for k0, k1 in self.grid_blocks(density.shape[0], live=1,
+                                       budget_gb=budget_gb):
+            v_ao = self.ao_grid_potential(mol, grids=slice(k0, k1))
+            out[k0:k1] = np.tensordot(density, v_ao, axes=((0, 1), (0, 1)))
+        return out
+
+    def state_specific_energy(self, mol, density, budget_gb=ISDF_TILE_GB):
+        """(E_SS, dV): the classical reaction-field energy of a density
+        difference in this continuum, E_SS = 1/2 dV^T Q dV in Hartree, with dV
+        its potential on the surface grid and Q the response matrix
+        (`response_matrix`, q = Q v), so the energy is <= 0.
+
+        It is the polarization energy of the charge drho alone: the response
+        of the solvent to the change of the solute's density, which a
+        state-specific solvation model adds to an excitation energy computed
+        without it. The electron charge's sign squares out. One continuum,
+        one dielectric constant: the optical object gives the vertical value,
+        its `static_partner` the equilibrium one.
+        """
+        dv = self.density_grid_potential(mol, density, budget_gb=budget_gb)
+        return 0.5 * float(dv @ self.response_matrix() @ dv), dv
 
     def aux_grid_potential(self, auxmol):
         """v_k[chi_P] for auxiliary basis functions, shape (naux, ngrids): the
@@ -606,6 +690,89 @@ class SolventScreening:
             self._aux_cache[key] = v_aux @ self.response_matrix() @ v_aux.T
         return self._aux_cache[key]
 
+    def fit_residual(self, mol, auxmol, mo_occ, mo_vir,
+                     budget_gb=ISDF_TILE_GB):
+        """Relative error of `aux_kernel`'s representation of vtilde on the
+        pair densities phi_i phi_a of `mo_occ` x `mo_vir`.
+
+        Every route reads vtilde as c_ia^T vtilde_PQ c_jb with c = J^-1 (P|ia)
+        the Coulomb fit of the pair density, and vtilde_PQ = v_k[chi_P] Q_kl
+        v_l[chi_Q] is exact for the FITTED density. What is not exact is the
+        fitted density's potential on the cavity, which lies in the solute's
+        tail where an auxiliary set without diffuse functions has nothing. So
+        the residual is
+
+            || G_fit - G || / || G ||,   G[ia, k] = v_k[phi_i phi_a],
+                                         G_fit = (P|ia)^T J^-1 v_k[chi_P]
+
+        and vtilde's own error is first order in it. The integrals are streamed:
+        the AO potential by grid block, the three-centre ones by auxiliary
+        shell block, so nothing of size nao^2 x ngrids or nao^2 x naux is held.
+        """
+        mo_occ = np.asarray(mo_occ, float)
+        mo_vir = np.asarray(mo_vir, float)
+        npair = mo_occ.shape[1] * mo_vir.shape[1]
+        exact = np.empty((npair, self.ngrids))
+        for k0, k1 in self.grid_blocks(mol.nao_nr(), budget_gb=budget_gb):
+            v_ao = self.ao_grid_potential(mol, grids=slice(k0, k1))
+            half = np.tensordot(mo_occ, v_ao, axes=(0, 0))     # (i, nu, k)
+            exact[:, k0:k1] = np.tensordot(half, mo_vir, axes=(1, 0)) \
+                .transpose(0, 2, 1).reshape(npair, k1 - k0)
+        pair = np.empty((npair, auxmol.nao_nr()))
+        ao_loc = auxmol.ao_loc_nr()
+        per = 8.0 * mol.nao_nr() ** 2
+        step = max(1, int(budget_gb * 1024 ** 3 / per)
+                   * auxmol.nbas // max(auxmol.nao_nr(), 1))
+        for s0 in range(0, auxmol.nbas, step):
+            s1 = min(s0 + step, auxmol.nbas)
+            block = pyscf_df.incore.aux_e2(
+                mol, auxmol, intor='int3c2e', aosym='s1',
+                shls_slice=(0, mol.nbas, 0, mol.nbas, s0, s1))
+            half = np.tensordot(mo_occ, block, axes=(0, 0))    # (i, nu, P)
+            pair[:, ao_loc[s0]:ao_loc[s1]] = np.tensordot(
+                half, mo_vir, axes=(1, 0)).transpose(0, 2, 1).reshape(
+                    npair, ao_loc[s1] - ao_loc[s0])
+        metric = scipy.linalg.cho_factor(auxmol.intor('int2c2e'))
+        fitted = pair @ scipy.linalg.cho_solve(metric,
+                                               self.aux_grid_potential(auxmol))
+        return float(np.linalg.norm(fitted - exact) / np.linalg.norm(exact))
+
+    def require_fit(self, mol, auxmol, mo_coeff, nocc):
+        """`fit_residual` on the SOLVENT_RI_PROBE_ORBITALS frontier orbitals
+        each side of the gap, refused above SOLVENT_RI_RESIDUAL_MAX.
+
+        An auxiliary set other than the orbital basis's own `<basis>-ri`, where
+        pyscf has one, is refused before anything is integrated: cc-pvdz-ri
+        under aug-cc-pVDZ misses the diffuse tail the cavity sees and moves S1,
+        T1 and dEST by 20-44 meV.
+        """
+        basis, aux = mol.basis, auxmol.basis
+        if isinstance(basis, str) and isinstance(aux, str):
+            try:
+                partner = auxbasis_for(basis, [mol.atom_pure_symbol(i)
+                                               for i in range(mol.natm)])
+            except ValueError:
+                partner = None
+            if partner is not None and aux.lower() != partner:
+                raise ValueError(
+                    f'the reaction field is represented in {aux}, not in '
+                    f'{partner}, the auxiliary partner of {basis}: a set '
+                    f'without the basis\'s diffuse functions cannot carry its '
+                    f'pair densities\' potential on the cavity')
+        mo_coeff = np.asarray(mo_coeff, float)
+        n = SOLVENT_RI_PROBE_ORBITALS
+        residual = self.fit_residual(mol, auxmol,
+                                     mo_coeff[:, max(0, nocc - n):nocc],
+                                     mo_coeff[:, nocc:nocc + n])
+        if residual > SOLVENT_RI_RESIDUAL_MAX:
+            raise ValueError(
+                f'{aux} represents the reaction field of the frontier pair '
+                f'densities with a relative error of {residual:.3f} on the '
+                f'cavity, above SOLVENT_RI_RESIDUAL_MAX = '
+                f'{SOLVENT_RI_RESIDUAL_MAX}: use an auxiliary set with the '
+                f'orbital basis\'s diffuse functions')
+        return residual
+
     def dynamic_factor(self, omega):
         """g(iw) = Omega_p^2 / (w^2 + Omega_p^2), the share of the reaction
         field left at imaginary frequency w, or 1 with no pole energy.
@@ -617,7 +784,18 @@ class SolventScreening:
         to screen with, so the dressed interaction is v + g(iw) vtilde. The
         excitation energies are unaffected: they see the reaction field at the
         excitation's own frequency, which is what eps_inf already describes.
+
+        Refused in equilibrium: the correlation integral is over the solvent's
+        ELECTRONIC fluctuations, which the slow orientational polarization of
+        an equilibrium excited state is not part of. A dRPA ground state takes
+        the non-equilibrium object.
         """
+        if self.equilibrium:
+            raise ValueError(
+                'an equilibrium continuum carries the static response of a '
+                'relaxed excited state; a correlation energy integrates the '
+                'electronic response over frequency and must take the '
+                'non-equilibrium environment (eps_inf, omega_p)')
         if self.omega_p is None:
             return np.ones_like(np.asarray(omega, float))
         return dynamic_screening_factor(omega, self.omega_p)
@@ -695,10 +873,49 @@ class SolventScreening:
         """
         if mol is self.mol:
             return self
+        return self._rebuilt(mol, self.equilibrium)
+
+    def equilibrium_partner(self):
+        """This continuum with the excitation's response at eps_static.
+
+        The same solvent, cavity and ground state; only the constant the
+        response is built at moves, from eps_inf to eps_static. Built once per
+        object; `for_geometry` of the partner keeps it in equilibrium.
+        """
+        if self.equilibrium:
+            return self
+        partner = getattr(self, '_equilibrium_partner', None)
+        if partner is None:
+            partner = self._equilibrium_partner = self._rebuilt(self.mol, True)
+        return partner
+
+    def non_equilibrium_partner(self):
+        """This continuum with the response at eps_inf: the solvent's ELECTRONIC
+        response, which is all that screens a correlation energy's fluctuations.
+
+        The same solvent, cavity, ground state and pole energy. A ground-state
+        correlation energy reads this in either mode: the slow polarization
+        cannot follow a fluctuation, and in equilibrium it relaxes around the
+        excitation's density difference, which only the excitation carries.
+        Built once per object; the non-equilibrium object is its own.
+        """
+        if not self.equilibrium:
+            return self
+        partner = getattr(self, '_non_equilibrium_partner', None)
+        if partner is None:
+            partner = self._non_equilibrium_partner = self._rebuilt(self.mol,
+                                                                    False)
+        return partner
+
+    def _rebuilt(self, mol, equilibrium):
+        """This continuum's settings around `mol`, in or out of equilibrium;
+        an eps_static given beside a solvent name travels with it."""
         dielectric = (dict(solvent=self.solvent) if self.solvent is not None
-                      else dict(eps=self.eps, allow_static_eps=True,
-                                eps_static=self.eps_static))
+                      else dict(eps=self.eps_optical, allow_static_eps=True))
         return SolventScreening(mol, method=self.method, omega_p=self.omega_p,
+                                equilibrium=equilibrium,
+                                eps_static=self.eps_static,
+                                frozen_polarization=self.frozen_polarization,
                                 **dielectric, **self._cavity)
 
     def mean_field(self, mol, scf_factory):
@@ -717,7 +934,11 @@ class SolventScreening:
         A factory that already converged its own PCM at eps_static is returned
         as it is, so the reaction field is applied once; one at any other
         constant relaxed a different ground state and raises. Otherwise the mean
-        field is wrapped and re-converged from its own density.
+        field is wrapped and re-converged from its own density, through
+        `distributed_mean_field`: serially that is the wrapped `kernel()`;
+        under ranks every rank runs pyscf's loop against the distributed J/K
+        and quadrature the factory's SCF left on the mean field, with the
+        reaction field rank 0's on every rank (`distributed_fock`).
 
         The optical response is not attached to the returned mean field: a
         gradient chain or surface carries this object itself. A caller handing
@@ -731,13 +952,14 @@ class SolventScreening:
             bound_pyscf_pcm_blocks(mf.with_solvent)
             return mf
         if self.eps_static is None:
-            warnings.warn(
-                'no eps_static: the ground state is left in the gas phase and '
-                'only the optical response is modelled -- the frozen-'
+            if self.frozen_polarization:
+                return mf
+            raise ValueError(
+                'no eps_static: the ground state would be left in the gas '
+                'phase with only the optical response modelled -- the frozen-'
                 'polarization limit, not non-equilibrium solvation. Pass '
-                'eps_static to relax the SCF in the continuum.',
-                RuntimeWarning, stacklevel=2)
-            return mf
+                'eps_static (or a solvent name) to relax the SCF in the '
+                'continuum, or declare frozen_polarization=True.')
         wrapped = (pyscf_solvent.PCM(mf) if self.cavity_atoms is None
                    else pyscf_solvent.PCM(mf, self._new_pcm(mf.mol)))
         wrapped.with_solvent.method = self.method
@@ -755,7 +977,7 @@ class SolventScreening:
         # pyscf's own PCM force and Hessian block by max_memory alone
         bound_pyscf_pcm_blocks(wrapped.with_solvent)
         with blas_single_threaded():
-            wrapped.kernel(dm0=mf.make_rdm1())
+            distributed_mean_field(wrapped, dm0=mf.make_rdm1())
         if not wrapped.converged:
             raise RuntimeError(
                 f'the SCF did not re-converge inside PCM(eps = '
@@ -1091,7 +1313,8 @@ class SolventScreening:
         label = f"solvent={self.solvent!r}, " if self.solvent else ""
         shell = (f", shell={len(self.cavity_atoms)} atoms"
                  if self.cavity_atoms is not None else "")
-        return (f"SolventScreening({label}eps={self.eps:.4f} (optical), "
+        kind = 'static, equilibrium' if self.equilibrium else 'optical'
+        return (f"SolventScreening({label}eps={self.eps:.4f} ({kind}), "
                 f"method={self.method!r}, ngrids={self.ngrids}{shell})")
 
 
@@ -1187,7 +1410,10 @@ def solvent_static_selfenergy(mf, mol=None):
     return environment_of(mf).static_self_energy(mf, mol)
 
 
-def get_solvent_screening(mf):
-    """The SolventScreening attached to mf, or None: the hook every integral
-    chokepoint calls."""
-    return getattr(mf, 'with_screening', None)
+def symmetrized_response(pcmobj):
+    """Q = (K^-1 R + (K^-1 R)^T) / 2 of a built pyscf PCM: q = Q v, pyscf's
+    symmetrized apparent-surface-charge response."""
+    K = pcmobj._intermediates['K']
+    R = pcmobj._intermediates['R']
+    KiR = np.linalg.solve(K, R)
+    return 0.5 * (KiR + KiR.T)

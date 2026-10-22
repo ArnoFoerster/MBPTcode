@@ -20,6 +20,15 @@ polarization frozen (vertical) or at the static one (equilibrium). The
 channel record keeps the eigenvalue (omega_eV, which holds the LR term of
 singlets), the shifts of both modes and the one added (omega_ss_eV); each
 root's active-space difference density goes to density_<spin>.npz.
+--ss-density relaxed builds the term from the orbital-relaxed difference
+density instead (the ground-state surface charges frozen; relaxed+pcm lets the
+continuum respond inside the orbital response, a bound on that choice): the
+channel record then also keeps the unrelaxed shifts (ss_shifts_unrelaxed_eV)
+and both dipole changes (delta_dipole_au), and density_<spin>.npz the relaxed
+densities in the full MO basis (delta_density_relaxed).
+
+--spin-scaling scs|sos runs SCS- or SOS-ADC(2) (ee_ri_fold; the factors of
+ADC2_SPIN_SCALING), gas phase or with the LR term, not with --state-specific.
 
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
@@ -38,9 +47,9 @@ import json
 import os
 import platform
 import resource
-import subprocess
 import sys
 import time
+import warnings
 
 
 def _repo_root(start):
@@ -59,27 +68,26 @@ ROOT = _repo_root(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import numpy as np                                                  # noqa: E402
-from pyscf import df, gto, lib, scf                                 # noqa: E402
+from pyscf import df, gto, scf                                      # noqa: E402
 
-from src.Base.constants import (EE_RI_AMPLITUDE_CACHE_GB,           # noqa: E402
-                                EE_RI_TILE_GB, HARTREE_TO_EV)
+from src.Base.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,    # noqa: E402
+                                EE_RI_AMPLITUDE_CACHE_GB, EE_RI_FOLD_TILE_ARRAYS,
+                                EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
 from src.Base.utils.mpi_grid import (distributed, grid_comm,        # noqa: E402
                                      lockstep_mean_field)
 from src.Base.utils.threads import blas_threads, openmp_threads    # noqa: E402
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc   # noqa: E402
+from tools.common import code_id, frozen_core                     # noqa: E402
 
-
-def frozen_core(mol):
-    """Doubly occupied core orbitals: 1s past He, 1s2s2p past Ne, 1s..3d past Ar
-    (the last only for Ga onwards; K-Zn keep their 3s3p frozen too)."""
-    n = 0
-    for a in range(mol.natm):
-        z = mol.atom_charge(a)
-        n += 1 if z > 2 else 0
-        n += 4 if z > 10 else 0
-        n += 4 if z > 18 else 0
-        n += 5 if z > 30 else 0
-    return n
+# the record's words for the state-specific term's density and its mode
+SS_DENSITY_CONVENTIONS = {
+    'unrelaxed': 'unrelaxed ISR-ADC(2)',
+    'relaxed': 'orbital-relaxed ADC(2) (ground-state charges frozen)',
+    'relaxed+pcm': 'orbital-relaxed ADC(2) (continuum responding)'}
+SS_MODE_CONVENTIONS = {
+    'off': 'not added',
+    'vertical': 'Q at eps_optical, slow polarization frozen',
+    'equilibrium': 'Q at eps_static'}
 
 
 def sha256(path):
@@ -87,21 +95,10 @@ def sha256(path):
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def git_sha():
-    snap = os.path.join(ROOT, 'SNAPSHOT.txt')
-    if os.path.isfile(snap):
-        with open(snap) as fh:
-            return fh.read().strip()
-    try:
-        return subprocess.check_output(['git', '-C', ROOT, 'rev-parse', 'HEAD'],
-                                       text=True).strip()
-    except Exception:                                   # noqa: BLE001
-        return None
-
-
 def peak_rss_gb():
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return r / (1024 ** 3 if platform.system() == 'Darwin' else 1024 ** 2)
+    # ru_maxrss is in bytes on macOS, in kB on Linux
+    return r / (BYTES_PER_GB if platform.system() == 'Darwin' else BYTES_PER_GB / 1024)
 
 
 def estimate(mol, nfrozen, auxbasis, jk_auxbasis, tile_gb, ranks=1):
@@ -117,11 +114,11 @@ def estimate(mol, nfrozen, auxbasis, jk_auxbasis, tile_gb, ranks=1):
     nv = mol.nao - mol.nelectron // 2
     naux = df.make_auxmol(mol, auxbasis).nao
     naux_jk = df.make_auxmol(mol, jk_auxbasis).nao
-    gb = 8.0 / 1024 ** 3
+    gb = 8.0 / BYTES_PER_GB
     npair = mol.nao * (mol.nao + 1) / 2
     amplitudes = min(EE_RI_AMPLITUDE_CACHE_GB, (no * nv) ** 2 * gb / ranks)
     factors = (no * nv * naux + no * no * naux + nv * nv * naux / ranks) * gb
-    tile = min(tile_gb, 5 * no * nv * nv * no * gb)
+    tile = min(tile_gb, EE_RI_FOLD_TILE_ARRAYS * no * nv * nv * no * gb)
     per_vector = 2 * no * nv * naux * gb
     fold_diag = min(tile_gb, nv * nv * naux * gb / ranks) + naux * naux * gb
     flop_m = 2.0 * (no * nv) ** 2 * naux
@@ -149,13 +146,15 @@ def build_reference(mol, args, env, out_dir, root):
         mf.max_cycle = 200
         mf.max_memory = args.max_memory
         mf.kernel(dm0=dm0)
-        if not mf.converged:
-            raise RuntimeError('the gas-phase SCF did not converge')
         return mf
 
     mf = factory(mol) if env is None else env.mean_field(mol, factory)
     if not mf.converged:
-        raise RuntimeError('the SCF did not converge')
+        # a numerical event: warned about, flagged in the record's 'scf'
+        # (converged false) and the run carries on
+        # (refuse inputs, warn numerics)
+        warnings.warn('the SCF did not converge; every number of this run is '
+                      'flagged (record scf.converged)', RuntimeWarning)
     lockstep_mean_field(mf)
     if root:
         np.savez(path, dm=mf.make_rdm1(), mo_energy=mf.mo_energy, e_tot=mf.e_tot)
@@ -183,6 +182,15 @@ def main():
                    choices=('off', 'vertical', 'equilibrium'),
                    help='add the state-specific reaction field of each '
                         "root's difference density (needs a continuum)")
+    p.add_argument('--ss-density', default='unrelaxed',
+                   choices=('unrelaxed', 'relaxed', 'relaxed+pcm'),
+                   help='difference density of the state-specific term: '
+                        'unrelaxed ISR-ADC(2), orbital-relaxed with the '
+                        'ground-state charges frozen, or relaxed with the '
+                        'continuum responding')
+    p.add_argument('--spin-scaling', default='none', choices=('none', 'scs', 'sos'),
+                   help='spin-component scaled ADC(2), factors (c_os, c_ss) of '
+                        'ADC2_SPIN_SCALING')
     p.add_argument('--frozen', default='auto',
                    help="'auto' (core shells), or a number of orbitals")
     p.add_argument('--conv-tol', type=float, default=1e-6,
@@ -224,9 +232,11 @@ def run(args, comm):
                         omp_threads=openmp_threads())), flush=True)
     if args.state_specific != 'off' and args.environment == 'gas':
         raise SystemExit('--state-specific needs --environment (a continuum)')
+    if args.ss_density != 'unrelaxed' and args.state_specific == 'off':
+        raise SystemExit('--ss-density needs --state-specific')
     if args.estimate_only:
         need = est['peak_gb']
-        if need * 1024 > args.max_memory:
+        if need * MB_PER_GB > args.max_memory:
             say(f'refused: about {need:.0f} GB needed, --max-memory '
                 f'{args.max_memory} MB', flush=True)
             return 2
@@ -250,27 +260,31 @@ def run(args, comm):
                                    'field at eps_optical in the singlet singles '
                                    'block; second order with the bare '
                                    'interaction; state-specific term '
-                                   '(1/2) dV Q dV of the unrelaxed ISR-ADC(2) '
-                                   'difference density: ' + {
-                                       'off': 'not added',
-                                       'vertical': 'Q at eps_optical, slow '
-                                                   'polarization frozen',
-                                       'equilibrium': 'Q at eps_static'}[
-                                       args.state_specific])
+                                   '(1/2) dV Q dV of the '
+                                   + SS_DENSITY_CONVENTIONS[args.ss_density]
+                                   + ' difference density: '
+                                   + SS_MODE_CONVENTIONS[args.state_specific])
 
     record = dict(label=args.label, xyz=os.path.abspath(args.xyz),
                   xyz_sha256=sha256(args.xyz), basis=args.basis,
                   auxbasis=args.auxbasis, jk_auxbasis=args.jk_auxbasis,
-                  method='ADC(2) (folded doubles, density fitted)',
+                  method=('ADC(2)' if args.spin_scaling == 'none' else
+                          args.spin_scaling.upper() + '-ADC(2)')
+                  + ' (folded doubles, density fitted)',
+                  spin_scaling=dict(name=args.spin_scaling, factors=(
+                      None if args.spin_scaling == 'none'
+                      else list(ADC2_SPIN_SCALING[args.spin_scaling]))),
                   state_specific=args.state_specific,
+                  ss_density=args.ss_density,
                   environment=env_info, nroots=args.nroots,
-                  conv_tol=args.conv_tol, code=git_sha(), estimate=est,
+                  conv_tol=args.conv_tol, code=code_id(ROOT), estimate=est,
                   host=platform.node(), threads=dict(blas=blas_threads(),
                                                      omp=openmp_threads()),
                   ranks=1 if comm is None else comm.Get_size())
     t0 = time.time()
     mf = build_reference(mol, args, env, args.out_dir, root)
-    record['scf'] = dict(e_tot=float(mf.e_tot), wall_s=time.time() - t0,
+    record['scf'] = dict(e_tot=float(mf.e_tot), converged=bool(mf.converged),
+                         wall_s=time.time() - t0,
                          homo_eV=float(mf.mo_energy[mol.nelectron // 2 - 1]
                                        * HARTREE_TO_EV),
                          lumo_eV=float(mf.mo_energy[mol.nelectron // 2]
@@ -283,7 +297,9 @@ def run(args, comm):
         if os.path.isfile(path):
             with open(path) as fh:
                 stored = json.load(fh)
-            if stored.get('state_specific', 'off') == args.state_specific:
+            if (stored.get('state_specific', 'off') == args.state_specific
+                    and stored.get('ss_density', 'unrelaxed') == args.ss_density
+                    and stored.get('spin_scaling', 'none') == args.spin_scaling):
                 channels[spin] = stored
                 say(f'{spin}: reused {path}', flush=True)
                 continue
@@ -293,27 +309,47 @@ def run(args, comm):
                                  auxbasis=args.auxbasis, environment=env,
                                  conv_tol=args.conv_tol, return_fold=True,
                                  tile_gb=args.tile_gb, device=args.device,
-                                 state_specific=args.state_specific)
+                                 state_specific=args.state_specific,
+                                 ss_density=args.ss_density,
+                                 spin_scaling=(None if args.spin_scaling == 'none'
+                                               else args.spin_scaling))
         op = res.operator
         ch = dict(omega_eV=(np.asarray(res.omega) * HARTREE_TO_EV).tolist(),
                   singles_weight_T1=np.asarray(res.t1).tolist(),
                   converged=np.asarray(res.converged).tolist(),
+                  # the fold's numerical events by name (ee_fold.FoldResult.flags),
+                  # and the SCF's: a rerun reuses this channel, its SCF or not
+                  flags=list(getattr(res, 'flags', [])) + ([] if mf.converged else [
+                      {'flag': 'scf_not_converged',
+                       'message': 'the channel was solved on an SCF that did '
+                                  'not converge'}]),
                   newton_steps=np.asarray(res.steps).tolist(),
                   loop=list(res.loop), level=np.asarray(res.level).tolist(),
                   e_mp2=op.e_mp2, product_columns=op.matvecs,
                   image_columns=op.image_columns, node_images=op.node_images,
                   tile_k=op.kt,
                   wall_s=time.time() - t, peak_rss_gb=peak_rss_gb(),
-                  state_specific=args.state_specific)
+                  state_specific=args.state_specific,
+                  ss_density=args.ss_density,
+                  spin_scaling=args.spin_scaling)
         if args.state_specific != 'off':
             ch['ss_shifts_eV'] = {m: (np.asarray(v) * HARTREE_TO_EV).tolist()
                                   for m, v in res.ss_shifts.items()}
             ch['ss_shift_eV'] = (np.asarray(res.ss_shift) * HARTREE_TO_EV).tolist()
             ch['omega_ss_eV'] = (np.asarray(e) * HARTREE_TO_EV).tolist()
+            densities = dict(delta_density=np.asarray(res.delta_density))
+            if args.ss_density != 'unrelaxed':
+                ch['ss_shifts_unrelaxed_eV'] = {
+                    m: (np.asarray(v) * HARTREE_TO_EV).tolist()
+                    for m, v in res.ss_shifts_unrelaxed.items()}
+                ch['delta_dipole_au'] = {k: np.asarray(v).tolist()
+                                         for k, v in res.delta_dipole.items()}
+                densities['delta_density_relaxed'] = np.asarray(
+                    res.delta_density_relaxed)
             if root:
                 np.savez(os.path.join(args.out_dir, f'density_{spin}.npz'),
-                         delta_density=np.asarray(res.delta_density),
-                         omega=res.omega, t1=res.t1, nfrozen=nfrozen)
+                         omega=res.omega, t1=res.t1, nfrozen=nfrozen,
+                         **densities)
         if root:
             with open(path, 'w') as fh:
                 json.dump(ch, fh, indent=1)
@@ -327,6 +363,11 @@ def run(args, comm):
         record['S'] = s[:3]
         record['T'] = tr[:3]
         record['dEST_eV'] = s[0] - tr[0]
+        # the caveats dEST is built on: the SCF and both channels' fold flags
+        record['dEST_flags'] = sorted(
+            {f['flag'] for c in ('singlet', 'triplet')
+             for f in channels[c].get('flags', [])}
+            | (set() if record['scf']['converged'] else {'scf_not_converged'}))
     record['wall_s'] = time.time() - t0
     record['peak_rss_gb'] = peak_rss_gb()
     if root:

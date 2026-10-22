@@ -19,8 +19,8 @@ about a generic axis plus a translation:
     rotates with the molecule and carries no net force or torque;
   - the force is the derivative of its energy at the rotated geometry,
     along a generic direction and along a rigid rotation;
-  - at R0 the energy and the points are the lab-frame convention's bit for
-    bit;
+  - at R0 the points and the energy are the lab-frame convention's to a few
+    ulp (two chains built and solved apart);
   - negative control: with the frames held in the lab frame the energy moves
     under the rotation and the force carries a torque.
 """
@@ -36,15 +36,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.Base import body_frame
 from src.Base.body_frame import BodyFrame, aligned_displacement, kabsch_rotation
-from src.Base.constants import ISDF_GRADIENT_FLOOR
+from src.Base.constants import (ISDF_GRADIENT_FLOOR,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.isdf_jk import isdf_jk
+from src.Base.numerics import Numerics
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.gradients.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.properties.optimize import translation_rotation_basis
 from src.properties.surfaces import potential_energy_surface
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
 #: Water with no symmetry, so no component of a force vanishes by symmetry.
@@ -64,7 +69,9 @@ FD_STEP = 1e-4
 
 def rhf(mol):
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -74,7 +81,7 @@ def isdf_rhf(mol):
     the orbitals, and at conv_tol_grad 1e-11 this SCF's residual puts 2e-8
     Ha/Bohr into the five-point difference of S1 along a rotation (9e-10 at
     1e-13)."""
-    mf = isdf_jk(scf.RHF(mol), auxbasis=BASIS + '-ri')
+    mf = isdf_jk(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(mol))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-13, 400
     mf.kernel()
     assert mf.converged
@@ -177,7 +184,7 @@ def test_a_linear_reference_keeps_the_lab_frame():
 def cd_route(spin):
     """The contour-deformation chain, total energy and force at `mol`."""
     mol = water()
-    chain = ExcitedStateChain(mol, rhf, spin=spin, bse_tda=spin == 'triplet')
+    chain = ExcitedStateChain(mol, rhf, spin=spin, bse_tda=spin == 'triplet', numerics=g1_numerics(mol))
 
     def energy(m):
         return chain.energy(m)[0]
@@ -257,7 +264,7 @@ def test_the_production_surface_is_invariant(factory):
 def test_the_drpa_ground_state_is_invariant():
     warnings.simplefilter('ignore')
     mol = water()
-    chain = RPAGroundStateChain(mol, rhf)
+    chain = RPAGroundStateChain(mol, rhf, numerics=Numerics(isdf={'counts': g1(mol)}))
     e0, g0 = chain.total_energy(mol), chain.total_gradient(mol)[0]
     force, torque = rigid_part(mol, g0)
     assert force < RIGID_TOL and torque < RIGID_TOL, (force, torque)
@@ -288,13 +295,15 @@ def test_the_dense_df_route_is_invariant():
 def test_r0_is_the_lab_frame_convention_bit_for_bit(monkeypatch):
     warnings.simplefilter('ignore')
     mol, energy, _ = cd_route('singlet')
-    chain_points = ExcitedStateChain(mol, rhf).coords(mol)
+    chain_points = ExcitedStateChain(mol, rhf, numerics=g1_numerics(mol)).coords(mol)
     e_body = energy(mol)
     lab_frames(monkeypatch)
     mol2, energy2, _ = cd_route('singlet')
-    assert energy2(mol2) == e_body
-    assert np.array_equal(ExcitedStateChain(mol2, rhf).coords(mol2),
-                          chain_points)
+    # a second chain's grid, SCF and solve: the same to a few ulp
+    assert_same(energy2(mol2), e_body, quantity='energy',
+                label='R0 lab frames')
+    assert_same(ExcitedStateChain(mol2, rhf, numerics=g1_numerics(mol2)).coords(mol2),
+                chain_points, unit='1', quantity='root', label='R0 points')
 
 
 def test_lab_frames_fail_the_invariance_gate(monkeypatch):

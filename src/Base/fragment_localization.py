@@ -47,7 +47,7 @@ from scipy.sparse.linalg import LinearOperator, minres
 from src.Base.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_TOL_GRAD,
                                 FRAGMENT_PM_POLISH_MAX,
                                 LOCALIZED_ASSIGNMENT_FLOOR)
-from src.Base.pyscf_interface import fock_mo
+from src.Base.pyscf_interface import fock_mo, occupied_count
 from src.Base.utils.krylov import root_driven_solve
 
 POPULATION_SCHEMES = ('lowdin', 'iao')
@@ -287,7 +287,7 @@ class FragmentOrbitals:
         mol = mf.mol
         fragments = check_partition(mol, fragments)
         mo = np.asarray(mf.mo_coeff, float)
-        nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
+        nocc = occupied_count(mf)
         s = mol.intor_symmetric('int1e_ovlp')
         c_o, c_v = mo[:, :nocc], mo[:, nocc:]
         if scheme == 'iao':

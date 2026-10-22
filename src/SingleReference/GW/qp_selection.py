@@ -35,6 +35,15 @@ monotone. A degenerate block is never split -- as a member, a hole or a
 probe -- and a probe block lends the mean of its members' shifts, which does
 not depend on the rotation inside it.
 
+The window edge. An edge orbital closer than QP_HAMILTONIAN_WINDOW to the
+first orbital outside the window mixes with it along a walk, and as a lone
+explicit orbital beside the outside's shared scissor it would be lost on the
+first step that rotates the two into each other. Such an edge -- on either
+side of the gap, whether its root is admitted or takes the inside scissor --
+is a hole of the next probe inward (`window_edge_holes`): it borrows the shift
+the outside orbitals borrow, so it and they carry one frozen shift and rotate
+freely in one unit. The next block inward is the window's edge then.
+
 The hole cap. The budget weighs a hole by the targets' weight on it, so a
 hole no target reaches could carry any error, and a root that is not a target
 at the reference geometry -- but becomes the followed state along a walk --
@@ -53,8 +62,12 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from src.Base.constants import (ADAPTIVE_HOLE_MAX_EV, HARTREE_TO_EV,
-                                HARTREE_TO_MEV)
+                                HARTREE_TO_MEV, QP_HAMILTONIAN_WINDOW)
 from src.Base.environment import NoEnvironment, attached_environment
+from src.SingleReference.GW.qp_states import (continuation_failed,
+                                             is_quasiparticle_root,
+                                             nearest_probe)
+from src.SingleReference.GW.qp_solve import add_reaction_field
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 
 
@@ -228,28 +241,141 @@ def degenerate_blocks(eps, members, tol):
     return blocks
 
 
+def merged_blocks(members, *groupings):
+    """The connected blocks of `members` under every grouping given, each a
+    sorted tuple; a member no grouping links is a block of its own."""
+    parent = {int(p): int(p) for p in members}
+
+    def root(p):
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+
+    for grouping in groupings:
+        for block in grouping:
+            block = [int(p) for p in block if int(p) in parent]
+            for p in block[1:]:
+                parent[root(p)] = root(block[0])
+    out = {}
+    for p in parent:
+        out.setdefault(root(p), []).append(p)
+    return sorted(tuple(sorted(b)) for b in out.values())
+
+
+def true_degenerate_blocks(eps, corrections, members, energy_tol,
+                           correction_tol):
+    """(blocks, record): the blocks of `members` that share ONE quasiparticle
+    correction, and what was decided for every candidate.
+
+    A candidate is two or more neighbours closer than `energy_tol` in eps; it
+    is a block only if its members' own corrections eps^QP_q - eps_q
+    (`corrections`, {orbital: Ha}) also lie within `correction_tol`, as a
+    true degeneracy's do. An accidental near-degeneracy whose corrections
+    differ keeps them: averaging would move each by half the difference. A
+    rejected candidate is split into the runs of members whose corrections
+    agree, and those that pass are blocks. record: {'kept': [...],
+    'rejected': [...]}, each entry the members, the energy and correction
+    spreads (Ha) and the corrections; a rejected one also `why`.
+    """
+    eps = np.asarray(eps, float)
+    corr = np.full(len(eps), np.nan)
+    for p, c in corrections.items():
+        corr[int(p)] = float(c)
+
+    def entry(b):
+        b = [int(p) for p in b]
+        return {'members': b, 'energy_spread_Ha': float(np.ptp(eps[b])),
+                'correction_spread_Ha': float(np.ptp(corr[b])),
+                'corrections_Ha': {p: float(corr[p]) for p in b}}
+
+    blocks, kept, rejected = [], [], []
+    for cand in degenerate_blocks(eps, members, energy_tol):
+        if len(cand) < 2:
+            continue
+        if np.ptp(corr[list(cand)]) < correction_tol:
+            blocks.append(tuple(cand))
+            kept.append(entry(cand))
+            continue
+        out = entry(cand)
+        out['why'] = (f'own corrections spread {out["correction_spread_Ha"]:.3e}'
+                      f' Ha >= {correction_tol:.1e} Ha: near-degenerate by '
+                      f'accident, not by symmetry')
+        out['split_into'] = []
+        for sub in degenerate_blocks(corr, cand, correction_tol):
+            if len(sub) > 1 and np.ptp(corr[list(sub)]) < correction_tol:
+                blocks.append(tuple(sub))
+                kept.append(entry(sub))
+                out['split_into'].append([int(p) for p in sub])
+        rejected.append(out)
+    return blocks, {'kept': kept, 'rejected': rejected}
+
+
 def _block_map(blocks):
     """{orbital: its block}."""
     return {p: b for b in blocks for p in b}
 
 
-def ac_unjudgeable(ac_shift, z, shift_max_ev):
+def ac_unjudgeable(ac_shift, z, shift_max_ev, failures=None):
     """{p: why} for the states the continuation cannot judge.
 
-    A Pade or Newton that failed (a non-finite shift), a pole strength outside
-    (0, 1], or a shift beyond `shift_max_ev`: such a state is never scissored
-    on the continuation's word.
+    A Pade or Newton that failed (a non-finite shift, with the exception
+    `failures` names for it), a pole strength outside (0, 1], or a shift
+    beyond `shift_max_ev`: such a state is never scissored on the
+    continuation's word.
     """
     out = {}
     for p, a in ac_shift.items():
         zp = None if z is None else z.get(int(p))
         if a is None or not np.isfinite(a):
-            out[int(p)] = 'continuation failed'
-        elif zp is None or not np.isfinite(zp) or not 0.0 < zp <= 1.0:
+            out[int(p)] = continuation_failed(p, failures)
+        elif zp is None or not is_quasiparticle_root(zp):
             out[int(p)] = f'Z_AC {zp} outside (0, 1]'
         elif abs(a) * HARTREE_TO_EV > shift_max_ev:
             out[int(p)] = (f'|a| {abs(a) * HARTREE_TO_EV:.3f} eV > '
                            f'{shift_max_ev} eV')
+    return out
+
+
+def window_edge_holes(eps, nocc, candidates, degeneracy_tol,
+                      gap=QP_HAMILTONIAN_WINDOW):
+    """{hole: probe}: the window-edge orbitals closer than `gap` (Ha) to the
+    first orbital outside the window on their side of the gap, each a hole
+    of the next probe inward, the orbital of the next block inward nearest
+    it (`nearest_probe`, as `calibrate_scissor` lends the outside orbitals).
+
+    Taken block by block from the outermost candidate of each side while the
+    block lies within `gap` of that first outside orbital; the frontier block
+    is never taken. A side with no orbital outside the window has none.
+    """
+    eps = np.asarray(eps, float)
+    candidates = sorted(int(p) for p in candidates)
+    held = set(candidates)
+    out = {}
+    for occupied in (True, False):
+        side = [p for p in candidates if (p < nocc) == occupied]
+        beyond = [p for p in range(len(eps)) if (p < nocc) == occupied
+                  and p not in held and side
+                  and (eps[p] < eps[side[0]] if occupied
+                       else eps[p] > eps[side[-1]])]
+        if not beyond:
+            continue
+        first = (max(beyond, key=lambda p: eps[p]) if occupied
+                 else min(beyond, key=lambda p: eps[p]))
+        blocks = degenerate_blocks(eps, side, degeneracy_tol)
+        # outermost first: occupied from the bottom, virtual from the top
+        blocks = blocks if occupied else blocks[::-1]
+        taken = []
+        for block in blocks[:-1]:
+            if np.min(np.abs(eps[list(block)] - eps[first])) >= gap:
+                break
+            taken.append(block)
+        if not taken:
+            continue
+        probe = blocks[len(taken)]
+        for block in taken:
+            for p in block:
+                out[p] = nearest_probe(eps, probe, p)
     return out
 
 
@@ -260,12 +386,16 @@ def mandatory_members(eps, nocc, candidates, degeneracy_tol, unjudgeable=()):
     one's (`calibrate_scissor` resolves to them) and bracket every hole; the
     frontier pair is where the continuation is most reliable and so where the
     calibration is anchored; a state the continuation cannot judge is solved.
-    Each widened over its degenerate block.
+    Each widened over its degenerate block. An edge within
+    QP_HAMILTONIAN_WINDOW of the outside is a hole (`window_edge_holes`) and
+    is never among them: the next block inward is the edge.
     """
     candidates = sorted(int(p) for p in candidates)
     blocks = _block_map(degenerate_blocks(eps, candidates, degeneracy_tol))
+    held = window_edge_holes(eps, nocc, candidates, degeneracy_tol)
+    inner = [p for p in candidates if p not in held]
     why = {}
-    for edge in (candidates[0], candidates[-1]):
+    for edge in (inner[0], inner[-1]):
         for p in blocks[edge]:
             why.setdefault(p, 'edge')
     occ = [p for p in candidates if p < nocc]
@@ -274,6 +404,8 @@ def mandatory_members(eps, nocc, candidates, degeneracy_tol, unjudgeable=()):
         for q in blocks[p]:
             why.setdefault(q, 'frontier')
     for p in unjudgeable:
+        if int(p) in held:
+            continue
         for q in blocks[int(p)]:
             why.setdefault(q, 'ac_unjudgeable')
     return why
@@ -327,20 +459,26 @@ def calibrate_ac(eps, nocc, ac_shift, explicit_shift, candidates):
     return Calibration(a_tilde=a_tilde, residual=residual, u=u)
 
 
-def matched_tiers(eps, nocc, a_tilde, probe_shift, explicit, blocks):
+def matched_tiers(eps, nocc, a_tilde, probe_shift, explicit, blocks,
+                  pinned=None):
     """{hole: probe block}: the explicit block of the hole's own side whose
     shift is nearest the hole block's mean calibrated AC shift.
 
     probe_shift: {q: s_q}, the shift each explicit q lends.
+    pinned: {hole: probe orbital} whose tier is fixed (`window_edge_holes`).
     Ties go to the nearest in energy, then to the lower index.
     """
     eps = np.asarray(eps, float)
     explicit = set(int(p) for p in explicit)
+    pinned = {} if pinned is None else pinned
     probes = [b for b in blocks if b[0] in explicit]
     s_of = {b: float(np.mean([probe_shift[q] for q in b])) for b in probes}
     tier_of = {}
     for b in blocks:
         if b[0] in explicit:
+            continue
+        if b[0] in pinned:
+            tier_of.update({p: (int(pinned[p]),) for p in b})
             continue
         side = b[0] < nocc
         mine = [pb for pb in probes
@@ -418,25 +556,32 @@ def select_explicit(eps, nocc, candidates, a_tilde, weights, tol_meV, *,
     {q: s_q} of the states already solved; a member not yet solved lends its
     calibrated AC shift a~_q, the prediction of its root. Ties go to the
     larger weight, then the lower index. Deterministic, so ranks that hold
-    the same inputs select the same set. tol_meV = 0 takes the whole window.
+    the same inputs select the same set. tol_meV = 0 takes the whole window
+    but its edge holes.
     barred: orbitals never added (a root the surface already rejected), whose
-    blocks stay holes whatever they cost.
+    blocks stay holes whatever they cost. A window edge within
+    QP_HAMILTONIAN_WINDOW of the outside (`window_edge_holes`) is barred
+    too, whatever `start` holds, and borrows from the next probe inward,
+    which is solved.
     """
     tol = float(tol_meV) / HARTREE_TO_MEV
     cap = None if hole_max_ev is None else float(hole_max_ev) / HARTREE_TO_EV
     candidates = sorted(int(p) for p in candidates)
     blocks = degenerate_blocks(eps, candidates, degeneracy_tol)
     bmap = _block_map(blocks)
-    barred = set(int(p) for p in barred)
+    pinned = window_edge_holes(eps, nocc, candidates, degeneracy_tol)
+    barred = set(int(p) for p in barred) | set(pinned)
     chosen = set()
-    for p in start:
-        chosen.update(bmap[int(p)])
+    for p in list(start) + list(pinned.values()):
+        if int(p) not in pinned:
+            chosen.update(bmap[int(p)])
     known = {} if probe_shift is None else {int(q): float(s)
                                            for q, s in probe_shift.items()}
     order, capped = [], []
     while True:
         shift = {q: known.get(q, a_tilde[q]) for q in chosen}
-        tier_of = matched_tiers(eps, nocc, a_tilde, shift, chosen, blocks)
+        tier_of = matched_tiers(eps, nocc, a_tilde, shift, chosen, blocks,
+                                pinned)
         signed, budget, terms = error_terms(weights, a_tilde, u, shift,
                                             tier_of, blocks)
         holes = [b for b in blocks if b[0] in tier_of
@@ -513,8 +658,8 @@ def calibrated_selection(eps, nocc, candidates, ac_shift, explicit_shift,
     """(`Selection`, `Calibration`) once explicit roots exist.
 
     The continuation is calibrated on the explicit shifts; if its residual
-    on the frontier exceeds gate_ev it is broken here and the whole window is
-    solved (fell_back='calibration'). Otherwise the greedy rule runs on the
+    on the frontier exceeds gate_ev it is broken here and the whole window
+    but its edge holes is solved (fell_back='calibration'). Otherwise the greedy rule runs on the
     calibrated shifts with u, from the explicit set and `start`, under the
     same hole cap.
     """
@@ -524,9 +669,12 @@ def calibrated_selection(eps, nocc, candidates, ac_shift, explicit_shift,
     gate = frontier_residual(calibration, eps, nocc, sorted(explicit_shift),
                              degeneracy_tol)
     if not np.isfinite(gate) or gate * HARTREE_TO_EV > gate_ev:
-        return Selection(explicit=candidates, tier_of={}, signed={},
-                         budget={}, order=[], fell_back='calibration'), \
-            calibration
+        edge = window_edge_holes(eps, nocc, candidates, degeneracy_tol)
+        return Selection(explicit=tuple(p for p in candidates
+                                        if p not in edge),
+                         tier_of={p: (q,) for p, q in edge.items()},
+                         signed={}, budget={}, order=[],
+                         fell_back='calibration'), calibration
     selection = select_explicit(
         eps, nocc, candidates, calibration.a_tilde, weights, tol_meV,
         start=set(explicit_shift) | set(int(p) for p in start),
@@ -536,28 +684,41 @@ def calibrated_selection(eps, nocc, candidates, ac_shift, explicit_shift,
 
 
 def ac_quasiparticle_shifts(mf, mol, nocc, states, *, factors, xc_diagonal,
-                            comm=None, timings=None):
+                            numerics, comm=None, timings=None, failures=None,
+                            reaction_field=None):
     """({p: a_p}, {p: Z_AC}): the analytic-continuation quasiparticle shift
-    a_p = omega_p - eps_p and pole strength of each state, Hartree. For the
-    selection only: no number returned here may reach an energy or a force.
+    a_p = omega_p - eps_p and pole strength of each state, Hartree. No number
+    returned here reaches an energy or a force directly: it selects, or places
+    the knots of a frozen `OutsideCurve` beyond the explicit window.
 
     The conventional space-time GW (`solve_qp_energy_space_time`) on the
     caller's own factors and its own static term, so that a - s, against the
     caller's explicit shift s, is the correlation part alone:
     factors:     the factors the caller's self-energy screens with (the bare
                  gauge in a continuum), as (X_mo, D) or `SlicedFactors`;
-    xc_diagonal: the caller's <p|Sigma_x - v_xc + Sigma^env|p> on `states`,
-                 Eq. (18) included, which replaces the route's own build.
+    xc_diagonal: the caller's <p|Sigma_x - v_xc|p> on `states`, which
+                 replaces the route's own build.
+    reaction_field: the caller's Eq. (18) array over every orbital, added to
+                 each root after the solve, whole, as the caller's own G0W0
+                 roots carry it (`qp_solve.add_reaction_field`); None in the
+                 gas phase.
+    numerics:    the caller's (`Numerics`): its quadrature and layout size the
+                 route's grids, where the route's own defaults sized them
+                 whatever the caller's were.
     The mean field is evaluated with no environment attached: the factors
-    are already bare and the environment's static term is in xc_diagonal.
-    A state whose continuation or root search fails comes back NaN.
+    are already bare and the environment's static term is reaction_field.
+    A state whose continuation fails numerically comes back NaN, its
+    exception recorded in `failures` ({p: 'Class: message'}) when given; any
+    other exception raises.
     """
     states = np.asarray(states, int)
     with attached_environment(mf, NoEnvironment()):
         roots, z = solve_qp_energy_space_time(
-            mf, mol, nocc, states, factors=factors,
+            mf, mol, nocc, states, numerics=numerics, factors=factors,
             xc_diagonal=np.asarray(xc_diagonal, float), with_z=True,
-            comm=comm, timings=timings)
+            comm=comm, timings=timings, failures=failures)
+    roots = add_reaction_field(np.asarray(roots, float), reaction_field,
+                               states)
     eps = np.asarray(mf.mo_energy, float)
     return ({int(p): float(w) - float(eps[p]) for p, w in zip(states, roots)},
             {int(p): float(zz) for p, zz in zip(states, z)})

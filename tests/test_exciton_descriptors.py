@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies,
                                       get_two_electron_integrals_chemist)
+from src.Base.numerics import numerics_of
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
                                                          solve_casida_davidson)
@@ -180,8 +181,9 @@ def main():
     omega, Xd, Yd = CasidaSolver(A, B).solve()
     order = np.argsort(omega)[:3]
     dense = exciton_descriptors(mf_df, mol, nocc, Xd[:, order], Yd[:, order])
-    om_dav, X_dav, Y_dav = solve_casida_davidson(lr, nocc, nroots=3,
-                                                 polarizability='RPA', conv_tol=1e-8)
+    om_dav, X_dav, Y_dav = solve_casida_davidson(
+        lr, nocc, numerics=numerics_of({'nroots': 3, 'bse_conv_tol': 1e-8}),
+        polarizability='RPA')
     order = np.argsort(om_dav)
     dav = exciton_descriptors(mf_df, mol, nocc, X_dav[:, order], Y_dav[:, order])
     worst = max(np.abs(dav[k] - dense[k]).max() for k in ('d_eh', 'sigma_e', 'sigma_h',
@@ -254,7 +256,8 @@ def main():
 
     print('\n=== 7. solve_bse_df returns the descriptors of its (X, Y) ===')
     def bse_df_check(label, **kw):
-        _, X_bse, Y_bse, info = solve_bse_df(mf_df, mol, nocc, nroots=3,
+        _, X_bse, Y_bse, info = solve_bse_df(mf_df, mol, nocc,
+                                             numerics=numerics_of({'nroots': 3}),
                                              progress=False, **kw)
         d = info.get('exciton_descriptors')
         direct = exciton_descriptors(mf_df, mol, nocc, X_bse, Y_bse)

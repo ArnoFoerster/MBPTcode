@@ -7,8 +7,8 @@ the chain calls through -- plus the one property that distinguishes it: the
 sites do NOT ride the molecule, so B carries no nuclear derivative and the
 whole geometry dependence sits in the field integrals.
 
-The field integral conventions underneath were pinned numerically before
-anything was built on them: `site_field` against a finite difference of the
+The field integral conventions underneath are pinned numerically:
+`site_field` against a finite difference of the
 potential with respect to a site (4e-11), and `site_field_aux_gradient`
 against a finite difference of `site_field` under a nuclear displacement
 (1e-11). Those are the two signs a reverse pass cannot recover from.

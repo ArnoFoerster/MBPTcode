@@ -3,7 +3,7 @@ them, so a space-time RPA/GW driver can be written once and run on either the
 T = 0 minimax grids or the finite-temperature IR basis.
 
     grid = TimeFrequencyGrid.minimax(nfreq, e_min, e_max)
-    grid = TimeFrequencyGrid.ir(beta, omega_max, eps=1e-10, statistics='boson')
+    grid = TimeFrequencyGrid.ir(beta, omega_max, statistics='boson')
 
     Pi_w = grid.to_omega(Pi_tau, parity='even')      # cosine transform
     Sig_w = grid.to_omega(Sig_tau, parity='odd')     # sine transform
@@ -92,10 +92,13 @@ import warnings
 
 import numpy as np
 
-from src.Base.constants import TRANSFORM_FIT_RCOND
-from src.Base.utils.grids import (minimax_frequency_grid, minimax_time_grid,
-                                  gauss_legendre_grid, _load_minimax_tau_data)
-from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
+from src.Base.constants import (DEFAULT_TAU_TARGET, IR_EPS,
+                                TRANSFORM_FIT_RCOND)
+from src.Base.utils.grids import (_load_minimax_tau_data, _require_positive_e_min,
+                                  gauss_legendre_grid, minimax_frequency_grid,
+                                  minimax_tau_supported_sizes,
+                                  minimax_time_grid)
+from src.Base.utils.matsubara import ir_sampling, matsubara_frequencies
 
 # GreenX minimax_utils.F90 transformation-type codes, kept so the port stays
 # line-comparable with the Fortran.
@@ -179,7 +182,7 @@ def laplace_test_error(npoints, R, nsample=4001, relative=False):
     return float(np.abs(1.0 / x - approx).max())
 
 
-def minimax_points_for_accuracy(e_min, e_max, target=1e-6, npoints_max=34,
+def minimax_points_for_accuracy(e_min, e_max, target, npoints_max=34,
                                 relative=False):
     """
     Smallest minimax grid whose Laplace test error meets `target`.
@@ -187,33 +190,30 @@ def minimax_points_for_accuracy(e_min, e_max, target=1e-6, npoints_max=34,
     Returns (npoints, achieved_error). If nothing in range reaches the target
     the best available is returned, and the caller should treat the second value
     as the accuracy it is actually getting rather than assume `target` was met.
+    A range no grid can be built on (e_min <= 0, e_max <= e_min) and one on
+    which no tabulated size gives a finite residual are refused.
     """
+    _require_positive_e_min(float(e_min), float(e_max),
+                            'minimax_points_for_accuracy')
     R = float(e_max) / float(e_min)
+    tabulated = set(minimax_tau_supported_sizes())
     best = (None, np.inf)
     for n in range(6, npoints_max + 1, 2):      # GreenX tabulates even sizes >= 6
-        try:
-            err = laplace_test_error(n, R, relative=relative)
-        except Exception:              # this size is not tabulated; try the next
+        if n not in tabulated:
             continue
+        err = laplace_test_error(n, R, relative=relative)
         if err < best[1]:
             best = (n, err)
         if err <= target:
             return n, err
+    if best[0] is None:
+        raise ValueError(
+            f"no tabulated minimax grid of at most {npoints_max} points fits "
+            f"the range [{float(e_min):.6g}, {float(e_max):.6g}] Ha (ratio "
+            f"{R:.6g}) with a finite Laplace residual: the range is not one a "
+            f"time grid can represent.")
     return best
 
-
-#: Kaltak-Klimes-Kresse residual that buys ~0.1 meV on the quasiparticle
-#: energy. Calibrated on naphthalene/cc-pVDZ at R_Sigma = 486, against the
-#: ntau -> infinity limit of the space-time HOMO:
-#:     eta 1.2e-08 -> 1.96 meV     eta 6.0e-10 -> 0.32 meV
-#:     eta 4.8e-11 -> 0.08 meV     eta 3.7e-12 -> 0.03 meV
-#: The mapping is empirical -- eta bounds the quadrature, not the self-energy
-#: it is used to integrate -- so this is a calibrated default, not a bound.
-#:
-#: It lives HERE, with the grid machinery, and `GW.imaginary_time` re-exports
-#: it: every space-time route needs it, and a constant defined twice is a
-#: constant that eventually differs.
-DEFAULT_TAU_TARGET = 1e-10
 
 #: Padding on the two self-energy fit ranges, as (below, above).
 #:
@@ -250,8 +250,6 @@ def minimax_points_for_ranges(ratios, target=DEFAULT_TAU_TARGET,
     for R in ratios:
         n, err = minimax_points_for_accuracy(1.0, R, target=target,
                                              npoints_max=npoints_max)
-        if n is None:                  # nothing tabulated resolved this ratio
-            return npoints_max, float('inf')
         npoints, worst = max(npoints, n), max(worst, err)
     return npoints, worst
 
@@ -425,7 +423,18 @@ def self_energy_fit_ranges_from_window(eps, mu, w_lo, w_hi, pad=SELF_ENERGY_PAD)
 
 
 def sigma_fit_ranges(eps, nocc, mu=None, intermediate=None):
-    """(rW, rS) for `sigma_transforms`, with rS narrowed to the masked sum."""
+    """(rW, rS) for `sigma_transforms`, the two exponential-decay ranges the
+    space-time self-energy needs: the molecular window padded by
+    SELF_ENERGY_PAD, rS narrowed to the masked sum over `intermediate`.
+
+    * Wt(i.tau): the RPA screened interaction has spectral weight below the
+      smallest independent-particle transition (collective excitations sit
+      under the HOMO-LUMO gap), so a range starting at the gap misfits where
+      Wt is largest. Measured on the Wt(i.w) -> tau -> Wt(i.w) round trip
+      at ntau=18: 1.3e-3 with [gap, e_max], 5.0e-8 with the widened range.
+    * Sigma(i.tau) = -G Wt is a product, so its decay rates are sums
+      |eps_m - mu| + Omega_S and reach far beyond either factor's range.
+    """
     eps = np.asarray(eps)
     # occ/virt taken by plain slicing, not `SingleReference.base.get_occ_virt_indices`:
     # importing that package back into Base would close an import cycle, since
@@ -616,7 +625,7 @@ class TimeFrequencyGrid:
                    method='gauss_legendre', meta={'w0': w0})
 
     @classmethod
-    def ir(cls, beta, omega_max, eps=1e-10, statistics='boson',
+    def ir(cls, beta, omega_max, eps=IR_EPS, statistics='boson',
            n_matsubara_factor=4):
         """Finite-temperature IR basis: transforms go through basis coefficients.
 
@@ -629,16 +638,10 @@ class TimeFrequencyGrid:
         statistics='boson' is the right choice for a polarizability; the
         self-energy and Green's function are 'fermion'.
         """
-
-        basis = IRBasis(beta * omega_max, eps=eps, statistics=statistics)
-        x_tau = basis.default_tau_sampling()
-        n_mats = basis.default_matsubara_sampling(n_max_factor=n_matsubara_factor)
-
+        basis, x_tau, n_mats, U_tau, U_mat = ir_sampling(
+            beta, omega_max, statistics, eps, n_max_factor=n_matsubara_factor)
         tau_points = 0.5 * beta * (x_tau + 1.0)
         omega_points = np.abs(matsubara_frequencies(n_mats, beta, statistics))
-
-        U_tau = basis.u_at(x_tau)               # (L, ntau) real
-        U_mat = basis.uhat(n_mats)              # (L, nfreq) complex
 
         # uhat_l is purely real for half the l and purely imaginary for the
         # other half (Li et al. 2020 Sec. II C; boson: even l real, fermion:

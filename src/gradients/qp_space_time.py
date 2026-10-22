@@ -11,36 +11,47 @@ route is larger than proj(tau):
         chi0(i.nu) = sum_tau cosft[nu,tau] proj(tau)
         W Bp       = [I - chi0]^-1 Bp    ->  wc[nu,q] = Bp[:,q]^T (W - I) Bp[:,q]
     residues:   chi0(w') = sum_tau 2 w_tau cosh(w' tau) proj(tau)   (w' < gap)
-    Newton on w = eps_p + Sigma^CD(w) from wc, Z from the closed-form slope
+    root of w = eps_p + Sigma^CD(w) from wc (the one bracket-and-refine
+    finder), Z from the closed-form slope
     reverse: the same blocks again, W Bp rebuilt per frequency, each block's
              chi0_bar folded straight into projbar(tau); the residues' rank-one
-             adjoints folded into the same projbar; then one
+             adjoints folded into the SAME projbar; then one
              `polarizability_backward` and the Bp chain back to (X, D).
 
 Peak memory is this rank's rows of proj(tau) and projbar(tau) (`ProjRows`),
 one frequency's chi0 on the rank that factorizes it, one tau slice on the
-rank that sweeps it, and the M-row tiles, all governed by one `tile_gb` and
-independent of the number of CD frequencies. Rebuilding W Bp in the reverse
-pass costs one more factorization per frequency (naux^3, against the sweep's
-M^2 (norb + naux) per tau) and removes the (nfreq, naux, norb) array.
+rank that sweeps it, and the M-row tiles, all governed by one `tile_gb`: at
+naux ~ 5000 a few GB, against the 90 GB of the full three-index tensor, and
+independent of how many frequencies the CD quadrature has. Rebuilding W Bp in
+the reverse pass costs one more factorization per frequency than holding it
+would -- naux^3 each, against the sweep's M^2 (norb + naux) per tau -- and
+removes the (nfreq, naux, norb) array.
 
-Residues (states whose root has crossed a neighbouring orbital energy, which
-is every state but the frontier pair) need W at a real frequency. Below the
-particle-hole gap it has the same imaginary-time form as on the imaginary axis
+At the chlorophyllide hexamer (M 117762, naux 28236, ntau 24, four states)
+the reverse call's peak falls from 601 GB a rank with every block whole to
+181 GB by rows at 8 ranks; the explicit residue route is refused there, C_ov
+alone being 2197 GB.
+
+Residues -- states whose root has crossed a neighbouring orbital energy, which
+is every state but the frontier pair -- need W at a REAL frequency. Below the
+particle-hole gap it has the same imaginary-time form as the imaginary axis
 (cos -> cosh) and comes out of proj(tau): `LaplaceRealScreening`, cubic, with
 no O(N^4) object; its adjoint is a rank-one update of projbar per residue. The
-tau grid has to carry the frequency (its e_min at most gap - w'), which is
-checked on the pair energies. Above the gap chi0 has real poles and no
-imaginary-time form; only the explicit backend serves it, through
-C_ov = B[:, occ, virt], (naux, nocc*nvirt), built from (X, D) and chained back
-to them: the O(N^4) end of the route, confined to states whose residues lie
-above the gap (inner valence and core).
+tau grid has to carry the frequency -- its e_min at most gap - w' -- and that
+is checked on the pair energies themselves, not assumed. Above the gap chi0
+has real poles and no imaginary-time form; only the explicit backend serves it,
+through C_ov = B[:, occ, virt], (naux, nocc*nvirt), built from (X, D) and
+chained back to them -- the O(N^4) end of the route, and now confined to
+states whose residues lie above the gap (inner valence and core).
 
 X and D may be `SlicedFactors`, each rank's grid rows of X_mo and D. Every
-step above reads them whole, so each solve gathers X_mo and D once at entry
-and drops them on return; the gathered arrays are the whole ones verbatim and
-every output is the whole factors' bit for bit.
+step above reads them whole -- the tau sweeps on both sides of each M^2 GEMM,
+the slices Bp and C_ov as sums over the grid -- so each solve gathers X_mo and
+D once at entry, holds them for the solve and its reverse pass and drops them
+on return; the gathered arrays are the whole ones verbatim and every output is
+the whole factors' bit for bit.
 """
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -48,61 +59,96 @@ import numpy as np
 
 from src.Base.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                 LAPLACE_SCREENING_TOL, QP_CD_NEWTON_TOL,
-                                QP_POLE_OFFSET, SOP_N_POLES)
+                                SOP_N_POLES)
 from src.Base.utils.mpi_grid import (agreement, allgather_rows,
                                      contiguous_block, current_comm, lockstep,
                                      mpi_map, ordered_chain_sum, ordered_sum,
                                      partition, reduce_sum)
-# cd_screening_contraction is re-exported, not used here: the routes below
-# call the multi-state form, which is what it is a one-state wrapper for.
-from src.SingleReference.GW.contour_deformation import (  # noqa: F401
-    cd_screening_contraction, cd_screening_contraction_multi,
-    residue_route_auto, screening_solver)
-# calibrate_scissor and frozen_scissor are re-exported, not used here: a
-# surface reaches the frozen shift through this module.
-from src.SingleReference.GW.qp_states import (calibrate_scissor,
-                                              frozen_scissor, scissor_route)
-from src.SingleReference.GW.contour_deformation import (cd_integral_weights,
-                                                        qp_energy_cd)
+from src.SingleReference.GW.contour_deformation import (
+    cd_integral_weights, cd_pair_contraction_multi,
+    cd_screening_contraction_multi, qp_energy_cd, residue_route_auto,
+    screening_solver)
+from src.SingleReference.GW.qp_states import scissor_route
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                    pole_amplitudes,
                                                    qp_energy_sop, sop_from_wc)
 from src.gradients.contour_deformation_adjoint import (
     ExplicitRealScreeningAdjoint as ExplicitRealScreening,
-    integral_term_backward, residue_terms_backward)
+    LaplaceRealScreeningAdjoint as LaplaceRealScreening,
+    integral_term_backward, pair_term_backward, residue_terms_backward)
 from src.gradients.sum_over_poles_adjoint import sigma_sop_backward
+from src.Solvers.qp_equation import qp_start, quasiparticle_weight
 from src.Base.sliced_factors import GridTileRows, SlicedFactors, whole_factor
+from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.space_time import (
-    ProjRows, polarizability_projected_rows)
+    ProjRows, polarizability_projected_rows, three_index_ov, three_index_slice)
 from src.gradients.space_time_adjoint import (
-    LaplaceRealScreening, polarizability_backward,
-    polarizability_backward_rows, three_index_ov, three_index_ov_backward,
-    three_index_slice, three_index_slice_backward,
+    polarizability_backward, polarizability_backward_rows,
+    three_index_ov_backward, three_index_slice_backward,
     three_index_slice_backward_rows)
 
 # The routes whose Sigma is analytic in omega: the pole model and the frozen
 # scissor integrate nothing on the contour-deformation quadrature.
 ANALYTIC_ROUTES = frozenset({'sop', 'scissor'})
+#: The route a pole-model state Eq. (27) does not admit takes, resolved by
+#: `fallback_route` from the problem's dimensions alone.
+FALLBACK_ROUTE = 'fallback'
+#: The residue routes the kernels take: a residue backend, the pole model,
+#: 'none' (refuse a residue) or 'auto' (a backend decided per geometry).
+KERNEL_RESIDUE_ROUTES = frozenset({'laplace', 'explicit', 'sop', 'none',
+                                   'auto'})
 
 
-def frozen_newton_seed(w0, p, eps, nocc, offset):
-    """Where the Newton for orbital p starts.
 
-    A frozen seed (a scalar, or a mapping orbital -> the reference geometry's
-    converged root) starts a displaced solve on the branch the reference
-    found. The default, eps_p pushed `offset` toward the chemical potential,
-    starts on the branch nearest the mean-field eigenvalue. Where a root has
-    walked up to a neighbouring orbital energy these differ:
-    f(w) = w - eps_p - Sigma(w) has a zero of vanishing pole strength on
-    either side of every eps_q, and the iteration started at the guard
-    reaches the satellite first.
-    """
+def frozen_root(w0, p):
+    """The root the reference geometry selected for orbital p -- w0 a scalar,
+    or a mapping orbital -> energy holding the reference's roots -- or None
+    before it is frozen. Where p is judged before its root is known
+    (`frozen_start`), and the root followed by energy where no accepted
+    geometry has named a branch (`followed_branch`): re-deciding by weight
+    at every geometry jumps branches where a satellite crosses the
+    quasiparticle, and f(w) = w - eps_p - Sigma(w) has a zero of vanishing
+    pole strength beside every pole of Sigma."""
     if isinstance(w0, Mapping):
         got = w0.get(int(p))
-        w0 = None if got is None else float(got)
-    if w0 is None:
-        return float(eps[p] + (offset if p < nocc else -offset))
-    return float(w0)
+        return None if got is None else float(got)
+    return None if w0 is None else float(w0)
+
+
+def frozen_start(w0, p, eps, nocc):
+    """Where orbital p is judged before its root is known: the frozen root,
+    else `qp_start` (eps_p pushed toward the chemical potential)."""
+    root = frozen_root(w0, p)
+    return qp_start(eps, p, nocc) if root is None else root
+
+
+def rescans_beside(z0, p):
+    """Whether a followed root of p below QP_WINDOW_Z_MIN has its window
+    rescanned for the largest weight beside it (the branch warning; the root
+    kept never depends on it): unless the reference's root of p, of pole
+    strength z0 (a mapping orbital -> Z frozen with w0), was no quasiparticle
+    either. A state with no quasiparticle at the reference has no
+    quasiparticle branch to lose; its satellites trade the largest weight at
+    every geometry, and the rescan of its whole window was most of the cost of
+    a displaced contour-deformation solve."""
+    z = z0.get(int(p)) if isinstance(z0, Mapping) else None
+    return z is None or quasiparticle_weight(z)
+
+
+def followed_branch(follow, w0, p):
+    """(w, labels): the root orbital p follows at this geometry and the
+    labels of the poles that bracketed it (None where the poles are
+    unknown), or None before a root is frozen. follow: a mapping orbital ->
+    (w, labels), the branch the last accepted geometry kept; an orbital it
+    does not name follows its frozen reference root w0 (`frozen_root`) by
+    energy. Whatever the weight, nothing is refused: the solve says where
+    the largest weight has left the branch (`find_qp_root`)."""
+    got = follow.get(int(p)) if isinstance(follow, Mapping) else None
+    if got is not None:
+        w, labels = got
+        return float(w), (None if labels is None else tuple(labels))
+    root = frozen_root(w0, p)
+    return None if root is None else (root, None)
 
 
 def static_term(xc_correction, si):
@@ -112,15 +158,25 @@ def static_term(xc_correction, si):
             if np.ndim(xc_correction) else float(xc_correction))
 
 
+def require_static_terms(xc_correction, nstates):
+    """Refuse per-state static terms that are not one per state of the set:
+    `static_term` reads them by position, so a list left over from another
+    set would put one orbital's correction on another."""
+    if np.ndim(xc_correction) and np.size(xc_correction) != nstates:
+        raise ValueError(f'{np.size(xc_correction)} static terms for a set '
+                         f'of {nstates} states')
+
+
 def frozen_on_pole_model(p, w0, sop_poles):
     """Whether the reference solve put orbital p on the pole model: True with
     its poles frozen, False with its root frozen and no poles, None before.
 
-    The Newton start is eps_p at the reference solve and the frozen root
-    after it, and the quasiparticle correction can carry a state across the
-    Eq. (27) limit (formaldehyde PBE0 orbitals 4, 5 and 10), so the verdict is
-    frozen with the root and the poles, as the scissor tiers are; only a state
-    with nothing frozen reads `compressible` at its Newton start.
+    Eq. (27) read at each geometry's start point is not one decision: the
+    start is eps_p before the reference solve and the frozen root after it,
+    and a state whose correction carries it across the wall (formaldehyde
+    PBE0 orbitals 4, 5 and 10: reach 0.96 / 0.76 / 0.76 at eps_p, 1.35 /
+    1.16 / 1.15 at the root) leaves the pole model for the quadrature at
+    every displaced geometry, a step in the surface at the first one.
     """
     if isinstance(sop_poles, Mapping) and sop_poles.get(int(p)) is not None:
         return True
@@ -129,20 +185,22 @@ def frozen_on_pole_model(p, w0, sop_poles):
     return None
 
 
-def pole_model_route(residue_route, scissor, p, eps, nocc, w0, pole_offset,
+def pole_model_route(residue_route, scissor, p, eps, nocc, w0,
                      sop_poles=None):
     """(route, shift, start) of orbital p before 'auto' is resolved.
 
     'sop' asks for the pole model; a state with a frozen scissor takes the
-    shift instead, and one Eq. (27) does not admit falls back to 'auto'. The
-    verdict is the reference solve's once it has frozen the root and the
-    poles (`frozen_on_pole_model`), else `compressible` at the Newton start.
-    Every other residue_route is taken as asked. Read off eps and the frozen
-    start alone, never the grid, so a caller can tell before solving whether
-    a set integrates anything on the quadrature.
+    shift instead, and one Eq. (27) does not admit at its start point falls
+    back to FALLBACK_ROUTE (`fallback_route`: one residue backend for every
+    geometry, where 'auto' would decide it per geometry and step the
+    surface). Once the reference solve has frozen the state's root
+    (w0) and its poles (sop_poles), that verdict is frozen with them
+    (`frozen_on_pole_model`), as the scissor tiers are. Every other
+    residue_route is taken as asked. Read off eps and the frozen start alone,
+    never the grid, so a caller can tell before solving whether a set
+    integrates anything on the quadrature.
     """
-    offset, _ = frozen_pole_offset(pole_offset, p)
-    start = frozen_newton_seed(w0, p, eps, nocc, offset)
+    start = frozen_start(w0, p, eps, nocc)
     route, shift = residue_route, None
     if route == 'sop':
         route, shift = scissor_route(scissor, p, eps, nocc, start)
@@ -150,45 +208,42 @@ def pole_model_route(residue_route, scissor, p, eps, nocc, w0, pole_offset,
         admitted = (compressible(start, eps, nocc)[0] if frozen is None
                     else frozen)
         if route == 'sop' and not admitted:
-            route = 'auto'
+            route = FALLBACK_ROUTE
     return route, shift, start
 
 
+def fallback_route(naux, nocc, nvir):
+    """The residue backend of a pole-model state Eq. (27) does not admit:
+    'explicit' where its blocks fit (`explicit_fits`), 'laplace' where they do
+    not. Decided by the dimensions alone, so the whole walk takes one."""
+    return 'explicit' if explicit_fits(naux, nocc, nvir) else 'laplace'
+
+
+def explicit_fits(naux, nocc, nvir):
+    """Whether the explicit residue backend's C_ov blocks fit in
+    EXPLICIT_RESIDUE_MAX_GB."""
+    return naux * nocc * nvir * 8 / 1e9 <= EXPLICIT_RESIDUE_MAX_GB
+
+
 def carried_analytically(states, eps, nocc, residue_route, scissor, w0,
-                         pole_offset, sop_poles=None):
+                         sop_poles=None):
     """Whether every state of the set takes the pole model or a frozen
-    scissor (`ANALYTIC_ROUTES`), so nothing of the set is integrated on the
-    contour-deformation quadrature and the grid only feeds the pole fits."""
+    scissor (`ANALYTIC_ROUTES`), so that nothing of the set is integrated on
+    the contour-deformation quadrature and the grid only feeds the pole fits
+    (`ExcitedStateChain._fix_cd_grid` sizes it for that)."""
     return all(pole_model_route(residue_route, scissor, int(p), eps, nocc, w0,
-                                pole_offset, sop_poles)[0] in ANALYTIC_ROUTES
+                                sop_poles)[0] in ANALYTIC_ROUTES
                for p in np.atleast_1d(states))
 
 
 def _stride_kw(sop_stride):
     """`stride=` for `sop_from_wc`, or nothing when the default is wanted.
 
-    The poles are common to all orbitals and placed from every stride-th
-    column. Placement moves dSigma/domega more than Sigma, so a gradient study
-    needs this knob and an energy one does not.
+    The poles are COMMON to all orbitals and placed from every stride-th
+    column. Placement is a stronger lever on dSigma/domega than on Sigma, so
+    this is a knob a gradient study needs and an energy one does not.
     """
     return {} if sop_stride is None else {'stride': int(sop_stride)}
-
-
-def frozen_pole_offset(pole_offset, p):
-    """(the guard offset orbital p uses, whether it may still be relaxed).
-
-    A frozen offset -- a scalar, or a mapping orbital -> offset -- pins the
-    Newton's guard band so that every geometry takes the same path to the root.
-    None leaves the default, which each geometry relaxes on its own whenever a
-    root sits inside the band, and an orbital a mapping does not name falls
-    back to that.
-    """
-    if pole_offset is None:
-        return QP_POLE_OFFSET, True
-    if isinstance(pole_offset, Mapping):
-        got = pole_offset.get(int(p))
-        return (QP_POLE_OFFSET, True) if got is None else (float(got), False)
-    return float(pole_offset), False
 
 
 def sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles, sop_stride):
@@ -196,7 +251,7 @@ def sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles, sop_stride):
 
     The pole positions are a realization of Sigma(omega), fitted by vector
     fitting on the reference geometry's wc and then held: the adjoint
-    (`sigma_sop_backward`) differentiates A = F^+ wc at fixed poles, so a set
+    (`sigma_sop_backward`) differentiates A = F^+ wc at FIXED poles, so a set
     re-fitted per geometry makes the force the derivative of a different
     surface from the one the energy walks. With the poles frozen only the
     amplitudes move, and they are linear in wc.
@@ -214,14 +269,15 @@ def sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles, sop_stride):
 
 def slices_over_ranks(X, D, states, tile_gb, comm=None):
     """[B_p for p in states], each slice built by one rank and gathered onto
-    every one; serially, a plain list.
+    every one; serially the list it always was. comm None is `current_comm()`.
 
-    A slice is O(M naux norb) per state, so building a window of hundreds of
-    states on every rank would not divide with the rank count. Each slice is
+    A slice is O(M naux norb), one per state, so a window of hundreds of
+    states built on every rank is a cost no rank count divides. Each slice is
     the same `three_index_slice` call on the same whole factors wherever it
     runs and travels verbatim (`allgather_rows`): every rank holds the serial
     slices bitwise, as views into one (nstates, naux, norb) array.
     """
+    comm = current_comm() if comm is None else comm
     nranks = 1 if comm is None else comm.Get_size()
     if nranks == 1:
         return [three_index_slice(X, D, int(p), tile_gb=tile_gb)
@@ -235,7 +291,7 @@ def slices_over_ranks(X, D, states, tile_gb, comm=None):
 
 
 def pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
-                     pole_offset, sop_poles):
+                     sop_poles):
     """The positions in `states` of the pole-model states with no frozen
     poles: the fits pass 1 makes, in state order."""
     if residue_route != 'sop':
@@ -243,14 +299,15 @@ def pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
     return [si for si, p in enumerate(states)
             if (sop_poles is None or sop_poles.get(int(p)) is None)
             and pole_model_route(residue_route, scissor, int(p), eps, nocc,
-                                 w0, pole_offset, sop_poles)[0] == 'sop']
+                                 w0, sop_poles)[0] == 'sop']
 
 
 def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
-                         scissor, w0, pole_offset, sop_poles, n_poles,
-                         sop_stride, comm=None):
+                         scissor, w0, sop_poles, n_poles, sop_stride,
+                         comm=None):
     """`sop_poles` with the fit of every pole-model state it lacks added, the
-    fits striped over the ranks (`mpi_map`) and gathered onto every one.
+    fits striped over the ranks (`mpi_map`) and gathered onto every one;
+    comm None is `current_comm()`.
 
     The fit is a dense least squares of about norb^3 a state, the one cost of
     pass 1 that grows with the molecule. It reads only the state's wc, which
@@ -258,10 +315,10 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     serial poles bitwise; `sop_model` then reads them as frozen poles, and
     the amplitudes are the call `sop_from_wc` would have made. The states
     fitted are those pass 1 sends to the pole model (route, scissor tier,
-    Eq. (27)'s verdict, `pole_model_route`) and has no frozen poles for.
+    compression condition at the start point) and has no frozen poles for.
     """
     need = pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
-                            pole_offset, sop_poles)
+                            sop_poles)
     if not need:
         return sop_poles
 
@@ -269,6 +326,7 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
         return sop_from_wc(wcs[si], nu_points, eps, nocc, n_poles=n_poles,
                            **_stride_kw(sop_stride))[0]
 
+    comm = current_comm() if comm is None else comm
     out = dict(sop_poles or {})
     for si, poles in zip(need, mpi_map(fit, need, comm)):
         out[int(states[si])] = poles
@@ -276,17 +334,17 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
 
 
 def integral_term_reverse(state, WtB, k):
-    """(Bp_bar, chi0_bar, eps_bar) of one contour-deformation frequency for one state.
+    """(Bp_bar, chi0_bar, eps_bar) of ONE contour-deformation frequency for one state.
 
     Sigma^int_p(w) = -(1/pi) sum_kq c[k,q] wc[k,q] with the weights of
     `cd_integral_weights`, so at a fixed frequency the adjoint on the
-    screening is the weight vector c[k, :] on wc[k, :], which
+    screening is the weight vector c[k, :] on wc[k, :] -- which
     `integral_term_backward` pushes back onto the state's slice and onto
-    chi0(i.nu_k); the explicit eps dependence of the weights gives the third
-    term. On the pole-model route the omega dependence is analytic and
+    chi0(i.nu_k) -- and the explicit eps dependence of the weights gives the
+    third term. On the pole-model route the omega dependence is analytic and
     `wc_bar` already holds the whole weight, so that term is zero.
 
-    state: one entry of the reverse pass's active set: the state's slice
+    state: one entry of the reverse pass's active set -- the state's slice
     `Bp`, its Z-weighted adjoint `zw`, the weights `c` and `dc` at its root
     (`integral_state`) and `wc_bar` or None.
     """
@@ -301,15 +359,15 @@ def integral_term_reverse(state, WtB, k):
 
 def integral_state(Bp, zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
                    **extra):
-    """One entry of the reverse pass's active set (`integral_term_reverse`),
-    with the integral term's weights at the root over every frequency: the
-    singular part sits on the two smallest nodes, whichever rank owns them."""
+    """One entry of the reverse pass's active set (`integral_term_reverse`):
+    the integral term's weights at the root are computed once, for every
+    frequency, because the exact singular part puts the near-pole correction
+    on the two smallest nodes whichever rank owns them."""
     state = dict(Bp=Bp, zw=zw, wc_bar=wc_bar, **extra)
     if wc_bar is None:
         state['c'], state['dc'] = cd_integral_weights(w_star - eps, nu_points,
                                                       nu_weights)
     return state
-
 
 def require_explicit_fits(naux, nocc, nvir, p):
     """Refuse the explicit residue backend where its blocks cannot fit.
@@ -319,7 +377,7 @@ def require_explicit_fits(naux, nocc, nvir, p):
     the pole model serve the same residues from proj(tau) without one.
     """
     gb = naux * nocc * nvir * 8 / 1e9
-    if gb > EXPLICIT_RESIDUE_MAX_GB:
+    if not explicit_fits(naux, nocc, nvir):
         raise MemoryError(
             f"residue_route 'explicit' (state {int(p)}) builds C_ov = "
             f"B[:, occ, virt], ({naux}, {nocc}*{nvir}), {gb:.3g} GB, and "
@@ -333,10 +391,12 @@ def fold_residue_adjoints(proj_bar, backends, tau_indices=None):
     """Add the Laplace residues' adjoints on proj(tau) into proj_bar, in place.
 
     One (naux, naux) slice at a time: the backends' slices summed in state
-    order from zero, then added to proj_bar (this association is part of the
-    bitwise result), so no per-state array exists. With no backend every slice
-    gains an exact zero. tau_indices: the slices the reverse sweep reads (a
-    tau partition); the rest are unread.
+    order from zero, then added to proj_bar -- the association of a zeroed
+    projbar the whole per-state arrays were added into before the integral
+    term's, so the result is that sum bit for bit and no per-state array
+    exists. With no backend every slice gains an exact zero, as the zeroed
+    projbar gave it. tau_indices: the slices the reverse sweep reads (a tau
+    partition), the rest being unread.
 
     proj_bar may be `ProjRows`: every slice then gains its rows alone, the
     same elements with the same operations, for whichever rank sweeps it.
@@ -358,193 +418,45 @@ def fold_residue_adjoints(proj_bar, backends, tau_indices=None):
 
 
 def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
-                           mu=None, xc_correction=0.0, w0=None,
-                           tol=QP_CD_NEWTON_TOL, residue_route='auto',
+                           *, residue_route, mu=None, xc_correction=0.0,
+                           w0=None, tol=QP_CD_NEWTON_TOL,
                            laplace_tol=LAPLACE_SCREENING_TOL,
                            want_grad=True, tile_gb=ISDF_TILE_GB,
-                           pole_offset=None, route_out=None,
+                           follow=None, route_out=None,
                            n_poles=SOP_N_POLES, sop_stride=None,
-                           scissor=None, sop_poles=None, comm=None):
+                           scissor=None, sop_poles=None, comm=None, z0=None):
     """(eps^QP_p, Z, eps_bar, X_bar, D_bar), or (eps^QP_p, Z) with want_grad=False.
 
-    grid:          TimeFrequencyGrid whose frequency axis is the CD quadrature
-                   (its cosft_wt maps proj(tau) onto nu_points) and whose tau
-                   axis, for a state with residues, reaches down to
-                   gap - w'_max; `residue_route_auto` decides from that.
-    residue_route: 'auto' (module docstring), 'laplace', 'explicit', 'none'
-                   (raise if the iteration meets a residue), or 'sop'.
-    'sop':         no residues: W is modelled by `n_poles` auxiliary poles and
-                   Sigma_c(omega) is closed form (`sum_over_poles`), so the
-                   screening is never evaluated off the imaginary axis. A
-                   state that Eq. (27) does not admit falls back to 'auto';
-                   `route_out['residue_route']` says which ran. The decision
-                   is taken at the reference solve's Newton start and then
-                   frozen with the root and the poles
-                   (`frozen_on_pole_model`), like every other branch here.
-    pole_offset:   the Newton's guard band, frozen by the caller
-                   (`frozen_pole_offset`); None relaxes it per geometry.
-    w0:            the Newton's start, a scalar or a mapping orbital -> energy
-                   frozen by the caller (`frozen_newton_seed`).
-    sop_poles:     the pole model's positions, a mapping orbital -> poles
-                   frozen by the caller (`sop_model`); None fits them here.
-    route_out:     a dict, if given, receives 'residue_route', 'residues',
-                   'pole_offsets', 'roots' and 'sop_poles'.
-    comm:          an MPI communicator (or `simulated_world` rank) whose ranks
-                   all call this in lockstep; None is `current_comm()`. eps is
-                   a `lockstep` of rank 0's at entry (the route and the Newton
-                   start are read off it); X and D are identical by
-                   construction and only audited. The partition is
-                   `qp_set_gradient`'s on one state. The Newton, the route
-                   decision and the residues are replicated, taken from eps
-                   and the reduced wc, so the collectives below them keep
-                   their shapes; wc, the root, Z and projbar are the serial
-                   ones bitwise at every rank count, and the adjoints are
-                   partial sums exact up to summation order.
+    `qp_set_gradient` of the one state p at weight one (zero without a
+    gradient): the same routes, frozen arguments, partition over the ranks
+    and bits. grid, residue_route, w0, z0, follow, sop_poles and comm are
+    that function's; xc_correction is p's static term.
+    route_out: a dict, if given, receives 'residue_route', 'residues',
+               'weights', 'roots', 'labels', 'branches' and 'sop_poles'.
     """
-    eps = np.asarray(eps, float)
-    X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     p = int(p)
-    nu_points = np.asarray(nu_points)
-    if len(nu_points) != grid.cosft_wt.shape[0]:
-        raise ValueError("the grid's frequency axis must be the CD quadrature")
-    comm = current_comm() if comm is None else comm
-    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
-                    else (0, 1))
-    if nranks > 1:
-        eps = lockstep(eps, comm)
-        agreement((X, D, xc_correction, w0, pole_offset, scissor, sop_poles),
-                  comm, audit_only=True, label='qp_gradient_space_time inputs')
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
-    nu_mine = partition(len(nu_points), rank, nranks) if nranks > 1 else None
-
-    proj_tau = polarizability_projected_rows(X, D, eps, nocc, grid.tau_points,
-                                             mu=mu, tile_memory_gb=tile_gb,
-                                             comm=comm)
-    Bp = three_index_slice(X, D, p, tile_gb=tile_gb)
-    wc = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, [Bp],
-                                        tile_gb=tile_gb,
-                                        freq_indices=nu_mine)[0]
-    if nranks > 1:
-        reduce_sum(wc, comm)                  # the others' rows are zero
-
-    offset, relax = frozen_pole_offset(pole_offset, p)
-    route, shift, start = pole_model_route(residue_route, scissor, p, eps,
-                                           nocc, w0, pole_offset, sop_poles)
-    if route == 'auto':
-        route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
-    poles = amp = None
-    if route in ('sop', 'scissor'):
-        rs = None
-    elif route == 'laplace':
-        rs = LaplaceRealScreening(proj_tau, grid, eps, nocc, tol=laplace_tol)
-    elif route == 'explicit':
-        require_explicit_fits(D.shape[1], nocc, len(eps) - nocc, p)
-        rs = ExplicitRealScreening(three_index_ov(X, D, eps, nocc, tile_gb=tile_gb),
-                                   eps, nocc)
-    elif route == 'none':
-        rs = None
-    else:
-        raise ValueError(f"residue_route {route!r}")
-    guard = {'pole_offset': offset}
-    if route == 'scissor':
-        # The shift is a constant, so the root moves with the orbital energy
-        # alone and the screening never enters this state's gradient.
-        w_star, z, res = float(eps[p] + xc_correction + shift), 1.0, []
-    elif route == 'sop':
-        poles, amp = sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles,
-                               sop_stride)
-        w_star, z = qp_energy_sop(p, amp, poles, eps, nocc,
-                                  xc_correction=xc_correction, tol=tol,
-                                  w0=start)
-        res = []
-    else:
-        w_star, z, res = qp_energy_cd(p, Bp, eps, nocc, nu_points, nu_weights,
-                                      xc_correction=xc_correction, tol=tol,
-                                      w0=start, wc=wc, real_screening=rs,
-                                      pole_offset=offset, relax_offset=relax,
-                                      guard_out=guard)
+    solved = {}
+    roots, eps_bar, X_bar, D_bar = qp_set_gradient(
+        X, D, eps, nocc, grid, nu_points, nu_weights, [p],
+        [1.0 if want_grad else 0.0], mu=mu, xc_correction=xc_correction,
+        w0=w0, tol=tol, residue_route=residue_route, laplace_tol=laplace_tol,
+        tile_gb=tile_gb, follow=follow, route_out=solved,
+        n_poles=n_poles, sop_stride=sop_stride, scissor=scissor,
+        sop_poles=sop_poles, comm=comm, keep_tape=False, z0=z0)
+    w_star, z = float(roots[0]), float(solved['z'][0])
     if route_out is not None:
-        route_out['residue_route'] = route
-        route_out['residues'] = res
-        route_out['pole_offsets'] = {p: guard['pole_offset']}
-        route_out['roots'] = {p: float(w_star)}
-        route_out['sop_poles'] = {} if poles is None else {p: poles}
+        route_out['residue_route'] = solved['routes'][p]
+        route_out['residues'] = solved['residues'][p]
+        route_out['weights'] = solved['weights']
+        route_out['roots'] = solved['roots']
+        route_out['sop_poles'] = solved['sop_poles']
     if not want_grad:
-        if nranks > 1:
-            agreement((w_star, z), comm, audit_only=True,
-                      label='qp_gradient_space_time outputs')
         return w_star, z
-
-    # Sigma^int's reverse pass, streamed over the same frequency blocks
-    naux = proj_tau.shape[-1]
-    eye = np.eye(naux)
-    eps_bar = np.zeros_like(eps)
-    Bp_bar = np.zeros_like(Bp)
-    if route == 'scissor':
-        eps_bar[p] += z
-        return w_star, z, eps_bar, np.zeros_like(X), np.zeros_like(D)
-    wc_bar = None
-    if route == 'sop':
-        # The pole model's whole omega dependence is analytic, so its adjoint
-        # on the imaginary-axis data is one transpose and enters the screening
-        # where the integral term's own weights do.
-        eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles, eps, nocc,
-                                                nu_points, sigma_bar=z)
-        eps_bar += eps_sop
-    state = integral_state(Bp, z, w_star, eps, nu_points, nu_weights, wc_bar)
-    proj_bar = proj_tau.zeros_like()
-    eps_bar_part = np.zeros_like(eps)
-    for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
-        for m, k in enumerate(fb.ks):
-            # one state, so the factorization is used once
-            WtB = screening_solver(eye - fb.chi0[m])(Bp)
-            bb, fb.chi0[m], e_k = integral_term_reverse(state, WtB, k)
-            Bp_bar += bb
-            eps_bar_part += e_k
-        proj_bar.fold(grid.cosft_wt, fb)
-    fb = None
-    if nranks > 1:
-        reduce_sum(Bp_bar, comm)
-        reduce_sum(eps_bar_part, comm)
-    eps_bar += eps_bar_part
-    eps_bar[p] += z
-
-    # Sigma^res: the shared part, then each backend's own chain
-    X3 = D3 = None
-    pushed = []
-    if res:
-        e_r, b_r, _ = residue_terms_backward(p, w_star, Bp, eps, nocc, res, z, rs)
-        eps_bar += e_r
-        Bp_bar += b_r
-        if route == 'laplace':
-            pushed.append(rs)
-        else:
-            e_c, Cov_bar = rs.adjoints()
-            eps_bar += e_c
-            X3, D3 = three_index_ov_backward(X, D, eps, nocc, Cov_bar,
-                                             tile_gb=tile_gb)
-            Cov_bar = None
-    fold_residue_adjoints(proj_bar, pushed)
-    del proj_tau, rs, pushed
-
-    e2, X_bar, D_bar = polarizability_backward(proj_bar, X, D, eps, nocc,
-                                               grid, mu=mu, tile_gb=tile_gb,
-                                               tau_indices=tau_mine)
-    if nranks > 1:
-        for arr in (e2, X_bar, D_bar):
-            reduce_sum(arr, comm)
-    del proj_bar
-    if X3 is not None:
-        X_bar += X3
-        D_bar += D3
-        X3 = D3 = None
-    three_index_slice_backward(X, D, p, Bp_bar, tile_gb=tile_gb,
-                               out=(X_bar, D_bar))
-    out = w_star, z, eps_bar + e2, X_bar, D_bar
-    if nranks > 1:
-        agreement(out, comm, audit_only=True,
-                  label='qp_gradient_space_time outputs')
-    return out
+    # a state with no adjoint on the factors (a frozen scissor) comes back as
+    # read-only zeros; a caller adds into them
+    if not X_bar.flags.writeable:
+        X_bar, D_bar = np.zeros(X_bar.shape), np.zeros(D_bar.shape)
+    return w_star, z, eps_bar, X_bar, D_bar
 
 
 @dataclass
@@ -581,22 +493,8 @@ class QPSetTape:
         self.C_ov = None
 
     def drop_residues(self):
-        """Drop C_ov once the solve that built it has stopped repeating."""
+        """Drop C_ov, once the solve that built it no longer repeats."""
         self.C_ov = None
-
-    def restricted(self, keep):
-        """This tape for the states `keep` (a mask over `states`) selects.
-
-        The same proj(tau) and the kept states' own slices and contractions,
-        so a set that loses a member is solved again without a second sweep.
-        """
-        keep = np.asarray(keep, bool)
-        return QPSetTape(self.X, self.D, self.eps, self.mu, self.tile_gb,
-                         self.states[keep], self.tau_points, self.cosft_wt,
-                         self.proj_tau,
-                         [b for b, k in zip(self.Bps, keep) if k],
-                         [w for w, k in zip(self.wcs, keep) if k],
-                         self.C_ov)
 
     def reads(self, X, D, eps, mu, tile_gb, states, grid):
         """(proj and Bps apply, wcs apply as well) for a call on these."""
@@ -606,6 +504,491 @@ class QPSetTape:
                 and np.array_equal(self.states, states)
                 and np.array_equal(self.tau_points, grid.tau_points))
         return same, same and np.array_equal(self.cosft_wt, grid.cosft_wt)
+
+
+@dataclass(eq=False)
+class QPSetPass:
+    """One `qp_set_gradient` call: its arguments, locked to rank 0's on
+    construction, and what each pass hands the next. The passes run in the
+    order the methods are listed, every statement and collective in the order
+    of the one-function form."""
+
+    X: object
+    D: object
+    eps: object
+    nocc: int
+    grid: object
+    nu_points: object
+    nu_weights: object
+    states: object
+    weights: object
+    residue_route: str
+    mu: object
+    xc_correction: object
+    w0: object
+    tol: float
+    laplace_tol: float
+    tile_gb: float
+    follow: object
+    route_out: object
+    n_poles: int
+    sop_stride: object
+    scissor: object
+    sop_poles: object
+    comm: object
+    rows_block: object
+    tape: object
+    timer: object
+    pairs: object
+    keep_tape: bool
+    z0: object = None
+
+    def __post_init__(self):
+        (X, D, eps, nocc, grid, nu_points, nu_weights, states, weights,
+         residue_route, mu, xc_correction, w0, tol, laplace_tol, tile_gb,
+         follow, route_out, n_poles, sop_stride, scissor, sop_poles,
+         comm, rows_block, tape, timer, pairs, keep_tape) = (
+            self.X, self.D, self.eps, self.nocc, self.grid, self.nu_points,
+            self.nu_weights, self.states, self.weights, self.residue_route,
+            self.mu, self.xc_correction, self.w0, self.tol, self.laplace_tol,
+            self.tile_gb, self.follow, self.route_out, self.n_poles,
+            self.sop_stride, self.scissor, self.sop_poles, self.comm,
+            self.rows_block, self.tape, self.timer, self.pairs,
+            self.keep_tape)
+        eps = np.asarray(eps, float)
+        self.X_in, self.D_in = X, D
+        self.paired = {s for i, j, _ in pairs for s in (int(i), int(j))}
+        states = np.atleast_1d(states)
+        weights = np.atleast_1d(weights)
+        require_static_terms(xc_correction, len(states))
+        nu_points = np.asarray(nu_points)
+        if len(nu_points) != grid.cosft_wt.shape[0]:
+            raise ValueError("the grid's frequency axis must be the CD "
+                             "quadrature")
+        comm = current_comm() if comm is None else comm
+        rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                        else (0, 1))
+        if nranks > 1:
+            # Before the routes are chosen: they are read off eps, and with
+            # the weights' zeros they set the active set whose adjoints pass 2
+            # reduces as one buffer.
+            eps, weights = lockstep((eps, weights), comm)
+            agreement((_audited(X), _audited(D), xc_correction, w0,
+                       follow, scissor, sop_poles, self.z0),
+                      comm, audit_only=True, label='qp_set_gradient inputs')
+        self.tau_mine = (partition(grid.ntau, rank, nranks) if nranks > 1
+                         else None)
+        self.nu_mine = (partition(len(nu_points), rank, nranks) if nranks > 1
+                        else None)
+        self.whole = {}
+        (self.eps, self.nocc, self.grid, self.nu_points, self.nu_weights,
+         self.states, self.weights, self.residue_route, self.mu,
+         self.xc_correction, self.w0, self.tol, self.laplace_tol,
+         self.tile_gb, self.follow, self.route_out, self.n_poles,
+         self.sop_stride, self.scissor, self.sop_poles, self.comm,
+         self.rows_block, self.tape, self.timer, self.pairs,
+         self.keep_tape) = (eps, nocc, grid, nu_points, nu_weights, states,
+                            weights, residue_route, mu, xc_correction, w0,
+                            tol, laplace_tol, tile_gb, follow, route_out,
+                            n_poles, sop_stride, scissor, sop_poles, comm,
+                            rows_block, tape, timer, pairs, keep_tape)
+        self.rank, self.nranks = rank, nranks
+
+    def factors(self):
+        """X_mo and D whole, gathered at the first call that reads them."""
+        if not self.whole:
+            self.whole['X'] = whole_factor(self.X_in, 'X_mo')
+            self.whole['D'] = whole_factor(self.D_in, 'D')
+        return self.whole['X'], self.whole['D']
+
+    def forward_contraction(self):
+        """proj(tau), the slices B_p and their screening contractions wc_p
+        over the CD frequencies: read from the tape where it applies."""
+        X_in, D_in, eps, mu, tile_gb, states, grid = (
+            self.X_in, self.D_in, self.eps, self.mu, self.tile_gb,
+            self.states, self.grid)
+        tape, timer, comm, route_out = (self.tape, self.timer, self.comm,
+                                        self.route_out)
+        same, same_wc = ((False, False) if tape is None
+                         else tape.reads(X_in, D_in, eps, mu, tile_gb, states,
+                                         grid))
+        if same:
+            proj_tau, Bps = tape.proj_tau, tape.Bps
+        else:
+            with stage(timer, 'qp_set.tau_sweep'):
+                X, D = self.factors()
+                proj_tau = polarizability_projected_rows(
+                    X, D, eps, self.nocc, grid.tau_points, mu=mu,
+                    tile_memory_gb=tile_gb, comm=comm)
+                Bps = slices_over_ranks(X, D, states, tile_gb, comm)
+        self.naux = proj_tau.shape[-1]
+        self.eye = np.eye(self.naux)
+        self.eps_bar = np.zeros_like(eps)
+        self.w_stars = np.zeros(len(states))
+        self.routes, self.weights_of, self.roots, self.fitted = {}, {}, {}, {}
+        self.labels, self.branches = {}, {}
+        self.C_ov = None
+        self.residues = {}
+        self.z_of = np.zeros(len(states))
+
+        if same_wc:
+            wcs = tape.wcs
+        else:
+            with stage(timer, 'qp_set.frequency_pass'):
+                wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt,
+                                                     Bps, tile_gb=tile_gb,
+                                                     freq_indices=self.nu_mine)
+                if self.nranks > 1:
+                    wcs = list(reduce_sum(np.stack(wcs), comm))
+        if route_out is not None and self.keep_tape:
+            route_out['tape'] = QPSetTape(X_in, D_in, eps.copy(), mu, tile_gb,
+                                          states.copy(),
+                                          np.array(grid.tau_points),
+                                          np.array(grid.cosft_wt), proj_tau,
+                                          Bps, wcs)
+        self.same, self.proj_tau, self.Bps, self.wcs = same, proj_tau, Bps, wcs
+
+    def solve_states(self):
+        """PASS 1 -- every state's route, root and residue set, and the
+        states that carry an adjoint (`active`).
+
+        Replicated: a root search on wc and, for a residue, a rank-one push into
+        its backend. The pole fits are the exception, striped over the ranks
+        a round at a time, one fit a rank, as the loop reaches them: the same
+        owner and the same bits as one striped call, and a pass stopped at an
+        unresolved root leaves the later rounds unfitted.
+        """
+        states, weights, eps, nocc, grid = (self.states, self.weights,
+                                            self.eps, self.nocc, self.grid)
+        Bps, wcs, nu_points, nu_weights = (self.Bps, self.wcs, self.nu_points,
+                                           self.nu_weights)
+        residue_route, scissor, w0, follow_of = (
+            self.residue_route, self.scissor, self.w0, self.follow)
+        sop_poles, nranks, naux, proj_tau = (self.sop_poles, self.nranks,
+                                             self.naux, self.proj_tau)
+        tol, laplace_tol, tile_gb = self.tol, self.laplace_tol, self.tile_gb
+        route_out, tape, same = self.route_out, self.tape, self.same
+        eps_bar, fitted, C_ov = self.eps_bar, self.fitted, self.C_ov
+        self.lap = time.perf_counter()
+        need = pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
+                                sop_poles)
+        fit_round = {si: need[i - i % nranks:i - i % nranks + nranks]
+                     for i, si in enumerate(need)}
+        active = []
+        for si, (p, wgt) in enumerate(zip(states, weights)):
+            p = int(p)
+            Bp, wc = Bps[si], wcs[si]
+            if si in fit_round and (sop_poles is None or p not in sop_poles):
+                rnd = fit_round[si]
+                sop_poles = fit_poles_over_ranks(
+                    states[rnd], [wcs[i] for i in rnd], nu_points, eps, nocc,
+                    residue_route, scissor, w0, sop_poles,
+                    self.n_poles, self.sop_stride, self.comm)
+            # PER STATE. <p|Sigma_x - v_xc|p> is a different number for every
+            # orbital, so a scalar shared across the set would put the HOMO's
+            # correction on the LUMO. A scalar is still accepted, and is the
+            # right thing on Hartree-Fock, where every entry is zero.
+            xc_p = static_term(self.xc_correction, si)
+            # after the reference, every geometry follows the branch the last
+            # accepted one kept, whatever its weight
+            follow, branch = followed_branch(follow_of, w0, p), {}
+            # A state Eq. (27) does not admit cannot be carried by the pole
+            # model at any M, so it takes the residue route instead and the
+            # record says so. On a valence quasiparticle set some states
+            # always will.
+            route, shift, start = pole_model_route(residue_route, scissor, p,
+                                                   eps, nocc, w0, sop_poles)
+            if route == FALLBACK_ROUTE:
+                route = fallback_route(naux, nocc, len(eps) - nocc)
+            if route == 'auto':
+                route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
+            if route == 'laplace':
+                rs = LaplaceRealScreening(proj_tau, grid, eps, nocc,
+                                          tol=laplace_tol)
+            elif route == 'explicit':
+                if C_ov is None:
+                    require_explicit_fits(naux, nocc, len(eps) - nocc, p)
+                    C_ov = (tape.C_ov if same and tape.C_ov is not None else
+                            three_index_ov(*self.factors(), eps, nocc,
+                                           tile_gb=tile_gb))
+                    if route_out is not None and self.keep_tape:
+                        route_out['tape'].C_ov = C_ov
+                rs = ExplicitRealScreening(C_ov, eps, nocc)
+            elif route in ('sop', 'scissor', 'none'):
+                rs = None
+            else:
+                raise ValueError(f'residue_route {route!r}')
+            poles = amp = None
+            if route == 'scissor':
+                w_star, z, res = float(eps[p] + xc_p + shift), 1.0, []
+            elif route == 'sop':
+                poles, amp = sop_model(wc, nu_points, eps, nocc, p, sop_poles,
+                                       self.n_poles, self.sop_stride)
+                fitted[p] = poles
+                w_star, z = qp_energy_sop(p, amp, poles, eps, nocc,
+                                          xc_correction=xc_p, tol=tol,
+                                          follow=follow, branch=branch)
+                res = []
+            else:
+                w_star, z, res = qp_energy_cd(
+                    p, Bp, eps, nocc, nu_points, nu_weights,
+                    xc_correction=xc_p, tol=tol, follow=follow, wc=wc,
+                    real_screening=rs, branch=branch,
+                    rescan=rescans_beside(self.z0, p))
+            self.w_stars[si] = w_star
+            self.z_of[si] = z
+            self.routes[p] = route
+            self.weights_of[p] = float(z)
+            self.roots[p] = float(w_star)
+            self.labels[p] = branch.get('labels')
+            if follow is not None:
+                self.branches[p] = branch
+            self.residues[p] = res
+            if wgt == 0.0 and si not in self.paired:
+                continue
+
+            zw = z * wgt
+            if route == 'scissor':
+                if si in self.paired:
+                    raise ValueError(f'orbital {p} carries a frozen scissor '
+                                     f'and has no screening contraction to '
+                                     f'pair')
+                eps_bar[p] += zw
+                continue
+            wc_bar = None
+            if route == 'sop':
+                # The pole model's whole omega dependence is analytic, so its
+                # adjoint on the imaginary-axis data is one transpose and
+                # enters the screening exactly where the integral term's own
+                # weights do.
+                eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles,
+                                                        eps, nocc, nu_points,
+                                                        sigma_bar=zw)
+                eps_bar += eps_sop
+            active.append(integral_state(Bp, zw, w_star, eps, nu_points,
+                                         nu_weights, wc_bar, si=si, p=p,
+                                         res=res, rs=rs, route=route))
+        self.active, self.sop_poles, self.C_ov = active, sop_poles, C_ov
+
+    def reverse_frequencies(self):
+        """PASS 2 -- the integral term's reverse pass, frequency outside,
+        over the frequencies this rank owns. Each frequency's addends reach
+        every rank and are added in frequency order (`ordered_sum`): the
+        one-rank bits."""
+        active, eps, comm, rank = self.active, self.eps, self.comm, self.rank
+        proj_tau, grid, naux, eye = (self.proj_tau, self.grid, self.naux,
+                                     self.eye)
+        pairs, Bps, paired = self.pairs, self.Bps, self.paired
+        self.lap = _lap(self.timer, 'qp_set.routes', self.lap)
+        Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
+        eps_bar_part = np.zeros_like(eps)
+        proj_bar = None
+
+        def chain_frequency(owner, terms):
+            """Every state's B_p_bar += its term at one frequency, added by
+            the frequency's owner and handed to every rank
+            (`ordered_chain_sum`)."""
+            for a in active:
+                si = a['si']
+                Bp_bars[si] = ordered_chain_sum(
+                    {0: terms[si]} if owner == rank else {}, [owner], comm,
+                    Bp_bars[si])
+
+        if active:
+            eps_terms = []
+            proj_bar = proj_tau.zeros_like()
+            for fb in proj_tau.blocks(grid.cosft_wt, self.tile_gb,
+                                      self.nu_mine):
+                owned = {}
+                for m, k in enumerate(fb.ks):
+                    solve = screening_solver(eye - fb.chi0[m])
+                    chi0_bar = np.zeros((naux, naux))
+                    terms, wtbs = {}, {}
+                    for j, a in enumerate(active):
+                        WtB = solve(a['Bp'])
+                        bb, cb, e_k = integral_term_reverse(a, WtB, k)
+                        terms[a['si']] = bb
+                        chi0_bar += cb
+                        eps_terms.append(((k, j), e_k))
+                        if a['si'] in paired:
+                            wtbs[a['si']] = WtB
+                    # the off-diagonal contractions' adjoints, on the same
+                    # solves
+                    for i, j, wc_bar in pairs:
+                        bi, bj, cb = pair_term_backward(
+                            Bps[i], Bps[j], wtbs[i], wtbs[j], wc_bar[k])
+                        terms[i] = terms[i] + bi
+                        terms[j] = terms[j] + bj
+                        chi0_bar += cb
+                    fb.chi0[m] = chi0_bar
+                    if fb.owners is None:
+                        chain_frequency(rank, terms)
+                    else:
+                        owned[k] = terms
+                    terms = wtbs = None
+                # B_p_bar is (naux, nmo) a frequency, 0.34 GB at the
+                # chlorophyllide dimer/cc-pVTZ: a round's terms join the
+                # running sum in frequency order as soon as the round is
+                # solved, so a rank holds one frequency's, whatever the number
+                # of frequencies
+                if fb.owners is not None:
+                    for k, owner in zip(fb.block, fb.owners):
+                        chain_frequency(int(owner), owned.get(k))
+                owned = None
+                proj_bar.fold(grid.cosft_wt, fb)
+            fb = solve = chi0_bar = None
+            eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
+            eps_terms = None
+        self.eps_bar += eps_bar_part
+        self.lap = _lap(self.timer, 'qp_set.frequency_reverse', self.lap)
+        self.Bp_bars, self.proj_bar = Bp_bars, proj_bar
+
+    def direct_terms(self):
+        """PASS 3 -- per state: the direct term, the residues, the slice
+        adjoint.
+
+        Replicated, like pass 1. Each backend leaves with its state, so the
+        explicit route holds one Cov_bar at a time; the Laplace backends keep
+        only their recorded pushes, folded into projbar after the pass.
+        """
+        active, eps, nocc, comm = self.active, self.eps, self.nocc, self.comm
+        rows_block, tile_gb, eps_bar = (self.rows_block, self.tile_gb,
+                                        self.eps_bar)
+        roots, route_out, Bp_bars = self.roots, self.route_out, self.Bp_bars
+        rs = self.C_ov = None
+        pushed = []
+        # The factors' adjoints exist only where a state carries one: one
+        # pair, every state's slice and residue adjoints added into it in
+        # turn.
+        X_bar = D_bar = None
+        X = D = None
+        if active:
+            X, D = self.factors()
+            if rows_block is None:
+                X_bar, D_bar = np.zeros_like(X), np.zeros_like(D)
+            else:
+                X_bar = GridTileRows.zeros(X.shape[0], X.shape[1],
+                                           rows_block, comm)
+                D_bar = GridTileRows.zeros(D.shape[0], self.naux, rows_block,
+                                           comm)
+        for a in active:
+            p, zw, Bp, res, route = (a['p'], a['zw'], a['Bp'], a['res'],
+                                     a['route'])
+            rs = a.pop('rs')
+            Bp_bar = Bp_bars[a['si']]
+            eps_bar[p] += zw
+            if res:
+                e_r, b_r, _ = residue_terms_backward(p, roots[p], Bp, eps,
+                                                     nocc, res, zw, rs)
+                eps_bar += e_r
+                Bp_bar += b_r
+                if route == 'laplace':
+                    pushed.append(rs)
+                else:
+                    e_c, Cov_bar = rs.adjoints()
+                    eps_bar += e_c
+                    X3, D3 = three_index_ov_backward(X, D, eps, nocc, Cov_bar,
+                                                     tile_gb=tile_gb)
+                    X_bar += X3
+                    D_bar += D3
+                    X3 = D3 = Cov_bar = None
+            rs = None
+            if rows_block is None:
+                three_index_slice_backward(X, D, p, Bp_bar, tile_gb=tile_gb,
+                                           out=(X_bar, D_bar))
+            else:
+                three_index_slice_backward_rows(X, D, p, Bp_bar,
+                                                (X_bar, D_bar))
+        if active:
+            fold_residue_adjoints(self.proj_bar, pushed)
+        pushed = None
+        del self.proj_tau
+        if route_out is not None:
+            route_out['routes'] = self.routes
+            # The roots, their pole strengths and the labels of the poles
+            # bracketing them, which the same caller hands back as `w0` and
+            # `follow`: a displaced geometry follows each root's branch
+            # (`followed_branch`). 'branches': per followed orbital, whether
+            # its branch continued and the largest weight here
+            # (`Solvers.qp_equation._note_branch`).
+            route_out['weights'] = self.weights_of
+            route_out['roots'] = roots
+            route_out['labels'] = self.labels
+            route_out['branches'] = self.branches
+            # The pole positions each pole-model state used, handed back as
+            # `sop_poles` so that the displaced geometries share the reference
+            # fit.
+            route_out['sop_poles'] = self.fitted
+            route_out['residues'] = self.residues
+        self.lap = _lap(self.timer, 'qp_set.direct_terms', self.lap)
+        self.X, self.D, self.X_bar, self.D_bar = X, D, X_bar, D_bar
+
+    def reverse_sweep(self):
+        """The M^2 reverse sweep of projbar onto (X, D), and the call's
+        (eps^QP values, eps_bar, X_bar, D_bar)."""
+        active, rows_block, comm = self.active, self.rows_block, self.comm
+        X, D, X_bar, D_bar = self.X, self.D, self.X_bar, self.D_bar
+        eps, nocc, grid, mu = self.eps, self.nocc, self.grid, self.mu
+        if active and rows_block is not None:
+            # the sweep reads the gathered X_mo through column views of its
+            # branches, so no copy of either stands beside it
+            e2, Xs, Ds = polarizability_backward_rows(self.proj_bar, X, D, eps,
+                                                      nocc, grid, mu=mu,
+                                                      block=rows_block,
+                                                      comm=comm)
+            del self.proj_bar
+            X_bar += Xs
+            D_bar += Ds
+            del Xs, Ds
+        elif active:
+            e2, Xs, Ds = polarizability_backward(self.proj_bar, X, D, eps,
+                                                 nocc, grid, mu=mu,
+                                                 tile_gb=self.tile_gb,
+                                                 tau_indices=self.tau_mine)
+            del self.proj_bar
+            if self.nranks > 1:
+                for arr in (e2, Xs, Ds):
+                    reduce_sum(arr, comm)
+            X_bar += Xs
+            D_bar += Ds
+            del Xs, Ds
+        else:
+            # Nothing carries a weight: the sweep would run on a zero projbar
+            # and return exact zeros, so it is not run. The active set is
+            # identical on every rank, so every rank skips the same
+            # collectives. The factors' adjoints are exact zeros held as
+            # read-only broadcasts of one zero: a forward solve returns no
+            # adjoint pair.
+            e2 = np.zeros_like(eps)
+            X_bar = np.broadcast_to(np.zeros(()), _grid_shape(self.X_in,
+                                                              'X_mo'))
+            D_bar = np.broadcast_to(np.zeros(()), _grid_shape(self.D_in, 'D'))
+        if active:
+            _lap(self.timer, 'qp_set.reverse_sweep', self.lap)
+        if self.route_out is not None:
+            # The pole strengths, for callers that must weight a term the
+            # Newton condition renormalizes. Anything added to the RIGHT of
+            # w = eps_p + Delta_p + Sigma_c(w) reaches dw multiplied by Z, so
+            # a caller carrying its own Delta (the Sigma_x - v_xc correction
+            # on a Kohn-Sham reference) needs these and cannot reconstruct
+            # them.
+            self.route_out['z'] = self.z_of
+            self.route_out['routes'] = self.routes
+        out = self.w_stars, self.eps_bar + e2, X_bar, D_bar
+        if self.nranks > 1:
+            # grid tiles are each rank's own rows: what ranks share is the rest
+            agreement(out if rows_block is None else out[:2], comm,
+                      audit_only=True, label='qp_set_gradient outputs')
+        return out
+
+
+def _lap(timer, key, t0):
+    """Add the seconds since t0 to timer[key]; the clock now, the next lap's
+    start."""
+    now = time.perf_counter()
+    if timer is not None:
+        timer[key] = timer.get(key, 0.0) + now - t0
+    return now
 
 
 def _audited(factor):
@@ -621,56 +1004,110 @@ def _grid_shape(factor, name):
     return np.shape(factor)
 
 
+def pair_contractions(tape, grid, pairs, tile_gb=None, comm=None):
+    """The off-diagonal contractions wc_ij (`cd_pair_contraction_multi`) of
+    `pairs`, positions into the states of a `QPSetTape`, on its proj(tau) and
+    slices; split over the contour-deformation frequencies as the diagonal
+    ones are and reduced, so every rank holds the serial ones bitwise."""
+    comm = current_comm() if comm is None else comm
+    nranks = 1 if comm is None else comm.Get_size()
+    mine = (partition(len(grid.cosft_wt), comm.Get_rank(), nranks)
+            if nranks > 1 else None)
+    out = cd_pair_contraction_multi(
+        tape.proj_tau, grid.cosft_wt, tape.Bps, pairs,
+        tile_gb=ISDF_TILE_GB if tile_gb is None else tile_gb,
+        freq_indices=mine)
+    if nranks > 1:
+        out = list(reduce_sum(np.stack(out), comm))
+    return out
+
+
 def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
-                    weights, mu=None, xc_correction=0.0, w0=None,
-                    tol=QP_CD_NEWTON_TOL, residue_route='auto',
+                    weights, *, residue_route, mu=None, xc_correction=0.0,
+                    w0=None, tol=QP_CD_NEWTON_TOL,
                     laplace_tol=LAPLACE_SCREENING_TOL,
-                    tile_gb=ISDF_TILE_GB, pole_offset=None, route_out=None,
+                    tile_gb=ISDF_TILE_GB, follow=None, route_out=None,
                     n_poles=SOP_N_POLES, sop_stride=None,
                     scissor=None, sop_poles=None, comm=None,
-                    rows_block=None, tape=None):
+                    rows_block=None, tape=None, timer=None, pairs=(),
+                    keep_tape=True, z0=None):
     """(eps^QP values, eps_bar, X_bar, D_bar) for sum_p weights[p] eps^QP_p.
 
-    A BSE@GW excitation energy carries a weight on every quasiparticle on the
-    BSE diagonal. proj(tau) is built once and every state's adjoint on chi0
-    folds into one projbar, so the M^2 sweep (`polarizability_backward`) runs
-    once for the set; per state remain a three-index slice, a screening
-    contraction and a Newton solve, (naux, norb) at worst. Only states with a
-    non-zero weight are differentiated; with every weight zero (a forward
-    solve) X_bar and D_bar are read-only broadcasts of one zero.
+    A BSE@GW excitation energy carries a weight on EVERY quasiparticle on the
+    BSE diagonal, so the naive chain runs the whole reverse pass once per
+    orbital. Almost all of it is shared: proj(tau) is built once, and every
+    state's adjoint on chi0 folds into ONE projbar, so the expensive sweep --
+    `polarizability_backward`, the only (M x M) work in the route -- runs once
+    for the entire set instead of once per state. What remains per state is a
+    three-index slice, a screening contraction and a root search, all
+    (naux, norb) at worst.
 
-    The work is three passes: every state's root and route (replicated), the
-    integral term's reverse over frequencies, then each state's direct term,
-    residues and slice adjoint. The reverse pass runs frequency outside,
-    states inside, as the forward contraction does: [1 - chi0(i.nu)] is
-    factorized once per frequency, every weighted state takes a triangular
-    solve from it, and the states' adjoints on chi0(i.nu) are summed before
-    the block is folded into projbar.
+    This is the same weight-folding the dense pilot does in `bse_qb._qp_chain`,
+    where hoisting the maps out of the orbital loop was worth 29.8x.
+
+    Only states with a non-zero weight are solved at all, so a quasiparticle
+    set smaller than the orbital basis costs proportionally less. Where no
+    state carries an adjoint on the factors -- the forward solve, every weight
+    zero -- X_bar and D_bar are read-only broadcasts of one zero, no pair of
+    the factors' shape formed.
+
+    THE REVERSE PASS RUNS FREQUENCY-OUTSIDE, STATES INSIDE, exactly as the
+    forward contraction does: [1 - chi0(i.nu)] is factorized ONCE per
+    frequency and every weighted state takes a triangular solve from it, and
+    the states' adjoints on chi0(i.nu) are summed before the block is folded
+    into projbar. A state loop outside would refactorize the same matrix once
+    per state -- nstates naux^3 for nothing, the largest cost of the gradient
+    at large naux. So the work is three passes: every
+    state's root and route (replicated, cheap), the integral term's reverse
+    over frequencies, then each state's direct term, residues and slice
+    adjoint.
+
+    residue_route: one of KERNEL_RESIDUE_ROUTES, required: 'auto' is not a
+                 frozen mode, and anything else is refused before any work.
 
     comm: an MPI communicator (or `simulated_world` rank) whose ranks all call
     this in lockstep; None is `current_comm()`. eps and the weights are a
-    `lockstep` of rank 0's at entry (the routes are read off eps, the active
-    set off the weights); X and D are identical by construction and only
-    audited. proj(tau) and projbar are held by auxiliary rows (`ProjRows`):
-    the tau sweep is split over tau and its slices exchanged into rows, its
-    reverse split over tau and reduced once; the forward contraction and the
-    reverse pass are split over the CD frequencies, each frequency's chi0
-    gathered whole to its owner and its adjoint handed back as rows, reduced
-    once. Everything decided per state (route, guard band, Newton) is decided
-    from eps and the reduced wc, never from a rank's own partial: it fixes
-    the active set, and with it the shapes pass 2 reduces. Every transform
-    over tau is one auxiliary row per call, so every wc, root and projbar are
-    the serial ones bitwise at every rank count; the adjoints are partial
-    sums over the partitions, exact up to summation order.
+    `lockstep` of RANK 0's at entry -- the routes are read off eps and the
+    active set off the weights; X and D are identical by construction and are
+    not broadcast again, an audited run comparing their digests on entry and
+    the outputs' on exit. proj(tau) and projbar are held by auxiliary rows
+    (`ProjRows`, 19.1 GB a rank at the chlorophyllide hexamer over 8 ranks
+    where the whole array is 153): the tau sweep is split over tau and its
+    slices exchanged into rows, its reverse split over tau and reduced once
+    (the three adjoints); the forward contraction and the reverse pass are
+    split over the contour-deformation frequencies, each frequency's chi0
+    gathered whole to its owner and its adjoint handed back as rows, and
+    reduced once (wc per state; then Bp_bar per state and the frequency part
+    of eps_bar). Everything decided per state --
+    the route, the followed root, the root search itself -- is decided from eps and
+    from the ALREADY REDUCED wc, never from a rank's own partial, so the
+    decisions cannot diverge once the inputs agree. They are what fixes the
+    ACTIVE SET, and the active set fixes how many buffers pass 2 reduces:
+    ranks reading different eps would call that collective with different
+    shapes. Every transform over tau is one auxiliary row per call, a shape
+    no rank count changes, so every wc, every root and projbar itself are the
+    serial ones bitwise at every rank count; the adjoints are partial sums
+    over the partitions, exact up to summation order.
 
-    pole_offset: the Newton's guard band, one value or a mapping orbital ->
-                 offset frozen by the caller (`frozen_pole_offset`).
-    w0:          the Newton's start, one value or a mapping orbital -> energy
-                 frozen by the caller (`frozen_newton_seed`).
+    w0:          the reference's roots, one value or a mapping orbital ->
+                 energy frozen by the caller: where each state is judged
+                 before its root is known (`frozen_start`), and the root
+                 followed where `follow` names none.
+    z0:          the pole strengths of those roots, a mapping orbital -> Z
+                 frozen with w0: a state whose reference root was no
+                 quasiparticle has no window rescan beside its followed root
+                 (`rescans_beside`); None rescans every one.
+    follow:      a mapping orbital -> (w, labels), the root the last accepted
+                 geometry kept and the labels of the poles bracketing it:
+                 the branch each state follows here, whatever its weight,
+                 instead of re-deciding the largest Z (`followed_branch`).
     sop_poles:   the pole model's positions, a mapping orbital -> poles frozen
                  by the caller (`sop_model`); None fits every state's here.
-    route_out:   a dict, if given, receives 'routes', 'z', 'pole_offsets',
-                 'roots', 'sop_poles' and 'tape' (`QPSetTape`).
+    route_out:   a dict, if given, receives 'routes', 'z', 'weights',
+                 'roots', 'labels', 'branches', 'residues', 'sop_poles' and,
+                 with keep_tape, 'tape' (`QPSetTape`).
+    keep_tape:   False hands back no tape, so proj(tau) is dropped before
+                 the reverse sweep instead of standing beside projbar.
     tape:        a `QPSetTape` of an earlier call; proj(tau), the slices and
                  their contractions are read from it where it applies
                  (`QPSetTape.reads`), bitwise, and a forward (every weight
@@ -682,281 +1119,29 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                  every tau (`polarizability_backward_rows`), so no rank
                  holds a whole pair and the rows are the same bits at every
                  rank count for the same projbar and Bp_bar.
+    timer:       a dict, if given, accumulating this rank's seconds per pass
+                 over every call: 'qp_set.tau_sweep' (proj(tau) and the
+                 slices), 'qp_set.frequency_pass' (the forward contraction
+                 over the CD frequencies), 'qp_set.routes' (pass 1: routes,
+                 roots, pole fits), 'qp_set.frequency_reverse' (pass 2),
+                 'qp_set.direct_terms' (pass 3) and 'qp_set.reverse_sweep'
+                 (the M^2 reverse sweep).
+    pairs:       (i, j, wc_bar) with i, j positions into `states`: an adjoint
+                 on the off-diagonal contraction wc_ij of
+                 `cd_pair_contraction_multi`, (nfreq, norb), folded into the
+                 same reverse pass; both states are reversed even at a zero
+                 weight, and must reach the factors through the integral term.
     """
-    eps = np.asarray(eps, float)
-    X_in, D_in = X, D
-    states = np.atleast_1d(states)
-    weights = np.atleast_1d(weights)
-    nu_points = np.asarray(nu_points)
-    if len(nu_points) != grid.cosft_wt.shape[0]:
-        raise ValueError("the grid's frequency axis must be the CD quadrature")
-    comm = current_comm() if comm is None else comm
-    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
-                    else (0, 1))
-    if nranks > 1:
-        # Before the routes are chosen: they are read off eps, and with the
-        # weights' zeros they set the active set whose adjoints pass 2 reduces
-        # as one buffer.
-        eps, weights = lockstep((eps, weights), comm)
-        agreement((_audited(X_in), _audited(D_in), xc_correction, w0,
-                   pole_offset, scissor, sop_poles),
-                  comm, audit_only=True, label='qp_set_gradient inputs')
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
-    nu_mine = partition(len(nu_points), rank, nranks) if nranks > 1 else None
-    whole = {}
-
-    def factors():
-        """X_mo and D whole, gathered at the first call that reads them."""
-        if not whole:
-            whole['X'] = whole_factor(X_in, 'X_mo')
-            whole['D'] = whole_factor(D_in, 'D')
-        return whole['X'], whole['D']
-
-    same, same_wc = ((False, False) if tape is None
-                     else tape.reads(X_in, D_in, eps, mu, tile_gb, states,
-                                     grid))
-    if same:
-        proj_tau, Bps = tape.proj_tau, tape.Bps
-    else:
-        X, D = factors()
-        proj_tau = polarizability_projected_rows(
-            X, D, eps, nocc, grid.tau_points, mu=mu, tile_memory_gb=tile_gb,
-            comm=comm)
-        Bps = slices_over_ranks(X, D, states, tile_gb, comm)
-    naux = proj_tau.shape[-1]
-    eye = np.eye(naux)
-    eps_bar = np.zeros_like(eps)
-    w_stars = np.zeros(len(states))
-    routes, offsets, roots, fitted, C_ov = {}, {}, {}, {}, None
-    z_of = np.zeros(len(states))
-
-    if same_wc:
-        wcs = tape.wcs
-    else:
-        wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt, Bps,
-                                             tile_gb=tile_gb,
-                                             freq_indices=nu_mine)
-        if nranks > 1:
-            wcs = list(reduce_sum(np.stack(wcs), comm))
-    if route_out is not None:
-        route_out['tape'] = QPSetTape(X_in, D_in, eps.copy(), mu, tile_gb,
-                                      states.copy(),
-                                      np.array(grid.tau_points),
-                                      np.array(grid.cosft_wt), proj_tau, Bps,
-                                      wcs)
-
-    # Pass 1: every state's route, root and residue set. Replicated: a
-    # Newton on wc and, for a residue, a rank-one push into its backend. The
-    # pole fits are the exception, striped over the ranks first.
-    sop_poles = fit_poles_over_ranks(states, wcs, nu_points, eps, nocc,
-                                     residue_route, scissor, w0, pole_offset,
-                                     sop_poles, n_poles, sop_stride, comm)
-    active = []
-    for si, (p, wgt) in enumerate(zip(states, weights)):
-        p = int(p)
-        Bp, wc = Bps[si], wcs[si]
-        # Per state: <p|Sigma_x - v_xc|p> differs from orbital to orbital. A
-        # scalar is accepted, and is right on Hartree-Fock, where every entry
-        # is zero.
-        xc_p = static_term(xc_correction, si)
-        offset, relax = frozen_pole_offset(pole_offset, p)
-        # A state Eq. (27) does not admit cannot be carried by the pole model
-        # at any M, so it takes the residue route and the record says so. The
-        # verdict is the reference solve's once it has frozen the root and the
-        # poles (`frozen_on_pole_model`).
-        route, shift, start = pole_model_route(residue_route, scissor, p, eps,
-                                               nocc, w0, pole_offset,
-                                               sop_poles)
-        if route == 'auto':
-            route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
-        if route == 'laplace':
-            rs = LaplaceRealScreening(proj_tau, grid, eps, nocc, tol=laplace_tol)
-        elif route == 'explicit':
-            if C_ov is None:
-                require_explicit_fits(naux, nocc, len(eps) - nocc, p)
-                C_ov = (tape.C_ov if same and tape.C_ov is not None else
-                        three_index_ov(*factors(), eps, nocc, tile_gb=tile_gb))
-                if route_out is not None:
-                    route_out['tape'].C_ov = C_ov
-            rs = ExplicitRealScreening(C_ov, eps, nocc)
-        else:
-            rs = None
-        guard = {'pole_offset': offset}
-        poles = amp = None
-        if route == 'scissor':
-            w_star, z, res = float(eps[p] + xc_p + shift), 1.0, []
-        elif route == 'sop':
-            poles, amp = sop_model(wc, nu_points, eps, nocc, p, sop_poles,
-                                   n_poles, sop_stride)
-            fitted[p] = poles
-            w_star, z = qp_energy_sop(p, amp, poles, eps, nocc,
-                                      xc_correction=xc_p, tol=tol, w0=start)
-            res = []
-        else:
-            w_star, z, res = qp_energy_cd(p, Bp, eps, nocc, nu_points, nu_weights,
-                                          xc_correction=xc_p, tol=tol,
-                                          w0=start, wc=wc, real_screening=rs,
-                                          pole_offset=offset, relax_offset=relax,
-                                          guard_out=guard)
-        w_stars[si] = w_star
-        z_of[si] = z
-        routes[p] = route
-        offsets[p] = guard['pole_offset']
-        roots[p] = float(w_star)
-        if wgt == 0.0:
-            continue
-
-        zw = z * wgt
-        if route == 'scissor':
-            eps_bar[p] += zw
-            continue
-        wc_bar = None
-        if route == 'sop':
-            # The pole model's whole omega dependence is analytic, so its
-            # adjoint on the imaginary-axis data is one transpose and enters
-            # the screening where the integral term's own weights do.
-            eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles, eps,
-                                                    nocc, nu_points,
-                                                    sigma_bar=zw)
-            eps_bar += eps_sop
-        active.append(integral_state(Bp, zw, w_star, eps, nu_points,
-                                     nu_weights, wc_bar, si=si, p=p, res=res,
-                                     rs=rs, route=route))
-
-    # Pass 2: the integral term's reverse pass, frequency outside, over the
-    # frequencies this rank owns. Each frequency's addends reach every rank
-    # and are added in frequency order (`ordered_sum`): the one-rank bits.
-    Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
-    eps_bar_part = np.zeros_like(eps)
-    if active:
-        bp_terms = {a['si']: {} for a in active}
-        eps_terms = []
-        proj_bar = proj_tau.zeros_like()
-        for fb in proj_tau.blocks(grid.cosft_wt, tile_gb, nu_mine):
-            for m, k in enumerate(fb.ks):
-                solve = screening_solver(eye - fb.chi0[m])
-                chi0_bar = np.zeros((naux, naux))
-                for j, a in enumerate(active):
-                    WtB = solve(a['Bp'])
-                    bb, cb, e_k = integral_term_reverse(a, WtB, k)
-                    bp_terms[a['si']][k] = bb
-                    chi0_bar += cb
-                    eps_terms.append(((k, j), e_k))
-                fb.chi0[m] = chi0_bar
-            proj_bar.fold(grid.cosft_wt, fb)
-        fb = solve = chi0_bar = None
-        eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
-        # B_p_bar is (naux, nmo) a frequency, too large to gather every
-        # frequency's, so the running sum visits the frequencies'
-        # round-robin owners in order
-        owners = [k % nranks for k in range(len(nu_points))]
-        for a in active:
-            Bp_bars[a['si']] = ordered_chain_sum(bp_terms[a['si']], owners,
-                                                 comm, Bp_bars[a['si']])
-        bp_terms = eps_terms = None
-    eps_bar += eps_bar_part
-
-    # Pass 3: per state, the direct term, the residues, the slice adjoint.
-    # Replicated, like pass 1. Each backend leaves with its state, so the
-    # explicit route holds one Cov_bar at a time; the Laplace backends keep
-    # only their recorded pushes, folded into projbar after the pass.
-    rs = C_ov = None
-    pushed = []
-    # The factors' adjoints exist only where a state carries one: one pair,
-    # every state's slice and residue adjoints added into it in turn.
-    X_bar = D_bar = None
-    if active:
-        X, D = factors()
-        if rows_block is None:
-            X_bar, D_bar = np.zeros_like(X), np.zeros_like(D)
-        else:
-            X_bar = GridTileRows.zeros(X.shape[0], X.shape[1], rows_block,
-                                       comm)
-            D_bar = GridTileRows.zeros(D.shape[0], naux, rows_block, comm)
-    for a in active:
-        p, zw, Bp, res, route = a['p'], a['zw'], a['Bp'], a['res'], a['route']
-        rs = a.pop('rs')
-        Bp_bar = Bp_bars[a['si']]
-        eps_bar[p] += zw
-        if res:
-            e_r, b_r, _ = residue_terms_backward(p, roots[p], Bp, eps, nocc,
-                                                 res, zw, rs)
-            eps_bar += e_r
-            Bp_bar += b_r
-            if route == 'laplace':
-                pushed.append(rs)
-            else:
-                e_c, Cov_bar = rs.adjoints()
-                eps_bar += e_c
-                X3, D3 = three_index_ov_backward(X, D, eps, nocc, Cov_bar,
-                                                 tile_gb=tile_gb)
-                X_bar += X3
-                D_bar += D3
-                X3 = D3 = Cov_bar = None
-        rs = None
-        if rows_block is None:
-            three_index_slice_backward(X, D, p, Bp_bar, tile_gb=tile_gb,
-                                       out=(X_bar, D_bar))
-        else:
-            three_index_slice_backward_rows(X, D, p, Bp_bar, (X_bar, D_bar))
-    if active:
-        fold_residue_adjoints(proj_bar, pushed)
-    pushed = None
-    del proj_tau
-    if route_out is not None:
-        route_out['routes'] = routes
-        # The guard band each state's Newton used. A caller freezing
-        # the branch records these and hands them back at the next geometry;
-        # re-deciding them there is a discontinuity in the same family as
-        # re-deciding the residue route.
-        route_out['pole_offsets'] = offsets
-        # The converged roots, which the same caller hands back as `w0` so that
-        # the displaced Newton starts on the branch this one found.
-        route_out['roots'] = roots
-        # The pole positions each pole-model state used, handed back as
-        # `sop_poles` so that the displaced geometries share the reference fit.
-        route_out['sop_poles'] = fitted
-    if active and rows_block is not None:
-        # the sweep reads the gathered X_mo through column views of its
-        # branches, so no copy of either stands beside it
-        e2, Xs, Ds = polarizability_backward_rows(proj_bar, X, D, eps, nocc,
-                                                  grid, mu=mu,
-                                                  block=rows_block, comm=comm)
-        del proj_bar
-        X_bar += Xs
-        D_bar += Ds
-        del Xs, Ds
-    elif active:
-        e2, Xs, Ds = polarizability_backward(proj_bar, X, D, eps, nocc,
-                                             grid, mu=mu, tile_gb=tile_gb,
-                                             tau_indices=tau_mine)
-        del proj_bar
-        if nranks > 1:
-            for arr in (e2, Xs, Ds):
-                reduce_sum(arr, comm)
-        X_bar += Xs
-        D_bar += Ds
-        del Xs, Ds
-    else:
-        # Nothing carries a weight: the sweep would run on a zero projbar and
-        # return exact zeros, so it is not run. The active set is identical on
-        # every rank, so every rank skips the same collectives. The factors'
-        # adjoints are exact zeros held as read-only broadcasts of one zero:
-        # a forward solve returns no adjoint pair.
-        e2 = np.zeros_like(eps)
-        X_bar = np.broadcast_to(np.zeros(()), _grid_shape(X_in, 'X_mo'))
-        D_bar = np.broadcast_to(np.zeros(()), _grid_shape(D_in, 'D'))
-    if route_out is not None:
-        # The pole strengths, for callers that must weight a term the Newton
-        # condition renormalizes. Anything added to the right of
-        # w = eps_p + Delta_p + Sigma_c(w) reaches dw multiplied by Z, so a
-        # caller carrying its own Delta (the Sigma_x - v_xc correction on a
-        # Kohn-Sham reference) needs these and cannot reconstruct them.
-        route_out['z'] = z_of
-        route_out['routes'] = routes
-    out = w_stars, eps_bar + e2, X_bar, D_bar
-    if nranks > 1:
-        # grid tiles are each rank's own rows: what ranks share is the rest
-        agreement(out if rows_block is None else out[:2], comm,
-                  audit_only=True, label='qp_set_gradient outputs')
-    return out
+    if residue_route not in KERNEL_RESIDUE_ROUTES:
+        raise ValueError(f'residue_route {residue_route!r}: one of '
+                         f'{sorted(KERNEL_RESIDUE_ROUTES)}')
+    run = QPSetPass(X, D, eps, nocc, grid, nu_points, nu_weights, states,
+                    weights, residue_route, mu, xc_correction, w0, tol,
+                    laplace_tol, tile_gb, follow, route_out, n_poles,
+                    sop_stride, scissor, sop_poles, comm, rows_block, tape,
+                    timer, pairs, keep_tape, z0)
+    run.forward_contraction()
+    run.solve_states()
+    run.reverse_frequencies()
+    run.direct_terms()
+    return run.reverse_sweep()

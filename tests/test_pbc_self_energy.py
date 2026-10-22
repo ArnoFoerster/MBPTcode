@@ -18,6 +18,9 @@ test_pbc_amplitudes and reduces correctly at nk=1 here.
 import os
 import sys
 
+# check 4 compares two code paths; MKL's AVX-512 run-to-run rounding moves it
+os.environ.setdefault('MKL_CBWR', 'AVX2')
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
@@ -27,6 +30,7 @@ from src.SingleReference.Periodic.pbc_integrals import PBCDFIntegrals
 from src.SingleReference.Periodic import pbc_self_energy as pse
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.base import get_occ_virt_indices
+from tests.pins import class_bar
 
 
 class _MolSE(SelfEnergySolver):
@@ -74,7 +78,7 @@ if __name__ == '__main__':
             s_pbc = pse.sigma_c_diag(dfints, eig, 0, n, w, mo_energy=e)
             s_mol = mol.calculate_self_energy(n, w, nocc, Om.real, chi_a_mol, None, vertex_mode='GW')
             max_err = max(max_err, abs(s_pbc - s_mol))
-    ok = max_err < 1e-10
+    ok = max_err <= class_bar('root')
     print(f"1. Sigma_c q=0 vs molecular SelfEnergySolver (all orb, 3 freqs): "
           f"maxerr={max_err:.2e} {'OK' if ok else 'FAIL'}")
     all_ok &= ok
@@ -120,12 +124,11 @@ if __name__ == '__main__':
             mine = pse.qp_energy_g0w0(df2, eig2, kn, n, mo_energy=e2,
                                       exchange_minus_vxc=vxc2[kn, n])
             max_gw = max(max_gw, abs(mine - qp_ref[kn, n]))
-    # 5 meV, NOT the old 0.05 Ha. The old tolerance was loose enough to pass at
-    # 36.7 meV while Sigma_c was too large by a factor of nkpts; the residual
-    # was misread as
-    # analytic-continuation error. With the nkpts normalization fixed this lands
-    # at ~0.65 meV, which IS the AC level, so the tolerance can be tight enough
-    # to catch a recurrence.
+    # 5 meV, NOT 0.05 Ha: a 0.05 Ha tolerance passes at 36.7 meV while Sigma_c
+    # is too large by a factor of nkpts, the residual being misread as
+    # analytic-continuation error. With the nkpts normalization this lands at
+    # ~0.65 meV, which IS the AC level, so the tolerance is tight enough to
+    # catch a wrong normalization.
     ok = max_gw < 0.005
     print(f"3. finite-q G0W0@HF QP (HOMO/LUMO, 1x1x2) vs krgw_ac fc=False: "
           f"max diff={max_gw*1e3:.1f} meV {'OK' if ok else 'FAIL'} (AC-limited)")
@@ -147,7 +150,7 @@ if __name__ == '__main__':
                 sm = mol.calculate_self_energy(n, w, nocc, Omb.real, chi_a_mol,
                                                chi_b_mol, vertex_mode=mode)
                 mx = max(mx, abs(sp - sm))
-        ok = mx < 1e-10
+        ok = mx <= class_bar('root')
         print(f"4. {mode} vertex Sigma q=0 vs molecular (all orb, 3 freqs): "
               f"maxerr={mx:.2e} {'OK' if ok else 'FAIL'}")
         all_ok &= ok

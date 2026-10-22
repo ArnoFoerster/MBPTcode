@@ -1,0 +1,266 @@
+{
+ "tadf_general": {
+  "S1_adiabatic_eV": "0x1.b361d68b557b9p+2",
+  "T1_adiabatic_eV": "0x1.a5c6c7d6facfbp+2",
+  "channels": {
+   "ISC S1->T1": {
+    "A1_marcus": "0x1.3da8d1160e8e8p+24",
+    "A2_mlj": "0x1.5ac00cac602c1p+24",
+    "A3_fc_condon": "0x1.579b2961765b2p+20",
+    "A4_fc_condon_ht": "0x1.706d825bf726bp+23",
+    "A4_ht_part": "0x1.457a1d2fc85b5p+23",
+    "dv_dq_rms_by_path_cm": {
+     "direct": "0x1.b0f26b8a4db34p-5"
+    },
+    "dv_dq_rms_cm": "0x1.b0f26b8a4db34p-4",
+    "initial_sublevel_average": "0x1.0000000000000p+0",
+    "marcus_mlj": {
+     "lambda_classical_eV": "0x1.a260c7ac83c18p-2",
+     "lambda_energy_eV": "0x1.b361d68b557b9p-2",
+     "lambda_sum_rule_eV": "0x1.1010eded1ba13p-6",
+     "remainder_min_meV": "0x1.8000000000000p+2",
+     "status": "computed"
+    },
+    "v_condon_cm": "0x1.891e9c7d70ce0p-2"
+   },
+   "RISC T1->S1": {
+    "A1_marcus": "0x1.3f6f6e9b7977ap+7",
+    "A2_mlj": "0x1.536e792f14935p+7",
+    "A3_fc_condon": "0x1.2d9991fd2cebdp+2",
+    "A4_fc_condon_ht": "0x1.a314b1b049109p+8",
+    "A4_ht_part": "0x1.9e5e4b68545cep+8",
+    "dv_dq_rms_by_path_cm": {
+     "direct": "0x1.af0b7a321f7fap-5"
+    },
+    "dv_dq_rms_cm": "0x1.80ea6015b65b9p-4",
+    "initial_sublevel_average": "0x1.8000000000000p+1",
+    "marcus_mlj": {
+     "lambda_classical_eV": "0x1.35885209ae62ap-2",
+     "lambda_energy_eV": "0x1.468960e8801cbp-2",
+     "lambda_sum_rule_eV": "0x1.1010eded1ba13p-6",
+     "remainder_min_meV": "0x1.8000000000000p+2",
+     "status": "computed"
+    },
+    "v_condon_cm": "0x1.303fbc35efe63p-4"
+   }
+  },
+  "dE_ST_adiabatic_eV": "0x1.b361d68b557b9p-3",
+  "dE_ST_vertical_eV": "0x1.5c4e453c44b9fp+0",
+  "dE_T2T1_vertical_eV": "0x1.b361d68b557b9p-3",
+  "emission_eV": "0x1.b361d68b557b9p+1",
+  "emitter": "S1",
+  "f_emission": "0x1.3333333333333p-2",
+  "hessian_route": "df",
+  "huang_rhys_S1T1_sum": "0x1.a45db69a80e28p-5",
+  "k_ic": "0x1.33dbc99fa9b0fp-87",
+  "k_ic_modes_cm": [
+   "0x1.edd1633e4a7edp+11",
+   "0x1.9b83d2b3e8bf0p+10",
+   "0x1.4936422986ff4p+11"
+  ],
+  "k_isc_t2": "0x1.b3460eb960943p+23",
+  "k_nr_t1": "0x1.95386887aac12p-93",
+  "k_r": "0x1.2e00fc8872a99p+26",
+  "k_risc_t2": "0x1.11c52753d0d90p+22",
+  "labels": {
+   "R0": [
+    "S1",
+    "T1"
+   ],
+   "S1_minimum": [
+    "S1",
+    "T1"
+   ],
+   "T1_minimum": [
+    "S1",
+    "T1"
+   ]
+  },
+  "lambda_S_eV": "0x1.468960e8801cbp-2",
+  "lambda_T_eV": "0x1.b361d68b557b9p-2",
+  "lambda_env_eV": "0x1.999999999999ap-5",
+  "lambda_sum_rule_eV": "0x1.1010eded1ba13p-6",
+  "pl": {
+   "k_delayed": "0x1.6ba12e5d59472p+8",
+   "k_prompt": "0x1.5c0ebab0d2632p+26",
+   "phi_delayed": "0x1.0efc1ef5505c1p-3",
+   "phi_prompt": "0x1.bc40f842abe8fp-1",
+   "phi_total": "0x1.0000000000000p+0",
+   "tau_delayed": "0x1.6874669ec10abp-9",
+   "tau_prompt": "0x1.7894d7b6669bbp-27"
+  },
+  "pl_with_t2": {
+   "k_delayed": "0x1.30516a29a2134p+10",
+   "k_nr_t_eff": "0x1.951c94a307712p-93",
+   "k_prompt": "0x1.9277d3e70890ep+26",
+   "k_risc_eff": "0x1.958d55199678cp+10",
+   "p_t2": "0x1.1948e32e8a898p-12",
+   "phi_delayed": "0x1.ff3a774b946cep-3",
+   "phi_prompt": "0x1.8031622d1ae4bp-1",
+   "phi_total": "0x1.fffffffffffffp-1",
+   "tau_delayed": "0x1.aeb5129b065e3p-11",
+   "tau_prompt": "0x1.45aba928bd091p-27"
+  },
+  "relaxed_solvation": null,
+  "reservoir": "T1",
+  "temperature_K": "0x1.2c00000000000p+8",
+  "v_s0t1_cm": "0x1.de79c4790071bp-3",
+  "v_s1t2_cm": "0x1.2149e6b3983b1p-3"
+ },
+ "tadf_uisc_shaped": {
+  "S1_adiabatic_eV": "0x1.b361d68b557b9p+2",
+  "T1_adiabatic_eV": "0x1.a5c6c7d6facfbp+2",
+  "channels": {
+   "ISC S1->T1": {
+    "A1_marcus": "0x1.7c8a505687d9fp+19",
+    "A2_mlj": "0x1.9f63bae6707d8p+19",
+    "A3_fc_condon": "0x1.9b9f83a259469p+15",
+    "A4_fc_condon_ht": "0x1.33f99805d5a0bp+22",
+    "A4_ht_part": "0x1.30c258fe90ee2p+22",
+    "dv_dq_rms_by_path_cm": {
+     "direct": "0x1.8119136653444p-5"
+    },
+    "dv_dq_rms_cm": "0x1.8119136653444p-4",
+    "initial_sublevel_average": "0x1.0000000000000p+0",
+    "marcus_mlj": {
+     "lambda_classical_eV": "0x1.a260c7ad2ecc5p-2",
+     "lambda_energy_eV": "0x1.b361d68b557b9p-2",
+     "lambda_sum_rule_eV": "0x1.1010ede26af3bp-6",
+     "remainder_min_meV": "0x1.8000000000000p+2",
+     "status": "computed"
+    },
+    "v_condon_cm": "0x1.303fbc35efe63p-4"
+   },
+   "RISC T1->S1": {
+    "A1_marcus": "0x1.16d3425aafffdp+6",
+    "A2_mlj": "0x1.304b6ea7e23d4p+6",
+    "A3_fc_condon": "0x1.2d9991f956f67p+2",
+    "A4_fc_condon_ht": "0x1.a314b1b0d4a13p+8",
+    "A4_ht_part": "0x1.9e5e4b68ef455p+8",
+    "dv_dq_rms_by_path_cm": {
+     "direct": "0x1.80ea6015b438cp-5"
+    },
+    "dv_dq_rms_cm": "0x1.80ea6015b438cp-4",
+    "initial_sublevel_average": "0x1.8000000000000p+1",
+    "marcus_mlj": {
+     "lambda_classical_eV": "0x1.a260c7ad2ecc5p-2",
+     "lambda_energy_eV": "0x1.b361d68b557b9p-2",
+     "lambda_sum_rule_eV": "0x1.1010ede26af3bp-6",
+     "remainder_min_meV": "0x1.8000000000000p+2",
+     "status": "computed"
+    },
+    "v_condon_cm": "0x1.303fbc35efe63p-4"
+   }
+  },
+  "dE_ST_adiabatic_eV": "0x1.b361d68b557b9p-3",
+  "dE_ST_vertical_eV": "0x1.5c4e453c44b9fp+0",
+  "dE_T2T1_vertical_eV": "0x1.b361d68b557b9p-3",
+  "emission_eV": "0x1.b361d68b557b9p+1",
+  "emitter": "S1",
+  "f_emission": "0x1.3333333333333p-2",
+  "hessian_route": "df",
+  "huang_rhys_S1T1_sum": "0x1.a45db6895b51fp-5",
+  "k_ic": "0x1.33dbc9ca4614dp-87",
+  "k_ic_modes_cm": [
+   "0x1.edd1633e4a7edp+11",
+   "0x1.9b83d2b3e8bf0p+10",
+   "0x1.4936422986ff4p+11"
+  ],
+  "k_isc_t2": "0x1.9aa7bafe956bdp+23",
+  "k_nr_t1": "0x1.953868bf23fddp-93",
+  "k_r": "0x1.2e00fc8872a99p+26",
+  "k_risc_t2": "0x1.11c52754639d4p+22",
+  "labels": {
+   "R0": [
+    "S1",
+    "T1"
+   ],
+   "S1_minimum": [
+    "S1",
+    "T1"
+   ],
+   "T1_minimum": [
+    "S1",
+    "T1"
+   ]
+  },
+  "lambda_S_eV": "0x1.b361d68b557b9p-2",
+  "lambda_T_eV": "0x1.b361d68b557b9p-2",
+  "lambda_env_eV": "0x1.999999999999ap-5",
+  "lambda_sum_rule_eV": "0x1.1010ede26af3bp-6",
+  "pl": {
+   "k_delayed": "0x1.89f87fe022b4dp+8",
+   "k_prompt": "0x1.41409c4fdc77dp+26",
+   "phi_delayed": "0x1.ead7fcdd87d8bp-5",
+   "phi_prompt": "0x1.e152803227827p-1",
+   "phi_total": "0x1.0000000000001p+0",
+   "tau_delayed": "0x1.4cb1ddce3c368p-9",
+   "tau_prompt": "0x1.9800d17b7eae8p-27"
+  },
+  "pl_with_t2": {
+   "k_delayed": "0x1.48b9b724a6ed5p+10",
+   "k_nr_t_eff": "0x1.951c94da7cde9p-93",
+   "k_prompt": "0x1.7495da3c40a6cp+26",
+   "k_risc_eff": "0x1.958d551a5a9dbp+10",
+   "p_t2": "0x1.1948e32e8a898p-12",
+   "phi_delayed": "0x1.83f8f5caa9c76p-3",
+   "phi_prompt": "0x1.9f01c28d558e4p-1",
+   "phi_total": "0x1.0000000000001p+0",
+   "tau_delayed": "0x1.8eba55ecf84c3p-11",
+   "tau_prompt": "0x1.5fca5fdfb3882p-27"
+  },
+  "relaxed_solvation": null,
+  "reservoir": "T1",
+  "temperature_K": "0x1.2c00000000000p+8",
+  "v_s0t1_cm": "0x1.de79c4790071bp-3",
+  "v_s1t2_cm": "0x1.2149e6b3983b1p-3"
+ },
+ "uisc": {
+  "ISC": {
+   "A1": "0x1.7c8a505687d9fp+19",
+   "A2": "0x1.9f63bae6707d8p+19",
+   "A3": "0x1.9b9f83a259469p+15",
+   "A4": "0x1.1dfb003248f25p+22",
+   "HT": "0x1.1ac3c12b043fcp+22",
+   "lams": {
+    "lambda_classical_eV": "0x1.a260c7ad2ecc5p-2",
+    "lambda_energy_eV": "0x1.b361d68b557b9p-2",
+    "lambda_sum_rule_eV": "0x1.1010ede26af3bp-6",
+    "remainder_min_meV": "0x1.8000000000000p+2",
+    "status": "computed"
+   }
+  },
+  "RISC": {
+   "A1": "0x1.16d3425aafffdp+6",
+   "A2": "0x1.304b6ea7e23d4p+6",
+   "A3": "0x1.2d9991f956f67p+2",
+   "A4": "0x1.a314b1b1a0ad0p+8",
+   "HT": "0x1.9e5e4b69bb512p+8",
+   "lams": {
+    "lambda_classical_eV": "0x1.a260c7ad2ecc5p-2",
+    "lambda_energy_eV": "0x1.b361d68b557b9p-2",
+    "lambda_sum_rule_eV": "0x1.1010ede26af3bp-6",
+    "remainder_min_meV": "0x1.8000000000000p+2",
+    "status": "computed"
+   }
+  },
+  "dv": [
+   "0x1.1c124ff02deffp-21",
+   "0x1.0da825f15beddp-23",
+   "0x1.ffc8487a036bdp-22",
+   "0x1.ec890b9ec197ap-22"
+  ],
+  "k_ic": "0x1.33dbc9ca4614dp-87",
+  "k_nr_t": "0x1.953868bf23fddp-93",
+  "k_r": "0x1.2e00fc8872a99p+26",
+  "pl": {
+   "k_delayed": "0x1.8ba9ed3bc357ap+8",
+   "k_prompt": "0x1.3fe0b26648562p+26",
+   "phi_delayed": "0x1.c9bf846fd6734p-5",
+   "phi_prompt": "0x1.e36407b90298ep-1",
+   "phi_total": "0x1.0000000000000p+0",
+   "tau_delayed": "0x1.4b456b0eba41cp-9",
+   "tau_prompt": "0x1.99c1aeedfc21ap-27"
+  }
+ }
+}

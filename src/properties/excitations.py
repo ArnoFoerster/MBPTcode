@@ -36,7 +36,6 @@ import functools
 import inspect
 import subprocess
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -44,15 +43,21 @@ from typing import Optional
 import numpy as np
 from pyscf import gto
 
+from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.constants import (GIT_PROVENANCE_TIMEOUT, HARTREE_TO_EV,
                                 HARTREE_TO_MEV, SURFACE_GRID_ACCURACY)
 from src.Base.declaration import (Excitation, GroundState, PhysicsMismatch,
                                   SurfacePhysics)
+from src.Base.numerics import (numerics_identity, require_same_identity,
+                               surface_numerics)
+from src.Base.geometry import elements_of
 from src.Base.scf_convergence import scf_record
-from src.Base.separable_ri import grid_points_per_atom
+from src.Base.separable_ri import grid_identity, grid_points_per_atom
 from src.Base.utils.mpi_grid import lockstep
+from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.rpa_energy import (ground_state_energy,
                                                            reference_energy)
+from src.gradients.state_manifold import StateManifold
 from src.properties import characters
 from src.properties.hessian import surface_hessian
 from src.properties.optimize import escape_saddle
@@ -164,11 +169,12 @@ def normalized_numerics(numerics):
                         key=lambda pair: pair[0]))
 
 
-def surface_of(spec, excitation, mol, scf_factory, mf=None):
+def surface_of(spec, excitation, mol, scf_factory, mf=None, settings=None):
     """The surface `spec` declares with `excitation` on it; None gives E_0's own.
 
     `mf` is a reference mean field already converged for this declaration at
-    `mol`; None converges one.
+    `mol`; None converges one. `settings` is the `Numerics` E_0's chain stands
+    on (`ground_surface_of`); an excited surface builds its own.
 
     Both surfaces come from one spec, so their difference is of one
     functional with itself at two geometries. The axes only a state has (the
@@ -184,7 +190,8 @@ def surface_of(spec, excitation, mol, scf_factory, mf=None):
     ground = {name: kwargs[name] for name in GROUND_AXES}
     ground.update((key, value) for key, value in spec.numerics
                   if key in row.numerics)
-    return potential_energy_surface(mol, scf_factory, mf=mf, **ground)
+    return potential_energy_surface(mol, scf_factory, mf=mf,
+                                    settings=settings, **ground)
 
 
 def ground_surface_of(spec, excited, mol, scf_factory):
@@ -193,9 +200,20 @@ def ground_surface_of(spec, excited, mol, scf_factory):
     One SCF per record: a surface that holds its converged reference (`mf0`,
     the excited chain's) hands it to the ground surface, which declares its
     functional off it and, in the gas phase, evaluates E_0 at `mol` on it.
+
+    A ground row with a chain (dRPA) stands on the excited surface's own
+    `Numerics`, so that E_c^dRPA is taken on the quadrature the excited
+    surface's ground half uses (`rpa_quadrature`) and the two energies of a
+    record differ by the state alone; a ground choice of its own would be
+    `Numerics.derive` of that object, and the seam refuses it.
     """
+    kwargs = {}
+    held = surface_numerics(excited)
+    row = find_row(spec.ground_state, None, spec.chi0, spec.factorization)
+    if held is not None and row.reads_settings:
+        kwargs['settings'] = held
     return surface_of(spec, None, mol, scf_factory,
-                      mf=getattr(excited, 'mf0', None))
+                      mf=getattr(excited, 'mf0', None), **kwargs)
 
 
 def git_commit():
@@ -226,20 +244,6 @@ def provenance(seconds):
             'timing': {'wall_seconds': float(seconds),
                        'utc': datetime.datetime.now(datetime.timezone.utc)
                        .strftime('%Y-%m-%dT%H:%M:%SZ')}}
-
-
-@contextmanager
-def stage(timer, key):
-    """Time the block into `timer[key]` (accumulating) by one assignment at its
-    end, as `FactorChain.phase` does; nothing when `timer` is None."""
-    if timer is None:
-        yield
-        return
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        timer[key] = timer.get(key, 0.0) + time.perf_counter() - t0
 
 
 def time_stages(surface, timer):
@@ -290,7 +294,10 @@ def grid_record(spec, mol):
 
     The level asked for (the entry point's own default when the spec names
     neither a level, counts nor radii), its shell counts, the points per atom
-    they come to and the multi-start recipe. A grid nobody validated is
+    they come to, the multi-start recipe and `grid_identity`: the level with
+    each element's counts and the digest of the radii they place, the stamp
+    that tells a grid apart from another under the same name (a resume or a
+    comparison checks it with `refuse_other_grid`). A grid nobody validated is
     refused here, before an integral is computed; a row with no interpolation
     grid reports None throughout.
     """
@@ -299,18 +306,24 @@ def grid_record(spec, mol):
     if not row.isdf_grid:
         return dict(grid_level=None, grid_counts=None,
                     grid_points_per_atom=None, grid_n_start=None,
-                    grid_label=None)
+                    grid_label=None, grid_identity=None)
     numerics = dict(spec.numerics)
     counts, n_start, label = resolve_grid(mol, numerics)
     level = numerics.get('grid_accuracy')
     if level is None and numerics.get('counts') is None \
             and numerics.get('radii') is None:
         level = SURFACE_GRID_ACCURACY
+    basis = numerics.get('basis') or str(mol.basis)
+    identity = grid_identity(
+        level, basis, elements_of(mol),
+        auxbasis=numerics.get('auxbasis') or paired_auxbasis(basis), counts=counts,
+        radii=numerics.get('radii'))
     return dict(grid_level=level,
                 grid_counts=None if counts is None else dict(counts),
                 grid_points_per_atom=(None if counts is None
                                       else grid_points_per_atom(counts)),
-                grid_n_start=n_start, grid_label=label)
+                grid_n_start=n_start, grid_label=label,
+                grid_identity=identity)
 
 
 def held_grid(surface):
@@ -324,30 +337,36 @@ def held_grid(surface):
     factorization = getattr(driven_chain(surface), 'factorization', None)
     if factorization is None:
         return None
-    return {'counts': dict(factorization.counts),
-            'points_per_atom': grid_points_per_atom(factorization.counts),
-            'n_start': factorization.n_start,
-            'fit_errors': {el: float(err) for el, err
-                           in factorization.fit_errors.items()}}
+    out = {'counts': dict(factorization.counts),
+           'points_per_atom': grid_points_per_atom(factorization.counts),
+           'n_start': factorization.n_start,
+           'fit_errors': {el: float(err) for el, err
+                          in factorization.fit_errors.items()}}
+    failed = getattr(factorization, 'fit_failed', None)
+    if failed:
+        # the warned-about failed fits, as a named flag
+        # (numerical events warn and are flagged)
+        out['fit_failed'] = list(failed)
+    return out
 
 
-def scissor_tiers(shifts, lent):
+def scissor_tiers(shifts, probes):
     """The frozen outside shifts grouped by the explicit root that supplied them.
 
-    `calibrate_scissor` gives every outside orbital the shift of the probe
-    nearest it in orbital energy, so the orbitals sharing one shift are one
-    tier and the probe is the explicit orbital that lent it (`lent`, {probe:
-    shift}: its root minus eps, and minus its own Eq. (18) term in a
-    continuum). Shifts in eV.
+    `probes` is the frozen map {orbital: the explicit orbitals it borrows
+    from}: one probe for an orbital `calibrate_scissor` gave the nearest
+    probe's shift, a degenerate block for a hole lent the block's mean. The
+    orbitals sharing one shift are one tier. Shifts in eV.
     """
     by_shift = {}
     for p, shift in shifts.items():
         by_shift.setdefault(float(shift), []).append(int(p))
     tiers = []
     for shift, orbitals in sorted(by_shift.items()):
-        probe = min(lent, key=lambda q: abs(lent[q] - shift), default=None)
-        tiers.append({'probe': None if probe is None else int(probe),
-                      'shift_eV': shift * HARTREE_TO_EV,
+        lent = (probes or {}).get(min(orbitals))
+        probe = (None if lent is None else int(lent[0]) if len(lent) == 1
+                 else [int(q) for q in lent])
+        tiers.append({'probe': probe, 'shift_eV': shift * HARTREE_TO_EV,
                       'n_orbitals': len(orbitals), 'orbitals': sorted(orbitals)})
     return tiers
 
@@ -365,17 +384,30 @@ def explicit_routes(chain):
     taken = {int(p): r for p, r in
              ((getattr(chain, 'qp_diagnostics', None) or {})
               .get('routes') or {}).items()}
+    view = chain.resolved
     routes = {}
-    for p in (int(q) for q in chain.qp_set):
+    for p in (int(q) for q in view.qp_set):
         if p in taken:
             routes[p] = taken[p]
-        elif p in chain.sop_poles:
+        elif p in view.sop_poles:
             routes[p] = 'sop'
-        elif p in chain.scissor_map:
+        elif p in view.scissor_map:
             routes[p] = 'scissor'
         else:
             routes[p] = chain.residue_route
     return routes
+
+
+def subspaces_at(chain, frozen, mol):
+    """The frozen quasiparticle-Hamiltonian record, with `dropped_here`: the
+    members that left their groups at `mol` when it is the geometry the
+    chain evaluated last and some did."""
+    record = getattr(frozen, 'qp_subspace_record', None)
+    here = getattr(chain, 'qp_subspace_drops', None)
+    if (not here or not here['dropped']
+            or not np.array_equal(here['coords'], mol.atom_coords())):
+        return record
+    return dict(record or {}, dropped_here=here['dropped'])
 
 
 def qp_bookkeeping(surface, mol):
@@ -390,70 +422,104 @@ def qp_bookkeeping(surface, mol):
     `explicit` and `outside` partition the orbitals. None for a surface with
     no quasiparticle set.
 
-    `demoted`: the orbitals the declaration made explicit whose reference
-    root had a pole strength outside (0, 1], outside the set, with the
-    reason, the route and the rejected root and Z.
+    `z_outside`: the explicit orbitals whose reference root has a pole
+    strength outside (0, 1], kept as solved, with the reason, the route and
+    the root and Z.
 
     Shifts and roots are in eV; `z` is the pole strength per explicit state,
     None until the chain keeps it; `qp_root` (dense only) which root of the
     quasiparticle equation each explicit state carries, the nearest by Newton
-    or the one of largest pole strength.
+    or the one of largest pole strength; `nfreq_cd` (cubic only) the
+    contour-deformation quadrature the chain settled on, which the numerics
+    record as asked. `blocks`: the orbitals sharing one correction (members,
+    energy and correction spreads in Ha) and the candidate blocks rejected,
+    with why; None before the cubic chain's first forward. `subspaces`
+    (qp_hamiltonian only): the subspaces the quasiparticle Hamiltonian
+    couples, the ones carried from the surface refrozen from, and `dropped`,
+    each member that took no pole model at this geometry, with the subspace
+    it left, its route and whether it was carried, and `groups`, each group's
+    Hamiltonian at the last forward (poles, pole strengths, Newton steps);
+    None otherwise. `conventions` (cubic only): `FrozenConventions.record`,
+    the groups, the holes promoted into them, and the keys' moves.
     """
     chain = driven_chain(surface)
-    if not hasattr(chain, 'qp_set'):
+    # the cubic chain's set is a frozen convention, the dense surface's its own
+    cubic = hasattr(chain, 'conventions')
+    if not cubic and not hasattr(chain, 'qp_set'):
         return None
-    cubic = hasattr(chain, 'outside_shift')
+    view, frozen = ((chain.resolved, chain.conventions) if cubic
+                    else (chain, chain))
     norb = int(len(chain.mf0.mo_energy)) if cubic else int(mol.nao)
-    explicit = sorted(int(p) for p in chain.qp_set)
+    explicit = sorted(int(p) for p in view.qp_set)
     outside = [p for p in range(norb) if p not in set(explicit)]
     roots = {int(p): float(w) for p, w in
-             (chain.qp_seeds if cubic else chain.seeds).items()}
+             (view.qp_seeds if cubic else chain.seeds).items()}
     record = {'kind': 'cubic' if cubic else 'dense', 'n_orbitals': norb,
               'explicit': explicit, 'n_explicit': len(explicit),
               'outside': outside, 'n_outside': len(outside),
-              'qp_root_eV': {p: w * HARTREE_TO_EV for p, w in roots.items()}}
+              'qp_root_eV': {p: w * HARTREE_TO_EV for p, w in roots.items()},
+              'blocks': getattr(frozen, 'qp_block_record', None),
+              'subspaces': subspaces_at(chain, frozen, mol)}
     if not cubic:
         record.update(outside_treatment='mean-field', n_scissor=0,
                       scissor_tiers=[], route=None, inside_scissor_eV={},
-                      sop=None, demoted={}, qp_root=chain.qp_root,
+                      sop=None, z_outside={}, qp_root=chain.qp_root,
                       z={int(p): float(v) for p, v in chain.qp_z.items()})
         return record
     eps = np.asarray(chain.mf0.mo_energy, float)
-    scissored = chain.outside == 'scissor'
-    shifts = (chain.outside_shift or {}) if scissored else {}
+    # a charged state's chain never calibrates a scissor: no BSE diagonal
+    scissored = view.outside_shift is not None
+    shifts = view.outside_shift or {}
     diagnostics = getattr(chain, 'qp_diagnostics', None) or {}
     routes = explicit_routes(chain)
     sop = None
     if chain.residue_route == 'sop':
-        poles = {int(p): np.asarray(v, float) for p, v in chain.sop_poles.items()}
+        poles = {int(p): np.asarray(v, float)
+                 for p, v in view.sop_poles.items()}
         sop = {'n_poles_asked': int(chain.n_poles),
                'sop_stride': chain.sop_stride,
                'poles_per_state': {p: int(len(v)) for p, v in poles.items()},
                'poles_hartree': {p: v.tolist() for p, v in poles.items()}}
     record.update(
-        outside_treatment=chain.outside,
+        outside_treatment='scissor' if scissored else None,
+        outside_scissor=getattr(chain, 'outside_scissor', 'tiers'),
+        # outside_scissor='curve': the frozen Delta(eps) beyond the window,
+        # its knots, probes and the probes it dropped; the tiers then cover
+        # only the orbitals off both curves
+        scissor_curve=frozen.curve_record(),
         n_scissor=len(outside) if scissored else 0,
-        scissor_tiers=scissor_tiers(shifts, chain.outside_lent or {}),
+        scissor_tiers=scissor_tiers(shifts, view.outside_probe),
         scissor_eV={int(p): float(s) * HARTREE_TO_EV
                     for p, s in sorted(shifts.items())},
         route=routes, n_sop=sum(r == 'sop' for r in routes.values()),
         n_inside_scissor=sum(r == 'scissor' for r in routes.values()),
         inside_scissor_eV={int(p): float(s) * HARTREE_TO_EV
-                           for p, s in sorted(chain.scissor_map.items())},
+                           for p, s in sorted(view.scissor_map.items())},
         eps_mean_field_eV={p: float(eps[p]) * HARTREE_TO_EV for p in explicit},
         sop=sop, z=diagnostics.get('z'),
-        # declared explicit, but the reference root was no quasiparticle
-        # (`_settle_qp_set`): outside the set, with why and the root rejected
-        demoted={int(p): {'reason': d['reason'], 'z': d['z'],
-                          'route': d['route'],
-                          'root_eV': d['root'] * HARTREE_TO_EV}
-                 for p, d in sorted(getattr(chain, 'qp_demoted',
-                                            {}).items())},
+        # quasiparticles kept on their followed branch where the largest
+        # weight had moved to another root, by orbital and geometry
+        qp_branch_warnings=list(getattr(chain, 'qp_branch_log', [])),
+        # quasiparticle-Hamiltonian groups kept with Z outside (0, 1] or
+        # carried on short of self-consistency, by group and geometry
+        # (`_log_qp_hamiltonian`)
+        qp_hamiltonian_warnings=list(getattr(chain, 'qp_hamiltonian_log', [])),
+        # explicit roots of pole strength outside (0, 1] at the reference
+        # (`_flag_z_outside`), kept as solved
+        z_outside={int(p): {'reason': d['reason'], 'z': d['z'],
+                            'route': d['route'],
+                            'root_eV': d['root'] * HARTREE_TO_EV}
+                   for p, d in sorted(view.qp_z_outside.items())},
+        # the contour-deformation quadrature the first forward settled on,
+        # doubled from the asked count where a root sat near an eps_q
+        nfreq_cd=int(frozen.nfreq_cd),
         # kind='adaptive': how the explicit set was selected out of the
         # admitted candidates, and what that costs each target state
         adaptive=(chain.selection_record()
-                  if getattr(chain, 'qp_partition', None) is not None
-                  else None))
+                  if view.qp_partition is not None else None),
+        # the frozen conventions keyed by orbital identity: the groups, the
+        # holes promoted into them and how the keys moved along the walk
+        conventions=frozen.record())
     return record
 
 
@@ -469,7 +535,8 @@ def adaptive_check(surface, mol, mf=None):
     reselects nor reruns the walk.
     """
     chain = driven_chain(surface)
-    if getattr(chain, 'qp_partition', None) is None:
+    if (not hasattr(chain, 'conventions')
+            or chain.resolved.qp_partition is None):
         return None
     mol, mf = chain.mean_field(mol, mf)
     om, pieces = chain._forward(mol, mf)
@@ -545,30 +612,6 @@ def root_by_irrep(spec, excitation, mol, scf_factory, irrep, listed=8):
             'roots': roots, 'impure': characters.impure(labels)}
 
 
-def followed_state(spec, excitation, mol, scf_factory, irrep, listed=8):
-    """Whether the root a relaxation followed by index is still the state at `mol`.
-
-    A walk keeps the n-th root of an energy-ordered manifold, so a crossing
-    along the path hands it another state without saying so. At the relaxed
-    geometry the root `excitation` indexes is labelled and compared with the
-    lowest root of `irrep`: `same_state` is False when they differ, and None
-    when the point group is lost and no label means anything. The surface is
-    built afresh at `mol`, so its energies are not the walk's; the labels are
-    what is read.
-    """
-    omega, labels, group, roots = labelled_spectrum(spec, excitation, mol,
-                                                    scf_factory, listed)
-    held = excitation.root - 1
-    lowest = next((int(n) for n in np.argsort(omega)
-                   if labels[int(n)]['irrep'] == irrep), None)
-    lost = group in ('C1',)
-    return {'target': irrep, 'point_group': group, 'followed_root': held,
-            'followed_irrep': labels[held]['irrep'],
-            'followed_purity': labels[held]['purity'],
-            'lowest_of_target': lowest, 'roots': roots,
-            'same_state': None if lost else lowest == held}
-
-
 def ground_state_at(surface, mol, total=None):
     """E_0(mol) and its additive terms on the ground surface's frozen conventions.
 
@@ -594,45 +637,34 @@ def ground_state_at(surface, mol, total=None):
 def relaxation_fields(info, prefix=''):
     """What an optimizer's record contributes, renamed away from `grad_max`.
 
-    `info['grad_max']` and `info['opt_grad_max']` are one number under two
-    names (the residual |dE/dR| at the converged geometry), and the first is
-    what the driving force at the input geometry is called elsewhere. Only the
-    unambiguous name travels.
+    `info['grad_max']` and `info['opt_grad_max']` are ONE number under two
+    names -- the residual |dE/dR| at the converged geometry -- and the first is
+    what the driving force at the INPUT geometry is called everywhere else.
+    Only the unambiguous name travels.
 
-    The refreeze shift is reported as how far the geometry moved when the
-    frozen conventions were rebuilt (Bohr) and how much energy that motion was
-    worth (meV). Either is None only when the outer loop did not run, and
-    `refreeze` then says why. Both are the first pass's; `refreeze_jumps_meV`
-    lists every pass and `refreeze_converged` says whether the last met
-    `refreeze_passes`' rule, which makes the energies read on the last
-    surface converged in its conventions to `refreeze_tol_meV`, the
-    walk-resolved tolerance of each pass, flagged (`refreeze_tol_flag`) above
-    REFREEZE_TOL_FLAG_MEV.
+    The refreeze is reported as the drift of the conventions at the minimum,
+    E_new(R*) - E_old(R*) at one geometry (meV, `optimize.refreeze_pass`),
+    the geometry move of the walk on the rebuilt surface (Bohr) and that
+    walk's whole energy change (meV, drift and descent). Each is None only
+    when the refreeze did not run, and `refreeze` then says why;
+    `refreeze_converged` is |drift| <= REFREEZE_TOL_MEV.
 
     `converged`, `cycles`, `status` and `opt_grad_max` are the walk whose
-    geometry the record reports (after a refreeze the last walk's), so
-    `converged` False means that geometry is not a minimum, whatever the
-    walks before it did. A relaxed number needs both `converged` and, where
-    the loop ran, `refreeze_converged`.
+    geometry the record reports -- after a refreeze the refrozen walk's --
+    so `converged` False means that geometry is not a minimum, whatever the
+    walk before it did. A relaxed number needs both `converged` and, where
+    the refreeze ran, `refreeze_converged`.
     """
     residual = info.get('opt_grad_max')
     shift = info.get('refreeze_shift')
     moved = info.get('refreeze_denergy')
-    jumps = info.get('refreeze_jumps')
+    drift = info.get('refreeze_drift_meV')
     return {prefix + 'opt_grad_max': None if residual is None else float(residual),
+            prefix + 'refreeze_drift_meV': None if drift is None else float(drift),
             prefix + 'refreeze_shift_bohr': None if shift is None else float(shift),
-            prefix + 'refreeze_shift_meV': (None if moved is None
-                                            else float(moved) * HARTREE_TO_MEV),
-            prefix + 'refreeze_jumps_meV': (None if jumps is None else
-                                            [float(j) * HARTREE_TO_MEV
-                                             for j in jumps]),
+            prefix + 'refreeze_denergy_meV': (None if moved is None
+                                              else float(moved) * HARTREE_TO_MEV),
             prefix + 'refreeze_converged': info.get('refreeze_converged'),
-            # the walk-resolved tolerance of each pass (`refreeze_passes`)
-            prefix + 'refreeze_walk_de_meV': info.get('refreeze_walk_de_meV'),
-            prefix + 'refreeze_tol_meV': info.get('refreeze_tol_meV'),
-            prefix + 'refreeze_walk_decided': info.get(
-                'refreeze_walk_decided'),
-            prefix + 'refreeze_tol_flag': info.get('refreeze_tol_flag'),
             prefix + 'refreeze': info.get('refreeze'),
             # the symmetry-breaking start (`optimize.start_nudge`)
             prefix + 'start_nudge': nudge_record(info.get('start_nudge')),
@@ -670,6 +702,32 @@ def excitation_energy(info, e_n, e_0):
     return float(e_n - e_0) if omega is None else float(omega)
 
 
+def state_specific_record(surface, mol):
+    """Scheme B's classical state-specific term at `mol`, in eV, or None.
+
+    A surface whose environment is `split_equilibrium.ClassicalStateSpecific`
+    (`environment.solvent_scheme(env, 'classical-ss')`) adds
+    E_SS = 1/2 dV^T Q dV of its declared density difference to omega_B
+    (`ExcitedStateChain.state_specific_correction`). It is a single-point
+    term: the surface's energy and force stay omega_B's, so the record
+    carries E_SS and E_B beside them and moves nothing else. Any other
+    environment carries its state-specific part inside omega (or has none):
+    None.
+    """
+    chain = driven_chain(surface)
+    if not hasattr(chain, 'state_specific_correction'):
+        return None
+    if getattr(chain.environment_at(mol), 'scheme', None) != 'classical-ss':
+        return None
+    rec = chain.state_specific_correction(mol)
+    return {'omega_B_eV': rec['omega_B'] * HARTREE_TO_EV,
+            'E_SS_eV': rec['E_SS'] * HARTREE_TO_EV,
+            'E_B_eV': rec['E_B'] * HARTREE_TO_EV,
+            'ss_density': rec['ss_density'],
+            'ss_equilibrium': rec['ss_equilibrium'],
+            'delta_dipole_au': rec['delta_dipole']}
+
+
 def vertical_block(excited, ground, mol, timer=None, gradient=True,
                    energy=None):
     """Omega_n(R0), the two total energies it is the difference of, and the
@@ -702,8 +760,13 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
 
     `qp_bookkeeping` and `held_grid` are what the quasiparticle set and the
     interpolation grid were; both are read after the evaluation, when the
-    chain has frozen its conventions at R0.
+    chain has frozen its conventions at R0. `scf_flags`: every mean field
+    the two surfaces' chains read with |F_ia| above `scf_force_tol`, warned
+    about and carried on (`scf_flags`); `casida_warnings`: every Casida
+    solve whose read roots were left above read_tol or unconfirmed, kept as
+    solved (`casida_warnings`).
     """
+    refuse_other_numerics(excited, ground)
     with stage(timer, 'record_force'):
         if gradient:
             force, e_n, info = evaluate(excited, mol)
@@ -736,20 +799,44 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
             'translation_residual': (None if residual is None
                                      else float(residual)),
             'davidson_solves': None if solves is None else list(solves),
-            'opt_grad_max': None, 'refreeze_shift_bohr': None,
-            'refreeze_shift_meV': None, 'refreeze_jumps_meV': None,
-            'refreeze_converged': None, 'refreeze_walk_de_meV': None,
-            'refreeze_tol_meV': None, 'refreeze_walk_decided': None,
-            'refreeze_tol_flag': None, 'refreeze': NOT_RELAXED,
+            'opt_grad_max': None, 'refreeze_drift_meV': None,
+            'refreeze_shift_bohr': None, 'refreeze_denergy_meV': None,
+            'refreeze_converged': None, 'refreeze': NOT_RELAXED,
             'optimizer': None, 'converged': None, 'cycles': 0,
             'status': NOT_RELAXED,
             'qp_z': z, 'residue_route_taken': route,
             'qp_bookkeeping': qp_bookkeeping(excited, mol),
             'held_grid': held_grid(excited),
+            'scf_flags': scf_flags(excited, ground),
+            'casida_warnings': casida_warnings(excited),
             'physics': physics_record(excited),
+            'state_specific': state_specific_record(excited, mol),
             'realization': excited.realization,
             'numerics': dict(excited.numerics),
             'mol_reference': mol}
+
+
+def saddle_check(surface, mol, walk, verbose=False, cache_dir=None):
+    """(minimum, the re-walk's record or None, the check's record) at a
+    walk's minimum `mol` on `surface`: the state's Hessian there (6N forces,
+    `surface_hessian`) and a saddle left along its negative mode and walked
+    again by `walk(surface, start) -> (mol, info)` (`escape_saddle`). The
+    record carries the Hessian's asymmetry and how many forces each Hessian
+    read back from `cache_dir` (its force cache; the second Hessian's is
+    its subdirectory 'second')."""
+    info, second = {}, {}
+    hess = surface_hessian(surface, mol, verbose=verbose, info=info,
+                           cache_dir=cache_dir)
+    moved, again, _, record = escape_saddle(
+        surface, mol, hess, walk,
+        lambda at_surface, at, cache_dir=None: surface_hessian(
+            at_surface, at, verbose=verbose, info=second,
+            cache_dir=cache_dir),
+        cache_dir=cache_dir)
+    record['hessian_asymmetry'] = info.get('asymmetry')
+    record['forces_reused'] = {'first': info.get('forces_reused'),
+                               'second': second.get('forces_reused')}
+    return moved, again, record
 
 
 def saddle_checked_state(relaxed, engine='auto', **walk_kw):
@@ -759,17 +846,26 @@ def saddle_checked_state(relaxed, engine='auto', **walk_kw):
     saddle a step along its negative mode and a second walk (`escape_saddle`).
 
     The second walk is `relax_state` with the first one's `engine` and
-    `walk_kw`, so it has the same refreeze passes and the same nudge. Where
-    it escaped, its record replaces the first. A second saddle, or an escape
-    walk that does not converge, is refused (RuntimeError naming the
-    status): neither geometry is a minimum.
+    `walk_kw`, so it has the same refreeze passes and the same nudge. Where it escaped, its record replaces
+    the first. A first walk that did not converge, a second saddle, or an
+    escape walk that does not converge, is REFUSED (RuntimeError naming the
+    status): no geometry there is a minimum, and a
+    Hessian at a point with a residual force tests nothing.
 
-    The record (`saddle_check`): 'first' and 'second' (`saddle_test`),
-    'status', 'hessian_asymmetry'. After an escape it also
+    The record (`saddle_check`): 'first' and 'second'
+    (`saddle_test`), 'status', 'hessian_asymmetry'. After an escape it also
     has 'step_bohr', 'direction', 'energies', 'energy_at_saddle',
     'energy_drop' (Hartree) and 'saddle_walk', which holds the first walk's
     `relaxation_fields` with its 'converged' and 'cycles'.
     """
+    first = relaxed['info']
+    if not first.get('converged'):
+        # a walk stopped by a collapsed trust radius ends where the surface
+        # is not quadratic: its 6N forces read that roughness as asymmetry
+        raise RuntimeError(
+            f"the walk did not converge ({first.get('status')}) (saddle "
+            f"check): its last geometry is not a stationary point, so there "
+            f"is no minimum to test")
     walked = {}
 
     def walk(surface, start):
@@ -778,15 +874,9 @@ def saddle_checked_state(relaxed, engine='auto', **walk_kw):
         return state['mol'], dict(state['info'],
                                   final_surface=state['surface'])
 
-    hess_info = {}
-    hess = surface_hessian(relaxed['surface'], relaxed['mol'], info=hess_info)
-    _, again, _, record = escape_saddle(
-        relaxed['surface'], relaxed['mol'], hess, walk,
-        lambda surface, at: surface_hessian(surface, at))
-    record['hessian_asymmetry'] = hess_info.get('asymmetry')
+    _, again, record = saddle_check(relaxed['surface'], relaxed['mol'], walk)
     if again is None:
         return relaxed, record
-    first = relaxed['info']
     record['saddle_walk'] = dict(relaxation_fields(first),
                                  converged=first.get('converged'),
                                  cycles=first.get('cycles'))
@@ -842,17 +932,99 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
         e0_hartree_at_excited_minimum=float(e_0.total),
         e0_terms_at_excited_minimum=dict(e_0.terms),
         mol_excited_minimum=relaxed['mol'],
+        state_specific_at_excited_minimum=state_specific_record(
+            relaxed['surface'], relaxed['mol']),
         hessian_at_excited_minimum=relaxed['info'].get('hessian'),
+        qp_branch_warnings=qp_branch_warnings(excited, relaxed['surface']),
+        qp_hamiltonian_warnings=qp_hamiltonian_warnings(
+            excited, relaxed['surface']),
+        scf_flags=scf_flags(excited, relaxed['surface'], ground),
+        casida_warnings=casida_warnings(excited, relaxed['surface']),
         **relaxation_fields(relaxed['info']))
     return record, relaxed
+
+
+def qp_hamiltonian_warnings(*surfaces):
+    """Every quasiparticle-Hamiltonian group the chains of `surfaces` kept
+    with eigenvectors of Z outside (0, 1] or carried on short of
+    self-consistency, once per kind, group and geometry, in the order logged
+    (`ExcitedStateChain.qp_hamiltonian_log`)."""
+    out, seen = [], set()
+    for surface in surfaces:
+        for entry in (getattr(driven_chain(surface), 'qp_hamiltonian_log',
+                              None) or []):
+            key = (entry['kind'], tuple(entry['orbitals']), entry['geometry'])
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(entry))
+    return out
+
+
+def casida_warnings(*surfaces):
+    """Every matrix-free Casida solve the chains of `surfaces` ran whose
+    roots the force reads were left above read_tol ('not_converged') or not
+    confirmed as the lowest ('unconfirmed'), kept as solved, once per kind,
+    roots, spin, state and geometry, in the order logged
+    (`ExcitedStateChain.casida_log`)."""
+    out, seen = [], set()
+    for surface in surfaces:
+        for entry in (getattr(driven_chain(surface), 'casida_log', None)
+                      or []):
+            key = (entry['kind'], tuple(entry['roots']), entry['spin'],
+                   entry['state'], entry['geometry'])
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(entry))
+    return out
+
+
+def scf_flags(*surfaces):
+    """Every mean field the chains of `surfaces` read with |F_ia| above
+    `scf_force_tol` (`ReferenceMeanField.flag_scf_quality`): where, the
+    residual, the tolerance and the nuclei (Bohr), once each, in the order
+    flagged. The run carried on (refuse inputs,
+    warn numerics); a number off a flagged mean field carries the residual
+    in its force."""
+    out, seen = [], set()
+    # a composed surface's ground half reads mean fields of its own
+    holders = [h for s in surfaces
+               for h in (driven_chain(s), getattr(s, 'ground', None))]
+    for holder in holders:
+        for flag in getattr(holder, 'scf_flags', None) or []:
+            coords = np.asarray(flag['coords'], float)
+            key = (flag['where'], flag['residual'], coords.tobytes())
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(flag, coords=coords.tolist()))
+    return out
+
+
+def qp_branch_warnings(*surfaces):
+    """Every quasiparticle the walks on `surfaces` kept on its followed
+    branch where the largest weight had moved to another root, once per
+    orbital and geometry, in the order logged (`ExcitedStateChain.
+    qp_branch_log`): orbital (slot), index, geometry hash, root and Z, the
+    largest weight there, and whether the branch continued."""
+    out, seen = [], set()
+    for surface in surfaces:
+        for entry in getattr(driven_chain(surface), 'qp_branch_log', None) or []:
+            key = (entry['orbital'], entry['geometry'])
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(entry))
+    return out
 
 
 def ground_at_minimum(ground, excited, relaxed):
     """The ground surface E_0 is read on at an excited minimum: `ground`
     itself where the walk ended on `excited`, else `ground` rebuilt at the
-    minimum, as the excited surface was (`relax_state`)."""
+    minimum, as the excited surface was (`relax_state`), on the walk's own
+    mean field there where its `refreeze` takes one: a second SCF at R*
+    would put E_0 and the excited energy on two references."""
     if relaxed['surface'] is excited:
         return ground
+    if 'mf' in inspect.signature(ground.refreeze).parameters:
+        return ground.refreeze(relaxed['mol'], mf=relaxed['mf'])
     return ground.refreeze(relaxed['mol'])
 
 
@@ -860,6 +1032,14 @@ def refuse_incomparable(physics_a, physics_b):
     """Refuse two declarations whose difference would be of two functionals."""
     if not physics_a.comparable_with(physics_b):
         raise PhysicsMismatch(physics_a, physics_b)
+
+
+def refuse_other_numerics(excited, ground):
+    """Refuse an E_0 surface and an excited surface on different numerics: their
+    difference would carry the difference of the quadratures. A surface that
+    holds no `Numerics` (mean field, dense) is not refused."""
+    require_same_identity(numerics_identity(excited), numerics_identity(ground),
+                          'E_0 against the excited energy')
 
 
 def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
@@ -880,6 +1060,7 @@ def adiabatic_energy(surface_excited, surface_ground, mol, refreeze=1,
     the excited minimum alone (`emission_block`).
     """
     report = compare_surfaces(surface_excited, surface_ground)
+    refuse_other_numerics(surface_excited, surface_ground)
     started = time.perf_counter()
     record, _ = emission_block(surface_excited, surface_ground, mol, refreeze,
                                engine, optimizer, hess_init=hess_init,
@@ -974,8 +1155,6 @@ def calc_vertical_states(spec, excitations, mol, scf_factory, timer=None,
                 f'{other} and {first} differ in more than spin and root; one '
                 f'shared evaluation serves one kernel on one quasiparticle '
                 f'and screening treatment')
-    # cycle: state_manifold imports src.properties, whose __init__ imports this
-    from src.gradients.state_manifold import StateManifold
     started = time.perf_counter()
     parts = {}
     with stage(timer, 'record_surface'):
@@ -1020,7 +1199,7 @@ def calc_emission_energy(spec, excitation, mol, scf_factory, refreeze=1,
     The state is relaxed from `mol` and the ground state is not: emission
     leaves the excited minimum for the ground surface at the same geometry,
     so E_0 is evaluated there. `relaxation_depth_eV` is what the state shed
-    getting there, and `refreeze_shift_meV` is the frozen conventions' error
+    getting there, and `refreeze_denergy_meV` is the frozen conventions' error
     bar on the result.
     """
     started = time.perf_counter()
@@ -1073,11 +1252,17 @@ def calc_adiabatic_gap(spec_a, excitation_a, spec_b, excitation_b, mol,
 
     The realizations may differ and are reported side by side
     (`realization_differs`), e.g. a dense oracle against a cubic route.
+    The numerics may not: two cubic surfaces on different grids, tolerances or
+    quadratures are refused (`NumericsMismatch`) before a relaxation starts.
     """
     started = time.perf_counter()
     refuse_incomparable(spec_a.physics(excitation_a), spec_b.physics(excitation_b))
     surface_a = surface_of(spec_a, excitation_a, mol, scf_factory)
     surface_b = surface_of(spec_b, excitation_b, mol, scf_factory)
+    # the two minima are on two surfaces: other numerics on one side move the
+    # gap by the difference of the numerics, so the relaxations are not started
+    require_same_identity(numerics_identity(surface_a),
+                          numerics_identity(surface_b), 'adiabatic gap')
     report = compare_surfaces(surface_a, surface_b)
     record_a, relaxed_a = emission_block(
         surface_a, ground_surface_of(spec_a, surface_a, mol, scf_factory),

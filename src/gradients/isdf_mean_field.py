@@ -59,17 +59,19 @@ import numpy as np
 from pyscf import scf as pyscf_scf
 from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import rks as rks_grad
+from pyscf.solvent import pcm as pyscf_pcm
 
 from src.Base.dispersion import dispersion_gradient
-from src.Base.isdf_jk import (  # noqa: F401
-    ISDFJK, _base_functional, exchange_free_reference,
-    mean_field_skeleton_force)
+from src.Base.pcm_derivatives import solvation_gradient
+from src.Base.isdf_jk import (ISDFJK, _base_functional,
+                              mean_field_skeleton_force)
 from src.Base.skeleton_tiles import (fitted_coulomb_energy_skeleton,
                                      one_electron_energy_skeleton,
                                      xc_energy_grid_skeleton)
-from src.gradients.isdf_derivatives import (  # noqa: F401
-    _auxmol_of, exchange_fit, isdf_exchange_adjoints, isdf_exchange_skeleton,
-    isdf_fock_partial_exchange, isdf_scf_handle, mean_field_exchange_wanted)
+from src.gradients.isdf_derivatives import (
+    _auxmol_of, exchange_fit, isdf_exchange_skeleton, isdf_scf_handle,
+    mean_field_exchange_wanted, require_fitted_coulomb)
+from src.gradients.one_electron import one_electron_gradient
 
 
 def require_isdf_gradient_support(mf, what):
@@ -87,14 +89,7 @@ def require_isdf_gradient_support(mf, what):
             f'a {type(mf).__name__}: an open-shell exchange energy is a sum '
             f'over spins of -(a_x/2) Tr[D_s K(D_s)], a different scalar with a '
             f'different adjoint.')
-    if with_df.j_route != 'df-direct':
-        raise NotImplementedError(
-            f'{what} takes the Coulomb derivative from the density-fitted '
-            f'skeleton, which is the right function only for '
-            f"j_route='df-direct'; this mean field builds J from the "
-            f'interpolation (j_route={with_df.j_route!r}), whose derivative is '
-            'not built. That route is measurably unsafe in an SCF anyway -- '
-            'see ISDFJK.build.')
+    require_fitted_coulomb(mf, what)
     if with_df.coords is not None and with_df.grid_radii is None:
         raise NotImplementedError(
             f'{what} needs the interpolation points as atom-local clouds, and '
@@ -166,10 +161,11 @@ def isdf_mean_field_gradient(mf, fit=None):
     dme = rhf_grad.make_rdm1e(mf.mo_energy, mf.mo_coeff, mf.mo_occ)
     handle = isdf_scf_handle(mf)
     auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
-    grad = rhf_grad.grad_nuc(mol)
+    one_electron = one_electron_gradient(mf)
+    grad = one_electron.grad_nuc(mol)
     # the generator's with_rinv_at_nucleus writes its molecule: a private one
     grad = grad + one_electron_energy_skeleton(
-        mol, rhf_grad.Gradients(mf).hcore_generator(mol.copy()), dm, dme)
+        mol, one_electron.hcore_generator(mol.copy()), dm, dme)
     grad = grad + fitted_coulomb_energy_skeleton(mol, auxmol, dm)
     if hasattr(mf, 'xc'):
         grad = grad + xc_energy_grid_skeleton(
@@ -177,12 +173,37 @@ def isdf_mean_field_gradient(mf, fit=None):
         if mf.do_nlc():
             grad = grad + _nlc_gradient(mf, dm)
     grad = grad + dispersion_gradient(mf)
+    if getattr(mf, 'with_solvent', None) is not None:
+        grad = grad + reaction_field_gradient(mf.with_solvent, dm)
     if not mean_field_exchange_wanted(mf):
         return grad
     fit = exchange_fit(mf, fit)
     if fit == 'replicated' and not mf.with_df._built:
         mf.with_df.build()
     return grad + isdf_exchange_skeleton(mf, fit=fit)
+
+
+def reaction_field_gradient(solvent, dm):
+    """(natm, 3) the explicit nuclear derivative of a PCM reaction-field
+    energy at fixed density: the cavity's surface charges against the nuclei,
+    against the electrons, and the response matrix moving with the cavity
+    (pyscf's own PCM gradient terms). The orbital response is in the energy-
+    weighted density already, the reaction field being in the converged Fock.
+
+    Without it the force of a PCM-wrapped ISDF-K mean field is the gas-phase
+    skeleton at the solvated density: on water/cc-pVDZ PBE0 in toluene,
+    4.3e-3 Ha/Bohr from a central difference of the reported energy, and
+    6e-8 with it.
+
+    The potential-integral term runs on `cavity_blocks`, not on pyscf's
+    `grad_qv`, whose blocks overrun libcint's int-sized index from ~90 atoms
+    in cc-pVDZ at 120 GB a rank (a segfault in the first force).
+    """
+    if not isinstance(solvent, pyscf_pcm.PCM):
+        raise NotImplementedError(
+            f'the reaction-field force is built for pyscf PCM continua, and '
+            f'this mean field carries a {type(solvent).__name__}')
+    return solvation_gradient(solvent, dm)
 
 
 def _nlc_gradient(mf, dm):

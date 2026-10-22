@@ -42,10 +42,14 @@ This route holds the full four-index interaction (or its three blocks) rather
 than factorizing it, which bounds it at a few hundred basis functions and makes
 it the reference the cubic space-time route is checked against.
 """
+import warnings
+
 import numpy as np
 
-from src.Base.constants import QB_QP_END_BLOCK_BYTES, QB_QP_ROOT_TOL
+from src.Base.constants import QP_WINDOW_Z_MIN
 from src.Base.eri_blocks import as_blocks
+from src.Solvers.qp_equation import (bracketed_root, largest_weight_root,
+                                     ranked_root)
 
 
 class RPA:
@@ -176,6 +180,9 @@ class QPqb:
         self.etU = self.qb.exp_t @ self.U                  # (I, nu)
         self.Wnu = np.sqrt(2.0) * np.einsum('pqI,In->pqn', self.Vbare, self.etU,
                                             optimize=True)
+        # each followed root the largest weight has left, kept on its branch
+        # (`solve_diag`): {orbital, w, z, w0, largest, labels}
+        self.branch_log = []
 
     # -- self-energy and diagonal QP solve --------------------------------
     def _pole_arrays(self, p):
@@ -194,31 +201,32 @@ class QPqb:
         nh, ph, npp, pp = self._pole_arrays(p)
         return float(-(nh / (w - ph) ** 2).sum() - (npp / (w - pp) ** 2).sum())
 
-    def solve_diag(self, p, w0=None, tol=1e-12, max_iter=200):
-        """Newton QP root; returns (w*, Z). Z <= QP_WINDOW_Z_MIN is a lost QP.
-
-        AN UNGUARDED NEWTON, deliberately, where `Solvers.qp_equation`'s
-        guarded one holds the iterate off the poles of Sigma and replaces a
-        root below its pole-strength floor by a linearized one. That guarded
-        solver returns this root bitwise wherever a quasiparticle exists
-        (every water/cc-pVDZ orbital with Z > 0.23), and a DIFFERENT number
-        for the low-weight satellites: 79 mHa on orbital 22. Those satellites
-        are what the pole-strength filter reads to decide which states carry a
-        quasiparticle at all, so they have to be the roots of this equation
-        and not a fallback.
-        """
-        w = self.eps[p] + self.delta[p] if w0 is None else w0
-        for _ in range(max_iter):
-            f = w - self.eps[p] - self.delta[p] - self.sigma(p, w)
-            fp = 1.0 - self.sigma_prime(p, w)
-            dw = -f / fp
-            w += dw
-            if abs(dw) < tol:
-                break
-        else:
-            raise RuntimeError(f"QP Newton p={p} not converged, |dw|={abs(dw):.2e}")
-        Z = 1.0 / (1.0 - self.sigma_prime(p, w))
-        return w, Z
+    def solve_diag(self, p, w0=None):
+        """(w*, Z) of w = eps_p + delta_p + Sigma_pp(w), solved exactly over
+        every root: the largest-weight one (`quasiparticle_root`), or with a
+        seed w0 the root between the poles bracketing it (`bracketed_root`),
+        a reference root followed. Z <= QP_WINDOW_Z_MIN is a lost QP. A
+        followed root the largest weight has left is kept on its branch,
+        warned about and logged in `branch_log`
+        (refuse inputs, warn numerics)."""
+        if w0 is None:
+            return self.quasiparticle_root(p)
+        num, pol, a = self._all_poles(p)
+        seen = {}
+        w, z = bracketed_root(num, pol, a, w0, out=seen)
+        if seen.get('flipped'):
+            largest = seen.get('largest')
+            self.branch_log.append({
+                'orbital': int(p), 'w': w, 'z': z, 'w0': float(w0),
+                'largest': (None if largest is None
+                            else [float(x) for x in largest]),
+                'labels': seen.get('labels')})
+            warnings.warn(
+                f'quasi-boson orbital {p}: the root {w:.10f} Ha followed from '
+                f'{float(w0):.10f} Ha has Z = {z:.4f}, the largest weight is '
+                f'elsewhere ({largest}); the branch is kept and logged in '
+                f'branch_log', RuntimeWarning, stacklevel=2)
+        return w, z
 
     def quasiparticle_root(self, p):
         """(w*, Z) of the root of w = eps_p + Sigma_pp(w) carrying the largest Z.
@@ -237,6 +245,34 @@ class QPqb:
         pol = np.concatenate([ph.ravel(), pp.ravel()])
         return largest_weight_root(num, pol, self.eps[p] + self.delta[p],
                                    label=f'orbital {p}')
+
+    def _all_poles(self, p):
+        """(num, pol, a) of orbital p's secular equation, every pole kept."""
+        nh, ph, npp, pp = self._pole_arrays(p)
+        return (np.concatenate([nh.ravel(), npp.ravel()]),
+                np.concatenate([ph.ravel(), pp.ravel()]),
+                self.eps[p] + self.delta[p])
+
+    def root_rank(self, p, w):
+        """How many eigenvalues of `supermatrix_diag(p)` lie below the root w:
+        the poles of Sigma_pp below it, one root sitting between each pair."""
+        return int(np.count_nonzero(self._all_poles(p)[1] < w))
+
+    def ranked_root(self, p, k):
+        """(w*, Z) of the k-th eigenvalue (from 0) of `supermatrix_diag(p)`.
+
+        The sorted eigenvalues of a symmetric matrix are continuous in its
+        elements (Weyl), so the root of a fixed rank is a continuous function
+        of the geometry wherever the pole count is fixed: the root decided at
+        a reference geometry, followed. It is the root a Newton from that
+        reference root reaches nearby, and stays on its branch where a Newton
+        from a distant seed lands on whichever root is nearest (formaldehyde
+        cc-pVDZ continuum virtuals, 0.02 Bohr off: satellites with Z ~ 1e-3).
+        Where a weakly coupled pole crosses the root, the branch passes it by
+        an avoided crossing, continuously.
+        """
+        num, pol, a = self._all_poles(p)
+        return ranked_root(num, pol, a, k, label=f'orbital {p}')
 
     def eigvec_diag(self, p, w):
         """Closed-form normalized eigenvector (rp, R_h (j,nu), R_p (b,nu))."""
@@ -275,218 +311,6 @@ class QPqb:
         w, V = np.linalg.eigh(H)
         k = np.argmax(V[0, :] ** 2)
         return w[k], V[0, k] ** 2
-
-
-# ---------------------------------------------------------------------------
-# the largest-weight root of the diagonal quasiparticle equation
-# ---------------------------------------------------------------------------
-
-def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL):
-    """(w*, Z) of f(w) = w - a - sum_i num_i/(w - pol_i) = 0 with the largest Z.
-
-    f rises from -inf to +inf between neighbouring poles, so each interval
-    holds one root, Z = 1/f'(w) there, and the weights of all roots sum to
-    one. Most intervals are excluded without a solve by `weight_bounds`, most
-    of the rest by `end_value_bounds`; the survivors are solved in decreasing
-    order of their bound until no bound exceeds the best Z found. Exact: no
-    bound under-estimates.
-
-    Couplings are dropped weakest first while their norm stays below `tol`,
-    which by Weyl's inequality moves no root by more than `tol`.
-    """
-    num = np.asarray(num, float).ravel()
-    pol = np.asarray(pol, float).ravel()
-    weakest = np.argsort(num, kind='stable')
-    keep = np.ones(num.size, bool)
-    keep[weakest[np.cumsum(num[weakest]) <= tol * tol]] = False
-    num, pol = num[keep], pol[keep]
-    order = np.argsort(pol, kind='stable')
-    num, pol = num[order], pol[order]
-    if num.size == 0:
-        return float(a), 1.0
-    best_w, best_z = None, -1.0
-    for m in (-1, num.size - 1):                       # the two outer roots
-        w, z = root_between(num, pol, a, m, tol)
-        if z > best_z:
-            best_w, best_z = w, z
-    bound = weight_bounds(num, pol, a)
-    order = np.argsort(-bound, kind='stable')
-    # In batches that double, so the best Z found rises before the costlier
-    # end-value pass reaches the long tail of weak intervals; an interval is
-    # passed over only when a bound puts it at or below a Z already found.
-    start, size = 0, 1
-    while start < order.size and bound[order[start]] > best_z:
-        batch = order[start:start + size]
-        batch = batch[bound[batch] > best_z]
-        tight = np.minimum(bound[batch], end_value_bounds(num, pol, a, batch))
-        for k in np.argsort(-tight, kind='stable'):
-            if tight[k] <= best_z:
-                break
-            w, z = root_between(num, pol, a, batch[k], tol)
-            if z > best_z:
-                best_w, best_z = w, z
-        start, size = start + size, 2 * size
-    if not (np.isfinite(best_w) and 0.0 < best_z <= 1.0):
-        raise RuntimeError(
-            f'quasiparticle root of {label or "the secular equation"} not '
-            f'found: w = {best_w!r}, Z = {best_z!r}. Every root of a positive-'
-            f'weight self-energy has 0 < Z <= 1, so this is a numerical '
-            f'failure, not a satellite to demote.')
-    return float(best_w), float(best_z)
-
-
-def secular(num, pol, a, w):
-    """(f, f') of the quasiparticle equation at w."""
-    r = num / (w - pol)
-    return w - a - r.sum(), 1.0 + (r / (w - pol)).sum()
-
-
-def root_between(num, pol, a, m, tol):
-    """(w, Z) of the one root between pol[m] and pol[m+1] (outer for m = -1, n-1).
-
-    Each step solves a model of f that keeps the bracketing poles exactly and
-    the rest of Sigma to first order about the iterate (`model_root`), so the
-    singular part costs no iterations; bisection on the sign of f safeguards
-    it. A root closer to a weak pole than w resolves is left with the bracket
-    one ulp wide and that pole still at its edge; its Z is then taken from
-    f = 0 itself, num/delta^2 = g^2/num with g = f without that pole, instead
-    of from a delta that is round-off.
-    """
-    n = num.size
-    lo = pol[m] if m >= 0 else -np.inf
-    hi = pol[m + 1] if m + 1 < n else np.inf
-    step = 1.0
-    while not np.isfinite(lo):
-        trial = hi - step
-        lo = trial if secular(num, pol, a, trial)[0] < 0 else -np.inf
-        step *= 2.0
-    step = 1.0
-    while not np.isfinite(hi):
-        trial = lo + step
-        hi = trial if secular(num, pol, a, trial)[0] > 0 else np.inf
-        step *= 2.0
-    edge = [j for j in (m, m + 1) if 0 <= j < n]
-    lo0, hi0 = lo, hi
-    w = 0.5 * (lo + hi)
-    width = hi - lo
-    while True:
-        r = num / (w - pol)
-        rd = r / (w - pol)
-        f = w - a - r.sum()
-        fp = 1.0 + rd.sum()
-        if f == 0.0:
-            return w, 1.0 / fp
-        if f > 0:
-            hi = w
-        else:
-            lo = w
-        dw = -f / fp
-        if abs(dw) < tol and lo < w + dw < hi:
-            w += dw
-            return w, 1.0 / secular(num, pol, a, w)[1]
-        mid = 0.5 * (lo + hi)
-        if not lo < mid < hi:
-            break                                      # bracket one ulp wide
-        far = r.sum() - r[edge].sum()
-        far_slope = rd[edge].sum() - rd.sum()
-        trial = model_root(num[edge], pol[edge], a + far - far_slope * w,
-                           1.0 - far_slope, lo, hi, tol)
-        # the model step only while it at least halves the bracket, so the
-        # loop ends within twice the bisection count that resolves w
-        take = lo < trial < hi and hi - lo <= 0.5 * width
-        width = hi - lo
-        w = trial if take else mid
-    j = m if (m >= 0 and lo == lo0) else m + 1 if (m + 1 < n and hi == hi0) \
-        else None
-    if j is None:
-        return w, 1.0 / secular(num, pol, a, w)[1]
-    d = w - pol
-    d[j] = 1.0
-    r = num / d
-    r[j] = 0.0
-    g = w - a - r.sum()
-    return w, 1.0 / (1.0 + (r / d).sum() + g * g / num[j])
-
-
-def model_root(num, pol, c, slope, lo, hi, tol):
-    """The root in (lo, hi) of slope*x - c - sum_j num_j/(x - pol_j), rising
-    there, by Newton safeguarded by bisection; the bracketing poles' share of
-    f with the rest linear in x."""
-    x = 0.5 * (lo + hi)
-    while True:
-        g, gp = slope * x - c, slope
-        for nj, pj in zip(num.tolist(), pol.tolist()):
-            g -= nj / (x - pj)
-            gp += nj / (x - pj) ** 2
-        if g > 0:
-            hi = x
-        else:
-            lo = x
-        dx = -g / gp
-        mid = 0.5 * (lo + hi)
-        if abs(dx) < tol or not lo < mid < hi:
-            return x + dx if lo < x + dx < hi else x
-        x = x + dx if lo < x + dx < hi else mid
-
-
-def end_value_bounds(num, pol, a, intervals):
-    """Upper bound on Z of the root in each of `intervals` (pol[m], pol[m+1]).
-
-    On interval m, g(w) = f(w) + num_m/(w - pol_m) + num_m+1/(w - pol_m+1) has
-    no pole and rises, so |g| >= G, its smaller end value when both ends share
-    a sign (0 otherwise). At the root g is the two bracketing terms, and
-    Cauchy-Schwarz on them gives 1/Z >= 1 + G^2/(num_m + num_m+1). Far from
-    a zero of g the root hugs a pole with a Z orders of magnitude below the
-    neighbour bound, which is most of a continuum orbital's intervals.
-    An end that coincides with an excluded pole bounds nothing.
-    """
-    ends = np.unique(np.concatenate([intervals, intervals + 1]))
-    value = np.empty(ends.size)
-    rows = max(1, QB_QP_END_BLOCK_BYTES // (8 * pol.size))
-    for r0 in range(0, ends.size, rows):
-        at = ends[r0:r0 + rows]
-        gap = pol[at][:, None] - pol[None, :]
-        gap[np.arange(at.size), at] = np.inf           # f without its own pole
-        with np.errstate(divide='ignore', invalid='ignore'):
-            value[r0:r0 + rows] = pol[at] - a - (num[None, :] / gap).sum(1)
-    reg = dict(zip(ends.tolist(), value.tolist()))
-    lo = np.array([reg[m] for m in intervals.tolist()])
-    hi = np.array([reg[m + 1] for m in intervals.tolist()])
-    width = pol[intervals + 1] - pol[intervals]
-    g_lo = lo - num[intervals + 1] / width              # g at pol[m]
-    g_hi = hi - num[intervals] / width                  # g at pol[m+1]
-    floor = np.where(g_lo > 0, g_lo, np.where(g_hi < 0, -g_hi, 0.0))
-    floor[~(np.isfinite(g_lo) & np.isfinite(g_hi))] = 0.0
-    return 1.0 / (1.0 + floor ** 2 / (num[intervals] + num[intervals + 1]))
-
-
-def weight_bounds(num, pol, a, neighbours=16):
-    """Upper bound on Z of the root in each interval (pol[m], pol[m+1]).
-
-    1/Z = 1 + sum_i num_i/(w - pol_i)^2 at the root, bounded below three ways:
-    the two bracketing poles at their joint minimum, (a^1/3 + b^1/3)^3/L^2;
-    `neighbours` more on each side at their farthest from the interval; and
-    Cauchy-Schwarz on f(w) = 0, (w - a)^2 <= sum(num) sum(num_i/(w - pol_i)^2),
-    which confines a large Z to near the bare level a.
-    """
-    n = num.size
-    width = np.diff(pol)
-    c = np.cbrt(num)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        s = (c[:-1] + c[1:]) ** 3 / width ** 2
-        idx = np.arange(n - 1)
-        for k in range(1, neighbours + 1):
-            left = idx - k
-            ok = left >= 0
-            s[ok] += num[left[ok]] / (pol[idx[ok] + 1] - pol[left[ok]]) ** 2
-            right = idx + 1 + k
-            ok = right < n
-            s[ok] += num[right[ok]] / (pol[right[ok]] - pol[idx[ok]]) ** 2
-        gap = np.maximum(np.maximum(pol[:-1] - a, a - pol[1:]), 0.0)
-        s = np.maximum(s, gap ** 2 / num.sum())
-        bound = 1.0 / (1.0 + s)
-    bound[~(width > 0)] = 0.0
-    return bound
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +376,12 @@ def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
     exact functional the gradient Lagrangian differentiates; used by the finite
     difference gates. It carries no static <Sigma_x - v_xc> shift, so on a
     Kohn-Sham reference it is not the same quantity as `QPqb.solve_diag`.
+
+    The satellite blocks are diagonalized for the poles of Sigma_pp and its
+    couplings to them, and the root comes from the one finder of
+    `Solvers.qp_equation`: the largest weight, or with w0 the root in the
+    interval between the poles that bracket it, refused below a
+    quasiparticle weight (`bracketed_root`).
     """
     norb = epsF.shape[0]
     nvirt = norb - nocc
@@ -566,22 +396,23 @@ def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
     Abar = qb.Abar
     V = eri[:, :, occ[:, None], virt[None, :]].reshape(norb, norb, n_ov)
     W = np.sqrt(2.0) * np.einsum('pqI,IJ->pqJ', V, qb.exp_t, optimize=True)
-    dim = 1 + nocc * n_ov + nvirt * n_ov
-    H = np.zeros((dim, dim))
-    H[0, 0] = epsF[p, p]
     Wh = W[p, :nocc, :].ravel()
     Wp = W[p, nocc:, :].ravel()
-    o0, o1 = 1, 1 + nocc * n_ov
-    H[0, o0:o1] = Wh; H[o0:o1, 0] = Wh
-    H[0, o1:] = Wp;   H[o1:, 0] = Wp
-    H[o0:o1, o0:o1] = (np.einsum('jk,IJ->jIkJ', epsF[np.ix_(occ, occ)], np.eye(n_ov))
-                       - np.einsum('jk,IJ->jIkJ', np.eye(nocc), Abar)).reshape(nocc * n_ov, nocc * n_ov)
-    H[o1:, o1:] = (np.einsum('bc,IJ->bIcJ', epsF[np.ix_(virt, virt)], np.eye(n_ov))
-                   + np.einsum('bc,IJ->bIcJ', np.eye(nvirt), Abar)).reshape(nvirt * n_ov, nvirt * n_ov)
-    w, Vv = np.linalg.eigh(H)
+    Hh = (np.einsum('jk,IJ->jIkJ', epsF[np.ix_(occ, occ)], np.eye(n_ov))
+          - np.einsum('jk,IJ->jIkJ', np.eye(nocc), Abar)).reshape(nocc * n_ov, nocc * n_ov)
+    Hp = (np.einsum('bc,IJ->bIcJ', epsF[np.ix_(virt, virt)], np.eye(n_ov))
+          + np.einsum('bc,IJ->bIcJ', np.eye(nvirt), Abar)).reshape(nvirt * n_ov, nvirt * n_ov)
+    num, pol = [], []
+    for block, coupling in ((Hh, Wh), (Hp, Wp)):
+        lam, U = np.linalg.eigh(block)
+        num.append((U.T @ coupling) ** 2)
+        pol.append(lam)
+    num, pol = np.concatenate(num), np.concatenate(pol)
     if w0 is None:
-        k = np.argmax(Vv[0, :] ** 2)
-    else:
-        cand = np.where(Vv[0, :] ** 2 > 0.2)[0]
-        k = cand[np.argmin(np.abs(w[cand] - w0))]
-    return w[k]
+        return largest_weight_root(num, pol, epsF[p, p],
+                                   label=f'orbital {p}')[0]
+    w, z = bracketed_root(num, pol, epsF[p, p], w0)
+    if not z > QP_WINDOW_Z_MIN:
+        raise ValueError(f'the root of orbital {p} that follows {w0} has '
+                         f'weight {z:.4f}, not above {QP_WINDOW_Z_MIN}')
+    return w

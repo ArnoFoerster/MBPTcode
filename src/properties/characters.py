@@ -283,7 +283,8 @@ def orbital_fingerprint(mf, orbital, window=CHARACTER_WINDOW, spin=None,
                 window=(start, stop), spin=spin)
 
 
-def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None):
+def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None,
+                  out=None):
     """(the orbital at `mf` that continues the fingerprinted one, similarities).
 
     Each candidate is projected on the REFERENCE geometry's localized orbitals
@@ -296,7 +297,9 @@ def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None):
     candidates: the orbitals to choose among, by default the reference window
     on the same side of the gap. Warns when the best two are closer than
     TRACKING_MARGIN: the track is then a guess, and a displaced geometry that
-    picks the other one puts a step in the surface.
+    picks the other one puts a step in the surface. `out`, a dict, receives
+    'ambiguous': the two candidates and their margin, for the caller's record
+    (refuse inputs, warn numerics).
 
     Returns (orbital index, {candidate: similarity}).
     """
@@ -315,6 +318,10 @@ def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None):
              for c in candidates}
     ranked = sorted(score, key=score.get, reverse=True)
     if len(ranked) > 1 and score[ranked[0]] - score[ranked[1]] < TRACKING_MARGIN:
+        if out is not None:
+            out['ambiguous'] = {
+                'candidates': [ranked[0], ranked[1]],
+                'margin': score[ranked[0]] - score[ranked[1]]}
         warnings.warn(
             f'orbital tracking is ambiguous: candidates {ranked[0]} and '
             f'{ranked[1]} match the reference character to '
@@ -329,14 +336,17 @@ def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
 
     Solves the quasiparticle energies of the `window` orbitals nearest the
     frontier on the orbital's side of the gap (and the orbital itself) through
-    `calc_qp_energy(**route)` -- by default the space-time route -- and warns
+    `calc_qp_energy(**route)` -- by default the space-time route, whose ISDF
+    grid `route` must name (`counts=` or `grid_accuracy=`) -- and warns
     when another orbital is the easier electron to remove (a higher occupied
     quasiparticle energy) or to add (a lower virtual one). G0W0 reorders
     states relative to the mean field, so a surface that follows a canonical
     index can be following the second-lowest process.
 
     Returns {'orbital', 'energies' {orbital: eV}, 'lowest_process',
-    'reordered'}.
+    'reordered', 'reference_diagnostics'} -- the last the unrestricted
+    reference's spin contamination and stability flags (`calc_qp_energy(out=)`),
+    None for a restricted one.
     """
     unrestricted = isinstance(mf, pyscf_scf.uhf.UHF)
     spin = (0 if spin_channel == 'alpha' else 1) if unrestricted else None
@@ -346,7 +356,9 @@ def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
     route = dict({'mode': 'space-time'}, **route)
     if unrestricted:
         route['spin_channel'] = spin_channel
-    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=states, **route)
+    seen = {}
+    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=states,
+                         out=seen, **route)
     if isinstance(out, dict):
         out = [out[p]['GW'] for p in states]
     energies = dict(zip(states, (float(e) for e in out)))
@@ -361,7 +373,8 @@ def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
             f'{orbital} follows the higher-energy process.', RuntimeWarning,
             stacklevel=2)
     return dict(orbital=int(orbital), energies=energies,
-                lowest_process=lowest, reordered=lowest != int(orbital))
+                lowest_process=lowest, reordered=lowest != int(orbital),
+                reference_diagnostics=seen.get('reference_diagnostics'))
 
 
 def surface_order(surface, mol=None, window=QP_ORDER_SEARCH, **route):

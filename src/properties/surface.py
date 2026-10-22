@@ -34,6 +34,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 from src.Base.constants import NUCLEAR_FD_STEP
+from src.Base.geometry import molecule_at
 from src.Base.utils.mpi_grid import lockstep
 
 #: The attribute names a surface may use for its selected root, most specific
@@ -156,10 +157,7 @@ class FiniteDifferenceGradient:
             ia, x, sign = job
             d = np.zeros((mol.natm, 3))
             d[ia, x] = sign * self.h
-            m = mol.copy()
-            m.set_geom_(crd + d, unit='Bohr')
-            m.build(False, False)
-            return self.surface.total_energy(m)
+            return self.surface.total_energy(molecule_at(mol, crd + d))
 
         # The 6 natm displaced energies are independent; the pair of one
         # component is differenced afterwards, in the same arithmetic as before.
@@ -264,6 +262,15 @@ def followed_root(surface, mol):
     # keeps the later one
     k = len(far) - 1 - int(np.argmin(far[::-1]))
     return int(log[k]['index'])
+
+
+def commit(surface, mol):
+    """Tell the state-following half of `surface` that a walk accepted `mol`
+    (`ExcitedStateChain.commit`); a surface that follows nothing ignores it."""
+    half = driven_chain(getattr(surface, 'surface', surface))
+    accept = getattr(half, 'commit', None)
+    if accept is not None:
+        accept(mol)
 
 
 def surface_mean_field(surface, mol):

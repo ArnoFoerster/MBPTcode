@@ -13,7 +13,7 @@ and no MPI is needed to check them, each over every module of both packages:
     another;
   * no module imports a serve loop (`serve_*`), `broadcast` or a
     `replicate*` -- the root-driven protocol and the rank-0-decides-then-sends
-    pattern these names implement are what the context replaced;
+    pattern these names implement are what the context takes the place of;
   * the only `mpi_grid` names a module uses are `lockstep`,
     `lockstep_mean_field` and `current_comm` -- lock what the layer decided
     itself, ask for the rank where a side effect needs it, nothing more.

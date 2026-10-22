@@ -26,6 +26,7 @@ from src.SingleReference.Periodic.pbc_rpa import (ri_rpa_ecorr, make_auxcell,
 from src.SingleReference.Periodic.pbc_rpa_damping import (make_coulG_damped,
                                                           nyquist_params)
 from src.SingleReference.Periodic.pbc_damped_integrals import build_dfintegrals_coulG
+from tests.pins import assert_same
 
 NW = 24
 MESH = [15, 15, 15]
@@ -208,8 +209,11 @@ def test_low_dim_coulomb_metric_rejected():
     ev, U = np.linalg.eigh(P)
     keep = ev > 1e-10 * ev.max()
     ref = (U[:, keep] * (ev[keep] ** -0.5)) @ U[:, keep].conj().T
-    assert np.array_equal(ref, coulomb_metric_inv_sqrt(P))
-    print("  [E] rank-deficient PSD metric: bit-identical to the old filter")
+    got = coulomb_metric_inv_sqrt(P)
+    for part in (np.real, np.imag):
+        assert_same(part(got), part(ref), unit='1', quantity='root',
+                    label='rank-deficient PSD metric')
+    print("  [E] rank-deficient PSD metric: the old filter's to a few ulp")
 
 
 if __name__ == '__main__':

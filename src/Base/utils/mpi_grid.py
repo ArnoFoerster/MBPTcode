@@ -891,6 +891,19 @@ def current_comm():
     return stack[-1].comm if stack else None
 
 
+def is_root():
+    """Whether this rank is rank 0 of the enclosing distribution, or runs in
+    none: the rank that writes and prints."""
+    comm = current_comm()
+    return comm is None or comm.Get_rank() == 0
+
+
+def n_ranks():
+    """The ranks of the enclosing distribution, 1 outside one."""
+    comm = current_comm()
+    return 1 if comm is None else comm.Get_size()
+
+
 @contextlib.contextmanager
 def abort_on_exception(comm):
     """MPI_Abort the job when an exception escapes the block on a real comm.
@@ -1224,6 +1237,15 @@ def _describe(entry):
 def _refuse_divergence(seen, rank):
     """Raise on every rank if any rank's structure differs from rank 0's or a
     rank that will be written holds a read-only array."""
+    for other, entry in enumerate(seen):
+        if not (isinstance(entry, tuple) and len(entry) == 3):
+            # what another collective sent: that rank's loop is elsewhere
+            raise ValueError(
+                f'lockstep (raised on rank {rank}): rank {other} sent '
+                f'{type(entry).__name__} where a lockstep sends its '
+                'structure; that rank is in another collective. The ranks '
+                'took different decisions before this call -- an input one '
+                'rank computed differently, never locked.')
     reference = seen[0][0]
     for other, entry in enumerate(seen):
         signature = entry[0]

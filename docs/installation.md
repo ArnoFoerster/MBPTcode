@@ -60,5 +60,49 @@ need nothing beyond pyscf.
 The distributed eigensolve needs `mpi4py` and ELPA's `pyelpa`, both
 optional; see [Distributed eigensolve](parallel.md#distributed-eigensolve).
 
+The code generators in `src/CodeGeneration` (they derive the ADC, MPn
+density, coupled-cluster and QDPT equations and write them out as NumPy
+modules) need `pdaggerq`. The hand-written methods do not; the generated
+charged-ADC levels (`ADCSolver(mf, level=..., pdaggerq=True)`: ADC(2) to
+ADC(5) for ionization potentials and electron affinities) need the modules the
+generators write, and those are not part of the repository: you produce them
+on your own machine.
+pdaggerq is not on PyPI; it builds from source with CMake:
+
+```bash
+git clone https://github.com/edeprince3/pdaggerq.git && cd pdaggerq && git checkout f3a1f29 && python -m pip install .
+```
+
+Then, from the repository root, `python src/CodeGeneration/generate_adcn.py`
+writes the ADC(2), ADC(3) and ADC(4) base blocks to
+`src/SingleReference/ADC/generatedADC/` (about a minute); `python
+src/CodeGeneration/generate_adc.py` reports what each ADC order still lacks, and
+`generate_adc.GenerateADC()` generates every registered module through ADC(5)
+(the ADC(5) U^(4) derivation alone runs well over half an hour).
+`generate_adc.GenerateRuntime(orders=(2, 3, 4))` writes everything the
+generated charged-ADC solvers import at those orders (the dense blocks, the
+matrix-free apply modules, their density-fitted twins, the Laplace and
+Goldstone-diagram modules); add 5 for ADC(5), whose Laplace modules run to
+hundreds of MB. A level whose modules are missing raises an ImportError
+naming the call that writes them, and its tests are skipped.
+
+```python
+from pyscf import gto, scf
+from src.CodeGeneration.generate_adc import GenerateRuntime
+from src.SingleReference.ADC import ADCSolver
+
+GenerateRuntime(orders=(2, 3, 4))          # once per machine, about five minutes
+mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.467; H 0 -0.757 -0.467', basis='sto-3g')
+mf = scf.RHF(mol).run()
+e, Z = ADCSolver(mf, level='adc4', pdaggerq=True, ntau=12).solve()
+print(e, Z)                                # the HOMO ionization pole (Hartree) and its weight
+```
+The generator tests skip when pdaggerq is missing. The diagram engine
+(`src/CodeGeneration/diagrammatic`) and the QDPT generator also need `networkx`
+(`pip install networkx`; openfermion already pulls it in). The MPn-density, CC
+and QDPT generators rewrite modules that are part of the repository; a
+regeneration differs from them in the header comments at least, so compare
+before keeping one.
+
 There is no build step. Run from the repository root so that `src` is
 importable.

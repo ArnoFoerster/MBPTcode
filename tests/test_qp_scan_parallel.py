@@ -28,7 +28,7 @@ if __name__ == '__main__':
     all_ok = True
     sigma = lambda w: 0.05 / (w + 0.8) + 0.01 / (w - 0.9)      # array-safe
     f = lambda w: w + 0.2 - sigma(w)
-    for method in ('pole_strength', 'graphical'):
+    for method in ('pole_strength',):
         s = Counted(f)
         v = Counted(f)
         r_s = solve_qp_equation(s, -0.2, method=method)
@@ -39,7 +39,7 @@ if __name__ == '__main__':
                          f'{v.calls} vs {s.calls}')
 
     bad = lambda w: np.atleast_2d(f(w))
-    for method in ('pole_strength', 'graphical'):
+    for method in ('pole_strength',):
         try:
             solve_qp_equation(bad, -0.2, method=method, vectorized=True)
             raised = False
@@ -151,17 +151,20 @@ if __name__ == '__main__':
         se_ = SelfEnergySolver(
             get_orbital_energies(mf, representation='spatial'),
             df_coeff=df_coeff, spin_mode='restricted')
-        xc = _static_correction(mf, mol, se_, None, None, 'alpha', False)[states]
+        xc = _static_correction(mf, mol, None, None, 'alpha', False)[states]
         ref = head_algorithm(mf, states, xc)
         d_head = max(abs(serial[p]['GW'] - ref[p]) for p in states)
         all_ok &= check(d_head < 1e-6,
                         f'{label}: helper vs the scalar per-frequency loop',
                         f'{d_head:.1e} eV')
         if label == 'PBE':
-            # the per-state static correction formula, inline
+            # the per-state static correction formula, inline, on the mean
+            # field's own (density-fitted) J and K: Sigma_x - v_xc =
+            # J - K/2 - v_Hxc of this reference
             dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+            vj, vk = mf.get_jk(mol, dm)
             v_hxc_mo = mf.mo_coeff.T @ mf.get_veff(mol, dm) @ mf.mo_coeff
-            v_hx_mo = se_.calculate_sigma_hx(mol, scf.RHF(mol), dm, mf.mo_coeff)
+            v_hx_mo = mf.mo_coeff.T @ (vj - 0.5 * vk) @ mf.mo_coeff
             per_state = np.array([v_hx_mo[p, p] - v_hxc_mo[p, p] for p in states])
             d_xc = np.max(np.abs(xc - per_state))
             all_ok &= check(d_xc < 1e-12,
@@ -177,7 +180,7 @@ if __name__ == '__main__':
             infos = {'GW': get_method_info('GW')}
             spectrum_ = _casida_spectrum(lr_, nocc, 'RPA', w_aux_, False, infos,
                                          ['GW'], False, True)
-            xc_orb = _static_correction(mf, mol, se_, None, None, 'alpha', False)
+            xc_orb = _static_correction(mf, mol, None, None, 'alpha', False)
             subset = [nocc, 2, nocc - 1]
             try:
                 sub = qp_energies_from_spectrum(
@@ -201,7 +204,7 @@ if __name__ == '__main__':
                 raised = True
             all_ok &= check(raised, 'PBE: xc shorter than the orbitals raises '
                                     'ValueError')
-    # a single state and a scalar return keep the old shape
+    # a single state and a scalar return keep their shape
     e_homo = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', state='homo')
     all_ok &= check(isinstance(e_homo, float), "state='homo' returns a float")
     # an empty state window: no states to scan, no result to return
@@ -217,10 +220,12 @@ if __name__ == '__main__':
         return real_scan(*args, **kwargs)
     qp_module.qp_energies_from_spectrum = recording_scan
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
+        from src.SingleReference.GW.evGW import EvGWNotConverged
+        try:
             calc_qp_energy(mf, mode='casida', self_consistency='evGW',
                            n_workers=3, max_cycle=2)
+        except EvGWNotConverged:
+            pass        # two cycles need not converge; the scans are counted
     finally:
         qp_module.qp_energies_from_spectrum = real_scan
     all_ok &= check(len(seen) > 0 and set(seen) == {3},

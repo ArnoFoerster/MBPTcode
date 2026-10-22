@@ -63,36 +63,37 @@ products themselves, which is what keeps the per-molecule step cubic.
 """
 import contextlib
 import threading
-import warnings
 
 import numpy as np
 import scipy.linalg
-from pyscf import df, dft, gto, lib, scf
+from pyscf import df, dft, scf
 from pyscf.lib import logger
 from pyscf.scf.dispersion import parse_disp
 
-from src.Base.constants import ISDF_DEFAULT_COUNTS, ISDF_RADII_MATCH_TOL
-from src.Base.pcm_derivatives import solvation_gradient
-from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_REGULARIZATION,
-                                   _ao_l_labels, atomic_grid, build_D_F,
-                                   fit_M_stable, fit_M_streaming,
-                                   molecular_points_covariant,
-                                   optimize_atomic_radii, resolve_isdf_grid,
-                                   shipped_radii_lookup, default_auxbasis)
+from src.Base.basis.ri_fallback import paired_auxbasis
+from src.Base.constants import (AUX_METRIC_LINDEP, AUX_METRIC_ROOT_FLOOR,
+                                ISDF_RADII_MATCH_TOL,
+                                ISDF_SCF_KERNEL_MEMORY_FRACTION)
+from src.Base.numerics import numerics_or_default
+from src.Base.separable_ri import (ANGULAR_WEIGHTS, _ao_l_labels,
+                                   atomic_grid, fit_settings, fit_M_stable,
+                                   fit_M_streaming, molecular_points_covariant,
+                                   UntabulatedISDFGrid, optimize_atomic_radii,
+                                   refuse_unrepresented_factors,
+                                   require_grid, resolve_isdf_grid,
+                                   shipped_radii_lookup)
+from src.Base.body_frame import BodyFrame
+from src.Base.geometry import elements_of
+from src.Base.separable_ri import atomic_frames, atomic_points
 from src.Base.utils import memory
-from src.Base.utils.mpi_grid import current_comm
+from src.Base.utils.mpi_grid import current_comm, lockstep
 
 #: Hartree-Fock minus its own exchange, for `exchange_free_reference`: the
 #: empty functional, so a pure Hartree-Fock mean field keeps none of it.
 _NO_FUNCTIONAL = '0*LDA'
 
-#: Eigenvalue floor for V^{1/2}. The attenuated metric is far more
-#: rank-deficient than the bare one -- erf(omega r)/r is smooth, so its
-#: two-centre matrix decays fast in the aux basis -- and a relative floor keeps
-#: the square root real without discarding anything that carries weight.
-_METRIC_EIG_TOL = 1e-12
-
-#: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on.
+#: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on,
+#: and the frames one built inside `frozen_frames` places its points on.
 _FROZEN = threading.local()
 
 
@@ -140,8 +141,111 @@ def frozen_pair_layout(layout):
         _FROZEN.layout = previous
 
 
+class FrozenFrames:
+    """The atomic frames of a reference geometry, turned with the molecule.
+
+    The covariant frames of `atomic_frames` are eigenvectors of each atom's
+    neighbour tensor, and where two of its eigenvalues are close -- an sp2
+    atom with three similar neighbours: formaldehyde's carbon (relative gap
+    3.2e-2), DMABN's planar amine nitrogen (1.0e-2) -- the in-plane axes turn
+    at 1/gap: 18.9 and 16.2 rad/Bohr. The ISDF energy depends on each cloud's
+    orientation at 1e-5 Ha with sub-5-degree structure, so a cloud turning that
+    fast makes the surface rough on a 1e-3 Bohr scale and a finite-difference
+    Hessian across it asymmetric (formaldehyde LRC-wPBEh/cc-pVDZ on GH, h =
+    1e-3 Bohr: 2.85e-2 Ha/Bohr^2, 2.7 percent of the largest force constant).
+
+    Frozen here, every geometry places its clouds on the reference's frames
+    F0_i turned by the Kabsch body frame Q of the whole molecule
+    (`body_frame.BodyFrame`): F_i = F0_i Q. The energy stays invariant under a
+    rigid motion, and Q turns at the rate of the whole molecule (the same
+    Hessian: 2.4e-7). At the reference F_i = F0_i bit for bit, so the energy
+    and the points there are those of turning frames; the force differs by
+    the frame-turning term, which is the derivative of the orientation
+    artifact. A convention, like the pair layout: frozen within a
+    finite-difference stencil (`properties.hessian`), recorded where it is.
+    """
+
+    def __init__(self, mol):
+        self.reference = np.array(mol.atom_coords(), dtype=float)
+        # rank 0's on every rank: eigh's last bits differ between nodes
+        self.frames = lockstep(atomic_frames(mol)[0])
+        self.body = BodyFrame(self.reference)
+
+    def at(self, coords):
+        """(natm, 3, 3) frames, rows the axes, at `coords` (Bohr)."""
+        q = self.body.rotation(coords)
+        return self.frames if q is None else self.frames @ q
+
+    def to_record(self):
+        """The convention and the reference geometry, for a record."""
+        return {'convention': 'reference-body-fixed',
+                'reference': self.reference.tolist()}
+
+
+@contextlib.contextmanager
+def frozen_frames(frames):
+    """Every ISDFJK built inside places its points on `frames`, a
+    `FrozenFrames`, and keeps them (`ISDFJK.frozen_frames`), its force's point
+    chain then turning them with the body frame only; None leaves each the
+    covariant frames of its own geometry."""
+    previous = getattr(_FROZEN, 'frames', None)
+    _FROZEN.frames = frames
+    try:
+        yield
+    finally:
+        _FROZEN.frames = previous
+
+
+def reference_frames(mf):
+    """The `FrozenFrames` an ISDF-K mean field at a chain's reference stands
+    on, kept on its fit (`ISDFJK.frozen_frames`) so its own force turns its
+    clouds the way every other geometry's will; None for a mean field without
+    an ISDF-K fit. At the reference the frozen frames ARE the covariant ones,
+    so its points and energy are unchanged. A mean field already on frames
+    frozen at another geometry is refused: it is a point of another anchor's
+    surface, not this reference's."""
+    with_df = getattr(mf, 'with_df', None)
+    if not isinstance(with_df, ISDFJK):
+        return None
+    coords = np.asarray(mf.mol.atom_coords(), dtype=float)
+    held = with_df.frozen_frames
+    if held is None:
+        if with_df.coords is not None and with_df.grid_radii is None:
+            return None          # points handed in: no frames placed them
+        held = FrozenFrames(mf.mol)
+        # rank 0's frames against this rank's placement: equal to round-off
+        if with_df.coords is not None and not np.allclose(
+                points_on_frames(mf.mol, with_df.grid_radii,
+                                 with_df.grid_origins, held.frames),
+                with_df.coords, rtol=0.0, atol=1e-10):
+            raise ValueError(
+                'this ISDF-K mean field\'s points are not on the covariant '
+                'frames of its own geometry, so no frames frozen here are '
+                'the ones its energy was taken on')
+        with_df.frozen_frames = held
+    elif not np.array_equal(held.reference, coords):
+        raise ValueError(
+            'this ISDF-K mean field places its points on frames frozen at '
+            'another geometry: it belongs to that anchor\'s surface and '
+            'cannot be the reference of a new one')
+    return held
+
+
+def points_on_frames(mol, radii, origins, frames):
+    """`molecular_points_covariant`'s points with the frames given, (natm, 3,
+    3) rows the axes: the same expression, so equal frames give the same bits."""
+    out = []
+    for ia in range(mol.natm):
+        sym = mol.atom_pure_symbol(ia)
+        pts = atomic_points(radii[sym], centre=(0.0, 0.0, 0.0),
+                            origin=(origins or {}).get(sym, False))
+        out.append(pts @ frames[ia] + mol.atom_coord(ia))
+    return np.vstack(out)
+
+
 def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
-              return_info=False, grid_accuracy=None):
+              return_info=False, grid_accuracy=None, frames=None,
+              runtime_radii=False):
     """Interpolation points for `mol`, the same way `space_time` picks them.
 
     The grid is one object, so a keyword naming it is never dropped; the
@@ -150,17 +254,18 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
       grid_accuracy alone   `resolve_isdf_grid` sets `counts` and `n_start`.
       grid_accuracy+counts  equal -> proceed; different -> ValueError. One
                             request cannot be two grids.
-      counts alone          tabulated -> the row; not tabulated -> a warning
-                            and a run-time re-optimization onto another local
-                            minimum of a multi-modal surface, which is a grid
-                            nothing validated.
+      counts alone          tabulated -> the row; not tabulated -> refused
+                            (`UntabulatedISDFGrid`) unless `runtime_radii`
+                            declares a run-time re-optimization onto another
+                            local minimum of a multi-modal surface, which is
+                            a grid nothing validated.
       radii alone           the radii are the grid; no row is consulted.
       radii+counts          where a row exists for those counts the two must
                             agree to `ISDF_RADII_MATCH_TOL` or the call is
                             refused, and the row's `origin` is honoured (it
                             places one extra point at the nucleus: 307 points
                             for a Duchemin-Blase carbon row, not 306).
-      nothing               `ISDF_DEFAULT_COUNTS`, sized for double zeta.
+      nothing               refused (`require_grid`).
 
     Shells are rotated into covariant atomic frames so the grid rotates with
     the molecule.
@@ -177,9 +282,13 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
     return_info: also return the per-element radii and cusp-sample flags the
         points were placed from. A nuclear derivative needs them, because a
         bare point cloud does not say which atom owns which row.
+    frames: a `FrozenFrames` the clouds are placed on; None is the covariant
+        frames of this geometry (`atomic_frames`).
+    runtime_radii: True declares a grid for counts the radii table holds no
+        row for, re-optimized here; False refuses one.
     """
-    auxbasis = auxbasis or default_auxbasis(mol.basis)
-    elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
+    auxbasis = auxbasis or paired_auxbasis(mol.basis)
+    elements = elements_of(mol)
     if grid_accuracy is not None:
         level_counts, n_start = resolve_isdf_grid(grid_accuracy, mol.basis,
                                                   elements, auxbasis=auxbasis)
@@ -193,8 +302,8 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                 f'override, and every energy built on the grid not asked for '
                 f'would be of a functional nobody requested.')
         counts = level_counts
+    require_grid(counts, radii, 'isdf_grid')
     named_counts = counts is not None
-    counts = counts or ISDF_DEFAULT_COUNTS
 
     if radii is None:
         radii, origins = {}, {}
@@ -207,12 +316,13 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                 radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
                                                      counts)
             except KeyError as no_row:
-                warnings.warn(
-                    f'ISDF grid re-optimized at run time: {no_row.args[0]} '
-                    f'Re-optimizing lands on another local minimum of a '
-                    f'multi-modal surface, so this grid is not a validated '
-                    f'one and is not reproducible from a clean checkout.',
-                    RuntimeWarning, stacklevel=2)
+                if not runtime_radii:
+                    raise UntabulatedISDFGrid(
+                        f'{no_row.args[0]} Re-optimizing lands on another '
+                        f'local minimum of a multi-modal surface, so that '
+                        f'grid is not a validated one and is not '
+                        f'reproducible from a clean checkout: declare it '
+                        f'with runtime_radii=True.') from None
                 radii[el] = optimize_atomic_radii(el, mol.basis, auxbasis,
                                                   counts=counts,
                                                   n_start=n_start)[0]
@@ -248,24 +358,32 @@ def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
                         f'`radii` to build the tabulated row, or drop `counts` '
                         f'to build the radii you passed; the two are different '
                         f'grids and nothing here can choose between them.')
-    pts = molecular_points_covariant(mol, radii, origin_by_element=origins)
+    if frames is None:
+        pts = molecular_points_covariant(mol, radii, origin_by_element=origins)
+    else:
+        pts = points_on_frames(mol, radii, origins,
+                               frames.at(mol.atom_coords()))
     return (pts, radii, origins) if return_info else pts
 
 
-def metric_sqrt(V, tol=_METRIC_EIG_TOL):
+def metric_sqrt(V):
     """V^{1/2} through a truncated eigendecomposition.
 
     V is a Coulomb (or attenuated Coulomb) two-centre matrix, positive
     semidefinite by construction, but the attenuated one is numerically
-    singular, so a Cholesky is not available and the small modes are dropped.
+    singular -- so a Cholesky is not available and the small modes are
+    dropped, below the relative floor AUX_METRIC_ROOT_FLOOR: the attenuated
+    metric is far more rank-deficient than the bare one -- erf(omega r)/r is
+    smooth, so its two-centre matrix decays fast in the aux basis -- and a
+    relative floor keeps the square root real without discarding anything
+    that carries weight.
     """
     w, v = np.linalg.eigh(V)
-    keep = w > tol * max(w.max(), 1e-300)
+    keep = w > AUX_METRIC_ROOT_FLOOR * max(w.max(), 1e-300)
     return (v[:, keep] * np.sqrt(w[keep])) @ v[:, keep].T
 
 
-def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
-                regularization=DEFAULT_REGULARIZATION, metric_rcond=1e-10):
+def fit_M_omega(mol, auxmol, coords, omega, numerics=None):
     """M refitted against the attenuated metric, the "second factorization".
 
     Same least-squares estimator as `separable_ri.fit_M`, but the RI fitting
@@ -280,6 +398,7 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
     noise. The reuse route has no such fragility: Z_w = M^T V_w M only
     multiplies by the metric.
     """
+    l_max_second, = fit_settings(numerics, 'l_max_second')
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
     ao = mol.eval_gto('GTOval_sph', coords)
@@ -292,7 +411,7 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
         V = auxmol.intor('int2c2e', aosym='s1')
         e3c = df.incore.aux_e2(mol, auxmol, intor='int3c2e',
                                aosym='s1').reshape(nao, nao, naux)
-    Vinv = np.linalg.pinv(V, rcond=metric_rcond, hermitian=True)
+    Vinv = np.linalg.pinv(V, rcond=AUX_METRIC_LINDEP, hermitian=True)
 
     D = (ao[:, :, None] * ao[:, None, second]).reshape(nk, -1)
     D *= np.tile(w, nao)[None, :]
@@ -303,10 +422,11 @@ def fit_M_omega(mol, auxmol, coords, omega, l_max_second=2,
     # than assumed, unlike the bare case where `build_D_F` puts an eye there.
     D = np.hstack([D, aux_on_grid])
     F = np.hstack([F, Vinv @ V])
-    # The Cholesky solve, not the explicit inverse: cond(G) reaches ~2e8 on a
-    # real grid, where forming G^-1 costs ~2e-9 relative against the same
-    # estimator solved stably.
-    return fit_M_stable(D, F, regularization)
+    # The Cholesky solve, not the explicit inverse: cond(G) reaches ~2e8
+    # on a real grid, where forming G^-1 costs ~2e-9 relative against the
+    # same estimator solved stably. The gradient chain already takes this
+    # route; the J/K build has no reason not to.
+    return fit_M_stable(D, F, numerics)
 
 
 # ---------------------------------------------------------------------------
@@ -435,23 +555,31 @@ class ISDFJK(df.df.DF):
     def __init__(self, mol, auxbasis=None, counts=None, radii=None,
                  z_mode='auto', block=None, refit_omega=False,
                  use_symmetry=True, j_route='df-direct', check_tol=1e-3,
-                 l_max_second=2, regularization=DEFAULT_REGULARIZATION,
-                 block_memory_gb=4.0, progress=None, n_start=1):
-        super().__init__(mol, auxbasis=auxbasis or default_auxbasis(mol.basis))
-        # Caps the working set of the fit's blocked loops, where the build's
-        # peak is (the Gram matrix is n_k^2). It does not change the answer
-        # but is a speed knob: one aux_e2 call per block, each rebuilding a
-        # shell-pair list over nbas x auxnbas (`separable_ri.build_D_F`).
-        self.block_memory_gb = block_memory_gb
+                 numerics=None, progress=None, n_start=1):
+        super().__init__(mol, auxbasis=auxbasis or paired_auxbasis(mol.basis))
+        # The fit's choices (`IsdfNumerics`: the test set's l_max_second, the
+        # Tikhonov shift) and the working set of its blocked loops
+        # (`LayoutNumerics.fit_gb`). The working set reaches here because the
+        # fit is where the peak is: the Gram matrix is n_k^2, and everything else
+        # in the build is small beside it.
+        # It does not change the answer, but it IS a speed knob: one aux_e2
+        # call per block, each rebuilding a shell-pair list over nbas x
+        # auxnbas -- see `separable_ri.build_D_F` for the measurement. The
+        # l_max_second of 2 is the published scheme's and is right for K,
+        # whose co-densities always carry an occupied orbital. It is exactly
+        # why J fails: an f x f AO product is never in the test set. Derive a
+        # larger one to fit what J needs, at a larger test set and a
+        # proportionally longer fit.
+        self.numerics = numerics_or_default(numerics)
         # None follows mol.verbose, so the knob that turns on the mean field's
         # output turns on the factorization's too, which can run for minutes
         # to hours.
         self.progress = (mol.verbose > 0) if progress is None else progress
-        self.counts = counts or ISDF_DEFAULT_COUNTS
-        # Whether the caller named counts. `isdf_grid` refuses explicit radii
-        # that contradict the table row at named counts, so passing the default
-        # on would refuse a caller who gave radii alone, for whom the radii are
-        # the grid.
+        require_grid(counts, radii, 'ISDFJK')
+        self.counts = counts
+        # Whether the caller named counts: `isdf_grid` refuses explicit radii
+        # that contradict the table row at named counts, so a caller who gave
+        # radii alone, for whom the radii are the grid, must not pass counts.
         self._named_counts = counts is not None
         self.radii = radii
         self.n_start = n_start
@@ -476,16 +604,12 @@ class ISDFJK(df.df.DF):
         self.check_tol = check_tol
         self._checked = False
         self.grid_warning = None
-        # Angular momentum cutoff on the second index of the test co-densities
-        # M is fitted against (`separable_ri.build_D_F`). The default of 2 is
-        # the published scheme's and is right for K, whose co-densities always
-        # carry an occupied orbital; it is why J fails (an f x f AO product is
-        # never in the test set). Raising it enlarges the test set and the fit.
-        self.l_max_second = l_max_second
-        self.regularization = regularization
         # The AO-pair columns the fit keeps, frozen at a reference geometry
         # (`frozen_pair_layout`); None screens at this geometry's own points.
         self.pair_layout = None
+        # The frames its points are placed on, frozen at a reference geometry
+        # (`frozen_frames`); None is this geometry's covariant frames.
+        self.frozen_frames = None
 
         self.coords = None
         self.X = None            # (nk, nao)
@@ -528,12 +652,12 @@ class ISDFJK(df.df.DF):
             self.coords, self.grid_radii, self.grid_origins = isdf_grid(
                 mol, counts=self.counts if self._named_counts else None,
                 radii=self.radii,
-                auxbasis=self.auxbasis, n_start=self.n_start, return_info=True)
+                auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
+                frames=self.fit_frames(),
+                runtime_radii=self.numerics.isdf.runtime_radii)
         self.X = mol.eval_gto('GTOval_sph', self.coords)
         self.M = fit_M_streaming(mol, self.auxmol, self.coords,
-                                 l_max_second=self.l_max_second,
-                                 regularization=self.regularization,
-                                 block_memory_gb=self.block_memory_gb,
+                                 numerics=self.numerics,
                                  progress=self.progress,
                                  layout=self.fit_layout())
         log.timer('ISDF factorization (M = %d points, nao = %d, naux = %d)'
@@ -560,6 +684,14 @@ class ISDFJK(df.df.DF):
             self.pair_layout = getattr(_FROZEN, 'layout', None)
         return self.pair_layout
 
+    def fit_frames(self):
+        """The frames the points are placed on: this handle's frozen ones,
+        else the ones a `frozen_frames` block holds, which it then keeps;
+        None is the covariant frames of its geometry."""
+        if self.frozen_frames is None:
+            self.frozen_frames = getattr(_FROZEN, 'frames', None)
+        return self.frozen_frames
+
     def _resolve_z_mode(self):
         if self.z_mode != 'auto':
             return self.z_mode
@@ -567,7 +699,8 @@ class ISDFJK(df.df.DF):
         free = (self.max_memory - memory.current_memory_mb()) * 1e6
         # Dense Z plus one row block plus the (nk, nao) buffers; a third of the
         # remaining memory is the budget, so an SCF still has room to breathe.
-        return 'dense' if nk * nk * 8 < 0.33 * free else 'factored'
+        return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
+                else 'factored')
 
     def _zrows(self, omega):
         """Z for one operator, built once and cached by omega."""
@@ -582,8 +715,7 @@ class ISDFJK(df.df.DF):
 
         if om != 0.0 and self.refit_omega:
             M = fit_M_omega(self.mol, self.auxmol, self.coords, om,
-                            l_max_second=self.l_max_second,
-                            regularization=self.regularization)
+                            numerics=self.numerics)
         else:
             M = self.M
         with range_coulomb(self.mol, self.auxmol, om):
@@ -773,8 +905,9 @@ class ISDFJK(df.df.DF):
 
     def reset(self, mol=None):
         super().reset(mol)
-        # `pair_layout` survives: a frozen layout is a choice of the walk, like
-        # the counts and radii, and a scanner's next geometry fits on it too
+        # `pair_layout` and `frozen_frames` survive: frozen conventions are a
+        # choice of the walk, like the counts and radii, and a scanner's next
+        # geometry fits on them too
         if mol is not None:
             self.coords = None
             self.X = self.M = None
@@ -816,6 +949,9 @@ def separable_factors_from_jk(mf):
     Returns the same pair `separable_factors` would, in the same auxiliary
     gauge, which is the part that must not drift: pairing factors from one fit
     with a W from another is a silent gauge error.
+
+    Refused, as `separable_factors` refuses, where they miss an orbital
+    density of `mf` by more than the bar (`refuse_unrepresented_factors`).
     """
     with_df = getattr(mf, 'with_df', None)
     if not isinstance(with_df, ISDFJK):
@@ -823,17 +959,135 @@ def separable_factors_from_jk(mf):
             'separable_factors_from_jk needs an SCF whose with_df is an ISDFJK '
             f'(got {type(with_df).__name__}); use space_time.separable_factors '
             'for a mean field that did not fit one.')
+    # cycle: pyscf_interface -> distributed_df -> this module
+    from src.Base.pyscf_interface import occupied_count
     if not with_df._built:
         with_df.build()
     V = with_df.auxmol.intor('int2c2e', aosym='s1')
-    return (with_df.X @ mf.mo_coeff, with_df.M.T @ metric_sqrt(V),
-            with_df.X, with_df.coords)
+    root = metric_sqrt(V)
+    out = (with_df.X @ mf.mo_coeff, with_df.M.T @ root, with_df.X,
+           with_df.coords)
+    refuse_unrepresented_factors(
+        mf.mol, with_df.auxmol, np.asarray(mf.mo_coeff, float), out[0],
+        out[1], root=root, nocc=occupied_count(mf))
+    return out
+
+
+def canonical_basis(S, threshold):
+    """(nao, m) canonical-orthogonal basis X = U w^-1/2 of the overlap
+    eigenvectors with eigenvalue above `threshold` (Lowdin's canonical
+    orthogonalization); X^T S X = 1."""
+    w, U = np.linalg.eigh(S)
+    keep = w > threshold
+    return U[:, keep] / np.sqrt(w[keep])
+
+
+def solve_in_span(mf, basis):
+    """`mf` with its orbitals and its DIIS confined to the AO span `basis`
+    (nao, m), orthonormal in the overlap (basis^T S basis = 1): the mean field
+    then carries m orbitals, none outside the span. `canonical_basis` gives the
+    canonical cut; `separable_ri.represented_span` the directions the
+    separable-RI factors represent. The span belongs to one geometry.
+
+    Both hooks are set: up to pyscf 2.12 the kernel calls the eigensolver
+    `_eigh(h, s)`; from 2.13 it takes its orthogonalizer from
+    `check_linear_dependency` and hands it to the eigensolver and to DIIS
+    alike, so an eigensolver hook alone leaves DIIS in the larger space and the
+    SCF stalls (|g| 1e-4 to 1e-2). Returns `mf`.
+    """
+    basis = np.asarray(basis, float)
+
+    def eigh_in_span(h, s, *_ignored, **_ignored_kw):
+        e, c = scipy.linalg.eigh(basis.T @ h @ basis)
+        return e, basis @ c
+
+    mf._eigh = eigh_in_span
+    mf.check_linear_dependency = lambda s1e, log=None: basis
+    return mf
+
+
+def canonical_span_size(mol, cut):
+    """How many overlap eigenvectors of `mol` lie above `cut`, or None when
+    none lies below it and the full basis is the span."""
+    w = np.linalg.eigvalsh(mol.intor('int1e_ovlp'))
+    kept = int((w > cut).sum())
+    return None if kept == len(w) else kept
+
+
+@contextlib.contextmanager
+def frozen_span(basis):
+    """Every `span_confined` mean field built inside is solved in the span of
+    `basis` (nao, m), AO coefficients frozen at a reference geometry, instead
+    of a canonical cut taken at its own; None leaves each its own cut.
+
+    With the coefficients fixed the span moves with the atoms through the AO
+    functions alone, so every orbital variation stays inside it and the
+    ordinary force is the exact slope of the energy: on benzene aug-cc-pVDZ
+    (13 of 192 directions dropped at 1e-4) the DF-HF force matches the finite
+    difference to 1.8e-7 Ha/Bohr, where a cut re-taken at every geometry
+    misses it by 4.9e-6. A refreeze cuts the span again at its new reference;
+    the jump is part of the drift it measures (-0.004 meV for a 0.02 Bohr
+    step of that benzene).
+    """
+    previous = getattr(_FROZEN, 'span', None)
+    _FROZEN.span = basis
+    try:
+        yield
+    finally:
+        _FROZEN.span = previous
+
+
+def span_confined(mf, n_kept, cut=None):
+    """`mf` solved in a span of `n_kept` overlap eigenvector directions of its
+    molecule (`solve_in_span`), or `mf` untouched where n_kept is None.
+
+    The near-null AO combinations of an augmented basis carry virtual orbitals
+    with coefficient norms of 30-400, whose densities the separable-RI factors
+    miss and on which a BSE binds spurious roots. Inside `frozen_span` the
+    span is the frozen basis, orthonormalized in this geometry's overlap;
+    outside it the `n_kept` largest overlap eigenvectors here (canonical
+    orthogonalization). A count, not a threshold, is what a launch fixes: at a
+    fixed threshold an eigenvalue crossing it changes the span's dimension.
+    `cut` is the threshold the count was taken at and is required with a
+    count: it is what mf.span records. mf.span_basis
+    is the basis's AO coefficients, which a chain freezes; mf.span records the
+    cut, the counts, whether the span was frozen, and the overlap eigenvalues
+    on either side of the boundary here.
+    """
+    if n_kept is None:
+        return mf
+    if cut is None:
+        raise ValueError('a span count names the cut it was taken at')
+    S = mf.mol.intor('int1e_ovlp')
+    w = np.linalg.eigvalsh(S)
+    nao = len(w)
+    if not 0 < n_kept <= nao:
+        raise ValueError(f'n_kept={n_kept}: between 1 and nao = {nao}')
+    first = nao - n_kept
+    frozen = getattr(_FROZEN, 'span', None)
+    if frozen is not None:
+        if frozen.shape != (nao, n_kept):
+            raise ValueError(f'the frozen span is {frozen.shape}, this mean '
+                             f'field keeps {n_kept} of {nao}')
+        # the same span, orthonormal in this geometry's overlap
+        m, V = np.linalg.eigh(frozen.T @ S @ frozen)
+        basis = frozen @ (V / np.sqrt(m)) @ V.T
+        mf.span_basis = frozen
+    else:
+        w, U = np.linalg.eigh(S)
+        basis = mf.span_basis = U[:, first:] / np.sqrt(w[first:])
+    mf.span = {'cut': cut, 'n_kept': int(n_kept), 'n_dropped': int(first),
+               'nao': int(nao), 'frozen': frozen is not None,
+               'smallest_kept_eigenvalue': float(w[first]),
+               'largest_dropped_eigenvalue': (float(w[first - 1]) if first
+                                              else 0.0)}
+    return solve_in_span(mf, basis)
 
 
 def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
             block=None, refit_omega=False, use_symmetry=True,
-            j_route='df-direct', check_tol=1e-3, l_max_second=2,
-            block_memory_gb=4.0, progress=None, n_start=1):
+            j_route='df-direct', check_tol=1e-3, numerics=None, progress=None,
+            n_start=1):
     """Give `mf` an ISDF `with_df`. Returns the modified SCF object.
 
     Routes through pyscf's own `density_fit` so the `_DFHF` mixin (which is
@@ -845,12 +1099,12 @@ def isdf_jk(mf, auxbasis=None, counts=None, radii=None, z_mode='auto',
     interaction, 8.4e-5 Ha/Bohr from a finite difference of this route's own
     energy on water/cc-pVDZ/B3LYP where the ISDF force sits at 7e-8.
     """
-    out = mf.density_fit(auxbasis=auxbasis or default_auxbasis(mf.mol.basis))
+    out = mf.density_fit(auxbasis=auxbasis or paired_auxbasis(mf.mol.basis))
     out.with_df = ISDFJK(mf.mol, auxbasis=auxbasis, counts=counts, radii=radii,
                          z_mode=z_mode, block=block, refit_omega=refit_omega,
                          use_symmetry=use_symmetry, j_route=j_route,
-                         check_tol=check_tol, l_max_second=l_max_second,
-                         block_memory_gb=block_memory_gb, progress=progress,
+                         check_tol=check_tol, numerics=numerics,
+                         progress=progress,
                          n_start=n_start)
     out.with_df.max_memory = mf.max_memory
     # Every ISDF mean field gets the ISDF force rather than each caller asking
@@ -951,18 +1205,7 @@ def mean_field_skeleton_force(mf):
     from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 
     if isinstance(getattr(mf, 'with_df', None), ISDFJK):
-        force = np.asarray(isdf_mean_field_gradient(mf))
-        # The ISDF force is assembled here, not by pyscf's gradient class, so
-        # pyscf's PCM mixin never adds the reaction field's Hellmann-Feynman
-        # part: the energy-weighted density already carries V_PCM through the
-        # orbital energies, but dE_PCM/dR at fixed density does not come for
-        # free. Without it the force is off by 1.0e-2 Ha/Bohr on water/cc-pVDZ
-        # in water.
-        with_solvent = getattr(mf, 'with_solvent', None)
-        if with_solvent is not None:
-            force = force + np.asarray(solvation_gradient(with_solvent,
-                                                          mf.make_rdm1()))
-        return force
+        return np.asarray(isdf_mean_field_gradient(mf))
     g0 = mf.Gradients()
     if hasattr(mf, 'xc'):
         g0.grid_response = True

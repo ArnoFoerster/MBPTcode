@@ -151,7 +151,7 @@ def check_qp(eps, B, nocc):
     return check(r['converged'] and 0.5 < r['Z'] < 1.0,
                  'diagonal FLEX QP converges to a quasiparticle (HOMO)',
                  f"IP {-r['e'] * 27.211386245988:.4f} eV, Z {r['Z']:.3f}, "
-                 f"{r['niter']} Newton steps")
+                 f"{r['niter']} self-energy evaluations")
 
 
 def check_closed_form(basis='6-31g'):

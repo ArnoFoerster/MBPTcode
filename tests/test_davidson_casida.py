@@ -10,6 +10,7 @@ from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_c
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver
+from src.Base.numerics import numerics_of
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 
 if __name__ == '__main__':
@@ -31,7 +32,7 @@ if __name__ == '__main__':
         A_dense, B_dense = lr.build_casida_matrices(nocc, lBSE=lBSE, W_aux=kwargs.get('W_aux'))
         omega_dense = np.sort(CasidaSolver(A_dense, B_dense).solve()[0])[:nroots]
 
-        omega_dav, X_dav, Y_dav = solve_casida_davidson(lr, nocc, nroots=nroots, polarizability=mode, **kwargs)
+        omega_dav, X_dav, Y_dav = solve_casida_davidson(lr, nocc, numerics=numerics_of({'nroots': nroots}), polarizability=mode, **kwargs)
         omega_dav = np.sort(omega_dav)
 
         diff = np.max(np.abs(omega_dense - omega_dav))
@@ -41,7 +42,7 @@ if __name__ == '__main__':
 
     se = SelfEnergySolver(eps, df_coeff=df_coeff, spin_mode='restricted', eta=1e-3)
     p_state = nocc - 1
-    omega, X, Y = solve_casida_davidson(lr, nocc, nroots=nroots, polarizability='BSE', W_aux=w_aux)
+    omega, X, Y = solve_casida_davidson(lr, nocc, numerics=numerics_of({'nroots': nroots}), polarizability='BSE', W_aux=w_aux)
     chi_a = se.get_chi_a(nocc, X, Y, p_state=p_state)
     compat_ok = chi_a.shape == (nroots, len(eps)) and np.all(np.isfinite(chi_a))
     print(f"AmplitudeGenerator compatibility: {'OK' if compat_ok else 'FAIL'}")

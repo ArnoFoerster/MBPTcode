@@ -28,6 +28,7 @@ import numpy as np
 
 from src.Base.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
                                 NUCLEAR_FD_STEP)
+from src.Base.geometry import molecule_at
 from src.properties.surface import evaluate
 
 
@@ -72,11 +73,8 @@ def mode_step(mode, masses, step=NUCLEAR_FD_STEP):
 
 def displaced_along(mol, mode, masses, dq):
     """`mol` moved by `dq` along one mass-weighted mode."""
-    out = mol.copy()
-    coords = np.asarray(mol.atom_coords()) + dq * cartesian_mode(mode, masses)
-    out.set_geom_(coords, unit='Bohr')
-    out.build(False, False)
-    return out
+    return molecule_at(mol, np.asarray(mol.atom_coords())
+                       + dq * cartesian_mode(mode, masses))
 
 
 def mode_gradient(grad, modes, masses):

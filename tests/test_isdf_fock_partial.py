@@ -3,9 +3,9 @@
 `fock_partial_skeleton` routes any density-fitted mean field to the
 auxiliary-basis skeleton, which knows nothing of an interpolative separable
 fit: on an ISDF mean field it returns the derivative of a different function,
-and that is what made the excited-state surface refuse the route. The exchange
-half now comes from the same adjoint chain the SCF force uses, generalized to
-the BILINEAR form a folded partial needs -- its exchange term is
+and that is why the excited-state surface must not take that skeleton on this
+route. The exchange half comes from the same adjoint chain the SCF force uses,
+generalized to the BILINEAR form a folded partial needs -- its exchange term is
 -(gamma vk[D] + D vk[gamma]), two different densities where the SCF energy has
 one twice.
 
@@ -28,11 +28,17 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
+from src.Base.numerics import Numerics
 from src.Base.constants import BOHR_TO_ANGSTROM
 from src.Base.isdf_jk import isdf_jk
-from src.gradients.isdf_derivatives import (fock_partial_skeleton,
+from src.gradients.isdf_derivatives import (_auxmol_of, exchange_channels,
+                                            fock_partial_skeleton,
+                                            fock_partial_skeleton_df,
+                                            isdf_exchange_adjoints,
+                                            isdf_fock_partial_exchange,
                                             xc_hybrid_coeff)
-from src.gradients.isdf_mean_field import isdf_fock_partial_exchange
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import assert_same
 
 AUXBASIS = 'cc-pvdz-ri'
 GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
@@ -52,7 +58,7 @@ def water(shift=None):
 
 
 def mean_field(shift=None, xc='b3lyp'):
-    mf = isdf_jk(dft.RKS(water(shift), xc=xc), auxbasis=AUXBASIS)
+    mf = isdf_jk(dft.RKS(water(shift), xc=xc), auxbasis=AUXBASIS, counts=g1(water(shift)))
     mf.grids.prune = None
     # the partial assumes the occupied-virtual Fock block vanishes
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
@@ -80,16 +86,14 @@ def bilinear(g_ao, dm, a_x, shift):
     The exchange term of the folded two-particle density
     Gamma_abcd = gamma_ab D_cd - gamma_ac D_bd / 2. Only the integrals move.
     """
-    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS)
+    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
     vk = mf.with_df.get_jk(dm, hermi=1, with_j=False)[1]
     return -0.5 * a_x * float(np.einsum('ab,ab->', g_ao, vk))
 
 
 def test_the_two_density_form_reduces_to_the_scf_one():
-    """dm_other = dm must be the SCF's own exchange energy exactly, not nearly:
+    """dm_other = dm must be the SCF's own exchange energy to a few ulp, not nearly:
     the bilinear is the same contraction with W^2 replaced by W1 W2."""
-    from src.gradients.isdf_mean_field import isdf_exchange_adjoints
-
     rng = np.random.default_rng(1)
     X = rng.standard_normal((9, 5))
     dm = rng.standard_normal((5, 5))
@@ -98,8 +102,8 @@ def test_the_two_density_form_reduces_to_the_scf_one():
     Z = Z + Z.T
     one = isdf_exchange_adjoints(X, Z, dm, 0.2)
     two = isdf_exchange_adjoints(X, Z, dm, 0.2, dm_other=dm)
-    assert np.array_equal(one[0], two[0])
-    assert np.array_equal(one[1], two[1])
+    assert_same(one[0], two[0], quantity='root', label='adjoint 0')
+    assert_same(one[1], two[1], quantity='root', label='adjoint 1')
 
 
 def test_the_exchange_half_follows_its_own_bilinear(reference):
@@ -131,9 +135,6 @@ def test_it_agrees_with_the_fitted_skeleton(reference):
     148 points per atom that is under a percent, which is the same fit error
     the total energy shows as 7.3 mHa.
     """
-    from src.gradients.isdf_derivatives import (_auxmol_of, exchange_channels,
-                                                fock_partial_skeleton_df)
-
     mf, gamma, _, _ = reference
     nocc = mf.mol.nelectron // 2
     isdf = isdf_fock_partial_exchange(mf, gamma)
@@ -180,7 +181,7 @@ def exx_minus_xc(dm, a_x, shift):
     grid moves with the atoms, which is the `grid_response` term the analytic
     side sets.
     """
-    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS)
+    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
     mf.grids.prune = None
     mf.grids.build()
     vk = mf.with_df.get_jk(dm, hermi=1, with_j=False)[1]
@@ -223,9 +224,9 @@ def test_the_double_counting_sums_to_zero_over_atoms(reference):
 
 
 def test_the_excited_state_gradient_follows_its_own_surface():
-    """END TO END, which is what the refusal was protecting and what the unit
-    gates above could not have caught on their own: the wrong prefactor passed
-    every one of them and left this residual CONSTANT at twice the gradient.
+    """END TO END, which is what the refusal protects and what the unit
+    gates above cannot catch on their own: a wrong prefactor passes every one
+    of them and leaves this residual CONSTANT at twice the gradient.
 
     The same sweep on the density-fitted route is run alongside, because what
     is being claimed is not that the interpolated gradient is exact -- it is
@@ -240,7 +241,7 @@ def test_the_excited_state_gradient_follows_its_own_surface():
     for route in ('df', 'isdf'):
         def build(m, route=route):
             mf = dft.RKS(m, xc='b3lyp')
-            mf = (isdf_jk(mf, auxbasis=AUXBASIS) if route == 'isdf'
+            mf = (isdf_jk(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
                   else mf.density_fit(auxbasis=AUXBASIS))
             mf.grids.prune = None
             mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
@@ -248,9 +249,11 @@ def test_the_excited_state_gradient_follows_its_own_surface():
             return mf
 
         mol = water()
-        chain = ExcitedStateChain(mol, build, basis='cc-pvdz', state=0,
-                                  spin='singlet', n_start=8, solver='davidson',
-                                  nroots=3, qp_window=2)
+        chain = ExcitedStateChain(
+            mol, build, state=0, spin='singlet',
+            numerics=g1_numerics(mol, Numerics(isdf={'basis': 'cc-pvdz', 'n_start': 8},
+                                               qp={'window': 2},
+                                               bse={'solver': 'davidson', 'nroots': 3})))
         g = chain.total_gradient(mol)[0]
         # ONE chain, its frozen conventions held, only the geometry moving:
         # re-freezing at every displaced point makes the surface discontinuous

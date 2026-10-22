@@ -85,7 +85,7 @@ def test_damping_bounds_the_coupling_where_undamped_it_diverges():
     """The claim is about SCALING, not a fixed ratio. Quartering the separation
     multiplies the undamped coupling by 64; the damped one must stay bounded.
 
-    A fixed-ratio assertion is what this test had first, and it fails: the
+    A fixed-ratio assertion fails: the
     ratio is 35 at 0.5 Bohr and 5 at 1.0, because the damping is only partial
     there. Bounded-versus-divergent is the property; "always ten times smaller"
     is not.

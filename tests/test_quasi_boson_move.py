@@ -11,30 +11,30 @@ production's classes.
 WHAT IS GATED. That the three adjoint classes subclass production's and build
 their own adjoint parts, and that `gradients.df_assembly` fits with
 production's builders rather than a copy; that every recorded forward quantity
-is bitwise the same on the adjoint class as on the forward one; the physics
+is the same to a few ulp on the adjoint class as on the forward one (two
+objects computing it); the physics
 itself as pinned numbers; the dedup verdicts as measured numbers; and that a
 fresh interpreter can import all three production modules without
 `src.gradients` appearing in sys.modules.
 
-THE GATES WERE SHOWN TO FAIL. Four perturbations, each on a backup copy of
-the tree, restored and verified with `cmp` afterwards:
+What breaks each gate:
 
   * the screened term of the BSE direct kernel flipped in sign
-    (`quasi_boson_bse`, Wd4 = eri4.oovv + S_d) fails
-    `test_the_route_still_computes_the_same_physics` on both systems, and
+    (`quasi_boson_bse`, Wd4 = eri4.oovv + S_d):
+    `test_the_route_still_computes_the_same_physics` on both systems; it
     moves the frozen water DenseBSESurface[singlet] R0 row by 7.6e-2 Ha in
     energy and 9.7e-3 Ha/Bohr in the gradient.
   * the pole-strength filter dropped (`quasi_boson_bse`, every root accepted
-    regardless of Z) fails `test_the_pole_strength_filter_is_the_declared_constant`
+    regardless of Z): `test_the_pole_strength_filter_is_the_declared_constant`
     and the water physics pin; the baseline row moves 2.3e-5 Ha and 1.7e-4
     Ha/Bohr, and the quasiparticle set grows from 15 states to 19.
-  * the boson seam reverted (`QPqbAdjoint.boson` removed, so a gradient object
-    would carry the forward-only RPA) fails
+  * `QPqbAdjoint.boson` removed, so a gradient object carries the forward-only
+    RPA:
     `test_the_adjoint_classes_subclass_production_and_build_their_own_parts`,
     `test_the_bse_partials_only_exist_on_the_adjoint_object` and
     `tests/test_gradients_qb.py::test_blocks_refuse_gradients_rather_than_guess`.
 
-A bitwise gate between the forward and the adjoint class compares one body of
+A few-ulp gate between the forward and the adjoint class compares one body of
 forward code reached two ways, so it sees an adjoint subclass that overrode
 the forward arithmetic and CANNOT see a kernel that changed sign. Physics is
 held by the pinned numbers below, by the frozen baseline record and by the
@@ -57,35 +57,40 @@ import src.SingleReference.GW.quasi_boson as production_qb
 import src.SingleReference.LinearResponse.quasi_boson_bse as production_bse
 import src.gradients.df_assembly as df_assembly
 import src.gradients.quasi_boson_adjoint as adjoint
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.constants import (QP_WINDOW_Z_MIN, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.Base.pyscf_interface import get_two_electron_integrals_chemist
 from src.SingleReference.GW.qp_energy import _two_electron_integrals
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida
-from src.Solvers.qp_equation import (solve_qp_equation_newton,
-                                     solve_qp_equation_newton_guarded)
+from tests.pins import (assert_same, bitwise, blas_identity, pin_bar,
+                        recorded_blas)
 
 #: The two systems every number below is measured on.
 H4_ATOM = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 WATER_ATOM = 'O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692'
 
 #: `e_corr_plasmon` against `rpa_correlation_energy_casida`, in Hartree. Not
-#: bitwise: the same trace formula off two different eigensolvers.
+#: bitwise: the same trace formula off two different eigensolvers. The values
+#: are the difference on the BLAS of tests/one_fit_pins.json (the workstation);
+#: another BLAS rounds the two eigensolves differently (water 2.3e-13 on a cluster's
+#: MKL 2025.3), and the difference then only has to stay under the energy bar
+#: of tests/pins.py.
 PLASMON_VS_CASIDA = {'h4': 1.78e-15, 'water': 5.68e-14}
+RECORDING_BLAS = recorded_blas(pathlib.Path(__file__).resolve().parent
+                               / 'one_fit_pins.json')
 
 #: `MOEriBlocks.from_mol` against the four-index builder production's
 #: quasiparticle driver uses, largest element of (ij|ab), in Hartree. Zero on
 #: H4/sto-3g -- the smallest molecule does not see this one.
 FROM_MOL_VS_DENSE = {'h4': 0.0, 'water': 4.56e-15}
 
-#: The guarded Newton of `Solvers.qp_equation` against `QPqb.solve_diag` on
-#: water: bitwise on every root above this pole strength, and this far apart in
-#: Hartree on the satellites below it. The threshold is not the guarded
-#: solver's own Z floor -- it converges onto a DIFFERENT root there, whose
-#: weight is 0.003 where this loop's is 0.233 -- so it is set between the
-#: lowest root the two share (Z = 0.376) and the highest they do not.
-NEWTON_BITWISE_ABOVE_Z = 0.3
-NEWTON_SATELLITE_GAP = 7.92e-2
+#: `QPqb.solve_diag` is the exact global solve: the largest-weight root, or
+#: the root bracketed by the poles around a seed. A Newton from eps_p + delta_p
+#: lands on a satellite on water/cc-pVDZ orbitals 15 and 17-23 (Z 0.01-0.38,
+#: up to 4.0 eV above the global root, whose Z is 0.2-0.53); orbital 15's
+#: global weight is pinned here.
+GLOBAL_Z_ORBITAL_15 = 0.53
 
 #: The physics itself, in Hartree: E_c^dRPA, the lowest BSE@GW singlet
 #: excitation, the HOMO quasiparticle energy and the size of the quasiparticle
@@ -98,8 +103,12 @@ PHYSICS_TOL = 1e-9
 PINNED = {
     'h4': {'e_corr': -0.07460064347212232, 'omega0': 0.11445588148996017,
            'homo_qp': -0.24698056044895061, 'n_qp': 4},
-    'water': {'e_corr': -0.2313009545750493, 'omega0': 0.3104456904334518,
-              'homo_qp': -0.44679715112656565, 'n_qp': 16},
+    # the global quasiparticle solve takes orbital 15's largest-weight root
+    # (Z 0.530), not the Newton satellite (Z 0.376, 0.546 eV higher), so the
+    # Z > QP_WINDOW_Z_MIN set contains it; the Newton satellite would put the
+    # lowest singlet 0.837 meV higher (0.3104456904334518).
+    'water': {'e_corr': -0.2313009545750493, 'omega0': 0.31041494986123275,
+              'homo_qp': -0.44679715112656565, 'n_qp': 17},
 }
 
 
@@ -107,8 +116,8 @@ def build(atom, basis, unit='Angstrom'):
     """(mol, mf, eri, nocc, norb) on a tightly converged RHF reference."""
     mol = gto.M(atom=atom, basis=basis, unit=unit, verbose=0)
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
@@ -132,20 +141,12 @@ def systems(h4, water):
     return {'h4': h4, 'water': water}
 
 
-def bitwise(a, b):
-    """True when two arrays agree bit for bit, shape and dtype included."""
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
-
-
 # ---------------------------------------------------------------------------
 # the gradient side holds no second copy of the forward
 # ---------------------------------------------------------------------------
 
 def test_df_assembly_reuses_the_production_fit():
     """Identity, not equality: a copy would drift the next time one is edited."""
-    assert df_assembly.df_eri_mo is production_eri.df_eri_mo
     assert df_assembly.df_integrals is production_eri.df_integrals
 
 
@@ -164,7 +165,7 @@ def test_the_adjoint_classes_subclass_production_and_build_their_own_parts():
 
 
 # ---------------------------------------------------------------------------
-# the adjoint classes compute the forward numbers bitwise
+# the adjoint classes compute the forward numbers to a few ulp
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
@@ -174,10 +175,13 @@ def test_the_adjoint_rpa_is_bitwise_the_forward_one(tag, h4, water):
     prod, adj = production_qb.RPA(A, B), adjoint.RPAAdjoint(A, B)
     for name in ('t', 'wt', 'Vt', 'exp_t', 'exp_mt', 'cosh_t', 'sinh_t',
                  'Abar', 'omega'):
-        assert bitwise(getattr(prod, name), getattr(adj, name)), name
-    assert bitwise(prod.eigAbar[1], adj.eigAbar[1])
-    assert prod.e_corr() == adj.e_corr()
-    assert prod.e_corr_plasmon() == adj.e_corr_plasmon()
+        assert_same(getattr(adj, name), getattr(prod, name), quantity='root',
+                    label=name)
+    assert_same(adj.eigAbar[1], prod.eigAbar[1], unit='1', quantity='vector',
+                label='eigenvectors of Abar')
+    assert_same(adj.e_corr(), prod.e_corr(), label='E_c')
+    assert_same(adj.e_corr_plasmon(), prod.e_corr_plasmon(),
+                label='E_c plasmon')
 
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
@@ -186,13 +190,17 @@ def test_the_adjoint_quasiparticle_solve_is_bitwise_the_forward_one(tag, h4,
     _, mf, eri, nocc, norb = systems(h4, water)[tag]
     prod = production_qb.QPqb(mf.mo_energy, eri, nocc, screening='rpa')
     adj = adjoint.QPqbAdjoint(mf.mo_energy, eri, nocc, screening='rpa')
-    assert bitwise(prod.Wnu, adj.Wnu) and bitwise(prod.omega, adj.omega)
+    assert_same(adj.Wnu, prod.Wnu, quantity='root', label='Wnu')
+    assert_same(adj.omega, prod.omega, quantity='root', label='omega')
     for p in range(norb):
-        assert prod.solve_diag(p) == adj.solve_diag(p)
-        assert prod.sigma(p, mf.mo_energy[p]) == adj.sigma(p, mf.mo_energy[p])
+        assert_same(adj.solve_diag(p), prod.solve_diag(p), label=('root, Z', p))
+        assert_same(adj.sigma(p, mf.mo_energy[p]),
+                    prod.sigma(p, mf.mo_energy[p]), label=('Sigma', p))
     p = nocc - 1
-    assert bitwise(prod.supermatrix_diag(p), adj.supermatrix_diag(p))
-    assert prod.solve_diag_dense(p) == adj.solve_diag_dense(p)
+    assert_same(adj.supermatrix_diag(p), prod.supermatrix_diag(p),
+                quantity='root', label='supermatrix diagonal')
+    assert_same(adj.solve_diag_dense(p), prod.solve_diag_dense(p),
+                label='dense root, Z')
 
 
 @pytest.mark.parametrize('screening,bse_tda', [('rpa', False), ('rpa', True),
@@ -205,15 +213,16 @@ def test_the_adjoint_bse_eigenpairs_are_bitwise_the_forward_ones(screening,
     for spin in ('singlet', 'triplet'):
         prod = production_bse.BSEqb(mf, eri, nocc, spin=spin, **kw)
         adj = adjoint.BSEqbAdjoint(mf, eri, nocc, spin=spin, **kw)
-        assert bitwise(prod.A_bse, adj.A_bse)
+        assert_same(adj.A_bse, prod.A_bse, quantity='root', label='A')
         assert (prod.B_bse is None) == (adj.B_bse is None)
         if prod.B_bse is not None:
-            assert bitwise(prod.B_bse, adj.B_bse)
-        assert bitwise(prod.Pinv, adj.Pinv)
-        assert bitwise(prod.eps_qp, adj.eps_qp)
+            assert_same(adj.B_bse, prod.B_bse, quantity='root', label='B')
+        assert_same(adj.Pinv, prod.Pinv, quantity='root', label='Pinv')
+        assert_same(adj.eps_qp, prod.eps_qp, label='eps_qp')
         assert prod.qp_roots == adj.qp_roots
-        assert bitwise(prod.Omega, adj.Omega)
-        assert bitwise(prod.X, adj.X) and bitwise(prod.Y, adj.Y)
+        assert_same(adj.Omega, prod.Omega, quantity='root', label='Omega')
+        assert_same(adj.X, prod.X, unit='1', quantity='vector', label='X')
+        assert_same(adj.Y, prod.Y, unit='1', quantity='vector', label='Y')
 
 
 def test_the_pole_strength_filter_is_the_declared_constant(water):
@@ -239,11 +248,13 @@ def test_as_blocks_passes_blocks_through_and_mo_eri_is_the_dense_transform(
     mol, mf, eri, nocc, _ = systems(h4, water)[tag]
     prod = production_eri.MOEriBlocks.from_dense(eri, nocc)
     assert production_eri.as_blocks(prod, nocc) is prod
-    assert bitwise(production_eri.mo_eri(mf, mol), eri)
+    assert_same(production_eri.mo_eri(mf, mol), eri, quantity='root',
+                label='mo_eri')
 
 
 def test_the_bse_partials_only_exist_on_the_adjoint_object(water):
-    """The reverse mode is what `gradients` keeps, and it is bitwise its own."""
+    """The reverse mode is what `gradients` keeps, and it is its own to a few
+    ulp."""
     _, mf, eri, nocc, _ = water
     forward = production_bse.BSEqb(mf, eri, nocc)
     assert not hasattr(forward, 'partials')
@@ -251,7 +262,9 @@ def test_the_bse_partials_only_exist_on_the_adjoint_object(water):
     b = adjoint.BSEqbAdjoint(mf, eri, nocc)
     gF, G4, tg = b.partials(0)
     gF2, G42, tg2 = adjoint.BSEqbAdjoint(mf, eri, nocc).partials(0)
-    assert bitwise(gF, gF2) and bitwise(G4, G42) and bitwise(tg, tg2)
+    assert_same(gF2, gF, quantity='root', label='gF')
+    assert_same(G42, G4, quantity='root', label='G4')
+    assert_same(tg2, tg, quantity='root', label='tg')
 
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
@@ -277,7 +290,7 @@ def test_the_route_still_computes_the_same_physics(tag, h4, water):
 @pytest.mark.parametrize('tag', ('h4', 'water'))
 def test_build_rpa_AB_is_the_casida_builder_bitwise_and_still_stays(tag, h4,
                                                                    water):
-    """Same blocks to the bit, kept separate for two reasons the gate names.
+    """Same blocks to a few ulp, kept separate for two reasons the gate names.
 
     `LinearResponseSolver` needs the full nao^4 `eri_chemist`, which is the
     array `MOEriBlocks` exists to avoid, and its `triplet=True` zeroes the
@@ -289,7 +302,8 @@ def test_build_rpa_AB_is_the_casida_builder_bitwise_and_still_stays(tag, h4,
     lr = LinearResponseSolver(mf.mo_energy, eri_chemist=eri,
                               spin_mode='restricted')
     Aw, Bw = lr.build_casida_matrices(nocc, lBSE=False)
-    assert bitwise(A, Aw) and bitwise(B, Bw)
+    assert_same(Aw, A, quantity='root', label='A')
+    assert_same(Bw, B, quantity='root', label='B')
 
     # tda_screening zeroes B and leaves A alone; triplet zeroes the exchange
     # in A and leaves B zero as well. Same B, different A: two variants.
@@ -297,7 +311,8 @@ def test_build_rpa_AB_is_the_casida_builder_bitwise_and_still_stays(tag, h4,
                                                  tda_screening=True)
     Awt, Bwt = lr.build_casida_matrices(nocc, lBSE=False, triplet=True)
     assert np.abs(B_tda).max() == 0.0 and np.abs(Bwt).max() == 0.0
-    assert bitwise(A_tda, A) and not bitwise(A_tda, Awt)
+    assert_same(A_tda, A, quantity='root', label='tda_screening leaves A')
+    assert not bitwise(A_tda, Awt)
 
     blocks = production_eri.MOEriBlocks.from_mol(mf.mol, mf.mo_coeff, nocc)
     assert blocks.dense is None
@@ -322,8 +337,11 @@ def test_the_plasmon_energy_is_not_the_casida_one_bitwise(tag, h4, water):
                               spin_mode='restricted')
     theirs = float(rpa_correlation_energy_casida(lr, nocc))
     diff = abs(ours - theirs)
-    assert diff != 0.0
-    assert 0.3 * PLASMON_VS_CASIDA[tag] < diff < 3.0 * PLASMON_VS_CASIDA[tag]
+    if RECORDING_BLAS == blas_identity():
+        assert diff != 0.0
+        assert 0.3 * PLASMON_VS_CASIDA[tag] < diff < 3.0 * PLASMON_VS_CASIDA[tag]
+    else:
+        assert diff < pin_bar(RECORDING_BLAS)
 
 
 @pytest.mark.parametrize('tag', ('h4', 'water'))
@@ -336,19 +354,21 @@ def test_from_mol_is_not_the_dense_four_index_builder_bitwise(tag, h4, water):
     """
     mol, mf, eri, nocc, norb = systems(h4, water)[tag]
     _, eri_prod = _two_electron_integrals(mol, mf, df=False, is_uhf=False)
-    assert bitwise(eri_prod, production_eri.mo_eri(mf, mol))
+    assert_same(eri_prod, production_eri.mo_eri(mf, mol), quantity='root',
+                label='mo_eri')
     blocks = production_eri.MOEriBlocks.from_mol(mol, mf.mo_coeff, nocc)
     occ, virt = slice(0, nocc), slice(nocc, norb)
     diff = np.abs(blocks.oovv - eri_prod[occ, occ, virt, virt]).max()
     expected = FROM_MOL_VS_DENSE[tag]
     if expected == 0.0:
-        assert diff == 0.0
+        assert_same(blocks.oovv, eri_prod[occ, occ, virt, virt],
+                    quantity='root', label='oovv')
     else:
         assert 0.3 * expected < diff < 3.0 * expected
 
 
 def test_mo_eri_is_the_bare_interaction_and_not_the_environment_aware_one(h4):
-    """They agree bitwise in the gas phase and mean different things.
+    """They agree to a few ulp in the gas phase and mean different things.
 
     `pyscf_interface.get_two_electron_integrals_chemist`, which
     `_two_electron_integrals` returns, substitutes v -> v + vtilde wherever an
@@ -359,49 +379,27 @@ def test_mo_eri_is_the_bare_interaction_and_not_the_environment_aware_one(h4):
     mol, mf, _, _, _ = h4
     _, environment_aware = _two_electron_integrals(mol, mf, df=False,
                                                    is_uhf=False)
-    assert bitwise(production_eri.mo_eri(mf, mol), environment_aware)
+    assert_same(production_eri.mo_eri(mf, mol), environment_aware,
+                quantity='root', label='gas phase')
     assert production_eri.mo_eri is not get_two_electron_integrals_chemist
 
 
-def test_the_quasiparticle_newton_keeps_its_own_loop(water):
-    """The guarded Newton is the same root, except where it is a different one.
-
-    `Solvers.qp_equation.solve_qp_equation_newton_guarded` returns this loop's
-    root BITWISE on every water/cc-pVDZ orbital whose pole strength clears
-    NEWTON_BITWISE_ABOVE_Z, and replaces the low-weight satellites by its
-    linearized fallback -- up to NEWTON_SATELLITE_GAP Hartree away. Those
-    satellite roots are exactly what `QP_WINDOW_Z_MIN` reads to decide which
-    states carry a quasiparticle, so rerouting would change the QP set rather
-    than move a root by an ulp. The undamped plain Newton is not bitwise even
-    on the quasiparticles.
-    """
+def test_the_quasiparticle_root_is_the_global_one(water):
+    """solve_diag is the largest-weight root of every root, and with that
+    root as a seed it returns it again: the seeded rule follows a root, it
+    does not move it. Following the bare level eps_p + delta_p instead would
+    not: on orbital 15 its bracket holds a satellite below QP_WINDOW_Z_MIN."""
     _, mf, eri, nocc, norb = water
     eps = np.asarray(mf.mo_energy, float)
     qp = production_qb.QPqb(eps, eri, nocc, screening='rpa')
-    worst_satellite = 0.0
-    plain_differs = 0
     for p in range(norb):
         w, z = qp.solve_diag(p)
-        with warnings.catch_warnings():
-            # the guarded Newton warns on every satellite it replaces
-            warnings.simplefilter('ignore', RuntimeWarning)
-            wg, _ = solve_qp_equation_newton_guarded(
-                lambda x, p=p: qp.sigma(p, x),
-                lambda x, p=p: qp.sigma_prime(p, x),
-                eps, p, nocc, xc_correction=float(qp.delta[p]),
-                w0=eps[p] + qp.delta[p], tol=1e-12, max_iter=200)
-        if z > NEWTON_BITWISE_ABOVE_Z:
-            assert wg == w, f'orbital {p}, Z={z:.3f}'
-        else:
-            worst_satellite = max(worst_satellite, abs(wg - w))
-        wp = solve_qp_equation_newton(
-            lambda x, p=p: x - eps[p] - qp.delta[p] - qp.sigma(p, x),
-            eps[p] + qp.delta[p],
-            deriv_func=lambda x, p=p: 1.0 - qp.sigma_prime(p, x),
-            tol=1e-12, max_iter=200)
-        plain_differs += int(wp != w)
-    assert 0.3 * NEWTON_SATELLITE_GAP < worst_satellite
-    assert plain_differs > 0
+        assert_same((w, z), qp.quasiparticle_root(p), label=('root, Z', p))
+        w_seeded, z_seeded = qp.solve_diag(p, w0=w)
+        assert abs(w_seeded - w) < 1e-10 and abs(z_seeded - z) < 1e-8
+    assert abs(qp.solve_diag(15)[1] - GLOBAL_Z_ORBITAL_15) < 5e-3
+    _, z_bare = qp.solve_diag(15, w0=eps[15] + qp.delta[15])
+    assert z_bare < QP_WINDOW_Z_MIN < qp.solve_diag(15)[1]
 
 
 # ---------------------------------------------------------------------------

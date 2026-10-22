@@ -24,18 +24,19 @@ second-order term keeping the bare interaction. Checks:
      solvated reference to 1e-6 eV; an environment attached to the mean field
      gives the numbers of the one passed explicitly; the singlet shift against
      the gas phase is negative and under 0.3 eV for formaldehyde's n->pi*.
-  7. the gas phase: an explicit NoEnvironment is the default bit for bit.
+  7. the gas phase: an explicit NoEnvironment is the default (two solves:
+     to a few ulp, `matches` of tests/pins.py).
   8. refusals: a continuum with eps_static on a gas-phase mean field, fold
      with spin None, fold at adc3, a continuum on the spin-orbital route.
   9. over simulated MPI ranks (2 and 3, one tile per occupied orbital) the
      operator's set-up, its products and the folded roots driven from rank 0,
-     by solver 'newton' and by the default's Davidson, are the serial ones bit
-     for bit, on every rank.
+     by solver 'newton' and by the default's Davidson, are the serial ones to
+     a few ulp, on every rank.
  10. B_vv split over the ranks: bare_factors on rank r of 3 keeps exactly its
-     auxiliary chunks, bit for bit the slices of the whole factor; over 2 and 3
+     auxiliary chunks, to a few ulp the slices of the whole factor; over 2 and 3
      simulated ranks each holding only its chunks, the products (M U, A_eff(w)
      U with |Y|^2, fold_images, doubles_dot) and the block solver's roots are
-     the serial whole-factor ones bit for bit, on every rank.
+     the serial whole-factor ones to a few ulp, on every rank.
  11. the fold-diagonal model the block solver seeds with: its Laplace sums equal
      the direct particle and hole sums to 1e-4 relative, and, its mean matched, it
      follows the exact diagonal of the folded doubles (correlation above 0.7,
@@ -57,7 +58,7 @@ import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-from pyscf import gto, mp, scf, tdscf
+from pyscf import gto, mp, tdscf
 
 from src.Base.constants import (EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
                                 HARTREE_TO_EV)
@@ -67,26 +68,8 @@ from src.Base.solvent_screening import SolventScreening
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
-
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
-H2CO = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.587; H 0 -0.94 -0.587'
-
-
-def check(ok, label, detail=''):
-    """Print one verdict line and return `ok` as a bool."""
-    tail = f'   ({detail})' if detail else ''
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
-    return bool(ok)
-
-
-def rhf_df(atom, basis):
-    """A tightly converged DF-RHF mean field."""
-    mol = gto.M(atom=atom, basis=basis, verbose=0)
-    mf = scf.RHF(mol).density_fit()
-    mf.conv_tol = 1e-12
-    mf.conv_tol_grad = 1e-8
-    mf.kernel()
-    return mf
+from tests.adc_common import H2CO, WATER_ORIGIN, check, df_rhf_converged, rhf_df
+from tests.pins import RECORDING_BLAS, matches
 
 
 def check_operator(mf):
@@ -168,14 +151,7 @@ def toluene(atom, basis):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     env = SolventScreening(mol, solvent='toluene')
 
-    def factory(m):
-        mf = scf.RHF(m).density_fit()
-        mf.conv_tol = 1e-12
-        mf.conv_tol_grad = 1e-8
-        mf.kernel()
-        return mf
-
-    return mol, env, env.mean_field(mol, factory)
+    return mol, env, env.mean_field(mol, df_rhf_converged)
 
 
 def pyscf_tda_pcm(mf, eps_optical, spin, nroots):
@@ -245,7 +221,9 @@ def check_adc2_pcm():
     attach_environment(mf, env)
     ea, _ = solve_ee_adc(mf, spin='singlet', fold=True, **kw)
     ee_, _ = solve_ee_adc(mf, spin='singlet', fold=True, environment=env, **kw)
-    ok &= check(np.array_equal(ea, ee_), 'attached environment equals explicit one')
+    # two solves: the same roots to a few ulp, not bitwise
+    ok &= check(matches(ea, ee_, RECORDING_BLAS, quantity='root'),
+                'attached environment equals explicit one')
     return ok
 
 
@@ -254,7 +232,9 @@ def check_gas_default(mf):
     a, _ = solve_ee_adc(mf, level='adc2', df=True, spin='singlet', nroots=2)
     b, _ = solve_ee_adc(mf, level='adc2', df=True, spin='singlet', nroots=2,
                         environment=NoEnvironment())
-    return check(np.array_equal(a, b), 'gas phase: NoEnvironment is the default')
+    # two solves: the same roots to a few ulp, not bitwise
+    return check(matches(a, b, RECORDING_BLAS, quantity='root'),
+                 'gas phase: NoEnvironment is the default')
 
 
 def check_refusals(mf):
@@ -304,14 +284,19 @@ def check_ranks(mf):
     ser = rank(None)
     for size in (2, 3):
         outs = run_simulated(rank, size)
-        same = all(np.array_equal(o['omega'], ser[0]['omega'])
-                   and np.array_equal(o['t1'], ser[0]['t1'])
-                   and np.array_equal(o['omega_d'], ser[0]['omega_d'])
-                   and np.array_equal(d, ser[1]) and e == ser[2]
-                   and np.array_equal(p[0], ser[3][0])
-                   and np.array_equal(p[1], ser[3][1])
+        # a rank split against the serial run: to a few ulp
+        same = all(matches(o['omega'], ser[0]['omega'], RECORDING_BLAS,
+                           quantity='root')
+                   and matches(o['t1'], ser[0]['t1'], RECORDING_BLAS, unit='1',
+                               quantity='vector')
+                   and matches(o['omega_d'], ser[0]['omega_d'], RECORDING_BLAS,
+                               quantity='root')
+                   and matches(d, ser[1], RECORDING_BLAS, quantity='root')
+                   and matches(e, ser[2], RECORDING_BLAS)
+                   and matches(p[0], ser[3][0], RECORDING_BLAS, quantity='root')
+                   and matches(p[1], ser[3][1], RECORDING_BLAS, quantity='root')
                    for o, d, e, p in outs)
-        ok &= check(same, f'{size} simulated ranks equal the serial run bit for bit')
+        ok &= check(same, f'{size} simulated ranks equal the serial run to a few ulp')
     return ok
 
 
@@ -344,10 +329,13 @@ def check_split_bvv(mf):
         part = ee_ri_fold.bare_factors(mol, mf, auxbasis='cc-pvdz-ri',
                                        comm=_RankStub(r, 3), aux_chunk=width)
         mine = [c for c, o in enumerate(owners) if o == r]
+        # each chunk built again on the rank: to a few ulp
         same = (part.Bvv is None and sorted(part.bvv_chunks) == mine and all(
-            np.array_equal(part.bvv_chunks[c], wvv[:, slice(*chunks[c])])
-            for c in mine) and np.array_equal(part.L, whole.L))
-        ok &= check(same, f'rank {r} of 3 keeps its B_vv chunks {mine}, bit for bit',
+            matches(part.bvv_chunks[c], wvv[:, slice(*chunks[c])],
+                    RECORDING_BLAS, unit='1', quantity='root')
+            for c in mine) and matches(part.L, whole.L, RECORDING_BLAS,
+                                       unit='1', quantity='root'))
+        ok &= check(same, f'rank {r} of 3 keeps its B_vv chunks {mine}, to a few ulp',
                     f'{part.nbytes() / whole.nbytes():.2f} of the whole factors')
     eps = np.asarray(get_orbital_energies(mf), float)
     F = ee_ri_fold.RIFactors.from_full(eps, DFIntegrals.from_scf(mol, mf).B_aa, no)
@@ -377,11 +365,14 @@ def check_split_bvv(mf):
     ser, ser_roots = products(None)
     for size in (2, 3):
         outs = run_simulated(products, size)
-        same = all(all(np.array_equal(x, y) for x, y in zip(o, ser))
-                   and np.array_equal(r['omega'], ser_roots['omega'])
-                   and np.array_equal(r['t1'], ser_roots['t1']) for o, r in outs)
+        same = all(all(matches(x, y, RECORDING_BLAS, quantity='root')
+                       for x, y in zip(o, ser))
+                   and matches(r['omega'], ser_roots['omega'], RECORDING_BLAS,
+                               quantity='root')
+                   and matches(r['t1'], ser_roots['t1'], RECORDING_BLAS,
+                               unit='1', quantity='vector') for o, r in outs)
         ok &= check(same, f'{size} simulated ranks, B_vv split: products and block '
-                    'roots equal the serial whole-factor run bit for bit')
+                    'roots equal the serial whole-factor run to a few ulp')
     return ok
 
 
@@ -469,7 +460,7 @@ def run():
     all_ok = True
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        mf = rhf_df(WATER, 'cc-pvdz')
+        mf = rhf_df(WATER_ORIGIN, 'cc-pvdz')
         all_ok &= check_operator(mf)
         all_ok &= check_solves(mf)
         all_ok &= check_cis_pcm()

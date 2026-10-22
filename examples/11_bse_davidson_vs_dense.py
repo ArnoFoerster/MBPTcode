@@ -26,7 +26,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.constants import HARTREE_TO_EV, ISDF_GRID_ACCURACY
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -48,8 +48,12 @@ mf.kernel()
 ev = lambda w: ', '.join(f'{x * HARTREE_TO_EV:.3f}' for x in np.sort(w)[:NROOTS])
 
 # # Default: GW space-time using ISDF, followed by Davidson
+# The grid is named: the G1 shell counts of cc-pVTZ. The radii table holds no
+# row for the jkfit auxiliary set, so they are optimized at run time (with a
+# warning), from six starts.
+COUNTS = dict(zip(('A1', 'A2', 'A3', 'B1'), ISDF_GRID_ACCURACY['cc-pvtz']['G1']))
 omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, probe='sign',
-                                   auxbasis=AUXBASIS, n_start=6)
+                                   auxbasis=AUXBASIS, n_start=6, counts=COUNTS)
 eps_qp, W_isdf = info['eps'], info['W_aux']
 X_mo, D = info['factors'][:2]
 

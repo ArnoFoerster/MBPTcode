@@ -26,7 +26,10 @@ import numpy as np
 from pyscf import gto, scf
 from pyscf.df.addons import make_auxmol
 
-from src.Base.constants import HARTREE_TO_EV, QP_ORDER_SEARCH
+from src.Base.constants import (HARTREE_TO_EV, QP_BLOCK_CORRECTION_TOL,
+                                QP_DEGENERACY_TOL, QP_ORDER_SEARCH,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
 from src.Base.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
@@ -34,6 +37,7 @@ from src.Base.environment import environment_of
 from src.Base.isdf_jk import ISDFJK, mean_field_skeleton_force
 from src.Base.utils.mpi_grid import lockstep
 from src.Base.utils.threads import blas_single_threaded
+from src.SingleReference.GW.qp_selection import true_degenerate_blocks
 from src.SingleReference.GW.qp_states import valence_qp_states
 from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, ground_state_energy, xc_hybrid_coeff)
@@ -77,8 +81,8 @@ def tight_rhf(mol):
     energy inherits directly.
     """
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
     with blas_single_threaded():
         mf.kernel()
@@ -182,6 +186,21 @@ def refuse_a_solvated_mean_field(mf, surface, force=False):
         f'RPAQPSurface composed on it, which carry the environment through '
         f'the auxiliary metric. Excitation energies and quasiparticle levels '
         f'are differences and are unaffected.')
+
+
+def refuse_a_foreign_mean_field(mf, mol, surface):
+    """Refuse a mean field converged at another geometry than `mol`.
+
+    The post-SCF integrals and their skeleton derivatives are built at `mol`,
+    while the core Hamiltonian and the mean field's own force read `mf.mol`:
+    on two geometries the energy and force are a mixture of both, of the right
+    shape and meaning neither.
+    """
+    if not np.array_equal(mf.mol.atom_coords(), mol.atom_coords()):
+        raise ValueError(
+            f'{surface} was handed a mean field converged at another geometry '
+            f'than the molecule it evaluates: converge the mean field at this '
+            f'geometry, or pass mf=None.')
 
 
 def mean_field_integrals(mf, mol):
@@ -293,6 +312,7 @@ class DenseRPASurface:
 
     def _build(self, mol, mf=None):
         mf = self._scf(mol) if mf is None else mf
+        refuse_a_foreign_mean_field(mf, mol, 'DenseRPASurface')
         refuse_a_solvated_mean_field(mf, 'DenseRPASurface')
         nocc = mol.nelectron // 2
         eri = mo_eri(mf, mol)
@@ -376,13 +396,17 @@ class QuasiparticleSurface:
         # eps enters with the sign of the electron count change reversed.
         self.sign = -1.0 if charge_change == -1 else +1.0
         self.orbital = orbital
-        self._seed = None
         mf = self._scf(mol)
         # The starting point is free -- Kohn-Sham included -- so the functional
         # is read off the mean field rather than assumed.
         self.physics_ground_state = declared_ground_state(mf, 'rpa')
+        # The Newton seed is the reference root, frozen: a seed carried from
+        # the last evaluation makes the root at a geometry depend on the call
+        # history, and from a far step it can land on a satellite.
         if orbital is None:
             self.orbital, self._seed = self._choose(mol, mf)
+        else:
+            self._seed = self._build(mol, mf)[3].solve_diag(orbital)[0]
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the mean field this surface evaluates on -- a gas-phase
@@ -395,6 +419,7 @@ class QuasiparticleSurface:
 
     def _build(self, mol, mf=None):
         mf = self._scf(mol) if mf is None else mf
+        refuse_a_foreign_mean_field(mf, mol, 'QuasiparticleSurface')
         nocc = mol.nelectron // 2
         eri = mo_eri(mf, mol)
         # G0W0 replaces the reference's static exchange-correlation potential by
@@ -436,7 +461,19 @@ class QuasiparticleSurface:
 
     @property
     def physics(self):
-        """What this surface computes: E_HF + E_c^dRPA -/+ eps^QP_p, gas phase."""
+        """What this surface computes: E_HF + E_c^dRPA -/+ eps^QP_p, gas phase.
+
+        The TDA-screened surface is refused rather than declared: its E_0 is
+        E_HF[rho] with E_c^dRPA = 0, which no `GroundState` names, and calling
+        it kind='rpa' would let `compare_surfaces` pair it with
+        `DenseRPASurface` and leave -E_c^dRPA in an adiabatic ionization.
+        """
+        if self.screening != 'rpa':
+            raise ValueError(
+                f'screening={self.screening!r} screens W in the Tamm-Dancoff '
+                f'approximation, whose E_0 carries no E_c^dRPA: declaring it '
+                f'on the dRPA ground state would put two functionals under one '
+                f'name.')
         return SurfacePhysics(self.physics_ground_state,
                               self.physics_excitation)
 
@@ -448,11 +485,21 @@ class QuasiparticleSurface:
             # Tamm-Dancoff surface is E_HF -/+ eps^QP and carries none.
             refuse_a_solvated_mean_field(mf, 'QuasiparticleSurface')
         w, _ = qp.solve_diag(self.orbital, w0=self._seed)
-        self._seed = w
+        self._log_branch(mol, qp)
         e0 = ground_state_energy(declared_ground_state(mf, 'rpa'), mf, mol,
                                  e_corr=(qp.qb.e_corr()
                                          if self.screening == 'rpa' else 0.0))
         return e0.total + self.sign * w, w, mf, eri, nocc, qp, e0
+
+    def _log_branch(self, mol, qp):
+        """Keep in `branch_log`, once per geometry, the followed root the
+        largest weight left at `mol` (`QPqb.solve_diag`, warned there)."""
+        log = self.__dict__.setdefault('branch_log', [])
+        coords = np.asarray(mol.atom_coords(), float).tolist()
+        for entry in qp.branch_log:
+            entry = dict(entry, coords=coords)
+            if entry not in log:
+                log.append(entry)
 
     def total_energy(self, mol=None, mf=None):
         return lockstep(float(self._state(self.mol0 if mol is None else mol,
@@ -525,8 +572,19 @@ class DenseBSESurface:
     The quasiparticle set and its roots are frozen at `mol` on construction and
     pinned everywhere else, so the surface is continuous. `refreeze` rebuilds
     them and is the honest error bar on any minimum found here. Under
-    qp_root='weight' only the set is frozen: each root is the largest-weight
-    one at the geometry asked.
+    qp_root='weight' the frozen roots are the largest-weight ones at `mol`,
+    and every other geometry follows each by its rank among the eigenvalues
+    of the diagonal supermatrix (`QPqb.ranked_root`), which is continuous: a
+    largest-weight root decided per geometry jumps branch where two roots
+    share the weight (formaldehyde/cc-pVDZ orbital 22, Z 0.19: 20 mHa within
+    1e-3 Bohr), and a Newton from the frozen root lands on a satellite a walk
+    step away.
+
+    Truly degenerate orbitals of the set (closer than QP_DEGENERACY_TOL
+    at `mol`, with their own reference corrections within
+    QP_BLOCK_CORRECTION_TOL) form blocks frozen with it, each carrying one
+    shared correction (`BSEqb` blocks); `qp_block_record` says why every
+    candidate was kept or rejected.
     """
 
     def __init__(self, mol, variant='BSE@GW', state=0, qp_orbs=None,
@@ -539,10 +597,13 @@ class DenseBSESurface:
         (pq|ia) alone, about a factor nao^2 / (nocc * nvirt) smaller. Energies
         only: gradients need the whole tensor and refuse.
 
-        qp_root: 'newton' follows each orbital's reference root by Newton from
-        its seed; 'weight' takes the root of largest pole strength at every
-        geometry (`QPqb.quasiparticle_root`), which no satellite nearer eps_p
-        can capture and which needs no seed, so `refreeze` leaves it as it is.
+        qp_root: 'newton' (the name is historical) takes the root of largest
+        weight at the reference and follows it through the interval between
+        the poles that bracket it (`QPqb.solve_diag`); 'weight' takes the
+        root of largest pole strength at `mol` (`QPqb.quasiparticle_root`),
+        which no satellite nearer eps_p can capture, and follows it by its
+        rank elsewhere. Values at `mol` itself are the largest-weight roots'
+        own.
         """
         self.eri_blocks = eri_blocks
         self.qp_root = qp_root
@@ -582,10 +643,23 @@ class DenseBSESurface:
                       pinned=not filter_z, delta=self.xc_shift(mf),
                       spin=spin, qp_root=qp_root)
         self.qp_set = sorted(probe.qp_roots)
-        # The reference roots: what 'newton' follows, and for 'weight' the
-        # record of what the reference geometry carried.
+        # The reference roots: 'newton' follows them through their bracket,
+        # 'weight' by their rank among the eigenvalues of the diagonal
+        # supermatrix.
         self.seeds = dict(probe.qp_roots)
         self.qp_z = dict(probe.qp_z)
+        self.ranks = ({p: probe.qp.root_rank(p, w)
+                       for p, w in self.seeds.items()}
+                      if qp_root == 'weight' else None)
+        # the probe solves without blocks: its roots are each orbital's own
+        blocks, record = true_degenerate_blocks(
+            mf.mo_energy, {p: w - mf.mo_energy[p] for p, w in
+                           self.seeds.items()},
+            self.qp_set, QP_DEGENERACY_TOL, QP_BLOCK_CORRECTION_TOL)
+        self.qp_blocks = tuple(blocks)
+        self.qp_block_record = dict(
+            record, energy_tol_Ha=QP_DEGENERACY_TOL,
+            correction_tol_Ha=QP_BLOCK_CORRECTION_TOL)
 
     @property
     def physics_excitation(self):
@@ -669,13 +743,20 @@ class DenseBSESurface:
             e_corr=b.qp.qb.e_corr() if self.screening == 'rpa' else 0.0)
 
     def _solve(self, mol, mf):
+        refuse_a_foreign_mean_field(mf, mol, 'DenseBSESurface')
         nocc = mol.nelectron // 2
         eri = self._eri(mol, mf)
+        # the largest-weight root is decided at the reference geometry only
+        weigh = (self.qp_root == 'weight'
+                 and np.array_equal(mol.atom_coords(), self.mol0.atom_coords()))
+        rule = ('weight' if weigh else
+                'rank' if self.qp_root == 'weight' else 'newton')
         b = BSEqb(mf, eri, nocc, screening=self.screening, bse_tda=self.bse_tda,
                   qp_orbs=self.qp_set, pinned=True,
-                  seeds=self.seeds if self.qp_root == 'newton' else None,
-                  delta=self.xc_shift(mf), spin=self.spin,
-                  qp_root=self.qp_root)
+                  seeds=self.seeds if rule == 'newton' else None,
+                  ranks=self.ranks if rule == 'rank' else None,
+                  delta=self.xc_shift(mf), spin=self.spin, qp_root=rule,
+                  blocks=self.qp_blocks)
         return b, eri, nocc, mol.nao, self._e0(mol, mf, b).total
 
     def total_energy(self, mol=None, mf=None):
@@ -789,10 +870,11 @@ class DenseBSESurface:
 
         EVERY constructor setting travels. A refreeze that dropped one would
         change which functional the walk is on halfway through it: without
-        `spin` a triplet comes back a singlet, well off itself, and without
-        `eri_blocks` a surface that fits in memory rebuilds the full nao^4
-        tensor at the next geometry. Under qp_root='weight' only the set is
-        rebuilt: no root was frozen.
+        `spin` a triplet comes back a singlet, 0.75 eV below itself on water,
+        and without `eri_blocks` a surface that fits in memory rebuilds the
+        full nao^4 tensor at the next geometry. Under qp_root='weight' the
+        largest-weight roots are decided again at `mol`, the branch the walk
+        follows from there.
         """
         return DenseBSESurface(mol, self.variant, self.state,
                                qp_orbs=self._qp_orbs_in,

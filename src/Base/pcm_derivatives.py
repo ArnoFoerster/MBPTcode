@@ -34,7 +34,8 @@ from pyscf import gto, lib
 from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 
-from src.Base.constants import ISDF_TILE_GB, PCM_CROSS_TERM_STEP
+from src.Base.constants import (ISDF_TILE_GB, PCM_CROSS_TERM_STEP, PCM_DM_CACHE_TOL,
+                                 PCM_FORCE_DENSITY_SYMMETRY_TOL)
 
 PI = np.pi
 
@@ -102,12 +103,21 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=ISDF_TILE_GB):
     `grad/pcm.py:grad_qv`, term for term, on `cavity_blocks` (pyscf's own
     blocking by `max_memory` passes LIBCINT_BLOCK_LIMIT at about 90 atoms in
     cc-pVDZ with a large memory budget).
+
+    The derivative is taken on the first AO index and doubled, which is the
+    derivative only for a symmetric dm; a density further from symmetric than
+    PCM_FORCE_DENSITY_SYMMETRY_TOL is refused (symmetrize it: the energy sees
+    only (dm + dm^T) / 2).
     """
     if not pcmobj._intermediates:
         pcmobj.build()
     dm = np.asarray(dm, float)
+    asym = float(np.max(np.abs(dm - dm.T))) if dm.size else 0.0
+    if asym > PCM_FORCE_DENSITY_SYMMETRY_TOL * max(1.0, float(np.max(np.abs(dm)))):
+        raise ValueError(f'the PCM force needs a symmetric AO density: max |dm - dm^T| '
+                         f'= {asym:.1e}; pass (dm + dm^T) / 2')
     dm_cache = pcmobj._intermediates.get('dm', None)
-    if dm_cache is None or np.linalg.norm(dm_cache - dm) >= 1e-10:
+    if dm_cache is None or np.linalg.norm(dm_cache - dm) >= PCM_DM_CACHE_TOL:
         pcmobj._get_vind(dm)
     if q_sym is None:
         q_sym = pcmobj._intermediates['q_sym']

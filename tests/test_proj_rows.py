@@ -1,5 +1,5 @@
 """No MPI call carries more than `MPI_COUNT_MAX` elements, and a collective
-cut into windows gives the bits of the one call.
+cut into windows gives the one call's numbers to a few ulp.
 
 mpi4py hands the library a C int as the count wherever the library lacks the
 MPI-4 large-count routines -- Open MPI 5.0.x has none -- and raises
@@ -10,8 +10,9 @@ over the flat buffer, the row-typed gathers, broadcasts and exchanges in
 rounds of row windows. Here the limit is set to `LIMIT` elements, far below
 the arrays, and on 2, 3 and 8 simulated ranks every collective is checked to
 
-  * give the bits the unchunked call gives (the sums are elementwise and the
-    gathers verbatim, so a window is the same arithmetic on fewer elements),
+  * give what the unchunked call gives, to a few ulp (the sums are
+    elementwise and the gathers verbatim, so a window is the same arithmetic
+    on fewer elements; two runs),
   * make more than one call, none of them past the limit (read off the
     simulated communicator's own methods, which see each window), and
   * refuse, in `exchange_blocks`, a single Alltoallv past the limit rather
@@ -22,14 +23,16 @@ quasiparticle solves hold instead of the whole (ntau, naux, naux) array.
 Water/cc-pVDZ Hartree-Fock, 8 tau points, 24 frequencies, at 2, 3 and 8
 simulated ranks:
 
-  * each rank's rows are bitwise the rows of the zero-padded Allreduce the
-    solves ran before (`polarizability_tau` split over tau, `reduce_sum`);
+  * each rank's rows are the rows of the zero-padded Allreduce the solves
+    ran before (`polarizability_tau` split over tau, `reduce_sum`) to a few
+    ulp (two computations);
   * `gather_slices` hands every rank the whole slices of its own list, in
-    its order, whatever the other ranks ask for -- the serial slices bitwise;
+    its order, whatever the other ranks ask for -- the serial slices to a
+    few ulp;
   * every frequency a rank owns comes out of `ProjRows.blocks` as the serial
-    ProjRows' chi0, bitwise, for one block of all frequencies and blocks of
-    five; the real-frequency transform is the serial one on every rank; the
-    adjoint folded into projbar rows is the serial fold's rows bitwise, and
+    ProjRows' chi0, to a few ulp, for one block of all frequencies and blocks
+    of five; the real-frequency transform is the serial one on every rank;
+    the adjoint folded into projbar rows is the serial fold's rows, and
     the tau slices the reverse sweep gathers are the serial slices;
   * the same, and the quasiparticle roots and pole strengths of both solves
     on the explicit, Laplace and pole-model routes, on a SHAPE-SENSITIVE BLAS:
@@ -66,6 +69,8 @@ from src.SingleReference.LinearResponse.space_time import (
     ProjRows, polarizability_projected_rows)
 from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
 from src.gradients.space_time_adjoint import polarizability_tau
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 SIZES = [2, 3, 8]
 #: The artificial count limit: every test array is several windows of it, and
@@ -83,7 +88,7 @@ TILES = [None, FIVE_PER_BLOCK_GB]
 #: Newton root nor a sum can hide a call whose shape followed the rank count.
 ROW_SKEW, COLUMN_SKEW = 2.0 ** -30, 2.0 ** -34
 #: What the 8-point grid's bare quadrature carries at the deeper states'
-#: residue frequencies (4e-4): this is a test of bits, not of the Laplace
+#: residue frequencies (4e-4): this is a test of last bits, not of the Laplace
 #: backend's accuracy, which needs the finer grids the chains build.
 LAPLACE_TOL_OF_THE_GRID = 1e-2
 
@@ -187,7 +192,8 @@ def test_windows_give_the_bits_of_one_call(size, monkeypatch):
     for rank, (a, b) in enumerate(zip(whole, cut)):
         assert sorted(a) == sorted(b)
         for name in a:
-            assert a[name].tobytes() == b[name].tobytes(), (size, rank, name)
+            assert_same(b[name], a[name], unit='1', quantity='root',
+                        label=(size, rank, name))
     for name in WINDOWED:
         sizes = calls.sizes[name]
         # more calls than one per collective and rank: the windows were cut
@@ -207,7 +213,8 @@ def test_the_one_call_results(size):
     for rank, res in enumerate(run_simulated(collectives, size)):
         assert np.array_equal(res['allgather_rows'], gathered)
         assert np.array_equal(res['allgather_blocks'], gathered)
-        assert np.array_equal(res['reduce_sum'], total)
+        assert_same(res['reduce_sum'], total, unit='1', quantity='root',
+                    label='reduce_sum')
         assert np.array_equal(res['broadcast_rows'],
                               rank_array(size - 1, (NROWS, ROW), 4))
         r0, r1 = blocks[rank]
@@ -259,7 +266,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')[:2]
+    X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))[:2]
     eps = np.asarray(mf.mo_energy, float)
     gap = eps[nocc] - eps[nocc - 1]
     nu, wt = gauss_legendre_grid(NFREQ, w0=gap)
@@ -310,8 +317,10 @@ def distributed_rows(w, tile, size):
     return run_simulated(lambda comm: rows_routes(w, tile, comm), size)
 
 
-def same_as_serial(serial, ranks):
-    """(name, rank) of every piece a rank holds that is not serial's bits."""
+def same_as_serial(serial, ranks, exact=False):
+    """(name, rank) of every piece a rank holds that is not serial's to a few
+    ulp (`pins.matches`), or, `exact`, not serial's bits: what a planted
+    shape-sensitive transform must move."""
     naux = serial['rows'].shape[1]
     moved = []
     for rank, got in enumerate(ranks):
@@ -327,7 +336,8 @@ def same_as_serial(serial, ranks):
         checks += [(f'gathered[{k}]', v, serial['rows'][k])
                    for k, v in got['gathered']]
         moved += [(name, rank) for name, a, b in checks
-                  if a.tobytes() != b.tobytes()]
+                  if (a.tobytes() != b.tobytes() if exact else not matches(
+                      a, b, RECORDING_BLAS, unit='1', quantity='root'))]
         assert got['rows'].shape == (NTAU, r1 - r0, naux)
     return moved
 
@@ -350,7 +360,7 @@ def test_rows_are_the_allreduced_rows(water, size):
 
     naux = w['D'].shape[1]
     for rows, cut, held in run_simulated(both, size):
-        assert rows.tobytes() == cut.tobytes()
+        assert_same(rows, cut, unit='1', quantity='root', label='rows')
         assert held <= NTAU * -(-naux // size) * naux * 8
 
 
@@ -372,7 +382,8 @@ def test_serial_rows_are_the_whole_sweep(water):
     serial = rows_routes(w, None)
     whole = polarizability_tau(w['X'], w['D'], w['eps'], w['nocc'], w['grid'],
                                mu=w['mu'])
-    assert serial['rows'].tobytes() == whole.tobytes()
+    assert_same(serial['rows'], whole, unit='1', quantity='root',
+                label='the sweep')
     blk = np.tensordot(w['grid'].cosft_wt, whole, axes=(1, 0))
     for k, chi0 in serial['chi0'].items():
         assert np.allclose(chi0, blk[k], rtol=1e-13, atol=1e-15)
@@ -413,7 +424,7 @@ def test_shape_sensitive_blas_moves_no_rank(water, shape_sensitive, size):
     roots = solves(water)
     for got in run_simulated(lambda comm: solves(water, comm), size):
         for name, value in roots.items():
-            assert got[name].tobytes() == value.tobytes(), (size, name)
+            assert_same(got[name], value, label=(size, name))
 
 
 def test_a_rank_count_shaped_transform_is_caught(water, shape_sensitive,
@@ -424,7 +435,7 @@ def test_a_rank_count_shaped_transform_is_caught(water, shape_sensitive,
     serial = rows_routes(water, FIVE_PER_BLOCK_GB)
     for size in SIZES:
         moved = same_as_serial(serial, distributed_rows(
-            water, FIVE_PER_BLOCK_GB, size))
+            water, FIVE_PER_BLOCK_GB, size), exact=True)
         assert {rank for _, rank in moved} == set(range(size)), (size, moved)
 
 

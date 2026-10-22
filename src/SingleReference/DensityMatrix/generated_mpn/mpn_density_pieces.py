@@ -438,7 +438,7 @@ def overlap3(l_amp, t_amp):
     t3 = t_amp
     result = np.zeros(())
     _tmp0 = einsum('cbaijk,ijkcba->', t3, l3, optimize=True)
-    result += 0.0277778 * _tmp0
+    result += 0.0277777777777778 * _tmp0
     return result
 
 
@@ -447,7 +447,7 @@ def overlap4(l_amp, t_amp):
     t4 = t_amp
     result = np.zeros(())
     _tmp0 = einsum('dcbaijkl,ijkldcba->', t4, l4, optimize=True)
-    result += 0.0017361 * _tmp0
+    result += 0.00173611111111111 * _tmp0
     return result
 
 
@@ -607,13 +607,13 @@ def m4_oo_22(g, kd, o, v, nv, no, l1, l2, l3, l4, t1, t2, t3, t4):
     _tmp3 = einsum('baim,inba->mn', t2, l2, optimize=True)
     result -= 0.5 * _tmp3
     _tmp4 = einsum('mn,cbaijk,ijkcba->mn', kd[o, o], t3, l3, optimize=True)
-    result += 0.0277778 * _tmp4
+    result += 0.0277777777777778 * _tmp4
     _tmp5 = einsum('cbaijm,ijncba->mn', t3, l3, optimize=True)
-    result -= 0.0833333 * _tmp5
+    result -= 0.0833333333333333 * _tmp5
     _tmp6 = einsum('mn,dcbaijkl,ijkldcba->mn', kd[o, o], t4, l4, optimize=True)
-    result += 0.0017361 * _tmp6
+    result += 0.00173611111111111 * _tmp6
     _tmp7 = einsum('dcbaijkm,ijkndcba->mn', t4, l4, optimize=True)
-    result -= 0.0069444 * _tmp7
+    result -= 0.00694444444444444 * _tmp7
     return result
 
 
@@ -650,9 +650,9 @@ def m4_vv_22(g, kd, o, v, nv, no, l1, l2, l3, l4, t1, t2, t3, t4):
     _tmp1 = einsum('faij,ijea->ef', t2, l2, optimize=True)
     result += 0.5 * _tmp1
     _tmp2 = einsum('fbaijk,ijkeba->ef', t3, l3, optimize=True)
-    result += 0.0833333 * _tmp2
+    result += 0.0833333333333333 * _tmp2
     _tmp3 = einsum('fcbaijkl,ijklecba->ef', t4, l4, optimize=True)
-    result += 0.0069444 * _tmp3
+    result += 0.00694444444444444 * _tmp3
     return result
 
 
@@ -689,7 +689,7 @@ def m4_ov_22(g, kd, o, v, nv, no, l1, l2, l3, l4, t1, t2, t3, t4):
     _tmp1 = einsum('ebaijm,ijba->me', t3, l2, optimize=True)
     result += 0.25 * _tmp1
     _tmp2 = einsum('ecbaijkm,ijkcba->me', t4, l3, optimize=True)
-    result -= 0.0277778 * _tmp2
+    result -= 0.0277777777777778 * _tmp2
     return result
 
 

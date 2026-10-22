@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import df as pyscf_df, gto, qmmm, scf
+from pyscf import df as pyscf_df, gto, qmmm
 
 from src.Base.composite_environment import CompositeEnvironment
 from src.Base.constants import HARTREE_TO_EV
@@ -41,6 +41,8 @@ from src.Base.environment import (Environment, NoEnvironment, PointCharges,
 from src.Base.polarizable_sites import PolarizableSites
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
+from tests.pins import assert_same
+from tests.reference_scf import rhf_conv_1e12
 
 WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 BASIS = 'cc-pvdz'
@@ -81,18 +83,10 @@ def quadrupole_charges(q):
     return PointCharges(coords, np.array([q, q, -q, -q]), unit='Bohr')
 
 
-def rhf(mol):
-    mf = scf.RHF(mol)
-    mf.conv_tol = 1e-12
-    mf.kernel()
-    assert mf.converged
-    return mf
-
-
 @pytest.fixture(scope='module')
 def water():
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    return mol, rhf(mol), mol.nelectron // 2
+    return mol, rhf_conv_1e12(mol), mol.nelectron // 2
 
 
 def frontier(mf, nocc, environment=None):
@@ -133,12 +127,14 @@ def test_the_charges_reach_the_ground_state_and_nothing_else(water):
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=BASIS + '-ri')
 
     assert charges.aux_kernel(auxmol) is None
-    assert np.array_equal(env.aux_kernel(auxmol), sites.aux_kernel(auxmol))
+    # two builds of the sites' kernel: to a few ulp
+    assert_same(env.aux_kernel(auxmol), sites.aux_kernel(auxmol),
+                quantity='root', label='charges add no kernel')
     assert env.static_self_energy(None, mol) is None
 
-    mf = env.mean_field(mol, rhf)
+    mf = env.mean_field(mol, rhf_conv_1e12)
     assert isinstance(mf, qmmm.itrf.QMMM)
-    assert mf.e_tot != pytest.approx(rhf(mol).e_tot, abs=1e-6)
+    assert mf.e_tot != pytest.approx(rhf_conv_1e12(mol).e_tot, abs=1e-6)
     with attached_environment(mf, charges):
         assert environment_quasiparticle_shift(mf) is None
 
@@ -165,8 +161,9 @@ def test_one_shift_from_the_summed_kernel_is_not_two_shifts_added(water):
         with attached_environment(mf, CompositeEnvironment(a, b)):
             together = environment_quasiparticle_shift(mf)
         added = shift_a + shift_b
-        assert np.array_equal(CompositeEnvironment(a, b).aux_kernel(auxmol),
-                              a.aux_kernel(auxmol) + b.aux_kernel(auxmol))
+        assert_same(CompositeEnvironment(a, b).aux_kernel(auxmol),
+                    a.aux_kernel(auxmol) + b.aux_kernel(auxmol),
+                    quantity='root', label='summed kernel')
         relative = abs(together[nocc - 1] / added[nocc - 1] - 1.0)
         assert relative == pytest.approx(expected, rel=0.25)
         assert abs(together[nocc - 1]) < abs(added[nocc - 1])
@@ -181,7 +178,7 @@ def test_the_charges_do_not_move_the_sites_shift_to_first_order(water):
     charges = quadrupole_charges(QUADRUPOLE_Q)
     with attached_environment(mf, sites):
         alone = environment_quasiparticle_shift(mf)
-    polarized = charges.mean_field(mol, rhf)
+    polarized = charges.mean_field(mol, rhf_conv_1e12)
     with attached_environment(polarized, CompositeEnvironment(charges, sites)):
         together = environment_quasiparticle_shift(polarized)
     assert alone[nocc - 1] * HARTREE_TO_EV == pytest.approx(0.0452, abs=1e-3)
@@ -204,7 +201,7 @@ def test_a_uniform_crystal_field_shifts_the_levels_and_not_the_gap(water):
     gas = frontier(mf, nocc)
     for sign in (1.0, -1.0):
         charges = shell_charges(sign * SHELL_Q)
-        polarized = charges.mean_field(mol, rhf)
+        polarized = charges.mean_field(mol, rhf_conv_1e12)
         homo, lumo = frontier(polarized, nocc)
         d_homo, d_lumo = homo - gas[0], lumo - gas[1]
         assert abs(d_homo + sign * shell_potential(SHELL_Q)) < 5e-3
@@ -238,7 +235,7 @@ def test_a_four_charge_quadrupole_is_not_a_uniform_potential(water):
     assert abs(v_mo[nocc]) > 2.0 * abs(v_mo[nocc - 1])
 
     gas = frontier(mf, nocc)
-    polarized = charges.mean_field(mol, rhf)
+    polarized = charges.mean_field(mol, rhf_conv_1e12)
     homo, lumo = frontier(polarized, nocc)
     d_homo, d_lumo = homo - gas[0], lumo - gas[1]
     assert abs(d_lumo) > 0.2 and abs(d_homo) < 0.05

@@ -38,9 +38,9 @@ Checks:
      property every other check here misses. All of the above are pointwise --
      a reduction, a consistency relation, a limit at fixed geometry. The
      integer collapse fails in a way none of them can see: nocc changes in
-     STEPS as the cell is strained, so E_c jumps. That was found by an
-     equation-of-state scan of BCC Li and not by any unit test, so it gets one
-     here.
+     STEPS as the cell is strained, so E_c jumps. An equation-of-state scan of
+     BCC Li shows it where a pointwise unit test does not, so it gets a check
+     of its own.
 """
 import os
 import sys

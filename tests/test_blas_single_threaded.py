@@ -70,13 +70,15 @@ import pytest
 from pyscf import df as pyscf_df, dft, gto
 
 import src.Base.separable_ri as separable_ri
-from src.Base.constants import BLAS_WRAP_MIN_THREADS, ISDF_DEFAULT_COUNTS
+from src.Base.constants import BLAS_WRAP_MIN_THREADS
 from src.Base.separable_ri import (atomic_grid, build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils import threads
 from src.Base.utils.threads import blas_single_threaded, blas_threads
 import src.SingleReference.GW.qp_solve as qp_solve
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -118,7 +120,7 @@ def isdf_case(atom, basis, aux):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
-        radii[el], origins[el] = atomic_grid(el, mol.basis, aux, ISDF_DEFAULT_COUNTS)
+        radii[el], origins[el] = atomic_grid(el, mol.basis, aux, g1(mol))
     coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
     return dict(mol=mol, coords=coords,
                 auxmol=pyscf_df.addons.make_auxmol(mol, auxbasis=aux))
@@ -218,26 +220,38 @@ def test_a_worker_thread_leaves_the_count_alone():
     running beside it, and it does: wrapping the static exchange build without
     this guard scattered the excited-state chain's force by 1.3e-08 Ha/Bohr
     against a 1e-08 gate. Real ranks are processes and never see this.
+
+    The count is read on the main thread while the worker holds its wrap,
+    since a worker may not read the libraries (`threads._library_threads`):
+    it gets None.
     """
     before = blas_threads()
     seen = {}
+    entered, release = threading.Event(), threading.Event()
 
     def inside_a_worker():
         with blas_single_threaded(min_threads=1) as handle:
             seen['handle'] = handle
             seen['count'] = blas_threads()
+            entered.set()
+            release.wait()
 
     worker = threading.Thread(target=inside_a_worker)
     worker.start()
+    entered.wait()
+    during = blas_threads()
+    release.set()
     worker.join()
     assert seen['handle'] is None, 'a worker thread got a live limit'
-    assert seen['count'] == before, 'a worker thread moved the whole process'
+    assert seen['count'] is None, 'a worker thread read the libraries'
+    assert during == before, 'a worker thread moved the whole process'
     assert blas_threads() == before
 
 
 @_needs_threadpoolctl
 def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch):
-    """The wrap and the same limit set from outside are the same arithmetic.
+    """The wrap and the same limit set from outside are the same arithmetic
+    (two builds: to a few ulp, `assert_same` of tests/pins.py).
 
     The thread count is faked past the threshold so the wrap arms on a workstation;
     the reference is the same build under the same limit, set from OUTSIDE.
@@ -248,7 +262,8 @@ def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch
     with threads.threadpool_limits(limits=1, user_api='blas'):
         reference = static_exchange_mean_field_matrix(water['mf'],
                                                       water['mol'])
-    assert np.array_equal(inside, reference), 'the wrap moved the static term'
+    assert_same(inside, reference, quantity='root',
+                label='the wrap moved the static term')
 
 
 @_needs_threadpoolctl
@@ -256,7 +271,7 @@ def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch
                     reason='this machine runs enough cores to arm the wrap')
 def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
                                                                     monkeypatch):
-    """The workstation case, bitwise: nothing is limited, so nothing re-associates.
+    """The workstation case: nothing is limited, so nothing re-associates.
 
     A route audit compares `xc_correction_eV` with `==` against a frozen
     record, and a two-thread build dropped to one moves it at 1e-16. Below the
@@ -264,8 +279,8 @@ def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
 
     Water/cc-pVDZ is too small for the count to reach its bits -- the two
     matrices are equal either way here -- so what carries the gate is the
-    assertion that nothing was limited; the bitwise line states the intent the
-    larger records enforce.
+    assertion that nothing was limited; the last line (two builds, so to a
+    few ulp) states the intent the larger records enforce.
     """
     seen = []
 
@@ -280,7 +295,7 @@ def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
     monkeypatch.setattr(qp_solve, 'blas_single_threaded',
                         contextlib.nullcontext)
     plain = static_exchange_mean_field_matrix(water['mf'], water['mol'])
-    assert np.array_equal(wrapped, plain)
+    assert_same(wrapped, plain, quantity='root', label='below the threshold')
 
 
 def armed(**kwargs):

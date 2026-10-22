@@ -1,35 +1,36 @@
-"""The contour deformation in production equals its reference copy, bitwise.
+"""The contour deformation in production equals its reference copy, to a few
+ulp (two computations of each number: `assert_same` of tests/pins.py).
 
 `SingleReference/GW/contour_deformation.py` holds the forward physics,
 `SingleReference/GW/real_screening.py` the explicit real-frequency screening,
-`Solvers/qp_equation.solve_qp_equation_newton_guarded` the pole-guarded Newton,
-and `gradients/contour_deformation_adjoint.py` the adjoints. A move is only a
-move if the numbers do not change, so every gate here is `array_equal`, not a
-tolerance.
+and `gradients/contour_deformation_adjoint.py` the adjoints. Production must
+reproduce the reference numbers, so every gate here is a few ulp, not a
+physics tolerance -- except the root itself: the reference's pole-guarded Newton is
+replaced by the one root finder of `Solvers.qp_equation`,
+which lands on the reference's root wherever
+that root is a quasiparticle, to the finder's tolerance, from another path.
 
-Every gate below fails when the source it watches is broken:
+What breaks each gate:
 
-  * the Newton step, -(w - eps_p - xc - s)/(1 - sp) signed + in
-    `Solvers.qp_equation`: both flat-screening guards, the refusal, the
-    frozen guard and water fail. One step from the oxygen 1s start of
-    water/cc-pVDZ goes to -20.117866411565 Ha correctly and to
-    -20.980701296715 Ha flipped, 0.86 Ha apart, and the iterate lists then
-    share nothing past their first entry.
-  * the residue term of Sigma dropped in `sigma_cd`: 2 fail. It is worth
+  * the residual of `qp_energy_cd`, w - eps_p - xc - s, signed + on s:
+    the flat-screening models and water land on another root. One Newton
+    step from the oxygen 1s start of water/cc-pVDZ goes to -20.117866411565
+    Ha correctly and to -20.980701296715 Ha flipped, 0.86 Ha apart.
+  * the residue term of Sigma dropped in `sigma_cd`. It is worth
     8.1e-3 Ha on that oxygen 1s, 0.520811747276 against 0.512737031268 Ha.
   * the imaginary-axis d-slope of `frequency_factor`, -2 (w^2 - d^2)/den^2
-    signed +: 1 fail. On the pair energies that gate samples, 0.05 to 3 Ha,
+    signed +. On the pair energies that gate samples, 0.05 to 3 Ha,
     the flip moves the slope by 1.0e+03 at w = 0.017, 3.8e+01 at w = 0.31 and
     6.4e-01 at w = 2.5 -- it diverges as the pair energy meets the frequency,
     which is where the integrand of Sigma^int is built.
   * the frequency-block split reading cosft_wt at the block-local row instead
-    of the global one: 1 fail. It shows only when a block carries SEVERAL
+    of the global one. It shows only when a block carries SEVERAL
     frequencies, which is why that gate picks a tile budget of two
     frequencies per block: at one per block the two indices coincide and the
     broken split passes.
   * the split transforming only the rows it owns instead of its serial
-    blocks: 1 fail, the same gate, on the row-count-sensitive tensordot.
-  * `_f_rpa` delegating its real-axis eta = 0 branch as well: 1 fail. That
+    blocks: the same gate, on the row-count-sensitive tensordot.
+  * `_f_rpa` delegating its real-axis eta = 0 branch as well. That
     branch is a/(a^2+0) - b/(b^2+0) against `frequency_factor`'s 1/a - 1/b,
     the same function up to 5.7e-14 apart, and the RPA numbers are pinned to
     its own spelling.
@@ -47,8 +48,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.Base.constants import (QP_POLE_OFFSET, QP_POLE_OFFSET_MIN,
-                                QP_POLE_STRENGTH_MIN)
+from src.Base.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import contour_deformation as prod
 from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
@@ -59,15 +59,17 @@ from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     frequency_blocks, owned_frequency_blocks)
 from src.SingleReference.base import get_occ_virt_indices
-from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
 from src.gradients import contour_deformation_adjoint as adjoint
 from src.gradients import qp_space_time as qst
 from src.gradients import space_time_adjoint as sta
 from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
+from tests.pins import assert_same
 
 # --------------------------------------------------------- the reference code
 # Verbatim reference implementations: a gate that recomputed the reference
-# through production would gate nothing.
+# through production would gate nothing. The retired guard's floor, from the
+# constants it was removed from with it.
+QP_POLE_OFFSET_MIN = 1e-9
 
 def _old_f_imaginary(d, nu):
     den = d ** 2 + nu ** 2
@@ -198,39 +200,17 @@ def _reference_newton(p, Bp, eps, nocc, nu_points, nu_weights, wc,
     residues = prod.residue_set(eps, nocc, w)
     sp = prod.sigma_cd_slope(p, w, Bp, eps, nocc, nu_points, nu_weights,
                              residues, wc, **common)
+    # a converged root is returned with its Z, the quasiparticle threshold
+    # read by the caller (production's rule)
     z = 1.0 / (1.0 - sp)
-    if z < QP_POLE_STRENGTH_MIN and linearize_on_capture:
-        w_lin = float(eps[p] + (QP_POLE_OFFSET if p < nocc
-                                else -QP_POLE_OFFSET))
-        res_lin = prod.residue_set(eps, nocc, w_lin)
-        if trace is not None:
-            trace.append(w_lin)
-        s_lin = prod.sigma_cd(p, w_lin, Bp, eps, nocc, nu_points, nu_weights,
-                              residues=res_lin, wc=wc, **common)
-        sp_lin = prod.sigma_cd_slope(p, w_lin, Bp, eps, nocc, nu_points,
-                                     nu_weights, res_lin, wc, **common)
-        w_new = w_lin - (w_lin - eps[p] - xc_correction - s_lin) / (1.0 - sp_lin)
-        warnings.warn(
-            f'the CD Newton for orbital {p} converged on a root with pole '
-            f'strength Z={z:.3f}, below {QP_POLE_STRENGTH_MIN}: that is a '
-            f'satellite at {w:.6f} Ha, not the quasiparticle. Falling back to '
-            f'the LINEARIZED quasiparticle energy {w_new:.6f} Ha. That is a '
-            f'different approximation from the self-consistent root and is '
-            f'not interchangeable with the other orbitals here.',
-            RuntimeWarning, stacklevel=2)
-        w = w_new
-        residues = prod.residue_set(eps, nocc, w)
-        sp = prod.sigma_cd_slope(p, w, Bp, eps, nocc, nu_points, nu_weights,
-                                 residues, wc, **common)
-        z = 1.0 / (1.0 - sp)
     return w, z, residues
 
 
 # ------------------------------------------------------------------- the data
 
-#: The synthetic spectrum of tests/test_cd_pole_guard.py: a flat screening puts
-#: the root inside the guard (-4e-3), outside it (-1e-2) or exactly on the pole
-#: (0.0).
+#: The synthetic spectrum of tests/test_cd_root_beside_an_orbital_energy.py: a
+#: flat screening puts the root inside the retired guard (-4e-3) or outside it
+#: (-1e-2).
 GUARD_EPS = np.array([-0.9, -0.6, -0.35, 0.15, 0.4, 0.8])
 GUARD_NOCC = 3
 GUARD_NU = np.array([0.05, 0.3, 1.0, 4.0])
@@ -260,30 +240,6 @@ def states(nocc):
     return (0, nocc - 2, nocc - 1, nocc)
 
 
-def _traced_solve(p, Bp, eps, nocc, nu_points, nu_weights, wc, trace,
-                  C_ov=None, **kwargs):
-    """`qp_energy_cd`'s two callbacks, recording every omega Sigma is asked for.
-
-    The production Newton takes Sigma through callbacks, so this is where its
-    iterates are visible; `qp_energy_cd` builds exactly these two.
-    """
-    common = dict(eta=0.0, C_ov=C_ov, real_screening=None)
-
-    def sigma(w):
-        trace.append(w)
-        return prod.sigma_cd(p, w, Bp, eps, nocc, nu_points, nu_weights,
-                             residues=prod.residue_set(eps, nocc, w), wc=wc,
-                             **common)
-
-    def slope(w):
-        return prod.sigma_cd_slope(p, w, Bp, eps, nocc, nu_points, nu_weights,
-                                   prod.residue_set(eps, nocc, w), wc, **common)
-
-    w, z = solve_qp_equation_newton_guarded(sigma, slope, eps, p, nocc,
-                                            **kwargs)
-    return w, z, prod.residue_set(eps, nocc, w)
-
-
 # ------------------------------------------------------------------- the gates
 
 def test_the_gradient_side_holds_no_second_copy():
@@ -292,28 +248,31 @@ def test_the_gradient_side_holds_no_second_copy():
     space_time_adjoint import back from production is production's object."""
     assert issubclass(adjoint.ExplicitRealScreeningAdjoint,
                       ExplicitRealScreening)
-    for name in ('cd_screening_contraction', 'cd_screening_contraction_multi',
-                 'residue_route_auto'):
+    for name in ('cd_screening_contraction_multi', 'residue_route_auto'):
         assert getattr(qst, name) is getattr(prod, name), name
     assert sta.owned_frequency_blocks is owned_frequency_blocks
 
 
 def test_frequency_factor_reproduces_the_old_formulas():
-    """The dedup onto one function has to be a rounding-for-rounding copy."""
+    """The dedup onto one function has to be a rounding-for-rounding copy (to
+    a few ulp: the old formula is evaluated again)."""
     rng = np.random.default_rng(20250918)
     d = rng.uniform(0.05, 3.0, size=37)
     for w in (0.0, 1e-13, 0.017, 0.31, 2.5, -0.44):
         f, dfd, dfw = frequency_factor(d, w, True, slopes=True)
         f_old, dfd_old = _old_f_imaginary(d, w)
-        assert np.array_equal(f, f_old) and np.array_equal(dfd, dfd_old)
+        assert_same(f, f_old, unit='1', quantity='root', label=('f', w))
+        assert_same(dfd, dfd_old, unit='1', quantity='root', label=('df/dd', w))
         assert dfw is None
-        assert np.array_equal(frequency_factor(d, w, True), f_old)
+        assert_same(frequency_factor(d, w, True), f_old, unit='1',
+                    quantity='root', label=('f alone', w))
         for eta in (0.0, 1e-3, 0.05):
             got = frequency_factor(d, w, False, eta, slopes=True)
             for a, b in zip(got, _old_f_real(d, w, eta)):
-                assert np.array_equal(a, b), (w, eta)
-            assert np.array_equal(frequency_factor(d, w, False, eta),
-                                  _old_f_real(d, w, eta)[0])
+                assert_same(a, b, unit='1', quantity='root', label=(w, eta))
+            assert_same(frequency_factor(d, w, False, eta),
+                        _old_f_real(d, w, eta)[0], unit='1', quantity='root',
+                        label=(w, eta, 'f alone'))
 
 
 def test_the_rpa_frequency_factor_is_untouched():
@@ -328,8 +287,8 @@ def test_the_rpa_frequency_factor_is_untouched():
         lr = type('LR', (), {'eta': eta})()
         for w in (0.0, 1e-13, 0.017, 0.31, 2.5, -0.44):
             for axis in (True, False):
-                assert np.array_equal(_f_rpa(lr, d, w, axis),
-                                      _old_f_rpa(lr, d, w, axis)), (eta, w, axis)
+                assert_same(_f_rpa(lr, d, w, axis), _old_f_rpa(lr, d, w, axis),
+                            unit='1', quantity='root', label=(eta, w, axis))
     lr = type('LR', (), {'eta': 0.0})()
     shared = frequency_factor(d, 0.31, False, 0.0)
     own = _f_rpa(lr, d, 0.31, False)
@@ -338,88 +297,47 @@ def test_the_rpa_frequency_factor_is_untouched():
     assert np.abs(shared - own).max() < 1e-12
 
 
+def assert_same_root(new, ref, where):
+    """The production root is the reference loop's where that one is a
+    quasiparticle: both converged to QP_CD_NEWTON_TOL on one equation, from
+    different paths, and the same residue set frozen at it."""
+    (w_new, z_new, res_new), (w_ref, z_ref, res_ref) = new, ref
+    assert z_ref > QP_WINDOW_Z_MIN, (where, z_ref)
+    assert abs(w_new - w_ref) < 1e-10, (where, w_new - w_ref)
+    assert abs(z_new - z_ref) < 1e-8, (where, z_new - z_ref)
+    assert res_new == res_ref, where
+
+
 @pytest.mark.parametrize('screening', [-4e-3, -1e-2])
-def test_the_guarded_newton_reproduces_the_old_loop_on_the_guard(screening):
-    """Same iterates, root, Z and warnings on the flat-screening models whose
-    root sits inside and outside the pole guard (physical sign, W^c(0) < 0;
-    tests/test_cd_pole_guard.py)."""
+def test_the_root_is_the_old_loops_on_the_flat_models(screening):
+    """The flat-screening models whose root sits inside and outside the
+    retired pole guard (physical sign, W^c(0) < 0;
+    tests/test_cd_root_beside_an_orbital_energy.py)."""
     Bp = np.zeros((3, len(GUARD_EPS)))
     wc = np.full((len(GUARD_NU), len(GUARD_EPS)), screening)
-    ref_trace, new_trace = [], []
-    with warnings.catch_warnings(record=True) as ref_caught:
-        warnings.simplefilter('always')
-        w_ref, z_ref, res_ref = _reference_newton(
-            GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC, GUARD_NU, GUARD_WT, wc,
-            trace=ref_trace)
-    with warnings.catch_warnings(record=True) as new_caught:
-        warnings.simplefilter('always')
-        w_new, z_new, res_new = _traced_solve(
-            GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC, GUARD_NU, GUARD_WT, wc,
-            new_trace)
-    assert prod.qp_energy_cd(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC,
-                             GUARD_NU, GUARD_WT, wc=wc)[:2] == (w_new, z_new)
-    assert new_trace == ref_trace, (new_trace, ref_trace)
-    assert w_new == w_ref and z_new == z_ref and res_new == res_ref
-    assert ([str(c.message) for c in new_caught]
-            == [str(c.message) for c in ref_caught])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        ref = _reference_newton(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC,
+                                GUARD_NU, GUARD_WT, wc)
+    new = prod.qp_energy_cd(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC,
+                            GUARD_NU, GUARD_WT, wc=wc)
+    assert_same_root(new, ref, screening)
 
 
-def test_a_root_on_the_pole_is_refused_with_the_same_words():
-    Bp = np.zeros((3, len(GUARD_EPS)))
-    wc = np.zeros((len(GUARD_NU), len(GUARD_EPS)))
-    with pytest.raises(RuntimeError) as ref:
-        _reference_newton(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC, GUARD_NU,
-                          GUARD_WT, wc)
-    with pytest.raises(RuntimeError) as new:
-        prod.qp_energy_cd(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC, GUARD_NU,
-                          GUARD_WT, wc=wc)
-    assert str(new.value) == str(ref.value)
-
-
-def test_the_frozen_guard_warns_exactly_as_it_did():
-    Bp = np.zeros((3, len(GUARD_EPS)))
-    wc = np.full((len(GUARD_NU), len(GUARD_EPS)), -4e-3)
-    ref_guard, new_guard = {}, {}
-    with warnings.catch_warnings(record=True) as ref_caught:
-        warnings.simplefilter('always')
-        w_ref = _reference_newton(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC,
-                                  GUARD_NU, GUARD_WT, wc, relax_offset=False,
-                                  guard_out=ref_guard)[0]
-    with warnings.catch_warnings(record=True) as new_caught:
-        warnings.simplefilter('always')
-        w_new = prod.qp_energy_cd(GUARD_NOCC - 1, Bp, GUARD_EPS, GUARD_NOCC,
-                                  GUARD_NU, GUARD_WT, wc=wc,
-                                  relax_offset=False, guard_out=new_guard)[0]
-    assert w_new == w_ref and new_guard == ref_guard
-    assert ([str(c.message) for c in new_caught]
-            == [str(c.message) for c in ref_caught])
-    assert any('frozen' in str(c.message) for c in new_caught)
-
-
-def test_the_guarded_newton_reproduces_the_old_loop_on_water(water):
+def test_the_root_is_the_old_loops_on_water(water):
     """The real thing: the oxygen 1s, both states below the gap, the first
     above it. The core state sweeps every occupied residue, so this exercises
-    the explicit real-frequency backend as well as the loop."""
+    the explicit real-frequency backend as well as the root search."""
     eps, nocc, b, c_ov, nu, wt = water
     d = ov_energies(eps, nocc)
     for p in states(nocc):
         bp = b[:, p, :]
         wc = prod.wc_explicit(bp, c_ov, d, nu)
-        ref_trace, new_trace = [], []
-        with warnings.catch_warnings(record=True) as ref_caught:
-            warnings.simplefilter('always')
-            w_ref, z_ref, res_ref = _reference_newton(
-                p, bp, eps, nocc, nu, wt, wc, C_ov=c_ov, trace=ref_trace)
-        with warnings.catch_warnings(record=True) as new_caught:
-            warnings.simplefilter('always')
-            w_new, z_new, res_new = _traced_solve(
-                p, bp, eps, nocc, nu, wt, wc, new_trace, C_ov=c_ov)
-        assert prod.qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc,
-                                 C_ov=c_ov)[:2] == (w_new, z_new)
-        assert new_trace == ref_trace, p
-        assert w_new == w_ref and z_new == z_ref and res_new == res_ref, p
-        assert ([str(c.message) for c in new_caught]
-                == [str(c.message) for c in ref_caught]), p
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            ref = _reference_newton(p, bp, eps, nocc, nu, wt, wc, C_ov=c_ov)
+        new = prod.qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov)
+        assert_same_root(new, ref, p)
 
 
 def test_the_residue_term_is_what_the_gate_is_worth(water):
@@ -440,8 +358,8 @@ def test_the_residue_term_is_what_the_gate_is_worth(water):
 
 
 def test_a_flipped_newton_step_would_not_survive_the_gate(water):
-    """The iterate comparison is sensitive to the step itself, not only to the
-    root: one step from the core start goes 0.86 Ha the other way."""
+    """The residual's sign is worth a root: one Newton step from the core
+    start goes 0.86 Ha the other way."""
     eps, nocc, b, c_ov, nu, wt = water
     d = ov_energies(eps, nocc)
     bp = b[:, 0, :]
@@ -457,8 +375,8 @@ def test_a_flipped_newton_step_would_not_survive_the_gate(water):
 
 
 def test_the_frequency_blocks_are_the_same_generator(monkeypatch):
-    """`owned_frequency_blocks` moved to production; the gradient package
-    imports it back, and both walk the same blocks.
+    """`owned_frequency_blocks` lives in production; the gradient package
+    imports it, and both walk the same blocks.
 
     The tile budget is picked so the axis really is split -- more than one
     block and more than one frequency in a block -- because a one-frequency
@@ -489,7 +407,7 @@ def test_the_frequency_blocks_are_the_same_generator(monkeypatch):
                                               **kwargs))
         assert [k for k, _ in one] == [k for k, _ in two]
         for (_, x), (_, y) in zip(one, two):
-            assert np.array_equal(x, y)
+            assert_same(x, y, unit='1', quantity='root', label=kwargs)
         # each row is its serial block's row, and the blocks together carry
         # every owned frequency once
         serial = {}
@@ -500,7 +418,8 @@ def test_the_frequency_blocks_are_the_same_generator(monkeypatch):
                 cosft_wt[ks], proj_tau, axes=(1, 0))))
         for ks, blk in one:
             for k, row in zip(ks, blk):
-                assert np.array_equal(row, serial[k]), (kwargs, k)
+                assert_same(row, serial[k], unit='1', quantity='root',
+                            label=(kwargs, k))
         carried = [k for ks, _ in one for k in ks]
         assert carried == sorted(kwargs.get('freq_indices',
                                             range(len(cosft_wt)))), kwargs

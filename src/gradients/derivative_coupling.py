@@ -51,12 +51,16 @@ Everything ISC, rISC and internal conversion need BETWEEN excited states is
 excited-excited.
 """
 import numpy as np
-from pyscf import gto
 
-from src.Base.constants import NUCLEAR_FD_STEP
-from src.gradients.grad_engine import one_electron_skeleton
+from src.Base.constants import (COUPLING_GAP_MIN, NUCLEAR_FD_STEP,
+                                ORBITAL_MULTIPLIER_DEGENERACY_TOL,
+                                ORBITAL_MULTIPLIER_RESIDUAL_TOL)
+from src.Base.numerics import numerics_identity, require_same_identity
+from src.Base.pyscf_interface import occupied_count
+from src.Base.geometry import molecule_at
 from src.gradients.isdf_derivatives import (fock_partial_skeleton,
                                             response_kernel, solve_lambda)
+from src.gradients.one_electron import one_electron_skeleton
 from src.properties.nonadiabatic import mo_overlap
 from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
                                        GROUND_SPIN_FACTOR)
@@ -85,9 +89,7 @@ def displaced(mol, crd, atom, axis, delta):
     """`mol` with one Cartesian component of one nucleus moved, in Bohr."""
     c = np.array(crd, float)
     c[atom, axis] += delta
-    return gto.M(atom=[(mol.atom_symbol(i), tuple(c[i])) for i in range(mol.natm)],
-                 basis=mol.basis, unit='Bohr', charge=mol.charge,
-                 spin=mol.spin, verbose=0)
+    return molecule_at(mol, c)
 
 
 def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
@@ -123,7 +125,7 @@ def _transition_weight(goo, gvv, nocc, norb):
     return EXCITED_SPIN_FACTOR * gam
 
 
-def _sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
+def sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
     """(natm, 3) sum_pq weight_pq Sigma_pq, Sigma_pq = <phi_p | d phi_q / dR>
     at FIXED coefficients -- one `int1e_ipovlp` contraction, no response.
 
@@ -221,6 +223,10 @@ def configuration_coupling(mol, mf, nocc, goo, gvv):
     Only the block-diagonal blocks of A enter: the state-to-state density of
     two singly excited states has no occupied-virtual block, so the one part of
     the rotation a gauge cannot fix never appears.
+
+    A pair inside ORBITAL_MULTIPLIER_DEGENERACY_TOL has no canonical rotation:
+    it is dropped when gamma vanishes on it (by symmetry) and refused when it
+    does not, as `multipliers` refuses such a pair's right-hand side.
     """
     c = np.asarray(mf.mo_coeff, float)
     eps = np.asarray(mf.mo_energy, float)
@@ -231,13 +237,22 @@ def configuration_coupling(mol, mf, nocc, goo, gvv):
     block = np.zeros((norb, norb), bool)
     block[:nocc, :nocc] = block[nocc:, nocc:] = True
     np.fill_diagonal(block, False)
-    safe = np.where(np.abs(de) < 1e-8, np.inf, de)
+    degenerate = block & (np.abs(de) < ORBITAL_MULTIPLIER_DEGENERACY_TOL)
+    if degenerate.any():
+        bad = float(np.abs(gam[degenerate]).max())
+        if bad > ORBITAL_MULTIPLIER_RESIDUAL_TOL:
+            raise RuntimeError(
+                f'a degenerate orbital pair carries state-to-state density '
+                f'{bad:.2e}: its canonical rotation is undefined, so the '
+                f'configuration term is too; symmetry-adapted treatment '
+                f'needed')
+    safe = np.where(degenerate, np.inf, de)
     g = np.where(block, gam / safe, 0.0)
     w_f = 0.5 * (g + g.T)
     w_s = np.where(block, -g * eps[None, :] + 0.5 * gam, 0.0)
     w_s = 0.5 * (w_s + w_s.T)
     return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
-            + _sigma_contraction(mol, c, gam, True))
+            + sigma_contraction(mol, c, gam, True))
 
 
 def ground_state_coupling(mol, mf, nocc, xn, yn):
@@ -289,12 +304,28 @@ def ov_coupling(mol, mf, nocc, w):
     w_sig = np.zeros((norb, norb))
     w_sig[:nocc, nocc:] = w
     return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
-            + _sigma_contraction(mol, mf.mo_coeff, w_sig, False))
+            + sigma_contraction(mol, mf.mo_coeff, w_sig, False))
 
 
-def occupied_count(mf):
-    """The closed-shell occupied count of `mf`."""
-    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
+def require_coupling_gap(gap, m, n):
+    """Refuse a pair of roots closer than COUPLING_GAP_MIN: the amplitude
+    term divides by their gap, and two roots that close have no well-defined
+    pair of eigenvectors to differentiate."""
+    if not abs(gap) >= COUPLING_GAP_MIN:
+        raise RuntimeError(
+            f'roots {m!r} and {n!r} are {abs(gap):.2e} Ha apart, below '
+            f'COUPLING_GAP_MIN = {COUPLING_GAP_MIN:.0e}: their derivative '
+            f'coupling divides by that gap and is not defined there')
+
+
+def require_evaluation_of(chain, evaluation, where):
+    """Refuse an evaluation taken on other numerics than `chain`'s: its
+    vectors are roots of another Casida matrix. A chain of None (the
+    evaluation alone) or a hand-built one is not checked."""
+    if chain is not None:
+        require_same_identity(numerics_identity(chain),
+                              getattr(evaluation, 'numerics_identity', None),
+                              where)
 
 
 def evaluated_root(evaluation, key):
@@ -307,6 +338,38 @@ def evaluated_root(evaluation, key):
     return spin, evaluation.root[key], evaluation.spectrum[spin]
 
 
+def evaluated_coupling(evaluation, m, n):
+    """(d_mn, diagnostics) in 1/Bohr between two roots of one
+    `StateEvaluation`, m and n its state keys: the interstate numerator it
+    computed over Omega_n - Omega_m, plus the configuration term's one
+    Z-vector. The numerator is symmetric in the pair, so either ordering held
+    in `evaluation.interstate` serves, and d_nm = -d_mn.
+    """
+    pair = (m, n) if (m, n) in evaluation.interstate else (n, m)
+    if pair not in evaluation.interstate:
+        raise ValueError(f'the evaluation holds no interstate numerator for '
+                         f'{(m, n)!r}; pass couplings=[{(m, n)!r}] to '
+                         f'evaluate')
+    flags = evaluation.require_scf_quality('evaluated_coupling')
+    num, diags = evaluation.interstate[pair]
+    spin_m, rm, (om, xm, ym) = evaluated_root(evaluation, m)
+    spin_n, rn, (_, xn, yn) = evaluated_root(evaluation, n)
+    if spin_m != spin_n:
+        raise ValueError(f'{m!r} and {n!r} are of different spin')
+    gap = float(om[rn] - om[rm])
+    require_coupling_gap(gap, m, n)
+    mol, mf = evaluation.mol, evaluation.mf
+    nocc = occupied_count(mf)
+    goo, gvv = state_to_state_density(nocc, xm[:, rm], ym[:, rm],
+                                      xn[:, rn], yn[:, rn])
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
+    amp = np.asarray(num) / gap
+    return amp + csf, dict(diags, gap=gap,
+                           branch_amplitude=float(np.abs(amp).max()),
+                           branch_configuration=float(np.abs(csf).max()),
+                           scf_flags=flags)
+
+
 def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     """(d_mn, diagnostics) in 1/Bohr between two BSE roots of `chain`.
 
@@ -315,35 +378,32 @@ def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     gap changes sign. One forward pass serves the numerator and the
     state-to-state density.
 
-    evaluation: a `StateEvaluation` whose `interstate` holds (m, n), m and n
-    its state keys; the numerator, the vectors and the mean field are read off
-    it, `chain` is not used, and only the configuration term's Z-vector runs.
+    evaluation: a `StateEvaluation` whose `interstate` holds the pair, m and n
+    its state keys (`evaluated_coupling`); `chain` is not used except to
+    refuse an evaluation of other numerics, and only the configuration term's
+    Z-vector runs.
     """
     if m == n:
         raise ValueError('a derivative coupling needs two different roots')
     if evaluation is not None:
-        if (m, n) not in evaluation.interstate:
-            raise ValueError(f'the evaluation holds no interstate numerator '
-                             f'for {(m, n)!r}; pass couplings=[{(m, n)!r}] to '
-                             f'evaluate')
-        num, diags = evaluation.interstate[(m, n)]
-        _, rm, (_, xn, yn) = evaluated_root(evaluation, m)
-        _, rn, _ = evaluated_root(evaluation, n)
-        mol, mf = evaluation.mol, evaluation.mf
-    else:
-        chain.require_differentiable_environment()
-        mol, mf = chain.mean_field(mol, mf)
-        om, pieces = chain._forward(mol, mf)
-        xn, yn = pieces[10], pieces[11]
-        num, diags = chain._interstate_gradient(pieces, om, m, n)
-        rm, rn = m, n
+        require_evaluation_of(chain, evaluation, 'derivative coupling')
+        return evaluated_coupling(evaluation, m, n)
+    chain.require_differentiable_environment()
+    mol, mf = chain.mean_field(mol, mf)
+    flags = chain.require_scf_quality(mf, 'analytic_coupling')
+    om, pieces = chain._forward(mol, mf)
+    xn, yn = pieces[10], pieces[11]
+    num, diags = chain._interstate_gradient(pieces, om, m, n)
+    require_coupling_gap(diags['gap'], m, n)
+    rm, rn = m, n
     nocc = occupied_count(mf)
     goo, gvv = state_to_state_density(nocc, xn[:, rm], yn[:, rm],
                                       xn[:, rn], yn[:, rn])
     csf = configuration_coupling(mol, mf, nocc, goo, gvv)
     amp = num / diags['gap']
     return amp + csf, dict(diags, branch_amplitude=float(np.abs(amp).max()),
-                           branch_configuration=float(np.abs(csf).max()))
+                           branch_configuration=float(np.abs(csf).max()),
+                           scf_flags=flags)
 
 
 def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
@@ -356,17 +416,25 @@ def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
     singlet); its vectors and mean field are used and no forward pass runs.
     """
     if evaluation is not None:
+        require_evaluation_of(chain, evaluation, 'ground-state coupling')
         spin, root, (om, xn, yn) = evaluated_root(evaluation, n)
         if spin != 'singlet':
             raise ValueError(f'd_0n couples the closed-shell ground state to a '
                              f'singlet; state {n!r} is a {spin}')
+        flags = evaluation.require_scf_quality('analytic_ground_coupling')
         mol, mf = evaluation.mol, evaluation.mf
     else:
+        if chain.spin != 'singlet':
+            raise ValueError(f'd_0n couples the closed-shell ground state to a '
+                             f'singlet; this chain solves {chain.spin} roots')
+        chain.require_differentiable_environment()
         mol, mf = chain.mean_field(mol, mf)
+        flags = chain.require_scf_quality(mf, 'analytic_ground_coupling')
         om, pieces = chain._forward(mol, mf)
         xn, yn = pieces[10], pieces[11]
         root = n
     d = ground_state_coupling(mol, mf, occupied_count(mf), xn[:, root],
                               yn[:, root])
     return d, {'omega_n': float(om[root]), 'gap': float(om[root]),
-               'branch_configuration': float(np.abs(d).max())}
+               'branch_configuration': float(np.abs(d).max()),
+               'scf_flags': flags}

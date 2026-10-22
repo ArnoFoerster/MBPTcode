@@ -37,12 +37,20 @@ otherwise a second route to a different number.
 """
 import numpy as np
 
-from src.Base.constants import LAPLACE_SCREENING_TOL
+from src.Base.constants import LAPLACE_SCREENING_TOL, RESIDUE_ON_CONTOUR_TOL
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.SingleReference.LinearResponse.space_time import \
     laplace_representation_error
 from src.SingleReference.base import get_occ_virt_indices
+
+
+class ResidueRefused(ValueError):
+    """A residue of the contour asks W at a real frequency its backend cannot
+    give: the tau grid does not carry it, or no particle-hole block was
+    supplied. The quasiparticle root search counts that frequency as
+    unknown and raises this only if no quasiparticle is found where Sigma is
+    known (`Solvers.qp_equation.SampledEquation`)."""
 
 
 class ExplicitRealScreening:
@@ -128,7 +136,7 @@ class LaplaceRealScreening:
                 gap = self.eps[virt].min() - self.eps[occ].max()
             else:
                 gap = float(self.pair_energies.min())
-            raise ValueError(
+            raise ResidueRefused(
                 f"real frequency {freq:.4f} Ha is not carried by the tau grid: "
                 f"bare-quadrature error {err:.1e} against tol {self.tol:.0e}; "
                 f"gap - freq = {gap - freq:.4f} Ha, the grid's e_min is "
@@ -144,6 +152,20 @@ class LaplaceRealScreening:
     def slope(self, freq, y):
         _, dc = self._weights(freq)
         return float(y @ np.tensordot(dc, self.proj_tau, axes=(0, 0)) @ y)
+
+
+def residue_set(eps, nocc, omega, tol=RESIDUE_ON_CONTOUR_TOL):
+    """[(q, weight)] for the poles of G the deformation sweeps over."""
+    out = []
+    for q in range(len(eps)):
+        gap = eps[q] - omega
+        if abs(gap) < tol:
+            out.append((q, -0.5 if q < nocc else 0.5))
+        elif q < nocc and gap > 0.0:
+            out.append((q, -1.0))
+        elif q >= nocc and gap < 0.0:
+            out.append((q, 1.0))
+    return out
 
 
 def ov_energies(eps, nocc):

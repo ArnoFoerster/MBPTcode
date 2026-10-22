@@ -33,7 +33,6 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import QB_QP_ROOT_TOL
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.eri_blocks import mo_eri
 from src.SingleReference.GW.quasi_boson import QPqb, largest_weight_root
@@ -41,12 +40,11 @@ from src.SingleReference.LinearResponse.quasi_boson_bse import BSEqb
 from src.gradients.dense_surfaces import tight_rhf
 from src.properties.optimize import optimize
 from src.properties.surfaces import potential_energy_surface
+from tests.pins import class_bar
 from tests.test_dense_surfaces import FD_TOL
 
-#: A root found by `largest_weight_root` sits within QB_QP_ROOT_TOL of the root
-#: of the equation it solved (its last Newton step), and that equation within
-#: QB_QP_ROOT_TOL of the full one (the couplings it dropped, by Weyl).
-ROOT_TOL = 2.0 * QB_QP_ROOT_TOL
+#: Roots and pole strengths of the two routes: the roots bar of tests/pins.py.
+ROOT_TOL = class_bar('root')
 
 #: Central-difference steps (Bohr) of the force check. An all-orbital surface
 #: carries continuum orbitals whose largest-weight root changes branch within

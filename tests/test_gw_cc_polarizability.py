@@ -1,6 +1,6 @@
 """Tests for the EOM-CC polarizability and the G0W@CC self-energy
 (src/SingleReference/GW/gw_cc.py), following Lewis & Berkelbach,
-JCTC 15, 2925 (2019) (papers/04b86ad6-...pdf).
+JCTC 15, 2925 (2019).
 
 For the 2-electron systems H2 and He the EOM-CC polarizability is EXACT, so:
 - alpha(0) must match a finite-field FCI polarizability, and

@@ -33,7 +33,9 @@ import time
 
 import numpy as np
 
-from src.Base.constants import BSE_DENSE_MAX_GB, HARTREE_TO_EV, KAPPA
+from src.Base.constants import (BSE_DENSE_MAX_GB, BSE_SOLVERS, HARTREE_TO_EV,
+                                KAPPA)
+from src.Base.numerics import numerics_or_default
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies,
                                       get_two_electron_integrals_chemist,
@@ -44,22 +46,22 @@ from src.SingleReference.GW.space_time import (_unpack_factors,
                                                separable_factors,
                                                solve_qp_diagonal_space_time)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (bse_pair_diagonal,
+from src.SingleReference.LinearResponse.davidson import (UnstableReference,
                                                          isdf_df_coefficients,
                                                          oscillator_strengths,
+                                                         refuse_second_numerics,
                                                          solve_bse_df,
                                                          solve_bse_isdf)
+from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse.space_time import (
+    static_screening_grid, static_screening_matrix)
 
-SOLVERS = ('davidson', 'dense')
-#: What `solver` accepts: a route by name, or 'auto' for `solver_choice`, which
-#: is resolved to one of SOLVERS before any other check runs.
-SOLVER_CHOICES = SOLVERS + ('auto',)
 INTEGRALS = ('isdf', 'df', 'full')
 
 #: Keywords each half of the route matrix accepts on top of the front end's own.
-DAVIDSON_KWARGS = ('conv_tol', 'max_cycle', 'guess_factor', 'progress')
-DENSE_KWARGS = ('tda',)
+DAVIDSON_KWARGS = ('progress',)
+DENSE_KWARGS = ()
 ISDF_KWARGS = ('factors', 'auxbasis', 'radii', 'counts', 'n_start',
                'grid_accuracy', 'distribute', 'comm')
 #: The two of those that only the matrix-free ISDF route can act on: it is the
@@ -67,7 +69,7 @@ ISDF_KWARGS = ('factors', 'auxbasis', 'radii', 'counts', 'n_start',
 #: the separable fit itself takes neither keyword. The dense route refuses them
 #: rather than forward a distributed request into a serial solve.
 ISDF_MPI_KWARGS = ('distribute', 'comm')
-SHARED_KWARGS = ('probe', 'gw_kwargs')
+SHARED_KWARGS = ('probe', 'gw_kwargs', 'tda')
 
 
 def solver_choice(n_ov, tda=False):
@@ -89,7 +91,7 @@ def solver_choice(n_ov, tda=False):
     return 'dense' if 2 * int(n_ov)**2 * 8 / 1e9 <= BSE_DENSE_MAX_GB else 'davidson'
 
 
-def solve_bse(mf, mol=None, nocc=None, nroots=5, solver='davidson',
+def solve_bse(mf, mol=None, nocc=None, numerics=None, solver='davidson',
               integrals='isdf', qp='G0W0', spin='singlet',
               self_consistency='G0W0', screen_at='mean-field', **route_kwargs):
     """BSE excitation energies: mean field in, (omega, X, Y, info) out.
@@ -117,21 +119,29 @@ def solve_bse(mf, mol=None, nocc=None, nroots=5, solver='davidson',
     screen_at:  which spectrum builds W when `qp` is an explicit array,
                 'mean-field' (default, the standard G0W0-BSE split) or 'qp'.
                 Ignored otherwise. See `solve_bse_isdf` for the full rule.
-    nroots:     roots wanted. None is the whole spectrum and is dense-only.
-    probe:      measure min eig(A - B) and refuse the solve while it is
+    numerics:   the choices (`Numerics`; None for the defaults): `bse.nroots`
+                is the roots wanted, None the whole spectrum and dense-only;
+                the Davidson routes read its residual, cycle cap, guess
+                count and preconditioner (`davidson.bse_settings`).
+    probe:      off (False) by default on every route. True or 'sign'
+                measures min eig(A - B) and refuses the solve while it is
                 negative, the mean-field instability regime where the Casida
                 omega^2 reduction is invalid. Davidson estimates it matrix-free
-                ('sign' stops as soon as the sign is proven); the dense route
-                reads it exactly off the A and B it just built, and skips it
-                under `tda`, which never makes that reduction.
+                ('sign' stops as soon as the sign is proven) and on large runs
+                it can cost more than the solve; the dense route reads it
+                exactly off the A and B it just built. Without it the Davidson
+                routes still refuse an unstable reference when their projected
+                (A - B) breaks down. info['min_eig_amb'] is None when it did
+                not run. Every route skips it under `tda`, which never makes
+                that reduction.
 
     Route-specific keywords, rejected rather than ignored when they belong to a
-    route that was not chosen: `conv_tol`, `max_cycle`, `guess_factor` and
-    `progress` are the Davidson iteration's; `tda` (solve with Y = 0) is the
-    dense solver's; `factors`, `auxbasis`, `radii`, `counts`, `n_start` and
-    `grid_accuracy` belong to the separable fit, and `distribute`/`comm` to the
+    route that was not chosen: `progress` is the Davidson iteration's; `factors`, `auxbasis`, `radii`, `counts`, `n_start`
+    and `grid_accuracy` belong to the separable fit, and `distribute`/`comm` to the
     matrix-free ISDF route that divides the tau axis and the rows of Zt over
-    MPI ranks. `gw_kwargs` reaches the GW step on any route.
+    MPI ranks. `gw_kwargs` reaches the GW step on any route, and `tda`
+    (the Tamm-Dancoff BSE, A X = omega X with Y = 0) every solver: the
+    Davidson routes then diagonalize the A half of their block action.
 
     Returns (omega, X, Y, info), with omega in Hartree ascending, X and Y of
     shape (n_pair, nroots) normalized <X|X> - <Y|Y> = 1, and info carrying
@@ -148,8 +158,8 @@ def solve_bse(mf, mol=None, nocc=None, nroots=5, solver='davidson',
     nocc = mol.nelectron // 2 if nocc is None else nocc
     solver = str(solver).lower()
     integrals = str(integrals).lower()
-    if solver not in SOLVER_CHOICES:
-        raise ValueError(f"solver={solver!r}; choose one of {list(SOLVER_CHOICES)}.")
+    if solver not in BSE_SOLVERS:
+        raise ValueError(f"solver={solver!r}; choose one of {list(BSE_SOLVERS)}.")
     if integrals not in INTEGRALS:
         raise ValueError(f"integrals={integrals!r}; choose one of {list(INTEGRALS)}.")
     if spin not in KAPPA:
@@ -175,24 +185,32 @@ def solve_bse(mf, mol=None, nocc=None, nroots=5, solver='davidson',
             "can hold (pq|rs) can hold A and B too, so the exact tensor pairs "
             "with solver='dense'. Use solver='dense' to keep the exact "
             "integrals, or integrals='df'/'isdf' to keep the matrix-free solver.")
+    nroots = numerics_or_default(numerics).bse.nroots
     if nroots is None and solver != 'dense':
         raise ValueError("nroots=None asks for the whole spectrum, which only "
                          "solver='dense' computes; give Davidson a root count.")
     _check_route_kwargs(solver, integrals, route_kwargs)
 
-    route = dict(nroots=nroots, qp=qp, spin=spin, screen_at=screen_at,
+    route = dict(qp=qp, spin=spin, screen_at=screen_at,
                  self_consistency=self_consistency, **route_kwargs)
     if solver == 'dense':
-        omega, X, Y, info = _solve_bse_dense(mf, mol, nocc, integrals, **route)
+        omega, X, Y, info = _solve_bse_dense(mf, mol, nocc, integrals,
+                                             nroots, numerics, **route)
     elif integrals == 'isdf':
-        omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, **route)
+        omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, numerics=numerics,
+                                           **route)
     else:
-        omega, X, Y, info = solve_bse_df(mf, mol, nocc, **route)
+        omega, X, Y, info = solve_bse_df(mf, mol, nocc, numerics=numerics,
+                                         **route)
 
     # One shape for every route: the keys a route cannot fill are present and
     # None, never a stand-in that reads like a measurement.
+    # A Davidson root left unconverged is returned as solved and named in
+    # 'davidson_flags' (refuse inputs, warn
+    # numerics); the dense route has none to name.
     info = {'factors': None, 'coeff_df': None, 'stats': None, 'n_states': None,
-            **info, 'solver': solver, 'integrals': integrals}
+            'davidson_flags': {}, **info, 'solver': solver,
+            'integrals': integrals}
     if spin != 'singlet':
         info['oscillator_strength'] = info['transition_dipole'] = None
     return omega, X, Y, info
@@ -222,7 +240,7 @@ def _check_route_kwargs(solver, integrals, route_kwargs):
 
 
 def _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
-               gw_kwargs=None, factors=None, **fit_kwargs):
+               numerics, gw_kwargs=None, factors=None, **fit_kwargs):
     """The quasiparticle diagonal, the integrals and the static W of one route.
 
     Everything the dense solver needs before it can build A and B, under
@@ -231,16 +249,21 @@ def _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
     (the G0W0-BSE split), and W never taken in a different auxiliary gauge than
     the kernel it screens.
 
-    fit_kwargs: `separable_factors` keywords, ISDF only.
+    fit_kwargs: `separable_factors` keywords, ISDF only. numerics: the
+    choices the GW stage, the fit and the static W read alike.
     """
+    numerics = numerics_or_default(numerics)
+    # the space-time GW reads the object; the Casida GW routes take keywords
+    refuse_second_numerics(gw_kwargs)
+    st_kwargs = dict(gw_kwargs or {}, numerics=numerics)
     if integrals == 'isdf' and factors is None:
-        factors = separable_factors(mf, mol, **fit_kwargs)
+        factors = separable_factors(mf, mol, numerics=numerics, **fit_kwargs)
 
     evgw_info = None
     if str(self_consistency).lower() in ('evgw', 'ev'):
         if integrals == 'isdf':
             qp, evgw_info = evgw_eigenvalues(mf, mol, mode='space-time',
-                                             factors=factors, **(gw_kwargs or {}))
+                                             factors=factors, **st_kwargs)
         else:
             qp, evgw_info = evgw_eigenvalues(mf, mol, mode='casida',
                                              df=(integrals == 'df'),
@@ -261,9 +284,8 @@ def _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
             raise ValueError(f"qp='{qp}'; choose 'G0W0', an energy array, or False.")
         if integrals == 'isdf':
             # One self-energy for the whole diagonal, and it carries W(0) out.
-            eps, _ = solve_qp_diagonal_space_time(mf, mol, nocc, factors=factors,
-                                                  extras=gw_extras,
-                                                  **(gw_kwargs or {}))
+            eps, _ = solve_qp_diagonal_space_time(
+                mf, mol, nocc, factors=factors, extras=gw_extras, **st_kwargs)
         else:
             out = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
                                  mode='casida', df=(integrals == 'df'),
@@ -293,19 +315,26 @@ def _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
         eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
 
     eps_screen = get_orbital_energies(mf, representation='spatial')
-    # The space-time self-energy already inverted [1 - chi0] at omega = 0, so
-    # the kernel's static W is one of its slots rather than a second sweep.
+    # On the separable factors W(0) is the one static build the Davidson route
+    # and the space-time GW stage read; the DF and four-index routes screen
+    # exactly on their own integrals.
     W_aux = gw_extras.get('w_static')
-    if W_aux is None:
+    if W_aux is None and integrals == 'isdf':
+        q = numerics.quadrature
+        W_aux = static_screening_matrix(X_mo, D, eps_screen, nocc,
+                                        static_screening_grid(
+                                            eps_screen, nocc, ntau=q.ntau_w,
+                                            tau_target=q.tau_target))
+    elif W_aux is None:
         W_aux = LinearResponseSolver(eps_screen, coeff_df=coeff, eri_chemist=eri,
                                      spin_mode='restricted').static_screening_aux(nocc)
     return dict(eps=eps, eps_screen=eps_screen, eps_mf=eps_mf, factors=factors,
                 coeff_df=coeff, eri=eri, W_aux=W_aux, evgw=evgw_info)
 
 
-def _solve_bse_dense(mf, mol, nocc, integrals, nroots=5, qp='G0W0',
+def _solve_bse_dense(mf, mol, nocc, integrals, nroots, numerics, qp='G0W0',
                      spin='singlet', self_consistency='G0W0',
-                     screen_at='mean-field', probe=True, tda=False,
+                     screen_at='mean-field', probe=False, tda=False,
                      gw_kwargs=None, **fit_kwargs):
     """BSE by building A and B and diagonalizing them: the whole spectrum, O(N^6).
 
@@ -315,7 +344,7 @@ def _solve_bse_dense(mf, mol, nocc, integrals, nroots=5, qp='G0W0',
     t = {}
     t0 = time.time()
     setup = _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
-                       gw_kwargs=gw_kwargs, **fit_kwargs)
+                       numerics, gw_kwargs=gw_kwargs, **fit_kwargs)
     t['setup'] = time.time() - t0
 
     t0 = time.time()
@@ -338,14 +367,14 @@ def _solve_bse_dense(mf, mol, nocc, integrals, nroots=5, qp='G0W0',
     if probe and not tda:
         amb = float(np.linalg.eigvalsh(A - B).min())
         if amb <= 0:
-            raise RuntimeError(
+            raise UnstableReference(
                 f'BSE refused before the solve: min eig(A-B) = {amb:.6f} Ha '
                 '<= 0 -- the mean-field reference is singlet/triplet unstable '
                 'and the Casida omega^2 reduction is invalid there. Check '
                 'first that the SCF is the LOWEST solution (vary the initial '
                 'guess, follow instabilities); if it is, stabilize the '
                 'reference or solve the non-Hermitian problem -- no shift '
-                'gives physical roots in this regime.')
+                'gives physical roots in this regime.', amb)
 
     omega, X, Y = CasidaSolver(A, B).solve(tda=tda)
     t['dense'] = time.time() - t0
@@ -359,7 +388,8 @@ def _solve_bse_dense(mf, mol, nocc, integrals, nroots=5, qp='G0W0',
     info = dict(eps=setup['eps'], eps_mf=setup['eps_mf'], W_aux=setup['W_aux'],
                 min_eig_amb=amb, oscillator_strength=f_osc,
                 transition_dipole=trans_dip, timings=t, evgw=setup['evgw'],
-                n_states=n_states)
+                n_states=n_states,
+                numerics_identity=numerics_or_default(numerics).identity())
     if integrals == 'isdf':
         info['factors'] = setup['factors']
     elif integrals == 'df':

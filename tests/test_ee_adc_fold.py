@@ -109,7 +109,7 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       h = 1e-4 Ha to 1e-6 relative, on the streamed kernel and on the generic
       path; at omega None it is zeros; an optional
       pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
-      forms, bitwise, called once per application with powers (1,), () and (2,).
+      forms, to a few ulp, called once per application with powers (1,), () and (2,).
   29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
       H1 = 0 its roots are the eigenvalues of H0, with H1 = -I they are
       (w_j + w0) / 2, a root at or above min D is dropped, and an exact crossing
@@ -180,16 +180,11 @@ from pyscf import gto, scf
 from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
+from tests.adc_common import check
+from tests.pins import same_bar
 
 HARTREE_TO_EV = 27.211386245988
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
-
-
-def check(ok, label, detail=''):
-    """Print one verdict line and return `ok` as a bool."""
-    tail = f'   ({detail})' if detail else ''
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
-    return bool(ok)
 
 
 def water_df(basis='cc-pvdz'):
@@ -353,13 +348,13 @@ def check_solve_folded(mf, eps, B, no):
     B2 = DFIntegrals.from_scf(mol, mf2).B_aa
     _, _, _, P2 = ee_r_sigma_df.build_operator(eps2, B2, 1, level='adc2',
                                                pieces=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        res2 = ee_fold.solve_folded(P2, 3, spin='triplet')
-    fewer = any('fewer' in str(w.message) for w in caught)
-    ok &= check(res2.omega.size == 1 and fewer,
-                'short channel warns and returns what it has',
-                f'{res2.omega.size} root(s), {len(caught)} warning(s)')
+    try:
+        ee_fold.solve_folded(P2, 3, spin='triplet')
+        refused = 'no error'
+    except ValueError as exc:
+        refused = str(exc)
+    ok &= check('fewer than nroots' in refused, 'short channel refused (an input)',
+                refused)
     # nocc = nvirt = 1: every reshape of the layout is degenerate. HeH+, not H2,
     # whose g/u symmetry cuts the one single from the one double
     mol3 = gto.M(atom='He 0 0 0; H 0 0 0.77', basis='sto-3g', charge=1, verbose=0)
@@ -1192,7 +1187,7 @@ def check_index_bracket():
         def lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols,
                       tol=None):
             return (np.array([offset + slope * omega]), np.ones((1, 1)),
-                    lambda v: dmv_value)
+                    lambda v: dmv_value, np.ones(1, bool))
         return lowest_at
 
     orig = ee_fold._lowest_at
@@ -1252,9 +1247,11 @@ def check_dense_default():
 
 
 def check_warning_paths(eps, B, no):
-    """The count's paths that warn or fall back: a surplus of unconverged roots, an
-    index solve that lands on a found root, the round limit, the index solve's
-    bisection, and a missing group re-solved per branch."""
+    """The count's paths that warn, flag and return what was found
+    (refuse inputs, warn numerics) or fall back: a surplus of
+    unconverged roots, an index solve that lands on a found root, the round
+    limit, the index solve's bisection, and a missing group re-solved per
+    branch."""
     from src.SingleReference.ADC.eeADC import ee_fold
 
     def run(P, nroots, **kw):
@@ -1263,6 +1260,10 @@ def check_warning_paths(eps, B, no):
             res = ee_fold.solve_folded(P, nroots, spin='singlet', solver='newton',
                                        **kw)
         return res, [str(x.message) for x in caught]
+
+    def flagged(res, *names):
+        got = {f['flag'] for f in res.flags}
+        return all(n in got for n in names)
 
     def pair(eps_m):
         # check 12's pair, the second state of M raised by eps_m
@@ -1277,6 +1278,9 @@ def check_warning_paths(eps, B, no):
     ok = check(any('where A_eff has' in x for x in msgs) and not res.converged.any(),
                'one Newton step: every root unconverged, and the count warns of the '
                'surplus', f'converged {res.converged.tolist()}')
+    ok &= check(flagged(res, 'roots_missing', 'roots_not_converged'),
+                'one Newton step: flagged roots_missing and roots_not_converged',
+                str([f['flag'] for f in res.flags]))
     # split 5.9e-9 Ha, below the default tol_omega: one root at that resolution
     Pp, w = pair(1e-8)
     res, msgs = run(Pp, 2)
@@ -1286,13 +1290,17 @@ def check_warning_paths(eps, B, no):
                 'a pair closer than tol_omega: the branch solved by index lands on '
                 'the found root, and the count says its root is missing',
                 f'nout {res.omega.size}')
+    ok &= check(flagged(res, 'roots_missing'), 'the same pair: flagged roots_missing',
+                str([f['flag'] for f in res.flags]))
     Pp, w = pair(1.2e-6)
-    keep = ee_fold._COUNT_ROUNDS
-    ee_fold._COUNT_ROUNDS = 0
+    keep = ee_fold.EE_FOLD_COUNT_ROUNDS
+    ee_fold.EE_FOLD_COUNT_ROUNDS = 0
     try:
         res, msgs = run(Pp, 2, tol_omega=1e-12)
     finally:
-        ee_fold._COUNT_ROUNDS = keep
+        ee_fold.EE_FOLD_COUNT_ROUNDS = keep
+    ok &= check(flagged(res, 'roots_missing'), 'no count round left: flagged '
+                'roots_missing', str([f['flag'] for f in res.flags]))
     ok &= check(any('1 of the 2 lowest roots not found after 0 round' in x
                     for x in msgs) and res.omega.size == 1,
                 'no count round left: the missing root is named, not solved',
@@ -1301,7 +1309,8 @@ def check_warning_paths(eps, B, no):
     def lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols,
                   tol=None):
         # λ(ω) = 5 - 3ω with T1 = 1: every Newton step leaves the bracket [1, 2]
-        return np.array([5.0 - 3.0 * omega]), np.ones((1, 1)), lambda v: 0.0
+        return (np.array([5.0 - 3.0 * omega]), np.ones((1, 1)), lambda v: 0.0,
+                np.ones(1, bool))
 
     orig = ee_fold._lowest_at
     ee_fold._lowest_at = lowest_at
@@ -1521,7 +1530,7 @@ def check_trace(eps, B, no):
     out0 = io.StringIO()
     with contextlib.redirect_stdout(out0):
         res0 = ee_fold.solve_folded(P, 3, spin='singlet')
-    calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold._HEARTBEAT
+    calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT
     apps, fop = [0], ee_fold.folded_operator
 
     def counted(matvec, diag, **k):
@@ -1542,7 +1551,7 @@ def check_trace(eps, B, no):
             apps[0] += bool(vector)
             return dmatvec(u, vector=vector)
         return mv, dmv, diag_s, embed, restrict
-    ee_fold.solve_symmetric, ee_fold._HEARTBEAT = counted, 0.0
+    ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT = counted, 0.0
     ee_fold.folded_operator = applied
     out1, outn = io.StringIO(), io.StringIO()
     try:
@@ -1552,7 +1561,7 @@ def check_trace(eps, B, no):
         with contextlib.redirect_stdout(outn):
             ee_fold.solve_folded(P, 3, spin='singlet', verbose=1, solver='newton')
     finally:
-        ee_fold.solve_symmetric, ee_fold._HEARTBEAT = solve, beat
+        ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT = solve, beat
         ee_fold.folded_operator = fop
     lines = out1.getvalue().splitlines()
     stamp = re.compile(r'\[t = \d+\.\d s, mv = (\d+)\]$')
@@ -1681,8 +1690,8 @@ def check_kernel_hook(eps, B, no):
     -dmatvec(u) to 1e-12 relative, the central difference of matvec at h = 1e-4 Ha
     to 1e-6 relative, on the streamed kernel and on the generic path, zeros at
     omega None; an optional pieces['K'] replaces the V,
-    divide, Vt path of matvec and of both dmatvec forms, bitwise, called once per
-    application with the powers (1,), () and (2,)."""
+    divide, Vt path of matvec and of both dmatvec forms, to a few ulp, called
+    once per application with the powers (1,), () and (2,)."""
     from src.SingleReference.ADC.eeADC import ee_fold
     ok = True
     nv = B.shape[1] - no
@@ -1720,8 +1729,11 @@ def check_kernel_hook(eps, B, no):
         return ws, float(Yf @ Yf)
 
     mvk, dmvk, _, _, _ = ee_fold.folded_operator(dict(P, K=K), om, spin='singlet')
-    same = (np.array_equal(mvk(u), mv(u)) and dmvk(u) == dmv(u)
-            and np.array_equal(dmvk(u, vector=True), g))
+    # two computations of one product (the hook's and the generic path's):
+    # a few ulp (tests/pins.same_bar), not bitwise
+    same = all(np.all(np.abs(np.asarray(x) - np.asarray(y)) <= same_bar(x, y))
+               for x, y in ((mvk(u), mv(u)), (dmvk(u), dmv(u)),
+                            (dmvk(u, vector=True), g)))
     ok &= check(same and calls == [(1,), (), (2,)],
                 "pieces['K'] is the kernel matvec and both dmatvec forms apply",
                 str(calls))
@@ -1915,7 +1927,7 @@ def check_solver_default(eps, B, no):
 
 def check_default_polish():
     """The default's exact polish and its duplicate check: a model root far from
-    its exact root (strong coupling, the centre never moved: _RECENTRE 10 Ha) with
+    its exact root (strong coupling, the centre never moved: EE_FOLD_RECENTRE 10 Ha) with
     one polish step comes back converged False with the solve's warning, never at
     the model's value as converged, and a 4-fold level so held comes back whole,
     every partner unconverged; two roots the Davidson hands over as copies of one
@@ -1925,15 +1937,15 @@ def check_default_polish():
     ok = True
     m, C, D = np.array([0.5, 0.9]), np.array([[0.25, 0.0]]), np.array([0.8])
     w = np.sort(_synthetic_exact(m, C, D)[0])
-    keep = ee_fold._RECENTRE
-    ee_fold._RECENTRE = 10.0
+    keep = ee_fold.EE_FOLD_RECENTRE
+    ee_fold.EE_FOLD_RECENTRE = 10.0
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
                                        dense_limit=0, max_newton=1, t_min=0.0)
     finally:
-        ee_fold._RECENTRE = keep
+        ee_fold.EE_FOLD_RECENTRE = keep
     warned = any('not converged' in str(x.message) for x in caught)
     off = abs(float(res.omega[0]) - w[0])
     ok &= check(warned and not res.converged[0] and off > 1e-6,
@@ -1991,8 +2003,8 @@ def check_default_polish():
     # the 4-fold level, its model root far from the exact one (the centre held at
     # M's root), and one polish step: the level comes back whole and unconverged
     m, C = kfold(4)
-    keep = ee_fold._RECENTRE
-    ee_fold._RECENTRE = 10.0
+    keep = ee_fold.EE_FOLD_RECENTRE
+    ee_fold.EE_FOLD_RECENTRE = 10.0
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -2000,7 +2012,7 @@ def check_default_polish():
                                        spin='singlet', dense_limit=0, max_newton=1,
                                        t_min=0.0)
     finally:
-        ee_fold._RECENTRE = keep
+        ee_fold.EE_FOLD_RECENTRE = keep
     lv = any('level' in str(x.message) and 'not converged' in str(x.message)
              for x in caught)
     ok &= check(lv and res.omega.size == 4 and not res.converged.any(),
@@ -2156,14 +2168,14 @@ def check_stream():
                 str(silent))
     loud = {}
     for text in ('', 'abc', 'nan', 'inf', '-1', '0'):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            gb = sb._stream_gb(text)
-        loud[text] = (gb, len(caught),
-                      bool(caught) and repr(text) in str(caught[0].message))
-    ok &= check(all(v == (16.0, 1, True) for v in loud.values()),
+        try:
+            sb._stream_gb(text)
+            loud[text] = 'no error'
+        except ValueError as exc:
+            loud[text] = repr(text) in str(exc)
+    ok &= check(all(v is True for v in loud.values()),
                 '_stream_gb: an empty, non-numeric, nan, inf or non-positive value is '
-                '16 GB with one warning naming it', str(loud))
+                'refused, the error naming it', str(loud))
     return ok
 
 

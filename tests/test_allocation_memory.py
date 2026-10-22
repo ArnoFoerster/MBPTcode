@@ -1,9 +1,9 @@
 """`Base.utils.memory`: what a SLURM allocation holds, and what pyscf did with it.
 
-`allocation_max_memory_mb` is the fix for the pentacene cc-pVTZ regression:
-pyscf's `max_memory` defaults to 4000 MB regardless of what the job was given,
-and on a 16-core node that default kept pentacene's 6.4 GB DF tensor out of core
-while anthracene's 1.8 GB one, at the same default, stayed in. These tests
+`allocation_max_memory_mb` reads the job's own memory: pyscf's `max_memory`
+defaults to 4000 MB regardless of what the job was given, and on a 16-core node
+that default keeps pentacene/cc-pVTZ's 6.4 GB DF tensor out of core while
+anthracene's 1.8 GB one, at the same default, stays in. These tests
 gate the environment parsing in isolation (monkeypatched, so they say nothing
 about an actual SLURM allocation) and `describe_df_storage` against a real DF
 mean field.
@@ -223,8 +223,8 @@ def test_current_memory_sees_what_the_process_holds():
 
 
 def test_without_psutil_it_is_pyscfs_reading(monkeypatch):
-    """Without psutil the helper is pyscf's lib.current_memory, exactly what
-    every budget read before, so Linux and a plain install are unchanged."""
+    """Without psutil the helper is pyscf's lib.current_memory, so Linux and a
+    plain install read pyscf's number."""
     monkeypatch.setattr(memory, 'psutil', None)
     assert current_memory_mb() == pyscf_lib.current_memory()[0]
 

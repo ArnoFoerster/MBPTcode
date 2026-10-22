@@ -15,7 +15,8 @@ from typing import Optional, Tuple, Union
 
 _GROUND_STATE_KINDS = ('rpa', 'dft')
 _SPINS = ('singlet', 'triplet')
-_KERNELS = ('bse', 'bse-tda')
+#: The BSE kernels an `Excitation` declares.
+KERNELS = ('bse', 'bse-tda')
 _QP_METHODS = ('g0w0', 'evgw')
 _SCREENINGS = ('rpa',)
 _CHARGE_CHANGES = (-1, 1)
@@ -74,8 +75,8 @@ class Excitation:
             raise ValueError(f"Excitation.spin={self.spin!r} not in {_SPINS}")
         if self.root < 1:
             raise ValueError(f"Excitation.root={self.root!r} must be >= 1")
-        if self.kernel not in _KERNELS:
-            raise ValueError(f"Excitation.kernel={self.kernel!r} not in {_KERNELS}")
+        if self.kernel not in KERNELS:
+            raise ValueError(f"Excitation.kernel={self.kernel!r} not in {KERNELS}")
         if self.qp not in _QP_METHODS:
             raise ValueError(f"Excitation.qp={self.qp!r} not in {_QP_METHODS}")
         if self.screening not in _SCREENINGS:

@@ -1,7 +1,5 @@
 import numpy as np
-from scipy.sparse.linalg import gmres, LinearOperator
-from pyscf import lib, scf
-from pyscf.scf import cphf, ucphf
+from pyscf import scf
 
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -21,6 +19,8 @@ from src.Base.constants import (
     CPHF_MAX_CYCLE,
     CPHF_TOL,
 )
+from src.Base.numerics import Numerics
+from src.Base.utils.cphf import solve as cphf_solve
 from src.Base.utils.grids import minimax_time_grid
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
     MPnDensityDriverUnrestricted)
@@ -162,7 +162,8 @@ def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cy
     coupling_ov = orbo.T @ vresp(mo_coeff @ D_corr @ mo_coeff.T) @ orbv
     Y = e_ia * dgamma_ov - 2.0 * coupling_ov
 
-    X_ai, _ = cphf.solve(fvind, mo_energy, mo_occ, -Y.T, max_cycle=max_cycle, tol=tol)
+    X_ai = cphf_solve(fvind, e_ia.T, Y.T, numerics=Numerics(
+        scf={'cphf_tol': tol, 'cphf_max_cycle': max_cycle}))
     relaxed_ov = X_ai.reshape(nv, no).T
 
     dgamma = np.zeros((nmo, nmo))
@@ -184,25 +185,13 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
     the finite-field dipole sum rule on open shells (both asserted in
     tests/test_uhf_mp2_relaxed_finite_field.py).
 
-    DELIBERATELY NOT USED: routing this through pyscf's own
-    ucphf.solve (the UHF counterpart of solve_cphf_relaxation's cphf.solve)
-    looked like the natural fix for the stalls seen on strongly
-    spin-contaminated systems (C2H3, C3H3) -- but pyscf's underlying
-    lib.krylov solver terminates EARLY via its own lindep (linear-dependence)
-    threshold on this equation, before actually satisfying its own x+aop(x)=b
-    contract (verified directly: raw contract residual ~1e-3 relative,
-    reproducibly, regardless of max_cycle). That's a real quirk of
-    lib.krylov on this particular inhomogeneous-source CPHF variant, not a
-    sign/shape bug in the call -- confirmed by building the dense (nv*no,
-    nv*no) operator explicitly and comparing exact numpy.linalg.solve against
-    both solvers. scipy gmres below is exact (residual ~1e-13 against that
-    same dense ground truth) even though slow/non-convergent on the hardest
-    cases, so kept as the base solver. level_shift here only floors the
-    PRECONDITIONER's denominator (M_matvec below) -- it does not touch the
-    actual operator A (fvind's full e_ia+coupling), so it cannot change what
-    gmres converges to, only how fast; a small nonzero value (e.g. 0.02-0.1)
-    is the safe knob to try when a system's occ-virt gaps get small enough
-    to make the naive 1/e_ia preconditioner blow up.
+    The solve is src.Base.utils.cphf.solve: pyscf's lib.krylov refined on the
+    true residual, raising when tol is not reached (lib.krylov alone stops on
+    its linear-dependence test on strongly spin-contaminated references).
+    level_shift floors only the PRECONDITIONER's denominators (sign-
+    preserving, |e_ia| >= level_shift); the operator keeps the exact e_ia, so
+    it changes how fast the solve converges, never what it converges to: the
+    knob for small occupied-virtual gaps.
     """
     mo_coeff_a, mo_coeff_b = mf_hess.mo_coeff
     mo_energy_a, mo_energy_b = mf_hess.mo_energy
@@ -238,8 +227,7 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
         # must not appear in the spin-resolved UHF equation.
         resp_a = (orbv_a.T @ v_a @ orbo_a).ravel()
         resp_b = (orbv_b.T @ v_b @ orbo_b).ravel()
-        # Add the diagonal part (e_ia * x) because gmres solves A*x = Y, where A = diag(e_ia) + K
-        return np.concatenate([resp_a, resp_b]) + x * np.concatenate([e_ia_a.T.ravel(), e_ia_b.T.ravel()])
+        return np.concatenate([resp_a, resp_b])
 
     D_corr_a = np.zeros((nmo, nmo))
     D_corr_a[:no_a, :no_a] = dgamma_oo_a
@@ -262,26 +250,16 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
 
     Y_flat = np.concatenate([Y_a.T.ravel(), Y_b.T.ravel()])
     h_diag = np.concatenate([e_ia_a.T.ravel(), e_ia_b.T.ravel()])
-    # Level-shifted, sign-preserving floor on the PRECONDITIONER only (not on
-    # h_diag as fed into fvind's exact diagonal above): avoids 1/h_diag
-    # blowing up for small occ-virt gaps without perturbing the operator A
-    # itself, so the gmres solution is exact regardless of level_shift.
+    # Level-shifted, sign-preserving floor on the PRECONDITIONER only: the
+    # operator keeps the exact h_diag, so the solution does not depend on it
     if level_shift:
         floor = np.sign(h_diag) * np.maximum(np.abs(h_diag), level_shift)
     else:
         floor = h_diag
-
-    def M_matvec(x):
-        return x / floor
-
-    A = LinearOperator((Y_flat.size, Y_flat.size), matvec=fvind)
-    M = LinearOperator((Y_flat.size, Y_flat.size), matvec=M_matvec)
-
-    X_ai_flat, info = gmres(A, Y_flat, M=M, rtol=tol, atol=tol, maxiter=max_cycle)
-    if info > 0:
-        print(f"Warning: gmres did not converge after {info} iterations.")
-    elif info < 0:
-        print(f"Warning: gmres failed with code {info}.")
+    X_ai_flat = cphf_solve(lambda x: fvind(np.ravel(x)), h_diag, Y_flat,
+                           numerics=Numerics(scf={'cphf_tol': tol,
+                                                  'cphf_max_cycle': max_cycle}),
+                           precond=floor)
 
     X_ai_a = X_ai_flat[:nv_a * no_a].reshape(nv_a, no_a)
     X_ai_b = X_ai_flat[nv_a * no_a:].reshape(nv_b, no_b)
@@ -744,7 +722,6 @@ class MP2DensityMatrixSolverUnrestricted:
         ei_b, ea_b = self.eps_b[ob], self.eps_b[vb]
 
         g_aa_ovvv = self.g_aaaa[oa, va, va, va]
-        g_aa_ooov = self.g_aaaa[oa, oa, oa, va]
         g_ab_ooov = self.g_abab[oa, ob, oa, vb]
         g_ab_vovv = self.g_abab[va, ob, va, vb]
 

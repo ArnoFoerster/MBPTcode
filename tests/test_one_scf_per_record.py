@@ -25,6 +25,8 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from tests.pins import assert_same as pins_same
+from tests.pins import assert_same_tree
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.utils.mpi_grid import distributed, run_simulated
 from src.properties.excitations import (SurfaceSpec, calc_vertical_excitation,
@@ -36,6 +38,8 @@ from tests.test_state_pair_force_distributed_ks import (BASIS, GRID_ACCURACY,
 XC = 'pbe0'
 SIZES = (2, 3)
 TIMELESS = ('provenance', 'mol_reference', 'physics')
+#: The record's numbers that are roots of the BSE, not SCF energies.
+ROOT_KEYS = ('omega_eV', 'en_hartree')
 _LOCK = threading.Lock()
 
 
@@ -83,8 +87,18 @@ def assert_same(a, b):
     for key in a:
         if key == 'realization':
             assert repr(a[key]) == repr(b[key]), key
+        elif key == 'gradient':
+            pins_same(np.asarray(a[key], float), np.asarray(b[key], float),
+                      quantity='gradient', label=key)
+        elif isinstance(a[key], (float, np.floating)):
+            pins_same(a[key], b[key], unit='eV' if key.endswith('_eV') else 'Ha',
+                      quantity='root' if key in ROOT_KEYS else 'energy',
+                      label=key)
         else:
-            assert a[key] == b[key], key
+            # the pole model's poles are read off a continuation: its class
+            assert_same_tree(a[key], b[key], label=key,
+                             quantity='continued' if key == 'qp_bookkeeping'
+                             else 'energy')
 
 
 def test_the_serial_record_converges_one_scf():

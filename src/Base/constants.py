@@ -7,6 +7,10 @@ HARTREE_TO_EV = 27.211386245988
 HARTREE_TO_KCAL = 627.509474
 BOHR_TO_ANGSTROM = 0.52917721092
 
+# Bytes in one GB and MB in one GB (binary), for every memory estimate.
+BYTES_PER_GB = 1024.0 ** 3
+MB_PER_GB = 1024.0
+
 # Lorentzian broadening for self-energy denominators / spectral functions.
 DEFAULT_BROADENING_ETA = 1e-3
 
@@ -31,34 +35,95 @@ AUX_METRIC_ROOT_FLOOR = 1e-12
 # truncation to be dropped.
 AUX_METRIC_INDEFINITE_TOL = 1e-10
 
-# Lebedev shell counts per atom of the default separable-RI / ISDF grid,
-# 148 points per atom.
-ISDF_DEFAULT_COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
+# The largest OPENBLAS_NUM_THREADS a stock OpenBLAS build accepts. Its thread
+# pool is sized at compile time (NUM_THREADS); asking for more can segfault
+# mid-SCF. Every launcher that sets the thread environment clamps OpenBLAS to
+# this while leaving OMP free to use the whole node.
+OPENBLAS_MAX_THREADS = 128
 
 # Validated ISDF interpolation grids: {basis: {level: (A1, A2, A3, B1)}}, the
 # Lebedev sub-shell replica counts measured to reach an accuracy; the only
 # place a validated count is written down.
 #
-# A level is an accuracy target, not a size: the largest deviation of the three
-# lowest BSE roots from `solve_bse_df` at the same mean field, over ten
-# molecules spanning H C N O P S Si B with the roots matched between the two
-# routes. G1 < 8 meV, G2 < 4 meV, G3 < 2 meV, at 6*A1 + 8*A2 + 12*A3 + 24*B1
-# points per atom.
+# A level is an accuracy target, not a size: the largest deviation of the lowest
+# BSE roots from `solve_bse_df` at the same mean field, over sixteen molecules
+# spanning H B C N O Si P S (fifteen at cc-pVQZ), singlets and triplets, with
+# the roots matched between the two routes. G1 < 8 meV, G2 < 4 meV, G3 < 2 meV,
+# at 6*A1 + 8*A2 + 12*A3 + 24*B1 points per atom. Each level is the cheapest
+# rung of the ladder 8, 16, ... 72 (A1 = rung) that meets its target on both
+# spins.
 #
 # The ladder is not monotone, so an entry licenses its own count and no other.
 # A missing level is a refusal, not a fallback: nobody measured it, so a
 # neighbouring level, a larger count and another basis are all equally
-# unlicensed.
+# unlicensed. aug-cc-pVQZ has no entry; cc-pVTZ G3 is the best rung although
+# it measures 2.02 meV (glyoxal triplet) against 2 meV. Worst root error at the
+# entry, meV: cc-pVDZ 16 6.79 / 24 1.94; aug-cc-pVDZ 16 6.66 / 24 1.86; cc-pVTZ
+# 16 4.40 / 32 3.18 / 40 2.02; aug-cc-pVTZ 24 3.88 / 32 1.43; cc-pVQZ 32 3.81 /
+# 64 1.41.
+#
+# 'GH' is not an accuracy target: it is the grid a finite-difference Hessian of
+# an ISDF-K mean field is built on (`ISDF_HESSIAN_MIN_GRID`), set by the
+# smoothness of the energy surface and not by the BSE roots: cc-pVDZ
+# formaldehyde frequencies against density fitting are off by up to 93 cm^-1
+# (HF) and 24 cm^-1 (B3LYP) at (24, 15, 9, 3), by 35 and 11 at (32, 20, 12, 4).
+# The 'GH' radii are the ones the Hessian was validated on; do not re-optimize
+# them for the BSE. A basis without a 'GH' entry has no validated Hessian grid.
 # The target each level is validated to, in eV: G1 < 8, G2 < 4, G3 < 2 meV.
 ISDF_GRID_ACCURACY_TARGET_EV = {'G1': 8e-3, 'G2': 4e-3, 'G3': 2e-3}
+
+# The ISDF-vs-DF acceptance check of a geometry (`photophysics.df_check`).
+# Its Davidson residual, Ha: the check decides a pass or a fail at the meV
+# scale of the targets above, and two kernels are solved per spin per stage.
+DF_CHECK_BSE_CONV_TOL = 1e-6
+# The largest |eps_DF - eps_ISDF| on the explicit set, eV, that still proves
+# the two mean fields order their orbitals alike (same functional; the ISDF-K
+# and the J/K fit differ by a few meV).
+DF_CHECK_ORBITAL_MATCH_TOL_EV = 5e-2
+# Roots solved above the compared one, so the Davidson's last root is not it.
+DF_CHECK_ROOTS_ABOVE_FOLLOWED = 3
+
+# Orbitals listed on each side of the gap in a vertical record's
+# quasiparticle spectrum, and the largest quasiparticle shifts (or the worst
+# unrepresented orbital densities) a vertical record reports.
+VERTICAL_FRONTIER_LISTED = 3
+VERTICAL_WORST_LISTED = 8
+
+# The production TADF run's command-line defaults (`photophysics.cli`), each
+# named in --help. The functional and the factors' grid level of the chain;
+# the BSE roots solved (above every reported one) and the roots reported per
+# spin; the frontier half-width of a declared frontier set; the shape of the
+# frozen quasiparticle shift beyond the explicit set.
+TADF_REFERENCE = 'lrc-wpbeh'
+TADF_GRID_ACCURACY = 'G1'
+TADF_NROOTS = 6
+TADF_N_STATES = 3
+TADF_QP_HALF_WIDTH = 2
+TADF_OUTSIDE_SCISSOR = 'curve'
+# Threads per rank, and the memory (MB) of a launch whose scheduler names no
+# allocation.
+TADF_THREADS = 2
+TADF_ALLOCATION_MB = 100000
+# The UISC rate model's defaults (`photophysics.declaration.UiscModel`): the
+# promoting modes differenced, the dimensionless step each way, the lowest
+# singlets and triplets of the coupling block, and the reorganization
+# energies (eV) Samanta et al., J. Am. Chem. Soc. 139, 4042 (2017), Sec. 2
+# scan with S = 0.
+UISC_N_MODES = 12
+UISC_DQ = 0.1
+UISC_BLOCKS = (2, 2)
+UISC_LAMBDA_SAMANTA_EV = (0.10, 0.20)
 ISDF_GRID_ACCURACY = {
-    'cc-pvdz':     {'G1': (16, 10, 6, 2), 'G2': (16, 10, 6, 2),
-                    'G3': (32, 20, 12, 4)},
-    'cc-pvtz':     {'G1': (24, 15, 9, 3), 'G2': (24, 15, 9, 3),
-                    'G3': (40, 25, 15, 5)},
-    'aug-cc-pvdz': {'G1': (24, 15, 9, 3), 'G2': (24, 15, 9, 3)},
-    'aug-cc-pvtz': {'G1': (24, 15, 9, 3), 'G2': (40, 25, 15, 5),
-                    'G3': (40, 25, 15, 5)},
+    'cc-pvdz':     {'G1': (16, 10, 6, 2), 'G2': (24, 15, 9, 3),
+                    'G3': (24, 15, 9, 3), 'GH': (32, 20, 12, 4)},
+    'cc-pvtz':     {'G1': (16, 10, 6, 2), 'G2': (32, 20, 12, 4),
+                    'G3': (40, 25, 15, 5), 'GH': (40, 25, 15, 5)},
+    'cc-pvqz':     {'G1': (32, 20, 12, 4), 'G2': (32, 20, 12, 4),
+                    'G3': (64, 40, 24, 8)},
+    'aug-cc-pvdz': {'G1': (16, 10, 6, 2), 'G2': (24, 15, 9, 3),
+                    'G3': (24, 15, 9, 3)},
+    'aug-cc-pvtz': {'G1': (24, 15, 9, 3), 'G2': (24, 15, 9, 3),
+                    'G3': (32, 20, 12, 4), 'GH': (40, 25, 15, 5)},
 }
 
 # Multi-start descents behind every grid tabulated above. A shipped radii row is
@@ -152,21 +217,24 @@ FCI_CONV_TOL = 1e-13
 # CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
 CPHF_MAX_CYCLE = 100
 CPHF_TOL = 1e-9
+# src.Base.utils.cphf.solve: rounds of solving again for the true residual
+CPHF_REFINEMENTS = 10
+# ... and pyscf's lib.krylov inside one round, on a unit right-hand side: its
+# own tolerance and the dependence threshold that ends it (the round stops on
+# the dependence test, so both sit below any true-residual tolerance)
+CPHF_KRYLOV_TOL = 1e-14
+CPHF_KRYLOV_LINDEP = 1e-20
+# Z-vector of a correlated force or relaxed excited-state density
+# (df_correlation_force, ee_relaxed_density), tighter than CPHF_TOL: the
+# force is first order in the multipliers' error
+CORRELATION_CPHF_TOL = 1e-10
 
 # QP root-finding (src/Solvers/qp_equation.py).
 QP_NEWTON_TOL = 1e-6
 QP_NEWTON_MAX_ITER = 50
-QP_BISECTION_TOL = 1e-6
-QP_BISECTION_MAX_ITER = 100
 QP_GRAPHICAL_TOL = 1e-8
 QP_GRAPHICAL_N_OMEGA = 150
 QP_GRAPHICAL_MAX_BISECTION = 100
-# Smallest pole strength Z = 1/f'(w) that the 'pole_strength' root selector will
-# accept as a quasiparticle; roots below it are satellites. Deep valence/semicore
-# states put low-Z satellites nearer to eps_HF than the true QP root, so the
-# closest-root rule picks the satellite (Ne 2s: Z=0.03 at -52.5 eV vs Z=0.89 at
-# -48.1 eV). Only matters where several roots exist.
-QP_Z_MIN = 0.05
 # Central-difference step (Hartree) for dSigma/dw when evaluating Z.
 QP_Z_DERIV_STEP = 1e-3
 # <S^2> above S(S+1) by more than this on an unrestricted reference is warned:
@@ -288,6 +356,12 @@ REASSOCIATED_SUM_REL_TOL = 1e-12
 # responses; ten covers that and still fails a defect, which moves the fit by
 # whole digits.
 FIT_REASSOCIATION_K = 10
+# Floor on the measured reassociation response the distance is divided by: a
+# grid on which reordering a sum happens to move a number by an ulp would
+# otherwise turn a 1e-12 realization difference into a ratio of thousands.
+# The row fit and the replicated fit differ by 1.3e-12 relative on the BSE root
+# there; a defect moves the fit by whole digits.
+FIT_REASSOCIATION_FLOOR = 2e-13
 
 # How many times a measured repeat or reassociation response of a number that
 # number may move when a comparison spans two SCF runs, two threaded pyscf K
@@ -341,23 +415,14 @@ PCM_CROSS_TERM_STEP = 1e-2
 # Contour deformation of the GW self-energy
 # (src/SingleReference/GW/contour_deformation.py). A pole of G at
 # |omega - eps_q| below RESIDUE_ON_CONTOUR_TOL counts as on the contour.
-# QP_POLE_OFFSET is how far off an orbital energy the quasiparticle iteration
-# is kept. The integral term takes its singular part in closed form
-# (`cd_integral_weights`), so Sigma is continuous through every orbital energy
-# and the offset sets only the Newton's start and the band a frozen path
-# records.
+# QP_POLE_OFFSET is how far toward the chemical potential from its orbital
+# energy a state's start point lies, where Eq. (27) of the pole model and the
+# residue backend's frequency margin are read before any root is known
+# (`qp_equation.qp_start`). The integral term takes its singular part in
+# closed form (`cd_integral_weights`), so Sigma is continuous through every
+# orbital energy and the root search needs no distance from them.
 RESIDUE_ON_CONTOUR_TOL = 1e-10
 QP_POLE_OFFSET = 1e-3
-# The smallest band the Newton may relax to when a quasiparticle root lies
-# inside the guard, where the guard undoes every step and the iteration
-# deadlocks at a fixed point that is not the root. Ten times the on-contour
-# tolerance: Sigma is exact at that distance, and a dense spectrum can put a
-# real root within 1e-6 Ha of a neighbouring level.
-QP_POLE_OFFSET_MIN = 1e-9
-# Below this pole strength a converged root is a satellite, not the
-# quasiparticle: Z = 1/(1 - dSigma/dw) collapses beside a pole of Sigma at
-# eps_q -/+ Omega_s.
-QP_POLE_STRENGTH_MIN = 0.1
 # Margin (Hartree) past the residue frequencies of the Newton start that the
 # tau grid must carry for the Laplace residue backend to be chosen: the root
 # moves by the quasiparticle correction, a few tenths of an eV to 2 eV.
@@ -386,8 +451,9 @@ CD_NFREQ_SOP = 32
 # which reaches down to gap - w' and needs the wider range these points buy.
 CD_NTAU = 24
 
-# Newton for the contour-deformation quasiparticle equation
-# (src/Solvers/qp_equation.py::solve_qp_equation_newton_guarded). The root is
+# Root tolerance (Ha) and step cap of the bracket-safeguarded Newton that
+# refines a bracketed quasiparticle root with a closed-form slope
+# (src/Solvers/qp_equation.py: contour deformation, pole model). The root is
 # converged far tighter than an energy needs because the gradient chain
 # differentiates the equation at that root: a residual of 1e-6 leaves Z and
 # every adjoint that multiplies it off by the same relative amount.
@@ -473,12 +539,6 @@ LAPLACE_SCREENING_TOL = 1e-8
 # (src/SingleReference/BSE/bse_upfolded.py).
 UPFOLDED_BSE_DENSE_LIMIT = 4000
 
-# Largest Remez residual of the self-energy's tau -> omega transform at which a
-# downfolded active-space model still holds. The residual, not the point count,
-# is what a caller checks: it is set by the interplay of ntau with the
-# self-energy's own energy range, which is far wider than the polarizability's.
-SIGMA_FIT_ERROR_MAX = 1e-2
-
 # BSE Casida solver: dense below this occupied-virtual pair count, the
 # matrix-free ISDF/DF Davidson above (12000 pairs is ~1.2 GB per block).
 # `solve_bse`'s solver='auto' compares BSE_DENSE_MAX_GB against
@@ -508,6 +568,13 @@ XC_SHIFT_GRADIENT_TOL = 1e-10
 # 4e-9 Ha/Bohr on water. A gate that asks for bitwise equality of two such
 # gradients is asking for a property the arithmetic does not have.
 ISDF_GRADIENT_FLOOR = 1e-8
+# Ha/Bohr. A force against the finite difference of its own energy on
+# formaldehyde/cc-pVDZ at the default and G1 counts, on the BSE-selected radii
+# of the shipped table: measured 1.2e-8 to 2.9e-8, where the radii of the table
+# before gave below ISDF_GRADIENT_FLOOR. Read only by the tests that measure it
+# (test_one_fit_forces_follow_their_energy, test_mean_field_force_tiles); every
+# other gate stays at the floor.
+ISDF_ROW_FORCE_ENERGY_TOL = 4e-8
 
 # Nuclear finite-difference step (Bohr) for the gradient/derivative-coupling
 # layer: the finite-difference gradient of a surface and the derivative
@@ -644,6 +711,11 @@ SCF_NEWTON_PRECOND_FLOOR = 1e-2
 # 1e-14 runs', their own reproducibility floor between two SCF runs.
 SCF_DIFFERENTIABLE_CONV_TOL = SCF_ENERGY_CONV_TOL
 SCF_DIFFERENTIABLE_GRAD_TOL = 1e-11
+# The energy test of a reference mean field held to the last bits a total
+# energy has (one ulp is 2.2e-16 |E|): what the dense reference surfaces and
+# the gates that compare against them converge, with SCF_DIFFERENTIABLE_GRAD_TOL
+# on the orbital gradient.
+SCF_TIGHT_CONV_TOL = 1e-14
 
 # Overlap-based root following, <Psi(prev)|Psi(now)> from `properties.
 # nonadiabatic.follow_state`. Below ROOT_FOLLOW_WEIGHT_MIN the state being
@@ -762,16 +834,17 @@ HESSIAN_FD_NOISE_REL = 1e-5
 # grid).
 HESSIAN_FD_STEP_RATIO = (2.5, 6.0)
 
-# Lowest level of ISDF_GRID_ACCURACY a finite-difference Hessian of an ISDF-K
-# mean field is built on. The ISDF energy depends on the orientation of each
+# Level of ISDF_GRID_ACCURACY ('GH', see there) a finite-difference Hessian of
+# an ISDF-K mean field is built on. The ISDF energy depends on the orientation of each
 # atom's interpolation cloud (1e-5 to 1e-4 Ha within a few degrees on
 # formaldehyde), and the covariant atomic frames turn the clouds at 1-20 rad
 # per Bohr of nuclear motion, so on coarse grids the surface is rough on a
 # 1e-3 Bohr scale and its force constants are wrong even in the h -> 0 limit
 # although the force is exact. Formaldehyde/cc-pVDZ/B3LYP against density
 # fitting, largest frequency error: 1362 cm^-1 at 148 points per atom, 405 at
-# G2, 11 at G3 (35 on Hartree-Fock).
-ISDF_HESSIAN_MIN_GRID = 'G3'
+# the (16, 10, 6, 2) grid, 24 at (24, 15, 9, 3), 11 at (32, 20, 12, 4); on
+# Hartree-Fock 93 at (24, 15, 9, 3) and 35 at (32, 20, 12, 4).
+ISDF_HESSIAN_MIN_GRID = 'GH'
 
 # Minimum share of sum (X+Y)^2 in a BSE root's winning Gamma_i (x) Gamma_a
 # channel for the root's point-group irrep label (src/properties/
@@ -828,6 +901,13 @@ DIABAT_GAP_MIN = 1e-4
 # last one asked for otherwise leaves the subspace at each restart.
 FRAGMENT_DAVIDSON_EXTRA_ROOTS = 4
 FRAGMENT_DAVIDSON_MIN_SPACE = 80
+# Hartree. The smallest magnitude a Jacobi denominator d -/+ Omega of that
+# Davidson, and the diagonal preconditioner of the partition's resolvent
+# solve, may take: no correction is divided by a number closer to zero.
+FRAGMENT_PRECONDITIONER_FLOOR = 1e-3
+# Size, relative to the largest entry of the orthogonalized block, below which
+# a new direction of that Davidson counts as already in the subspace.
+FRAGMENT_DAVIDSON_NEW_DIRECTION_TOL = 1e-10
 # Newton step (Hartree) at which the pole guard stops locating the lowest
 # positive eigenvalue on Q. It sharpens the reported value only, not the
 # guard's verdict.
@@ -841,7 +921,8 @@ FRAGMENT_GUARD_TOL = 1e-5
 FRAGMENT_GUARD_MAX_CYCLE = 1000
 # Seed of the two generic AO vectors a, b that fix each diabat's sign: the
 # sign of a^T T b, T its AO transition density (`fragment_bse.diabat_phase`).
-FRAGMENT_PHASE_SEED = 20261006
+# Any integer: it fixes a convention, and |couplings| do not depend on it.
+FRAGMENT_PHASE_SEED = 1
 
 # How many orbitals past the frontier are solved to find the lowest-energy
 # attachment or removal: G0W0 reorders states relative to the mean field, so
@@ -893,23 +974,18 @@ GEOMETRIC_START_TOL = 1e-8
 # Sylvester denominators fall below it has no rotation derivative.
 BODY_FRAME_MIN_SPREAD = 1e-6
 
-# The refreeze loop of both optimizers. After a walk converges, its frozen
-# conventions are rebuilt at the minimum and the state relaxed again, until
-# the energy moves by less than REFREEZE_TOL_MEV between two successive
-# surfaces or the refrozen walk does not move (a surface rebuilt where it was
-# built is the same surface), at most REFREEZE_MAX_PASSES times. Every energy
-# a relaxation reports is the last surface's.
-REFREEZE_TOL_MEV = 0.1
+# The refreeze of both optimizers, an outer loop around the walk. After a walk
+# converges at R*, its frozen conventions are rebuilt there -- the ones this
+# geometry would choose -- and the drift E_new(R*) - E_old(R*) is measured at
+# that one geometry (the rebuilt surface's first evaluation against the old
+# surface's last), so it holds the change of the conventions and none of the
+# walk's descent. The state is relaxed on the rebuilt surface; a drift above
+# REFREEZE_TOL_MEV refreezes again at that walk's minimum, at most
+# REFREEZE_MAX_PASSES times, and a drift still above it is warned about and
+# flagged (`optimize.RefreezeNotConverged`). A few meV is far below the accuracy of GW-BSE
+# excitation energies and gaps.
+REFREEZE_TOL_MEV = 3.0
 REFREEZE_MAX_PASSES = 4
-# The walk-resolved tolerance. A walk stops at a residual gradient g, and on
-# its own approximate Hessian H that leaves the energy undetermined by
-# dE_walk = 1/2 g^T H^-1 g (`optimize.walk_resolution`): a jump between two
-# passes below that is not a measurement of the conventions. Two passes count
-# as converged when |jump| <= max(REFREEZE_TOL_MEV, the larger dE_walk of the
-# two walks); where the walks resolve better than REFREEZE_TOL_MEV the floor
-# decides. A converged result whose tolerance exceeds REFREEZE_TOL_FLAG_MEV is
-# flagged in the record and warned about.
-REFREEZE_TOL_FLAG_MEV = 1.0
 
 # The start of every excited-state walk (`optimize.start_nudge`). A surface
 # invariant to rigid motion keeps the point group of the geometry a walk
@@ -973,22 +1049,28 @@ CONFORMER_TEMPERATURE = 300.0
 # which is a different factorization and not a coarser one.
 SURFACE_GRID_ACCURACY = 'G2'
 
+# eV in meV, for a difference already taken in eV.
+EV_TO_MEV = 1000.0
+
 # Hartree in meV. Derived from HARTREE_TO_EV rather than spelled again, so the
 # refreeze drift a relaxation record reports in meV and the excitation energy
 # it reports in eV can never be two different conversions.
-HARTREE_TO_MEV = 1000.0 * HARTREE_TO_EV
+HARTREE_TO_MEV = EV_TO_MEV * HARTREE_TO_EV
 
 # The saddle test of a minimum's Hessian (`optimize.escape_saddle`). A walk's
 # end is a saddle when the lowest curvature of the internal Cartesian Hessian
 # (rigid motion projected out, Ha/Bohr^2) is below SADDLE_CURVATURE_TOL; it is
 # then left along that mode by SADDLE_ESCAPE_STEP_BOHR (the first trust radius
 # of `optimize`) and walked again. The tolerance is the curvature whose
-# energy gain over that step, |k| s^2 / 2, is REFREEZE_TOL_MEV, the
-# resolution every relaxed energy is quoted to: a softer negative mode moves
-# no energy the record could see. It sits about five times above the noise of
-# a central-difference Hessian of an excited-state force at NUCLEAR_FD_STEP.
+# energy gain over that step, |k| s^2 / 2, is SADDLE_ENERGY_TOL_MEV: a softer
+# negative mode lowers the energy by less than 0.1 meV over the escape step,
+# far inside the refreeze tolerance. It sits five times above the noise of a
+# central-difference Hessian of the excited-state force at NUCLEAR_FD_STEP
+# (asymmetry 1.5e-4 Ha/Bohr^2 at the formaldehyde S1 minimum, LRC-wPBEh/
+# cc-pVDZ, ISDF-K mean field converged to SCF_OPTIMIZATION_GRAD_TOL).
 SADDLE_ESCAPE_STEP_BOHR = 0.1
-SADDLE_CURVATURE_TOL = (-2.0 * REFREEZE_TOL_MEV / HARTREE_TO_MEV
+SADDLE_ENERGY_TOL_MEV = 0.1
+SADDLE_CURVATURE_TOL = (-2.0 * SADDLE_ENERGY_TOL_MEV / HARTREE_TO_MEV
                         / SADDLE_ESCAPE_STEP_BOHR ** 2)
 
 # Seconds `properties.excitations` waits for git to name the commit a record
@@ -1244,6 +1326,12 @@ DAVIDSON_SPACE_GB = 16
 # cycles only for a solve that needs more.
 BSE_FORCE_MAX_CYCLE = 3 * DAVIDSON_SPACE_CYCLES
 
+# Bohr. Largest atomic displacement over which a Casida Davidson along a walk
+# starts from the previous geometry's converged vectors, carried into this
+# geometry's orbitals (`davidson.DavidsonWarmStart`), rather than from unit
+# vectors alone: the SCF warm start's rule, for the same steps.
+DAVIDSON_WARM_START_MAX_SHIFT = SCF_WARM_START_MAX_SHIFT
+
 # Fraction of this rank's max_memory (the allocation's share a job hands pyscf,
 # `Base.utils.memory.allocation_max_memory_mb`) that the Davidson's trial space
 # (`LinearResponse.davidson`) may take together with the block action's own
@@ -1312,10 +1400,431 @@ SCREENED_CHUNK_BYTES = 2 << 30
 # memory and the GEMM shapes, never a number beyond the summation order.
 EE_RI_TILE_GB = 8.0
 
+# Spin-component scaling (c_os, c_ss) of the doubles in ADC(2): SCS (Grimme,
+# J. Chem. Phys. 118, 9095 (2003); Hellweg, Gruen and Haettig, Phys. Chem.
+# Chem. Phys. 10, 4119 (2008)) and SOS (Jung, Lochan, Dutoi and Head-Gordon,
+# J. Chem. Phys. 121, 9793 (2004)), the factors of Turbomole's ricc2.
+ADC2_SPIN_SCALING = {'scs': (6.0 / 5.0, 1.0 / 3.0), 'sos': (1.3, 0.0)}
+
 # Auxiliary functions per chunk while the occupied/virtual factors of the
 # folded ADC(2) operator are transformed from the AO three-index tensor; the
 # chunk holds (n_aux_chunk, nao, nao) doubles.
 EE_RI_AUX_CHUNK = 128
+
+# ---------------------------------------------------------------------------
+# Root finders, static screening, ISDF span and grid identity, reaction-field fit
+# ---------------------------------------------------------------------------
+
+# Separable-RI factors on near-null AO combinations (`separable_ri`): the
+# relative Coulomb residual of an orbital density against its RI-V fit beyond
+# which the factors do not represent it. ISDF_DENSITY_RESIDUAL_TOL selects the
+# S-normalized overlap eigenfunctions of `represented_span`, which also drops
+# every eigenvalue below ISDF_SPAN_OVERLAP_FLOOR (coefficient norms above
+# 1e3); ISDF_ORBITAL_RESIDUAL_TOL refuses a set of orbitals
+# (`refuse_unrepresented_orbitals`). Measured on CBP gas aug-cc-pVDZ at
+# (24,15,9,3): worst virtual density 1.9 and min eig(A - B) -1.7 Ha.
+ISDF_DENSITY_RESIDUAL_TOL = 1e-2
+
+ISDF_ORBITAL_RESIDUAL_TOL = 5e-2
+
+ISDF_SPAN_OVERLAP_FLOOR = 1e-6
+
+# A refusal names at most ISDF_REFUSED_ORBITALS_NAMED orbitals, worst first;
+# the fitted densities D^T X_mo^2 are summed in tiles of
+# ISDF_FITTED_DENSITY_ROWS grid rows.
+ISDF_REFUSED_ORBITALS_NAMED = 12
+
+ISDF_FITTED_DENSITY_ROWS = 4096
+
+# A UHF Casida exciton whose charge amplitude chi_a for orbital p has norm below
+# this is an M_s = 0 triplet component, which the restricted singlet spectrum
+# does not hold: it is dropped from the singlet-only PSD sums (PSD1/5/6/8) so a
+# closed shell gives the RHF self-energy (agreement measured at 3e-9 eV on
+# water/6-31G). The triplet modes PSD2/4/7/9 keep it, as the spin-orbital eh
+# pair does.
+UHF_PSD_CHARGE_AMPLITUDE_MIN = 1e-5
+
+# Ha. Scan windows of the quasiparticle root search (`qp_equation.
+# find_qp_root`) on a self-energy known pointwise, eps -+ half width: (|eps|
+# above which the tier applies, half width). Deeper states have
+# larger corrections and their satellites sit further out.
+QP_SEARCH_WINDOW_TIERS = ((0.0, 0.5), (1.5, 1.0), (4.0, 2.0))
+
+# Floor on |Z| below which the periodic root scan (`pbc_occupations.
+# qp_energy_root_occ`) counts a root as a pole artifact (Z -> 0 beside a pole of
+# Sigma_c) when it reports how many roots a metal's band has. Not a
+# quasiparticle threshold: that is QP_WINDOW_Z_MIN.
+PBC_QP_Z_MIN = 0.05
+
+# A walk step whose evaluation raises `StepFailed` is retried from the last
+# accepted geometry with the radius times WALK_STEP_SHRINK, by the Cartesian
+# walker and by geomeTRIC alike; below WALK_TRUST_MIN_BOHR (Bohr, the norm of
+# the 3N-vector step) the radius has collapsed and the walk stops.
+WALK_STEP_SHRINK = 0.25
+
+WALK_TRUST_MIN_BOHR = 2e-3
+
+# The walk's step cap and its trust radius (Bohr, the norm of the 3N-vector
+# step). The first step is taken on a guessed Hessian, and a longer one can
+# carry a quasiparticle root past where the frozen Newton seed finds it.
+WALK_MAX_CYCLE = 50
+WALK_TRUST_BOHR = 0.1
+WALK_TRUST_MAX_BOHR = 0.5
+
+# Largest relative error of the auxiliary representation of the reaction field
+# a solvated run accepts: || G_fit - G || / || G || over the pair densities of
+# the SOLVENT_RI_PROBE_ORBITALS highest occupied x lowest virtual orbitals, G
+# the cavity potential of a pair density and G_fit that of its Coulomb fit
+# (`SolventScreening.fit_residual`). vtilde_PQ itself is the exact cavity
+# contraction; the residual is the fit's missing tail on the cavity, and it
+# converges with the auxiliary set's diffuse functions (an even-tempered set
+# reaches the exact contraction to 0.02 meV). Measured, IEF-PCM toluene,
+# PBE0, static-W BSE: the basis's own -ri set gives 3.9-6.1% at cc-pVDZ
+# (water 6.1%: S1 +10.0, T1 -4.7, dEST +14.6 meV; formaldehyde and planar
+# DMABN: <= 1.3 meV) and 1.4-1.5% at aug-cc-pVDZ (<= 5 meV); cc-pvdz-ri on
+# aug-cc-pVDZ gives 12.6-16.8% and 20-44 meV.
+SOLVENT_RI_RESIDUAL_MAX = 0.08
+
+SOLVENT_RI_PROBE_ORBITALS = 20
+
+# Turning rate (rad per Bohr of one nuclear coordinate) above which an atom's
+# covariant ISDF frame is reported (`separable_ri.frame_turning_record`). The
+# rate is 1/gap of the atom's neighbour-tensor eigenvalues times its slope:
+# 0.3-3 rad/Bohr on ordinary atoms (water 0.9, DMABN twisted amine N 3.0),
+# 16.2 on DMABN's planar amine N and 18.9 on the ladder formaldehyde's carbon,
+# where turning frames made the GH Hessian 2.7 percent asymmetric. Reported,
+# not refused: Hessians and walks freeze the frames (`isdf_jk.FrozenFrames`).
+FRAME_TURNING_RATE_BAR = 5.0
+
+# The upfolded BSE's non-symmetric Davidson: residual norm, cycle cap, the
+# floor on |theta - H_ii| of the diagonal preconditioner, and the norm below
+# which a new direction counts as already spanned.
+UPFOLDED_BSE_DAVIDSON_TOL = 1e-7
+
+UPFOLDED_BSE_DAVIDSON_MAX_CYCLE = 100
+
+UPFOLDED_BSE_PRECOND_FLOOR = 1e-8
+
+UPFOLDED_BSE_LINDEP_TOL = 1e-8
+
+# Relative imaginary part (|Im| / max(1, |Re|max) Ha) above which a returned
+# upfolded-BSE root is complex: the dynamical BSE has no real solution there.
+UPFOLDED_BSE_IMAG_TOL = 1e-6
+
+# Orbital-energy separation (Ha), at the geometry the explicit set is decided
+# at, below which neighbouring members on one side of the gap share a
+# subspace of the quasiparticle Hamiltonian (`ExcitedStateChain(
+# qp_hamiltonian=True)`), frozen with the set. Generous: H is invariant to
+# rotations inside a subspace, so a pair that later crosses keeps a smooth
+# surface, and one that never mixes keeps its own corrections to second order
+# in Sigma_pq / gap. DMABN/cc-pVDZ LUMO and LUMO+1 are 0.43 eV apart at R0
+# and cross on the S1 walk.
+QP_HAMILTONIAN_WINDOW = 0.03
+
+# The quasiparticle Hamiltonian of one subspace solved to self-consistency
+# (`sum_over_poles.subspace_hamiltonian`): the largest element (Ha) of the
+# residual e0 + Sigma^c[H] - H at which the Newton takes its last step, and
+# the cap on its steps (from the frozen seed one or two steps suffice).
+QP_SUBSPACE_TOL = 1e-13
+
+QP_SUBSPACE_MAX_ITER = 200
+
+# Interior samples of an interval between neighbouring poles that no bound
+# certifies as holding exactly one root (`qp_equation.PoleSum`): a negative
+# fitted amplitude at one of its ends, or negative ones nearby strong enough
+# to bend f. The sign of f next to a pole is known from its amplitude, and a
+# turning point of f between two samples is located on the closed-form slope,
+# so the 0 or 2 crossings an interval with mixed-sign amplitudes holds are
+# found. An unbounded outer interval is sampled on QP_GRAPHICAL_N_OMEGA points.
+QP_POLE_INTERVAL_SAMPLES = 3
+
+# The pole-aware grid scan of a self-energy known only pointwise
+# (`qp_equation.SampledEquation`: contour deformation, analytic continuation).
+# f = w - eps - Sigma rises with slope >= 1 between the poles of a
+# positive-weight Sigma, so a grid cell whose secant slope is below
+# QP_SCAN_SECANT_MIN hides a pole, and with it possibly a root beside it with
+# no sign change at the cell's ends; such a cell is halved, at most
+# QP_SCAN_SPLIT_DEPTH times, until the sign changes show.
+QP_SCAN_SECANT_MIN = 0.5
+QP_SCAN_SPLIT_DEPTH = 6
+# The scan's points per window are QP_GRAPHICAL_N_OMEGA whether f has a
+# closed-form slope or not. A cell must not hold a root, a pole and a second
+# root, which show as one sign change: 40 points (25 mHa cells) lost the
+# Z 0.54 root of water/cc-pVDZ's orbital 15 1.80 Ha up to its Z 0.37 partner
+# 20 mHa away, which 150 points resolve.
+
+# Width of the energy bins whose median correction is one knot, eV; probes
+# within one bin of the window edge are left to the edge's explicit root.
+OUTSIDE_CURVE_BIN_EV = 1.0
+
+# Largest excursion, eV, of the curve's spline beyond the values of the two
+# knots bounding an interval, read at the members' eigenvalues; a curve past it
+# is refused at build time. Measured on the reference curves of LRC-wPBEh
+# ISDF-K/cc-pVDZ: formaldehyde 0.046 (gas) and 0.005 eV (toluene), DMABN 0.15
+# (gas) and 0.20 eV (toluene), all on the virtual side.
+OUTSIDE_CURVE_OVERSHOOT_EV = 0.5
+
+# Ritz pairs the Davidson tracks beyond the requested roots, Tamm-Dancoff and
+# Casida alike, as max(floor, nroots // divisor). A root whose guess pair is
+# dressed far below its own diagonal by couplings to high pairs starts as a
+# Ritz value ABOVE the next root up, and a solve that corrects only the lowest
+# nroots then converges on that next root instead: formaldehyde/cc-pVDZ
+# triplet in toluene, 4 Tamm-Dancoff roots, returned 0.366009 Ha for a fourth
+# root at 0.363695 Ha, every residual below 1e-9. A tracked extra pair is
+# corrected until it converges or its residual interval lies above the highest
+# requested root: theta - |r| for the Hermitian A, theta - r_S for the Casida
+# problem, r_S the residual of J S in the metric S = [[A, B], [B, A]].
+DAVIDSON_EXTRA_ROOTS_FLOOR = 2
+
+DAVIDSON_EXTRA_ROOTS_DIVISOR = 2
+
+# How a BSE state is followed between geometries beyond its index: by the
+# overlap of its Casida vector with the last accepted one.
+ROOT_FOLLOWING = ('overlap',)
+
+# Auxiliary gauge of a static W handed to the ISDF BSE: the separable fit's
+# symmetric V^-1/2 metric root. pyscf's cderi is L^-1-whitened, an orthogonal
+# rotation of the same index, so a W in that gauge has the right shape and is wrong.
+SEPARABLE_AUX_GAUGE = 'separable'
+
+# Thiele-Pade continuation of Sigma_c(i omega) (`analyticalContinuation.
+# pade_nodes`): PADE_NPADE Gauss-Legendre nodes of the half axis mapped by
+# omega = PADE_W0 (1 + x)/(1 - x), PADE_W0 in Ha.
+PADE_NPADE = 16
+
+PADE_W0 = 1.0
+
+# Relative truncation of the IR singular values (Shinaoka et al., Phys. Rev. B
+# 96, 035147 (2017)) for the molecular imaginary-axis grids: the IR transforms
+# of `TimeFrequencyGrid.ir`, the default `IRBasis` and the finite-temperature
+# Pade cap `ir_continuation_order`. Fits land near this accuracy.
+IR_EPS = 1e-10
+
+# Relative to max |a|: the skew part V^T A V - (A V)^T V (and B's) of the
+# Casida Davidson's projected blocks that a symmetric block action leaves.
+# Measured at most 8.8e-16 on water and benzene/cc-pVDZ (ISDF and DF, BSE,
+# TDHF, RPA, one and three ranks); a grid reduction one row off its block
+# leaves 1.2e-2 to 0.46 and roots converged 0.19 Ha low.
+DAVIDSON_ACTION_SYMMETRY_TOL = 1e-8
+
+# What a pin recorded under one BLAS may miss by under another, per quantity
+# class (tests/pins.py; bitwise under the recording BLAS). Measured on a
+# cluster's MKL 2025.3 against a workstation's MKL 2021.4/SSE4.2 + Accelerate.
+# Energies, Ha: up to 1.4e-12 (water RPABSESurface[singlet]; mean fields 6e-14
+# to 4e-13); a pole strength not read off a continuation holds to the same
+# number, dimensionless.
+PIN_CROSS_BLAS_BAR = 2e-12
+
+# Forces and gradients, Ha/Bohr, the ISDF gradient floor: 1.15e-9 to 2.2e-9
+# (surface_comm 1.15e-9 to 1.82e-9, outside_scissor R0 2.0e-9 to 2.2e-9).
+PIN_CROSS_BLAS_GRADIENT_BAR = ISDF_GRADIENT_FLOOR
+
+# Quantities of an analytic continuation, which amplifies the fit's last
+# bits: the Pade route's quasiparticle energy, Ha, and its pole strength Z,
+# dimensionless (Z the continuation's derivative; st-pade HOMO Z missed by
+# 5.6e-11 water, 2.1e-11 formaldehyde, 5.6e-10 thioformaldehyde).
+PIN_CROSS_BLAS_CONTINUED_BAR = 1e-9
+
+# Vectors and orbital coefficients, after sign alignment, under another BLAS
+# than the one a pin was recorded on; dimensionless.
+PIN_CROSS_BLAS_VECTOR_BAR = 1e-10
+
+# Roots and matrix elements under another BLAS, Ha; it holds the GWGammaInf
+# vertex self-energy's 1.2e-10 miss.
+PIN_CROSS_BLAS_ROOT_BAR = 2e-10
+
+# Two computations of one number on the recording machine (two solves, two
+# routes, a run and an archived tree's run) are not bitwise: a BLAS reduction
+# taken in another order reproduces only to an ulp (1.1e-16
+# Ha, one ulp of a 0.689 Ha operand, one cluster run in five). They are held
+# to this many ulp of the larger of their magnitude and one unit (tests/pins.
+# same_bar): the unit floor because a
+# difference of O(1) operands keeps their ulps, not its own. 8 ulp: a few
+# roundings of a reduction, far below every class bar (2e-12 Ha at its least).
+PIN_SAME_ULPS = 8
+
+# Two Davidson solves of one problem (two rank splits) each sit within their
+# residual |r| <= conv_tol of an eigenvalue (Weyl: some eigenvalue lies within
+# |r| of a Ritz value), so their roots differ by at most this many conv_tol.
+PIN_DAVIDSON_ROOT_FACTOR = 2
+
+
+# ---- the gradient and property layer: one Numerics object, the conventions,
+# the refreeze outer loop and the rate table
+
+# The three sublevels M = -1, 0, +1 of a triplet. A crossing that STARTS in a
+# triplet (RISC, T1 -> S0) averages its rate over them, thermalized when the
+# zero-field splitting is far below kT, so it carries |V|^2 / 3 where the sum
+# over the final sublevels gives ISC the whole |V|^2.
+TRIPLET_SUBLEVELS = 3
+
+# The ISDF fit's choices (`IsdfNumerics`): the angular cutoff of the second
+# index of its test co-densities, its pair screening and its Tikhonov shift.
+ISDF_FIT_L_MAX_SECOND = 2
+
+# Pair-screening threshold: a test co-density is dropped when its peak
+# amplitude anywhere on the interpolation grid falls below this times the
+# global maximum. It is what makes the pair count linear in system size.
+#
+# NOT a Schwarz bound, and it does not read as an accuracy target. A screened
+# pair is not set to zero in the result -- the factorization is dense in the
+# pair index, so it still returns a value there, just one no equation
+# constrained. So the threshold is a statement about which CONSTRAINTS are
+# redundant, and the failure is a cliff rather than a slope. Measured on
+# benzene and naphthalene at cc-pVTZ, fit error relative to 1e-10:
+#
+#     1e-06   1.00x        76% / 58% of columns kept
+#     1e-05   1.37x/1.97x  65% / 47%
+#     1e-04    102x/136x   45% / 29%
+#
+# 1e-06 is free -- identical to four figures, and the BSE roots move under
+# 0.03 meV at cc-pVDZ against the ~5 meV the grid itself contributes. There is
+# nothing to harvest past it, so do not tune this looking for more.
+ISDF_FIT_PAIR_TOL = 1e-6
+
+# Their eq 9 regularization, "a reasonable parameter for double precision".
+# Delesma, Golze and Rinke, reimplementing this in FHI-aims, report that "the
+# inversion is numerically stable without L2 regularization" -- so derive 0.0
+# (`Numerics.derive`) if the balanced Gram matrix is well conditioned for your
+# grid, and compare.
+ISDF_FIT_REGULARIZATION = 4e-7
+
+# Geometries whose evaluation a surface retains (`gradients.evaluation`): the
+# mean field, the forward pass, the roots and, once asked, the force. A walk
+# holds its accepted geometry and the trial step beside it, and every later
+# question about either -- the record's energy, the ground state there, a
+# root-following match -- reads the same SCF and the same roots. Only the
+# newest geometry keeps its forward pass whole; the older keeps its roots.
+EVALUATION_CACHE_SIZE = 2
+
+# What a mean field along a GEOMETRY OPTIMIZATION is converged to: the energy
+# test at its rounding floor, and an orbital gradient whose bias on the force
+# (about ten times |g| through the orbital response) is four decades under
+# GEOM_OPT_CONV's residual. A quantity that feeds a finite difference
+# (a numerical Hessian, a displaced spin-orbit element) keeps
+# SCF_DIFFERENTIABLE_GRAD_TOL.
+SCF_OPTIMIZATION_CONV_TOL = SCF_ENERGY_CONV_TOL
+SCF_OPTIMIZATION_GRAD_TOL = 1e-8
+
+# Cycle cap of a production mean field (`photophysics.chain`); the PCM
+# re-convergence copies it.
+SCF_MAX_CYCLE = 200
+
+# How many of the largest |H_ixjy - H_jyix| a refused finite-difference
+# Hessian lists, with their atom/axis pairs, in the asymmetry.json it leaves.
+HESSIAN_ASYMMETRY_WORST = 10
+
+# A followed state whose best overlap falls below ROOT_FOLLOW_WEIGHT_MIN is
+# searched for again among this many times the roots (at most the whole pair
+# space); found nowhere, the step is refused rather than continued on another
+# state.
+ROOT_FOLLOW_RESOLVE_FACTOR = 2
+
+# Orbital-energy separation (Ha) below which neighbouring orbitals count as one
+# degenerate block (one separation for both uses). A quasiparticle
+# window is widened so it never cuts one, since inside a degenerate subspace a
+# single orbital is no smooth function of the geometry. And, at the geometry the
+# explicit set is decided at, neighbouring members of the set closer than this
+# form a block carrying ONE correction, the mean of its members'
+# eps^QP_p - eps_p, frozen with the set -- for true degeneracies only
+# (QP_BLOCK_CORRECTION_TOL): orbitals merely close in energy have corrections of
+# their own, and averaging them moves each by half their difference
+# (formaldehyde/cc-pVDZ HF orbitals 12/13, 4.2e-3 Ha apart, corrections 370 meV
+# apart: SOP - AC -188/+185 meV averaged, -3.0/+0.3 meV each on its own).
+QP_DEGENERACY_TOL = 1e-4
+
+# A BAR, not a choice: the spread (Ha) of the
+# members' own corrections eps^QP_q - eps_q, at the reference geometry, within
+# which a QP_DEGENERACY_TOL block is a true degeneracy and shares one
+# correction; an accidental near-degeneracy has corrections of its own
+# (PXZ-TRZ/aug-cc-pVDZ virtual pairs 1e-4 Ha apart, corrections 30-170 meV
+# apart: averaged, SOP T1 moves by -22 meV).
+QP_BLOCK_CORRECTION_TOL = 1e-4
+
+# The frozen conventions keyed by orbital identity (`gradients.conventions`):
+# the least weight an orbital of a displaced geometry must hold in the span of
+# the frozen unit (a near-degenerate group, one explicit orbital, or the holes
+# and outside orbitals sharing one frozen shift) it is matched to. Between a
+# quarter and three quarters mixed with another unit an orbital belongs to
+# neither, and its convention is refused, not guessed; with any bar at one half
+# two crossing orbitals would only ever swap labels, a step in the surface.
+CONVENTION_SPAN_MIN = 0.75
+
+# Kaltak-Klimes-Kresse residual that buys ~0.1 meV on the quasiparticle
+# energy. Calibrated on naphthalene/cc-pVDZ at R_Sigma = 486, against the
+# ntau -> infinity limit of the space-time HOMO:
+#     eta 1.2e-08 -> 1.96 meV     eta 6.0e-10 -> 0.32 meV
+#     eta 4.8e-11 -> 0.08 meV     eta 3.7e-12 -> 0.03 meV
+# The mapping is empirical -- eta bounds the quadrature, not the self-energy
+# it is used to integrate -- so this is a calibrated default, not a bound.
+#
+# The default of `QuadratureNumerics.tau_target`, the ONE minimax target every
+# route sizes an 'auto' tau grid at (`minimax_points_for_accuracy`
+# has no second default of its own); the molecular and periodic space-time
+# routes read it through `utils.time_frequency`.
+DEFAULT_TAU_TARGET = 1e-10
+
+# The space-time self-energy's Pade continuation: its points on the
+# Gauss-Legendre frequency grid of scale GL_FREQUENCY_SCALE (Ha), which the
+# frequency axis of chi0 shares where its size is given explicitly.
+DEFAULT_NPADE = 16
+
+GL_FREQUENCY_SCALE = 1.0
+
+# How the frozen scissor beyond the explicit window is shaped
+# (`GW.qp_states.OutsideCurve`): 'tiers' lends each orbital the shift of the
+# explicit orbital nearest in energy, a constant; 'curve' gives it Delta(eps_p)
+# of a natural cubic spline (C2) through energy-binned analytic-continuation
+# corrections of every orbital, anchored on the window edge's own root. On
+# PXZ-TRZ/aug-cc-pVDZ
+# the virtual corrections above the window run from -0.5 to +7.6 eV and the deep
+# occupied average -4.6 eV, where the tiers lend -0.70 and -0.03 eV.
+OUTSIDE_SCISSOR_MODES = ('tiers', 'curve')
+
+# The Casida eigensolvers a surface may ask for; 'auto' is the memory rule
+# (`LinearResponse.bse.solver_choice`).
+BSE_SOLVERS = ('auto', 'dense', 'davidson')
+
+# Unit-vector guesses per requested root. One each is what a diagonal-dominant
+# argument suggests, and it silently returns the WRONG STATES whenever the
+# smallest orbital-energy differences are degenerate. A unit vector in the
+# occupied-virtual pair basis carries a definite pair symmetry and both A and B
+# are block diagonal over it, so the Davidson subspace never leaves the irreps
+# its guess started in: it converges, to `nroots` roots that are not the lowest
+# ones. benzene/cc-pVDZ RPA at nroots=5 puts a degenerate quartet plus half of
+# the next degenerate pair in the guess and returns
+#     0.483476 0.519125 0.523487 0.570116 0.570117
+# against a true lowest five of
+#     0.483476 0.519125 0.519134 0.523487 0.553819
+# -- with converged True on all five. So `converged` does not catch this; only
+# a better-spanning guess does, and the two fixes are independent.
+#
+# Over-requesting is a heuristic, not a guarantee -- it buys directions in more
+# irreps, and nothing here knows which irreps the true lowest roots live in.
+# Completing the degenerate set alone is NOT enough (measured: six guesses on
+# that benzene case still miss the fifth root); 2x plus completion is. A result
+# worth trusting is worth repeating at a raised `guess_factor`.
+DAVIDSON_GUESS_FACTOR = 2
+
+# A Marcus-Levich-Jortner rate splits a crossing's reorganization energy
+# lambda, taken from the accepting state's energies at the two minima, into the
+# Huang-Rhys sum rule sum_k S_k omega_k of the displaced modes and a classical
+# remainder lambda - sum_k S_k omega_k. Where the sum rule reaches or exceeds
+# the energy-based lambda the harmonic displacement model has failed (a
+# torsion projected on Cartesian normal modes inflates S), and the Marcus and
+# MLJ rates are refused with both lambdas recorded, never run on a clamped
+# remainder. lambda is a difference of two excited-state energies, each
+# carrying up to REFREEZE_TOL_MEV of convention drift, so a remainder within
+# twice that is not resolved and is refused as well.
+RATE_LAMBDA_REMAINDER_MIN_MEV = 2.0 * REFREEZE_TOL_MEV
+
+# Quanta of the effective mode the rate table's Marcus-Levich-Jortner sum
+# keeps; the Poisson weight it drops is refused above sqrt(eps) by the rate.
+RATE_MLJ_N_MAX = 400
+
+# Default eigenvalue tolerance (Hartree) of an excitation-energy ADC solve
+# (`eeADC.ee_driver.solve_ee_adc` and the ADC(2) state model)
+EE_ADC_CONV_TOL = 1e-8
 
 # GB of MP1 amplitudes (one spin channel, this rank's occupied tiles) that the
 # folded ADC(2) operator keeps for the second-order singles block instead of
@@ -1326,6 +1835,14 @@ EE_RI_AMPLITUDE_CACHE_GB = 32.0
 # product (`eeADC.ee_ri_fold`), the chunks dealt over the MPI ranks and summed
 # in chunk order; never set by the rank count, so neither are the bits.
 EE_RI_EXCHANGE_CHUNK = 128
+# (chunk, nv, nv) arrays alive in one exchange chunk of a folded product
+EE_RI_EXCHANGE_ARRAYS = 3
+# (kt, nv, no, nv) arrays alive in one occupied tile of a folded product
+EE_RI_FOLD_TILE_ARRAYS = 5
+# ... in one occupied tile of the RI difference density (`eeADC.ee_ri_density`)
+# and in one virtual tile of its vv pass
+EE_RI_DENSITY_OCC_TILE_ARRAYS = 9
+EE_RI_DENSITY_VIRT_TILE_ARRAYS = 6
 
 # The configuration-dependent part of the folded doubles' diagonal, for the
 # block solver's seeds: a configuration (i, a) is pulled down by the
@@ -1382,3 +1899,161 @@ EE_FOLD_BLOCK_LINDEP = 1e-10
 # Newton/bisection on a model root: steps, and the relative step that ends it
 EE_FOLD_MODEL_ROOT_MAX_ITER = 100
 EE_FOLD_MODEL_ROOT_STEP = 1e-15
+
+# The Franck-Condon rows (multimode Condon and Herzberg-Teller) share one
+# density built from the S1-T1 displacement, whose harmonic reorganization is
+# the sum rule sum_k S_k omega_k. A crossing's FC rows are refused when that
+# sum rule and the crossing's energy-based lambda (its accepting state's, the
+# one the Marcus rows use) differ by more than this factor either way: the
+# displacement model then does not describe the crossing. The bar catches a
+# failed model (a Cartesian projection of a torsion is off by 3-15x), not a
+# quantitative one: in the inverted region a 30% change of lambda already
+# moves the classical rate by orders of magnitude.
+RATE_FC_LAMBDA_RATIO_MAX = 2.0
+
+# Thermal reach of the state manifold in the rate table, in k_B T: every
+# initial state within this of the lowest one at its minimum is Boltzmann
+# populated, and every final state up to this above the higher of the initial
+# and the lowest final state is a channel (exp(-10) = 4.5e-5).
+RATE_THERMAL_WINDOW_KT = 10.0
+
+# Curvilinear displacements (`properties.curvilinear`): a valence angle
+# above this many degrees is linear and neither it nor a dihedral through it is
+# a primitive (both are undefined at 180 degrees); the directions they would
+# span are carried by the Cartesian displacement instead.
+CURVILINEAR_LINEAR_ANGLE_DEG = 175.0
+# Relative singular-value cut of the mass-weighted Wilson B matrix's
+# pseudo-inverse. Its redundant and rigid-body singular values are zero to
+# round-off and the smallest physical one is ~1e-2 of the largest.
+CURVILINEAR_PINV_RCOND = 1e-8
+
+# Derivative couplings (`gradients.derivative_coupling`): two roots closer
+# than this (Hartree) have no well-defined pair of eigenvectors, and the
+# amplitude term divides by their gap. Refused, as `DIABAT_GAP_MIN` refuses a
+# diabat with a neighbour this close.
+COUPLING_GAP_MIN = 1e-4
+
+# Vibronic and rate models (`properties.vibronic`, `rates`, `spin_vibronic`):
+# every normal mode they read must be a vibration at least this many cm^-1.
+# An imaginary mode is a saddle, which has no Franck-Condon density of
+# states; a mode below the floor is a rigid-body remnant or a flat direction,
+# whose Huang-Rhys factor g^2 / (2 omega^3) has no bound.
+VIBRONIC_MODE_FLOOR_CM = 1.0
+
+# The per-root Newton, its seeds and its count check (`eeADC.ee_fold`)
+# Hartree: seeds spread by at most this are one level
+EE_FOLD_DEGENERATE = 1e-8
+# tight seeds: Ritz error |r|^2/gap far below EE_FOLD_DEGENERATE
+EE_FOLD_SEED_RESIDUAL = 1e-9
+# seeds of M: they only place the seed frequency
+EE_FOLD_M_SEED_RESIDUAL = 1e-3
+# seeds of A_eff at the seed frequency
+EE_FOLD_AEFF_SEED_RESIDUAL = 1e-4
+# Hartree: seeds closer than this are re-solved tight
+EE_FOLD_SEED_SPLIT = 1e-5
+# loosest residual of a Newton step's eigensolve
+EE_FOLD_INNER_CAP = 1e-3
+# its residual: this times the previous |lambda - omega|
+EE_FOLD_INNER_RATIO = 0.1
+# Hartree: the count check's correction r / (d - e + shift)
+EE_FOLD_CHECK_SHIFT = 0.1
+# the count check decides mu against a window, no tighter
+EE_FOLD_CHECK_RESIDUAL = 1e-4
+# unit vectors on the lowest lifted diagonal beside the random one
+EE_FOLD_CHECK_SEEDS = 8
+# relative norm left off a span below which a start vector is in it
+EE_FOLD_SPAN = 1e-8
+# full-vector overlap above which two roots are one
+EE_FOLD_DUPLICATE = 0.5
+# rounds of the count check before it warns
+EE_FOLD_COUNT_ROUNDS = 3
+# seconds: an eigensolve reports at most this often meanwhile
+EE_FOLD_HEARTBEAT = 600.0
+# Hartree: a root this far from the centre rebuilds the images
+EE_FOLD_RECENTRE = 0.01
+# roots past nroots the Davidson may follow and seeds whole
+EE_FOLD_FOLLOW = 2
+
+# The tiled nuclear force of a density-fitted correlated energy
+# (`SingleReference.df_correlation_force_tiled`): GB of one unit of the
+# derivative-integral pass (an AO shell block against an auxiliary chunk, a
+# few (n_aux_chunk, nao, n_block) arrays), and the auxiliary functions per
+# chunk of that pass and of the JK fit's exchange intermediates. Both fix the
+# summation order, so neither is ever set by the rank count.
+DF_FORCE_BLOCK_GB = 1.0
+DF_FORCE_AUX_CHUNK = 256
+# Basis functions above which the ADC(2)/MP2 state models take the tiled force
+# instead of the dense reference (every MO factor and doubles tensor whole).
+EE_FORCE_DENSE_MAX_NAO = 150
+# Residual (Hartree) to which a root is converged before its force: the force
+# is first order in the singles vector's error, the energy second.
+EE_FORCE_ROOT_RESIDUAL = 1e-11
+
+# Self-consistent solvation loop (src.Base.solvation_loop)
+# largest change of an induced charge between cycles (e)
+SOLVATION_LOOP_TOL_Q = 1e-7
+# change of the free energy G between cycles (Hartree)
+SOLVATION_LOOP_TOL_ENERGY = 1e-8
+# cycle cap of one loop
+SOLVATION_LOOP_MAX_CYCLE = 30
+# vectors kept by the DIIS extrapolation of the charges
+SOLVATION_LOOP_DIIS_SPACE = 8
+# a walk's G_eq at its minimum and the vertical's at the same geometry, each
+# on its own frozen conventions, differing by more than this many loop
+# tol_energy is flagged in the photophysics record (walk_vs_vertical_flag)
+WALK_VERTICAL_G_FLAG_FACTOR = 10
+# Loosest orbital gradient (pyscf conv_tol_grad) a state model's SCF may be
+# converged to (src.SingleReference.state_models): the relaxed density and the
+# Hellmann-Feynman force assume stationary orbitals, and both are first order
+# in the orbital gradient. pyscf's default, sqrt(conv_tol), is refused.
+STATE_MODEL_SCF_GRAD_TOL = 1e-9
+# Largest max |dm - dm^T| / max(1, max |dm|) of an AO density whose PCM force
+# is taken (src.Base.pcm_derivatives.potential_integral_gradient, which
+# differentiates the first AO index only and doubles it): a symmetric density
+# built in floating point stays some 1e-15 off; a transition density that
+# was never symmetrized is off at order 1.
+PCM_FORCE_DENSITY_SYMMETRY_TOL = 1e-10
+# Norm of the difference below which a PCM object's cached density (and its
+# charges) is reused for a force (pcm_derivatives.potential_integral_gradient)
+PCM_DM_CACHE_TOL = 1e-10
+
+# Folded ADC(2) nuclear force (src.SingleReference.ADC.eeADC.ee_gradient)
+# eigenvalue tolerance (Hartree) of the root whose force is taken
+EE_FORCE_ROOT_TOL = 1e-12
+# A state model's force re-solves its root at EE_FORCE_ROOT_TOL; at the call's
+# own field its omega must equal the call's to this many times the call's
+# conv_tol, or the force is another state's (ee_state_model, follow='index').
+# Water and formaldehyde 6-31G, roots 0-2: at most 1.9e-10 Ha apart at 1e-8.
+EE_FORCE_OMEGA_MATCH = 10.0
+
+# Tiled correlation force (src.SingleReference.df_correlation_force_tiled)
+# (kt, nv, no, nv) arrays alive in one MP2 tile: I, D, tau, lambda, a product
+DF_FORCE_MP2_TILE_ARRAYS = 5
+# ... and in one tile of ee_relaxed_density.tiled_pieces
+DF_FORCE_PIECES_TILE_ARRAYS = 14
+# (chunk, nao, block) arrays alive per unit of an AO shell block
+DF_FORCE_BLOCK_ARRAYS = 5
+
+# pdaggerq prints term coefficients rounded to seven decimals (1/576 -> 0.0017361);
+# the exact rational is recovered within half a unit of the last printed digit
+# (src/Base/pdaggerq_interface.exact_coefficient).
+PDAGGERQ_COEFFICIENT_PRINT_TOLERANCE = 5.5e-8
+
+# Seed of the random directions solve_symmetric's lowest-k completion adds to
+# the start of its solve on the complement of the converged roots.
+DAVIDSON_COMPLETION_SEED = 0
+
+# Root following (Solvers.davidson.overlap_pick): two Ritz vectors whose
+# overlaps on the followed reference differ by less than this are a tie,
+# broken by energy (the roots beyond the reference's rank have overlap ~0).
+DAVIDSON_FOLLOW_OVERLAP_TIE = 1e-6
+
+# Generated charged-ADC solves (SingleReference.ADC.sigma_driver): the exact
+# k=2 downfold's outer omega iterations, the residual cap of its inner
+# Davidson, the diagonal downfold's omega fixed point (steps, Ha), and the
+# floor on |omega - K2| that keeps a Schur pole off the current omega (Ha).
+ADC_DOWNFOLD_MAX_OUTER = 50
+ADC_DOWNFOLD_DAVIDSON_TOL_CAP = 1e-8
+ADC_SCHUR_FIXED_POINT_MAX_ITER = 200
+ADC_SCHUR_FIXED_POINT_TOL = 1e-12
+ADC_SCHUR_POLE_GUARD = 1e-10

@@ -31,6 +31,7 @@ of the spectrum.
 is kept as a private, tests-only oracle to validate this generated/iterative
 solver on small systems -- it is not part of the public API.
 """
+import warnings
 from itertools import permutations
 
 import numpy as np
@@ -349,25 +350,47 @@ class EOMCC:
             vs = [vs]
             conv = np.atleast_1d(conv)
 
-        max_imag = np.max(np.abs(es.imag)) if np.iscomplexobj(es) else 0.0
-        if max_imag > 1e-6:
-            print(f"WARNING: EOM-{sector} eigenvalues have |Im| up to {max_imag:.2e}")
+        max_imag = float(np.max(np.abs(es.imag))) if np.iscomplexobj(es) else 0.0
+        if max_imag > EOM_IMAG_TOL:
+            # Refuse inputs, warn numerics; the
+            # result says so (`EOMResult.complex_eigenvalues`)
+            warnings.warn(f'EOM-{sector} eigenvalues have |Im| up to '
+                          f'{max_imag:.2e}; their real parts are returned',
+                          ComplexEOMEigenvalues, stacklevel=2)
 
         order = np.argsort(es.real)
         omega = es.real[order] - self.e_cc
         vectors = [np.asarray(vs[i]).real for i in order]
         conv = np.asarray(conv)[order]
-        return EOMResult(self, sector, left, omega, vectors, conv)
+        return EOMResult(self, sector, left, omega, vectors, conv,
+                         max_imag=max_imag)
+
+
+class ComplexEOMEigenvalues(RuntimeWarning):
+    """A non-Hermitian EOM solve that returned eigenvalues with an
+    imaginary part above EOM_IMAG_TOL: the real parts are kept and the result
+    is flagged (`EOMResult.complex_eigenvalues`)."""
+
+
+#: |Im omega| above which an EOM eigenvalue is reported as complex.
+EOM_IMAG_TOL = 1e-6
 
 
 class EOMResult:
-    def __init__(self, eomcc, sector, left, omega, vectors, conv):
+    """The roots of one EOM solve. `max_imag` is the largest |Im| of the
+    eigenvalues the solver returned and `complex_eigenvalues` whether it
+    exceeds EOM_IMAG_TOL: the omega kept are the real parts."""
+
+    def __init__(self, eomcc, sector, left, omega, vectors, conv,
+                 max_imag=0.0):
         self.eomcc = eomcc
         self.sector = sector
         self.left = left
         self.omega = omega
         self.vectors = vectors
         self.conv = conv
+        self.max_imag = float(max_imag)
+        self.complex_eigenvalues = self.max_imag > EOM_IMAG_TOL
 
     def amplitudes(self, n):
         """Unpack the n-th eigenvector into its r{1,2,3} (or l{1,2,3})

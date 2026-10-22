@@ -26,8 +26,7 @@ H -2.147  1.240  0.000
 
 if __name__ == '__main__':
     # w0 defaults to gap_scaled_w0 (None) throughout -- a fixed w0 needs a
-    # much larger nfreq to converge on small-gap systems like benzene (see
-    # tests/converge_nfreq_benzene notes in the density-matrix session log);
+    # much larger nfreq to converge on small-gap systems like benzene;
     # gap-scaled w0 gets sub-meV/few-meV agreement even at nfreq=20.
     cases = [
         ('HF/6-31g HOMO', 'H 0 0 0; F 0 0 0.9', '6-31g', 'homo', 30),

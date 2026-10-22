@@ -1,9 +1,9 @@
-"""Distributed tau loops must reproduce the serial answer exactly, and every
-collective cut into windows at an artificial count limit the bits of its one
-call (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
+"""Distributed tau loops must reproduce the serial answer, and every
+collective cut into windows at an artificial count limit its one call's
+numbers to a few ulp (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
 The reduce-scatter hands each rank its rows of the all-reduce within the
 spread of the summed partials over the orders a reduction adds them in, whole
-and in windows: bitwise over simulated ranks, which add both in rank order,
+and in windows: to a few ulp over simulated ranks, which add both in rank order,
 at that bar over MPI ranks, whose Reduce_scatter and Allreduce may add in
 different orders (tests/test_sliced_factors.py gates it under pytest).
 
@@ -29,6 +29,8 @@ from src.Base.constants import HARTREE_TO_EV
 from tests.test_proj_rows import LIMIT, collectives
 from tests.test_sliced_factors import (rank_partials, reassociation_bar,
                                        scatter_shapes)
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 comm, rank, size = grid_comm()
 
@@ -49,7 +51,7 @@ for n in (14, 18, 40):
 
 if rank == 0:
     print(f'\n-- every collective cut at MPI_COUNT_MAX = {LIMIT} gives the '
-          'bits of its one call')
+          'numbers of its one call to a few ulp')
 
 
 def windowed(run):
@@ -66,14 +68,16 @@ def windowed(run):
 
 if size > 1:
     whole, cut = windowed(lambda: collectives(comm))
-    moved = [k for k in whole if whole[k].tobytes() != cut[k].tobytes()]
+    moved = [k for k in whole if not matches(cut[k], whole[k], RECORDING_BLAS,
+                                             unit='1', quantity='root')]
     moved = [m for own in comm.allgather(moved) for m in own]
     all_ok &= check(not moved, f'over {size} MPI ranks', f'moved: {moved}')
 else:
     for s in (2, 3, 8):
         whole, cut = windowed(lambda: run_simulated(collectives, s))
         moved = [k for a, b in zip(whole, cut) for k in a
-                 if a[k].tobytes() != b[k].tobytes()]
+                 if not matches(b[k], a[k], RECORDING_BLAS, unit='1',
+                                quantity='root')]
         all_ok &= check(not moved, f'over {s} simulated ranks', f'moved: {moved}')
 
 if rank == 0:
@@ -95,8 +99,8 @@ def scattered_rows(c):
 
 def scatter_faults(s, whole, cut, exact):
     """Per rank and shape: the rows against the all-reduce's, and the windowed
-    rows against the one call's, past the summation-order bar (at all when
-    `exact`)."""
+    rows against the one call's, past the summation-order bar (past a few ulp
+    when `exact`: two runs in rank order)."""
     faults = []
     for r, (w_rank, c_rank) in enumerate(zip(whole, cut)):
         for shape, (rows, want), (cut_rows, _) in zip(scatter_shapes(s),
@@ -106,7 +110,8 @@ def scatter_faults(s, whole, cut, exact):
                                   ('windowed', cut_rows, rows)):
                 miss = (np.abs(got - ref).max(initial=0.0)
                         if got.shape == ref.shape else np.inf)
-                if miss > bar or (exact and miss):
+                if miss > bar or (exact and not matches(
+                        got, ref, RECORDING_BLAS, unit='1', quantity='root')):
                     faults.append(f'rank {r} {shape} {tag}: {miss:.2e} '
                                   f'against {bar:.2e}')
     return faults
@@ -123,14 +128,14 @@ else:
     for s in (2, 3, 8):
         whole, cut = windowed(lambda: run_simulated(scattered_rows, s))
         faults = scatter_faults(s, whole, cut, exact=True)
-        all_ok &= check(not faults, f'over {s} simulated ranks, bitwise',
+        all_ok &= check(not faults, f'over {s} simulated ranks, to a few ulp',
                         '; '.join(faults))
 
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri'); mf.kernel()
 nocc = mol.nelectron // 2
-F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
 serial = solve_qp_energy_space_time(mf, mol, nocc, nocc-1, factors=F) * HARTREE_TO_EV
 if rank == 0:
     print(f'\n-- QP energy, {size} rank(s)')

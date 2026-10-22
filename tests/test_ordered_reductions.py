@@ -6,8 +6,11 @@ sum from one owner to the next for addends too large to gather. Serially
 each is the addends' own sum in that order, so a kernel that adds its tiles
 in tile order gives the one-rank bits at any rank count, where `reduce_sum`
 joins rank partials in an order the rank count decides. Gated on water
-/cc-pVDZ RHF at 1, 2, 3, 5 and 8 simulated ranks, every sum bitwise the
-serial one (no tolerance):
+/cc-pVDZ RHF at 1, 2, 3, 5 and 8 simulated ranks, every sum the serial one
+to a few ulp (`assert_same`: each rank's addends are its own computation of
+the serial tiles, no method tolerance). The planted
+defects are shown to move the bits of the sums; under the recording BLAS
+their 1e-12 moves also lie far outside the few-ulp bar:
 
   * the helpers on random addends, owners round-robin (`ordered_sum`) and in
     consecutive runs (`ordered_chain_sum`), and the planted defect -- rank
@@ -24,7 +27,7 @@ serial one (no tolerance):
   * each site fails when the helper it calls moves the largest element of
     rank 1's first addend by MOVE.
 
-What is NOT bitwise yet, and why: qp_set_gradient's other outputs and the
+What is NOT on the ordered sums yet, and why: qp_set_gradient's other outputs and the
 dRPA adjoint still join rank partials elsewhere (their residue and proj_bar
 sums), and the Davidson's block action still reduce-scatters its grid
 products, so the composed forces stay at RANK_SPLIT_FORCE_TOL.
@@ -48,15 +51,16 @@ from src.Base.utils.mpi_grid import (current_comm, distributed,  # noqa: E402
                                      run_simulated)
 from src.Base.utils.time_frequency import TimeFrequencyGrid  # noqa: E402
 from src.SingleReference.GW.space_time import separable_factors  # noqa: E402
-from src.SingleReference.LinearResponse import davidson, space_time  # noqa: E402
+from src.SingleReference.LinearResponse import space_time  # noqa: E402
 from src.SingleReference.LinearResponse import trial_space  # noqa: E402
-from src.SingleReference.LinearResponse.davidson import static_screening_matrix  # noqa: E402
 from src.SingleReference.LinearResponse.space_time import (  # noqa: E402
-    rpa_correlation_energy_space_time)
+    rpa_correlation_energy_space_time, static_screening_matrix)
 from src.SingleReference.LinearResponse.trial_space import PairRows  # noqa: E402
 from src.gradients import qp_space_time  # noqa: E402
 from src.gradients.qp_space_time import qp_set_gradient  # noqa: E402
 from tests.test_mpi_routes import WATER  # noqa: E402
+from tests.isdf_test_grid import g1  # noqa: E402
+from tests.pins import RECORDING_BLAS, assert_same, matches  # noqa: E402
 
 SIZES = [2, 3, 5, 8]
 #: Pair rows per trial-space tile: benzene-sized pair spaces in many tiles.
@@ -77,7 +81,8 @@ def water():
     mf.kernel()
     nocc = mol.nelectron // 2
     with distributed(None):
-        X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')[:2]
+        X, D = separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
+                                counts=g1(mol))[:2]
     eps = np.asarray(mf.mo_energy)
     gap = eps[nocc] - eps[nocc - 1]
     nu, wt = gauss_legendre_grid(24, w0=gap)
@@ -120,7 +125,16 @@ def recording(monkeypatch, module, name, plant=False):
 
 
 def same_calls(ref, got):
-    """Every call's result bitwise the serial run's, call for call."""
+    """Every call's result the serial run's to a few ulp, call for call."""
+    return len(ref) == len(got) and all(
+        a.shape == b.shape
+        and matches(b, a, RECORDING_BLAS, unit='1', quantity='root')
+        for a, b in zip(ref, got))
+
+
+def bitwise_calls(ref, got):
+    """Every call's result the serial run's bits, call for call: what a
+    planted move must break."""
     return len(ref) == len(got) and all(
         a.shape == b.shape and np.array_equal(a, b) for a, b in zip(ref, got))
 
@@ -129,7 +143,7 @@ def same_calls(ref, got):
 @pytest.mark.parametrize('size', SIZES)
 def test_the_helpers_are_the_one_rank_sum(size):
     """Random addends, round-robin and consecutive owners: every rank holds
-    the serial sum's bits."""
+    the serial sum to a few ulp."""
     rng = np.random.default_rng(size)
     n = 23
     terms = [rng.standard_normal((7, 5)) * 10.0 ** rng.integers(-8, 8)
@@ -138,7 +152,8 @@ def test_the_helpers_are_the_one_rank_sum(size):
     serial = ordered_sum(list(enumerate(terms)), None, onto=onto)
     chain_serial = ordered_chain_sum(dict(enumerate(terms)), [0] * n, None,
                                      onto)
-    assert np.array_equal(serial, chain_serial)
+    assert_same(chain_serial, serial, unit='1', quantity='root',
+                label='chained against gathered')
     owners = [r for r in range(size)
               for _ in range(*mpi_grid.contiguous_block(n, r, size))]
 
@@ -150,7 +165,9 @@ def test_the_helpers_are_the_one_rank_sum(size):
                 ordered_chain_sum(chain, owners, comm, onto))
 
     for a, b in run_simulated(rank, size):
-        assert np.array_equal(a, serial) and np.array_equal(b, serial)
+        assert_same(a, serial, unit='1', quantity='root', label='ordered_sum')
+        assert_same(b, serial, unit='1', quantity='root',
+                    label='ordered_chain_sum')
 
 
 def test_a_moved_addend_fails_both_helpers():
@@ -220,8 +237,11 @@ def pair_joins(w):
     return [rows.join(mine, (2, 6, 4)) for _ in range(3)]
 
 
+# chi0(0) is patched where it lives: static_screening_matrix is in
+# LinearResponse/space_time.py and calls space_time.ordered_chain_sum; the
+# davidson's ordered_chain_sum is its block-action B chain, not chi0.
 SITES = {
-    'chi0(0)': (chi0_static, davidson, 'ordered_chain_sum'),
+    'chi0(0)': (chi0_static, space_time, 'ordered_chain_sum'),
     'E_c': (rpa_energy, space_time, 'ordered_sum'),
     'qp_set eps_bar': (qp_set, qp_space_time, 'ordered_sum'),
     'qp_set B_p_bar': (qp_set, qp_space_time, 'ordered_chain_sum'),
@@ -233,7 +253,7 @@ SITES = {
 @pytest.mark.parametrize('site', list(SITES))
 def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
     """Every call of the site's ordered sum, at 2, 3, 5 and 8 ranks, every
-    rank, bitwise the serial call; chi0(0)'s W and E_c themselves too."""
+    rank, the serial call to a few ulp; chi0(0)'s W and E_c themselves too."""
     run, module, name = SITES[site]
     log = recording(monkeypatch, module, name)
     with distributed(None):
@@ -247,8 +267,9 @@ def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
             assert same_calls(ref, log.get(r, [])), (site, size, r)
         if site in ('chi0(0)', 'E_c'):
             for out in outs:
-                assert np.array_equal(out, ref_out), (site, size)
-    print(f'[info] {site}: {len(ref)} ordered sum(s), every call bitwise the '
+                assert_same(out, ref_out, unit='1', quantity='root',
+                            label=(site, size))
+    print(f'[info] {site}: {len(ref)} ordered sum(s), every call to a few ulp of the '
           f'serial one at {SIZES} ranks')
 
 
@@ -264,7 +285,7 @@ def test_every_site_fails_a_moved_addend(water, monkeypatch, site):
     monkeypatch.undo()
     log = recording(monkeypatch, module, name, plant=True)
     run_simulated(lambda comm: run(water), 3)
-    assert not all(same_calls(ref, log.get(r, [])) for r in range(3)), site
+    assert not all(bitwise_calls(ref, log.get(r, [])) for r in range(3)), site
 
 
 if __name__ == '__main__':

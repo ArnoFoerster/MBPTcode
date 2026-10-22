@@ -240,6 +240,10 @@ _DRIVER_STAGES = (('eig', 'scf_driver_eig'),
                   ('make_rdm1', 'scf_driver_rdm1'),
                   ('get_grad', 'scf_driver_grad'))
 
+#: A continuum solvent's calls inside a Fock build (`_lock_solvent`): its
+#: reaction field of a density, and that field's linear response.
+_SOLVENT_CALLS = ('kernel', '_B_dot_x')
+
 #: The keys a stage inside `mf.kernel()` adds to; what is left of the kernel's
 #: wall is `scf_driver`.
 _KERNEL_STAGES = ('scf_build_slices', 'scf_guess', '_grid_build', 'scf_grid',
@@ -1182,6 +1186,59 @@ def release_distributed(mf):
     return mf
 
 
+def _lock_solvent(mf, comm, timings):
+    """`mf.with_solvent`'s calls answering rank 0's numbers until
+    `_unlock_solvent`; what to put back, or None.
+
+    pyscf's continuum adds itself to a Fock build in two calls
+    (`_SOLVENT_CALLS`). `kernel(dm)` is the reaction field of the SCF
+    density, (e_solvent, v_solvent): `get_veff` only TAGS the J/K matrix with
+    it and `get_fock` and `energy_elec` add it, once per cycle. `_B_dot_x(dm1)`
+    is its linear response, which an equilibrium response function adds (a
+    Newton step on the solvated orbital Hessian). Both are replicated and
+    cheap -- a cavity of a few hundred points -- so every rank computes them
+    from the density the J/K entry lockstepped, and the result is
+    lockstepped to rank 0's (checked: only a rank apart moves anything). The
+    loop's energy, Fock matrix and DIIS then read the same reaction field on
+    every rank, which is what keeps the replicated drivers in step.
+
+    None where `mf` carries no continuum, or an enclosing block already
+    locked it.
+    """
+    solvent = getattr(mf, 'with_solvent', None)
+    if solvent is None or getattr(solvent, '_rank_locked', False):
+        return None
+    saved = []
+    for name in _SOLVENT_CALLS:
+        if not hasattr(solvent, name):
+            continue
+        saved.append((name, solvent.__dict__.get(name)))
+        setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
+                                            timings))
+    solvent._rank_locked = True
+    return solvent, saved
+
+
+def _unlock_solvent(locked):
+    """The continuum's own calls back (`_lock_solvent`)."""
+    if locked is None:
+        return
+    solvent, saved = locked
+    _restore_methods(solvent, saved)
+    del solvent._rank_locked
+
+
+def _locked_call(func, comm, timings):
+    """`func`, its result rank 0's on every rank (a checked `lockstep`)."""
+    def call(*args, **kwargs):
+        out = func(*args, **kwargs)
+        t0 = time.time()
+        out = lockstep(out, comm, check=True)
+        _spent(timings, 'scf_lockstep', t0)
+        return out
+    return call
+
+
 @contextlib.contextmanager
 def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
     """`mf` answering J/K and the quadrature over the ranks inside the block.
@@ -1199,6 +1256,11 @@ def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
 
     Blocks nest: an inner block leaves installed what an enclosing one
     installed, so a routine may bracket its own Fock pieces whoever calls it.
+
+    A mean field in a continuum (`mf.with_solvent`, pyscf's PCM) has its
+    reaction field locked inside the block as well (`_lock_solvent`): every
+    rank computes it from the lockstepped density and every rank ends on
+    rank 0's.
     """
     comm = current_comm() if comm is None else comm
     handles = distributed_handles(mf, comm)
@@ -1232,9 +1294,11 @@ def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
             part.install(mf)
     for part in parts:
         part.timings = timings
+    solvent = _lock_solvent(mf, comm, timings)
     try:
         yield handles
     finally:
+        _unlock_solvent(solvent)
         for part in parts:
             # A handle between stages measures nothing: the next stage says
             # where its own numbers go, and a stale dict would take the

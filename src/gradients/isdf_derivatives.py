@@ -46,7 +46,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, FIT_REALIZATIONS,
+from src.Base.constants import (AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
+                                FIT_REALIZATIONS,
                                 ORBITAL_MULTIPLIER_MAX_ITER,
                                 ORBITAL_MULTIPLIER_TOL,
                                 THREE_CENTER_BLOCK_BYTES,
@@ -64,22 +65,24 @@ from src.Base.isdf_jk import (ISDFJK, isdf_grid, mean_field_skeleton_force,
                               range_coulomb)
 from src.Base.pcm_derivatives import reaction_field_fock_skeleton
 from src.Base.pyscf_interface import fock_mo, response_kernel
-from src.Base.separable_ri import (ANGULAR_WEIGHTS, DEFAULT_PAIR_TOL,
-                                   DEFAULT_REGULARIZATION, _FRAME_DECAY,
-                                   AdjointSeeds, _ao_l_labels, _content_key,
+from src.Base.separable_ri import (ANGULAR_WEIGHTS, _FRAME_DECAY,
+                                   AdjointSeeds, GaugeSeeds, _ao_l_labels,
+                                   _content_key,
                                    atomic_frames, atomic_points,
-                                   aux_metric_sqrt, build_D_F, fit_M_stable,
+                                   fit_settings,
+                                   aux_metric_sqrt, fit_M_stable,
                                    fit_rows_adjoints,
                                    rows_transpose_product, screened_layout,
-                                   subshells, test_set_D, test_set_layout)
+                                   test_set_D, test_set_layout)
 from src.Base.skeleton_tiles import (fitted_fock_skeleton,
                                      isdf_exchange_seeds, xc_grid_skeleton)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import current_comm, lockstep
 from src.gradients.multipliers import solve_orbital_multipliers
+from src.gradients.one_electron import one_electron_skeleton
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.LinearResponse.rpa_energy import (
-    exchange_channels, exx_double_counting, rsh_split, xc_hybrid_coeff)
+    exchange_channels, rsh_split, xc_hybrid_coeff)
 
 #: The row-fit adjoint pending on this thread (`one_fit_adjoint`): each
 #: simulated rank is a thread assembling its own force.
@@ -92,11 +95,13 @@ class FitKey:
     estimator's settings. Seeds of one key share one
     `separable_ri.fit_rows_adjoints` call (`contract`)."""
 
-    def __init__(self, mol, auxmol, coords, layout, block, l_max_second=2,
-                 regularization=DEFAULT_REGULARIZATION, block_memory_gb=4.0):
+    def __init__(self, mol, auxmol, coords, layout, block, numerics=None):
+        l_max_second, regularization, block_memory_gb = fit_settings(
+            numerics, 'l_max_second', 'regularization', 'block_memory_gb')
         self.mol, self.auxmol = mol, auxmol
         self.coords, self.layout = np.asarray(coords), layout
         self.block = int(block)
+        self.numerics = numerics
         self.settings = dict(l_max_second=int(l_max_second),
                              regularization=float(regularization),
                              block_memory_gb=float(block_memory_gb))
@@ -116,7 +121,7 @@ class FitKey:
         """[RowFitAdjoint] of `targets` (`AdjointSeeds`) on this fit."""
         return fit_rows_adjoints(self.mol, self.auxmol, self.coords,
                                  self.layout, targets, block=self.block,
-                                 **self.settings)
+                                 numerics=self.numerics)
 
 
 class PointChain:
@@ -430,7 +435,7 @@ def collocation_adjoint(mol, coords, Xao_bar, pts_local, atom_of_point,
 # the fit: adjoint of the regularized least-squares estimator
 # ---------------------------------------------------------------------------
 
-def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
+def fit_adjoint(D, F, M_bar, numerics=None):
     """(D_bar, F_bar) of sum_{beta k} M_bar[beta,k] M[beta,k], M from `fit_M`.
 
     `fit_M` row-balances D, forms a regularized Gram matrix and solves
@@ -455,8 +460,8 @@ def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
     on the row fit (tests/test_fit_adjoint_stability.py), and an explicit
     inverse loses most of double precision. G is symmetric positive definite,
     so one Cholesky factorization serves every solve.
-    `fit_adjoint_conditioning` reports the amplification.
     """
+    regularization, = fit_settings(numerics, 'regularization')
     s = np.sqrt(np.einsum('kr,kr->k', D, D))
     s = np.where(s == 0.0, 1.0, s)
     d = 1.0 / s
@@ -497,124 +502,25 @@ def fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
     return D_bar, F_bar
 
 
-def fit_adjoint_conditioning(D, regularization=DEFAULT_REGULARIZATION):
-    """(cond(G), reg, amplification) for the Gram matrix the fit adjoint inverts.
-
-    The adjoint's error scales as cond(G)^2 because G^-1 enters twice, so this
-    is the number that says whether a converged-looking fit gradient can be
-    trusted.
-    """
-    s = np.sqrt(np.einsum('kr,kr->k', D, D))
-    s = np.where(s == 0.0, 1.0, s)
-    Dt = D * (1.0 / s)[:, None]
-    G = Dt @ Dt.T
-    G[np.diag_indices_from(G)] += regularization
-    w = np.linalg.eigvalsh(G)
-    cond = float(w.max() / max(w.min(), 1e-300))
-    return cond, regularization, cond ** 2
-
-
 # ---------------------------------------------------------------------------
 # the grid itself: the fit error differentiated in the interpolation points
 # ---------------------------------------------------------------------------
-
-def fit_error_coulomb_grad(mol, auxmol, coords, layout=None, F=None, V=None,
-                           l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
-                           regularization=DEFAULT_REGULARIZATION):
-    """(E, dE/dr_g) for `separable_ri.fit_error_coulomb`, the grid's objective.
-
-    E = ||M D - F||_V, and of the three only D knows where the points are.
-    E^2 = Tr[R^T V R] with R = M D - F reverses as R_bar = 2 V R,
-    M_bar = R_bar D^T, D_bar = M^T R_bar plus the fit's own adjoint, and
-
-        dE/dr_g = (1/2E) sum_c D_bar[g,c] dD[g,c]/dr_g,
-
-    one GTOval_ip_sph evaluation. Row g of D depends on r_g alone, so the points
-    do not couple and the result is (n_k, 3), not a Jacobian.
-
-    E comes from `fit_M_stable`, so value and gradient are the same realization
-    of the estimator. `layout` freezes which AO pairs the test set holds, since
-    screening is a discrete choice and a derivative is only defined at fixed
-    column set. It has to travel with its F, whose columns are those same pairs.
-
-    The fit adjoint applies G^-1 twice, so the accuracy here follows cond(G).
-    See `fit_adjoint_conditioning`.
-    """
-    if (layout is None) != (F is None):
-        raise ValueError('layout and F describe the same columns and must be '
-                         'passed together; F built by screening at these '
-                         'coordinates does not match a frozen layout.')
-    if V is None:
-        V = auxmol.intor('int2c2e', aosym='s1')
-    if layout is None:
-        layout = test_set_layout(mol, coords, l_max_second=l_max_second,
-                                 pair_tol=pair_tol)
-        F = build_D_F(mol, auxmol, coords, l_max_second=l_max_second,
-                      pair_tol=pair_tol)[1]
-    D = test_set_D(mol, auxmol, coords, layout)
-    M = fit_M_stable(D, F, regularization)
-    R = M @ D - F
-    E = float(np.sqrt(np.einsum('br,bc,cr->', R, V, R)))
-
-    R_bar = 2.0 * (V @ R)                                  # d(E^2)/dR
-    D_bar = M.T @ R_bar                                    # R's explicit D
-    D_bar += fit_adjoint(D, F, R_bar @ D.T, regularization)[0]   # and M's
-
-    mu, nu, w = layout
-    nao = mol.nao_nr()
-    ao = mol.eval_gto('GTOval_sph', coords)
-    g = mol.eval_gto('GTOval_ip_sph', coords)              # (3, nk, nao)
-    gaux = auxmol.eval_gto('GTOval_ip_sph', coords)
-    pair_bar = D_bar[:, :len(mu)] * w[None, :]
-
-    # Fold the pair adjoint onto the AO index before meeting the gradients.
-    # Each column contributes chi_mu' chi_nu + chi_mu chi_nu'. The direct
-    # einsum over the column list instead materializes (3, n_k, n_pair), which
-    # is gigabytes on a molecule.
-    S = np.zeros((len(coords), nao))
-    for first, second in ((mu, nu), (nu, mu)):
-        order = np.argsort(first, kind='stable')
-        edges = np.searchsorted(first[order], np.arange(nao + 1))
-        for m in range(nao):
-            cols = order[edges[m]:edges[m + 1]]
-            if len(cols):
-                S[:, m] += np.einsum('kc,kc->k', pair_bar[:, cols], ao[:, second[cols]])
-    P = (np.einsum('xkm,km->kx', g, S)
-         + np.einsum('kc,xkc->kx', D_bar[:, len(mu):], gaux))
-    return E, P / (2.0 * E)
-
-
-def atomic_radii_adjoint(radii, P, origin=False):
-    """{shell: dE/dr_i} from an adjoint P[g] = dE/dr_g on one atom's points.
-
-    The reverse of `atomic_points`, walking the point list in that function's
-    order. r_g = r_i u_g with u_g a unit direction, so dE/dr_i sums u_g . P[g]
-    over the sub-shell. The cusp sample sits at the nucleus and carries no
-    radius.
-    """
-    shells, out, k = subshells(), {}, (1 if origin else 0)
-    for name, rs in radii.items():
-        u = shells[name]
-        grad = np.empty(len(np.atleast_1d(rs)))
-        for i in range(len(grad)):
-            grad[i] = np.einsum('gx,gx->', u, P[k:k + len(u)])
-            k += len(u)
-        out[name] = grad
-    return out
 
 
 # ---------------------------------------------------------------------------
 # the D factor: D = M^T V^(1/2), all the way back to the nuclei
 # ---------------------------------------------------------------------------
 
-def sqrtm_adjoint(V, Vh_bar, tol=1e-12):
+def sqrtm_adjoint(V, Vh_bar, tol=AUX_METRIC_ROOT_FLOOR):
     """V_bar for an adjoint on V^(1/2), V symmetric positive semidefinite.
 
     The Frechet derivative L of the square root solves Vh L + L Vh = E, so in
     the eigenbasis it is the Hadamard multiplier 1/(sqrt(w_i) + sqrt(w_j)).
     That multiplier is symmetric, hence the map is self-adjoint and the reverse
-    pass is the same operation. The truncation mirrors `separable_factors`,
-    which drops eigenvalues below tol x max before taking the root.
+    pass is the same operation. The truncation is the forward's
+    (`separable_ri._metric_spectrum`, which drops eigenvalues below
+    AUX_METRIC_ROOT_FLOOR x max before taking the root), so energy and force
+    keep one spectrum.
     """
     w, U = np.linalg.eigh(V)
     keep = w > tol * w.max()
@@ -730,17 +636,17 @@ class GaugeAdjoint:
 
 def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
                     atom_of_point, frames=None, decay=_FRAME_DECAY,
-                    regularization=DEFAULT_REGULARIZATION, with_frames=True,
+                    numerics=None, with_frames=True,
                     environment=None, body=None):
     """(natm, 3) gradient of sum_{gP} D_bar[g,P] D[g,P], D = M^T V_env^(1/2)."""
     return dfactor_adjoint_gauges(mol, auxmol, coords,
                                   [(D_bar, environment)], layout, pts_local,
                                   atom_of_point, frames=frames, decay=decay,
-                                  regularization=regularization,
+                                  numerics=numerics,
                                   with_frames=with_frames, body=body)
 
 
-def product_pairs(mol, l_max_second=2):
+def product_pairs(mol, numerics=None):
     """(mu, nu, weight) of every pair of the test set's product basis, (all
     AOs) x (AOs with l <= l_max_second), in `test_set_layout`'s order.
 
@@ -749,6 +655,7 @@ def product_pairs(mol, l_max_second=2):
     product form of D D^T over all of them, while F D^T keeps the screened
     ones. A frozen `test_set_layout` is a subsequence of this list.
     """
+    l_max_second, = fit_settings(numerics, 'l_max_second')
     l_ao = _ao_l_labels(mol)
     second = np.flatnonzero(l_ao <= l_max_second)
     w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
@@ -788,7 +695,7 @@ def require_whole_fit_adjoint(nao, naux, npoint, ngram, what):
 
 def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
                            atom_of_point, frames=None, decay=_FRAME_DECAY,
-                           regularization=DEFAULT_REGULARIZATION,
+                           numerics=None,
                            with_frames=True, gram_layout=None, body=None):
     """(natm, 3) gradient of sum over `gauges` of sum_{gP} D_bar[g,P] D[g,P].
 
@@ -843,7 +750,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     del F_pairs
     ngram = len(gmu)
     D_test = test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
-    M = fit_M_stable(D_test, F, regularization)
+    M = fit_M_stable(D_test, F, numerics)
 
     V_bar = np.zeros_like(V)
     ao_bar = np.zeros_like(ao)
@@ -853,12 +760,14 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
         gauge = gauge if isinstance(gauge, GaugeAdjoint) else GaugeAdjoint(*gauge)
         D_bar, environment = gauge.d_bar, gauge.environment
         dressed = dresses_interaction(environment, auxmol)
-        if not dressed and (gauge.root_bar is not None
-                            or gauge.kernel_bar is not None):
+        # a bare gauge's root V^(1/2) takes an adjoint as a dressed one's
+        # does (the split partition's static half on the bare interaction);
+        # only a vtilde adjoint has nowhere to land
+        if not dressed and gauge.kernel_bar is not None:
             raise ValueError(
                 f'{environment!r} dresses nothing, so this gauge has no '
-                'vtilde and no dressed root for the extra adjoints to land '
-                'on; they belong to the gauge that carries the environment')
+                'vtilde for a kernel adjoint to land on; it belongs to the '
+                'gauge that carries the environment')
         V_gauge = V + environment.aux_kernel(auxmol) if dressed else V
         Vh = aux_metric_sqrt(auxmol, environment, V=V)
 
@@ -866,7 +775,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
         Vh_bar = M @ D_bar                                 # (naux, naux)
         if gauge.root_bar is not None:
             Vh_bar = Vh_bar + gauge.root_bar
-        Dtest_bar, F_bar = fit_adjoint(D_test, F, M_bar, regularization)
+        Dtest_bar, F_bar = fit_adjoint(D_test, F, M_bar, numerics)
 
         # --- the metric: the root of the dressed gauge, and the bare V^-1
         # inside F's pair columns. Y is the adjoint on V_env and reaches V and
@@ -913,10 +822,18 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
 
 def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                     pts_local, atom_of_point, frames=None, decay=_FRAME_DECAY,
-                    with_frames=True, block=None, pending=None, body=None):
+                    with_frames=True, block=None, pending=None, body=None,
+                    gauges=()):
     """(g_collocation, g_fit, held): the collocation branch of X_bar and the
     fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
     the frozen `layout` (its Gram matrix over every product pair).
+
+    d_bar is the BARE gauge's adjoint (None where no target reads it);
+    gauges: `GaugeAdjoint`s of dressed factors on the same fit, each with
+    the environment that dresses its metric root, which ride the same call
+    as `separable_ri.GaugeSeeds` -- `dfactor_adjoint_gauges`' gauges, in
+    the fit's tiles. A gauge whose environment dresses nothing belongs in
+    d_bar and is refused here.
 
     `separable_ri.fit_rows_adjoints` runs both in the fit's tiles and
     returns their centre terms and point adjoints, the same bits on every
@@ -934,7 +851,17 @@ def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                  FIT_CHOLESKY_BLOCK if block is None else block)
     chain = PointChain(pts_local, atom_of_point, frames, with_frames, decay,
                        body=body)
-    seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff)
+    dressed = []
+    for g in gauges:
+        if not dresses_interaction(g.environment, auxmol):
+            raise ValueError(
+                f'{g.environment!r} dresses nothing: its adjoint is on the '
+                'bare gauge and belongs in d_bar')
+        dressed.append(GaugeSeeds(g.d_bar, g.environment,
+                                  root_bar=g.root_bar,
+                                  kernel_bar=g.kernel_bar))
+    seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff,
+                         gauges=dressed)
     adjoint = (key.contract([seeds])[0] if pending is None
                else pending.contract(key, seeds, chain))
     g_coll = adjoint.coll_centre + chain(mol, adjoint.coll_points)
@@ -995,7 +922,7 @@ def require_no_range_separation(mf, what):
             f'differences of them, until the split lands.')
 
 
-def fock_partial_Y(mf, gamma, nocc):
+def fock_partial_Y(mf, gamma, nocc, environment=True):
     """Orbital-rotation gradient of Tr[gamma F], gamma a symmetric MO partial.
 
     Tr[gamma F] depends on the coefficients through the two-sided transform and
@@ -1007,25 +934,31 @@ def fock_partial_Y(mf, gamma, nocc):
     same expression serves the target's own partial and the multiplier's. It
     needs a Coulomb and an exchange build and nothing else, so with a fitted or
     ISDF mean field it is cubic and no norb^4 tensor appears.
+
+    environment=False takes G without the continuum's response (the ground
+    state's surface charges frozen), for a density response in the frozen
+    field (`relaxed_density_mo`).
     """
     C = mf.mo_coeff
     gs = 0.5 * (gamma + gamma.T)
     g_ao = C @ gs @ C.T
-    G = response_kernel(mf)(g_ao)
+    G = response_kernel(mf, environment=environment)(g_ao)
     F_mo = fock_mo(mf)
     Y = 2.0 * (F_mo @ gs)
     Y[:, :nocc] += 4.0 * (C.T @ G @ C)[:, :nocc]
     return Y
 
 
-def qp_xc_correction(mf, states=None, reaction_field=None):
+def qp_xc_correction(mf, states=None, reaction_field=None,
+                     reaction_field_after_solve=False):
     """`GW.qp_solve.static_exchange_diagonal` at exchange='mf', all states by
     default: the gradient chain and `calc_qp_energy` differentiate and evaluate
     one function, so there is nothing here but the default."""
     states = (np.arange(np.shape(mf.mo_coeff)[-1]) if states is None
               else states)
-    return static_exchange_diagonal(mf, mf.mol, states, exchange='mf',
-                                    reaction_field=reaction_field)
+    return static_exchange_diagonal(
+        mf, mf.mol, states, exchange='mf', reaction_field=reaction_field,
+        reaction_field_after_solve=reaction_field_after_solve)
 
 
 def _delta_o_response(mf):
@@ -1064,8 +997,23 @@ def sigma_x_minus_vxc(mf, dm):
                                               - mf.get_j(mf.mol, dm))
 
 
+def weight_matrix(weights):
+    """The symmetric MO weight of sum_pq w_pq <p|O|q>: diag(w) for a vector of
+    diagonal weights, the symmetric part of a matrix otherwise."""
+    w = np.asarray(weights, float)
+    return np.diag(w) if w.ndim == 1 else 0.5 * (w + w.T)
+
+
+def qp_xc_correction_matrix(mf, orbitals):
+    """<p|Sigma_x - v_xc|q> over `orbitals`, the static correction's
+    off-diagonal block, on the operator `qp_xc_correction_Y` differentiates."""
+    c = np.asarray(mf.mo_coeff)[:, list(orbitals)]
+    return c.T @ sigma_x_minus_vxc(mf, mf.make_rdm1()) @ c
+
+
 def qp_xc_correction_Y(mf, weights, nocc):
-    """Orbital-rotation gradient of sum_p w_p <p|Sigma_x - v_xc|p>.
+    """Orbital-rotation gradient of sum_p w_p <p|Sigma_x - v_xc|p>, or of
+    sum_pq w_pq <p|Sigma_x - v_xc|q> for a symmetric matrix of weights.
 
     The same shape as `fock_partial_Y`, with the Fock replaced by this
     operator: two terms, one from the two-sided MO transform and one from the
@@ -1073,7 +1021,7 @@ def qp_xc_correction_Y(mf, weights, nocc):
     multiplier solve, because it shares Lambda with every other contribution.
     """
     C = mf.mo_coeff
-    gs = np.diag(np.asarray(weights, float))
+    gs = weight_matrix(weights)
     g_ao = C @ gs @ C.T
     dm = mf.make_rdm1()
     o_ao = sigma_x_minus_vxc(mf, dm)
@@ -1084,7 +1032,8 @@ def qp_xc_correction_Y(mf, weights, nocc):
 
 
 def qp_xc_correction_skeleton(mf, weights, nocc):
-    """(natm, 3) of d/dR sum_p w_p <p|Sigma_x - v_xc|p>, coefficients fixed.
+    """(natm, 3) of d/dR sum_p w_p <p|Sigma_x - v_xc|p>, coefficients fixed;
+    a matrix of weights is sum_pq w_pq <p|Sigma_x - v_xc|q>.
 
     The operator is -((1 - a_x)/2) K - v_xc^DFT (see `_delta_o_response`), so
     the exchange half is `fock_partial_skeleton`'s K structure at weight
@@ -1095,7 +1044,7 @@ def qp_xc_correction_skeleton(mf, weights, nocc):
     if not is_ks:
         return np.zeros((mf.mol.natm, 3))
     C = mf.mo_coeff
-    gs = np.diag(np.asarray(weights, float))
+    gs = weight_matrix(weights)
     # Sigma_x is the full-range exact exchange whatever the reference is, and
     # v_xc carries the reference's own channels, so Sigma_x - v_xc is one
     # full-range unit minus each of them. On a global hybrid that collapses to
@@ -1106,9 +1055,11 @@ def qp_xc_correction_skeleton(mf, weights, nocc):
     # density-fitted derivative J/K do not share a convention, and the mismatch
     # shows up as a sharply degraded translational invariance.
     if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+        require_fitted_coulomb(mf, 'the Sigma_x - v_xc skeleton')
         # Sigma_x is the interpolated exchange here, because that is what the
-        # SCF built. Taking it from the auxiliary basis would differentiate one
-        # operator while the energy carries another.
+        # SCF built and what the chain's own static exchange uses. Taking it
+        # from the auxiliary basis would differentiate one operator while the
+        # energy carries another.
         return (isdf_fock_partial_exchange(mf, gs, channels=delta)
                 - xc_skeleton(mf, gs))
     if getattr(mf, 'with_df', None) is not None:
@@ -1191,7 +1142,8 @@ def exx_double_counting_Y(mf, nocc):
 
 
 def solve_lambda(mf, Y_E, nocc, tol=ORBITAL_MULTIPLIER_TOL,
-                 max_iter=ORBITAL_MULTIPLIER_MAX_ITER, verbose=False):
+                 max_iter=ORBITAL_MULTIPLIER_MAX_ITER, verbose=False,
+                 environment=True):
     """Symmetric zero-diagonal Lambda with antisym(Y_E + Y[Lambda]) = 0.
 
     The cubic route's entry to `solve_orbital_multipliers`: the matvec is
@@ -1199,7 +1151,7 @@ def solve_lambda(mf, Y_E, nocc, tol=ORBITAL_MULTIPLIER_TOL,
     four-index tensor, and the orbital energies come from the mean field.
     """
     return solve_orbital_multipliers(
-        lambda Lam: fock_partial_Y(mf, Lam, nocc),
+        lambda Lam: fock_partial_Y(mf, Lam, nocc, environment=environment),
         Y_E, mf.mo_energy, tol=tol, max_iter=max_iter, verbose=verbose)
 
 
@@ -1320,18 +1272,19 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     if fit == 'rows':
         return _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels)
     with_df = mf.with_df
+    require_placed_grid(with_df, 'the ISDF exchange skeleton')
     mol, auxmol, crd = with_df.mol, with_df.auxmol, with_df.coords
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
-    reg = with_df.regularization
 
     # The fit is rebuilt, not taken from the mean field, so that the function
     # differentiated is a single realization of the SCF's estimator
     # (`fit_M_streaming`: the Gram matrix over every product pair, F over the
     # screened ones): `fit_adjoint` reverses `fit_M_stable` on D over every
     # product pair with F zero on the screened ones. Taking the SCF's own M
-    # instead mixes two realizations, which differ in their near-null space
-    # and move this force above the gradient's reproducibility floor.
-    gram = product_pairs(mol, l_max_second=with_df.l_max_second)
+    # instead mixes two realizations, which on water/cc-pVDZ differ by
+    # 1.1e-08 relative in the fit's near-null space and move this force by
+    # 3.5e-08 Ha/Bohr on Hartree-Fock, above the 1e-8 floor.
+    gram = product_pairs(mol, numerics=with_df.numerics)
     gmu, gnu, gw = gram
     ngram = len(gmu)
     require_whole_fit_adjoint(nao, naux, len(crd), ngram,
@@ -1339,7 +1292,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     # the pair columns the SCF's fit kept: a walk's frozen layout, else the
     # screen at these points
     layout = (with_df.pair_layout if with_df.pair_layout is not None else
-              test_set_layout(mol, crd, l_max_second=with_df.l_max_second))
+              test_set_layout(mol, crd, numerics=with_df.numerics))
     mu, nu, wc = layout
     cols = pair_positions(layout, gram, nao)
     D_test = test_set_D(mol, auxmol, crd, gram)
@@ -1349,7 +1302,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     F = np.zeros((naux, ngram + naux))
     F[:, cols] = np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :]
     F[:, ngram:] = np.eye(naux)
-    M = fit_M_stable(D_test, F, reg)
+    M = fit_M_stable(D_test, F, with_df.numerics)
     X = mol.eval_gto('GTOval_sph', crd)
 
     # One channel per exchange operator, sharing the fit. The ISDF route keeps
@@ -1377,7 +1330,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
             V_bar += M @ Z_bar @ M.T
         else:
             attenuated.append((omega, M @ Z_bar @ M.T))
-    Dtest_bar, F_bar = fit_adjoint(D_test, F, M_bar, reg)
+    Dtest_bar, F_bar = fit_adjoint(D_test, F, M_bar, with_df.numerics)
 
     # F's pair columns are w_c V^-1 (mu nu|P), so they reach the metric a
     # second time and the three-centre integrals once; its screened columns
@@ -1406,8 +1359,8 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     grad += c_ao + c_aux
     pts_local, owner = point_layout(mol, with_df.grid_radii,
                                     with_df.grid_origins)
-    return grad + point_chain(mol, P + P_aux, pts_local, owner,
-                              frames=atomic_frames(mol)[0], with_frames=True)
+    return grad + mean_field_point_chain(with_df, mol, pts_local,
+                                         owner)(mol, P + P_aux)
 
 
 def _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels):
@@ -1443,7 +1396,7 @@ def _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels):
     seeds, two, _ = isdf_exchange_seeds(
         key.mol, key.auxmol, key.coords, key.layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=key.block,
-        **key.settings)
+        numerics=key.numerics)
     if pending is not None and pending.open:
         pending.deposit(key, chain, seeds)
         return lockstep(two)
@@ -1457,18 +1410,22 @@ def _exchange_rows_fit(mf):
     """(FitKey, PointChain, M^T tiles, X tiles) of the row fit the ISDF-K
     mean field's exchange skeleton differentiates: its grid, the distributed
     SCF's tiles where it carries them (None elsewhere), and its points'
-    chain, which follows the atomic frames of each geometry."""
+    chain, which follows the atomic frames of each geometry, or the frozen
+    ones the fit was placed on (`mean_field_point_chain`)."""
     with_df = mf.with_df
+    require_placed_grid(with_df, 'the ISDF exchange skeleton')
     mol = with_df.mol
     handle = isdf_scf_handle(mf)
-    if with_df.coords is not None and with_df.grid_radii is not None:
+    if with_df.coords is not None:
         coords, radii, origins = (with_df.coords, with_df.grid_radii,
                                   with_df.grid_origins)
     else:
         coords, radii, origins = lockstep(isdf_grid(
             mol, counts=with_df.counts if with_df._named_counts else None,
             radii=with_df.radii, auxbasis=with_df.auxbasis,
-            n_start=with_df.n_start, return_info=True))
+            n_start=with_df.n_start, return_info=True,
+            frames=with_df.frozen_frames,
+            runtime_radii=with_df.numerics.isdf.runtime_radii))
     if handle is not None and not np.array_equal(handle.coords, coords):
         raise RuntimeError(
             "the distributed SCF's interpolation points are not this mean "
@@ -1476,25 +1433,64 @@ def _exchange_rows_fit(mf):
     auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
     block = handle.tile if handle is not None else FIT_CHOLESKY_BLOCK
     layout = (with_df.pair_layout if with_df.pair_layout is not None else
-              screened_layout(mol, coords, l_max_second=with_df.l_max_second,
+              screened_layout(mol, coords, numerics=with_df.numerics,
                               block=block))
     key = FitKey(mol, auxmol, coords, layout, block,
-                 l_max_second=with_df.l_max_second,
-                 regularization=with_df.regularization,
-                 block_memory_gb=with_df.block_memory_gb)
+                 numerics=with_df.numerics)
     pts_local, owner = point_layout(mol, radii, origins)
-    chain = PointChain(pts_local, owner, atomic_frames(mol)[0], True)
+    chain = mean_field_point_chain(with_df, mol, pts_local, owner)
     if handle is None:
         return key, chain, None, None
     return key, chain, handle.MT, handle.X
 
 
+def mean_field_point_chain(with_df, mol, pts_local, owner):
+    """The `PointChain` of an ISDF-K mean field's points: the covariant
+    frames of `mol`, turning with each atom's environment, or the frames its
+    fit was placed on inside `isdf_jk.frozen_frames`, turned by their body
+    frame alone."""
+    frozen = getattr(with_df, 'frozen_frames', None)
+    if frozen is None:
+        return PointChain(pts_local, owner, atomic_frames(mol)[0], True)
+    return PointChain(pts_local, owner, frozen.frames, False,
+                      body=frozen.body)
+
+
+def require_placed_grid(with_df, what):
+    """Raise if the ISDF factorization's points were handed in from outside
+    (`coords` set, `grid_radii` None): the point chain needs the radii that
+    placed them and which atom owns which point, and neither is known."""
+    if with_df.coords is not None and with_df.grid_radii is None:
+        raise NotImplementedError(
+            f'{what} needs the interpolation points as atom-local clouds, and '
+            f'this factorization was handed its `coords` from outside, so the '
+            f'radii that placed them -- and which atom owns which point -- are '
+            f'unknown. Let ISDFJK.build pick the grid.')
+
+
+def require_fitted_coulomb(mf, what):
+    """Raise if `mf` builds J from the interpolation (`j_route` not
+    'df-direct'): every ISDF-K skeleton takes the Coulomb derivative from the
+    density-fitted one, which is the derivative of another function then."""
+    with_df = getattr(mf, 'with_df', None)
+    if isinstance(with_df, ISDFJK) and with_df.j_route != 'df-direct':
+        raise NotImplementedError(
+            f'{what} takes the Coulomb derivative from the density-fitted '
+            f'skeleton, which is the right function only for '
+            f"j_route='df-direct'; this mean field builds J from the "
+            f'interpolation (j_route={with_df.j_route!r}), whose derivative is '
+            'not built. That route is measurably unsafe in an SCF anyway -- '
+            'see ISDFJK.build.')
+
+
 def mean_field_exchange_wanted(mf):
     """Whether the ISDF-K mean-field force of `mf` carries an interpolated
     exchange skeleton: a hybrid's, the one predicate that force and the
-    pending call's stash both read."""
+    pending call's stash both read. Every exchange channel counts, so a
+    screened hybrid with no long-range exact exchange (alpha = 0) still has
+    its short-range term."""
     return (isinstance(getattr(mf, 'with_df', None), ISDFJK)
-            and xc_hybrid_coeff(mf)[1] != 0.0)
+            and any(w != 0.0 for _, w in exchange_channels(mf)))
 
 
 def _mean_field_exchange_target(mf, keys):
@@ -1510,7 +1506,8 @@ def _mean_field_exchange_target(mf, keys):
     channels = exchange_channels(mf)
     seeds, two, _ = isdf_exchange_seeds(
         key.mol, key.auxmol, key.coords, key.layout, dm, prefactor=1.0,
-        channels=channels, mt=mt, X=X, block=key.block, **key.settings)
+        channels=channels, mt=mt, X=X, block=key.block,
+        numerics=key.numerics)
     return {'key': key, 'chain': chain, 'seeds': [seeds], 'role': 'mean_field',
             'two': two, 'request': (dm, None, 1.0, channels)}
 
@@ -1602,6 +1599,7 @@ def fock_partial_skeleton(mf, gamma, nocc):
         # Its exchange comes from the ISDF factors, which the auxiliary-basis
         # skeleton knows nothing about.
         if isinstance(mf.with_df, ISDFJK):
+            require_fitted_coulomb(mf, 'the folded Fock partial skeleton')
             g = fock_partial_skeleton_df(mf, _auxmol_of(mf), gamma, nocc,
                                          channels=(), coulomb=True)
             g = g + isdf_fock_partial_exchange(mf, gamma)
@@ -1668,8 +1666,6 @@ def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False):
     eps_bar: the adjoint on the orbital energies, gamma = diag(eps_bar), or a
         full symmetric MO Fock partial gamma_pq = dE/dF_pq.
     """
-    # cycle: grad_engine imports this module at module level.
-    from src.gradients.grad_engine import one_electron_skeleton
     C = mf.mo_coeff
     eps_bar = np.asarray(eps_bar, float)
     gamma = np.diag(eps_bar) if eps_bar.ndim == 1 else 0.5 * (eps_bar + eps_bar.T)
@@ -1685,6 +1681,29 @@ def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False):
                                [C @ Mmat @ C.T])[0]
     return g1 + g2, {'stationarity': np.abs(Y_tot - Y_tot.T).max(),
                      'multiplier_res': res}
+
+
+def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False):
+    """The orbital-relaxed density of a target, gamma + Lambda in the MO basis
+    of `mf`: d target / d h = Tr[C (gamma + Lambda) C^T h] for any one-electron
+    perturbation h, from the same Fock partial and orbital-rotation gradient
+    `eps_chain_gradient` folds into a force.
+
+    environment=False solves the multiplier with the response kernel of the
+    gas phase on the mean field's orbitals: the continuum's surface charges
+    stay those of the ground state, as a state-specific term needs (the
+    classical E_SS already holds the solvent's whole linear answer to the
+    density, and a responding kernel would count the mutual polarization a
+    second time). environment=True is the force's own multiplier.
+    """
+    eps_bar = np.asarray(eps_bar, float)
+    gamma = (np.diag(eps_bar) if eps_bar.ndim == 1
+             else 0.5 * (eps_bar + eps_bar.T))
+    Y_E = fock_partial_Y(mf, gamma, nocc, environment=environment)
+    if Y_extra is not None:
+        Y_E = Y_E + Y_extra
+    Lam, res = solve_lambda(mf, Y_E, nocc, environment=environment)
+    return gamma + Lam, res
 
 
 def exchange_channel_skeleton(mf, g_ao, D, omega, weight):

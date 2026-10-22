@@ -1,7 +1,7 @@
 """The gradient chains on sliced ISDF factors: each rank its grid rows between
 and inside the stages, every whole-array read one gather per sweep or solve,
-and every number the whole layout's at the same rank count -- bit for bit
-where pyscf repeats its bits.
+and every number the whole layout's at the same rank count -- to a few ulp
+where pyscf repeats its bits (two layouts are two computations).
 
 A factorization built with `sliced=True` hands its chains, over more than one
 rank, ONE `SlicedFactors` per geometry: each rank's `contiguous_block` of the
@@ -21,7 +21,7 @@ the whole layout on the same rank count:
     handed ONE mean field at every geometry (`one_mean_field_per_geometry`),
     and pyscf's OpenMP is held to one thread, where its K builds add their
     partials in one order, so the layout is all that differs and the sliced
-    numbers are the whole layout's bit for bit;
+    numbers are the whole layout's to a few ulp;
     tests/test_force_serial_shaped.py shows the layout bitwise on a
     shape-sensitive BLAS and every rank rank 0's under an emulated race;
   * THE MEMORY ASSERTION, between steps: at every evaluation the walk asks
@@ -37,24 +37,24 @@ the whole layout on the same rank count:
     quasiparticle force and its interstate element, and the charged surface,
     the whole layout's on slices;
   * every layout comparison on ONE mean field per geometry
-    (`one_mean_field_per_geometry`) with pyscf's OpenMP on one thread:
-    bitwise;
-  * what slices cannot serve is refused by name: a reaction field before any
-    SCF, a chain whose kernels read the factors whole, a layout that
-    contradicts a shared factorization, Eq. (18)'s densities, and a dense
-    row handed the layout keyword.
+    (`one_mean_field_per_geometry`) with pyscf's OpenMP on one thread: to a
+    few ulp;
+  * what slices cannot serve is refused by name: a chain whose kernels read
+    the factors whole, a layout that contradicts a shared factorization, and
+    a dense row handed the layout keyword; a continuum is served
+    (tests/test_solvated_row_fit.py).
 
-SHOWN TO FAIL, each once, then restored and byte-compared (`cmp`):
+What breaks each gate:
   * `sliced_factors_at` also keeping the whole D on the factorization on
     rank 1 (`self.factorization._whole_D = d` where `comm.Get_rank() == 1`):
-    `test_state_pair_chain_on_slices` failed at 2, 3 and 8 ranks on the
+    `test_state_pair_chain_on_slices` at 2, 3 and 8 ranks, on the
     between-steps scan, rank 1 holding D (444, 84) whole at each of the three
     evaluations of the walk, every force still bitwise;
   * `polarizability_backward` re-gathering D at every tau point:
-    `test_gathers_are_one_per_sweep` failed at 2 and 3 ranks, D 8 -> 22
-    gathers per composed force (one more per point of the static screening's
-    14-point grid), while `test_state_pair_chain_on_slices` stayed green: a
-    gather moves bytes, not bits.
+    `test_gathers_are_one_per_sweep` at 2 and 3 ranks, D 8 -> 22 gathers per
+    composed force (one more per point of the static screening's 14-point
+    grid); `test_state_pair_chain_on_slices` does not see it, since a gather
+    moves bytes, not bits.
 
 HEXAMER ESTIMATE (the whole per-stage table is in
 `src/gradients/factor_chain.py`'s module docstring), per rank over 8 ranks,
@@ -69,15 +69,16 @@ factor arrays only, from M 117762, nmo = nao 10980, nocc 972, naux 28236
 import os
 import sys
 import types
-import warnings
 import weakref
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pytest
-from pyscf import gto, lib, scf
+from pyscf import gto, scf
 
+from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics import Numerics, numerics_of
 from src.Base.declaration import Excitation, GroundState
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.solvent_screening import SolventScreening
@@ -85,12 +86,14 @@ from src.Base.utils.mpi_grid import (contiguous_block, distributed,
                                      run_simulated)
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain, FrozenFactorization
-from src.gradients.reaction_field_adjoint import static_screening
 from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
 from src.properties.surface import evaluate
 from src.properties.surfaces import potential_energy_surface
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
+from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 SIZES = [2, 3, 8]
 BASIS = 'cc-pvdz'
@@ -109,7 +112,9 @@ COMPOSED_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
 def chain_scf(mol):
     """A mean field converged for gradient work (conv_tol_grad 1e-11)."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -131,12 +136,13 @@ def own_water(atom=H2O):
     return gto.M(atom=atom, basis=BASIS, verbose=0)
 
 
-def state_pair(sliced, scf_factory=chain_scf, **kw):
+def state_pair(sliced, scf_factory=chain_scf, **numerics):
     """The composed singlet surface on this rank's OWN Mole, the Casida step
     matrix-free so the block action runs on rows."""
     mol = own_water()
-    return RPABSESurface(mol, scf_factory, spin='singlet', mf=scf_factory(mol),
-                         solver='davidson', sliced=sliced, **kw)
+    return RPABSESurface(
+        mol, scf_factory, spin='singlet', mf=scf_factory(mol),
+        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': sliced, **numerics})))
 
 
 def reachable_arrays(root):
@@ -224,11 +230,27 @@ def watch_between_steps(surface, log):
     surface.total_gradient = scanned
 
 
-def bitwise(a, b):
-    """Every array of `a` holds the bits of the same array of `b`."""
-    return len(a) == len(b) and all(
-        np.asarray(x).shape == np.asarray(y).shape
-        and np.array_equal(np.asarray(x), np.asarray(y)) for x, y in zip(a, b))
+def same_layout(a, b, label):
+    """The sliced layout's numbers `a` are the whole layout's `b`: to a few
+    ulp (`same_bar`, unit 1) under the BLAS the pins record (two layouts, two
+    computations); under another, where the whole layout's
+    GEMM rows round by call shape and the sliced layout's do not, each array is
+    within the cross-BLAS bar of its class (a matrix is a gradient or a vector
+    of amplitudes: the gradient class; a scalar or a 1-D array an energy),
+    after the sign of each column of a vector is fixed to the whole one's."""
+    ok = len(a) == len(b)
+    for x, y in zip(a, b):
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        if x.shape != y.shape:
+            return False
+        if x.ndim == 2:
+            x = x * np.where(np.sum(x * y, axis=0) < 0.0, -1.0, 1.0)
+        bar = pin_bar(RECORDING_BLAS, '1', quantity='gradient' if x.ndim == 2
+                      else 'energy') or same_bar(x, y, '1')
+        miss = float(np.max(np.abs(x - y), initial=0.0))
+        print(f'[info] {label}: sliced - whole {miss:.2e} against {bar:.0e}')
+        ok &= miss <= bar
+    return ok
 
 
 def spectrum_and_vectors(surface):
@@ -236,20 +258,6 @@ def spectrum_and_vectors(surface):
     ex = surface.excited
     om, pieces = ex._forward(ex.mol0, ex.mf0)
     return om, pieces[10], pieces[11]
-
-
-@pytest.fixture
-def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
-    order, so two layouts on one mean field differ by the layout alone."""
-    threads = lib.num_threads()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(1)
-    yield
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(threads)
 
 
 def test_serially_the_flag_is_inert(pyscf_one_thread):
@@ -262,14 +270,15 @@ def test_serially_the_flag_is_inert(pyscf_one_thread):
         assert isinstance(x_mo, np.ndarray) and isinstance(d, np.ndarray)
         gw, ew, _ = whole.total_gradient()
         gs, es, ds = sliced.total_gradient()
-    assert bitwise((gs, es), (gw, ew))
+    # two layouts: to a few ulp
+    assert same_layout((gs, es), (gw, ew), 'serial, flag inert')
     assert 'factor_gathers' not in ds
 
 
 @pytest.mark.parametrize('size', SIZES)
 def test_state_pair_chain_on_slices(size, pyscf_one_thread):
     """Force, energy, roots, vectors, dRPA force and a one-cycle walk the
-    whole layout's on one mean field per geometry, bitwise; rows alone
+    whole layout's on one mean field per geometry, to a few ulp; rows alone
     between steps."""
 
     def rank(comm):
@@ -305,9 +314,10 @@ def test_state_pair_chain_on_slices(size, pyscf_one_thread):
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
         for key in ('force', 'ground', 'spectrum', 'walk'):
-            assert bitwise(out['sliced'][key], out['whole'][key]), (
+            assert same_layout(out['sliced'][key], out['whole'][key],
+                               f'{size} ranks, {key}'), (
                 f'rank {r} of {size}: {key} sliced != whole')
-            assert bitwise(out['sliced'][key], res[0]['sliced'][key]), (
+            assert bitwise_arrays(out['sliced'][key], res[0]['sliced'][key]), (
                 f'rank {r} of {size}: {key} != rank 0')
         # Between steps: no whole factor anywhere on the sliced surface.
         scans = out['sliced']['scans']
@@ -337,10 +347,13 @@ def test_gathers_are_one_per_sweep(size):
     def with_ground_tau(ntau):
         mol = own_water()
         mf = chain_scf(mol)
-        ground = RPAGroundStateChain(mol, chain_scf, mf=mf, ntau=ntau,
-                                     sliced=True)
-        return RPABSESurface(mol, chain_scf, spin='singlet', mf=mf,
-                             solver='davidson', ground=ground)
+        # the ground half's own tau count is a field of the one Numerics both
+        # halves read; a half on other numerics is refused
+        return RPABSESurface(
+            mol, chain_scf, spin='singlet', mf=mf,
+            numerics=g1_numerics(mol, Numerics(
+                bse={'solver': 'davidson'}, quadrature={'ntau_rpa': ntau},
+                layout={'sliced': True})))
 
     def rank(comm):
         return (gathers(state_pair(True)),
@@ -366,8 +379,10 @@ def test_excited_chain_on_slices(size, solver, pyscf_one_thread):
         scf_factory = one_mean_field_per_geometry()
         for tag, sliced in (('whole', None), ('sliced', True)):
             mol = own_water()
-            chain = ExcitedStateChain(mol, scf_factory, mf=scf_factory(mol),
-                                      solver=solver, sliced=sliced)
+            chain = ExcitedStateChain(
+                mol, scf_factory, mf=scf_factory(mol),
+                numerics=g1_numerics(mol, Numerics(bse={'solver': solver},
+                                                   layout={'sliced': sliced})))
             here = own_water(H2O_DISPLACED)
             g_ex, d_ex = chain.excitation_gradient(here)
             g_qp, d_qp = chain.quasiparticle_gradient(0, here)
@@ -378,9 +393,10 @@ def test_excited_chain_on_slices(size, solver, pyscf_one_thread):
 
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
-        assert bitwise(out['sliced'], out['whole']), (
+        assert same_layout(out['sliced'], out['whole'],
+                           f'{solver}, {size} ranks'), (
             f'rank {r}: sliced != whole')
-        assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
+        assert bitwise_arrays(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
 
 
 def test_charged_surface_on_slices(pyscf_one_thread):
@@ -391,16 +407,17 @@ def test_charged_surface_on_slices(pyscf_one_thread):
         scf_factory = one_mean_field_per_geometry()
         for sliced in (None, True):
             mol = own_water()
-            surface = RPAQPSurface(mol, scf_factory, state=0,
-                                   mf=scf_factory(mol), sliced=sliced)
+            surface = RPAQPSurface(
+                mol, scf_factory, state=0, mf=scf_factory(mol),
+                numerics=g1_numerics(mol, Numerics(layout={'sliced': sliced})))
             g, e, _ = surface.total_gradient(own_water(H2O_DISPLACED))
             out.append((g, e))
         return out
 
     res = run_simulated(rank, 2)
     for r, (whole, sliced) in enumerate(res):
-        assert bitwise(sliced, whole), f'rank {r}'
-        assert bitwise(sliced, res[0][1]), f'rank {r} != rank 0'
+        assert same_layout(sliced, whole, f'charged, rank {r}'), f'rank {r}'
+        assert bitwise_arrays(sliced, res[0][1]), f'rank {r} != rank 0'
 
 
 def test_the_dispatcher_carries_the_layout():
@@ -429,32 +446,38 @@ def test_the_dispatcher_carries_the_layout():
 
 def test_what_slices_cannot_serve_is_refused():
     mol = own_water()
-    solvated = SolventScreening(mol, eps=1.78)
+    # the frozen-polarization limit, declared: the chain's SCF is the gas
+    # phase's
+    solvated = SolventScreening(mol, eps=1.78, frozen_polarization=True)
     built = []
 
     def counted(m):
         built.append(m)
         return chain_scf(m)
 
-    with pytest.raises(ValueError, match='reaction field'):
-        ExcitedStateChain(mol, counted, environment=solvated, sliced=True)
-    assert built == [], 'the reaction field was refused only after an SCF'
     with pytest.raises(ValueError, match='sliced=False'):
-        FactorChain(mol, counted, sliced=True)
+        FactorChain(mol, counted, numerics=Numerics(isdf={'counts': g1(mol)},
+                                                    layout={'sliced': True}))
     with pytest.raises(ValueError, match='layout|sliced'):
-        ExcitedStateChain(mol, counted, sliced=False,
-                          factorization=FrozenFactorization(mol, sliced=True))
+        ExcitedStateChain(
+            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+                                                                          layout={'sliced': True})),
+            numerics=Numerics(layout={'sliced': False}))
     assert built == []
-    # the dRPA chain has no bare gauge to need, and takes a continuum on slices
-    RPAGroundStateChain(mol, chain_scf, environment=solvated, sliced=True)
+    # a continuum is served on slices, its bare gauge and Eq. (18) by rows
+    # (tests/test_solvated_row_fit.py)
+    RPAGroundStateChain(mol, chain_scf, environment=solvated, numerics=Numerics(isdf={'counts': g1(mol)},
+                                                                                layout={'sliced': True}))
+    ExcitedStateChain(
+        mol, chain_scf, environment=solvated,
+        numerics=g1_numerics(mol, Numerics(layout={'sliced': True})))
 
     def rank(comm):
         m = own_water()
-        chain = ExcitedStateChain(m, chain_scf, mf=chain_scf(m), sliced=True)
+        chain = ExcitedStateChain(
+            m, chain_scf, mf=chain_scf(m),
+            numerics=g1_numerics(m, Numerics(layout={'sliced': True})))
         rows = chain.factors_at(m, chain.mf0)[0]
-        with pytest.raises(ValueError, match='densities'):
-            static_screening(rows, rows, chain.mf0.mo_energy, chain.nocc,
-                             chain.w_grid)
         with pytest.raises(TypeError):
             tuple(rows)
         return True

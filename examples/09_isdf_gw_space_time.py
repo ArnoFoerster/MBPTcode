@@ -22,8 +22,9 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
 from src.Base.isdf_jk import isdf_jk, separable_factors_from_jk
+from src.Base.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.space_time import (solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
@@ -33,7 +34,9 @@ mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
 nocc = mol.nelectron // 2
 
 # 1. SCF with an ISDF with_df: J and K from the factors, no cderi stored.
-mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri')
+#    The interpolation grid is named, here the level the surfaces use.
+counts = resolve_isdf_grid(SURFACE_GRID_ACCURACY, str(mol.basis))[0]
+mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=counts)
 mf.kernel()
 print(f'ISDF-SCF   E = {mf.e_tot:.8f} Ha')
 

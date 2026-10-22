@@ -21,8 +21,8 @@ and LRC-wPBEh, density-fitted and ISDF-K references, at the default grid:
       to 1e-13 relative;
   (e) a meta-GGA (TPSS) and an LDA follow their own differences;
   (f) over 2, 3 and 8 simulated ranks every rank holds the one-rank
-      skeleton bitwise (the tiles' addends are gathered verbatim and summed
-      in tile order); planted, a rank dropping one of its tiles moves it;
+      skeleton to a few ulp (the tiles' addends are gathered verbatim and
+      summed in tile order; each rank computes its own); planted, a rank dropping one of its tiles moves it;
   (g) a VV10 functional is refused, since its kernel is not differentiated.
 """
 import pathlib
@@ -42,6 +42,8 @@ from src.Base.constants import ISDF_GRADIENT_FLOOR                   # noqa: E40
 from src.Base.isdf_jk import isdf_jk                                 # noqa: E402
 from src.Base.utils.mpi_grid import current_comm, run_simulated      # noqa: E402
 from src.gradients.isdf_derivatives import xc_skeleton               # noqa: E402
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same  # noqa: E402
 
 #: The test molecules' geometries, Angstrom.
 SYSTEMS = {
@@ -83,7 +85,7 @@ def mean_field(name, xc, reference='df'):
     key = (name, xc, reference)
     if key not in MEAN_FIELDS:
         mol = molecule(name)
-        mf = (isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri')
+        mf = (isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
               if reference == 'isdf-k' else dft.RKS(mol, xc=xc).density_fit())
         mf.conv_tol, mf.conv_tol_grad = 1e-11, 1e-8
         mf.kernel()
@@ -245,7 +247,7 @@ def test_every_rank_holds_the_one_rank_skeleton(size):
     mf = mean_field('formaldehyde', 'pbe0')
     one = xc_skeleton(mf, partial(mf))
     for r, got in enumerate(over_ranks(size)):
-        assert np.array_equal(got, one), (size, r)
+        assert_same(got, one, quantity='gradient', label=(size, r))
 
 
 def test_a_dropped_tile_moves_it():

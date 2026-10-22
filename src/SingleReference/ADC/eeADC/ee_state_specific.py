@@ -34,10 +34,14 @@ term (at eps_inf in both modes: split equilibrium, Guido et al., J. Chem.
 Theory Comput. 17, 5155 (2021)) answers the transition density, so nothing
 is counted twice.
 
-Left out: the MP2 correlation density of the reference (PTD) and the orbital
-relaxation of Delta rho; Delta rho is the unrelaxed ISR-ADC(2) difference
-density (ee_density, ee_ri_density). Delta V and Q use the LR term's
-smeared surface points (SolventScreening.response_matrix).
+Delta rho is either the unrelaxed ISR-ADC(2) difference density (ee_density,
+ee_ri_density; the default) or the orbital-relaxed one, d omega / d h, with
+the ground state's surface charges frozen in the orbital response
+(ee_relaxed_density; ee_driver's ss_density='relaxed'). Relaxation shrinks
+the dipole change of a charge-transfer-like state and with it E_SS. Left
+out: the MP2 correlation density of the reference
+(PTD). Delta V and Q use the LR term's smeared surface points
+(SolventScreening.response_matrix).
 """
 import numpy as np
 
@@ -49,6 +53,28 @@ def check_mode(mode):
     if mode not in MODES:
         raise ValueError(f'state_specific={mode!r}; expected one of {MODES}')
     return mode
+
+
+def shift_modes(env, mode):
+    """The response modes to evaluate for the requested mode, 'vertical' first."""
+    check_mode(mode)
+    modes = ('vertical',) if getattr(env, 'eps_static', None) is None else \
+        ('vertical', 'equilibrium')
+    if mode not in modes:
+        raise ValueError(f'state_specific={mode!r} needs the continuum\'s '
+                         'eps_static')
+    return modes
+
+
+def delta_dipoles(mol, mo_act, C, delta_density, delta_density_relaxed):
+    """{'unrelaxed', 'relaxed'}: (nroots, 3) dipole change of every root, from
+    the difference densities in the active orbitals mo_act and in all MOs C."""
+    r = mol.intor('int1e_r')
+    return {
+        'unrelaxed': np.array([-np.einsum('xmn,mn->x', r, mo_act @ D @ mo_act.T)
+                               for D in delta_density]),
+        'relaxed': np.array([-np.einsum('xmn,mn->x', r, C @ D @ C.T)
+                             for D in delta_density_relaxed])}
 
 
 def surface_potential(env, mol, dm_ao):

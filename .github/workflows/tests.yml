@@ -1,0 +1,64 @@
+name: tests
+
+# Fast tier on every push and pull request, on pinned dependencies: a red
+# run means the code changed. The slow tier runs nightly on the newest
+# dependencies, so a red nightly after a green push means a library moved.
+# Heavy tests (hour-long, real MPI) run on the cluster, not here:
+# tools/ci/heavy.txt.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  fast:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # several tests extract a pinned commit with git archive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: tools/ci/pinned.txt
+      - name: Install
+        run: |
+          pip install -r tools/ci/pinned.txt
+          pip install openfermion openfermionpyscf geometric psutil
+          pip install cppe pyscf-dispersion || true   # optional: tests skip without them
+      - name: Fast tier, shard ${{ matrix.shard }} of 4
+        run: python tools/ci/run_tier.py fast --shard ${{ matrix.shard }}/4 --timeout 600
+
+  slow:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install newest releases
+        run: |
+          pip install numpy scipy pyscf opt_einsum threadpoolctl pytest
+          pip install openfermion openfermionpyscf geometric psutil
+          pip install cppe pyscf-dispersion || true
+          pip list
+      - name: Slow tier, shard ${{ matrix.shard }} of 6
+        run: python tools/ci/run_tier.py slow --shard ${{ matrix.shard }}/6 --timeout 3000

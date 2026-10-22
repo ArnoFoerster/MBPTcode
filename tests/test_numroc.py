@@ -1,7 +1,7 @@
 """ScaLAPACK NUMROC: the block-cyclic split must account for every row.
 
 `ElpaEigensolver._numroc` says how many rows of an n x n matrix a process owns.
-Two defects sat here undetected because nothing imports the module without MPI
+Two defects go undetected because nothing imports the module without MPI
 and ELPA installed, and neither is on PyPI:
 
   * `__init__` called it with 4 of its 5 required arguments, so constructing the

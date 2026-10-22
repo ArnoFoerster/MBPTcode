@@ -23,14 +23,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.constants import BSE_DENSE_MAX_NOV
+from src.Base.numerics import Numerics
 from src.Base.pyscf_interface import (get_density_fitting_coefficients,
                                       get_orbital_energies)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_block_action,
                                                          solve_casida_davidson)
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.gradients.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1, g1_numerics
 
 NROOTS = 3
 
@@ -63,9 +66,10 @@ def check_matrix_free_matches_the_dense_blocks(mol, mf, nocc, lr):
             A, B = lr.build_casida_matrices(nocc, lBSE=(mode != 'RPA'),
                                             triplet=(spin == 'triplet'))
             dense = np.sort(CasidaSolver(A, B).solve()[0])[:NROOTS]
-            om, _, _ = solve_casida_davidson(lr, nocc, nroots=NROOTS,
-                                             polarizability=mode,
-                                             conv_tol=1e-10, spin=spin)
+            om, _, _ = solve_casida_davidson(
+                lr, nocc,
+                numerics=Numerics(bse={'nroots': NROOTS, 'conv_tol': 1e-10}),
+                polarizability=mode, spin=spin)
             d = np.abs(np.sort(om)[:NROOTS] - dense).max()
             ok &= check(d < 1e-8, f'{mode} {spin}: matrix-free == dense blocks',
                         f'max |dw| {d:.1e} Ha')
@@ -80,8 +84,8 @@ def check_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr):
     """
     roots = {}
     for spin in ('singlet', 'triplet'):
-        om, _, _ = solve_casida_davidson(lr, nocc, nroots=NROOTS,
-                                         polarizability='RPA', conv_tol=1e-10,
+        om, _, _ = solve_casida_davidson(lr, nocc, numerics=Numerics(bse={'nroots': NROOTS, 'conv_tol': 1e-10}),
+                                         polarizability='RPA',
                                          spin=spin)
         roots[spin] = np.sort(om)[:NROOTS]
     return check((roots['triplet'] < roots['singlet']).all()
@@ -95,7 +99,7 @@ def check_the_triplet_is_a_different_number_and_lies_below(mol, mf, nocc, lr):
 def check_isdf_action_drops_the_bare_term_from_both_blocks(mol, mf, nocc, lr):
     """kappa = 0 must remove the Hartree term from A AND B, not just from A."""
     nvirt = len(mf.mo_energy) - nocc
-    X_mo, D, W_aux = isdf_bse_factors(mf, mol, nocc)[:3]
+    X_mo, D, W_aux = isdf_bse_factors(mf, mol, nocc, counts=g1(mol))[:3]
     z = np.random.default_rng(1).standard_normal((2, nocc, nvirt))
 
     act_s, _ = isdf_block_action(lr, nocc, True, W_aux, (X_mo, D),
@@ -125,38 +129,23 @@ def _chain_factory(m):
 
 
 def check_chain_lets_a_triplet_reach_davidson(mol):
-    """'auto' used to send every triplet to the dense solver; at production
+    """'auto' must not send every triplet to the dense solver; at production
     sizes that is a dense (n_ov)^2 matrix instead of a matrix-free solve.
 
-    THE TAMM-DANCOFF FORM IS NOT EXEMPT FROM THE MEMORY RULE and is refused
-    above it rather than served densely. `solver_choice`'s docstring says why
-    the boundary does not move for it: the dense route BUILDS both blocks
-    either way (`build_casida_matrices` returns the pair; only
-    `CasidaSolver.solve` drops B), so a TDA solve holds the same memory. And it
-    cannot go matrix-free instead, because `solve_casida_davidson` takes no
-    `tda` and solves the full Casida problem -- routing there would return
-    roots of a different kernel from the declared one. So 'auto' above the rule
-    raises with the memory in the message, which is what it costs; the
-    construction-time refusal of an explicit solver='davidson' stands
-    unchanged.
+    The Tamm-Dancoff form is not exempt from the memory rule either
+    (`solver_choice`): above it, it goes matrix-free like the full kernel,
+    on the A half of the same block action.
     """
+    numerics = g1_numerics(mol, Numerics(bse={'solver': 'auto'}))
     chain = ExcitedStateChain(mol, _chain_factory, spin='triplet',
-                              solver='auto', dense_max_nov=1)
-    ok = check(chain.solver_used(10_000) == 'davidson',
+                              numerics=numerics)
+    ok = check(chain.solver_used(10 * BSE_DENSE_MAX_NOV) == 'davidson',
                "'auto' sends a triplet above the memory rule to the Davidson")
-    tda = ExcitedStateChain(mol, _chain_factory, spin='triplet', solver='auto',
-                            bse_tda=True, dense_max_nov=1)
-    for label, call in (
-            ("'auto' above the rule refuses a Tamm-Dancoff triplet",
-             lambda: tda.solver_used(10_000)),
-            ("solver='davidson' refuses a Tamm-Dancoff triplet at construction",
-             lambda: ExcitedStateChain(mol, _chain_factory, spin='triplet',
-                                       solver='davidson', bse_tda=True))):
-        try:
-            call()
-            ok &= check(False, label)
-        except NotImplementedError as exc:
-            ok &= check('Tamm-Dancoff' in str(exc), label)
+    tda = ExcitedStateChain(mol, _chain_factory, spin='triplet', bse_tda=True,
+                            numerics=numerics)
+    ok &= check(tda.solver_used(10 * BSE_DENSE_MAX_NOV) == 'davidson',
+                "'auto' sends a Tamm-Dancoff triplet above the memory rule to "
+                "the Davidson too")
     return ok
 
 
@@ -169,10 +158,15 @@ def check_chain_gives_the_same_excitation_either_solver(mol):
     """
     ok = True
     for spin in ('singlet', 'triplet'):
-        kw = dict(spin=spin, state=0, basis='cc-pvdz')
-        dense = ExcitedStateChain(mol, _chain_factory, solver='dense', **kw)
-        david = ExcitedStateChain(mol, _chain_factory, solver='davidson',
-                                  nroots=4, bse_conv_tol=1e-10, **kw)
+        dense = ExcitedStateChain(
+            mol, _chain_factory, spin=spin,
+            numerics=g1_numerics(mol, Numerics(isdf={'basis': 'cc-pvdz'},
+                                               bse={'solver': 'dense'})))
+        david = ExcitedStateChain(
+            mol, _chain_factory, spin=spin,
+            numerics=g1_numerics(mol, Numerics(
+                isdf={'basis': 'cc-pvdz'},
+                bse={'solver': 'davidson', 'nroots': 4, 'conv_tol': 1e-10})))
         om_dense = dense.excitation(mol)
         om_david = david.excitation(mol)
         d = abs(om_dense - om_david)

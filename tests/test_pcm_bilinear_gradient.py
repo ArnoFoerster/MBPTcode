@@ -20,10 +20,12 @@ import pytest
 from pyscf import gto, scf
 from pyscf.solvent.grad.pcm import grad_solver
 
+from src.Base.numerics import Numerics
 from src.Base.constants import BOHR_TO_ANGSTROM, PCM_CROSS_TERM_STEP
 from src.Base.pcm_derivatives import (frozen_surface,
                                       reaction_field_fock_skeleton,
                                       solver_bilinear_gradient)
+from tests.isdf_test_grid import g1_numerics
 
 #: pyscf's PCM has FOUR branches, not three: COSMO is its own, with
 #: f = (eps-1)/(eps+1/2) against C-PCM's (eps-1)/eps. The derivative is shared
@@ -374,7 +376,9 @@ def test_the_solvated_excitation_gradient_matches_finite_differences():
 
     mol0 = gto.M(atom=ATOM, basis='cc-pvdz', verbose=0)
     env = SolventScreening(mol0, solvent='water')      # both halves live
-    chain = ExcitedStateChain(mol0, factory, solver='dense', environment=env)
+    chain = ExcitedStateChain(
+        mol0, factory, environment=env,
+        numerics=g1_numerics(mol0, Numerics(bse={'solver': 'dense'})))
     analytic, _ = chain.excitation_gradient(mol0)
 
     h = 1e-4

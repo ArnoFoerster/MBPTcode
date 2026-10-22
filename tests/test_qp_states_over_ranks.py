@@ -11,7 +11,9 @@ The split is over the states, with no reduction: rank r takes states r,
 r + nranks, ... and the roots are all-gathered back into state order. Sigma
 arrives all-reduced and identical on every rank and the static term is
 replicated from rank 0, so each root is the same scalar iteration on the same
-numbers wherever it runs, and the gates here are bitwise per state. Ranks
+numbers wherever it runs, and the gates here are a few ulp per state (two
+computations of one root, `assert_same` on the
+Pade-continued class). Ranks
 beyond the state count own an empty block and only serve the gather.
 
 The BSE's block action is gated here too, because the same row split carries
@@ -23,7 +25,7 @@ What each gate catches:
 
   perturbation                           gates that then fail
   a rank solves the state next to its    all nine state gates (the window,
-  own (`states[(i + 1) % n]` under a     bitwise and blocked, the
+  own (`states[(i + 1) % n]` under a     in core and blocked, the
   partition; serial untouched)           oversubscribed one and the whole
                                          diagonal), and the BSE through its
                                          own refusal of an unstable reference
@@ -36,7 +38,7 @@ What each gate catches:
   counted nranks times)                  kappa = 2 term and nothing else
 
 The adaptive explicit set over 2 and 3 simulated ranks selects the serial
-partition, with its explicit roots bitwise across ranks.
+partition, with its explicit roots the same to a few ulp across ranks.
 """
 import os
 import sys
@@ -48,18 +50,21 @@ import numpy as np
 import pytest
 from pyscf import gto, lib, scf
 
+from src.Base.numerics import Numerics
 from src.Base.declaration import QPStates
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_block_action,
-                                                         isdf_bse_factors,
+from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf)
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.gradients.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import assert_same
 
 SIZES = [2, 3]
 #: More ranks than states: the surplus ranks own an empty block.
@@ -84,7 +89,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
     return dict(mf=mf, mol=mol, nocc=nocc, factors=factors,
                 window=np.arange(nocc - 2, nocc + 3))     # 5 states
 
@@ -111,7 +116,8 @@ def test_window_states_bitwise(water, size):
     for qp in run_simulated(one_rank, size):
         assert qp.shape == ref.shape
         for i, p in enumerate(w['window']):
-            assert qp[i] == ref[i], f'state {p} moved off the serial root'
+            assert_same(qp[i], ref[i], quantity='continued',
+                        label=f'state {p} moved off the serial root')
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -128,7 +134,7 @@ def test_blocked_window_states_bitwise(water, size):
                                           comm=comm)
 
     for qp in run_simulated(one_rank, size):
-        assert np.array_equal(qp, ref)
+        assert_same(qp, ref, quantity='continued', label='blocked window')
 
 
 def test_more_ranks_than_states(water):
@@ -150,7 +156,7 @@ def test_more_ranks_than_states(water):
     out = run_simulated(one_rank, OVERSUBSCRIBED)
     for qp in out:
         assert qp.shape == (len(states),)
-        assert np.array_equal(qp, ref)
+        assert_same(qp, ref, quantity='continued', label='oversubscribed')
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -168,27 +174,28 @@ def test_qp_diagonal_bitwise(water, size):
         return eps
 
     for eps in run_simulated(one_rank, size):
-        assert np.array_equal(eps, ref)
+        assert_same(eps, ref, quantity='continued', label='diagonal')
 
 
 @pytest.mark.parametrize('size', SIZES)
 def test_bse_diagonal_and_roots(water, size):
-    """The BSE built on that diagonal: the quasiparticle energies bitwise, the
+    """The BSE built on that diagonal: the quasiparticle energies to a few ulp, the
     roots and min eig(A-B) to the last bits of the row-split action."""
     w = water
-    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
+    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
                                       probe=True, progress=False,
                                       factors=w['factors'])
 
     def one_rank(comm):
-        om, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
+        om, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
                                         probe=True, progress=False,
                                         factors=w['factors'], distribute=True,
                                         comm=comm)
         return om, info
 
     for om, info in run_simulated(one_rank, size):
-        assert np.array_equal(info['eps'], info0['eps'])      # the GW diagonal
+        assert_same(info['eps'], info0['eps'], quantity='continued',
+                    label='the GW diagonal')
         assert relative(om, om0) < ROOT_REL
         assert relative([info['min_eig_amb']], [info0['min_eig_amb']]) < ROOT_REL
         assert info['nranks'] == size
@@ -249,21 +256,21 @@ def adaptive_partition():
     window = resolve_qp_states(QPStates('adaptive'), eps, mol.nelectron // 2,
                                degeneracy_tol=1e-4).explicit
     chain = ExcitedStateChain(
-        mol, adaptive_scf, qp_window=list(window), residue_route='sop',
-        scissor='calibrate', outside='scissor', solver='dense', mf=mf,
-        qp_select=QPStates('adaptive', targets=(('singlet', 0),
-                                                ('triplet', 0))))
+        mol, adaptive_scf, mf=mf,
+        numerics=g1_numerics(mol, Numerics(qp={'window': list(window), 'residue_route': 'sop', 'scissor': 'calibrate', 'select': QPStates('adaptive', targets=(('singlet', 0), ('triplet', 0)))},
+                                           bse={'solver': 'dense'})))
     chain.energy(mol, mf)
-    part = chain.qp_partition
+    part = chain.resolved.qp_partition
     return part.explicit, part.tier_of, np.array(
-        [chain.qp_seeds[p] for p in part.explicit])
+        [chain.resolved.qp_seeds[p] for p in part.explicit])
 
 
 @pytest.mark.parametrize('size', SIZES)
 def test_adaptive_partition_over_ranks(size):
     """The continuation over ranks re-associates its sums, and the partition
     it selects does not move: the same explicit set and tier map on every
-    rank and at every rank count, the explicit roots bitwise across ranks."""
+    rank and at every rank count, the explicit roots the same to a few ulp
+    across ranks (each rank converges its own mean field and chain)."""
     threads = lib.num_threads()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -277,7 +284,7 @@ def test_adaptive_partition_over_ranks(size):
     for explicit, tiers, roots in out:
         assert explicit == explicit0 and tiers == tiers0
         assert np.abs(roots - roots0).max() < ADAPTIVE_ROOT_TOL
-        assert np.array_equal(roots, out[0][2])
+        assert_same(roots, out[0][2], label='explicit roots across ranks')
 
 
 if __name__ == '__main__':

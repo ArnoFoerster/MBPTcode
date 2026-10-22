@@ -56,13 +56,11 @@ WHAT COMES OUT is the rotational invariant
 which is what the golden rule wants (the sum over the three degenerate triplet
 sublevels) and which, being a rotational invariant of a real vector, is free of
 the phase convention the literature disagrees about for the M = +-1 pair. The
-per-sublevel elements are available through `sublevel_elements`. Whether k_RISC
-carries a further 1/3 for thermal averaging over the initial sublevels is the
-CALLER's decision -- Bredas 2017 does not, parts of the Marian literature do --
-and `rates.py` is handed |V|, not a rate.
+per-sublevel elements are available through `sublevel_elements`. `rates.py` is
+handed |V|, not a rate: it averages a crossing out of a triplet over the three
+thermalized initial sublevels (|V|^2 / 3; Bredas 2017 keeps the sum).
 """
 import copy
-import warnings
 
 import numpy as np
 from pyscf import lib
@@ -72,13 +70,15 @@ from pyscf.x2c import sfx2c1e, x2c
 
 from src.Base.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
                                 SOC_MANIFOLD_CONV_TOL)
+from src.Base.numerics import (Numerics, Stamped, numerics_identity,
+                               require_one_stamp)
 from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
 from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.LinearResponse.davidson import (solve_bse_isdf,
+from src.SingleReference.LinearResponse.davidson import (davidson_flags,
+                                                         solve_bse_isdf,
                                                          solve_casida_davidson)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
-from src.properties.vibronic import displace_along_mode
 
 # alpha^2/4, the Breit-Pauli prefactor of the PAULI MATRIX: H_SO =
 # (alpha^2/2) (r x p).s with s = sigma/2 is (alpha^2/4) (r x p).sigma. So the
@@ -249,11 +249,12 @@ def soc_operator_mo(mf, mol=None, two_electron='somf', one_electron='x2c'):
     mol = mf.mol if mol is None else mol
     if (one_electron == 'x2c' and getattr(mf, 'with_x2c', None) is None
             and (mol.atom_charges() > HEAVY_ATOM_Z).any()):
-        warnings.warn(
-            'the X2C spin-orbit operator is being used with a mean field that '
-            'is not scalar-relativistic, and this molecule carries an element '
+        raise ValueError(
+            'the X2C spin-orbit operator is asked of a mean field that is not '
+            'scalar-relativistic, and this molecule carries an element '
             'heavier than Kr: the two are in different pictures. Build the '
-            'reference with .x2c() (or sfx2c1e) to match them.', RuntimeWarning)
+            'reference with .x2c() (or sfx2c1e), or pass '
+            "one_electron='breit-pauli'.")
     h_ao = soc_operator(mol, mf.make_rdm1(), two_electron, one_electron)
     mo = np.asarray(mf.mo_coeff)
     return np.einsum('xpq,pi,qj->xij', h_ao, mo, mo, optimize=True)
@@ -336,6 +337,33 @@ def coupling(t_vec, spin_factor):
     return float(spin_factor * np.linalg.norm(np.asarray(t_vec, float)))
 
 
+def interstate_vectors(h_mo, nocc, x_s, y_s, x_t, y_t):
+    """(n_s, n_t, 3) `interstate_element` of every singlet-triplet root
+    pair, before the spin factor. X, Y are the solver's (n_ov, nroots)
+    arrays; Y None is Tamm-Dancoff."""
+    out = np.zeros((x_s.shape[1], x_t.shape[1], 3))
+    for i in range(x_s.shape[1]):
+        for j in range(x_t.shape[1]):
+            out[i, j] = interstate_element(
+                h_mo, nocc, x_s[:, i], x_t[:, j],
+                None if y_s is None else y_s[:, i],
+                None if y_t is None else y_t[:, j])
+    return out
+
+
+def slope_from_squares(v2_plus, v2_minus, v2_centre, dq):
+    """|dV/dq| from V^2 at +dq, -dq and the centre:
+
+        |dV/dq|^2 = (V(+dq)^2 + V(-dq)^2 - 2 V(0)^2) / (2 dq^2)
+
+    exact for V linear in q, Condon term included. |V| is a norm and passes
+    through zero linearly for a forbidden pair, so a central difference of
+    the modulus is identically zero however large the slope; V^2 is smooth
+    there."""
+    dv2 = (v2_plus + v2_minus - 2.0 * v2_centre) / (2.0 * dq ** 2)
+    return float(np.sqrt(max(0.0, dv2)))
+
+
 def socme_table(h_mo, nocc, x_s, y_s, x_t, y_t, nroots=None):
     """(n_singlet + 1, n_triplet) table of |<S_I|H_SO|T_J>| in Hartree.
 
@@ -347,15 +375,14 @@ def socme_table(h_mo, nocc, x_s, y_s, x_t, y_t, nroots=None):
     n_s = x_s.shape[1] if nroots is None else min(nroots, x_s.shape[1])
     n_t = x_t.shape[1] if nroots is None else min(nroots, x_t.shape[1])
     out = np.zeros((n_s + 1, n_t))
+    pairs = interstate_vectors(h_mo, nocc, x_s[:, :n_s], y_s[:, :n_s],
+                               x_t[:, :n_t], y_t[:, :n_t])
     for j in range(n_t):
         out[0, j] = coupling(
             ground_state_element(h_mo, nocc, x_t[:, j], y_t[:, j]),
             GROUND_SPIN_FACTOR)
         for i in range(n_s):
-            out[i + 1, j] = coupling(
-                interstate_element(h_mo, nocc, x_s[:, i], x_t[:, j],
-                                   y_s[:, i], y_t[:, j]),
-                EXCITED_SPIN_FACTOR)
+            out[i + 1, j] = coupling(pairs[i, j], EXCITED_SPIN_FACTOR)
     return out
 
 
@@ -418,7 +445,7 @@ def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
 
     The one-call entry, and the only one a caller normally needs:
 
-        singlet, triplet = isdf_manifolds(mf, mol, nocc, nroots=5)
+        singlet, triplet = isdf_manifolds(mf, mol, nocc)
         out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet)
         k = marcus_levich_jortner_rate(out['socme'][1, 0], ...)
 
@@ -431,10 +458,18 @@ def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
     the repo returns them -- Davidson or dense, ISDF or DF or full ERIs, gas
     phase or solvated. Y may be None for a Tamm-Dancoff run.
 
+    Two manifolds stamped with different numerics are refused
+    (`NumericsMismatch`): a coupling of the vectors of two Casida matrices
+    built on different grids or tolerances is not a matrix element of either.
+    A plain triple carries no stamp and is taken as it is.
+
     Returns a dict: 'socme' the (n_s + 1, n_t) table in Hartree with the ground
     state in row 0, 'h_mo' the operator, 'h_rel' the effective relativistic
-    Hamiltonian, and the two energy arrays.
+    Hamiltonian, the two energy arrays and, for manifolds that name them
+    (`isdf_manifolds`), 'davidson_flags' {spin: the roots their Davidson left
+    unconverged or unconfirmed, `davidson_flags`}, empty when clean.
     """
+    require_one_stamp((singlet, triplet), 'spin-orbit coupling')
     om_s, x_s, y_s = singlet
     om_t, x_t, y_t = triplet
     h_mo = soc_operator_mo(mf, mol, two_electron, one_electron)
@@ -443,55 +478,15 @@ def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
             'h_rel': qdpt_hamiltonian(h_mo, nocc, om_s, x_s, y_s,
                                       om_t, x_t, y_t, nroots),
             'omega_singlet': np.asarray(om_s, float),
-            'omega_triplet': np.asarray(om_t, float)}
+            'omega_triplet': np.asarray(om_t, float),
+            'davidson_flags': {
+                spin: flags for spin, flags in (
+                    ('singlet', getattr(singlet, 'davidson_flags', None)),
+                    ('triplet', getattr(triplet, 'davidson_flags', None)))
+                if flags}}
 
 
-def promoting_mode_couplings(mol0, omega, modes, masses, soc_at, i, j, dq=0.1):
-    """|dV_ij/dq_k| in Hartree, every real ground-state mode, Herzberg-Teller.
-
-    The correction Samanta, Kim, Coropceanu and Bredas, J. Am. Chem. Soc.
-    139, 4042 (2017) carry beside the Condon term: for an El-Sayed-forbidden
-    pair the vertical <S_I|H_SO|T_J> is near zero and the rate is carried
-    instead by the derivative along a mode that lends the pair the symmetry
-    it lacks.
-
-    soc_at: mol -> the (n_s + 1, n_t) socme table `spin_orbit_couplings`
-    returns, so this function owns no electronic-structure route and works
-    on any of them; `i`, `j` index that table (i = 0 is the ground state
-    row). `omega`, `modes`, `masses` are `vibronic.normal_modes`'s, and
-    `displace_along_mode` reads the dimensionless step `dq`.
-
-    |V| IS A NORM: for a Condon-forbidden pair it passes through zero
-    LINEARLY in q, so |V(+dq)| = |V(-dq)| and a central difference of the
-    modulus is identically zero however large the true slope is. V^2 is
-    smooth through the zero instead:
-
-        |dV/dq_k|^2 = (|V(+dq_k)|^2 + |V(-dq_k)|^2 - 2|V(0)|^2) / (2 dq^2)
-
-    which is exact for V linear in q_k, Condon term included, and is what is
-    actually differentiated below.
-
-    Returns (v0, modes): the Condon term |V_ij(mol0)| in Hartree -- read
-    here rather than left for the caller to recompute -- and a list of
-    (mode index, omega_k in Hartree, |dV/dq_k| in Hartree) over modes with
-    omega_k > 0. An imaginary omega_k is not a displacement direction at a
-    minimum and nothing here means anything along it.
-    """
-    v0 = float(soc_at(mol0)[i, j])
-    out = []
-    for k in range(modes.shape[1]):
-        if omega[k] <= 0:
-            continue
-        v_pm = [float(soc_at(displace_along_mode(mol0, modes, masses, omega,
-                                                  k, sign * dq))[i, j])
-               for sign in (+1, -1)]
-        dv2 = (v_pm[0] ** 2 + v_pm[1] ** 2 - 2.0 * v0 ** 2) / (2.0 * dq ** 2)
-        out.append((k, float(omega[k]), float(np.sqrt(max(0.0, dv2)))))
-    return v0, out
-
-
-def isdf_manifolds(mf, mol, nocc, nroots=5, conv_tol=SOC_MANIFOLD_CONV_TOL,
-                   **kwargs):
+def isdf_manifolds(mf, mol, nocc, numerics=None, **kwargs):
     """((omega, X, Y) singlet, (omega, X, Y) triplet) from ONE GW and ONE W.
 
     The adapter for the ISDF matrix-free route. `solve_bse_isdf` is
@@ -504,14 +499,31 @@ def isdf_manifolds(mf, mol, nocc, nroots=5, conv_tol=SOC_MANIFOLD_CONV_TOL,
     dense route refuses such a case by name; the Davidson does not probe, so a
     triplet root that comes back below its own Tamm-Dancoff value is the signal
     to re-run with the TDA form rather than to trust the number.
+
+    numerics: the Davidson's choices (`BSENumerics`) for both manifolds;
+    None derives the defaults at SOC_MANIFOLD_CONV_TOL, looser than the
+    gradient chains' because a coupling contracts the whole vector.
     """
-    om_s, x_s, y_s, info = solve_bse_isdf(mf, mol, nocc, nroots=nroots,
-                                          conv_tol=conv_tol, **kwargs)
+    if numerics is None:
+        numerics = Numerics().derive(
+            'a spin-orbit coupling contracts the whole vector, which averages '
+            'its residual down', bse={'conv_tol': SOC_MANIFOLD_CONV_TOL})
+    om_s, x_s, y_s, info = solve_bse_isdf(mf, mol, nocc, numerics=numerics,
+                                          **kwargs)
     lr = LinearResponseSolver(info['eps'], spin_mode='restricted')
+    timings = {}
     om_t, x_t, y_t = solve_casida_davidson(
-        lr, nocc, nroots=nroots, polarizability='BSE', W_aux=info['W_aux'],
-        isdf_factors=info['factors'], conv_tol=conv_tol, spin='triplet')
-    return (om_s, x_s, y_s), (om_t, x_t, y_t)
+        lr, nocc, numerics=numerics, polarizability='BSE',
+        W_aux=info['W_aux'], isdf_factors=info['factors'], spin='triplet',
+        timings=timings)
+    stamp = info['numerics_identity']
+    singlet = Stamped((om_s, x_s, y_s), stamp)
+    triplet = Stamped((om_t, x_t, y_t), stamp)
+    # roots left unconverged are kept as solved, warned about and named here,
+    # where `spin_orbit_couplings` copies them
+    singlet.davidson_flags = info['davidson_flags']
+    triplet.davidson_flags = davidson_flags(timings)
+    return singlet, triplet
 
 
 def chain_manifolds(chain, mol=None, mf=None, evaluation=None):
@@ -547,7 +559,11 @@ def chain_manifolds(chain, mol=None, mf=None, evaluation=None):
     x_mo, d, eps_qp, w_aux = pieces[4], pieces[5], pieces[7], pieces[8]
     other = copy.copy(chain)
     other.spin = 'triplet' if chain.spin == 'singlet' else 'singlet'
-    om_b, xb, yb, _ = other._casida(x_mo, d, eps_qp, w_aux)
-    a = (om_a, pieces[10], pieces[11])
-    b = (om_b, xb, yb)
+    # the other spin on the same quasiparticle Hamiltonian, where there is one
+    qp_h = getattr(pieces, 'qp_h', None)
+    om_b, xb, yb, _ = other._casida(x_mo, d, eps_qp, w_aux,
+                                    **({} if qp_h is None else {'qp_h': qp_h}))
+    stamp = numerics_identity(chain)
+    a = Stamped((om_a, pieces[10], pieces[11]), stamp)
+    b = Stamped((om_b, xb, yb), stamp)
     return (a, b) if chain.spin == 'singlet' else (b, a)

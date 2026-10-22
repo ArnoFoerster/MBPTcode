@@ -7,7 +7,7 @@ A root's force is Hellmann-Feynman on its Casida vectors,
 
 (m = n for dOmega_n, m != n for the interstate element), and this is the
 reverse of the block action that solved for them
-(`davidson.isdf_block_action`). Substituting B[P,p,q] = sum_k D[k,P] X[k,p]
+(`block_actions.isdf_block_action`). Substituting B[P,p,q] = sum_k D[k,P] X[k,p]
 X[k,q] into every kernel term closes each pair sum into a grid object,
 
     P_T = X_o T X_v^T  (M x M),        T in {x_m, x_n, y_m, y_n}

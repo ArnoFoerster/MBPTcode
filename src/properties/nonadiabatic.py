@@ -91,6 +91,8 @@ import numpy as np
 from pyscf import gto
 
 from src.Base.constants import NUCLEAR_FD_STEP
+from src.Base.geometry import molecule_at
+from src.Base.pyscf_interface import occupied_count
 from src.SingleReference.LinearResponse.linear_response import check_normalization
 from src.properties.spin_orbit import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from src.properties.surface import driven_chain
@@ -138,6 +140,13 @@ def mo_overlap(mol_a, mo_a, mol_b, mo_b):
     The atomic-orbital cross overlap is exact for any separation; the basis
     functions of the two geometries sit on different centres and `intor_cross`
     integrates them against each other.
+
+    This is PHYSICS, the overlap <Psi_I(R)|Psi_J(R+h)> a derivative coupling
+    is the finite difference of. Whether an orbital or a state at one
+    geometry is THE SAME as one at another is decided by
+    `gradients.conventions.body_overlap` (Loewdin orbitals turned with the
+    molecule), for the frozen conventions and the followed state alike: the
+    spatial overlap loses a core orbital over a 0.2 Bohr step.
     """
     s_ao = gto.mole.intor_cross('int1e_ovlp', mol_a, mol_b)
     return np.asarray(mo_a).T @ s_ao @ np.asarray(mo_b)
@@ -184,6 +193,20 @@ def state_overlap(t, nocc, x_a, y_a, x_b, y_b):
         block = det2 * np.einsum('jbI,jbJ->IJ', moved, v, optimize=True)
         out[1:, 1:] += EXCITED_SPIN_FACTOR * (block if u is xa else -block)
     return out
+
+
+def relative_overlap(s):
+    """`state_overlap` over S_00 = det(T^oo)^2, the overlap of the two
+    reference determinants: the overlap root following reads.
+
+    D multiplies every element and belongs to no excitation: the core
+    electrons ride on the nuclei, so D ~ exp(-h^2 <P^2>/2) falls with any
+    displacement. A rigid 0.1 Bohr translation leaves formaldehyde/6-31G at
+    D = 0.71; one 0.19 Bohr rms step of DMABN/cc-pVDZ at D = 0.019, with the
+    relative overlap 0.996. Over D a state overlaps itself to 1 - O(h^2).
+    """
+    s = np.asarray(s, float)
+    return s / s[0, 0]
 
 
 def align_roots(s, nstates):
@@ -334,10 +357,7 @@ def displaced(mol, coords, atom, axis, step):
     """`mol` with one Cartesian component moved by `step` Bohr."""
     shift = np.zeros((mol.natm, 3))
     shift[atom, axis] = step
-    out = mol.copy()
-    out.set_geom_(coords + shift, unit='Bohr')
-    out.build(False, False)
-    return out
+    return molecule_at(mol, coords + shift)
 
 
 def derivative_couplings(source, mol=None, states=(0, 1), step=NUCLEAR_FD_STEP,
@@ -366,7 +386,7 @@ def derivative_couplings(source, mol=None, states=(0, 1), step=NUCLEAR_FD_STEP,
     states = tuple(sorted({int(n) for n in states}))
     mf0, omega0, x0, y0 = solve(mol)
     mol = mf0.mol if mol is None else mol
-    nocc = int(np.count_nonzero(np.asarray(mf0.mo_occ) > 0))
+    nocc = occupied_count(mf0)
     if states[-1] >= x0.shape[1]:
         raise ValueError(f'root {states[-1]} was asked for but the solve '
                          f'returned {x0.shape[1]} roots')

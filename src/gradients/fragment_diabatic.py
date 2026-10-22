@@ -102,8 +102,6 @@ WHAT IS NOT HERE. A diabat block with several states whose energies come close
 by construction; any environment beyond what the chain itself
 differentiates.
 """
-import contextlib
-import time
 
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, minres
@@ -113,10 +111,10 @@ from src.Base.fragment_localization import (FragmentOrbitals,
                                             fragment_ao_indices)
 from src.Base.utils.krylov import root_driven_solve
 from src.Base.utils.mpi_grid import lockstep
+from src.Base.utils.timing import stage
 from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
-from src.gradients.derivative_coupling import (_sigma_contraction,
-                                               configuration_coupling,
-                                               ov_coupling)
+from src.gradients.derivative_coupling import (configuration_coupling,
+                                               ov_coupling, sigma_contraction)
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.properties.fragment_bse import (BSEOperator, FragmentCanonical,
@@ -131,8 +129,8 @@ from src.properties.vibronic import project_coupling
 
 def _ket_derivative(mol, weight):
     """(natm, 3) sum_{mu nu} W_{mu nu} <mu | d nu / dR> at fixed coefficients:
-    `_sigma_contraction` in the AO basis itself."""
-    return _sigma_contraction(mol, np.eye(mol.nao), weight, False)
+    `sigma_contraction` in the AO basis itself."""
+    return sigma_contraction(mol, np.eye(mol.nao), weight, False)
 
 
 def _overlap_derivative(mol, w_s):
@@ -347,16 +345,11 @@ class DiabaticGradient:
                 progress=progress)
         self._cache = {}
 
-    @contextlib.contextmanager
     def _timed(self, key):
+        """Report `key` to `progress` and time the block into `timings`."""
         if getattr(self, 'progress', None) is not None:
             self.progress(key)
-        t0 = time.perf_counter()
-        try:
-            yield
-        finally:
-            self.timings[key] = (self.timings.get(key, 0.0)
-                                 + time.perf_counter() - t0)
+        return stage(self.timings, key)
 
     # -- local-basis K action
     def _a(self, x):

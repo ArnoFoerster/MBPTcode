@@ -11,8 +11,8 @@ Four independent arbiters, in increasing strength:
   3. ADC(2)/ADC(2)-x/ADC(3) == pyscf's EE-ADC.
   4. ADC(3) excitation energies are exact through lambda^3 against a
      determinant-space expansion of H(lambda) = F + lambda(H - F). This is
-     the gate that caught the Z^(A) sign (see z_intermediates): pyscf
-     agreement alone would not have, because pyscf's precomputed M_ carries
+     the gate on the Z^(A) sign (see z_intermediates): pyscf
+     agreement alone would not see it, because pyscf's precomputed M_ carries
      only part of the ph/ph block.
 """
 import itertools

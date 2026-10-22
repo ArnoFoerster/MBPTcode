@@ -7,7 +7,8 @@ adjoint does (G_bar = -W Z^T, `separable_ri.fit_rows_adjoints`). On
 water/cc-pVDZ RHF, the BSE@GW excitation force of a sliced Davidson chain:
 the four Casida-level seeds at its reverse call, every element moved one ulp
 up or down by `ULP_DRAWS` fixed draws, are folded through the chain's own
-fold on its own forward pieces (which, unmoved, give the force bitwise), and
+fold on its own forward pieces (which, unmoved, give the force to a few
+ulp), and
 the force moves at most `FIT_ADJOINT_ULP_RESPONSE_MAX`, on the whole fit and
 on the row fit alike (6.5e-13 to 1.0e-12 and 2.7e-13 to 5.2e-13 Ha/Bohr).
 pyscf's OpenMP is held to one thread, so every number here repeats bit for
@@ -15,23 +16,23 @@ bit. The form G_bar = -G^-1 (A^T B_bar) G^-1 by two more solves
 (`two_solve_fit_adjoint`) moves the force about 1e4 times further and fails
 the gate.
 """
-import os
 import sys
-import warnings
 
 import numpy as np
 import pytest
 import scipy.linalg
-from pyscf import gto, lib
+from pyscf import gto
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+from src.Base.separable_ri import fit_settings
 from src.Base.constants import (FIT_ADJOINT_ULP_RESPONSE_MAX,
                                 FIT_CHOLESKY_BLOCK)
-from src.Base.separable_ri import DEFAULT_REGULARIZATION
+from src.Base.numerics import numerics_of
 from src.gradients import isdf_derivatives
 from src.gradients.excited_state import ExcitedStateChain
 from tests.test_chain_sliced_factors import BASIS, H2O, chain_scf
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import assert_same
+from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 #: Fixed draws of the one-ulp seed changes.
 ULP_DRAWS = (3, 5, 7)
@@ -39,23 +40,10 @@ ULP_DRAWS = (3, 5, 7)
 ROW_FIT_BLOCK = 64
 
 
-@pytest.fixture
-def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread, so its K partials are summed in one
-    order and a fold repeats its bits."""
-    threads = lib.num_threads()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(1)
-    yield
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(threads)
-
-
-def two_solve_fit_adjoint(D, F, M_bar, regularization=DEFAULT_REGULARIZATION):
+def two_solve_fit_adjoint(D, F, M_bar, numerics=None):
     """`fit_adjoint` with G_bar = -G^-1 (A^T B_bar) G^-1 by two more Cholesky
-    solves on (nk, nk) arrays: the same quantity in a less stable form."""
+    solves on (nk, nk) arrays: the same quantity in the two-solve form."""
+    regularization, = fit_settings(numerics, 'regularization')
     s = np.sqrt(np.einsum('kr,kr->k', D, D))
     s = np.where(s == 0.0, 1.0, s)
     d = 1.0 / s
@@ -86,8 +74,9 @@ def ulp_responses(**fit):
     """(the force, [max |force moved| per draw]) of the water chain on the
     fit `fit` names, its seeds moved one ulp per element."""
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
-    chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol),
-                              solver='davidson', sliced=True, **fit)
+    chain = ExcitedStateChain(
+        mol, chain_scf, mf=chain_scf(mol),
+        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': True, **fit})))
     rec = {}
     seeds_of = chain._casida_seeds
 
@@ -104,7 +93,8 @@ def ulp_responses(**fit):
         return np.asarray(chain._fold_to_nuclei(
             rec['pieces'], *[np.array(a, copy=True) for a in seeds])[0])
 
-    assert np.array_equal(fold(rec['seeds']), g)
+    assert_same(fold(rec['seeds']), g, quantity='gradient',
+                label='the unmoved seeds refolded')
     eps = np.finfo(float).eps
     moved = []
     for draw in ULP_DRAWS:

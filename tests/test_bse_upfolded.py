@@ -168,3 +168,51 @@ def test_driver_end_to_end_with_gw_energies():
     wt, _ = solve_bse_upfolded(mf, mol, spin='triplet', nroots=3, e_qp=e_qp)
     assert wt[0] < ws[0]                                # triplet below singlet
     assert 5.0 < ws[0] * HARTREE_TO_EV < 12.0
+
+
+def test_an_unconverged_davidson_says_so():
+    """max_cycle exhausted, or tol out of reach until the corrections are
+    spanned: the Ritz values are returned with a warning and the flag
+    'upfolded_bse_not_converged' (refuse inputs,
+    warn numerics), refused on request."""
+    _, _, eps, e_qp, gb, no, nv = _case()
+    diag = B.diagonal(eps, e_qp, gb, no, nv, 'singlet')
+    aop = lambda v: B.sigma(v, eps, e_qp, gb, no, nv, 'singlet')
+    flags = []
+    with pytest.warns(RuntimeWarning, match='1 cycles'):
+        B.davidson_nonsymmetric(aop, diag, nroots=3, max_cycle=1, flags=flags)
+    assert [f['flag'] for f in flags] == ['upfolded_bse_not_converged']
+    with pytest.warns(RuntimeWarning, match='already spanned'):
+        B.davidson_nonsymmetric(aop, diag, nroots=3, tol=0.0, max_cycle=500)
+    with pytest.raises(B.UpfoldedBSERefusal, match='not converged'):
+        B.davidson_nonsymmetric(aop, diag, nroots=3, max_cycle=1,
+                                refuse_unconverged=True)
+
+
+def test_a_complex_ritz_pair_is_nan_and_flagged():
+    """The lowest pair of a planted operator is 1 +- 0.5i: not a root, so NaN
+    (value and vector), warned and flagged."""
+    H = np.diag([1.0, 1.0, 3.0, 4.0, 5.0, 6.0])
+    H[0, 1], H[1, 0] = 0.5, -0.5
+    flags = []
+    with pytest.warns(RuntimeWarning, match='complex'):
+        w, X = B.davidson_nonsymmetric(lambda v: H @ v, np.diag(H).copy(),
+                                       nroots=2, flags=flags)
+    assert np.isnan(w).all() and np.isnan(X).all()
+    # the pair's residual stays: the loop also ends unconverged, flagged
+    assert [f['flag'] for f in flags] == ['upfolded_bse_complex_roots',
+                                          'upfolded_bse_not_converged']
+
+
+def test_df_picks_the_integrals_and_size_only_the_solver(monkeypatch):
+    """df=True puts the fitted integrals in every block on both paths, so the
+    dense and the matrix-free solve return the same roots."""
+    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+                verbose=0)
+    mf = scf.RHF(mol).density_fit().run()
+    w_dense, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
+                                      df=True, matrix_free=False)
+    monkeypatch.setattr(B, 'UPFOLDED_BSE_DENSE_LIMIT', 0)
+    w_free, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
+                                     df=True)
+    assert np.abs(np.sort(w_free) - w_dense).max() < 1e-7

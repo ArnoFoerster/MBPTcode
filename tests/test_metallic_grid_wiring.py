@@ -23,7 +23,7 @@ Checks:
      repairs the silent one, mo_occ + beta the loud one.
   3. The T = 0 path is untouched: on a gapped system thermal_e_min returns the
      gap itself for any beta whose pi/beta is below it, so grids, and every
-     number downstream, are bit-identical.
+     number downstream, are the same to a few ulp.
   4. The Pade order cap: truncation happens after the greedy ordering, is a
      no-op when the cap exceeds the sample count, and refuses a cap too small
      to fit.
@@ -52,6 +52,7 @@ from src.SingleReference.Periodic.pbc_rpa_damping import (nyquist_params,
                                                           make_coulG_damped)
 from src.SingleReference.Periodic.pbc_damped_integrals import build_dfintegrals_coulG
 from src.SingleReference.Periodic.pbc_occupations import transition_window
+from tests.pins import RECORDING_BLAS, matches
 
 
 def check(ok, label, detail=''):
@@ -226,11 +227,12 @@ def check_gapped_is_untouched():
         if np.pi / beta >= gap:
             continue
         got = build_freq_grid(list(e), nocc, 16, beta=beta)
-        ok &= check(np.array_equal(got[0], ref[0]) and np.array_equal(got[1], ref[1]),
-                    f'beta={beta:g}: the grid is bit-identical to the T=0 one')
+        ok &= check(matches(got[0], ref[0], RECORDING_BLAS, quantity='root')
+                    and matches(got[1], ref[1], RECORDING_BLAS, quantity='root'),
+                    f'beta={beta:g}: the grid is the T=0 one to a few ulp')
     # And mo_occ is a no-op when the occupations are integers.
     got = build_freq_grid(list(e), nocc, 16, mo_occ=f)
-    ok &= check(np.array_equal(got[0], ref[0]),
+    ok &= check(matches(got[0], ref[0], RECORDING_BLAS, quantity='root'),
                 'passing integer mo_occ is a no-op')
 
     # A small beta (high temperature) SHOULD move it -- otherwise the knob is
@@ -320,7 +322,7 @@ def check_pade_cap_is_sized_from_sigma_not_from_w():
                 f'{n_sigma - n_w} lost')
 
     # The wiring itself: capture the wmax solve_qp_energy_imaginary_axis passes.
-    # Without the fix this is e_max and the test fails on the value.
+    # A route that ignores the gap passes e_max here and fails on the value.
     from pyscf import gto, scf
     import src.SingleReference.GW.imaginary_axis as ia
 

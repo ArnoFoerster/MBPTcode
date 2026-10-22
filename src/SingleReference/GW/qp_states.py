@@ -52,13 +52,18 @@ nothing to the force beyond moving the diagonal -- which is what makes it safe
 for the deep states, whose leverage on a frontier quasiparticle is 0.05 meV per
 20 eV for the core and 3.6-10 meV per eV for the inner valence.
 
-A ROOT THAT IS NO QUASIPARTICLE LEAVES THE SET. A declaration names the
+Beyond the window the correction is not flat: it rises through the virtual
+continuum and falls through the inner valence and core. An `OutsideCurve`
+freezes Delta(eps) per side instead of a number, read at the orbital's current
+eigenvalue, so the force gains dDelta/deps on that eigenvalue's seed.
+
+A ROOT OF POLE STRENGTH OUTSIDE (0, 1] IS KEPT. A declaration names the
 orbitals before anything is solved, so it cannot know that the root the solve
 converges on has a pole strength outside (0, 1] (`is_quasiparticle_root`).
-The surface that solves the set rejects such a root at the reference geometry
-and moves its orbital to the scissor, with the reason recorded; the set is
-then frozen like everything else, and a rejected root at a displaced geometry
-is refused rather than demoted.
+The surface that solves the set keeps such a root as solved, warns, and
+records it at the reference geometry (`qp_z_outside`); it neither refuses it
+nor moves the orbital to the scissor (rare and often
+harmless).
 """
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -66,12 +71,15 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from pyscf.data.elements import chemcore
+from scipy.interpolate import CubicSpline
 
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.constants import (HARTREE_TO_EV, OUTSIDE_CURVE_BIN_EV,
+                                OUTSIDE_CURVE_OVERSHOOT_EV,
+                                QP_WINDOW_Z_MIN)
 from src.Base.declaration import QPStates
-from src.SingleReference.GW.contour_deformation import residue_set
 from src.SingleReference.GW.real_screening import ov_energies
-from src.SingleReference.GW.sum_over_poles import compressible
+from src.SingleReference.GW.sum_over_poles import compressible, pole_condition
+from src.Solvers.qp_equation import quasiparticle_weight
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,89 @@ class ResolvedQPStates:
     label: str = ''
 
 
+class CurveOvershoots(ValueError):
+    """An outside curve's spline leaves the range of its neighbouring knots."""
+
+
+@dataclass(frozen=True)
+class OutsideCurve:
+    """The frozen correction Delta(eps) one side of the spectrum beyond the
+    explicit window carries: eps^QP_p = eps_p + Delta(eps_p).
+
+    A natural cubic spline (C2: the second derivative is continuous at every
+    knot and zero at the outermost ones) through the window edge's own
+    correction and the median analytic-continuation correction of each energy
+    bin of probes, continued linearly with the end slope beyond the knots,
+    which keeps it C2 there too. C2 matters because a knot sits on a member's
+    eigenvalue at the geometry the curve is built at: a C1 interpolant puts a
+    curvature jump into the surface exactly there. The knots are frozen; the
+    orbital's CURRENT eigenvalue is what is read, so the force carries
+    dDelta/deps * deps_p/dR and no orbital identity is tracked.
+
+    side:    'occupied' (below the window) or 'virtual' (above it).
+    members: the orbitals that carry it, frozen by index.
+    anchor:  the explicit edge orbital whose correction is the first knot.
+    knots:   (eps, Delta) pairs in Hartree, eps ascending.
+    probes:  {orbital: {'eps', 'ac', 'z', 'used' or 'dropped'}}, Hartree.
+    """
+    side: str
+    members: Tuple[int, ...]
+    anchor: int
+    knots: Tuple[Tuple[float, float], ...]
+    probes: Dict[int, dict] = field(default_factory=dict, hash=False)
+
+    def _spline(self):
+        x = np.array([k[0] for k in self.knots])
+        y = np.array([k[1] for k in self.knots])
+        return x, y, CubicSpline(x, y, bc_type='natural', extrapolate=False)
+
+    def __call__(self, e):
+        """(Delta(e), dDelta/de) at the eigenvalues e, Hartree."""
+        e = np.asarray(e, float)
+        if len(self.knots) == 1:
+            return np.full_like(e, self.knots[0][1]), np.zeros_like(e)
+        x, y, fit = self._spline()
+        slope = fit.derivative()
+        lo, hi = e < x[0], e > x[-1]
+        inner = np.clip(e, x[0], x[-1])
+        delta, d = fit(inner), slope(inner)
+        # beyond the outermost knots: the tangent there, zero curvature like
+        # the natural end itself
+        delta = np.where(lo, y[0] + slope(x[0]) * (e - x[0]), delta)
+        delta = np.where(hi, y[-1] + slope(x[-1]) * (e - x[-1]), delta)
+        d = np.where(lo, slope(x[0]), np.where(hi, slope(x[-1]), d))
+        return delta, d
+
+    def overshoot(self, e):
+        """Hartree by which Delta at the eigenvalues `e` leaves [min, max] of
+        the two knots bracketing each: the spline's excursion where members
+        read it; 0 beyond the knots, where the curve is the end tangent."""
+        if len(self.knots) < 2:
+            return 0.0
+        x, y, fit = self._spline()
+        e = np.asarray(e, float)
+        inside = e[(e >= x[0]) & (e <= x[-1])]
+        if not inside.size:
+            return 0.0
+        i = np.clip(np.searchsorted(x, inside, side='right') - 1, 0,
+                    len(x) - 2)
+        lo, hi = np.minimum(y[i], y[i + 1]), np.maximum(y[i], y[i + 1])
+        delta = fit(inside)
+        return float(np.max(np.maximum(delta - hi, lo - delta).clip(0.0)))
+
+    def as_record(self):
+        """The curve in eV, for a record."""
+        return {'side': self.side, 'n_members': len(self.members),
+                'members': [int(p) for p in self.members],
+                'anchor': int(self.anchor),
+                'knots_eV': [[float(e) * HARTREE_TO_EV, float(v) * HARTREE_TO_EV]
+                             for e, v in self.knots],
+                'probes': {int(p): {k: (v * HARTREE_TO_EV
+                                        if k in ('eps', 'ac') and v is not None
+                                        else v) for k, v in rec.items()}
+                           for p, rec in sorted(self.probes.items())}}
+
+
 def admitted_by_pole_condition(eps, nocc, p, limit):
     """(ok, reach) of Eq. (27) for orbital p against a caller-supplied Om_1.
 
@@ -103,10 +194,7 @@ def admitted_by_pole_condition(eps, nocc, p, limit):
 
     reach: the worst swept pole in units of `limit`. ok is reach < 1.
     """
-    omega = float(eps[int(p)])
-    swept = residue_set(eps, nocc, omega)
-    reach = max((abs(eps[q] - omega) for q, _ in swept), default=0.0) / float(limit)
-    return bool(reach < 1.0), float(reach)
+    return pole_condition(float(eps[int(p)]), eps, nocc, float(limit))
 
 
 def is_quasiparticle_root(z):
@@ -122,8 +210,7 @@ def is_quasiparticle_root(z):
 
     No tolerance: the bounds are those of the definition.
     """
-    z = float(z)
-    return bool(0.0 < z <= 1.0)
+    return quasiparticle_weight(z, 0.0)
 
 
 def particle_hole_gap(eps, nocc):
@@ -297,11 +384,14 @@ def calibrate_scissor(eps, nocc, roots, excluded):
     if not probes:
         raise ValueError('a scissor needs at least one explicitly solved root')
     deltas = {q: float(roots[q]) - eps[q] for q in probes}
-    out = {}
-    for p in excluded:
-        near = min(probes, key=lambda q: abs(eps[q] - eps[int(p)]))
-        out[int(p)] = deltas[near]
-    return out
+    return {int(p): deltas[nearest_probe(eps, probes, p)] for p in excluded}
+
+
+def nearest_probe(eps, probes, p):
+    """The probe orbital nearest p in orbital energy, the lowest index on a
+    tie: the one whose shift a scissor lends p."""
+    return min(sorted(int(q) for q in probes),
+               key=lambda q: abs(eps[q] - eps[int(p)]))
 
 
 def calibrate_scissor_tiers(eps, roots, tier_of):
@@ -321,3 +411,99 @@ def calibrate_scissor_tiers(eps, roots, tier_of):
         out[int(p)] = float(np.mean([float(roots[int(q)]) - eps[int(q)]
                                      for q in block]))
     return out
+
+
+def curve_sides(eps, nocc, explicit, outside):
+    """{side: (anchor, members)}: the outside orbitals beyond the explicit
+    window on each side, and the explicit edge orbital nearest them.
+
+    Occupied members lie below the lowest explicit occupied orbital, virtual
+    ones above the highest explicit virtual; an outside orbital between
+    explicit ones is not on either curve.
+    """
+    eps = np.asarray(eps, float)
+    explicit = [int(p) for p in explicit]
+    out = {}
+    occ = [p for p in explicit if p < nocc]
+    vir = [p for p in explicit if p >= nocc]
+    if occ:
+        edge = min(occ, key=lambda p: eps[p])
+        members = [int(p) for p in outside if p < nocc and eps[p] < eps[edge]]
+        if members:
+            out['occupied'] = (edge, tuple(sorted(members)))
+    if vir:
+        edge = max(vir, key=lambda p: eps[p])
+        members = [int(p) for p in outside
+                   if p >= nocc and eps[p] > eps[edge]]
+        if members:
+            out['virtual'] = (edge, tuple(sorted(members)))
+    return out
+
+
+def continuation_failed(p, failures):
+    """The reason a state whose continuation failed is dropped, naming the
+    exception where `failures` ({p: 'Class: message'}) holds one."""
+    why = None if failures is None else failures.get(int(p))
+    return 'continuation failed' + ('' if why is None else f' ({why})')
+
+
+def fit_outside_curve(eps, side, anchor, anchor_shift, members, ac_shift, z,
+                      bin_ev=OUTSIDE_CURVE_BIN_EV, failures=None):
+    """The frozen `OutsideCurve` of one side from its probes' corrections.
+
+    ac_shift/z: {probe: AC correction (without its orbital's own Eq. (18)
+    term), pole strength}, Hartree. A probe whose continuation failed or whose
+    Z lies outside (0, 1] is dropped (`is_quasiparticle_root`). Bins of width
+    bin_ev start at the anchor and step outward; each bin's knot is its mean
+    eps and median correction, the median so that one odd orbital in a bin
+    does not move the curve. The first bin is the anchor's: probes within it
+    are left to the explicit root, which keeps the window edge continuous.
+    failures: {probe: 'Class: message'} of the failed continuations.
+    """
+    eps = np.asarray(eps, float)
+    e0 = float(eps[int(anchor)])
+    width = float(bin_ev) / HARTREE_TO_EV
+    probes, used = {}, []
+    for p in sorted(ac_shift):
+        a, zp = ac_shift[p], None if z is None else z.get(int(p))
+        rec = {'eps': float(eps[p]), 'ac': None if a is None else float(a),
+               'z': None if zp is None else float(zp)}
+        if a is None or not np.isfinite(a):
+            rec['dropped'] = continuation_failed(p, failures)
+        elif zp is None or not np.isfinite(zp) or not is_quasiparticle_root(zp):
+            rec['dropped'] = f'Z_AC {zp} outside (0, 1]'
+        elif abs(float(eps[p]) - e0) < width:
+            rec['dropped'] = 'within the window edge bin'
+        else:
+            rec['used'] = True
+            used.append(int(p))
+        probes[int(p)] = rec
+    used.sort(key=lambda p: abs(float(eps[p]) - e0))
+    knots = [(e0, float(anchor_shift))]
+    start, members_bin = None, []
+    for p in used + [None]:
+        dist = None if p is None else abs(float(eps[p]) - e0)
+        if p is None or (start is not None and dist - start >= width):
+            if members_bin:
+                knots.append((float(np.mean([eps[q] for q in members_bin])),
+                              float(np.median([ac_shift[q]
+                                               for q in members_bin]))))
+            start, members_bin = dist, []
+        if p is None:
+            break
+        if start is None:
+            start = dist
+        members_bin.append(p)
+    knots.sort()
+    curve = OutsideCurve(side=side, members=tuple(int(p) for p in members),
+                         anchor=int(anchor), knots=tuple(knots), probes=probes)
+    # a C2 spline gives up the no-overshoot of a shape-preserving cubic
+    over = curve.overshoot(eps[np.asarray(members, int)]) * HARTREE_TO_EV
+    if over > OUTSIDE_CURVE_OVERSHOOT_EV:
+        raise CurveOvershoots(
+            f'the {side} outside curve overshoots its knot values by '
+            f'{over:.3f} eV (bar OUTSIDE_CURVE_OVERSHOOT_EV = '
+            f'{OUTSIDE_CURVE_OVERSHOOT_EV} eV): knots (eV) '
+            f'{[[e * HARTREE_TO_EV, v * HARTREE_TO_EV] for e, v in knots]}. '
+            f"Use outside_scissor='tiers' for this system.")
+    return curve

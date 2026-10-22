@@ -32,7 +32,6 @@ import functools
 import itertools
 import os
 import threading
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -46,7 +45,8 @@ _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not
 
 def _stream_gb(text):
     """The slab budget in GB from MBPT_STREAM_GB: unset is 16; a finite number above
-    zero is itself; anything else is 16 with a warning naming the value."""
+    zero is itself; anything else is refused (ValueError naming the value), at
+    import on every rank alike."""
     if text is None:
         return 16.0
     try:
@@ -55,9 +55,8 @@ def _stream_gb(text):
         gb = np.nan
     if np.isfinite(gb) and gb > 0.0:
         return gb
-    warnings.warn(f'MBPT_STREAM_GB={text!r} is no finite budget above zero; '
-                  'streaming at 16 GB', RuntimeWarning)
-    return 16.0
+    raise ValueError(f'MBPT_STREAM_GB={text!r} is no finite budget above zero; '
+                     'unset it for 16 GB or give a number of GB')
 
 
 # GB a streamed kernel's slabs in flight may hold together; the job's environment

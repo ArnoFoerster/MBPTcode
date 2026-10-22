@@ -10,6 +10,11 @@ from pyscf import gto, scf, df
 from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.Base.numerics import numerics_of
+
+#: The residual the solves run to: benzene's matrix-free Casida breaks down
+#: in round-off at the 1e-8 Ha a production solve converges to.
+CONV_TOL = 1e-5
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 
 BENZENE_GEOM = """
@@ -51,13 +56,13 @@ if __name__ == '__main__':
     t_dense = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    omega_dav, X_dav, Y_dav = solve_casida_davidson(lr, nocc, nroots=nroots, polarizability='BSE', W_aux=w_aux)
+    omega_dav, X_dav, Y_dav = solve_casida_davidson(lr, nocc, numerics=numerics_of({'nroots': nroots, 'bse_conv_tol': CONV_TOL}), polarizability='BSE', W_aux=w_aux)
     omega_dav = np.sort(omega_dav)
     t_dav = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     omega_dav_sym, X_dav_sym, Y_dav_sym = solve_casida_davidson(
-        lr, nocc, nroots=nroots, polarizability='BSE', W_aux=w_aux, orbsym=mf.orbsym)
+        lr, nocc, numerics=numerics_of({'nroots': nroots, 'bse_conv_tol': CONV_TOL}), polarizability='BSE', W_aux=w_aux, orbsym=mf.orbsym)
     omega_dav_sym = np.sort(omega_dav_sym)
     t_dav_sym = time.perf_counter() - t0
 

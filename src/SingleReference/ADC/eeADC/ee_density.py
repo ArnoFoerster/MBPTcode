@@ -49,8 +49,7 @@ Normalization: the FULL eigenvector is a unit vector, sum u1^2 + sum u2^2 = 1
 alone. The terms sum to a traceless matrix, so the difference density holds
 no charge. The density is unrelaxed: no orbital response.
 
-Independent check (tests/test_ee_adc_state_specific.py): pyscf's ISR-ADC(2)
-excited-state density (Banerjee and Sokolov, radc_ee / uadc_ee make_rdm1)
+pyscf's ISR-ADC(2) excited-state density (Banerjee and Sokolov, radc_ee / uadc_ee make_rdm1)
 is the TOTAL density rho_HF + T1 rho_0^(2) + Delta; this module's Delta
 equals it minus rho_HF minus T1 rho_0^(2), rho_0^(2) the MP2 ground-state
 correlation density, for singlets and (through uadc_ee) triplets. The two
@@ -76,8 +75,6 @@ TERMS = {
     'ov': ('ov_sd', 'ov_tsd', 'ov_p0v', 'ov_p0o', 'ov_tdv', 'ov_tdo'),
 }
 ALL_TERMS = TERMS['oo'] + TERMS['vv'] + TERMS['ov']
-# the terms of an ADC(1) (CIS) state: its singles alone, unit weight
-ADC1_TERMS = ('oo_ss0', 'vv_ss0')
 
 
 def _sym(A):
@@ -198,12 +195,3 @@ def spin_orbital_difference_density(eps, g, nocc, v, level='adc2',
         out = difference_density_terms(be, u1, u2, amps['t2_1'],
                                        ee_utils.mp_density2(amps))
     return out if terms else assemble(out, nocc, nv)
-
-
-def embed_active(D_act, nmo, frozen):
-    """A density of the active orbitals (frozen core dropped) in the full MO
-    basis: the frozen rows and columns are zero, the frozen core being
-    uncorrelated in the ADC treatment."""
-    D = np.zeros((nmo, nmo))
-    D[frozen:, frozen:] = D_act
-    return D

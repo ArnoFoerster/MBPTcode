@@ -42,8 +42,8 @@ them, and dispatches between the two routes on `beta`.
 """
 import numpy as np
 
-from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
-                                           minimax_points_for_ranges,
+from src.Base.constants import DEFAULT_TAU_TARGET
+from src.Base.utils.time_frequency import (minimax_points_for_ranges,
                                            self_energy_fit_ranges_from_window)
 from src.SingleReference.Periodic.pbc_isdf_rpa import (chemical_potential_occ,
                                                        require_integer_occupation)
@@ -53,7 +53,7 @@ from src.SingleReference.Periodic.pbc_occupations import fermi_level_from_mf
 def self_energy_fit_ranges_k(mo_energy, mo_occ, mu=None):
     """((w_lo, w_hi), (sig_lo, sig_hi)) over the whole k-mesh.
 
-    Periodic form of `GW.imaginary_time.self_energy_fit_ranges`, and the
+    Periodic form of `time_frequency.sigma_fit_ranges`, and the
     reason the range trap needs its own code rather than a forwarded
     sentinel: the self-energy range is the SUM of the Green's function and
     screening ranges, so it is wider than either, and it must be taken over all

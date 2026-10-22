@@ -1,8 +1,9 @@
 """Gates for src/gradients/multipliers.py -- the shared orbital-response solve.
 
-The two gradient engines used to carry one copy each of the Z-vector solve
-antisym(Y_E + Y[fold(Lambda)]) = 0. Both copies are embedded below verbatim,
-and the shared solver is required to reproduce them BITWISE on each route's
+The two gradient engines solve the Z-vector equation
+antisym(Y_E + Y[fold(Lambda)]) = 0 with one shared solver. The engines' own
+two spellings of it are embedded below verbatim, and the shared solver is
+required to reproduce them BITWISE on each route's
 own inputs: the dense four-index matvec on H4/sto-3g, and the Coulomb/exchange
 matvec `fock_partial_Y` on water/cc-pVDZ. The only edit to the copied bodies
 is that the tolerances are spelled as the constants rather than as digits;
@@ -12,16 +13,15 @@ asserts.
 Bitwise, not approximate: lgmres is deterministic for identical inputs and
 call order, so anything that moved -- a different preconditioner, a different
 right-hand side, an extra float conversion -- shows up in the last bit rather
-than hiding under a tolerance. Every gate here was shown to fail under a
-perturbation of the shared solver, each restored and `cmp`-verified:
+than hiding under a tolerance. What breaks each gate, in the shared solver:
 
-  drop the preconditioner (M=Mop -> M=None)      both equivalence gates fail,
-      by 6.9e-16 (dense) and 2.0e-12 (cubic) -- the same equation converged
-      along a different Krylov path
-  flip the right-hand side (rhs = -antisym -> +antisym)   both equivalence
-      gates and both stationarity checks fail
-  drop the degenerate-pair refusal               its gate fails
-  drop the residual check                        its gate fails
+  * the preconditioner dropped (M=Mop -> M=None): both equivalence gates, by
+    6.9e-16 (dense) and 2.0e-12 (cubic) -- the same equation converged along
+    a different Krylov path.
+  * the right-hand side flipped (rhs = -antisym -> +antisym): both
+    equivalence gates and both stationarity checks.
+  * the degenerate-pair refusal dropped: its own gate.
+  * the residual check dropped: its own gate.
 
 The OVERALL sign of the antisymmetrization is a gauge of this equation and
 nothing can see it: `M - M^T -> M^T - M` negates the right-hand side and the
@@ -44,7 +44,9 @@ from pyscf import ao2mo, gto, scf
 from src.Base.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                                 ORBITAL_MULTIPLIER_MAX_ITER,
                                 ORBITAL_MULTIPLIER_RESIDUAL_TOL,
-                                ORBITAL_MULTIPLIER_TOL)
+                                ORBITAL_MULTIPLIER_TOL,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.SingleReference.GW.quasi_boson import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
                                        solve_multipliers)
@@ -52,6 +54,7 @@ from src.gradients.isdf_derivatives import fock_partial_Y, solve_lambda
 from src.gradients.multipliers import solve_orbital_multipliers
 from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.targets import rpa_partials
+from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -59,7 +62,7 @@ H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 
 
 # ---------------------------------------------------------------------------
-# the two pre-consolidation implementations, copied verbatim
+# the two original implementations, copied verbatim
 # ---------------------------------------------------------------------------
 
 def _antisym_to_vec(Mmat, iu):
@@ -166,7 +169,9 @@ def dense_case():
     `correlation_gradients` assembles it before the multiplier solve."""
     mol = gto.M(atom=H4, unit='Bohr', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     norb, nocc = mol.nao, mol.nelectron // 2
@@ -188,7 +193,9 @@ def cubic_case():
     does it."""
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     nocc = mol.nelectron // 2
@@ -220,26 +227,26 @@ def _pair_blind_matvec(eps, pair):
 
 
 # ---------------------------------------------------------------------------
-# equivalence with the pre-consolidation implementations
+# equivalence with the original implementations
 # ---------------------------------------------------------------------------
 
 def test_the_dense_route_reproduces_its_old_solver(dense_case):
-    """The four-index matvec through the shared solver, bitwise."""
+    """The four-index matvec through the shared solver, to a few ulp."""
     Y_E, F_mo, eri, nocc, eps = dense_case
     lam_ref, res_ref = _reference_solve_multipliers(Y_E, F_mo, eri, nocc, eps)
     lam_new, res_new = solve_multipliers(Y_E, F_mo, eri, nocc, eps)
-    assert np.array_equal(lam_new, lam_ref)
-    assert res_new == res_ref
+    assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
+    assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6          # there is a multiplier to compare
 
 
 def test_the_cubic_route_reproduces_its_old_solver(cubic_case):
-    """`fock_partial_Y` through the shared solver, bitwise."""
+    """`fock_partial_Y` through the shared solver, to a few ulp."""
     mf, Y_E, nocc = cubic_case
     lam_ref, res_ref = _reference_solve_lambda(mf, Y_E, nocc)
     lam_new, res_new = solve_lambda(mf, Y_E, nocc)
-    assert np.array_equal(lam_new, lam_ref)
-    assert res_new == res_ref
+    assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
+    assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6
 
 

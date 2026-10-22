@@ -8,7 +8,7 @@ not by the mean field's serial `ISDFJK`, which would build the (M, M) Gram
 matrix, its M^3 Cholesky and X, M and L whole on every rank.
 
 Gated here:
-  * `lgmres_root_driven` serially is scipy's `lgmres` call, bitwise; under
+  * `lgmres_root_driven` serially is scipy's `lgmres` call, to a few ulp; under
     2 and 3 simulated ranks, with a matvec that is a collective and a rank
     whose own arithmetic differs, every rank applies the operator the same
     number of times and ends on rank 0's solution, which is the serial one;
@@ -42,6 +42,7 @@ from src.Base.isdf_jk import isdf_jk
 from src.Base.separable_ri import resolve_isdf_grid
 from src.Base.utils.krylov import lgmres_root_driven
 from src.Base.utils.mpi_grid import distributed, reduce_sum, run_simulated
+from tests.pins import assert_same
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
 BASIS = 'cc-pvdz'
@@ -72,7 +73,7 @@ def test_root_driven_lgmres_is_scipys_serially():
         x, info = lgmres_root_driven(lambda v: a @ v, rhs, precond, ATOL,
                                      MAX_ITER)
     assert info == info_ref == 0
-    assert np.array_equal(x, x_ref)
+    assert_same(x, x_ref, unit='1', quantity='root', label='lgmres solution')
 
 
 @pytest.mark.parametrize('size', (2, 3))

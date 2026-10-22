@@ -44,6 +44,7 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from src.SingleReference.LinearResponse.pp_rpa import (
     build_pprpa_matrices_restricted, pair_indices, singlet_pair_indices)
 from src.SingleReference.LinearResponse.riccati import channel_corrections_from_amplitudes
+from src.Solvers.qp_equation import QPRootNotConverged, solve_qp_equation_scan
 
 LANCZOS_BLOCK = 20          # steps added per extension of a resolvent Lanczos
 LANCZOS_MAX_STEPS = 2000
@@ -408,21 +409,31 @@ class FlexSelfEnergy:
 
     def solve_qp(self, p, which='flex', static=0.0, eh_triplet='rpa',
                  tol=QP_NEWTON_TOL, max_iter=QP_NEWTON_MAX_ITER, w0=None):
-        """Diagonal QP w = eps_p + static + Sigma_pp(w) by Newton, from w0
-        (default eps_p + static); which='flex' or 'faddeev'. Returns
-        {'e', 'Z', 'converged', 'niter'}."""
+        """Diagonal QP w = eps_p + static + Sigma_pp(w) by the one root finder
+        of `Solvers.qp_equation`: bracketed about eps_p + static, refined on
+        the closed-form slope, the largest Z kept; with w0, the root that
+        follows it. which='flex' or 'faddeev'. Returns {'e', 'Z',
+        'converged', 'niter'}, niter the self-energy evaluations."""
         if which == 'flex':
             sig = lambda q, x: self.sigma_flex(q, x, eh_triplet)
         else:
             sig = lambda q, x: self.sigma_operator(('faddeev', eh_triplet), q, x)
-        w = self.eps[p] + static if w0 is None else w0
-        for it in range(1, max_iter + 1):
-            s, ds = sig(p, w)
-            f = w - self.eps[p] - static - s
-            step = f / (1.0 - ds)
-            w -= step
-            if abs(step) < tol:
-                s, ds = sig(p, w)
-                return {'e': w, 'Z': 1.0 / (1.0 - ds), 'converged': True,
-                        'niter': it}
-        return {'e': w, 'Z': 1.0 / (1.0 - ds), 'converged': False, 'niter': max_iter}
+        calls = [0]
+
+        def residual(w):
+            calls[0] += 1
+            return w - self.eps[p] - static - sig(p, w)[0]
+
+        def fprime(w):
+            return 1.0 - sig(p, w)[1]
+
+        try:
+            w, z = solve_qp_equation_scan(residual, fprime,
+                                          float(self.eps[p] + static),
+                                          follow=w0, tol=tol,
+                                          max_iter=max_iter,
+                                          label=f'FLEX orbital {p}')
+        except QPRootNotConverged as failed:
+            return {'e': failed.last, 'Z': np.nan, 'converged': False,
+                    'niter': calls[0]}
+        return {'e': w, 'Z': z, 'converged': True, 'niter': calls[0]}

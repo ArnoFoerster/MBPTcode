@@ -5,7 +5,7 @@ import warnings
 import weakref
 
 import numpy as np
-from pyscf import gto, scf, ao2mo, lib
+from pyscf import scf, ao2mo, lib
 from pyscf.scf import stability as scf_stability
 
 from src.Base.constants import AUX_METRIC_LINDEP, UHF_SPIN_CONTAMINATION_WARN
@@ -167,7 +167,8 @@ def get_dipole_integrals(mol, mf, representation='spatial'):
             return dip_mo
 
 def unrestricted_reference_diagnostics(mf, who):
-    """{'s2', 's2_exact', 'stable'} of an unrestricted reference, warned, cached.
+    """{'s2', 's2_exact', 'stable', 'spin_contaminated'} of an unrestricted
+    reference, warned, cached on the mean field as `reference_diagnostics`.
 
     A quasiparticle calculation on a UHF/UKS determinant is only as meaningful
     as the determinant: spin contamination mixes spin states into every
@@ -187,8 +188,12 @@ def unrestricted_reference_diagnostics(mf, who):
     s = 0.5 * mf.mol.spin
     exact = s * (s + 1.0)
     _, stable = scf_stability.uhf_internal(mf, return_status=True, verbose=0)
-    out = {'s2': float(s2), 's2_exact': float(exact), 'stable': bool(stable)}
-    if s2 - exact > UHF_SPIN_CONTAMINATION_WARN:
+    # the named flags a record copies (refuse
+    # inputs, warn numerics): 'stable' False, 'spin_contaminated' True
+    out = {'s2': float(s2), 's2_exact': float(exact), 'stable': bool(stable),
+           'spin_contaminated': bool(s2 - exact
+                                     > UHF_SPIN_CONTAMINATION_WARN)}
+    if out['spin_contaminated']:
         warnings.warn(
             f'{who}: the unrestricted reference is spin-contaminated, <S^2> = '
             f'{s2:.4f} against S(S+1) = {exact:.4f}; its quasiparticle energies '
@@ -200,6 +205,7 @@ def unrestricted_reference_diagnostics(mf, who):
             f'the quasiparticle energies start from a saddle point.',
             RuntimeWarning, stacklevel=3)
     mf._reference_diagnostics = (key, out)
+    mf.reference_diagnostics = out
     return out
 
 
@@ -238,6 +244,11 @@ def require_closed_shell_or_unrestricted(mf, who, mol=None):
             f'orbitals doubly occupied and the rest empty -- or an unrestricted '
             f'one; this one has spin {mol.spin} and {off} occupations off that '
             f'pattern. Run an open shell as UHF/UKS.')
+
+
+def occupied_count(mf):
+    """The closed-shell occupied count of the mean field `mf`."""
+    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
 
 
 def get_orbital_energies(mf, representation='spatial'):
@@ -414,6 +425,7 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
     C_ov = np.concatenate(ov_parts, axis=0)
     del ov_parts
     C_rows = np.concatenate(row_parts, axis=0) if mo_r is not None else None
+    del row_parts
 
     # An environment that dresses the interaction is a naux x naux congruence
     # on the auxiliary index, so it applies to a slice exactly as it applies to
@@ -513,7 +525,10 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
         norb = mo.shape[1]
         if has_df:
             try:
-                coeff_list = []
+                # filled in place: a list of blocks and its concatenation
+                # would hold the naux nmo^2 factor twice
+                coeff = np.empty((mf.with_df.get_naoaux(), norb, norb))
+                p0 = 0
                 for chunk in mf.with_df.loop(blksize=200):
                     ao_3c = lib.unpack_tril(chunk)
                     naux_block = ao_3c.shape[0]
@@ -522,9 +537,9 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
                     
                     tmp = (ao_3c.reshape(-1, nao) @ mo).reshape(naux_block, nao, nmo)
                     tmp_t = tmp.transpose(0, 2, 1).reshape(-1, nao)
-                    mo_3c = (tmp_t @ mo).reshape(naux_block, nmo, nmo)
-                    coeff_list.append(mo_3c)
-                coeff = np.concatenate(coeff_list, axis=0)
+                    coeff[p0:p0 + naux_block] = (tmp_t @ mo).reshape(naux_block, nmo, nmo)
+                    p0 += naux_block
+                    del ao_3c, tmp, tmp_t
             except Exception as exc:
                 _warn_df_fallback(exc)
                 has_df = False

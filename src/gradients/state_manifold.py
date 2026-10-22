@@ -64,20 +64,20 @@ built, and the ground-state force once. Every number is the one the chain of
 that spin and root returns evaluated alone, bit for bit. An integer state
 keeps meaning a root of the chain's own spin.
 """
-import contextlib
 import copy
+import warnings
 
 import numpy as np
 
 from src.Base.constants import KAPPA, NUCLEAR_FD_STEP
+from src.Base.numerics import Stamped, numerics_identity
+from src.Base.pyscf_interface import occupied_count
+from src.Base.sliced_factors import SlicedFactors
 from src.gradients.excited_state import FirstPoint
+from src.gradients.reference_mean_field import check_scf_quality, scf_force_tol
 from src.properties import nonadiabatic
 from src.properties.surface import (driven_chain, own_root_attribute,
                                     root_attribute)
-
-#: Sentinel for "this instance had no `_forward` of its own before pinning".
-_UNSET = object()
-
 
 def select_root(surface, n):
     """Set root `n` on `surface` and on the half that holds its spectrum.
@@ -111,58 +111,62 @@ def copy_for_root(surface):
     return out
 
 
-@contextlib.contextmanager
-def pinned_forward(chain, mol, mf):
-    """Evaluate one `_forward(mol, mf)` and hold it under every root inside.
-
-    Legitimate because the forward pass does not depend on the selected root:
-    a chain's `_casida` returns the whole spectrum and reads the root only to
-    check that a Davidson run reaches it. That check is made here instead,
-    once, since the pinned pass would otherwise carry the guard of whichever
-    root ran first.
-
-    Yields False, having done nothing, for a chain with no `_forward` -- the
-    downfolded chains rebuild their model per root -- so the caller falls back
-    to a pass each and the manifold stays correct either way.
-    """
-    if not hasattr(chain, '_forward'):
-        yield False
-        return
-    om, pieces = chain._forward(mol, mf)
-    held = chain.__dict__.get('_forward', _UNSET)
-
-    def replay(m, f=None):
-        # A pinned pass belongs to ONE geometry; anything else is a caller bug
-        # that would otherwise return the reference geometry's spectrum.
-        if m is not mol:
-            raise RuntimeError('the pinned forward pass belongs to a different '
-                               'geometry than the one asked for')
-        return om, pieces
-
-    chain._forward = replay
-    try:
-        yield True
-    finally:
-        if held is _UNSET:
-            del chain._forward
-        else:
-            chain._forward = held
-
-
 class StateEvaluation:
     """What `StateManifold.evaluate` computed at one geometry, by the
-    manifold's state keys: `energy` (E_0 + Omega, Hartree), `omega`, `root`
+    manifold's state keys: `energy` (E_0 + Omega, Hartree), `e0` (that
+    E_0, the declared ground state's: the mean field's on a chain alone,
+    E_HF + E_c^dRPA under `GroundState('rpa', ...)`), `omega`, `root`
     (the root the state is at here), `gradient` and `info` for the force
     targets, `interstate` {(m, n): (d<m|H|n>/dR, diagnostics)}, `spectrum`
     {spin: (omega, X, Y)}, `g0` the ground-state force (None without a force
-    target) and `target` {key: (spin, root)}."""
+    target), `target` {key: (spin, root)} and `scf_residual`, max |F_ia| of
+    `mf` (None until measured). `numerics_identity` names the `Numerics` the
+    whole evaluation stands on, and stamps every spectrum in it."""
 
-    def __init__(self, mol, mf):
+    def __init__(self, mol, mf, numerics_identity=None):
         self.mol, self.mf = mol, mf
+        self.numerics_identity = numerics_identity
         self.energy, self.omega, self.root, self.target = {}, {}, {}, {}
         self.gradient, self.info, self.interstate = {}, {}, {}
         self.spectrum = {}
         self.g0 = None
+        self.e0 = None
+        self.scf_residual = None
+        # the mean field's |F_ia| above `scf_force_tol`, warned about once
+        # (`require_scf_quality`)
+        self.scf_flags = []
+
+    def spectrum_of(self, om, pieces):
+        """(omega, X, Y) of a Casida solve, stamped with this evaluation's
+        numerics identity."""
+        return Stamped((om, pieces[10], pieces[11]), self.numerics_identity)
+
+    def require_scf_quality(self, where='evaluation'):
+        """The flags (`scf_flags`) a force or coupling read off this
+        evaluation carries: one when its mean field's |F_ia| exceeds
+        `scf_force_tol`, warned about once, as the chain's own
+        `require_scf_quality` flags one taken directly; the run carries on
+        (refuse inputs, warn numerics). A mean
+        field that was never run is an input and is refused."""
+        if getattr(self.mf, 'mo_coeff', None) is None:
+            raise ValueError(f'{where}: the mean field of this evaluation was '
+                             f'never run (no mo_coeff)')
+        if self.scf_residual is None:
+            nocc = occupied_count(self.mf)
+            self.scf_residual = check_scf_quality(self.mf, nocc)
+        tol = scf_force_tol(self.mf)
+        # an evaluation made before the list existed
+        flags = self.__dict__.setdefault('scf_flags', [])
+        if self.scf_residual > tol and not flags:
+            flags.append({'where': where, 'residual': float(self.scf_residual),
+                          'tol': float(tol), 'coords': np.array(
+                              self.mol.atom_coords(), float)})
+            warnings.warn(
+                f'{where}: the mean field carries |F_ia| = '
+                f'{self.scf_residual:.2e}, above the {tol:.0e} a force on it '
+                f'may carry (`scf_force_tol`); the gradient Lagrangian '
+                f'assumes the block vanishes', RuntimeWarning, stacklevel=3)
+        return [dict(f) for f in flags]
 
     def first_point(self, key):
         """The `FirstPoint` of force target `key`: this geometry, its spin
@@ -244,9 +248,15 @@ class StateManifold:
 
     def _require_reachable(self):
         """A Davidson chain that solves fewer roots than were asked for would
-        raise from inside the first gradient, after the forward pass was paid."""
+        raise from inside the first gradient, after the forward pass was paid.
+        'auto' is resolved on the chain's own pair space (`solver_used`): one
+        that resolves dense solves every root."""
         nroots = getattr(self.driven, 'nroots', None)
         solver = getattr(self.driven, 'solver', None)
+        if solver == 'auto' and hasattr(self.driven, 'solver_used'):
+            nocc = self.driven.nocc
+            nmo = len(self.driven.mf0.mo_energy)
+            solver = self.driven.solver_used(nocc * (nmo - nocc))
         top = max(self._root_of(n) for n in self.states)
         if nroots is not None and solver != 'dense' and nroots <= top:
             raise ValueError(
@@ -262,17 +272,10 @@ class StateManifold:
         return self.chain.scf_factory(mol)
 
     def _mean_field(self, mol=None, mf=None):
-        """(mol, mf) through the surface's own environment.
-
-        The composed surface answers this itself and its ground-state half is
-        the fallback; `scf_factory` is not an answer -- it is the raw factory
-        and carries no environment, so the shared pass would be pinned on a
-        mean field none of the roots are evaluated on.
-        """
-        owner = self.chain
-        if not hasattr(owner, 'mean_field'):
-            owner = owner.ground
-        return owner.mean_field(mol, mf)
+        """(mol, mf) through the surface's own environment (`mean_field`), not
+        `scf_factory`, which carries none: the shared pass would be taken on
+        a mean field none of the roots are evaluated on."""
+        return self.chain.mean_field(mol, mf)
 
     def _at(self, n):
         """The chain with root `n` selected. Mutates the manifold's own copy."""
@@ -351,8 +354,9 @@ class StateManifold:
         if self.shares_forward:
             return dict(self.evaluate(mol, mf).energy)
         mol, mf = self._mean_field(mol, mf)
-        with pinned_forward(self.driven, mol, mf):
-            return {n: self._at(n).total_energy(mol, mf) for n in self.states}
+        out = {n: self._at(n).total_energy(mol, mf)
+               for n in self._highest_first()}
+        return {n: out[n] for n in self.states}
 
     def gradients(self, mol=None, mf=None):
         """{n: (dE_n/dR, E_n, diagnostics)} for every state, off ONE forward
@@ -366,8 +370,16 @@ class StateManifold:
             return {n: (ev.gradient[n], ev.energy[n], ev.info[n])
                     for n in self.states}
         mol, mf = self._mean_field(mol, mf)
-        with pinned_forward(self.driven, mol, mf):
-            return {n: self._at(n).total_gradient(mol, mf) for n in self.states}
+        out = {n: self._at(n).total_gradient(mol, mf)
+               for n in self._highest_first()}
+        return {n: out[n] for n in self.states}
+
+    def _highest_first(self):
+        """The states, highest root first: a chain without a split forward
+        evaluates its roots through its own cache (`Evaluation`), which a
+        forward solved for the highest root serves for every root below it,
+        so the manifold runs one forward pass, solved for all of them."""
+        return sorted(self.states, key=self._root_of, reverse=True)
 
     def gaps(self, mol=None, mf=None):
         """{(m, n): E_n - E_m} over the states, in Hartree, off ONE forward
@@ -423,30 +435,28 @@ class StateManifold:
                     f'an interstate element is taken between two roots of ONE '
                     f'Casida solve; got {m!r} and {n!r}')
         mol, mf = self._mean_field(mol, mf)
+        ev = StateEvaluation(mol, mf, numerics_identity(self.driven))
         if gradients or couplings:
             self.driven.require_differentiable_environment()
+            ev.scf_residual = self.driven.residual_of(mf)
+            # flagged on the chain, which the record reads, and held here
+            ev.scf_flags = self.driven.require_scf_quality(
+                mf, 'StateManifold.evaluate')
         composed = self.driven is not self.chain
-        ev = StateEvaluation(mol, mf)
         ground = None
         if composed and gradients:
             ground = self.chain.ground.total_gradient(mol, mf)
-        shared = self.driven._shared_forward(mol, mf)
+        shared = self.forward(mol, mf)
         try:
-            solved = self._solve_spins(shared, wanted, ev)
-            # An adaptive explicit set is checked on these eigenvectors at the
-            # reference geometry; one that grows is solved and checked again,
-            # and the spin views taken on the old set are dropped.
-            verify = getattr(self.driven, 'verify_selection', None)
-            while verify is not None and verify(shared, solved):
-                shared.release()
-                self._solvers.clear()
-                self._views.clear()
-                shared = self.driven._shared_forward(mol, mf)
-                solved = self._solve_spins(shared, wanted, ev)
+            shared, solved = self.spectra(mol, mf, shared, wanted, ev)
             for k in wanted:
                 ev.target[k] = self._target(k)
-                om, pieces = solved[ev.target[k][0]]
-                root = self._view(k).tracked_state(mol, mf, om, pieces)
+                spin = ev.target[k][0]
+                root, om, pieces = self._view(k).tracked_root(
+                    mol, mf, *solved[spin])
+                # a wider re-solve replaces the spin's solve for what follows
+                solved[spin] = (om, pieces)
+                ev.spectrum[spin] = ev.spectrum_of(om, pieces)
                 ev.root[k], ev.omega[k] = int(root), float(om[root])
             if not composed:
                 e_0 = mf.e_tot
@@ -454,6 +464,7 @@ class StateManifold:
                 e_0 = ground[1]
             else:
                 e_0 = self.chain.ground.energy(mol, mf)[0]
+            ev.e0 = float(e_0)
             for k in wanted:
                 ev.energy[k] = e_0 + ev.omega[k]
             for k in gradients:
@@ -471,6 +482,51 @@ class StateManifold:
             shared.release()
         return ev
 
+    # ------------------------------------------- the forward, step by step
+    def mean_field(self, mol=None, mf=None):
+        """(mol, mf) the manifold evaluates at: its reference's where
+        omitted, `mf` converged at `mol` where not given."""
+        return self._mean_field(mol, mf)
+
+    def forward(self, mol, mf):
+        """The driven chain's shared forward at (mol, mf): everything before
+        the Casida step, unreleased (the caller releases it)."""
+        return self.driven._shared_forward(mol, mf)
+
+    def spectra(self, mol, mf, shared, wanted, ev):
+        """(shared, {spin: (Omega, pieces)}): one Casida solve per spin of
+        the keys `wanted` on `shared`, with an adaptive explicit set checked
+        on those eigenvectors at the reference geometry, by the chain
+        (`verified`); a set that grows is solved and checked again on a
+        fresh forward, and the spin views taken on the old set are
+        dropped."""
+        solved = self._solve_spins(shared, wanted, ev)
+
+        def again(fresh):
+            self._solvers.clear()
+            self._views.clear()
+            return self._solve_spins(fresh, wanted, ev)
+        return self.driven.verified(mol, mf, shared, solved, again)
+
+    def ac_shifts(self, mol, mf, shared, states):
+        """({p: a_p}, {p: Z_p}, failures) of the chain's own analytic
+        continuation (`_ac_shifts`) on `states`, on the bare factors and the
+        static term of the shared forward `shared`."""
+        d_sigma = shared.d if shared.d_bare is None else shared.d_bare
+        if not isinstance(d_sigma, SlicedFactors) and \
+                isinstance(shared.x_mo, SlicedFactors):
+            # sliced, the rows the self-energy reads are X_mo's
+            d_sigma = shared.x_mo
+        return self.driven._ac_shifts(mol, mf, shared.x_mo, d_sigma, states,
+                                      shared.shift, 'ac_shifts')
+
+    def spectra_on(self, shared, eps_qp):
+        """{spin: Omega} of every spin solved on `shared`, solved again on
+        the quasiparticle energies `eps_qp` with the same W."""
+        return {spin: solver._casida(shared.x_mo, shared.d, eps_qp,
+                                     shared.w_aux)[0]
+                for spin, solver in self._solvers.items()}
+
     def _solve_spins(self, shared, wanted, ev):
         """{spin: (omega, pieces)}: one Casida solve per spin on `shared`."""
         solved = {}
@@ -483,7 +539,7 @@ class StateManifold:
             solver.state, solver.timer = top, self.driven.timer
             om, pieces = solver._casida_forward(shared)
             solved[spin] = (om, pieces)
-            ev.spectrum[spin] = (om, pieces[10], pieces[11])
+            ev.spectrum[spin] = ev.spectrum_of(om, pieces)
         return solved
 
     def _view(self, k):

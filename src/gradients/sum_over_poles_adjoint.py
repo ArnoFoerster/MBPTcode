@@ -13,8 +13,8 @@ import numpy as np
 
 from src.Base.constants import SOP_FIT_RCOND
 from src.SingleReference.GW.real_screening import ov_energies, screening_aux
-from src.SingleReference.GW.sum_over_poles import (denominators,
-                                                   pole_pseudoinverse)
+from src.SingleReference.GW.sum_over_poles import (
+    denominators, pole_pseudoinverse, subspace_self_energy_jacobian)
 from src.SingleReference.base import get_occ_virt_indices
 from src.gradients.contour_deformation_adjoint import (integral_term_backward,
                                                        screening_chain)
@@ -44,6 +44,43 @@ def sigma_sop_backward(omega, amplitudes, poles, eps, nocc, nu_points,
                                 SOP_FIT_RCOND if rcond is None else rcond)
     wc_bar = sigma_bar * (f_pinv.T @ (1.0 / den).T)            # (nfreq, norb)
     return eps_bar, wc_bar, omega_bar
+
+
+def subspace_hamiltonian_backward(h, amp, d, h_bar):
+    """(e0_bar, amp_bar, d_bar) of <h_bar, H> through the fixed point
+    H = e0 + Sigma^c[H] of `subspace_hamiltonian`.
+
+    The implicit adjoint: (1 - J^T) Lambda = h_bar, J the derivative of
+    Sigma^c[H] = 1/2 sum_x [R_x A_x + A_x R_x], R_x = (H - d_x)^-1, on H
+    (`subspace_self_energy_jacobian`). Then e0_bar = Lambda, A_x's adjoint is
+    (R_x Lambda + Lambda R_x)/2 and d_x's tr(Lambda R_x^2 A_x). Everything is
+    taken in H's eigenbasis, where R_x is diagonal.
+    """
+    e, u = np.linalg.eigh(h)
+    d = np.asarray(d, float).ravel()
+    r = 1.0 / (e[None, :] - d[:, None])
+    at = u.T @ amp @ u
+    n = len(e)
+    hb = u.T @ (0.5 * (h_bar + np.asarray(h_bar).T)) @ u
+    jac = subspace_self_energy_jacobian(r, at)
+    lam = np.linalg.solve(np.eye(n * n) - jac.T, hb.ravel()).reshape(n, n)
+    lam = 0.5 * (lam + lam.T)
+    amp_bar = u @ (0.5 * lam[None] * (r[:, :, None] + r[:, None, :])) @ u.T
+    d_bar = np.einsum('kl,xl,xlk->x', lam, r ** 2, at)
+    return u @ lam @ u.T, amp_bar, d_bar
+
+
+def subspace_residues_backward(amp_bar, poles, nu_points, pairs):
+    """{(a, b): wc_ab_bar} for `subspace_residues`' pairs a <= b, each
+    (nfreq, norb): the transpose of A = F^+ wc, an off-diagonal pair taking
+    both of its symmetric elements."""
+    n_poles = len(poles)
+    pinv = pole_pseudoinverse(nu_points, poles)
+    out = {}
+    for a, b in pairs:
+        g = amp_bar[:, a, b] if a == b else amp_bar[:, a, b] + amp_bar[:, b, a]
+        out[(a, b)] = pinv.T @ g.reshape(-1, n_poles).T
+    return out
 
 
 def sop_partials(omega, amplitudes, poles, eps, nocc, nu_points, Bp, C_ov,

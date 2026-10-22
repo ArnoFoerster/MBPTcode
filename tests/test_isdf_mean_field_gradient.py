@@ -25,15 +25,15 @@ import numpy as np
 import pytest
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.isdf_jk import ISDFJK, isdf_jk
-from src.Base.separable_ri import DEFAULT_REGULARIZATION
+from src.Base.constants import BOHR_TO_ANGSTROM, ISDF_FIT_REGULARIZATION
+from src.Base.isdf_jk import ISDFJK, isdf_jk, exchange_free_reference
+from src.Base.numerics import Numerics
 from src.gradients.isdf_derivatives import (fock_partial_skeleton_df,
                                             xc_hybrid_coeff)
-from src.gradients.isdf_mean_field import (exchange_free_reference,
-                                           isdf_exchange_skeleton,
+from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
+from tests.isdf_test_grid import g1
 
 AUXBASIS = 'cc-pvdz-ri'
 GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
@@ -41,7 +41,7 @@ GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
 #: Angstrom. Three halvings, so h^2 (a factor of 4 each time) is distinguishable
 #: from a constant, which is the whole content of the gate.
 STEPS = (4e-3, 2e-3, 1e-3, 5e-4)
-#: The displaced coordinate: H(1) along z, where the defect was measured.
+#: The displaced coordinate: H(1) along z.
 MOVED = (1, 2)
 
 
@@ -63,10 +63,11 @@ def mean_field(xc, shift=None, route='isdf', regularization=None):
     """
     mol = water(shift)
     mf = dft.RKS(mol, xc=xc) if xc else scf.RHF(mol)
-    mf = (isdf_jk(mf, auxbasis=AUXBASIS) if route == 'isdf'
+    mf = (isdf_jk(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
           else mf.density_fit(auxbasis=AUXBASIS))
     if regularization is not None:
-        mf.with_df.regularization = regularization
+        mf.with_df.numerics = Numerics(
+            isdf={'regularization': regularization})
     if xc:
         mf.grids.prune = None
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
@@ -159,7 +160,7 @@ def test_the_exchange_skeleton_follows_its_own_energy():
     assert np.abs(g.sum(axis=0)).max() < 1e-10
 
     def energy(shift):
-        w = ISDFJK(water(shift), auxbasis=AUXBASIS, check_tol=None)
+        w = ISDFJK(water(shift), auxbasis=AUXBASIS, check_tol=None, counts=g1(water(shift)))
         w.build()
         vk = w.get_jk(dm, hermi=1, with_j=False)[1]
         return -0.25 * a_x * float(np.einsum('ij,ji->', dm, vk))
@@ -211,14 +212,25 @@ def test_the_remaining_error_is_the_fits_conditioning():
     7.9e3 and the error from 1e-8 to 1e-11. A missing term would not care."""
     ia, x = MOVED
     errors = {}
-    for reg in (DEFAULT_REGULARIZATION, 1e-2):
+    for reg in (ISDF_FIT_REGULARIZATION, 1e-2):
         mf = mean_field(None, regularization=reg)
         g = isdf_mean_field_gradient(mf)
         errors[reg] = richardson(sweep(
             g[ia, x], lambda s: mean_field(None, s, regularization=reg).e_tot,
             ia, x, steps=STEPS[1:]))
-    assert abs(errors[DEFAULT_REGULARIZATION]) < 1e-7, errors
-    assert abs(errors[1e-2]) < 0.1 * abs(errors[DEFAULT_REGULARIZATION]), errors
+    assert abs(errors[ISDF_FIT_REGULARIZATION]) < 1e-7, errors
+    # The finite difference resolves an error only above its own floor: the
+    # SCF energy converged to 1e-12 Ha, divided by the finest step. Where the
+    # default error stands above that floor, the regularization takes it down
+    # tenfold. Where it already stands at the floor (3e-10 on a BLAS whose
+    # last bits happen to favour this fit; 1e-8 on others), the two numbers are
+    # noise to each other and the premise is that both lie below the floor.
+    floor = 1e-12 / min(STEPS[1:])
+    if abs(errors[ISDF_FIT_REGULARIZATION]) > floor:
+        assert (abs(errors[1e-2])
+                < 0.1 * abs(errors[ISDF_FIT_REGULARIZATION])), errors
+    else:
+        assert abs(errors[1e-2]) < floor, errors
 
 
 def test_the_reference_is_missing_exactly_the_exchange():
@@ -249,10 +261,10 @@ def test_what_is_not_covered_refuses_by_name():
     mol = water()
     cases = {
         'interpolated Coulomb': isdf_jk(dft.RKS(mol, xc='b3lyp'),
-                                        auxbasis=AUXBASIS, j_route='isdf'),
-        'unrestricted': isdf_jk(dft.UKS(mol, xc='b3lyp'), auxbasis=AUXBASIS),
+                                        auxbasis=AUXBASIS, j_route='isdf', counts=g1(dft.RKS(mol, xc='b3lyp'))),
+        'unrestricted': isdf_jk(dft.UKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.UKS(mol, xc='b3lyp'))),
         'restricted open shell': isdf_jk(dft.ROKS(mol, xc='b3lyp'),
-                                         auxbasis=AUXBASIS),
+                                         auxbasis=AUXBASIS, counts=g1(dft.ROKS(mol, xc='b3lyp'))),
     }
     for label, mf in cases.items():
         with pytest.raises(NotImplementedError):
@@ -260,9 +272,9 @@ def test_what_is_not_covered_refuses_by_name():
 
     # a grid handed in from outside: the rows are points, but which atom owns
     # which is exactly what the point chain needs and cannot recover
-    built = ISDFJK(mol, auxbasis=AUXBASIS, check_tol=None)
+    built = ISDFJK(mol, auxbasis=AUXBASIS, check_tol=None, counts=g1(mol))
     built.build()
-    injected = isdf_jk(dft.RKS(mol, xc='b3lyp'), auxbasis=AUXBASIS)
+    injected = isdf_jk(dft.RKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc='b3lyp')))
     injected.with_df.coords = built.coords
     with pytest.raises(NotImplementedError):
         require_isdf_gradient_support(injected, 'injected coords')
@@ -273,10 +285,9 @@ def test_what_is_not_covered_refuses_by_name():
             dft.RKS(mol, xc='b3lyp').density_fit(auxbasis=AUXBASIS), 'fitted')
 
     # and the covered cases are not refused. A range-separated hybrid is one of
-    # them now: its exchange is one channel per operator sharing the bare fit,
+    # them: its exchange is one channel per operator sharing the bare fit,
     # and the exchange-free reference zeroes the coefficients instead of
-    # subtracting HF by name, which is what could not be written down before.
-    # Gated in test_range_separated_exchange.py.
+    # subtracting HF by name. Gated in test_range_separated_exchange.py.
     for label, xc in (('covered', 'b3lyp'), ('range-separated', 'lrc-wpbeh')):
         require_isdf_gradient_support(
-            isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS), label)
+            isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc))), label)

@@ -10,8 +10,9 @@ Static kernel in closed form,
 with no t dependence: the screening is the mean-field response, and the
 amplitudes only enter through the quasiparticle energies on the BSE diagonal.
 Those come from the diagonal quasi-boson EOM solve of
-`GW.quasi_boson.QPqb` -- the nearest root by Newton, or the root of largest
-pole strength (`qp_root`) -- unless filtered on pole strength (Hartree-Fock
+`GW.quasi_boson.QPqb` -- the nearest root by Newton, the root of largest pole
+strength, or the root of a frozen rank among the eigenvalues of the diagonal
+supermatrix (`qp_root`) -- unless filtered on pole strength (Hartree-Fock
 fallback for a state whose root is a satellite), while the screening keeps
 mean-field energies: the standard G0W0-BSE split.
 
@@ -29,9 +30,10 @@ from src.Base.constants import KAPPA, QP_WINDOW_Z_MIN
 from src.Base.eri_blocks import as_blocks
 from src.Base.utils.threads import openmp_threads, row_map
 from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.LinearResponse.linear_response import static_pair_resolvent
 
 #: The rules for which root of the quasiparticle equation reaches the diagonal.
-QP_ROOT_RULES = ('newton', 'weight')
+QP_ROOT_RULES = ('newton', 'weight', 'rank')
 
 
 class BSEqb:
@@ -44,7 +46,7 @@ class BSEqb:
 
     def __init__(self, mf, eri_mo, nocc, screening='rpa', bse_tda=False,
                  qp_orbs='all', seeds=None, pinned=False, delta=None,
-                 spin='singlet', qp_root='newton'):
+                 spin='singlet', qp_root='newton', blocks=(), ranks=None):
         """delta: the static <p|Sigma_x - v_xc|p> shift; see `QPqb`. It reaches
         the BSE through `eps_qp` alone, which is where the quasiparticle
         energies enter the kernel.
@@ -57,18 +59,31 @@ class BSEqb:
         those two terms and carries the same factor.
 
         qp_root: which root of each listed orbital's quasiparticle equation
-        the diagonal carries. 'newton' is `QPqb.solve_diag` from eps_p or the
-        seed, the nearest root, a satellite where one lies closer than the
-        quasiparticle; 'weight' is `QPqb.quasiparticle_root`, the root with
-        the largest Z, decided afresh at every geometry and so taking no seed.
+        the diagonal carries. 'newton' (the name is historical) is
+        `QPqb.solve_diag`: the root of largest weight, or with a seed the root
+        in the interval between the poles that bracket it; 'weight' is
+        `QPqb.quasiparticle_root`, the root with the largest Z at this
+        geometry, and so takes no seed; 'rank' is
+        `QPqb.ranked_root` at `ranks[p]`, the eigenvalue of the diagonal
+        supermatrix with that many below it: a root decided at another
+        geometry, followed continuously.
+
+        blocks: tuples of solved orbitals that are near-degenerate; each block
+        carries ONE correction, the mean of its members' eps^QP_p - eps_p, on
+        its members' own eps_p. Diagonal G0W0 gives each index its own root,
+        which two orbitals rotating into each other across an avoided crossing
+        trade within a fraction of the gap's geometric scale.
         """
         if spin not in KAPPA:
             raise ValueError(f"spin {spin!r}: one of {', '.join(sorted(KAPPA))}")
         if qp_root not in QP_ROOT_RULES:
             raise ValueError(f'qp_root {qp_root!r}: one of {QP_ROOT_RULES}')
-        if qp_root == 'weight' and seeds:
-            raise ValueError("qp_root='weight' decides each root from the "
-                             "poles at this geometry and follows no seed")
+        if qp_root != 'newton' and seeds:
+            raise ValueError(f"qp_root={qp_root!r} decides each root from the "
+                             f"poles at this geometry and follows no seed")
+        if (qp_root == 'rank') != (ranks is not None):
+            raise ValueError("ranks are what qp_root='rank' follows, and "
+                             "nothing else reads them")
         self.qp_root = qp_root
         self.spin = spin
         self.kappa = KAPPA[spin]
@@ -93,21 +108,36 @@ class BSEqb:
         self.eps_qp = eps.copy()
         self.qp_roots = {}
         self.qp_z = {}
-        solved = (largest_weight_roots(self.qp, self.qp_orbs)
-                  if qp_root == 'weight' else
-                  {p: self.qp.solve_diag(p, w0=seeds.get(p) if seeds else None)
-                   for p in self.qp_orbs})
+        if qp_root == 'weight':
+            solved = largest_weight_roots(self.qp, self.qp_orbs)
+        elif qp_root == 'rank':
+            solved = {p: self.qp.ranked_root(p, ranks[p])
+                      for p in self.qp_orbs}
+        else:
+            solved = {p: self.qp.solve_diag(p, w0=seeds.get(p) if seeds
+                                            else None)
+                      for p in self.qp_orbs}
+        # the followed roots kept on a branch the largest weight has left
+        # (`QPqb.solve_diag`), for the caller's record
+        self.qp_branch_log = list(self.qp.branch_log)
         for p in self.qp_orbs:
             w, Z = solved[p]
             if pinned or Z > QP_WINDOW_Z_MIN:
                 self.eps_qp[p] = w
                 self.qp_roots[p] = w
                 self.qp_z[p] = Z
+        self.qp_blocks = tuple(tuple(int(p) for p in b) for b in blocks)
+        for b in self.qp_blocks:
+            if any(p not in self.qp_roots for p in b):
+                raise ValueError(f'block {b} shares one correction, so every '
+                                 f'member needs a solved root')
+            b = list(b)
+            self.eps_qp[b] = eps[b] + np.mean(self.eps_qp[b] - eps[b])
 
         # screening resolvent P^-1 at mean-field energies
         qb = self.qp.qb
         P = (qb.A + qb.B) if screening == 'rpa' else qb.A
-        self.Pinv = np.linalg.inv(P)
+        self.Pinv = static_pair_resolvent(P)
 
         # kernel pieces
         nocc_, nvirt_, norb_ = nocc, self.nvirt, self.norb

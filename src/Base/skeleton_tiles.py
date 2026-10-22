@@ -93,7 +93,7 @@ from pyscf.dft import gen_grid, numint, radi
 
 from src.Base.constants import (FIT_CHOLESKY_BLOCK, SKELETON_AUX_TILE,
                                 THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
-from src.Base.separable_ri import (DEFAULT_REGULARIZATION, AdjointSeeds,
+from src.Base.separable_ri import (AdjointSeeds,
                                    _tile_collocation, _tiles_at_root,
                                    _two_centre_rows_adjoint, fit_rows,
                                    fit_rows_adjoint)
@@ -356,9 +356,7 @@ def fitted_fock_skeleton(mol, auxmol, g_ao, dm, occ=None, coulomb=True,
 
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
                        prefactor=1.0, channels=((0.0, 1.0),), mt=None, X=None,
-                       block=None, l_max_second=2,
-                       regularization=DEFAULT_REGULARIZATION,
-                       block_memory_gb=4.0, comm=None):
+                       block=None, numerics=None, comm=None):
     """(centre, points, held) of d/dR E_K^ISDF at fixed densities on the row
     fit: the (natm, 3) centre terms of every integral and collocation, and
     the (nk, 3) adjoint on the points for the point and frame chain.
@@ -374,12 +372,9 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
     seeds, two, held = isdf_exchange_seeds(
         mol, auxmol, coords, layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=block,
-        l_max_second=l_max_second, regularization=regularization,
-        block_memory_gb=block_memory_gb, comm=comm)
+        numerics=numerics, comm=comm)
     adjoint = fit_rows_adjoint(mol, auxmol, coords, None, layout,
-                               l_max_second=l_max_second,
-                               regularization=regularization,
-                               block_memory_gb=block_memory_gb, comm=comm,
+                               numerics=numerics, comm=comm,
                                block=block, mt_bar=seeds.mt_bar,
                                x_bar_ao=seeds.x_bar_ao,
                                metric_bar=seeds.metric_bar)
@@ -390,9 +385,7 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
 
 def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
                         prefactor=1.0, channels=((0.0, 1.0),), mt=None,
-                        X=None, block=None, l_max_second=2,
-                        regularization=DEFAULT_REGULARIZATION,
-                        block_memory_gb=4.0, comm=None):
+                        X=None, block=None, numerics=None, comm=None):
     """(seeds, centre, held): what d/dR E_K^ISDF of `isdf_exchange_rows`
     hands the row fit's adjoint -- `separable_ri.AdjointSeeds` with MT_bar
     and X_bar on this rank's tiles and the bare metric's V_bar on rank 0 --
@@ -418,9 +411,7 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
         held[name] = max(held.get(name, 0), int(nbytes))
 
     if mt is None:
-        fit = fit_rows(mol, auxmol, coords, l_max_second=l_max_second,
-                       regularization=regularization,
-                       block_memory_gb=block_memory_gb, comm=comm,
+        fit = fit_rows(mol, auxmol, coords, numerics=numerics, comm=comm,
                        block=block, layout=layout)
         mt = fit.mt
         held.update({f'fit_{k}': v for k, v in fit.held.items()})

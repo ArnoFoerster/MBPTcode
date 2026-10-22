@@ -17,8 +17,13 @@ import numpy as np
 
 from src.Base.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
 from src.Base.declaration import PhysicsMismatch
+from src.Base.geometry import molecule_at
 from src.Base.isdf_jk import refuse_isdf_jk_gradient
+from src.Base.numerics import (numerics_identity, require_same_identity,
+                               stamp_of)
 from src.properties.optimize import relax, translation_rotation_basis
+from src.properties.rates import require_vibrational_modes
+from src.properties.spin_orbit import slope_from_squares
 from src.properties.surface import evaluate, surface_mean_field
 
 
@@ -90,10 +95,8 @@ def huang_rhys_from_gradient(grad, omega, modes, masses):
     w = np.repeat(np.asarray(masses), 3) ** -0.5
     g_mw = np.asarray(grad).ravel() * w              # d/dq = M^-1/2 d/dx
     gk = modes.T @ g_mw
-    ok = omega > 0
-    s = np.zeros_like(gk)
-    s[ok] = gk[ok] ** 2 / (2.0 * omega[ok] ** 3)
-    return s, gk
+    require_vibrational_modes(omega, 'huang_rhys_from_gradient')
+    return gk ** 2 / (2.0 * omega ** 3), gk
 
 
 def project_coupling(d_cart, modes, masses):
@@ -121,10 +124,7 @@ def displace_along_mode(mol0, modes, masses, omega, k, dq):
     """
     w = np.repeat(np.asarray(masses), 3) ** -0.5
     dx = (modes[:, k] * w).reshape(-1, 3) * (dq / np.sqrt(omega[k]))
-    m = mol0.copy()
-    m.set_geom_(mol0.atom_coords() + dx, unit='Bohr')
-    m.build(False, False)
-    return m
+    return molecule_at(mol0, mol0.atom_coords() + dx)
 
 
 def huang_rhys_from_displacement(mol_gs, mol_ex, omega, modes, masses):
@@ -143,10 +143,8 @@ def huang_rhys_from_displacement(mol_gs, mol_ex, omega, modes, masses):
     dx = (np.asarray(mol_ex.atom_coords()) - np.asarray(mol_gs.atom_coords())).ravel()
     dq = dx * np.repeat(np.asarray(masses), 3) ** 0.5   # q = M^1/2 x
     dqk = modes.T @ dq
-    ok = omega > 0
-    s = np.zeros_like(dqk)
-    s[ok] = omega[ok] * dqk[ok] ** 2 / 2.0
-    return s, dqk
+    require_vibrational_modes(omega, 'huang_rhys_from_displacement')
+    return omega * dqk ** 2 / 2.0, dqk
 
 
 def align_to(mol_ref, mol_move, return_rotation=False):
@@ -172,9 +170,7 @@ def align_to(mol_ref, mol_move, return_rotation=False):
     u, _, vt = np.linalg.svd((m[:, None] * b0).T @ a0)
     d = np.sign(np.linalg.det(u @ vt))
     rot = u @ np.diag([1.0, 1.0, d]) @ vt
-    out = mol_move.copy()
-    out.set_geom_(b0 @ rot + ca, unit='Bohr')
-    out.build(False, False)
+    out = molecule_at(mol_move, b0 @ rot + ca)
     return (out, rot) if return_rotation else out
 
 
@@ -185,8 +181,8 @@ def reorganization_from_huang_rhys(s, omega):
     Huang-Rhys spectrum and a relaxation energy must satisfy it, so it is a
     gate and not a definition -- `vibronic_analysis` checks it.
     """
-    ok = omega > 0
-    return float((np.asarray(s)[ok] * omega[ok]).sum())
+    require_vibrational_modes(omega, 'reorganization_from_huang_rhys')
+    return float((np.asarray(s) * omega).sum())
 
 
 def relax_state(surface, mol=None, engine='auto', **kw):
@@ -224,6 +220,9 @@ def relax_state(surface, mol=None, engine='auto', **kw):
     # record says so rather than implying a default nobody declared.
     record['physics'] = getattr(final, 'physics', None)
     record['realization'] = getattr(final, 'realization', None)
+    # the numerics the energies were computed on, which a seam that differences
+    # two records checks (`adiabatic_gap`, `reorganization`)
+    record['numerics_identity'] = numerics_identity(final)
     return record
 
 
@@ -254,11 +253,17 @@ def adiabatic_gap(state_a, state_b):
     only one side has. Two records that carry no declaration -- a hand-built
     surface, a toy -- are differenced as they always were: this module records
     and refuses nothing it cannot check.
+
+    REFUSES two records stamped with different numerics (`NumericsMismatch`):
+    the two minima are on two surfaces, and a gap between two grids, tolerances
+    or quadratures is partly a difference of them.
     """
     physics_a, physics_b = state_a.get('physics'), state_b.get('physics')
     if (physics_a is not None and physics_b is not None
             and not physics_a.comparable_with(physics_b)):
         raise PhysicsMismatch(physics_a, physics_b)
+    require_same_identity(stamp_of(state_a), stamp_of(state_b),
+                          'adiabatic gap')
     return state_a['e_total'] - state_b['e_total']
 
 
@@ -277,6 +282,10 @@ def reorganization(surface_target, state_from, state_target):
     about which of the two, or their average, is called lambda, so this returns
     the ONE-WAY quantity and leaves the convention to the caller.
     """
+    # the donor record gives a geometry only; the target's energy at its own
+    # minimum is differenced against the surface's, so those two must agree
+    require_same_identity(numerics_identity(surface_target),
+                          stamp_of(state_target), 'reorganization')
     return energy_at(surface_target, state_from['mol']) - state_target['e_total']
 
 
@@ -423,3 +432,40 @@ def vibronic_analysis(surface, state, mol_gs, mf_gs, hess=None, top=8,
             print(f'  {omega[i] * HARTREE_TO_CM:10.1f} {s_grad[i]:10.4f} '
                   f'{s_disp[i]:10.4f}')
     return out
+
+
+def promoting_mode_couplings(mol0, omega, modes, masses, soc_at, i, j, dq=0.1):
+    """|dV_ij/dq_k| in Hartree, every real ground-state mode, Herzberg-Teller.
+
+    The correction Samanta, Kim, Coropceanu and Bredas, J. Am. Chem. Soc.
+    139, 4042 (2017) carry beside the Condon term: for an El-Sayed-forbidden
+    pair the vertical <S_I|H_SO|T_J> is near zero and the rate is carried
+    instead by the derivative along a mode that lends the pair the symmetry
+    it lacks.
+
+    soc_at: mol -> the (n_s + 1, n_t) socme table `spin_orbit_couplings`
+    returns, so this function owns no electronic-structure route and works
+    on any of them; `i`, `j` index that table (i = 0 is the ground state
+    row). `omega`, `modes`, `masses` are `normal_modes`'s, and
+    `displace_along_mode` reads the dimensionless step `dq`.
+
+    |V| is differenced through V^2 (`slope_from_squares`): a central
+    difference of the modulus is zero for a Condon-forbidden pair.
+
+    Returns (v0, modes): the Condon term |V_ij(mol0)| in Hartree -- read
+    here rather than left for the caller to recompute -- and a list of
+    (mode index, omega_k in Hartree, |dV/dq_k| in Hartree) over every mode.
+    An imaginary omega_k is not a displacement direction at a minimum and
+    is refused (`require_vibrational_modes`).
+    """
+    require_vibrational_modes(omega, 'promoting_mode_couplings')
+    v0 = float(soc_at(mol0)[i, j])
+    out = []
+    for k in range(modes.shape[1]):
+        v_pm = [float(soc_at(displace_along_mode(mol0, modes, masses, omega,
+                                                  k, sign * dq))[i, j])
+               for sign in (+1, -1)]
+        out.append((k, float(omega[k]),
+                    slope_from_squares(v_pm[0] ** 2, v_pm[1] ** 2, v0 ** 2,
+                                       dq)))
+    return v0, out

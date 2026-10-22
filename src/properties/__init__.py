@@ -54,45 +54,66 @@ through `FiniteDifferenceGradient` instead of being excluded.
 `src.Embedding` and its cRPA-embedded surfaces are out of scope for this
 repository, so no row here dispatches to one; a spec that names such a surface
 is simply not among the combinations `potential_energy_surface` realizes.
+
+The names below are imported on first use, so a module of the gradient layer
+that reads one module of this package (`nonadiabatic`, `surface`,
+`characters`) does not import the drivers, which import the gradient layer.
 """
-from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
-                                  PhysicsMismatch, QPStates, SurfacePhysics)
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    PotentialEnergySurface,
-                                    surface_mean_field)
-from src.properties.optimize import (ground_state_residual_force, optimize,
-                                     optimize_geometric, relax,
-                                     relax_ground_state,
-                                     translation_rotation_basis)
-from src.properties.vibronic import (adiabatic_gap, align_to, energy_at,
-                                     huang_rhys_from_displacement,
-                                     huang_rhys_from_gradient, normal_modes,
-                                     relax_state, reorganization,
-                                     reorganization_four_point,
-                                     reorganization_from_huang_rhys,
-                                     vibronic_analysis)
-from src.properties.conformers import (Conformer, Torsion, boltzmann_weights,
-                                       conformer_average, conformer_rmsd,
-                                       deduplicate, rotatable_bonds,
-                                       search_conformers, torsion_starts,
-                                       torsion_values)
-from src.properties.characters import (ct_character, orbital_fingerprint,
-                                       quasiparticle_character,
-                                       quasiparticle_order, roots,
-                                       surface_order, track_orbital)
-from src.properties.rates import marcus_levich_jortner_rate, marcus_rate
-from src.properties.spin_orbit import (chain_manifolds, isdf_manifolds,
-                                       qdpt_hamiltonian, qdpt_spectrum,
-                                       soc_operator, soc_operator_mo,
-                                       socme_table, spin_orbit_couplings)
-from src.properties.nonadiabatic import (DerivativeCouplings,
-                                         derivative_couplings, mo_overlap,
-                                         state_overlap, translational_sum)
-from src.properties.surfaces import (Realization, compare_surfaces,
-                                     potential_energy_surface)
-from src.properties.excitations import (SurfaceSpec, adiabatic_energy,
-                                        calc_adiabatic_excitation,
-                                        calc_adiabatic_gap,
-                                        calc_emission_energy,
-                                        calc_vertical_excitation, surface_of)
-from src.properties.hessian import numerical_hessian
+import importlib
+
+_EXPORTS = {
+    'src.Base.declaration': ('ChargedExcitation', 'Excitation', 'GroundState',
+                             'PhysicsMismatch', 'QPStates', 'SurfacePhysics'),
+    'src.properties.surface': ('FiniteDifferenceGradient',
+                               'PotentialEnergySurface', 'surface_mean_field'),
+    'src.properties.optimize': ('ground_state_residual_force',
+                                'optimize_geometric', 'relax',
+                                'relax_ground_state',
+                                'translation_rotation_basis'),
+    'src.properties.vibronic': ('adiabatic_gap', 'align_to', 'energy_at',
+                                'huang_rhys_from_displacement',
+                                'huang_rhys_from_gradient', 'normal_modes',
+                                'relax_state', 'reorganization',
+                                'reorganization_four_point',
+                                'reorganization_from_huang_rhys',
+                                'vibronic_analysis'),
+    'src.properties.conformers': ('Conformer', 'Torsion', 'boltzmann_weights',
+                                  'conformer_average', 'conformer_rmsd',
+                                  'deduplicate', 'rotatable_bonds',
+                                  'search_conformers', 'torsion_starts',
+                                  'torsion_values'),
+    'src.properties.characters': ('ct_character', 'orbital_fingerprint',
+                                  'quasiparticle_character',
+                                  'quasiparticle_order', 'roots',
+                                  'surface_order', 'track_orbital'),
+    'src.properties.rates': ('marcus_levich_jortner_rate', 'marcus_rate'),
+    'src.properties.spin_orbit': ('chain_manifolds', 'isdf_manifolds',
+                                  'qdpt_hamiltonian', 'qdpt_spectrum',
+                                  'soc_operator', 'soc_operator_mo',
+                                  'socme_table', 'spin_orbit_couplings'),
+    'src.properties.nonadiabatic': ('DerivativeCouplings',
+                                    'derivative_couplings', 'mo_overlap',
+                                    'state_overlap', 'translational_sum'),
+    'src.properties.surfaces': ('Realization', 'compare_surfaces',
+                                'potential_energy_surface'),
+    'src.properties.excitations': ('SurfaceSpec', 'adiabatic_energy',
+                                   'calc_adiabatic_excitation',
+                                   'calc_adiabatic_gap',
+                                   'calc_emission_energy',
+                                   'calc_vertical_excitation', 'surface_of'),
+    'src.properties.hessian': ('numerical_hessian',),
+}
+_MODULE_OF = {name: module for module, names in _EXPORTS.items()
+              for name in names}
+
+
+def __getattr__(name):
+    """The exported routine or class `name`, imported from its module."""
+    module = _MODULE_OF.get(name)
+    if module is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    return getattr(importlib.import_module(module), name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_MODULE_OF))

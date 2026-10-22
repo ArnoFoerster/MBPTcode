@@ -192,12 +192,13 @@ def check_variants(mol, mf):
         ok &= channels(mol, mf, level, **kw)[0]
     h2 = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)).run()
     for path, matrix_free in (('davidson', True), ('dense', False)):
-        (e, _), warned = solve(h2, level='adc1', nroots=3, spin='singlet',
-                               matrix_free=matrix_free)
-        ok &= check(len(e) == 1 and any('fewer than nroots' in str(w.message)
-                                        for w in warned),
-                    f'{path}: a channel smaller than nroots warns and returns '
-                    'what it holds', f'{len(e)} root(s), {len(warned)} warning(s)')
+        try:
+            solve(h2, level='adc1', nroots=3, spin='singlet', matrix_free=matrix_free)
+            raised = 'no error'
+        except ValueError as exc:
+            raised = str(exc)
+        ok &= check('fewer than nroots' in raised,
+                    f'{path}: a channel smaller than nroots is refused', raised)
     try:
         solve_ee_adc(mf, level='adc2', nroots=1, route='spinorbital',
                      return_parity=True)

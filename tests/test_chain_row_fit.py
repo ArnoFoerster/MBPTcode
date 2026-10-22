@@ -1,7 +1,8 @@
 """The gradient chains on the row-distributed fit: `FrozenFactorization(
 sliced=True, fit='rows')` builds each rank's grid rows of X_mo, D and X_ao
 with `separable_ri.fit_rows` on the frozen points, so no rank forms the fit
-whole at any geometry, and the rows are bitwise the same at every rank count.
+whole at any geometry, and the rows are the same at every rank count to a few
+ulp.
 
 Gated over 1, 2, 3 and 8 simulated ranks (`run_simulated`, threads of this
 process with the real collectives) on water/cc-pVDZ Hartree-Fock at 148
@@ -10,7 +11,7 @@ into 7 tiles and every rank count owns a different set of them, each rank on
 its own Mole:
 
   (a) the rows every rank holds, at the reference and at a displaced
-      geometry, are bitwise the same rows of a one-rank run of the chain;
+      geometry, are the same rows of a one-rank run of the chain to a few ulp;
   (b) the anchored gate: against the whole-fit sliced chain at the same rank
       count, the composed state-pair force, energy and root at a displaced
       geometry, the BSE roots at the reference, the dRPA force and a
@@ -52,7 +53,6 @@ Only (c) catches `row_fit_factors` falling back to the whole fit (D formed
 whole and the rows cut from it by `SlicedFactors.from_whole`): the rows and
 the numbers are the same, only formed whole.
 """
-import functools
 import inspect
 import os
 import sys
@@ -62,22 +62,22 @@ import pytest
 import scipy.linalg
 from pyscf import df as pyscf_df, gto
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
-                                FIT_REASSOCIATION_K, HARTREE_TO_EV,
+from src.Base.constants import ISDF_FIT_REGULARIZATION
+from src.Base.chain_settings import with_setting
+from src.Base.numerics import Numerics, numerics_of
+from src.Base.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIATION_K,
+                                HARTREE_TO_EV,
                                 ISDF_GRADIENT_FLOOR)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base import separable_ri
-from src.Base.separable_ri import (DEFAULT_REGULARIZATION, aux_metric_sqrt,
-                                   fit_M_stable)
+from src.Base.separable_ri import aux_metric_sqrt, fit_M_stable
 from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
                                      whole_factor)
 from src.Base.solvent_screening import SolventScreening
 from src.Base.utils.mpi_grid import (contiguous_block, distributed, lockstep,
                                      partition, run_simulated)
-from src.gradients import excited_state, factor_chain
+from src.gradients import factor_chain, state_following
 from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
@@ -93,6 +93,8 @@ from tests.test_chain_sliced_factors import (COMPOSED_GATHERS, H2O,
                                              H2O_DISPLACED, chain_scf,
                                              own_water, reachable_arrays,
                                              reachable_rows)
+from tests.isdf_test_grid import g1, g1_kw, g1_numerics
+from tests.pins import assert_same, bitwise_arrays
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 #: The package the memory scan traces: every frame whose code lives here.
@@ -131,12 +133,16 @@ def row_kw(block=TILE):
     return dict(sliced=True, fit='rows', fit_block=block)
 
 
-def state_pair(atom=H2O, **kw):
-    """The composed singlet surface on this rank's own Mole, the Casida step
+def state_pair(atom=H2O, bse_conv_tol=None, **layout):
+    """The composed singlet surface on this rank's OWN Mole, the Casida step
     matrix-free so the block action runs on rows."""
     mol = molecule(atom)
-    return RPABSESurface(mol, chain_scf, spin='singlet', mf=chain_scf(mol),
-                         solver='davidson', **kw)
+    choices = dict(layout, solver='davidson')
+    if bse_conv_tol is not None:
+        choices['bse_conv_tol'] = bse_conv_tol
+    return RPABSESurface(
+        mol, chain_scf, spin='singlet', mf=chain_scf(mol),
+        numerics=g1_numerics(mol, numerics_of(choices)))
 
 
 def rows_of(factors):
@@ -145,14 +151,6 @@ def rows_of(factors):
     if isinstance(x_mo, SlicedFactors):
         return x_mo.rows, x_mo.X_mo, x_mo.D, x_mo.X_ao
     return (0, len(crd)), x_mo, d, x_ao
-
-
-def bitwise(a, b):
-    """Every array of `a` holds the bits of the same array of `b`."""
-    return len(a) == len(b) and all(
-        np.asarray(x).shape == np.asarray(y).shape
-        and np.asarray(x).tobytes() == np.asarray(y).tobytes()
-        for x, y in zip(a, b))
 
 
 def relative(a, b):
@@ -178,7 +176,7 @@ def reassociated_fit(mol, layout):
               for s in reversed(range(mol.nbas))]
     shells = [c for c in shells if len(c)]
 
-    def fit(D, F, regularization=DEFAULT_REGULARIZATION):
+    def fit(D, F, regularization=ISDF_FIT_REGULARIZATION):
         blocks = shells + [np.arange(len(mu), D.shape[1])]
         s2 = np.zeros(D.shape[0])
         for c in blocks:
@@ -259,8 +257,7 @@ def adjoint_widths(chain):
     nao, naux = mol.nao, chain.naux
     ngram = len(product_pairs(mol)[0])
     n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
-    budget = inspect.signature(
-        separable_ri.fit_rows).parameters['block_memory_gb'].default
+    budget, = separable_ri.fit_settings(None, 'block_memory_gb')
     cut = len(separable_ri.ao_blocks(mol, chain.M, n2, naux, budget)) > 1
     return (chain.M, {chain.mf0.mo_coeff.shape[1], nao, naux, chain.M, n2,
                       len(chain.layout[0]), ngram, ngram + naux},
@@ -453,11 +450,11 @@ def whole_assembly(gram=True):
         g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                      self.pts_local, self.owner,
                                      frames=self.frames,
-                                     with_frames=self.with_frames,
+                                     with_frames=False,
                                      body=self.body)
         g_fit = dfactor_adjoint_gauges(
             mol, auxmol, crd, [(d_bar, None)], self.layout, self.pts_local,
-            self.owner, frames=self.frames, with_frames=self.with_frames,
+            self.owner, frames=self.frames, with_frames=False,
             gram_layout=product_pairs(mol) if gram else self.layout,
             body=self.body)
         return g_coll, g_fit, None
@@ -488,10 +485,7 @@ def anchored(ref, bar, got, keys, floored=()):
     over FIT_REASSOCIATION_K."""
     lines, ratios = [], {}
     for key in keys:
-        anchor = relative(bar[key], ref[key])
-        if key in floored:
-            anchor = max(anchor, FIT_REALIZATION_ENERGY_TOL
-                         / (FIT_REASSOCIATION_K * abs(float(ref[key]))))
+        anchor = max(relative(bar[key], ref[key]), FIT_REASSOCIATION_FLOOR)
         dist = relative(got[key], ref[key])
         ratios[key] = (dist / anchor if anchor
                        else (0.0 if dist == 0 else np.inf))
@@ -508,12 +502,13 @@ GATED = ('force', 'energy', 'root', 'bse_roots', 'drpa_force', 'step',
 @pytest.mark.parametrize('size', [1] + SIZES)
 def test_rows_through_the_chain_are_bitwise_across_rank_counts(size):
     """Every rank's rows, at the reference and at a displaced geometry, are
-    the same rows of a one-rank run of the chain, bit for bit."""
+    the same rows of a one-rank run of the chain, to a few ulp (two rank
+    splits)."""
 
     def factors(comm):
         mol = own_water()
         chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol),
-                                    **row_kw())
+                                    numerics=numerics_of(g1_kw(mol, row_kw())))
         here, mf = chain.mean_field(own_water(H2O_DISPLACED))
         return (rows_of(chain.factors_at(chain.mol0, chain.mf0)),
                 rows_of(chain.factors_at(here, mf)))
@@ -525,8 +520,12 @@ def test_rows_through_the_chain_are_bitwise_across_rank_counts(size):
         for (rows, *arrays), (_, *full) in zip(per_rank, whole):
             r0, r1 = rows
             assert rows == contiguous_block(len(full[0]), r, size)
-            assert bitwise(arrays, [a[r0:r1] for a in full]), (
-                f'rank {r} of {size}: rows differ from the one-rank chain')
+            assert len(arrays) == len(full), (r, size)
+            for k, (got, want) in enumerate(zip(arrays,
+                                                [a[r0:r1] for a in full])):
+                assert_same(got, want, unit='1', quantity='root', label=(
+                    f'rank {r} of {size}: rows {k} differ from the one-rank '
+                    'chain'))
 
 
 # ------------------------------------------------------ (b), (c) and (d)
@@ -557,7 +556,7 @@ def test_state_pair_on_the_row_fit(size, monkeypatch):
             print(f'\n{size} ranks: ' + '; '.join(lines))
         assert max(ratios.values()) <= FIT_REASSOCIATION_K, (r, lines)
         for key in GATED:
-            assert bitwise([rows[r][key]], [rows[0][key]]), (
+            assert bitwise_arrays([rows[r][key]], [rows[0][key]]), (
                 f'rank {r} of {size}: {key} != rank 0')
         assert rows[r]['gathers'] == ROW_FIT_GATHERS
         assert whole[r]['gathers'] == COMPOSED_GATHERS
@@ -663,9 +662,13 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
                       product_fit_factors(fit_M_stable, gram=False))
         retired = run(**row_kw())
     with monkeypatch.context() as patch:
-        patch.setattr(excited_state, 'solve_casida_davidson',
-                      functools.partial(solve_casida_davidson,
-                                        preconditioner='bare'))
+        def bare_davidson(*args, numerics=None, **kwargs):
+            return solve_casida_davidson(
+                *args, numerics=with_setting(numerics or Numerics(),
+                                             'bse.preconditioner', 'bare'),
+                **kwargs)
+
+        patch.setattr(state_following, 'solve_casida_davidson', bare_davidson)
         bare = four(patch)
     bare_own, bare_near = anchored(bare[2], bare[3], bare[0], ('bse_roots',))
     bare_same, bare_beside = anchored(bare[2], bare[3], bare[1],
@@ -711,8 +714,12 @@ def test_refreeze_carries_settings():
         refrozen = surface.refreeze(own_water(H2O_DISPLACED))
         fac = refrozen.ground.factorization
         assert fac is refrozen.excited.factorization
-        chains = [RPAGroundStateChain(own_water(), chain_scf, **row_kw()),
-                  ExcitedStateChain(own_water(), chain_scf, **row_kw())]
+        chains = [RPAGroundStateChain(
+                      own_water(), chain_scf,
+                      numerics=numerics_of(g1_kw(own_water(), row_kw()))),
+                  ExcitedStateChain(
+                      own_water(), chain_scf,
+                      numerics=g1_numerics(own_water(), numerics_of({**row_kw()})))]
         alone = [c.refreeze(own_water(H2O_DISPLACED)).factorization
                  for c in chains]
         return [(f.sliced, f.fit, f.fit_block) for f in [fac] + alone]
@@ -749,7 +756,9 @@ def test_the_dispatcher_carries_the_fit():
 
 def test_what_the_row_fit_cannot_serve_is_refused():
     mol = own_water()
-    solvated = SolventScreening(mol, eps=1.78)
+    # the frozen-polarization limit, declared: the chain's SCF is the gas
+    # phase's
+    solvated = SolventScreening(mol, eps=1.78, frozen_polarization=True)
     built = []
 
     def counted(m):
@@ -757,26 +766,32 @@ def test_what_the_row_fit_cannot_serve_is_refused():
         return chain_scf(m)
 
     with pytest.raises(ValueError, match='sliced=True'):
-        FrozenFactorization(mol, fit='rows')
+        FrozenFactorization(mol, Numerics(isdf={'fit': 'rows', 'counts': g1(mol)}))
     with pytest.raises(ValueError, match='rows'):
-        FrozenFactorization(mol, sliced=True, fit='cyclic')
+        FrozenFactorization(mol, Numerics(isdf={'fit': 'cyclic', 'counts': g1(mol)},
+                                          layout={'sliced': True}))
     with pytest.raises(ValueError, match='tile'):
-        FrozenFactorization(mol, sliced=True, fit_block=TILE)
+        FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+                                          layout={'sliced': True, 'fit_block': TILE}))
     with pytest.raises(ValueError, match='sliced=False'):
-        FactorChain(mol, counted, **row_kw())
+        FactorChain(mol, counted, numerics=numerics_of(g1_kw(mol, row_kw())))
     with pytest.raises(ValueError, match='fit='):
-        ExcitedStateChain(mol, counted, fit='rows',
-                          factorization=FrozenFactorization(mol, sliced=True))
+        ExcitedStateChain(
+            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+                                                                          layout={'sliced': True})),
+            numerics=Numerics(isdf={'fit': 'rows'}))
     with pytest.raises(ValueError, match='fit_block'):
-        ExcitedStateChain(mol, counted, fit_block=32,
-                          factorization=FrozenFactorization(mol, **row_kw()))
-    with pytest.raises(ValueError, match='row fit'):
-        RPAGroundStateChain(mol, counted, environment=solvated, **row_kw())
-    with pytest.raises(ValueError, match='reaction field'):
-        ExcitedStateChain(mol, counted, environment=solvated, **row_kw())
+        ExcitedStateChain(
+            mol, counted, factorization=FrozenFactorization(mol, numerics_of(g1_kw(mol, row_kw()))),
+            numerics=Numerics(layout={'fit_block': 32}))
     assert built == [], 'a refusal came only after an SCF'
+    # a continuum is a further gauge of the one fit, served by rows
+    # (tests/test_solvated_row_fit.py)
+    ExcitedStateChain(mol, chain_scf, environment=solvated,
+                      numerics=g1_numerics(mol, numerics_of(row_kw())))
     with pytest.raises(ValueError, match='never forms the whole fit'):
-        chain = RPAGroundStateChain(mol, chain_scf, **row_kw())
+        chain = RPAGroundStateChain(mol, chain_scf,
+                                    numerics=numerics_of(g1_kw(mol, row_kw())))
         chain.factors(mol, chain.auxmol(mol), chain.coords(mol))
     # one rank is the row fit too, and the whole grid
     x_mo, d, *_ = chain.factors_at(chain.mol0, chain.mf0)

@@ -57,12 +57,13 @@ and one Z-vector per coupling pair (T1-T2, S1-S2).
 """
 import numpy as np
 
-from src.gradients.derivative_coupling import (configuration_coupling,
-                                               state_to_state_density)
+from src.Base.pyscf_interface import occupied_count
+from src.gradients.derivative_coupling import evaluated_coupling
 from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
                                        GROUND_SPIN_FACTOR,
                                        ground_state_element,
                                        interstate_element)
+from src.properties.rates import require_vibrational_modes
 from src.properties.vibronic import project_coupling
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization)
@@ -116,7 +117,7 @@ def mode_derivatives(dv_cart, modes, masses, omega, rotation=None):
     dq_k = sqrt(omega_k) dQ_k with Q_k mass-weighted, so the Cartesian
     derivative is projected like a gradient (`vibronic.project_coupling`) and
     divided by sqrt(omega_k); |dV/dq_k| is what `rates.spin_vibronic_rate`
-    takes. Imaginary and zero modes come back as zero.
+    takes. Every mode must be a vibration (`require_vibrational_modes`).
 
     rotation: the (3, 3) Kabsch matrix of `vibronic.align_to(...,
     return_rotation=True)` when the couplings were computed in another frame
@@ -126,11 +127,11 @@ def mode_derivatives(dv_cart, modes, masses, omega, rotation=None):
     if rotation is not None:
         dv = np.einsum('axe,xy->aye', dv, np.asarray(rotation, float))
     w = np.asarray(omega, float)
+    require_vibrational_modes(w, 'mode_derivatives')
     out = np.zeros((len(w), dv.shape[-1]))
-    real = w > 0
     for eta in range(dv.shape[-1]):
         proj = project_coupling(dv[..., eta], modes, masses)
-        out[real, eta] = proj[real] / np.sqrt(w[real])
+        out[:, eta] = proj / np.sqrt(w)
     return out, np.linalg.norm(out, axis=1)
 
 
@@ -142,27 +143,14 @@ def _root(ev, key):
     return spin, x[:, r], y[:, r], float(om[r])
 
 
-def evaluated_coupling(ev, m, n):
-    """(natm, 3) d_mn = <m|d/dR n> between two roots of one `StateEvaluation`.
-
-    The amplitude term is the interstate numerator `evaluate(couplings=...)`
-    computed, over Omega_n - Omega_m; the configuration term is one Z-vector
-    (`derivative_coupling.configuration_coupling`). The numerator is
-    symmetric, so either ordering of the pair in `ev.interstate` serves.
-    """
-    pair = (m, n) if (m, n) in ev.interstate else (n, m)
-    if pair not in ev.interstate:
-        raise ValueError(f'no interstate numerator for {(m, n)!r}; pass '
-                         f'couplings=[{(m, n)!r}] to evaluate')
-    num = ev.interstate[pair][0]
-    spin_m, xm, ym, om_m = _root(ev, m)
-    spin_n, xn, yn, om_n = _root(ev, n)
-    if spin_m != spin_n:
-        raise ValueError(f'{m!r} and {n!r} are of different spin')
-    nocc = int(np.count_nonzero(np.asarray(ev.mf.mo_occ) > 0))
-    goo, gvv = state_to_state_density(nocc, xm, ym, xn, yn)
-    return (np.asarray(num) / (om_n - om_m)
-            + configuration_coupling(ev.mol, ev.mf, nocc, goo, gvv))
+def merge_scf_flags(held, flags):
+    """Append to `held` each of `flags` (a coupling's or force's
+    `scf_flags`) not held yet, by where and residual; returns `held`."""
+    for flag in flags or ():
+        key = (flag.get('where'), flag.get('residual'))
+        if all((f.get('where'), f.get('residual')) != key for f in held):
+            held.append(flag)
+    return held
 
 
 def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
@@ -184,11 +172,13 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
 
     Returns a dict: 'v0' |V(S, T)| and 'v0_vector', 'dv_cart' (natm, 3, 3),
     'paths' {label: (natm, 3, 3)} per intermediate state, 'couplings'
-    {label: (natm, 3)} the d used, 'soc' {label: (3,)} the elements used, and
+    {label: (natm, 3)} the d used, 'soc' {label: (3,)} the elements used,
+    'scf_flags' the couplings' own (a mean field above `scf_force_tol`,
+    warned about and carried on; empty when clean), and
     with modes, masses and omega given, 'dv_dq' (nmode,) and 'dv_dq_vector'
     (nmode, 3), plus 'dv_dq_paths' {label: (nmode,)}.
     """
-    nocc = int(np.count_nonzero(np.asarray(ev.mf.mo_occ) > 0))
+    nocc = occupied_count(ev.mf)
     for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
         if ev.target[key][0] != spin:
             raise ValueError(f'{key!r} is not a {spin}')
@@ -198,15 +188,18 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     check_normalization(np.c_[xt], np.c_[yt])
     v0 = soc_vector(h_mo, nocc, (xs, ys), (xt, yt))
     v_s, d_s, v_t, d_t, labels = {}, {}, {}, {}, {}
+    scf = []
     for key in triplet_paths:
         _, xn, yn, _ = _root(ev, key)
         v_t[key] = soc_vector(h_mo, nocc, (xs, ys), (xn, yn))
-        d_t[key] = evaluated_coupling(ev, key, triplet)
+        d_t[key], diags = evaluated_coupling(ev, key, triplet)
+        merge_scf_flags(scf, diags.get('scf_flags'))
         labels[key] = f'{key[0]}{key[1] + 1}'
     for key in singlet_paths:
         _, xm, ym, _ = _root(ev, key)
         v_s[key] = soc_vector(h_mo, nocc, (xm, ym), (xt, yt))
-        d_s[key] = evaluated_coupling(ev, key, singlet)
+        d_s[key], diags = evaluated_coupling(ev, key, singlet)
+        merge_scf_flags(scf, diags.get('scf_flags'))
         labels[key] = f'{key[0]}{key[1] + 1}'
     paths = {}
     for key in v_t:
@@ -219,7 +212,8 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     out = {'v0': float(np.linalg.norm(v0)), 'v0_vector': v0, 'dv_cart': dv,
            'paths': paths,
            'couplings': {labels[k]: v for k, v in {**d_s, **d_t}.items()},
-           'soc': {labels[k]: v for k, v in {**v_s, **v_t}.items()}}
+           'soc': {labels[k]: v for k, v in {**v_s, **v_t}.items()},
+           'scf_flags': scf}
     if modes is not None:
         out['dv_dq_vector'], out['dv_dq'] = mode_derivatives(
             dv, modes, masses, omega, rotation)

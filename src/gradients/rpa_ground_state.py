@@ -27,7 +27,7 @@ the derivative of that fit's estimator (`FrozenFactorization`).
 """
 import numpy as np
 
-from src.Base.constants import RPA_ENERGY_NFREQ
+from src.Base.chain_settings import CarriedGrids, chain_setting, rpa_counts
 from src.Base.declaration import SurfacePhysics
 from src.Base.environment import environment_label
 from src.Base.utils.grids import gap_scaled_w0, gauss_legendre_grid
@@ -39,7 +39,8 @@ from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, ground_state_energy)
 from src.SingleReference.LinearResponse.solvated_rpa_energy import fold_terms
 from src.Base.dispersion import refuse_dispersion_under_rpa
-from src.gradients.factor_chain import FactorChain
+from src.Base.geometry import molecule_at
+from src.gradients.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.solvated_rpa_energy import fold_bar_to_gauge
 from src.gradients.space_time_adjoint import rpa_energy_and_adjoint
 
@@ -61,22 +62,27 @@ class RPAGroundStateChain(FactorChain):
     solvated_rpa_energy.py`), on the cavity the caller gives: on the
     electrostatic one the term is several times too large, and it belongs on
     the solvent-accessible surface.
+
+    In an EQUILIBRIUM continuum E_0 and its force are those of the
+    non-equilibrium one bit for bit (`environment_at`): the ground state
+    relaxes in eps_static in both modes, and the equilibrium switch moves only
+    an excitation's response.
     """
 
     READS_SLICED_FACTORS = True
 
-    def __init__(self, mol, scf_factory, basis=None, auxbasis=None, counts=None,
-                 n_start=1, ntau=None, nfreq=RPA_ENERGY_NFREQ, frames='frozen',
-                 tile_gb=None, mf=None, environment=None, factorization=None,
-                 fold=False, radii=None, sliced=None, fit=None,
-                 fit_block=None):
-        super().__init__(mol, scf_factory, basis=basis, auxbasis=auxbasis,
-                         counts=counts, n_start=n_start, frames=frames, mf=mf,
-                         environment=environment, factorization=factorization,
-                         radii=radii, sliced=sliced, fit=fit,
-                         fit_block=fit_block)
-        self.tile_gb = tile_gb
-        self.fold = bool(fold)
+    # the working-set cap of the tiled intermediates, and whether the energy
+    # folds the continuum's frequency dependence: choices of `settings`
+    tile_gb = chain_setting('layout.tile_gb')
+    fold = chain_setting('solvent.fold')
+
+    def __init__(self, mol, scf_factory, numerics=None, mf=None,
+                 environment=None, factorization=None, carried=None):
+        super().__init__(mol, scf_factory, numerics=numerics, mf=mf,
+                         environment=environment, factorization=factorization)
+        # the quadrature: the one a chain before this resolved (`carried`),
+        # else its own where derived, else the excited state's
+        ntau, nfreq = rpa_counts(self.settings, carried)
         refuse_dispersion_under_rpa(self.mf0, type(self).__name__)
         eps = np.asarray(self.mf0.mo_energy, float)
         occ, virt = get_occ_virt_indices(eps, self.nocc)
@@ -94,6 +100,23 @@ class RPAGroundStateChain(FactorChain):
 
     def _tile_kw(self):
         return {} if self.tile_gb is None else {'tile_gb': self.tile_gb}
+
+    def environment_at(self, mol):
+        """The screening E_c reads at THIS geometry: the solvent's electronic
+        response, in either solvation mode.
+
+        E_c is the zero-point energy of the solute's density fluctuations, and
+        only the solvent's electrons follow them -- with eps_inf and its pole
+        g(iw) (Duchemin, Amblard and Blase, J. Chem. Theory Comput. 20, 9072
+        (2024)). The slow orientational polarization follows the mean density,
+        which the mean field already carries at eps_static, and in equilibrium
+        it relaxes around the excitation's density difference, which only the
+        excitation carries. So an equilibrium continuum is read through its
+        non-equilibrium partner: E_0 and its force are one function in both
+        modes, while the declared environment (and its mean field) stays the
+        one given. eps_static inside E_c would be a different functional.
+        """
+        return correlation_screening(super().environment_at(mol))
 
     def _fold_terms(self, mol, auxmol):
         """(screening, counter_term) of the frequency-dependent fold, or
@@ -165,6 +188,7 @@ class RPAGroundStateChain(FactorChain):
         """(dE_c/dR, E_c, diagnostics). Nothing larger than three-index."""
         self.require_differentiable_environment()
         mol, mf = self.mean_field(mol, mf)
+        self.flag_scf_quality(mf, 'correlation_gradient')
         (e_c, eps_bar, x_bar, d_bar, fold_bar), (auxmol, crd, x_mo) = (
             self._forward(mol, mf, True))
         # THE EXACT-EXCHANGE / DOUBLE-COUNTING TERM RIDES ALONG. E_0 is
@@ -213,8 +237,10 @@ class RPAGroundStateChain(FactorChain):
         """E_HF + E_c^dRPA in Hartree: the surface a property routine steps on."""
         return self.energy(mol, mf)[0]
 
-    def refreeze(self, mol, factorization=None):
-        """The same surface with radii, layout, frames and grids rebuilt at `mol`.
+    def _refrozen(self, mol, factorization, mf, walked, qp_floor):
+        """The same surface with radii, layout, frames and grids rebuilt at
+        `mol` (`FactorChain.refreeze`). Nothing here is keyed to orbitals, so
+        `walked` carries nothing over.
 
         The tau count and the frequency quadrature are carried over as resolved
         integers rather than re-derived: a quadrature that changes size between
@@ -222,23 +248,64 @@ class RPAGroundStateChain(FactorChain):
         not compare. The environment is the same object; it rebuilds itself
         around the new atoms.
 
-        The fold and an explicit radii set travel for the same reason the
-        quadrature does: each is a choice of FUNCTIONAL, and a walk that
-        changed one at the first refreeze would compare two surfaces.
+        The fold travels for the same reason the quadrature does: it is a
+        choice of FUNCTIONAL, and a walk that changed it at the first
+        refreeze would compare two surfaces. The factorization's settings
+        travel inside `factorization`.
         """
-        return type(self)(mol, self.scf_factory, basis=self.basis,
-                          auxbasis=self.auxbasis, counts=self.counts,
-                          n_start=self.n_start, ntau=self.ntau,
-                          nfreq=len(self.grid.omega_points),
-                          frames=self.frames_mode, tile_gb=self.tile_gb,
-                          environment=self.environment,
-                          factorization=factorization, fold=self.fold,
-                          radii=(self.radii
-                                 if self.factorization.radii_tag is not None
-                                 else None),
-                          sliced=self.sliced, fit=self.fit,
-                          fit_block=self.fit_block)
+        return type(self)(mol, self.scf_factory, numerics=self.settings,
+                          mf=mf, environment=self.environment,
+                          factorization=factorization,
+                          carried=self.carried_grids())
+
+    def carried_grids(self):
+        """The resolved dRPA quadrature a refreeze or a restore starts from."""
+        return CarriedGrids(ntau_rpa=int(self.ntau),
+                            nfreq_rpa=len(self.grid.omega_points))
+
+    def settings_record(self):
+        """The chain's choices besides its factorization: the resolved
+        quadratures, the fold and the tile cap."""
+        return {'ntau': int(self.ntau), 'nfreq': len(self.grid.omega_points),
+                'fold': self.fold, 'tile_gb': self.tile_gb}
+
+    def to_record(self):
+        """Everything this surface froze, for `from_record`: the reference
+        geometry, its settings, the factorization and the reference mean
+        field's ISDF-K pair layout. The `Numerics` is the one asked for and
+        the resolved quadrature is `carried`, as a refreeze carries it."""
+        return {'class': f'{type(self).__module__}:{type(self).__qualname__}',
+                'mol0_coords': np.array(self.mol0.atom_coords(), float),
+                'settings': self.settings_record(),
+                'numerics': self.settings,
+                'carried': self.carried_grids(),
+                'factorization': self.factorization.to_record(),
+                'scf_layout': self.scf_layout()}
+
+    @classmethod
+    def from_record(cls, record, mol, scf_factory, environment=None, mf=None,
+                    factorization=None):
+        """The surface `to_record` wrote, rebuilt without deriving any
+        convention again: one SCF at its reference geometry (or `mf`), the
+        recorded factorization (or `factorization`, the same one another half
+        already read back) and the resolved quadratures."""
+        chain = cls(molecule_at(mol, record['mol0_coords']), scf_factory,
+                    environment=environment, mf=mf,
+                    factorization=(FrozenFactorization.from_record(
+                        record['factorization']) if factorization is None
+                        else factorization),
+                    numerics=record['numerics'], carried=record.get('carried'))
+        chain._scf_layout = {'layout': record['scf_layout']}
+        return chain
 
     def label(self):
         """The state and the method, for a log line or a relaxation record."""
         return f'dRPA ground state / {self.basis}'
+
+
+def correlation_screening(environment):
+    """`environment` as a correlation energy's fluctuations see it: a continuum
+    in equilibrium answers with its non-equilibrium partner (response at
+    eps_inf, pole g(iw)); everything else is returned as it is."""
+    partner = getattr(environment, 'non_equilibrium_partner', None)
+    return environment if partner is None else partner()

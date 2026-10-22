@@ -12,9 +12,10 @@ Water/cc-pVDZ (HF, DF) on the chain's own ISDF factors. Gated here:
 - [1 - chi0(i.nu)] is factorized by Cholesky (`screening_solver`), which
   matches LU to rounding and falls back to LU, with a warning, on a matrix
   that is not positive definite.
-- a root rejected as no quasiparticle is demoted and the set re-solved on
-  the same grid. The quadrature Newton is scripted there, so which root is
-  where is fixed by the test.
+- a root of pole strength outside (0, 1] is kept, warned about and flagged
+  (it was demoted and the set re-solved without it), and
+  the set is solved on the same grid. The quadrature Newton is scripted
+  there, so which root is where is fixed by the test.
 """
 import os
 import sys
@@ -27,8 +28,8 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CD_NFREQ, CD_NFREQ_SOP, ISDF_TILE_GB,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
+from src.Base.numerics import numerics_of
+from src.Base.constants import (CD_NFREQ, CD_NFREQ_SOP, ISDF_TILE_GB, SCF_DIFFERENTIABLE_CONV_TOL,
                                 SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates
 from src.SingleReference.GW.contour_deformation import (
@@ -36,9 +37,10 @@ from src.SingleReference.GW.contour_deformation import (
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.LinearResponse.space_time import (
     owned_frequency_blocks, polarizability_projected_rows, three_index_slice)
-import src.gradients.excited_state as excited_state
+import src.gradients.qp_set as qp_set_module
 import src.gradients.qp_space_time as qp_space_time
 from src.gradients.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1_numerics
 
 #: Cholesky against LU on the same chi0(i.nu): both backward stable on a
 #: matrix with eigenvalues in [1, ~2], so wc agrees to rounding, relative to
@@ -64,22 +66,23 @@ def water():
     return mol, factory(mol)
 
 
-def chain_on(water, **kw):
+def chain_on(water, nfreq_cd=None, **route):
     """(chain, the arguments of a forward set solve on its factors)."""
     mol, mf = water
-    chain = ExcitedStateChain(mol, factory, mf=mf, **kw)
+    chain = ExcitedStateChain(mol, factory, mf=mf,
+                              numerics=g1_numerics(mol, numerics_of({**route, 'nfreq_cd': nfreq_cd})))
     x_mo, d, eps, mu = chain._factors_for(mol, mf)[:4]
-    return chain, (x_mo, d, eps, mu, 0.0, np.zeros(len(chain.qp_set)))
+    return chain, (x_mo, d, eps, mu, 0.0, np.zeros(len(chain.resolved.qp_set)))
 
 
 def recorded_solves(monkeypatch):
     """[nfreq] per `qp_set_gradient` call of the chain."""
-    calls, real = [], excited_state.qp_set_gradient
+    calls, real = [], qp_set_module.qp_set_gradient
 
     def solve(*a, **k):
         calls.append(len(a[5]))
         return real(*a, **k)
-    monkeypatch.setattr(excited_state, 'qp_set_gradient', solve)
+    monkeypatch.setattr(qp_set_module, 'qp_set_gradient', solve)
     return calls
 
 
@@ -88,12 +91,12 @@ def test_cholesky_matches_lu_on_the_frequency_pass(water, monkeypatch):
     """wc from the Cholesky pass against the same contraction by LU, block
     by block on the same chi0(i.nu); and no LU is taken on the way."""
     chain, (x_mo, d, eps, mu, _, _) = chain_on(water, qp_window=STATES)
-    grid = chain.gw_grid
+    grid = chain.conventions.gw_grid
     proj = polarizability_projected_rows(x_mo, d, eps, chain.nocc,
                                          grid.tau_points, mu=mu)
     Bps = [three_index_slice(x_mo, d, p) for p in STATES]
     naux = d.shape[1]
-    ref = [np.zeros((len(chain.nu), B.shape[1])) for B in Bps]
+    ref = [np.zeros((len(chain.conventions.nu), B.shape[1])) for B in Bps]
     for ks, blk in owned_frequency_blocks(proj, grid.cosft_wt, ISDF_TILE_GB):
         for m, k in enumerate(ks):
             lu = scipy.linalg.lu_factor(np.eye(naux) - blk[m])
@@ -131,13 +134,13 @@ def test_a_pole_model_set_takes_the_fixed_grid_once(water, monkeypatch):
     admitted = list(resolve_qp_states(QPStates(), eps, mol.nelectron // 2,
                                       degeneracy_tol=1e-6).explicit)
     chain, args = chain_on(water, qp_window=admitted, residue_route='sop')
-    assert chain.nfreq_cd == CD_NFREQ
+    assert chain.conventions.nfreq_cd == CD_NFREQ
     calls = recorded_solves(monkeypatch)
     chain._qp_set_solve(*args)
     assert set(chain.qp_diagnostics['routes'].values()) == {'sop'}
     # the freezing solve and its repeat from the roots it froze, one grid
     assert calls == [CD_NFREQ_SOP] * 2, calls
-    assert chain.nfreq_cd == CD_NFREQ_SOP and chain.cd_sized
+    assert chain.conventions.nfreq_cd == CD_NFREQ_SOP and chain.conventions.cd_sized
 
 
 def test_an_asked_grid_is_a_floor_under_the_pole_model_grid(water,
@@ -167,7 +170,7 @@ def test_a_set_on_the_quadrature_takes_the_plain_grid_once(water,
     chain._qp_set_solve(*args)
     assert chain.qp_diagnostics['routes'][0] not in ('sop', 'scissor')
     assert calls == [CD_NFREQ] * 2, calls
-    assert chain.nfreq_cd == CD_NFREQ and chain.cd_sized
+    assert chain.conventions.nfreq_cd == CD_NFREQ and chain.conventions.cd_sized
 
 
 # ------------------------------------------ one grid, one verdict per root
@@ -208,22 +211,23 @@ def test_a_root_beside_its_own_pole_is_solved_on_the_one_grid(quadrature_set,
     asked = scripted(monkeypatch, chain, script)
     chain._qp_set_solve(*args)
     assert asked == [(p, CD_NFREQ) for p in STATES] * 2
-    assert chain.nfreq_cd == CD_NFREQ and chain.cd_sized
+    assert chain.conventions.nfreq_cd == CD_NFREQ and chain.conventions.cd_sized
 
 
-@pytest.mark.filterwarnings('ignore:quasiparticle roots with a pole strength')
-def test_a_rejected_root_is_demoted_on_the_same_grid(quadrature_set,
-                                                     monkeypatch):
+def test_a_root_outside_the_bounds_is_kept_on_the_same_grid(quadrature_set,
+                                                             monkeypatch):
     chain, args, eps = quadrature_set
     script = {p: (far(eps, p), 0.9) for p in STATES}
     script[2] = (far(eps, 2), -0.5)
     asked = scripted(monkeypatch, chain, script)
-    chain._qp_set_solve(*args)
-    assert list(chain.qp_set) == [3, 4] and list(chain.qp_demoted) == [2]
-    assert chain.qp_demoted[2]['z'] == -0.5
-    assert asked == ([(p, CD_NFREQ) for p in STATES]
-                     + [(p, CD_NFREQ) for p in (3, 4)] * 2)
-    assert chain.nfreq_cd == CD_NFREQ
+    with pytest.warns(RuntimeWarning, match='pole strength outside'):
+        chain._qp_set_solve(*args)
+    assert list(chain.resolved.qp_set) == list(STATES)
+    assert list(chain.resolved.qp_z_outside) == [2]
+    assert chain.resolved.qp_z_outside[2]['z'] == -0.5
+    assert chain.qp_diagnostics['z'][2] == -0.5
+    assert asked == [(p, CD_NFREQ) for p in STATES] * 2
+    assert chain.conventions.nfreq_cd == CD_NFREQ
 
 
 if __name__ == '__main__':

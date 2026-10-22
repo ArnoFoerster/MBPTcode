@@ -19,7 +19,7 @@ import sys
 import numpy as np
 from pyscf import lib
 
-from src.Base.constants import ALLOCATION_MEMORY_FRACTION
+from src.Base.constants import ALLOCATION_MEMORY_FRACTION, BYTES_PER_GB
 
 try:                    # optional: the resident size off Linux
     import psutil
@@ -117,3 +117,14 @@ def describe_df_storage(mf):
     cderi_in_core = None if cderi is None else isinstance(cderi, np.ndarray)
     return dict(cderi_gb=cderi_gb, cderi_in_core=cderi_in_core,
                 max_memory_mb=mf.max_memory)
+
+
+def tile_width(per_index_bytes, cap, numerics):
+    """Indices per tile: as many as numerics.layout.tile_gb (a
+    `src.Base.numerics.Numerics`; the working-set cap of one tile, GB) holds at
+    per_index_bytes each, at least one and at most cap. A layout without a
+    tile_gb is refused: the width is the caller's choice, not a default here."""
+    tile_gb = numerics.layout.tile_gb
+    if tile_gb is None:
+        raise ValueError('tile_width needs numerics.layout.tile_gb')
+    return int(max(1, min(cap, tile_gb * BYTES_PER_GB // per_index_bytes)))

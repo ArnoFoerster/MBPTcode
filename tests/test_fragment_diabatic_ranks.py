@@ -117,8 +117,10 @@ from src.gradients.excited_state import ExcitedStateChain
 from src.gradients.fragment_diabatic import DiabaticGradient
 from src.properties import fragment_bse
 from src.properties.surfaces import potential_energy_surface
-from tests.test_fragment_diabatic import (AUX, BASIS, DIMER, FRAGMENTS, SITES,
-                                          factory)
+from src.Base.numerics import numerics_of
+from tests.isdf_test_grid import g1
+from tests.test_fragment_diabatic import (AUX, BASIS, DIMER, FRAGMENTS, OMEGA0,
+                                          SITES, factory)
 
 #: The `reduced` bars (module docstring).
 PARTITION_BAR = 1e-10
@@ -354,16 +356,15 @@ def own_mean_field(gate, mf0):
 
 def evaluate(mol, mf, tda, adjoint, sliced):
     """The partition and the ELEMENTS' gradients of one run."""
-    chain = ExcitedStateChain(mol, factory, bse_tda=tda, auxbasis=AUX, mf=mf,
-                              sliced=sliced, bse_adjoint=adjoint)
+    chain = ExcitedStateChain(mol, factory, bse_tda=tda, mf=mf, numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol), 'sliced': sliced, 'bse_adjoint': adjoint}))
     return measure(DiabaticGradient(chain, FRAGMENTS, SITES, mf=mf,
-                                    route='isdf'))
+                                    route='isdf', omega0=OMEGA0))
 
 
 def isdf_factory(mol):
     """An LRC-wPBEh ISDF-K mean field at grid G1: converged here serially,
     built and handed to the chain unconverged under ranks, which converges it
-    over them (`factor_chain.converged_factory`)."""
+    over them (`reference_mean_field.converged_factory`)."""
     mf = dft.RKS(mol, xc=ISDF_XC)
     elements = sorted({mol.atom_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid('G1', str(mol.basis), elements,

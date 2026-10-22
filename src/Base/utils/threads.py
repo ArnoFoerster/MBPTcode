@@ -85,6 +85,9 @@ _TAKEN = threading.local()
 _ROW_POOLS = {}
 _ROW_POOLS_LOCK = threading.Lock()
 
+#: `openmp_threads`' count per process, read once by the main thread.
+_OPENMP_THREADS = {}
+
 
 class _BlasLimit:
     """Every BLAS pool at `limit` threads from entry to exit, the counts found
@@ -165,24 +168,58 @@ def blas_threads():
 
     The largest count over the loaded BLAS libraries -- there is more than one
     when MKL and OpenBLAS are both mapped in -- since that is the pool a GEMM
-    would actually use.
+    would actually use. None in a thread other than the main one, which may
+    not read the libraries (`_library_threads`).
     """
-    if threadpool_info is None:
+    counts = _library_threads('blas')
+    if counts is None:
         return None
-    counts = [lib['num_threads'] for lib in threadpool_info()
-              if lib.get('user_api') == 'blas' and lib.get('num_threads')]
     return max(counts) if counts else None
 
 
 def openmp_threads():
     """Threads the process's OpenMP pools are set to, the largest of them --
     the count OMP_NUM_THREADS gave the run, which no wrap here moves -- or 1
-    where none can be read."""
-    if threadpool_info is None:
+    where none can be read.
+
+    Read once per process, by the main thread, and kept, since nothing moves
+    it; another thread gets the main thread's count, or 1 before the main
+    thread has read one (`_library_threads`)."""
+    pid = os.getpid()
+    if pid in _OPENMP_THREADS:
+        return _OPENMP_THREADS[pid]
+    counts = _library_threads('openmp')
+    if counts is None:
         return 1
-    counts = [lib['num_threads'] for lib in threadpool_info()
-              if lib.get('user_api') == 'openmp' and lib.get('num_threads')]
-    return max(counts) if counts else 1
+    _OPENMP_THREADS[pid] = max(counts) if counts else 1
+    return _OPENMP_THREADS[pid]
+
+
+def _library_threads(user_api):
+    """The thread counts of the loaded libraries of `user_api`, or None where
+    they may not be read: threadpoolctl absent, or a thread other than the
+    main one. threadpoolctl finds the libraries with dl_iterate_phdr and a
+    Python callback, which holds the loader's lock while it waits for the
+    GIL; a second thread that holds the GIL and needs that lock -- numpy's
+    temporary elision walks the stack through dl_iterate_phdr -- waits for
+    the first, and neither moves. Two simulated ranks deadlock so, one in
+    `openmp_threads`, one in an array product."""
+    if (threadpool_info is None
+            or threading.current_thread() is not threading.main_thread()):
+        return None
+    return [lib['num_threads'] for lib in threadpool_info()
+            if lib.get('user_api') == user_api and lib.get('num_threads')]
+
+
+def blas_libraries():
+    """The BLAS libraries this process loaded, {api, version, threads} each,
+    or None where they may not be read (`_library_threads`)."""
+    if (threadpool_info is None
+            or threading.current_thread() is not threading.main_thread()):
+        return None
+    return [{'api': lib.get('internal_api'), 'version': lib.get('version'),
+             'threads': lib.get('num_threads')}
+            for lib in threadpool_info() if lib.get('user_api') == 'blas']
 
 
 def row_map(fn, n, threads):

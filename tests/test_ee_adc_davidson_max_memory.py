@@ -10,6 +10,8 @@ reaching davidson1 is 0 and the subspace goes to disk; with 10**6 MB it is that
 budget less the process's use, under 10 GB here. Both give the same roots to
 1e-10 Eh, since only where the subspace is stored differs. solve_symmetric called
 without max_memory hands davidson1 none, so its other callers keep pyscf's default.
+Every davidson1 call of one solve (the roots, then the lowest-k completion on
+their complement) gets the same budget.
 
 Run: python tests/test_ee_adc_davidson_max_memory.py
 """
@@ -79,10 +81,12 @@ def check_ee_adc_budget():
     ncore = int((mol.atom_charges() > 2).sum())
     e_small, seen_small = solve(mf, 1, ncore)
     e_large, seen_large = solve(mf, LARGE_MB, ncore)
-    ok = check(seen_small == [0], 'mf.max_memory = 1 MB reaches davidson1 as 0',
-               f'received {seen_small}')
+    # one davidson1 call for the roots and one for the lowest-k completion's
+    # solve on their complement, each handed the same budget
+    ok = check(len(seen_small) >= 1 and set(seen_small) == {0},
+               'mf.max_memory = 1 MB reaches davidson1 as 0', f'received {seen_small}')
     held = [LARGE_MB - m for m in seen_large if isinstance(m, (int, float))]
-    ok &= check(held == [HELD_MB],
+    ok &= check(len(held) == len(seen_large) >= 1 and set(held) == {HELD_MB},
                 f'mf.max_memory = {LARGE_MB} MB reaches davidson1 less the '
                 "process's use", f'received {seen_large}')
     d = np.abs(e_small - e_large).max()
@@ -105,7 +109,8 @@ def check_default_untouched():
         err = f'; {type(exc).__name__}: {exc}'
     finally:
         undo()
-    ok = check(seen == ['absent'], 'solve_symmetric without max_memory passes none',
+    ok = check(len(seen) >= 1 and set(seen) == {'absent'},
+               'solve_symmetric without max_memory passes none',
                f'received {seen}{err}')
     d = np.inf if e is None else np.abs(np.asarray(e) - np.linalg.eigvalsh(a)[:2]).max()
     ok &= check(d < 1e-6, 'and still finds the two lowest eigenvalues',

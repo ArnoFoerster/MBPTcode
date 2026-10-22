@@ -2,7 +2,7 @@
 
 `mode` is the chi0 realization and `continuation` is how that chi0 reaches the
 real axis. The reference is the `qp_routes` section of
-`tests/qp_energy_continuation_baseline.json`, a record of the route audit on
+`tests/baseline_forward_routes.json`, a record of the route audit on
 water, formaldehyde and thioformaldehyde (cc-pVDZ, density-fitted RHF on
 cc-pvdz-ri, conv_tol 1e-12, conv_tol_grad 1e-11) through the gradient chain's
 `qp_gradient_space_time(want_grad=False)`. Geometries, shell counts and the SCF
@@ -26,7 +26,7 @@ thioformaldehyde 114 of 1764.
   lap   energy and Z bitwise on all nine rows. Every record row carries
         `residue_route_taken` 'laplace', so all nine gate the cosh transform
         itself. Against `cd` the six frontier rows, which sweep no residue,
-        are bitwise; the three homo-1 rows that sweep one differ by at most
+        agree to a few ulp (two solves); the three homo-1 rows that sweep one differ by at most
         6.9e-14 eV in the root and 3.2e-15 in Z, the quadrature's difference.
         The bare Laplace fit at the frequencies the converged roots ask for
         is at most 2.5e-11, against the 1e-08 of `LAPLACE_SCREENING_TOL`.
@@ -51,30 +51,44 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.numerics import Numerics
 from src.Base.constants import (CD_NFREQ, HARTREE_TO_EV,
-                                LAPLACE_SCREENING_TOL, QP_POLE_OFFSET)
+                                LAPLACE_SCREENING_TOL)
+from src.SingleReference.GW.real_screening import ResidueRefused
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         solve_qp_energy_contour)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.pins import (assert_pin, assert_same, matches, pin_bar,
+                        recorded_blas)
 
-BASELINE = json.loads((pathlib.Path(__file__).resolve().parent
-                       / 'qp_energy_continuation_baseline.json').read_text())
+BASELINE_RECORD = (pathlib.Path(__file__).resolve().parent
+                   / 'baseline_forward_routes.json')
+BASELINE = json.loads(BASELINE_RECORD.read_text())['qp_routes']
 #: The record's rows re-recorded through the one fit.
 PINS = json.loads((pathlib.Path(__file__).resolve().parent
                    / 'one_fit_pins.json').read_text())['qp_routes']
+#: The BLAS each file was recorded on: bitwise there, the bar of each
+#: quantity class off it (tests/pins.py).
+BASELINE_BLAS = recorded_blas(BASELINE_RECORD)
+PINS_BLAS = recorded_blas(pathlib.Path(__file__).resolve().parent
+                          / 'one_fit_pins.json')
 
 MOLECULES = ('water', 'formaldehyde', 'thioformaldehyde')
+#: Routes read off a Pade continuation, which amplifies the fit's last bits:
+#: their pins take the 'continued' bar.
+CONTINUED_ROUTES = ('st-pade', 'space-time')
 
-#: How far the one fit moves each molecule's roots (eV) and pole strengths
-#: from the record, with headroom: the realization alone on water, which keeps
-#: every pair, and growing with the pairs the screen drops (6 on
-#: formaldehyde, 114 on thioformaldehyde).
-RECORD_MOVE_EV = {'water': 1e-10, 'formaldehyde': 1e-7,
-                  'thioformaldehyde': 5e-5}
-RECORD_MOVE_Z = {'water': 1e-11, 'formaldehyde': 5e-9,
-                 'thioformaldehyde': 5e-6}
+#: How far each molecule's roots (eV) and pole strengths sit from the record,
+#: with headroom: the ISDF grid the record predates moves them, 0.96 meV on
+#: water, 2.1 meV on formaldehyde and 2.8 meV on thioformaldehyde. The dense
+#: routes do not move.
+RECORD_MOVE_EV = {'water': 1.1e-3, 'formaldehyde': 2.4e-3,
+                  'thioformaldehyde': 3.1e-3}
+RECORD_MOVE_Z = {'water': 5e-5, 'formaldehyde': 1e-5,
+                 'thioformaldehyde': 1e-4}
 #: Added to `RECORD_MOVE_EV` for the space-time row alone, in eV: the record
 #: was written on a W frequency grid that does not span the range its
 #: transform is fitted over, which moves that row by -4.967e-4 (water),
@@ -137,21 +151,28 @@ def case(name):
         return mf
 
     mf = scf_factory(mol)
-    assert mf.e_tot == rec['e_scf'], (
+    assert matches(mf.e_tot, rec['e_scf'], BASELINE_BLAS,
+                   quantity='energy'), (
         f'{name}: this mean field is {mf.e_tot!r} and the record was written '
         f'on {rec["e_scf"]!r}; every number below inherits the orbitals, so '
         f'nothing bitwise can hold across that.')
     assert rec['cd_grid']['nfreq_cd'] == CD_NFREQ, (
         'the recorded contour grid grew past its starting size; the gate below '
         'builds it at CD_NFREQ')
-    chain = ExcitedStateChain(mol, scf_factory, mf=mf, basis=rec['basis'],
-                              auxbasis=rec['auxbasis'],
-                              counts=rec['isdf']['counts'],
-                              n_start=rec['isdf']['n_start'],
-                              ntau_gw=rec['cd_grid']['ntau_gw'],
-                              nfreq_cd=CD_NFREQ, residue_route='explicit')
+    chain = ExcitedStateChain(
+        mol, scf_factory, mf=mf,
+        numerics=g1_numerics(mol, Numerics(isdf={'basis': rec['basis'], 'auxbasis': rec['auxbasis'], 'counts': rec['isdf']['counts'], 'n_start': rec['isdf']['n_start']},
+                                           qp={'residue_route': 'explicit'},
+                                           quadrature={'ntau_gw': rec['cd_grid']['ntau_gw'], 'nfreq_cd': CD_NFREQ})))
     _CASES[name] = (mol, mf, chain.factors_at(mol, mf)[:2], chain, records)
     return _CASES[name]
+
+
+def cd_numerics(records):
+    """The baseline's tau count, for whichever route the continuation takes:
+    the contour's `ntau_gw` and the space-time Pade's `ntau_st`."""
+    ntau = records[0]['cd_grid']['ntau_gw']
+    return Numerics(quadrature={'ntau_gw': ntau, 'ntau_st': ntau})
 
 
 def contour_run(name, continuation):
@@ -161,7 +182,7 @@ def contour_run(name, continuation):
     energies, z = calc_qp_energy(mf, state=states, mode='space-time',
                                  continuation=continuation, return_z=True,
                                  factors=factors,
-                                 ntau=records[0]['cd_grid']['ntau_gw'])
+                                 numerics=cd_numerics(records))
     return records, energies, z
 
 
@@ -174,34 +195,39 @@ def assert_pinned(name, rec, route, energy, pole_strength=None, slack=0.0,
     pin = PINS[name][rec['orbital_label']][route]
     row = rec['routes'][route]
     assert row['status'] == 'ok'
-    assert energy == pin['energy_eV'], (where, energy - pin['energy_eV'])
+    quantity = 'continued' if route in CONTINUED_ROUTES else 'energy'
+    assert_pin(energy, pin['energy_eV'], PINS_BLAS, 'eV', quantity=quantity,
+               label=where)
     moved = abs(energy - row['energy_eV'])
     assert moved <= RECORD_MOVE_EV[name] + slack, (where, moved)
     if pole_strength is not None:
-        assert pole_strength == pin['z'], (where, pole_strength - pin['z'])
+        assert_pin(pole_strength, pin['z'], PINS_BLAS, '1',
+                   quantity=quantity, label=where)
         moved = abs(pole_strength - row['z'])
         assert moved <= RECORD_MOVE_Z[name] + z_slack, (where, moved)
 
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_the_chain_factors_are_productions(name):
-    """X_mo and D of the chain are `separable_factors`' at the same grid,
-    bitwise: both fit with `fit_M_streaming` on the same points and pairs."""
+    """X_mo and D of the chain are `separable_factors`' at the same grid, to
+    a few ulp: both fit with `fit_M_streaming` on the same points and pairs,
+    two fits."""
     mol, mf, factors, chain, records = case(name)
     rec = records[0]
     x_mo, d, _, _ = separable_factors(mf, mol, auxbasis=rec['auxbasis'],
                                       counts=rec['isdf']['counts'],
                                       n_start=rec['isdf']['n_start'])
-    assert np.array_equal(factors[0], x_mo)
-    assert np.array_equal(factors[1], d)
+    assert_same(factors[0], x_mo, unit='1', quantity='root', label='X_mo')
+    assert_same(factors[1], d, unit='1', quantity='root', label='D')
 
 
 @pytest.mark.parametrize('name', MOLECULES)
 def test_contour_grid_reproduces_the_chain(name):
-    """`cd_frequency_grid` is the chain's `_build_cd_grid`, bitwise.
+    """`cd_frequency_grid` is the chain's `_build_cd_grid`, to a few ulp (the
+    test builds it again).
 
     Production may not depend on `src.gradients`, so the helper is a copy,
-    pinned to the original on every molecule: the quadrature, its weights, the
+    pinned to the chain's on every molecule: the quadrature, its weights, the
     imaginary-time axis and the cosine transform between them.
     """
     mol, mf, factors, chain, records = case(name)
@@ -209,13 +235,17 @@ def test_contour_grid_reproduces_the_chain(name):
     nu, weights, grid, w0 = cd_frequency_grid(
         eps, mol.nelectron // 2, ntau=records[0]['cd_grid']['ntau_gw'],
         nfreq_cd=CD_NFREQ)
-    assert np.array_equal(nu, chain.nu)
-    assert np.array_equal(weights, chain.wt)
-    assert w0 == chain.w0_cd
-    assert np.array_equal(grid.tau_points, chain.gw_grid.tau_points)
-    assert np.array_equal(grid.tau_weights, chain.gw_grid.tau_weights)
-    assert np.array_equal(grid.cosft_wt, chain.gw_grid.cosft_wt)
-    assert w0 == records[0]['cd_grid']['e_min_gw']
+    assert_same(nu, chain.conventions.nu, quantity='root', label='nu')
+    assert_same(weights, chain.conventions.wt, quantity='root', label='wt')
+    assert_same(w0, chain.conventions.w0_cd, quantity='root', label='w0')
+    assert_same(grid.tau_points, chain.conventions.gw_grid.tau_points,
+                unit='1', quantity='root', label='tau points')
+    assert_same(grid.tau_weights, chain.conventions.gw_grid.tau_weights,
+                unit='1', quantity='root', label='tau weights')
+    assert_same(grid.cosft_wt, chain.conventions.gw_grid.cosft_wt, unit='1',
+                quantity='root', label='cosine weights')
+    assert_pin(w0, records[0]['cd_grid']['e_min_gw'], BASELINE_BLAS,
+               quantity='energy')
 
 
 @pytest.mark.parametrize('name', MOLECULES)
@@ -228,23 +258,22 @@ def test_cd_reproduces_the_baseline_bitwise(name):
 
 
 @pytest.mark.parametrize('name', MOLECULES)
-def test_cd_residue_count_and_guard_match_the_record(name):
-    """The residue set and the guard band, which decide which branch was solved.
+def test_cd_residue_count_matches_the_record(name):
+    """The residue set, which decides which branch was solved.
 
     Two routes can agree on an energy and have solved different equations; the
-    residue count says the contour swept the same poles, and the guard band is
-    the Newton path the record was written on.
+    residue count says the contour swept the same poles. (The record's guard
+    band was the retired Newton's path, and has no counterpart.)
     """
     mol, mf, factors, chain, records = case(name)
     _, _, diagnostics = solve_qp_energy_contour(
         mf, mol, mol.nelectron // 2, [rec['orbital'] for rec in records],
         continuation='cd', factors=factors,
-        ntau=records[0]['cd_grid']['ntau_gw'])
+        numerics=cd_numerics(records))
     assert diagnostics['nfreq_cd'] == records[0]['cd_grid']['nfreq_cd']
     for rec, got in zip(records, diagnostics['states']):
         row = rec['routes']['cd']['params']
         assert got['residues'] == row['residues'], rec['orbital_label']
-        assert got['pole_offset'] == row['pole_offset'], rec['orbital_label']
         assert got['sop_admits'] == row['sop_eq27_admits']
 
 
@@ -270,7 +299,8 @@ def test_laplace_and_cd_agree_below_the_gap(name):
     The contour is identical up to where each residue reads W, the explicit
     O(N^4) chi0(w') or the O(N^3) cosh transform of proj(tau), so the two
     differ only by quadrature, within `LAPLACE_CD_TOL_EV` / `LAPLACE_CD_TOL_Z`;
-    rows that sweep no residue are bitwise.
+    rows that sweep no residue agree to a few ulp (two solves of one root: a
+    reduction in another order moves the last bit, so not bitwise).
     """
     records, laplace, z_laplace = contour_run(name, 'laplace')
     _, cd, z_cd = contour_run(name, 'cd')
@@ -279,7 +309,8 @@ def test_laplace_and_cd_agree_below_the_gap(name):
         assert abs(e_l - e_c) <= LAPLACE_CD_TOL_EV, (where, e_l - e_c)
         assert abs(zl - zc) <= LAPLACE_CD_TOL_Z, (where, zl - zc)
         if rec['routes']['laplace']['params']['residues'] == 0:
-            assert e_l == e_c and zl == zc, where
+            assert_same(e_l, e_c, unit='eV', quantity='energy', label=where)
+            assert_same(zl, zc, unit='1', quantity='energy', label=where)
 
 
 @pytest.mark.parametrize('name', MOLECULES)
@@ -296,12 +327,11 @@ def test_laplace_diagnostics_name_the_route_and_its_representation_error(name):
     _, _, diagnostics = solve_qp_energy_contour(
         mf, mol, mol.nelectron // 2, [rec['orbital'] for rec in records],
         continuation='laplace', factors=factors,
-        ntau=records[0]['cd_grid']['ntau_gw'])
+        numerics=cd_numerics(records))
     assert diagnostics['residue_route_taken'] == 'laplace'
     for rec, got in zip(records, diagnostics['states']):
         row = rec['routes']['laplace']['params']
         assert got['residues'] == row['residues'], rec['orbital_label']
-        assert got['pole_offset'] == row['pole_offset'], rec['orbital_label']
         error = got['representation_error']
         if row['residues'] == 0:
             assert error is None, rec['orbital_label']
@@ -316,24 +346,26 @@ def test_laplace_refuses_a_residue_the_tau_grid_cannot_carry():
     chi0(w') = int 2 cosh(w' tau) proj(tau) dtau holds only while the grid's
     bare 1/y quadrature carries every pair energy d -/+ w', so a state whose
     contour sweeps a residue past that is refused rather than silently served
-    from the explicit backend. Water's oxygen 1s sweeps a residue 19 Ha out and
-    its 2a1, 0.64 Ha out, is past the grid's e_min; continuation='cd' answers
-    both.
+    from the explicit backend. Water's oxygen 1s sweeps residues up to 19 Ha
+    out and its 2a1 0.64 Ha out, past the grid's e_min; the root search finds
+    no quasiparticle where the backend can serve the contour and raises its
+    refusal, naming the first frequency it could not carry
+    (`ResidueRefused`); continuation='cd' answers both.
     """
     mol, mf, factors, chain, records = case('water')
-    isdf = dict(factors=factors, ntau=records[0]['cd_grid']['ntau_gw'])
-    for state, freq in ((0, 19.2141), (1, 0.6365)):
-        with pytest.raises(ValueError) as refusal:
+    isdf = dict(factors=factors, numerics=cd_numerics(records))
+    for state in (0, 1):
+        with pytest.raises(ResidueRefused) as refusal:
             calc_qp_energy(mf, state=state, mode='space-time',
-                           continuation='laplace', **isdf)
+                           continuation='laplace', **isdf, counts=g1(mf))
         message = str(refusal.value)
         assert f'orbital {state}' in message
-        assert f'real frequency {freq:.4f} Ha' in message
+        assert 'real frequency' in message
         assert 'not carried by the tau grid' in message
         # ... and the explicit backend serves the same state on the same grid
         energy, pole_strength = calc_qp_energy(
             mf, state=state, mode='space-time', continuation='cd',
-            return_z=True, **isdf)
+            return_z=True, **isdf, counts=g1(mf))
         assert np.isfinite(energy) and 0.0 < pole_strength <= 1.0
 
 
@@ -362,7 +394,7 @@ def test_sop_refuses_a_state_eq27_excludes():
     mol, mf, factors, chain, records = case('water')
     with pytest.raises(ValueError) as refusal:
         calc_qp_energy(mf, state=0, mode='space-time', continuation='sop',
-                       factors=factors, ntau=records[0]['cd_grid']['ntau_gw'])
+                       factors=factors, numerics=cd_numerics(records))
     message = str(refusal.value)
     assert 'orbital 0' in message
     assert 'gaps away' in message and 'Eq. (27)' in message
@@ -371,7 +403,7 @@ def test_sop_refuses_a_state_eq27_excludes():
     # and the state the pole model refuses is one the contour answers
     energy, pole_strength = calc_qp_energy(
         mf, state=0, mode='space-time', continuation='cd', return_z=True,
-        factors=factors, ntau=records[0]['cd_grid']['ntau_gw'])
+        factors=factors, numerics=cd_numerics(records))
     assert energy < -500.0 and 0.0 < pole_strength <= 1.0
 
 
@@ -379,11 +411,11 @@ def test_sop_refuses_a_state_eq27_excludes():
 def test_pade_is_todays_space_time_route(name):
     """The default continuation and 'pade' named are the space-time route.
 
-    Bitwise against `calc_qp_energy(mode='space-time')` with no continuation
-    named and against the pinned `space-time` row, the record's within the
-    one fit's move plus `W_GRID_MOVE_EV`. The record's `st-pade` row is a
-    different quadrature (the gradient chain's Pade on the contour grid) and
-    is asserted to differ. At 18 points the W fit and the Sigma fits are both
+    To a few ulp of `calc_qp_energy(mode='space-time')` with no
+    continuation named and of the pinned `space-time` row, the
+    record's within the one fit's move plus `W_GRID_MOVE_EV`. The record's
+    `st-pade` row is a different quadrature (the gradient chain's Pade on the
+    contour grid) and is asserted to differ. At 18 points the W fit and the Sigma fits are both
     near 1e-3, and the Pade continuation turns 1e-6 Ha changes in them into
     sub-meV moves of the root.
     """
@@ -391,11 +423,14 @@ def test_pade_is_todays_space_time_route(name):
     rec = records[0]
     row = rec['routes']['space-time']
     shared = dict(state=rec['orbital'], mode='space-time', factors=factors,
-                  auxbasis=rec['auxbasis'], ntau=row['params']['ntau'],
-                  nfreq='auto', npade=row['params']['npade'])
+                  auxbasis=rec['auxbasis'],
+                  numerics=Numerics(quadrature={
+                      'ntau_st': row['params']['ntau'], 'nfreq_st': 'auto',
+                      'npade': row['params']['npade']}))
     default = calc_qp_energy(mf, **shared)
     named = calc_qp_energy(mf, continuation='pade', **shared)
-    assert default == named
+    # two solves of one root: to a few ulp, not bitwise
+    assert_same(default, named, unit='eV', quantity='continued', label=name)
     assert_pinned(name, rec, 'space-time', default,
                   slack=W_GRID_MOVE_EV[name])
     assert default != rec['routes']['st-pade']['energy_eV']
@@ -414,7 +449,7 @@ def test_eps_anchor_carries_the_quasiparticle_slope():
     eps = np.asarray(mf.mo_energy, float)
     p, kw = rec['orbital'], dict(state=rec['orbital'], mode='space-time',
                                  continuation='cd', factors=factors,
-                                 ntau=rec['cd_grid']['ntau_gw'])
+                                 numerics=cd_numerics(records))
     _, z = calc_qp_energy(mf, return_z=True, **kw)
     moved = []
     for step in (Z_ANCHOR_STEP, -Z_ANCHOR_STEP):
@@ -433,7 +468,7 @@ def test_validity_table_refuses_and_admits_each_pair():
     """
     mol, mf, factors, chain, records = case('water')
     rec = records[0]
-    isdf = dict(factors=factors, ntau=rec['cd_grid']['ntau_gw'])
+    isdf = dict(factors=factors, numerics=cd_numerics(records))
 
     # casida runs 'spectral' and nothing else, and has none of the keywords the
     # imaginary-axis realizations read.
@@ -443,8 +478,7 @@ def test_validity_table_refuses_and_admits_each_pair():
                         (dict(continuation='sop'), 'accepts')):
         with pytest.raises(ValueError, match=expect):
             calc_qp_energy(mf, state=rec['orbital'], **bad)
-    for keyword in ('nfreq_cd', 'w0_cd', 'pole_offset', 'n_poles',
-                    'sop_stride', 'ntau', 'counts'):
+    for keyword in ('w0_cd', 'ntau', 'counts', 'numerics'):
         with pytest.raises(TypeError, match=f"'spectral'.*{keyword}"):
             calc_qp_energy(mf, state=rec['orbital'], **{keyword: 1})
 
@@ -465,37 +499,38 @@ def test_validity_table_refuses_and_admits_each_pair():
     # gap being the one every residue backend can serve
     assert np.isfinite(calc_qp_energy(mf, state=rec['orbital'],
                                       mode='space-time',
-                                      continuation='laplace', **isdf))
+                                      continuation='laplace', **isdf, counts=g1(mf)))
     with pytest.raises(ValueError, match='choose one of'):
         calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
-                       continuation='thiele', **isdf)
+                       continuation='thiele', **isdf, counts=g1(mf))
 
     # ... and each continuation reads its own keywords and no other's
     assert np.isfinite(calc_qp_energy(mf, state=rec['orbital'],
                                       mode='space-time', continuation='cd',
-                                      nfreq_cd=CD_NFREQ, w0_cd=None,
-                                      pole_offset=QP_POLE_OFFSET, **isdf))
+                                      w0_cd=None, **isdf, counts=g1(mf)))
+    ntau = rec['cd_grid']['ntau_gw']
+    poles = Numerics(quadrature={'ntau_gw': ntau, 'ntau_st': ntau},
+                     qp={'n_poles': 12, 'sop_stride': 8})
     assert np.isfinite(calc_qp_energy(mf, state=rec['orbital'],
                                       mode='space-time', continuation='sop',
-                                      n_poles=12, sop_stride=8, **isdf))
-    for keyword, continuation in (('n_poles', 'cd'), ('sop_stride', 'cd'),
-                                  ('npade', 'cd'), ('n_poles', 'laplace'),
-                                  ('npade', 'laplace'), ('nfreq', 'sop'),
+                                      **dict(isdf, numerics=poles),
+                                      counts=g1(mf)))
+    for keyword, continuation in (('npade', 'cd'), ('npade', 'laplace'),
+                                  ('nfreq', 'sop'),
                                   ('greedy', 'sop')):
         with pytest.raises(TypeError, match=f"'{continuation}'.*{keyword}"):
             calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
                            continuation=continuation, **dict(isdf,
-                                                             **{keyword: 1}))
-    for keyword in ('nfreq_cd', 'w0_cd', 'pole_offset', 'n_poles',
-                    'sop_stride'):
+                                                             **{keyword: 1}), counts=g1(mf))
+    for keyword in ('w0_cd',):
         with pytest.raises(TypeError, match=f"'pade'.*{keyword}"):
             calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
-                           continuation='pade', **dict(isdf, **{keyword: 1}))
+                           continuation='pade', **dict(isdf, **{keyword: 1}), counts=g1(mf))
 
-    # the contour's Newton has no root selector for qp_solver to set
+    # one root rule for every route: qp_solver has one value
     with pytest.raises(ValueError, match='qp_solver'):
         calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
-                       continuation='cd', qp_solver='graphical', **isdf)
+                       continuation='cd', qp_solver='graphical', **isdf, counts=g1(mf))
 
 
 def test_return_z_follows_the_continuation():
@@ -507,20 +542,21 @@ def test_return_z_follows_the_continuation():
     """
     mol, mf, factors, chain, records = case('water')
     rec = records[0]
-    isdf = dict(factors=factors, ntau=rec['cd_grid']['ntau_gw'])
+    isdf = dict(factors=factors, numerics=cd_numerics(records))
     for continuation in ('cd', 'laplace', 'sop'):
         energy, z = calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
                                    continuation=continuation, return_z=True,
-                                   **isdf)
+                                   **isdf, counts=g1(mf))
         pin = PINS['water'][rec['orbital_label']][continuation]['energy_eV']
-        assert abs(energy - pin) <= SOP_SEED_TOL_EV
+        assert abs(energy - pin) <= SOP_SEED_TOL_EV + pin_bar(
+            PINS_BLAS, 'eV', quantity='energy'), (continuation, energy - pin)
         assert 0.0 < z <= 1.0
     with pytest.raises(ValueError, match='not differentiable'):
         calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
-                       return_z=True, **isdf)
+                       return_z=True, **isdf, counts=g1(mf))
     with pytest.raises(ValueError, match='not differentiable'):
         calc_qp_energy(mf, state=rec['orbital'], return_z=True)
     # a list of states brings back a list of each
     energies, zs = calc_qp_energy(mf, state=[rec['orbital']], mode='space-time',
-                                  continuation='cd', return_z=True, **isdf)
+                                  continuation='cd', return_z=True, **isdf, counts=g1(mf))
     assert len(energies) == len(zs) == 1

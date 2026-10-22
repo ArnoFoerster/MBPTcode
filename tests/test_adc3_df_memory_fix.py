@@ -1,5 +1,5 @@
 """
-Regression test for the ADC(3) DF matrix-free memory-reduction fix
+Regression test for the ADC(3) DF matrix-free memory reduction
 """
 import os
 import sys
@@ -21,13 +21,14 @@ from src.SingleReference.ADC.adc_r_sigma_df import (
 import src.SingleReference.ADC.adc_utils as _adc_utils_mod
 import src.SingleReference.ADC.adc_r_utils as _adc_r_utils_mod
 import src.SingleReference.ADC.adc_r_sigma_df as _adc_r_sigma_df_mod
+from tests.pins import RECORDING_BLAS, matches
 
 
 class _SpyTargets:
-    """The file split spread _g_slice_df bindings over adc_utils (definer),
-    adc_r_utils and adc_r_sigma_df (from-imports). Setting an attribute here
-    sets it on all three, so the old single-module monkeypatch pattern below
-    keeps covering every call site (_B_SLAB_BYTES is read from adc_utils'
+    """_g_slice_df is bound in adc_utils (definer), adc_r_utils and
+    adc_r_sigma_df (from-imports). Setting an attribute here sets it on all
+    three, so a single-module monkeypatch covers every call site (_B_SLAB_BYTES
+    is read from adc_utils'
     own global, also covered)."""
     _mods = (_adc_utils_mod, _adc_r_utils_mod, _adc_r_sigma_df_mod)
 
@@ -65,7 +66,9 @@ if __name__ == '__main__':
     # every OTHER block must still be present and byte-identical between the
     # two calls -- the skip flags must not have side effects on unrelated blocks
     common_keys = set(blk_full) & set(blk_skip)
-    ok = all(np.array_equal(blk_full[k], blk_skip[k]) for k in common_keys) and len(common_keys) == 16
+    # two builds: each block to a few ulp
+    ok = all(matches(blk_full[k], blk_skip[k], RECORDING_BLAS, quantity='root')
+             for k in common_keys) and len(common_keys) == 16
     all_ok &= ok
     print(f"remaining 16 blocks unaffected by skip flags: {'OK' if ok else 'FAIL'} (common_keys={len(common_keys)})")
 
@@ -97,10 +100,10 @@ if __name__ == '__main__':
     print(f"_u_pv_vp_contract_df (rank-2 free index 'ij') matches dense g_vv_pv/vp einsum "
           f"(max diff={diff:.2e}): {'OK' if ok else 'FAIL'}")
 
-    # --- (c) end-to-end: DF matrix-free operator (which now goes through
-    # this whole fix) still matches dense build_supermatrix's H@z exactly,
+    # --- (c) end-to-end: DF matrix-free operator (which goes through
+    # the skip flags) matches dense build_supermatrix's H@z exactly,
     # on a molecule with nontrivial virtual mixing and level='adc3' (so the
-    # U_I/U_II/U_III second-order pieces this fix touches are active --
+    # U_I/U_II/U_III second-order pieces the flags touch are active --
     # gated off entirely at level='adc2x') ---
     mol = gto.M(atom='H 0 0 0; Li 0 0 1.6', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
@@ -133,10 +136,10 @@ if __name__ == '__main__':
     # apply_U_2p1h_fwd/_adj made matrix-free -- and at hexacene/cc-pVQZ they
     # are 2.8 TB APIECE, 5.6 of that system's 8.3 TB total. Their only
     # consumer on the unscreened DF path is U_Ip's pair of ring
-    # contractions, now routed through _u_Ip_pv_vp_contract_df.
+    # contractions, routed through _u_Ip_pv_vp_contract_df.
     print()
 
-    # --- (a) the new skip flag actually skips building the blocks ---
+    # --- (a) the skip flag actually skips building the blocks ---
     blk_ov_skip = _build_g_blocks_df(B, O, V, norb, need_ovpv_ovvp=False)
     missing = [k for k in ('g_ovpv', 'g_ovvp') if k not in blk_ov_skip]
     ok = sorted(missing) == ['g_ovpv', 'g_ovvp']
@@ -145,9 +148,11 @@ if __name__ == '__main__':
           f"{'OK' if ok else 'FAIL'} (still present: "
           f"{[k for k in ('g_ovpv', 'g_ovvp') if k in blk_ov_skip]})")
 
-    # and, as above, no side effects on any other block
+    # and, as above, no side effects on any other block (two builds: each
+    # block to a few ulp)
     common_keys = set(blk_full) & set(blk_ov_skip)
-    ok = (all(np.array_equal(blk_full[k], blk_ov_skip[k]) for k in common_keys)
+    ok = (all(matches(blk_full[k], blk_ov_skip[k], RECORDING_BLAS,
+                      quantity='root') for k in common_keys)
           and len(common_keys) == 18)
     all_ok &= ok
     print(f"remaining 18 blocks unaffected by need_ovpv_ovvp: "
@@ -213,7 +218,7 @@ if __name__ == '__main__':
     # u_II/u_III/Y_mix_1/Y_mix_2 + the g_ijpa-g_ijap_T temporary are five
     # (O,O,norb,V) arrays (92 GB apiece at hexacene/QZ), the explicit
     # U_II/U_III another 45 GB each, and g_oo_pp/g_vopo/g_voho (95/92/92 GB)
-    # exist only to feed them. U_II/U_III are now applied matrix-free and
+    # exist only to feed them. U_II/U_III are applied matrix-free and
     # U_I's rings go through _u_I_ring_contract_df.
     print()
 
@@ -362,7 +367,8 @@ if __name__ == '__main__':
     print(f"_build_g_blocks_df(need_oovv_vvoo=False) omits g_oovv/g_vvoo: {'OK' if ok else 'FAIL'}")
 
     common4 = set(blk_full4) & set(blk_skip4)
-    ok = all(np.array_equal(blk_full4[k], blk_skip4[k]) for k in common4) and len(common4) == 18
+    ok = all(matches(blk_full4[k], blk_skip4[k], RECORDING_BLAS, quantity='root')
+             for k in common4) and len(common4) == 18
     all_ok &= ok
     print(f"remaining 18 blocks unaffected by need_oovv_vvoo: {'OK' if ok else 'FAIL'} "
           f"(common_keys={len(common4)})")

@@ -22,8 +22,8 @@ WHAT EACH GATE IS FOR:
 - antisymmetry d_mn = -d_nm is a measurement, not a tautology: the two are
   computed from separate calls and the interstate numerator is symmetrized over
   both orderings, so the sign comes from the gap alone.
-- the excitation gradient must be untouched by the refactor that gave the
-  interstate seed its own entry into the same reverse chain.
+- the excitation gradient must be untouched by the interstate seed's own
+  entry into the same reverse chain.
 - `ov_coupling`, the occupied-virtual block of the derivative overlap for ANY
   weight, against the same contraction of displaced solves: the ground-state
   coupling is one weight of it, the fragment localization response another
@@ -41,9 +41,9 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
+from src.Base.numerics import Numerics
 from src.Base.constants import AMU_TO_ME, NUCLEAR_FD_STEP
-from src.gradients.bse_isdf import (bse_backward, bse_blocks, bse_solve,
-                                    interstate_backward)
+from src.gradients.bse_isdf import bse_blocks, bse_solve, interstate_backward
 from src.gradients.derivative_coupling import (analytic_coupling,
                                                analytic_ground_coupling,
                                                canonical_overlap_derivative,
@@ -55,6 +55,8 @@ from src.properties import rates, vibronic
 from src.properties.nonadiabatic import (derivative_couplings,
                                          translational_sum)
 from src.properties.spin_orbit import EXCITED_SPIN_FACTOR
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import assert_same
 
 #: C2v, in the yz plane. The three lowest roots are well separated, so the
 #: assignment the reference makes across a displacement is never in doubt.
@@ -84,8 +86,9 @@ def factory(mol):
 @pytest.fixture(scope='module')
 def chain():
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
-    return ExcitedStateChain(mol, factory, state=0, nroots=5,
-                             auxbasis='cc-pvdz-ri')
+    return ExcitedStateChain(
+        mol, factory, state=0, numerics=g1_numerics(mol, Numerics(isdf={'auxbasis': 'cc-pvdz-ri'},
+                                                                  bse={'nroots': 5})))
 
 
 @pytest.fixture(scope='module')
@@ -148,7 +151,7 @@ def test_diagonal_path_survives_the_interstate_refactor(chain):
     Not gated on an absolute energy: Omega is a function of the auxiliary
     basis, the grid counts and the radii, so a magic number here would fail
     whenever any of those moved and would say nothing about the wiring. What
-    the refactor could break is the wiring itself, and that shows as a broken
+    can break is the wiring itself, and that shows as a broken
     sum rule or as the two entry points into the chain disagreeing.
     """
     grad, diags = chain.excitation_gradient()
@@ -250,9 +253,11 @@ def test_kernel_pieces_are_the_forward_before_the_casida_step(chain):
     kern = chain.kernel_pieces(mol, mf)
     assert len(kern) == len(full) == 17
     assert kern[9] == {} and kern[10] is None and kern[11] is None
-    for k in (4, 5, 6, 7, 8):
-        assert np.array_equal(np.asarray(kern[k]), np.asarray(full[k]))
-    assert kern[12] == full[12]
+    # built again, not read back: the factors, eps, eps^QP, W and mu to a
+    # few ulp (the quasiparticle roots are solved a second time)
+    for k in (4, 5, 6, 7, 8, 12):
+        assert_same(np.asarray(kern[k], float), np.asarray(full[k], float),
+                    quantity='root', label=k)
     # the fold consumes x_bar and d_bar, so each fold gets its own seeds
     ref = chain._fold_to_nuclei(full, *chain._casida_seeds(full, 0),
                                 release_tape=False)[0]
@@ -271,7 +276,7 @@ def test_residual_is_the_reference_step_and_not_a_missing_term(chain):
         fd = derivative_couplings(chain, states=(0, 1), step=h)[1, 2]
         ratios.append(np.abs(ana - fd).max() / h ** 2)
     ratios = np.array(ratios)
-    assert ratios.ptp() / ratios.mean() < 0.05
+    assert np.ptp(ratios) / ratios.mean() < 0.05
 
 
 def test_antisymmetry_is_exact(chain):
@@ -303,7 +308,9 @@ def test_kohn_sham_reference(chain):
         return mf
 
     mol = gto.M(atom=CH2O, basis='cc-pvdz', verbose=0)
-    ch = ExcitedStateChain(mol, ks, state=0, nroots=5, auxbasis='cc-pvdz-ri')
+    ch = ExcitedStateChain(
+        mol, ks, state=0, numerics=g1_numerics(mol, Numerics(isdf={'auxbasis': 'cc-pvdz-ri'},
+                                                             bse={'nroots': 5})))
     ana, diags = analytic_coupling(ch, 0, 1)
     fd = derivative_couplings(ch, states=(0, 1))[1, 2]
     assert np.abs(ana - fd).max() / np.abs(fd).max() < 1e-4
@@ -351,18 +358,22 @@ def test_internal_conversion_rate_plumbing():
     The rate is quadratic in the coupling and linear in nothing else, so
     doubling every d_k must quadruple it; a zero coupling must give exactly
     zero rather than a small number; and an imaginary frequency must be
-    dropped rather than propagated as a negative sqrt.
+    refused rather than dropped or propagated as a negative sqrt.
     """
     omega = np.array([-0.001, 0.004, 0.009])
     d_k = np.array([5.0, 1e-3, 2e-3])
     s_k = np.array([0.0, 0.3, 0.2])
+    s_vib, w_vib = s_k[1:], omega[1:]
 
     def rho(de):
-        return rates.fc_weighted_dos(de, s_k[1:], omega[1:], 300.0,
+        return rates.fc_weighted_dos(de, s_vib, w_vib, 300.0,
                                      lambda_classical=0.002)
 
+    with pytest.raises(ValueError, match='imaginary'):
+        rates.internal_conversion_rate(0.05, d_k, omega, rho, 300.0)
+    omega, d_k = omega[1:], d_k[1:]
     k, per = rates.internal_conversion_rate(0.05, d_k, omega, rho, 300.0)
-    assert per[0] == 0.0                      # the imaginary mode is dropped
+    assert (per > 0.0).all()
     assert k > 0.0 and np.isclose(k, per.sum())
     k2, _ = rates.internal_conversion_rate(0.05, 2.0 * d_k, omega, rho, 300.0)
     assert np.isclose(k2, 4.0 * k, rtol=1e-12)
@@ -409,8 +420,9 @@ def test_coupling_rotates_with_the_molecule(chain):
     turned = gto.M(atom=[(mol.atom_symbol(i), tuple(crd[i]))
                          for i in range(mol.natm)], basis='cc-pvdz',
                    unit='Bohr', verbose=0)
-    ch_b = ExcitedStateChain(turned, factory, state=0, nroots=5,
-                             auxbasis='cc-pvdz-ri')
+    ch_b = ExcitedStateChain(
+        turned, factory, state=0, numerics=g1_numerics(turned, Numerics(isdf={'auxbasis': 'cc-pvdz-ri'},
+                                                                        bse={'nroots': 5})))
     d_b, _ = analytic_ground_coupling(ch_b, 0)
     # UP TO THE GLOBAL SIGN, and that is not sloppiness. d_0n is LINEAR in the
     # Casida vector, whose overall sign each solve picks arbitrarily, so two

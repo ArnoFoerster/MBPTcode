@@ -14,8 +14,16 @@ WHAT EACH GATE IS FOR:
   no gradient at all, so a gradient that is not the derivative of its own
   energy at displaced geometries (the h^1 defect `hessian.py` found on the
   ISDF mean-field force) fails it.
-- The step ladder must show the h^2 order. A ratio of 2 is that same defect
-  seen from the step side.
+- There is no step-ladder gate. The ratio of the frequency changes between
+  steps 4h, 2h and h reads 4 for an h^2 error and 2 for an h^1 error, but on
+  the Hessian-grade grid (GH) the whole ladder moves the C=O and scissor
+  frequencies by 0.011 and 0.037 cm^-1 (1.4e-6 and 2.5e-5 of the frequency,
+  asymmetry 5e-10 and below): the changes sit at the ISDF force's noise floor
+  (HESSIAN_FD_NOISE_REL), ratios 1.85 and 2.36 measure that floor, not an
+  order; a ratio window recorded on a grid whose noise lay under the ladder
+  would pass for the wrong reason. The h^1 defect the ratio would catch is
+  caught by the gradient-versus-energy curvature gate above, which uses no
+  ladder.
 - The leakage estimate must predict the mode it was told to leave out. S1
   mixes the C=O stretch with the CH2 scissor and the C-H stretch, all a1. The
   two-mode subspace plus its leakage must land on the three-mode result, and
@@ -33,13 +41,17 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import HARTREE_TO_CM  # noqa: E402
+from src.Base.constants import (HARTREE_TO_CM, ISDF_HESSIAN_MIN_GRID,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics import Numerics  # noqa: E402
 from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
 from src.properties.mode_hessian import (displaced_along, mode_hessian,  # noqa: E402
                                          mode_step, step_ladder,
                                          stretch_modes)
 from src.properties.optimize import MeanFieldSurface, relax_ground_state  # noqa: E402
 from src.properties.vibronic import normal_modes  # noqa: E402
+from tests.isdf_test_grid import counts_at
 
 CH2O = 'C 0 0 0.0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588'
 CARBONYL = [(0, 1)]
@@ -48,7 +60,9 @@ CH_BONDS = [(0, 2), (0, 3)]
 
 def factory(mol):
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.verbose = 0
     mf.kernel()
     assert mf.converged
@@ -66,8 +80,9 @@ def ground():
 @pytest.fixture(scope='module')
 def s1(ground):
     mol = ground[0]
-    return ExcitedStateChain(mol, factory, state=0, nroots=4,
-                             auxbasis='cc-pvdz-ri')
+    return ExcitedStateChain(
+        mol, factory, state=0, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': counts_at(mol, ISDF_HESSIAN_MIN_GRID)},
+                                                 bse={'nroots': 4}))
 
 
 @pytest.fixture(scope='module')
@@ -118,16 +133,6 @@ def test_the_gradient_curvature_is_the_energy_curvature(ground, s1, carbonyl):
         assert abs(r['block'][0, 0] - reference) < 2e-3 * abs(reference)
 
 
-def test_the_step_ladder_converges_as_the_square_of_the_step(ground, s1,
-                                                             carbonyl):
-    mol, _, omega, modes, masses = ground
-    results, ratios = step_ladder(s1, mol, omega, modes, masses,
-                                  [carbonyl, 2])
-    # measured 3.84 and 4.03; an h^1 error gives 2
-    assert np.all((ratios[0] > 3.3) & (ratios[0] < 4.7))
-    assert all(r['asymmetry'] < 1e-6 for r in results)
-
-
 def test_the_leakage_predicts_the_mode_left_out(ground, s1, carbonyl):
     mol, _, omega, modes, masses = ground
     ch = stretch_modes(mol, modes, masses, CH_BONDS, top=1)[0][0]
@@ -135,10 +140,13 @@ def test_the_leakage_predicts_the_mode_left_out(ground, s1, carbonyl):
     three = mode_hessian(s1, mol, omega, modes, masses, [carbonyl, 2, ch])
     predicted = np.sort(two['omega_cm'] + two['leakage_cm'])
     exact = np.sort(three['omega_cm'])[:2]
-    # measured: the scissor-like root moves 16.6 cm^-1, predicted to 1.2
+    # measured on GH: the two roots move 0.080 and 0.198 cm^-1 (0.43 on the
+    # 148-point grid); the other CH stretch and the modes below the
+    # C=O do not couple to it. The shift must stand above twice the 0.05 cm^-1
+    # slack of the prediction bar below, or agreeing within it says nothing.
     moved = np.abs(np.sort(two['omega_cm']) - exact)
-    assert moved.max() > 5.0
-    assert np.all(np.abs(predicted - exact) < 0.2 * moved + 0.5)
+    assert moved.max() > 0.1
+    assert np.all(np.abs(predicted - exact) < 0.2 * moved + 0.05)
 
 
 class _NoisySurface:

@@ -182,6 +182,20 @@ def integral_term_backward(Bp, WtB, weights, want_chi0=True):
     return 2.0 * WB * weights, wc, chi0_bar
 
 
+def pair_term_backward(Bi, Bj, WtBi, WtBj, weights):
+    """(Bi_bar, Bj_bar, chi0_bar) of sum_q g_q Bi[:,q]^T (W - I) Bj[:,q] at
+    ONE frequency, WtB = W B, weights = g, (norb,).
+
+    W is symmetric, so each slice takes the other's (W - I) B; chi0 takes the
+    symmetric part of W Bi diag(g) Bj^T W, the only part a symmetric chi0
+    reads. With Bi = Bj it is `integral_term_backward`'s pair of terms.
+    """
+    bi_bar = (WtBj - Bj) * weights
+    bj_bar = (WtBi - Bi) * weights
+    half = (WtBi * weights) @ WtBj.T
+    return bi_bar, bj_bar, 0.5 * (half + half.T)
+
+
 def residue_terms_backward(p, omega, Bp, eps, nocc, residues, sigma_bar,
                            real_screening):
     """(eps_bar, Bp_bar, omega_bar) of sigma_bar * Sigma^res, through a backend.

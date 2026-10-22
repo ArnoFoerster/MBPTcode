@@ -61,3 +61,12 @@ that product cheap. A few points the user may want to know:
   the available memory allows. Under MPI the trial vectors are split over the
   ranks; the roots agree with a serial run to within the convergence
   tolerance.
+- **Starting from the last geometry.** Along a geometry optimization or a
+  finite difference, consecutive solves are nearly the same problem. Setting
+  `chain.davidson_warm_start = DavidsonWarmStart()` (from
+  `src.SingleReference.LinearResponse.davidson`) on an
+  `ExcitedStateChain` makes each matrix-free solve start from the previous
+  geometry's roots, carried into the new orbitals through their overlap, so
+  sign flips and rotations of degenerate orbitals do not spoil the guess. It
+  is off by default. It changes how many iterations a solve takes, not the
+  roots it converges to; a step larger than 0.5 Bohr starts cold.

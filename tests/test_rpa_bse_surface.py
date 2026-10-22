@@ -16,12 +16,14 @@ import pytest
 from pyscf import dft, gto, scf
 
 from src.Base.constants import CD_NFREQ, HARTREE_TO_EV
+from src.Base.numerics import Numerics
 from src.Base.solvent_screening import SolventScreening
 from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.isdf_derivatives import (exx_double_counting,
-                                            exx_double_counting_Y,
+from src.gradients.isdf_derivatives import (exx_double_counting_Y,
                                             exx_double_counting_skeleton)
+from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
 from src.gradients.rpa_ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -51,7 +53,7 @@ def water():
 
 def test_energy_is_the_plasmon_ground_state_plus_omega(water):
     """E_nu = E_0 + Omega, and E_0 carries E_c -- which the chain alone drops."""
-    s = RPABSESurface(water, hf_factory)
+    s = RPABSESurface(water, hf_factory, numerics=g1_numerics(water))
     e_nu, e_0, e_hf, e_c, omega = s.energy(water)
     assert abs(e_nu - (e_0 + omega)) < 1e-12
     assert abs(e_0 - (e_hf + e_c)) < 1e-12
@@ -64,7 +66,7 @@ def test_energy_is_the_plasmon_ground_state_plus_omega(water):
 
 def test_gradient_matches_finite_difference(water):
     """The gate. 4-point FD of the SAME frozen surface; one step is worthless."""
-    s = RPABSESurface(water, hf_factory)
+    s = RPABSESurface(water, hf_factory, numerics=g1_numerics(water))
     g, _, _ = s.total_gradient(water)
     x0 = water.atom_coords()
 
@@ -94,14 +96,14 @@ def test_a_kohn_sham_reference_reaches_the_same_functional(water):
     NUMBER, since the two are evaluated at different densities, but the same
     energy expression, and E_HF[rho] must be far from E_KS.
     """
-    chain = RPAGroundStateChain(water, ks_factory)
+    chain = RPAGroundStateChain(water, ks_factory, numerics=Numerics(isdf={'counts': g1(water)}))
     mf = chain.mf0
     _, e_hf, e_c = chain.energy(water)
     assert chain.is_kohn_sham(mf)
     assert abs(e_hf - mf.e_tot) * HARTREE_TO_EV > 1.0, 'E_HF[rho_KS] is not E_KS'
     # E_HF[rho_KS] must be an HF-shaped energy: within ~0.1 Ha of the HF minimum,
     # and ABOVE it, since HF orbitals are the ones that minimize it.
-    hf_min = RPAGroundStateChain(water, hf_factory).mf0.e_tot
+    hf_min = RPAGroundStateChain(water, hf_factory, numerics=Numerics(isdf={'counts': g1(water)})).mf0.e_tot
     assert hf_min - 1e-9 <= e_hf <= hf_min + 0.1, (e_hf, hf_min)
     assert e_c < 0.0
 
@@ -112,7 +114,7 @@ def test_ground_state_gradient_from_any_starting_point(water, factory):
     """The gate that makes the starting point free: dE_0/dR against a 4-point
     FD, on Hartree-Fock and on a HYBRID -- a pure functional would hide an
     a_x bookkeeping error, so the hybrid is the one that matters."""
-    chain = RPAGroundStateChain(water, factory)
+    chain = RPAGroundStateChain(water, factory, numerics=Numerics(isdf={'counts': g1(water)}))
     g, _, _ = chain.total_gradient(water)
     x0 = water.atom_coords()
 
@@ -160,12 +162,13 @@ def test_both_halves_share_one_factorization(water, surface_cls):
     """A composed surface is ONE functional, so it gets ONE factorization.
 
     `separable_factors` is deterministic given its settings, so two chains
-    handed matching keywords already agree bitwise and merely pay twice --
+    handed matching keywords already agree to a few ulp and merely pay twice --
     measured, at a DISPLACED geometry, not the reference where they agree by
     construction. Holding one object makes that structural instead of a
     property of this constructor remembering to pass matching keywords.
     """
-    s = surface_cls(water, hf_factory, state=0)
+    s = surface_cls(water, hf_factory, state=0,
+                    numerics=g1_numerics(water))
     assert s.ground.factorization is s.excited.factorization
 
 
@@ -174,14 +177,16 @@ def test_both_halves_share_one_factorization(water, surface_cls):
 def test_refreeze_rebuilds_one_shared_factorization(water, surface_cls):
     """Refreezing must build a NEW factorization and give it to BOTH halves.
 
-    New, because a factorization is frozen AT a geometry and carrying the old
-    one keeps the old radii, points and frames -- the discontinuity refreeze
+    New, because a factorization is frozen AT a geometry and carrying the
+    previous one keeps its radii, points and frames -- the discontinuity
+    refreeze
     exists to remove. Shared, because otherwise the surface reverts to two
     factorizations after the first refreeze and the sharing quietly stops
     holding for the rest of the optimization, which is a regression no energy
     or gradient gate would show.
     """
-    s = surface_cls(water, hf_factory, state=0)
+    s = surface_cls(water, hf_factory, state=0,
+                    numerics=g1_numerics(water))
     moved = water.copy()
     c = water.atom_coords().copy()
     c[1, 1] += 0.05
@@ -216,7 +221,7 @@ def test_solvated_gradient_matches_finite_difference(water):
     stationary for neither functional: 4.1e-03, 4.2e-04 and 4.2e-04 Ha/Bohr
     respectively, against a surface whose forces are 2e-02."""
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
-    s = RPAGroundStateChain(water, ks_factory, environment=env)
+    s = RPAGroundStateChain(water, ks_factory, environment=env, numerics=Numerics(isdf={'counts': g1(water)}))
     g, _, _ = s.total_gradient(water)
     x0 = water.atom_coords()
 
@@ -255,7 +260,7 @@ def test_solvated_excited_surface_gradient_matches_finite_difference(water):
     the fit adjoint's own floor at every h.
     """
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
-    s = RPABSESurface(water, ks_factory, environment=env)
+    s = RPABSESurface(water, ks_factory, environment=env, numerics=g1_numerics(water))
     g, _, _ = s.total_gradient(water)
     x0 = water.atom_coords()
 
@@ -267,7 +272,7 @@ def test_solvated_excited_surface_gradient_matches_finite_difference(water):
         m.build(False, False)
         return s.total_energy(m)
 
-    assert s.excited.nfreq_cd == CD_NFREQ, 'the CD grid was resized'
+    assert s.excited.conventions.nfreq_cd == CD_NFREQ, 'the CD grid was resized'
     h = 2e-3
     f = [energy_at(d * h) for d in (1, -1, 2, -2)]
     fd = (8 * (f[0] - f[1]) - (f[2] - f[3])) / (12 * h)
@@ -283,22 +288,22 @@ def test_the_cd_grid_is_never_resized(water):
     to 8.1e-4 Ha, 13 times the 64-point grid's first frequency; with the
     singular part in closed form both keep the chain's own quadrature.
     """
-    gas = RPABSESurface(water, ks_factory)
+    gas = RPABSESurface(water, ks_factory, numerics=g1_numerics(water))
     gas.total_energy(water)
-    assert gas.excited.cd_sized
-    assert gas.excited.nfreq_cd == CD_NFREQ
+    assert gas.excited.conventions.cd_sized
+    assert gas.excited.conventions.nfreq_cd == CD_NFREQ
 
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
-    s = RPABSESurface(water, ks_factory, environment=env)
+    s = RPABSESurface(water, ks_factory, environment=env, numerics=g1_numerics(water))
     s.total_energy(water)
-    assert s.excited.nfreq_cd == CD_NFREQ
-    assert s.excited.gw_grid.cosft_wt.shape[0] == CD_NFREQ
-    # the case that stresses it: a root within 40 first nodes of a
-    # neighbouring orbital energy
+    assert s.excited.conventions.nfreq_cd == CD_NFREQ
+    assert s.excited.conventions.gw_grid.cosft_wt.shape[0] == CD_NFREQ
+    # and the case is the one that stresses it: a root within the
+    # resolution rule's reach (40 x the first node) of a NEIGHBOURING level
     eps = np.asarray(s.excited.mf0.mo_energy, float)
-    d = min(abs(s.excited.qp_seeds[int(p)] - eps[q])
-            for p in s.excited.qp_set for q in range(len(eps)) if q != int(p))
-    assert d < 40 * s.excited.nu.min(), d
+    d = min(abs(s.excited.resolved.qp_seeds[int(p)] - eps[q])
+            for p in s.excited.resolved.qp_set for q in range(len(eps)) if q != int(p))
+    assert d < 40 * s.excited.conventions.nu.min(), d
 
 
 def test_the_solvated_surface_has_no_step_over_the_stencil(water):
@@ -314,7 +319,7 @@ def test_the_solvated_surface_has_no_step_over_the_stencil(water):
     the stencil: the third derivative and nothing else.
     """
     env = SolventScreening(water, eps=1.78, eps_static=78.39)
-    s = RPABSESurface(water, ks_factory, environment=env)
+    s = RPABSESurface(water, ks_factory, environment=env, numerics=g1_numerics(water))
     x0 = water.atom_coords()
 
     def energy_at(dx):
@@ -325,13 +330,19 @@ def test_the_solvated_surface_has_no_step_over_the_stencil(water):
         m.build(False, False)
         return s.total_energy(m)
 
-    h = 1e-3
-    e = np.array([energy_at(k * h) for k in range(-10, 11)])
-    d2 = (e[2:] - 2 * e[1:-1] + e[:-2]) / h ** 2
+    h, span, reach = 1e-3, 10, 5            # the stencil's second differences need |k| <= 5
+    # every point answers: a refusal here is the crossing's step come back
+    e = {k: energy_at(k * h) for k in range(-span, span + 1)}
+    centres = list(range(-span + 1, span))
+    d2 = np.array([(e[k + 1] - 2 * e[k] + e[k - 1]) / h ** 2 for k in centres])
     med = np.median(d2)
-    stencil = d2[5:14]                      # the second differences at |dz| <= 4 mBohr
+    stencil = d2[[abs(k) < reach for k in centres]]   # |dz| <= 4 mBohr
     assert np.abs(stencil - med).max() < 0.005 * abs(med), \
         f'over the stencil {np.array2string(stencil, precision=3)}'
+    # what the worst second difference anywhere in the scan is worth in energy
+    kink = float(np.abs(d2 - med).max()) * h ** 2 * HARTREE_TO_EV
+    assert kink < 1e-6, (f'a {kink * 1e3:.2f} meV step at the pole crossing: '
+                         f'{np.array2string(d2, precision=2)}')
     # what the worst second difference anywhere in the scan is worth in energy
     kink = float(np.abs(d2 - med).max()) * h ** 2 * HARTREE_TO_EV
     assert kink < 1e-6, (f'a {kink * 1e3:.2f} meV step at the pole crossing: '

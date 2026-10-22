@@ -63,6 +63,8 @@ import warnings
 import numpy as np
 from scipy.special import spherical_jn
 
+from src.Base.constants import IR_EPS
+
 #: Matsubara statistics -> the zeta in omega_n = (2n + zeta) pi / beta.
 _ZETA = {'fermion': 1, 'boson': 0}
 
@@ -201,7 +203,7 @@ class IRBasis:
     v : (L, ny) basis functions on the omega axis, orthonormal in y.
     """
 
-    def __init__(self, lambda_, eps=1e-8, statistics='fermion', order=16,
+    def __init__(self, lambda_, eps=IR_EPS, statistics='fermion', order=16,
                  n_extra=2):
         if lambda_ <= 0:
             raise ValueError(f"lambda_ = {lambda_} must be positive")
@@ -209,6 +211,8 @@ class IRBasis:
             raise ValueError(f"statistics={statistics!r}; expected one of {list(_ZETA)}")
         self.lambda_ = float(lambda_)
         self.eps = float(eps)
+        #: the last `fit_matsubara`'s conditioning (`_check_fit_is_determined`)
+        self.last_fit = None
         self.statistics = statistics
 
         self._order = order
@@ -512,7 +516,9 @@ class IRBasis:
         return coeffs
 
     def _check_fit_is_determined(self, rank, sv, n, real):
-        """Refuse a rank-deficient fit; report a merely ill-conditioned one.
+        """Refuse a rank-deficient fit; report a merely ill-conditioned one,
+        and keep its conditioning in `last_fit` ('condition',
+        'ill_conditioned').
 
         `rank` and `sv` come free from the `lstsq` that has just run, so this
         costs nothing beyond the comparison -- there is no second SVD.
@@ -525,6 +531,10 @@ class IRBasis:
         """
         if rank >= self.size:
             cond = float(sv[0] / sv[self.size - 1])
+            # the last fit's conditioning, a flag a record copies
+            # (refuse inputs, warn numerics)
+            self.last_fit = {'condition': cond,
+                             'ill_conditioned': bool(cond > _COND_WARN)}
             if cond > _COND_WARN:
                 warnings.warn(
                     f"IRBasis.fit_matsubara: the fit at these {len(np.atleast_1d(n))} "
@@ -568,7 +578,19 @@ def matsubara_frequencies(n, beta, statistics='fermion'):
     return (2 * np.asarray(n) + zeta) * np.pi / beta
 
 
-def ir_continuation_order(beta, wmax, eps=1e-8, statistics='fermion'):
+def ir_sampling(beta, omega_max, statistics, eps=IR_EPS, n_max_factor=4):
+    """(basis, x_tau, n, U_tau, U_mat) of the IR basis at Lambda = beta*omega_max:
+    its default tau sampling x in [-1, 1], its default Matsubara indices n >= 0
+    (`default_matsubara_sampling` on an axis widened by n_max_factor),
+    u_l(x) (L, ntau) and uhat_l(n) (L, nfreq). The one construction every IR
+    transform on the molecular side is built from."""
+    basis = IRBasis(beta * omega_max, eps=eps, statistics=statistics)
+    x_tau = basis.default_tau_sampling()
+    n = basis.default_matsubara_sampling(n_max_factor=n_max_factor)
+    return basis, x_tau, n, basis.u_at(x_tau), basis.uhat(n)
+
+
+def ir_continuation_order(beta, wmax, eps=IR_EPS, statistics='fermion'):
     """A non-arbitrary Pade/multipole order for a system at (beta, wmax).
 
     The IR size at Lambda = beta*wmax is the number of independent structures

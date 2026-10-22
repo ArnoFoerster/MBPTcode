@@ -41,7 +41,7 @@ def run_tests():
         print(f"  Restricted:   {val_res:12.6f} eV")
         print(f"  Unrestricted: {val_unres:12.6f} eV")
         print(f"  Difference:   {diff:12.3e} eV")
-        threshold = 4.0e-1 if m.upper() == 'PSD2' else 1.0e-5
+        threshold = 1.0e-5
         assert diff < threshold, f"Unrestricted spin mode differs for {m} (df=True): {diff:.3e} eV (threshold={threshold})"
 
     print("\n" + "="*80)
@@ -64,7 +64,7 @@ def run_tests():
         print(f"  Restricted:   {val_res:12.6f} eV")
         print(f"  Unrestricted: {val_unres:12.6f} eV")
         print(f"  Difference:   {diff:12.3e} eV")
-        threshold = 4.0e-1 if m.upper() == 'PSD2' else 1.0e-5
+        threshold = 1.0e-5
         assert diff < threshold, f"Unrestricted spin mode differs for {m} (df=False): {diff:.3e} eV (threshold={threshold})"
 
     print("\n" + "="*80)

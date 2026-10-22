@@ -17,19 +17,20 @@ import os
 
 import numpy as np
 
-from src.Base.constants import ISDF_TILE_GB, SCREENED_CHUNK_BYTES
+from src.Base.constants import (DEFAULT_TAU_TARGET, ISDF_TILE_GB,
+                                SCREENED_CHUNK_BYTES)
 from src.Base.sliced_factors import SlicedFactors
 from src.Base.utils.mpi_grid import (agreement, contiguous_block,
                                      current_comm, partition, reduce_sum)
 from src.Base.utils.grids import minimax_frequency_grid
-from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
-                                          minimax_transform_weights,
-                                          minimax_points_for_accuracy,
-                                          COSINE_TW, COSINE_WT, SINE_TW,
-                                          SELF_ENERGY_PAD)
+from src.Base.utils.time_frequency import (minimax_transform_weights,
+                                          minimax_points_for_ranges,
+                                          self_energy_fit_ranges_from_window,
+                                          sigma_fit_ranges,
+                                          COSINE_TW, COSINE_WT, SINE_TW)
 from src.SingleReference.base import get_occ_virt_indices, transition_range
 from src.SingleReference.LinearResponse.space_time import (
-    FrequencyBlock, ProjRows, owned_frequency_blocks,
+    FrequencyBlock, ProjRows, dyson_screening, owned_frequency_blocks,
     polarizability_projected_sweep, polarizability_projected_tau,
     split_branches, sweep_waves, three_index_slice, wave_items)
 
@@ -135,31 +136,6 @@ def self_energy_imaginary_time(X, D, W_tilde_aux_tau, eps, nocc, tau_points,
     return sig_l, sig_g
 
 
-def self_energy_fit_ranges(eps, nocc, mu=None):
-    """
-    The two exponential-decay ranges the space-time self-energy needs.
-
-    * Wt(i.tau): the RPA screened interaction has spectral weight below the
-      smallest independent-particle transition (collective excitations sit
-      under the HOMO-LUMO gap), so a range starting at the gap misfits where
-      Wt is largest. Measured on the Wt(i.w) -> tau -> Wt(i.w) round trip
-      at ntau=18: 1.3e-3 with [gap, e_max], 5.0e-8 with the widened range.
-    * Sigma(i.tau) = -G Wt is a product, so its decay rates are sums
-      |eps_m - mu| + Omega_S and reach far beyond either factor's range.
-
-    Returns ((w_lo, w_hi), (sig_lo, sig_hi)).
-    """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    w_lo = eps[virt].min() - eps[occ].max()
-    w_hi = eps[virt].max() - eps[occ].min()
-    dG = np.abs(eps - mu)
-    lo, hi = SELF_ENERGY_PAD
-    return ((lo * w_lo, hi * w_hi),
-            (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
-
-
 def screening_frequency_grid(ntau, eps, nocc, mu=None):
     """(points, weights): the minimax frequencies W(i.omega) is sampled on.
 
@@ -169,7 +145,7 @@ def screening_frequency_grid(ntau, eps, nocc, mu=None):
     near 1e-3 however many points it is given. chi0 is fitted onto these
     frequencies one output row at a time from its own bare-window tau axis.
     """
-    rW, _ = self_energy_fit_ranges(eps, nocc, mu=mu)
+    rW, _ = sigma_fit_ranges(eps, nocc, mu=mu)
     return minimax_frequency_grid(ntau, *rW)
 
 
@@ -184,7 +160,7 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
         W(i.omega)  -> W(i.tau)        rW, widened below the gap
         Sigma(i.tau)-> Sigma(i.omega)  rS, widest: Sigma is a product, so its
                                        decay rates are sums (see
-                                       `self_energy_fit_ranges`)
+                                       `sigma_fit_ranges`)
 
     R = e_max/e_min grows as the gap closes, so this returns more
     points for a longer acene than a shorter one at fixed accuracy: naphthalene
@@ -198,16 +174,17 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
         mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    rW, rS = self_energy_fit_ranges(eps, nocc, mu=mu)
+    rW, rS = sigma_fit_ranges(eps, nocc, mu=mu)
     ratios = ((eps[virt].max() - eps[occ].min())
               / (eps[virt].min() - eps[occ].max()),
               rW[1] / rW[0],
               rS[1] / rS[0])
-    return _points_for_ratios(ratios, target, npoints_max)
+    return minimax_points_for_ranges(ratios, target=target,
+                                     npoints_max=npoints_max)
 
 
 def unrestricted_fit_ranges(spectra, noccs):
-    """`self_energy_fit_ranges` of an unrestricted reference: the same rule on
+    """`sigma_fit_ranges` of an unrestricted reference: the same rule on
     the union of both spin channels, each at its own mid-gap.
 
     W is built from both spins' transitions, so its range is theirs together;
@@ -216,11 +193,11 @@ def unrestricted_fit_ranges(spectra, noccs):
     transforms. A closed shell run unrestricted gets the restricted ranges.
     """
     w_lo, w_hi = transition_range(spectra, noccs)
-    dG = np.concatenate([np.abs(e - 0.5 * (e[n - 1] + e[n]))
-                         for e, n in zip(spectra, noccs)])
-    lo, hi = SELF_ENERGY_PAD
-    return ((lo * w_lo, hi * w_hi),
-            (lo * (dG.min() + w_lo), hi * (dG.max() + w_hi)))
+    parts = [self_energy_fit_ranges_from_window(e, 0.5 * (e[n - 1] + e[n]),
+                                                w_lo, w_hi)
+             for e, n in zip(spectra, noccs)]
+    rW = parts[0][0]
+    return (rW, (min(rS[0] for _, rS in parts), max(rS[1] for _, rS in parts)))
 
 
 def unrestricted_screening_frequency_grid(ntau, spectra, noccs):
@@ -237,21 +214,8 @@ def minimax_points_for_gw_unrestricted(spectra, noccs,
     """`minimax_points_for_gw` over both spin channels' ranges together."""
     w_lo, w_hi = transition_range(spectra, noccs)
     rW, rS = unrestricted_fit_ranges(spectra, noccs)
-    return _points_for_ratios((w_hi / w_lo, rW[1] / rW[0], rS[1] / rS[0]),
-                              target, npoints_max)
-
-
-def _points_for_ratios(ratios, target, npoints_max):
-    """(npoints, worst error): the smallest tabulated grid that fits every
-    range ratio in `ratios` to `target`, or the largest and inf if none does."""
-    npoints, worst = 0, 0.0
-    for R in ratios:
-        n, err = minimax_points_for_accuracy(1.0, R, target=target,
-                                             npoints_max=npoints_max)
-        if n is None:                       # nothing tabulated resolved this R
-            return npoints_max, float('inf')
-        npoints, worst = max(npoints, n), max(worst, err)
-    return npoints, worst
+    return minimax_points_for_ranges((w_hi / w_lo, rW[1] / rW[0], rS[1] / rS[0]),
+                                     target=target, npoints_max=npoints_max)
 
 
 def screened_chunk(nfreq, naux, chunk_bytes=SCREENED_CHUNK_BYTES):
@@ -310,11 +274,9 @@ def screened_interaction_rows(W_minus_I, Ctw, naux, comm,
 
 def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
                                      freq_block=None, scratch_dir=None,
-                                     tile_memory_gb=ISDF_TILE_GB,
-                                     wt_scratch=None, static_index=None,
-                                     static_out=None, transform=None,
-                                     tau_indices=None, tau_out_indices=None,
-                                     comm=None):
+                                     tile_memory_gb=ISDF_TILE_GB, wt_scratch=None,
+                                     transform=None, tau_indices=None,
+                                     tau_out_indices=None, comm=None):
     """
     Wt(i.tau) = sum_w Ctw[.,w] ( [I - chi0(i.w)]^-1 - I ), in one blocked pass.
 
@@ -322,13 +284,13 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     for the whole axis. Every block needs all of proj(tau) again, and
     rebuilding them is the N^3 cost of the method, so recomputing costs a
     factor nfreq/freq_block in time; `scratch_dir` caches them on disk.
+    `wt_scratch` puts Wt itself on disk, memory-mapped: every consumer reads
+    it as Wt[k] inside a tau loop, once per k.
 
     transform: `bare_gauge_transform`, when a reaction field dresses the
     factors. Wt is then the bare screening: the self-energy takes the
     continuum as Duchemin et al.'s static Eq. (18) shift, and screening it
-    dynamically as well would count the same polarization twice. The captured
-    `static_out['w_static']` stays dressed, because the BSE kernel it is
-    carried for is built in the dressed gauge with the dressed factors.
+    dynamically as well would count the same polarization twice.
 
     tau_indices / tau_out_indices / comm: the tau partition inside each
     frequency block. This rank projects only the input points `tau_indices`
@@ -343,8 +305,8 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
     rank folds every output row, so the return is the whole Wt, identical on
     every rank; a partition handed in without a comm stays the caller's
     partial, never reduced here. An audited run compares the inputs' digests
-    and, on the way out, those of W(omega = 0) and of a whole Wt (rows held
-    per rank differ by design and are not compared).
+    and, on the way out, that of a whole Wt (rows held per rank differ by
+    design and are not compared).
 
     X is the MO collocation, or `SlicedFactors` over `comm`, whose occupied
     and virtual columns `split_branches` gathers whole once for the sweep.
@@ -380,8 +342,6 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
         Wt[:] = 0.0
     else:
         Wt = np.zeros((len(rows_out), naux, naux))
-    eye = np.eye(naux)
-    dg = np.diag_indices(naux)
 
     cache, path = None, None
     if scratch_dir is not None:
@@ -410,13 +370,7 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
             if nranks > 1:
                 reduce_sum(blk, comm)         # every rank now holds chi0(block)
             for m in range(k1 - k0):
-                b = blk[m]
-                if static_index is not None and k0 + m == static_index:
-                    static_out['w_static'] = np.linalg.inv(eye - b)   # dressed
-                if transform is not None:
-                    b[:] = transform.T @ b @ transform     # chi0 into the bare gauge
-                b[:] = np.linalg.inv(eye - b)
-                b[dg] -= 1.0                  # the correlation part, W - I
+                blk[m] = dyson_screening(blk[m], transform, correlation=True)
             # one output tau at a time: `Wt += tensordot(Ctw[:, k0:k1], blk)`
             # would materialize a temporary the size of Wt
             for i, t in enumerate(rows_out):
@@ -431,8 +385,7 @@ def screened_interaction_tau_blocked(X, D, eps, nocc, grid, Ctw, mu=None,
         Wt.flush()
         Wt = np.lib.format.open_memmap(wt_scratch, mode='r')
     if nranks > 1:
-        agreement(((static_out or {}).get('w_static'),
-                   Wt if tau_out_indices is None else None), comm,
+        agreement(Wt if tau_out_indices is None else None, comm,
                   audit_only=True,
                   label='screened_interaction_tau_blocked outputs')
     if tau_out_indices is None:
@@ -537,7 +490,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
         mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    rW, rS = ranges or self_energy_fit_ranges(eps, nocc, mu=mu)
+    rW, rS = ranges or sigma_fit_ranges(eps, nocc, mu=mu)
 
     if Wt_tau is None:
         Ctw, _ = minimax_transform_weights(COSINE_WT, tau_points, omega_in,
@@ -640,7 +593,7 @@ def self_energy_diagonal_rows(pairs, Wt, eps, nocc, tau_points, omega_out,
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
         mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    _, rS = ranges or self_energy_fit_ranges(eps, nocc, mu=mu)
+    _, rS = ranges or sigma_fit_ranges(eps, nocc, mu=mu)
     C, _ = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS,
                                      warn=False)
     S, _ = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS,
@@ -703,7 +656,6 @@ def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
     Wt's (`mpi_grid.agreement`).
     """
     naux = proj_tau.shape[-1]
-    eye = np.eye(naux)
     comm = current_comm() if comm is None else comm
     rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
                     else (0, 1))
@@ -715,7 +667,7 @@ def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
     for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb,
                                           nu_mine):
         for m in range(len(ks)):
-            blk[m] = np.linalg.inv(eye - blk[m]) - eye
+            blk[m] = dyson_screening(blk[m], correlation=True)
         Wt_tau += np.tensordot(Ctw[:, ks], blk, axes=(1, 0))
     if nranks > 1:
         reduce_sum(Wt_tau, comm)

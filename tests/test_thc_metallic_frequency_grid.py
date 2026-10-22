@@ -50,8 +50,8 @@ def _synthetic(e_min, nmo=6):
 def test_floor_restores_spectrum_coverage():
     """Every measured Li window must span its spectrum once floored.
 
-    The raw column is the defect and the floored column is the fix; asserting
-    both keeps the test honest about which half it is checking.
+    The raw column fails the coverage and the floored column meets it;
+    asserting both keeps the test honest about which half it is checking.
     """
     raw_fail = 0
     for k, e_min, e_max in LI_WINDOWS:
@@ -105,10 +105,11 @@ def test_a_gap_above_the_floor_is_untouched():
 
 
 def test_beta_zero_reproduces_the_unfloored_grid():
-    """The escape hatch for comparing against pre-fix numbers.
+    """The escape hatch for comparing against unfloored numbers.
 
     thermal_e_min rejects beta <= 0, so this has to be handled before the call
-    rather than passed through -- otherwise reproducing an old number raises.
+    rather than passed through -- otherwise reproducing an unfloored number
+    raises.
     """
     mo_e, mo_occ, kplus = _synthetic(1.873e-03)
     f_none, _, _, _ = frequency_grid_occ(mo_e, mo_occ, kplus, 32, beta=None)

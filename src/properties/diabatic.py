@@ -30,6 +30,7 @@ diabat that swaps, shows up there as a ladder that does not converge as h^2.
 import numpy as np
 
 from src.Base.constants import DIABAT_OVERLAP_FLOOR, NUCLEAR_FD_STEP
+from src.Base.geometry import molecule_at
 from src.Base.fragment_localization import FragmentOrbitals
 from src.properties.fragment_bse import BSEOperator, FragmentPartition
 from src.properties.nonadiabatic import mo_overlap, state_overlap
@@ -84,10 +85,8 @@ def _align(part, reference):
 
 
 def displaced_along(mol, direction, h):
-    out = mol.copy()
-    out.set_geom_(np.asarray(mol.atom_coords()) + h * direction, unit='Bohr')
-    out.build(False, False)
-    return out
+    """`mol` moved by `h` along the Cartesian `direction` (Bohr)."""
+    return molecule_at(mol, np.asarray(mol.atom_coords()) + h * direction)
 
 
 def diabatic_derivative(chain, fragments, sites, direction, ct=None,

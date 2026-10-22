@@ -24,6 +24,13 @@ Licensed under the Apache License, Version 2.0.
     explicit contraction ordering) and are described in the file's module
     docstring; the amplitude equations themselves are unchanged.
 
+  * src/Base/pdaggerq_interface.py and src/CodeGeneration/
+    Code generators that derive equations with pdaggerq (an optional
+    dependency, not distributed here) and emit NumPy modules. The restricted
+    CC generator (generate_restricted_ccsdt.py) sets up its operators as
+    pdaggerq's examples ccsdt_with_spin.py, lambda_singles.py and
+    lambda_doubles.py do.
+
 --------------------------------------------------------------------------
 GreenX
 https://github.com/nomad-coe/greenX

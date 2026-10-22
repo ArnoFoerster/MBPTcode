@@ -28,6 +28,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.Base.numerics import Numerics
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.LinearResponse import davidson
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
@@ -45,11 +46,16 @@ def water():
     return _system(WATER)
 
 
-def solve(s, timings, **kw):
-    """One BSE Davidson on water's ISDF action."""
-    return solve_casida_davidson(lr_of(s), s['nocc'], nroots=NROOTS,
+def solve(s, timings, max_cycle=None, **kw):
+    """One BSE Davidson on water's ISDF action, capped at `max_cycle`
+    (None: the default cap)."""
+    bse = {'nroots': NROOTS, 'conv_tol': CONV_TOL}
+    if max_cycle is not None:
+        bse['max_cycle'] = max_cycle
+    numerics = Numerics(bse=bse)
+    return solve_casida_davidson(lr_of(s), s['nocc'], numerics=numerics,
                                  polarizability='BSE', W_aux=s['W_aux'],
-                                 isdf_factors=s['factors'], conv_tol=CONV_TOL,
+                                 isdf_factors=s['factors'],
                                  timings=timings, **kw)
 
 

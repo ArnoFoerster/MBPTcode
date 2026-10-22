@@ -2,11 +2,9 @@
 
 The functional itself -- the block fold of the ACFDT log-determinant over a
 non-overlapping solvent, its reaction-field matrix N and its solute-solvent
-dispersion term -- is
-`SingleReference.LinearResponse.solvated_rpa_energy`, and every name this
-module used to define resolves to it. `dispersion_energy` is kept as an alias
-of `solute_solvent_dispersion_energy`, the name that tells it apart from the
-empirical D3/D4 correction of `Base.dispersion`.
+dispersion term `solute_solvent_dispersion_energy` (not the empirical D3/D4
+correction of `Base.dispersion`) -- is
+`SingleReference.LinearResponse.solvated_rpa_energy`.
 
 THE FOLD HAS A FORCE. `rpa_energy_and_adjoint` carries the adjoints of the
 rescaled interaction and the bare counter-term as `fold_bar`, and
@@ -23,18 +21,12 @@ than a piece of the functional. A production surface asks for the fold through
 import numpy as np
 
 from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import (dynamic_screening_factor,  # noqa: F401
+from src.Base.solvent_screening import (dynamic_screening_factor,
                                         solvent_plasmon_energy)
-from src.SingleReference.LinearResponse.solvated_rpa_energy import (  # noqa: F401
-    SolvatedCorrelation, fold_terms, screening_matrix,
-    solute_solvent_dispersion_energy)
+from src.SingleReference.LinearResponse.solvated_rpa_energy import (
+    SolvatedCorrelation, screening_matrix, solute_solvent_dispersion_energy)
 from src.gradients.space_time_adjoint import (rpa_energy_and_adjoint,
                                               rpa_frequency_traces)
-
-#: The solute-solvent term under the name this module bound before the
-#: functional moved; `Base.dispersion.dispersion_energy` is the unrelated
-#: empirical D3/D4 correction.
-dispersion_energy = solute_solvent_dispersion_energy
 
 
 def fold_bar_to_gauge(auxmol, environment, fold_bar, V=None):

@@ -11,7 +11,7 @@ remainders on both axes, which catches a partition that only works when
 everything divides evenly.
 
 Gates, all against the serial call in the same process:
-  * quasiparticle-set gradient (`qp_set_gradient`): roots bitwise, the three
+  * quasiparticle-set gradient (`qp_set_gradient`): roots to a few ulp, the three
     adjoints at 1e-11 relative (the frequency-outside reverse pass sums the
     states' adjoints in a different order under a partition);
   * the single-state quasiparticle gradient (`qp_gradient_space_time`), the
@@ -25,7 +25,8 @@ Gates, all against the serial call in the same process:
     `selfenergy_block`, `selfenergy_diag`);
   * static W and the whole ISDF BSE (`isdf_bse_factors`, `solve_bse_isdf`),
     including the Davidson on the row-split block action, and the BSE handed
-    its GW stage's diagonal and W(0), bitwise the BSE that solves them itself;
+    its GW stage's diagonal and W(0), the BSE that solves them itself to a
+    few ulp;
   * the in-core GW route split over grid rows (`_qp_grid_rows`) at 2, 3, 8,
     32 and 64 ranks, on tiles and blocks small enough that from 3 ranks up
     the ranks share a tau point's tiles and block pairs: its two reduced sums
@@ -35,14 +36,16 @@ Gates, all against the serial call in the same process:
     partial its own items' addends in that order, bitwise, and the reduced
     sum within `join_bound` of the exact sum of the ranks' partials, half an
     ulp per join of two of them, floored at one ulp of its largest element;
-    its output partitions bitwise: chi0's rows the serial update of the
-    gathered proj rows, each W and W(0) the serial inversion of its gathered
-    chi0, Wt's rows those of one rank on the same W, the pair-built Sigma the
-    transform of its reduced branch sums, the driver's W(0) the kernels';
+    its output partitions to a few ulp: chi0's rows the serial update of the
+    gathered proj rows, each W the serial inversion of its gathered chi0,
+    Wt's rows those of one rank on the same W, the pair-built Sigma the
+    transform of its reduced branch sums, the driver's W(0) the static
+    build's;
     the quasiparticle energies against serial on COMPOSED_GRAD_K times what
-    relabelling the grid points moves them, floored at the root finder's
-    `QP_BISECTION_TOL`; one rank's pair-built Sigma against the AO-built one
-    on the same relabelling anchor; every rank rank 0's, bitwise;
+    relabelling the grid points moves them, floored at the scan's
+    bisection tolerance `QP_GRAPHICAL_TOL`; one rank's pair-built Sigma
+    against the AO-built one on the same relabelling anchor; every rank
+    rank 0's to a few ulp (each rank forms its own);
   * the BSE@GW surface end to end (`ExcitedStateChain`), both forces against
     serial at RANK_SPLIT_FORCE_TOL, every rank's SCF the serial one bit for
     bit with pyscf's OpenMP on one thread;
@@ -58,17 +61,21 @@ Gates, all against the serial call in the same process:
     receiving: a `FactorChain` built on every rank with rank 1's radii,
     frames and fit perturbed must end with rank 0's radii, clouds, frames,
     points, pair layout and fit, the radii search having run on every rank;
-    and the points continued frames place at a displaced geometry are rank
-    0's even where rank 1's frames moved;
+    and the points placed at a displaced geometry (the frozen frames turned
+    by the molecule's rotation) are rank 0's even where rank 1's rotation
+    moved;
   * that two ranks sharing a filesystem cannot tear the radii cache they both
     write;
   * the minimax transform's pseudo-inverse cutoff, which must leave every
-    grid here bitwise and still refuse a NaN row.
+    grid here the same to a few ulp and still refuse a NaN row.
 Water/cc-pVDZ, Hartree-Fock, one factorization shared by every test.
 
-Which gates are bitwise. A reduction over disjoint zero-padded slots
+Which gates are a few ulp. A reduction over disjoint zero-padded slots
 (proj(tau) and the branch sums of the self-energy, where a rank writes only the
-tau points it owns) adds exact zeros and is bitwise. Everything reduced as a
+tau points it owns) adds exact zeros, and what it feeds is the serial number
+to a few ulp (two computations, `assert_same`; a copy
+of one rank's value on another, a lockstep or a broadcast, stays `==`).
+Everything reduced as a
 partial sum is re-associated instead: chi0 accumulates its tau points as they
 arrive, Wt(tau) and projbar sum over frequencies, so a partition sums the same
 terms in a different order and agrees to the last bits. Those gates are
@@ -86,11 +93,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import gto, lib, scf
+from pyscf import gto, scf
 
 from src.Base import separable_ri
-from src.Base.constants import (COMPOSED_GRAD_K, QP_BISECTION_TOL,
-                                RANK_SPLIT_FORCE_TOL, TRANSFORM_FIT_RCOND)
+from src.Base.constants import (COMPOSED_GRAD_K, QP_GRAPHICAL_TOL,
+                                RANK_SPLIT_FORCE_TOL,
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL, SEPARABLE_AUX_GAUGE,
+                                TRANSFORM_FIT_RCOND)
+from src.Base.numerics import Numerics
 from src.Base.utils import time_frequency
 from src.Base.utils.grids import gauss_legendre_grid
 from src.Base.utils.mpi_grid import (contiguous_block, distributed,
@@ -98,11 +109,14 @@ from src.Base.utils.mpi_grid import (contiguous_block, distributed,
                                      run_simulated)
 from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
                                            TimeFrequencyGrid,
-                                           minimax_transform_weights)
+                                           minimax_transform_weights,
+                                           sigma_fit_ranges)
 from src.SingleReference.GW import imaginary_time
-from src.SingleReference.GW.imaginary_time import (
-    SigmaPairs, screened_interaction_rows, self_energy_diagonal_rows,
-    self_energy_fit_ranges)
+from src.SingleReference.GW.imaginary_time import (SigmaPairs,
+                                                   screened_interaction_rows,
+                                                   self_energy_diagonal_rows,
+                                                   screened_interaction_tau,
+                                                   selfenergy_block)
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from src.SingleReference.GW.space_time import (_dyson_in_place, _dyson_owned,
                                                _sigma_mo_diagonal,
@@ -111,7 +125,8 @@ from src.SingleReference.GW.space_time import (_dyson_in_place, _dyson_owned,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_frequency_rows, chi0_imaginary_frequency,
-    polarizability_rows_sweep, split_branches, wave_items)
+    polarizability_rows_sweep, split_branches, static_screening_grid,
+    static_screening_matrix, wave_items)
 from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
                                                          solve_bse_isdf)
 from src.gradients import factor_chain
@@ -122,17 +137,19 @@ from src.gradients.qp_space_time import (qp_gradient_space_time,
 from src.gradients.reaction_field_adjoint import static_grid, static_screening
 from src.gradients.space_time_adjoint import (polarizability_tau,
                                               rpa_energy_and_adjoint,
-                                              screened_interaction_tau,
-                                              selfenergy_block,
                                               selfenergy_block_backward,
                                               selfenergy_diag,
                                               selfenergy_diag_backward,
                                               sigma_transforms)
+from tests.pins import assert_same
 from tests.reduction_bounds import reduced_sum_verdict
+from tests.isdf_test_grid import g1
 from tests.test_mpi_routes import (ROW_NTAU, ROW_PERMUTATIONS, ROW_TILE_GB,
                                    RecordedSimulatedComm, branch_pair_addends,
                                    grid_row_axes, proj_tile_addends,
                                    sweep_owners)
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 NTAU, NFREQ = 8, 24
 REL = 1e-11
@@ -161,20 +178,6 @@ H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 ROW_SIZES = [2, 3, 8, 32, 64]
 
 
-@pytest.fixture
-def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread, where it adds its K partials in one
-    order, so every rank-thread's SCF is the serial one bit for bit."""
-    threads = lib.num_threads()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(1)
-    yield
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(threads)
-
-
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
@@ -183,7 +186,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
     X, D = factors[0], factors[1]
     eps = np.asarray(mf.mo_energy, float)
     gap = eps[nocc] - eps[nocc - 1]
@@ -223,7 +226,8 @@ def test_qp_set_gradient(water, size, route):
         return qp_set_gradient(*args, comm=comm, **kw)
 
     for roots, eps_bar, X_bar, D_bar in run_simulated(one_rank, size):
-        assert np.array_equal(roots, serial[0])        # replicated, so bitwise
+        # zero-padded reductions: two computations of one root, a few ulp
+        assert_same(roots, serial[0], label='roots')
         assert close(eps_bar, serial[1])
         assert close(X_bar, serial[2])
         assert close(D_bar, serial[3])
@@ -240,8 +244,8 @@ def test_qp_gradient_space_time(water, size, route):
     whole adjoint and that term is absent. The root and the pole strength read
     the reduced wc, whose frequency partition writes one rank's rows and leaves
     the rest exact zeros, so under a reduction taken in rank order they are
-    bitwise; the adjoints are partial sums over that partition and agree only
-    to the last bits.
+    the serial ones to a few ulp; the adjoints are partial sums over that
+    partition and agree only to the last bits.
     """
     w = water
     args = (w['X'], w['D'], w['eps'], w['nocc'], w['grid'], w['nu'], w['wt'],
@@ -253,7 +257,9 @@ def test_qp_gradient_space_time(water, size, route):
         return qp_gradient_space_time(*args, comm=comm, **kw)
 
     for w_star, z, eps_bar, X_bar, D_bar in run_simulated(one_rank, size):
-        assert w_star == serial[0] and z == serial[1]   # zero-padded, so bitwise
+        # zero-padded: two computations of one root, a few ulp
+        assert_same(w_star, serial[0], label='root')
+        assert_same(z, serial[1], unit='1', label='Z')
         assert close(eps_bar, serial[2])
         assert close(X_bar, serial[3])
         assert close(D_bar, serial[4])
@@ -288,7 +294,8 @@ def test_qp_gradient_space_time_empty_blocks(water, size, route):
         return qp_gradient_space_time(*args, comm=comm, **kw)
 
     for w_star, z, eps_bar, X_bar, D_bar in run_simulated(one_rank, size):
-        assert w_star == serial[0] and z == serial[1]
+        assert_same(w_star, serial[0], label='root')
+        assert_same(z, serial[1], unit='1', label='Z')
         assert close(eps_bar, serial[2])
         assert close(X_bar, serial[3])
         assert close(D_bar, serial[4])
@@ -308,7 +315,8 @@ def test_static_screening(water, size):
     a0, w0 = static_screening(*args)
 
     for a, wmat in run_simulated(lambda c: static_screening(*args, comm=c), size):
-        assert np.array_equal(a, a0)            # no sweep, so bitwise
+        # no sweep: the same local contraction on every rank, a few ulp
+        assert_same(a, a0, quantity='root', label='A')
         assert close(wmat, w0)
 
 
@@ -416,21 +424,22 @@ def test_rpa_energy_and_adjoint(water, size):
 def test_static_w_and_bse(water, size):
     # probe=False here: this gate is the reduction, and the probe is a second
     # eigensolver in front of it. Replicated on every rank it is a Lanczos
-    # (`davidson._lanczos_lowest`), not ARPACK (scipy's eigsh holds one
+    # (`probe._lanczos_lowest`), not ARPACK (scipy's eigsh holds one
     # process-wide lock across its whole iteration, so rank threads deadlock
     # in it); test_bse_is_rank_zeros_with_perturbed_ranks turns it on.
     w = water
     _, _, W0 = isdf_bse_factors(w['mf'], w['mol'], w['nocc'], factors=w['factors'])
-    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
-                                      probe=False, progress=False)
+    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
+                                      probe=False, progress=False, counts=g1(w['mol']))
 
     def one_rank(comm):
         _, _, W = isdf_bse_factors(w['mf'], w['mol'], w['nocc'],
                                    factors=w['factors'], distribute=True,
                                    comm=comm)
-        om, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
+        om, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
                                         probe=False, progress=False,
-                                        distribute=True, comm=comm)
+                                        distribute=True, comm=comm,
+                                        counts=g1(w['mol']))
         return W, om, info
 
     for W, om, info in run_simulated(one_rank, size):
@@ -444,14 +453,14 @@ def test_static_w_and_bse(water, size):
 def test_bse_takes_the_gw_stage_diagonal(water, size):
     """The diagonal and W(0) of the GW call `qp='G0W0'` makes, handed to the
     BSE as `qp=` and `W_aux=`, give that entry's roots, vectors, diagonal and
-    kernel bitwise on every rank, and the handed BSE solves no quasiparticle
+    kernel to a few ulp on every rank, and the handed BSE solves no quasiparticle
     equation of its own."""
     w = water
     sigma_x = static_exchange_mean_field_matrix(w['mf'], w['mol'])
 
     def one_rank(comm):
         om0, X0, Y0, info0 = solve_bse_isdf(
-            w['mf'], w['mol'], w['nocc'], nroots=3, factors=w['factors'],
+            w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}), factors=w['factors'],
             probe=False, progress=False, sigma_x_matrix=sigma_x)
         gw_out = {}
         eps, _ = solve_qp_diagonal_space_time(w['mf'], w['mol'], w['nocc'],
@@ -459,14 +468,18 @@ def test_bse_takes_the_gw_stage_diagonal(water, size):
                                               extras=gw_out,
                                               sigma_x_matrix=sigma_x)
         om, X, Y, info = solve_bse_isdf(
-            w['mf'], w['mol'], w['nocc'], nroots=3, factors=w['factors'],
-            qp=eps, W_aux=gw_out['w_static'], probe=False, progress=False)
+            w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}), factors=w['factors'],
+            qp=eps, W_aux=gw_out['w_static'],
+            W_aux_gauge=SEPARABLE_AUX_GAUGE, probe=False, progress=False)
         return (om0, X0, Y0, info0), (om, X, Y, info)
 
     for (om0, X0, Y0, info0), (om, X, Y, info) in run_simulated(one_rank, size):
-        for a, b in ((om, om0), (X, X0), (Y, Y0), (info['eps'], info0['eps']),
-                     (info['W_aux'], info0['W_aux'])):
-            assert np.array_equal(a, b)
+        for a, b, unit, kind in (
+                (om, om0, 'Ha', 'root'), (X, X0, '1', 'vector'),
+                (Y, Y0, '1', 'vector'),
+                (info['eps'], info0['eps'], 'Ha', 'continued'),
+                (info['W_aux'], info0['W_aux'], 'Ha', 'root')):
+            assert_same(a, b, unit=unit, quantity=kind, label=kind)
         assert info['nranks'] == size
         assert 'qp' in info0['timings'] and 'qp' not in info['timings']
 
@@ -501,13 +514,15 @@ def _serial_gw(w, g, X_mo, D, X_ao):
     grid = g['grid']
     chi0 = chi0_imaginary_frequency(X_mo, D, eps, nocc, grid, mu=g['mu'],
                                     tile_memory_gb=ROW_TILE_GB)
-    W = _dyson_in_place(chi0.copy(), range(grid.nfreq), grid.nfreq - 1)
-    Wt = imaginary_time._transform_screened(g['Ctw'], W[:-1])
-    sigma = _sigma_mo_diagonal(X_mo, D, W[:-1], w['mf'], eps, nocc, g['tau'],
+    W = _dyson_in_place(chi0.copy(), range(grid.nfreq))
+    Wt = imaginary_time._transform_screened(g['Ctw'], W)
+    sigma = _sigma_mo_diagonal(X_mo, D, W, w['mf'], eps, nocc, g['tau'],
                                g['fp'], g['pade'], g['mu'],
                                np.arange(len(eps)), X_ao=X_ao,
                                block_memory_gb=ROW_TILE_GB)
-    return chi0, W[-1], Wt, sigma
+    w0 = static_screening_matrix(X_mo, D, eps, nocc,
+                                 static_screening_grid(eps, nocc))
+    return chi0, w0, Wt, sigma
 
 
 def _gw_window(w, factors, comm=None):
@@ -516,8 +531,7 @@ def _gw_window(w, factors, comm=None):
     extras = {}
     kwargs = {} if comm is None else dict(distribute=True, comm=comm)
     qp, _ = solve_qp_diagonal_space_time(w['mf'], w['mol'], w['nocc'],
-                                         factors=factors, ntau=ROW_NTAU,
-                                         tile_gb=ROW_TILE_GB, extras=extras,
+                                         factors=factors, numerics=Numerics(quadrature={'ntau_st': ROW_NTAU}, layout={'tile_gb': ROW_TILE_GB}), extras=extras,
                                          **kwargs)
     return qp, extras['w_static']
 
@@ -624,22 +638,20 @@ def test_grid_rows_proj_is_bounded(water, gw_rows, size):
 @pytest.mark.parametrize('size', ROW_SIZES)
 def test_grid_rows_partitions_are_bitwise(water, gw_rows, size):
     """chi0's rows are the serial update of the gathered proj rows, each
-    owner's W - I the serial inversion of its gathered chi0 and W(0) that of
-    chi0(0) on every rank, and Wt's rows on the serial W - I those of one
-    rank, bitwise."""
+    owner's W - I the serial inversion of its gathered chi0, and Wt's rows on
+    the serial W - I those of one rank, to a few ulp."""
     w, g = water, gw_rows['g']
     grid, naux = g['grid'], w['D'].shape[1]
     X_o, X_v, e_o, e_v = split_branches(w['X'], w['eps'], w['nocc'],
                                         g['mu'])[:4]
-    W_serial = _dyson_in_place(gw_rows['ref'][0].copy(), range(grid.nfreq),
-                               grid.nfreq - 1)
-    W_minus_I = {k: W_serial[k] - np.eye(naux) for k in range(grid.nfreq - 1)}
+    W_serial = _dyson_in_place(gw_rows['ref'][0].copy(), range(grid.nfreq))
+    W_minus_I = {k: W_serial[k] - np.eye(naux) for k in range(grid.nfreq)}
 
     def wt_rows(comm):
         size_, rank = (1, 0) if comm is None else (comm.Get_size(),
                                                    comm.Get_rank())
         mine = {k: np.ascontiguousarray(W_minus_I[k]) for k in
-                partition(grid.nfreq - 1, rank, size_)}
+                partition(grid.nfreq, rank, size_)}
         return screened_interaction_rows(mine, g['Ctw'], naux, comm).rows
 
     def one_rank(comm):
@@ -651,8 +663,8 @@ def test_grid_rows_partitions_are_bitwise(water, gw_rows, size):
         whole = np.empty(chi0.shape)
         for k, c in chi0.gather_slices(range(grid.nfreq)):
             whole[k] = c
-        owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
-        return proj, chi0.rows, whole, owned, w0, wt_rows(comm)
+        owned = _dyson_owned(chi0)
+        return proj, chi0.rows, whole, owned, wt_rows(comm)
 
     out = run_simulated(one_rank, size)
     proj = np.concatenate([o[0] for o in out], axis=1)     # (ntau, naux, naux)
@@ -661,17 +673,19 @@ def test_grid_rows_partitions_are_bitwise(water, gw_rows, size):
         chi0 += grid.cosft_wt[:, k, None, None] * proj[k]
     wt_one = wt_rows(None)
     eye = np.eye(naux)
-    for r, (_, rows, whole, owned, w0, wt) in enumerate(out):
+    for r, (_, rows, whole, owned, wt) in enumerate(out):
         r0, r1 = contiguous_block(naux, r, size)
-        assert np.array_equal(rows, chi0[:, r0:r1]), r
-        assert np.array_equal(whole, chi0), r
-        assert sorted(owned) == [k for k in partition(grid.nfreq, r, size)
-                                 if k != grid.nfreq - 1]
+        assert_same(rows, chi0[:, r0:r1], unit='1', quantity='root',
+                    label=('chi0 rows', r))
+        assert_same(whole, chi0, unit='1', quantity='root',
+                    label=('chi0 gathered', r))
+        assert sorted(owned) == [int(k) for k in partition(grid.nfreq, r,
+                                                           size)]
         for k, Wm in owned.items():
-            assert np.array_equal(Wm, _minus_eye(np.linalg.inv(
-                eye - chi0[k]))), (r, k)
-        assert np.array_equal(w0, np.linalg.inv(eye - chi0[-1])), r
-        assert np.array_equal(wt, wt_one[:, r0:r1]), r
+            assert_same(Wm, _minus_eye(np.linalg.inv(eye - chi0[k])),
+                        unit='1', quantity='root', label=('W - I', r, k))
+        assert_same(wt, wt_one[:, r0:r1], unit='1', quantity='root',
+                    label=('Wt rows', r))
 
 
 def _minus_eye(W):
@@ -689,10 +703,10 @@ def test_grid_rows_self_energy_is_bounded(water, gw_rows, size):
     pairs' addends in pair order, bitwise; the reduced sums lie within
     `join_bound` of the exact sum of the ranks' partials. The chain's
     pair-built Sigma is the tau -> omega transform of its reduced branch
-    sums, bitwise; the driver's W(0) the chain's; the quasiparticle
+    sums, to a few ulp; the driver's W(0) the chain's; the quasiparticle
     energies within COMPOSED_GRAD_K times what relabelling the grid points
-    moves them, floored at the root finder's `QP_BISECTION_TOL`; every
-    rank's Sigma, W(0) and energies rank 0's."""
+    moves them, floored at the scan's bisection tolerance
+    `QP_GRAPHICAL_TOL`; every rank's Sigma, W(0) and energies rank 0's."""
     w, g = water, gw_rows['g']
     grid, naux = g['grid'], w['D'].shape[1]
     X_mo, D, X_ao = w['factors'][:3]
@@ -712,7 +726,10 @@ def test_grid_rows_self_energy_is_bounded(water, gw_rows, size):
                             naux, on_serial), g['tau'])
         chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=g['mu'],
                                    comm=comm, tile_memory_gb=ROW_TILE_GB)
-        owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
+        owned = _dyson_owned(chi0)
+        w0 = static_screening_matrix(X_mo, D, eps, nocc,
+                                     static_screening_grid(eps, nocc),
+                                     comm=comm)
         Wt = screened_interaction_rows(owned, g['Ctw'], naux, comm)
         slabs = [slab.copy() for _, slab in Wt.gather_slices(range(ntau))]
         chain = RecordedSimulatedComm(comm, [])
@@ -727,12 +744,12 @@ def test_grid_rows_self_energy_is_bounded(water, gw_rows, size):
     pairs, slabs = sigma_pairs(), out[0][2]
     chain_sums = [branch_pair_addends(pairs, slab, t)
                   for slab, t in zip(slabs, g['tau'])]
-    rS = self_energy_fit_ranges(eps, nocc, mu=g['mu'])[1]
+    rS = sigma_fit_ranges(eps, nocc, mu=g['mu'])[1]
     C = minimax_transform_weights(COSINE_TW, g['tau'], g['pade'], *rS)[0]
     S = minimax_transform_weights(SINE_TW, g['tau'], g['pade'], *rS)[0]
     shape, ref_qp = (2, ntau, len(eps)), gw_rows['ref_qp'][0]
     qp_bar = COMPOSED_GRAD_K * max(gw_rows['moved'][4] * np.abs(ref_qp).max(),
-                                   QP_BISECTION_TOL)
+                                   QP_GRAPHICAL_TOL)
     for r, (on_serial, chain, slabs_r, sigma, w0, (qp, w0_driver)) in \
             enumerate(out):
         for sums, per_point in ((on_serial, gw_rows['sig']),
@@ -744,12 +761,20 @@ def test_grid_rows_self_energy_is_bounded(water, gw_rows, size):
                                       [got[:, k] for k in range(ntau)]), r)
         assert all(np.array_equal(a, b) for a, b in zip(slabs_r, slabs)), r
         sig_l, sig_g = chain[0][2].reshape(shape)
-        assert np.array_equal(sigma, -0.5 * ((sig_g + sig_l).T @ C.T + 1j * (
-            (sig_g - sig_l).T @ S.T))), r
-        assert np.array_equal(w0, w0_driver), r
+        want = -0.5 * ((sig_g + sig_l).T @ C.T + 1j * (
+            (sig_g - sig_l).T @ S.T))
+        for part in (np.real, np.imag):
+            assert_same(part(sigma), part(want), quantity='root',
+                        label=('Sigma', r))
+        assert_same(w0, w0_driver, quantity='root', label=('W(0)', r))
         assert np.abs(qp - ref_qp).max() <= qp_bar, r
-        for a, b in zip((sigma, w0, qp), (out[0][3], out[0][4], out[0][5][0])):
-            assert np.array_equal(a, b), r
+        # each rank forms its own Sigma, W(0) and roots: rank 0's to a few ulp
+        for part in (np.real, np.imag):
+            assert_same(part(sigma), part(out[0][3]), quantity='root',
+                        label=('Sigma, rank 0', r))
+        assert_same(w0, out[0][4], quantity='root', label=('W(0), rank 0', r))
+        assert_same(qp, out[0][5][0], quantity='continued',
+                    label=('roots, rank 0', r))
 
 
 def test_pair_built_sigma_is_anchored_serially(water, gw_rows):
@@ -775,7 +800,9 @@ def test_pair_built_sigma_is_anchored_serially(water, gw_rows):
 def chain_scf(mol):
     """A mean field converged for gradient work (conv_tol_grad 1e-11)."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -791,7 +818,7 @@ def own_chain():
     origin and return gradients far apart; real ranks are separate processes.
     """
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
-    return ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol))
+    return ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol), numerics=g1_numerics(mol))
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -820,8 +847,8 @@ def test_excited_state_chain_gradients(size, pyscf_one_thread):
           f'{d_qp / tol:.4f} of RANK_SPLIT_FORCE_TOL {tol:.0e} Ha/Bohr')
     assert d_ex <= tol and d_qp <= tol
     for g_ex, g_qp in out[1:]:                  # one surface on every rank
-        assert np.array_equal(g_ex, out[0][0])
-        assert np.array_equal(g_qp, out[0][1])
+        assert_same(g_ex, out[0][0], quantity='gradient', label='excitation')
+        assert_same(g_qp, out[0][1], quantity='gradient', label='quasiparticle')
     assert np.abs(ref_ex).max() > 1e-3          # there is a force to compare
 
 
@@ -901,7 +928,7 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
     def one_rank(comm):
         local.rank = comm.Get_rank()
         mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
-        chain = FactorChain(mol, chain_scf, mf=chain_scf(mol))
+        chain = FactorChain(mol, chain_scf, mf=chain_scf(mol), numerics=Numerics(isdf={'counts': g1(mol)}))
         crd = chain.coords(mol)
         x_ao, m_fit, _ = chain.factorization.shareable_factors(
             mol, chain.auxmol(mol), crd)
@@ -929,28 +956,27 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
 def test_placed_points_are_rank_zeros(monkeypatch):
     """The interpolation points placed at a displaced geometry are rank 0's.
 
-    Frozen frames place the points by one small matmul of the locked clouds,
-    which two rank threads compute bit for bit alike; continued frames are
-    re-derived at every geometry (`continued_frames`, through the `eigh` of
-    `atomic_frames`), which is where a rank's own bits enter. Rank 1's
-    continued frames are moved in their last bits here, and every rank must
-    still place rank 0's points.
+    The frozen frames turn with the molecule by its Kabsch rotation onto the
+    reference (`BodyFrame.rotation`), an SVD in which a node's own bits
+    enter. Rank 1's rotation is moved in its last bits here, and every rank
+    must still place rank 0's points.
     """
     local = threading.local()
-    real = factor_chain.continued_frames
+    real = factor_chain.BodyFrame.rotation
 
-    def continued(mol, frames, **kw):
-        out = real(mol, frames, **kw)
-        return out if getattr(local, 'rank', 0) == 0 else out * (1.0 + 1e-12)
+    def rotation(self, coords):
+        out = real(self, coords)
+        return (out if out is None or getattr(local, 'rank', 0) == 0
+                else out * (1.0 + 1e-12))
 
-    monkeypatch.setattr(factor_chain, 'continued_frames', continued)
+    monkeypatch.setattr(factor_chain.BodyFrame, 'rotation', rotation)
 
     def one_rank(comm):
         local.rank = comm.Get_rank()
         mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
         shifted = gto.M(atom='O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468',
                         basis=BASIS, verbose=0)
-        return FrozenFactorization(mol, frames='continued').coords(shifted)
+        return FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)})).coords(shifted)
 
     out = run_simulated(one_rank, 2)
     assert np.array_equal(out[1], out[0])
@@ -1038,17 +1064,17 @@ def test_bse_is_rank_zeros_with_perturbed_ranks(water, size):
     the last bits of that sum; the perturbation it must not admit is 1e-3.
 
     The (A-B) probe runs here, replicated as a Lanczos
-    (`davidson._lanczos_lowest`): scipy's eigsh holds one process-wide lock
+    (`probe._lanczos_lowest`): scipy's eigsh holds one process-wide lock
     across its whole iteration, so rank threads would deadlock inside it.
     """
     w = water
-    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], nroots=3,
+    om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
                                       probe=True, progress=False,
                                       factors=w['factors'])
 
     def one_rank(comm):
         mf, factors = _rank_inputs(w, comm)
-        om, _, _, info = solve_bse_isdf(mf, w['mol'], w['nocc'], nroots=3,
+        om, _, _, info = solve_bse_isdf(mf, w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
                                         probe=True, progress=False,
                                         factors=factors, distribute=True,
                                         comm=comm)
@@ -1073,7 +1099,7 @@ def test_qp_window_is_rank_zeros_with_perturbed_mean_field(water, size):
     """The distributed GW window returns rank 0's quasiparticle energies when
     rank 1 arrives with another mean field.
 
-    Bitwise, unlike the BSE: the mean-field arrays are a lockstep of rank 0's
+    To a few ulp, unlike the BSE: the mean-field arrays are a lockstep of rank 0's
     before the grid is sized from them, the reduction hands every rank the
     same chi0 and the same Sigma, and the Pade continuation and Newton that
     follow end in a lockstep of rank 0's roots. These energies are the BSE
@@ -1092,7 +1118,7 @@ def test_qp_window_is_rank_zeros_with_perturbed_mean_field(water, size):
         return qp, mf.mo_energy, mf.mo_coeff
 
     for qp, mo_energy, mo_coeff in run_simulated(one_rank, size):
-        assert np.array_equal(qp, ref)
+        assert_same(qp, ref, quantity='continued', label='window')
         assert np.array_equal(mo_energy, w['mf'].mo_energy)   # repaired
         assert np.array_equal(mo_coeff, w['mf'].mo_coeff)
 
@@ -1166,7 +1192,7 @@ def test_transform_pseudo_inverse(water):
     the fit error of a NaN row is NaN, and `max(x, nan)` returns x, so the
     fit-error warning never sees it.
 
-    The cutoff leaves these grids bitwise. The smallest relative singular
+    The cutoff leaves these grids the same to a few ulp. The smallest relative singular
     value they reach is 2.4e-17 and the cutoff sits at 1e-100, so small values
     are still inverted, as GreenX inverts them; cutting at the SVD's backward
     error instead would move this grid's omega -> tau weights in the sixth
@@ -1179,8 +1205,9 @@ def test_transform_pseudo_inverse(water):
     for kind in (COSINE_TW, COSINE_WT):
         cut, err_cut = _weights(kind, grid, e_min, e_max)
         uncut, err_uncut = _weights(kind, grid, e_min, e_max, rcond=-1.0)
-        assert np.array_equal(cut, uncut)
-        assert err_cut == err_uncut
+        assert_same(cut, uncut, unit='1', quantity='root', label=kind)
+        assert_same(err_cut, err_uncut, unit='1', quantity='root',
+                    label=(kind, 'fit error'))
 
     # The two ways 1/S breaks, in the arithmetic itself, and why it is silent.
     with np.errstate(invalid='ignore', divide='ignore'):

@@ -205,8 +205,8 @@ def test_the_charges_are_in_the_key(mol):
 
 
 def test_the_cache_is_bounded(holder, mol):
-    """Retention was the whole cost of the old version: every geometry a
-    relaxation ever visited stayed alive, cavity and molecule both."""
+    """An unbounded cache keeps every geometry a relaxation ever visited
+    alive, cavity and molecule both; the cache holds ENVIRONMENT_CACHE_SIZE."""
     for i in range(6):
         holder.environment_at(displaced(mol, 1, 0, (i + 1) * 1e-3))
     assert len(holder._environment_cache) == ENVIRONMENT_CACHE_SIZE

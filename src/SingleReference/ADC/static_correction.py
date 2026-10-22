@@ -200,7 +200,8 @@ def _rotate_dgamma_to_original_basis(dgamma_semi, U_oo, U_vv, nocc):
     return U @ dgamma_semi @ U.T
 
 
-def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None, u2_denom_dress=None):
+def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None, u2_denom_dress=None,
+                        amplitudes=None):
     """RHF-only: MP2-level Delta_gamma in the spatial MO basis, shared by
     build_mp2_static_correction's RHF branch and build_mp2_static_correction_restricted.
 
@@ -231,6 +232,26 @@ def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
     routes through MPnDensityDriverRestricted's DF
     methods instead of building g_aaaa/g_abab/g_bbbb at all. Ignored (falls
     back to the dense eri_chemist path) for a KS reference.
+
+    amplitudes: foreign amplitude pool (cc_adc_amplitudes.cc_amplitudes_restricted's
+    keying: 't2_aaaa', 't2_abab', 't1_aa') to use in place of the MBPT
+    T2^(1)/T1^(2) this function would otherwise compute. Delta_gamma^(2) is
+    then the same second-order functional evaluated at those amplitudes: an
+    expectation-value (bra = ket-adjoint) density, not the corresponding CC
+    response 1-RDM, which would need the true Lambda amplitudes and the higher
+    e^T terms. That is deliberate: it is the convention the CC-ADC(3)
+    supermatrix itself uses (cc_adc_amplitudes.py: bra amplitudes are the
+    adjoints of the ket ones, which keeps the ISR Hermitian), so this is the
+    Sigma(inf) that matches that construction, where the Lambda-CCSD 1-RDM
+    (build_ccsd_static_correction_restricted) does not.
+    The driver already takes the amplitudes as parameters; nothing here
+    reimplements the functional. CPHF relaxation (relax=True) and the B_aa DF
+    route both still apply unchanged. Mutually exclusive with u2_denom_dress
+    (EN dressing renormalizes the MBPT denominators; a converged CC amplitude
+    has no denominator left to dress) and unsupported for a KS reference (its
+    T1 singles blocks are built from the MBPT amplitudes too). The streamed
+    DF path is skipped: it generates T2^(1) from B_aa on the fly, which is
+    what is being overridden.
     """
 
     ks_setup = _ks_semicanonical_setup(mf, mol, nocc, ncore)
@@ -241,6 +262,34 @@ def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
 
     w = slice(ncore, None)
 
+    foreign_t2 = foreign_t1_2 = None
+    if amplitudes is not None:
+        if u2_denom_dress is not None:
+            raise ValueError(
+                "amplitudes= and u2_denom_dress= are mutually exclusive: the EN "
+                "dressing renormalizes the MBPT denominators, and a converged CC "
+                "amplitude has no denominator left to dress.")
+        if ks_setup is not None:
+            raise NotImplementedError(
+                "amplitudes= is not supported for a KS reference (its T1 singles "
+                "blocks are built from the MBPT amplitudes too).")
+        missing = {'t2_aaaa', 't2_abab', 't1_aa'} - set(amplitudes)
+        if missing:
+            raise KeyError(f"amplitudes= is missing {sorted(missing)}; expected "
+                           "cc_amplitudes_restricted's keying")
+        foreign_t2 = (amplitudes['t2_aaaa'], amplitudes['t2_abab'])
+        foreign_t1_2 = amplitudes['t1_aa']
+        no_act, nv_act = nocc - ncore, nmo - nocc
+        want2, want1 = (nv_act, nv_act, no_act, no_act), (nv_act, no_act)
+        for name, arr, want in (('t2_aaaa', foreign_t2[0], want2),
+                                ('t2_abab', foreign_t2[1], want2),
+                                ('t1_aa', foreign_t1_2, want1)):
+            if tuple(arr.shape) != want:
+                raise ValueError(
+                    f"amplitudes[{name!r}] has shape {tuple(arr.shape)}, expected "
+                    f"{want} for nocc={nocc} ncore={ncore} nmo={nmo}; a frozen-core "
+                    "CC pool must be frozen with the same ncore as this correction.")
+
     # The DF + plain-HF branch is rank-4-free end to end when the dressing
     # is streamable (bare, or hh/pp spin-adapted): the T2^(1) amplitudes
     # stream from B_aa (compute_delta_gamma2_df_streamed) with the EN shift
@@ -250,6 +299,7 @@ def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
     # materialized driver path below -- the same documented exception as
     # the ADC solver's _dress_is_streamable gate.
     _mp2_streamable = (B_aa is not None and ks_setup is None
+                       and amplitudes is None
                        and _dress_is_streamable(u2_denom_dress))
 
     e_abij = e_ai = None
@@ -285,14 +335,17 @@ def _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
         B_aa_w = B_aa[:, w, w]
         driver = MPnDensityDriverRestricted(np.diag(eps[w]), None, None, None,
                                             nocc - ncore, B_aa=B_aa_w, B_bb=B_aa_w, e_abij=e_abij, e_ai=e_ai)
-        oo_a, ov_a, vv_a = driver.compute_delta_gamma2_df()
+        oo_a, ov_a, vv_a = driver.compute_delta_gamma2_df(t2_1=foreign_t2,
+                                                          t1_2_aa=foreign_t1_2)
     else:
         reusable_eri = eri_chemist if ks_setup is None else None
         g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf_eval, eri_chemist=reusable_eri)
         driver = MPnDensityDriverRestricted(np.diag(eps[w]), g_aaaa[w, w, w, w],
                                             g_abab[w, w, w, w], g_bbbb[w, w, w, w],
                                             nocc - ncore, e_abij=e_abij, e_ai=e_ai)
-        oo_a, ov_a, vv_a = driver.compute_delta_gamma2()
+        oo_a, ov_a, vv_a = driver.compute_delta_gamma2(
+            t2_1=foreign_t2,
+            order2=None if foreign_t1_2 is None else (foreign_t1_2,))
     oo_act, ov_act, vv_act = 2.0 * oo_a, 2.0 * ov_a, 2.0 * vv_a
 
     if ks_setup is not None:
@@ -395,6 +448,105 @@ def _mp3_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=None, B_aa=None
     if ks_setup is not None:
         dgamma_full = _rotate_dgamma_to_original_basis(dgamma_full, U_oo, U_vv, nocc)
     return dgamma_full
+
+
+def _mp4_dgamma_spatial(mf, mol, nocc, ncore, eri_chemist=None, laplace_ntau=6):
+    """RHF-only: Delta_gamma^(2) + Delta_gamma^(3) + Delta_gamma^(4) in the
+    spatial MO basis, the density whose G[Delta_gamma] is Sigma(infinity)
+    through fifth order -- what the ADC(5) orbital block needs, one order
+    beyond the MP3 density ADC(4) needs.
+
+    Correlation blocks come from MPnDensityDriverRestricted; the order-4 piece
+    routes its t2_3/t3_3 through the Laplace-fused numerators at laplace_ntau,
+    so no rank>=3 amplitude is materialized for them (m4_*_22 and overlap4
+    still consume the order-2 t4, which the order-2 census builds anyway).
+    """
+    ks_setup = _ks_semicanonical_setup(mf, mol, nocc, ncore)
+    mf_eval = ks_setup[0] if ks_setup is not None else mf
+    eps = get_orbital_energies(mf_eval, representation='spatial')
+    nmo = len(eps)
+    w = slice(ncore, None)
+
+    reusable_eri = eri_chemist if ks_setup is None else None
+    g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf_eval,
+                                                                eri_chemist=reusable_eri)
+    driver = MPnDensityDriverRestricted(np.diag(eps[w]), g_aaaa[w, w, w, w],
+                                        g_abab[w, w, w, w], g_bbbb[w, w, w, w],
+                                        nocc - ncore)
+    (oo2_a, ov2_a, vv2_a), (oo3_a, ov3_a, vv3_a) = driver.compute_delta_gamma23(
+        laplace_ntau=laplace_ntau)
+    oo4_a, ov4_a, vv4_a = driver.compute_delta_gamma4(laplace_ntau=laplace_ntau)
+
+    oo_act = 2.0 * (oo2_a + oo3_a + oo4_a)
+    ov_act = 2.0 * (ov2_a + ov3_a + ov4_a)
+    vv_act = 2.0 * (vv2_a + vv3_a + vv4_a)
+
+    if ks_setup is not None:
+        _, U_oo, U_vv, t1_ov, dgamma_oo_t1, dgamma_vv_t1 = ks_setup
+        oo_act = oo_act + dgamma_oo_t1
+        ov_act = ov_act + t1_ov
+        vv_act = vv_act + dgamma_vv_t1
+
+    dgamma_oo, dgamma_ov, dgamma_vv = _embed_active(oo_act, ov_act, vv_act, nocc, ncore)
+    dgamma_full = _build_dgamma_block(nmo, nocc, dgamma_oo, dgamma_ov, dgamma_vv)
+    if ks_setup is not None:
+        dgamma_full = _rotate_dgamma_to_original_basis(dgamma_full, U_oo, U_vv, nocc)
+    return dgamma_full
+
+
+def build_mp4_static_correction_restricted(mf, mol=None, nocc=None, ncore=0,
+                                           laplace_ntau=6):
+    """Restricted G[Delta_gamma] from the MP4 1-RDM: Sigma(infinity) through
+    fifth order, the order-consistent orbital-block static correction for
+    ADC(5) (ADC(4) needs the MP3 density, ADC(3) the MP2 one).
+
+    Unrelaxed only: an MP4 orbital relaxation needs a Lambda-based two-particle
+    density the MP2 Z-vector shortcut does not provide, and the MP3-relaxed
+    density already carries that limitation.
+
+    laplace_ntau: Laplace points of the fused order-4 numerators;
+    build_static_correction(kind='mp4_unrelaxed') uses the default."""
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError(
+            "build_mp4_static_correction_restricted is RHF-only; the "
+            "unrestricted density driver has no order-4 Delta_gamma.")
+    mol = mol if mol is not None else mf.mol
+    nocc = nocc if nocc is not None else mol.nelectron // 2
+    eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+    dgamma_spatial = _mp4_dgamma_spatial(mf, mol, nocc, ncore,
+                                         eri_chemist=eri_chemist,
+                                         laplace_ntau=laplace_ntau)
+    return _static_correction_from_dgamma_restricted(eri_chemist, dgamma_spatial)
+
+
+def build_mp4_static_correction(mf, mol=None, nocc=None, ncore=0, laplace_ntau=6):
+    """Spin-orbital counterpart of build_mp4_static_correction_restricted
+    (RHF reference, interleaved alpha/beta), for the spin-orbital ADC(5)
+    branch."""
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError(
+            "build_mp4_static_correction is RHF-only (the spin-orbital form of "
+            "the restricted MP4 density); the unrestricted density driver has "
+            "no order-4 Delta_gamma.")
+    mol = mol if mol is not None else mf.mol
+    nocc = nocc if nocc is not None else mol.nelectron // 2
+    eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+    dgamma_spatial = _mp4_dgamma_spatial(mf, mol, nocc, ncore,
+                                         eri_chemist=eri_chemist,
+                                         laplace_ntau=laplace_ntau)
+    g_anti_spin = get_antisymmetrized_spin_eri(eri_chemist)
+    return _spin_orbital_static_correction(g_anti_spin, dgamma_spatial)
+
+
+def static_kind_for_level(level):
+    """The static-correction kind whose Sigma(infinity) is order-consistent
+    with an ADC level: the orbital block of ADC(n) carries Sigma(infinity)
+    through order n, and G[Delta_gamma^(m)] is of order m+1, so ADC(n) needs
+    the MP(n-1) density. A level with no such builder (above ADC(5)) returns
+    None."""
+    return {'adc2': 'mp2_unrelaxed', 'adc2x': 'mp2_unrelaxed',
+            'adc3': 'mp2_unrelaxed', 'adc4': 'mp3_unrelaxed',
+            'adc4t2': 'mp3_unrelaxed', 'adc5': 'mp4_unrelaxed'}.get(level)
 
 
 def _dgamma_spatial_from_ao_density(mf, dm_cc_ao):
@@ -652,7 +804,8 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
     return direct - exchange
 
 
-def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False, ncore=0, B_aa=None, u2_denom_dress=None):
+def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False, ncore=0, B_aa=None,
+                                           u2_denom_dress=None, amplitudes=None):
     """Restricted (spatial-MO) counterpart of build_mp2_static_correction, for
     ADCSolverRestricted/solve_ip_ea_restricted. RHF only -- use
     build_mp2_static_correction (spin-orbital) for UHF.
@@ -669,6 +822,13 @@ def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False,
     dense eri_chemist norb^4 array is never built at all (both the density
     correlation piece, via _mp2_dgamma_spatial's own B_aa branch, and the
     final J-0.5*K contraction, via _static_correction_from_dgamma_restricted_df).
+
+    amplitudes: foreign (e.g. CCSD/CCD) amplitude pool replacing the MBPT
+    T2^(1)/T1^(2) in Delta_gamma^(2), the Sigma(inf) partner of a CC-ADC(3)
+    amplitude substitution, bra = ket-adjoint like the supermatrix itself.
+    See _mp2_dgamma_spatial's parameter of the same name for what this is and
+    is not: an expectation-value density, not the CC response 1-RDM that
+    build_ccsd_static_correction_restricted computes.
     """
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError(
@@ -679,11 +839,13 @@ def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False,
     nocc = nocc if nocc is not None else mol.nelectron // 2
 
     if B_aa is not None:
-        dgamma_spatial = _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, B_aa=B_aa, u2_denom_dress=u2_denom_dress)
+        dgamma_spatial = _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, B_aa=B_aa,
+                                             u2_denom_dress=u2_denom_dress, amplitudes=amplitudes)
         return _static_correction_from_dgamma_restricted_df(B_aa, dgamma_spatial)
 
     eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-    dgamma_spatial = _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=eri_chemist, u2_denom_dress=u2_denom_dress)
+    dgamma_spatial = _mp2_dgamma_spatial(mf, mol, nocc, relax, ncore, eri_chemist=eri_chemist,
+                                         u2_denom_dress=u2_denom_dress, amplitudes=amplitudes)
     return _static_correction_from_dgamma_restricted(eri_chemist, dgamma_spatial)
 
 
@@ -1066,7 +1228,7 @@ def _add_ks(base, ks):
 
 
 _STATIC_KINDS = (None, 'mp2_unrelaxed', 'mp2_relaxed', 'mp3_unrelaxed',
-                 'mp3_relaxed', 'ccsd', 'ccsdt')
+                 'mp3_relaxed', 'mp4_unrelaxed', 'ccsd', 'ccsdt')
 
 #: EN-prefixed kind spellings (scan-script vocabulary): prefix -> dress dict
 _EN_KIND_PREFIXES = (('full_en_hp_', {'hh': True, 'pp': True, 'hp': True}),
@@ -1090,13 +1252,13 @@ def parse_static_kind(kind):
 def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
                             nocc=None, ncore=0, B_aa=None, spin='auto',
                             df=False, cphf_level_shift=0.0, cphf_max_cycle=None,
-                            cphf_tol=None):
+                            cphf_tol=None, amplitudes=None):
     """Sigma(infinity) static-correction dispatcher over the builders above;
     the KS double-counting correction is always added on top (zero-effect for
     plain HF references).
 
     kind: one of (None, 'mp2_unrelaxed', 'mp2_relaxed', 'mp3_unrelaxed',
-        'mp3_relaxed', 'ccsd', 'ccsdt'), optionally EN-prefixed with
+        'mp3_relaxed', 'mp4_unrelaxed', 'ccsd', 'ccsdt'), optionally EN-prefixed with
         'hhen_' / 'full_en_' / 'full_en_hp_' (the scan-script vocabulary;
         see parse_static_kind).
     en_dress: Epstein-Nesbet dressing dict, threaded as u2_denom_dress into
@@ -1120,7 +1282,12 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         (the DF hook of the restricted MP2/MP3/CCSD builders).
     cphf_level_shift/cphf_max_cycle/cphf_tol: forwarded to the UHF CPHF/
         Z-vector solve (relax=True only, dense or df); see
-        solve_cphf_relaxation_uhf /."""
+        solve_cphf_relaxation_uhf.
+    amplitudes: foreign (CC) amplitude pool for the MP2 density functional,
+        the Sigma(inf) partner of a CC-ADC(3) amplitude substitution. Restricted
+        MP2 kinds only ('mp2_unrelaxed'/'mp2_relaxed'); rejected elsewhere
+        rather than silently ignored. See
+        build_mp2_static_correction_restricted's parameter of the same name."""
     mol = mol if mol is not None else mf.mol
     kind, kind_dress = parse_static_kind(kind)
     if kind_dress is not None:
@@ -1143,6 +1310,16 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
             "restricted's own parameter), not this flag")
     if kind not in _STATIC_KINDS:
         raise ValueError(f"kind={kind!r}; expected one of {_STATIC_KINDS}")
+    if amplitudes is not None:
+        if spin != 'restricted':
+            raise NotImplementedError(
+                "amplitudes= is implemented on the restricted branch only "
+                f"(got spin={spin!r}); the CC-ADC(3) route it serves is restricted.")
+        if kind not in ('mp2_unrelaxed', 'mp2_relaxed'):
+            raise ValueError(
+                f"amplitudes= applies to the MP2 density kinds only (got kind={kind!r}): "
+                "an MP3/MP4/CC/None static has no second-order amplitude functional "
+                "to substitute into.")
     en_dress = validate_en_dress(en_dress)
     if en_dress is not None and kind not in ('mp2_unrelaxed', 'mp2_relaxed',
                                              'mp3_unrelaxed', 'mp3_relaxed'):
@@ -1157,11 +1334,17 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         elif kind.startswith('mp2'):
             base = build_mp2_static_correction_restricted(
                 mf, mol, nocc, relax=relax, ncore=ncore, B_aa=B_aa,
-                u2_denom_dress=en_dress)
+                u2_denom_dress=en_dress, amplitudes=amplitudes)
         elif kind.startswith('mp3'):
             base = build_mp3_static_correction_restricted(
                 mf, mol, nocc, relax=relax, ncore=ncore, B_aa=B_aa,
                 u2_denom_dress=en_dress)
+        elif kind.startswith('mp4'):
+            if B_aa is not None:
+                raise NotImplementedError(
+                    "kind='mp4_unrelaxed' has no DF route (the MP4 density driver "
+                    "takes dense spin-block integrals); pass B_aa=None")
+            base = build_mp4_static_correction_restricted(mf, mol, nocc, ncore=ncore)
         elif kind == 'ccsd':
             base = build_ccsd_static_correction_restricted(mf, mol, ncore=ncore,
                                                           B_aa=B_aa)
@@ -1210,6 +1393,8 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
     elif kind.startswith('mp3'):
         base = build_mp3_static_correction(mf, mol, nocc, relax=relax,
                                            ncore=ncore, u2_denom_dress=en_dress)
+    elif kind.startswith('mp4'):
+        base = build_mp4_static_correction(mf, mol, nocc, ncore=ncore)
     elif kind == 'ccsd':
         base = build_ccsd_static_correction(mf, mol, ncore=ncore)
     else:

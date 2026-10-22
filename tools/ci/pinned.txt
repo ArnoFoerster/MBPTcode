@@ -1,0 +1,11 @@
+# Versions the suite was last run against (py310 environment, 2026-10-16).
+# The per-push workflow installs exactly these; the nightly one does not.
+# pyscf is pinned to the cluster's 2.13.1: 2.13 never
+# density-prunes the SCF grid and solves through SCF._eigh, so 2.12 and 2.13
+# give different grids and numbers.
+numpy==1.26.4
+scipy==1.15.3
+pyscf==2.13.1
+opt_einsum==3.4.0
+threadpoolctl==3.6.0
+pytest==9.1.1

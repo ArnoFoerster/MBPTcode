@@ -1,0 +1,118 @@
+"""Regression test for the generated matrix-free APPLY module
+(generatedADC/adc4_c2_apply_blocks.py, produced by
+src/CodeGeneration/sigma_codegen.py).
+
+Validates each generated apply function against the dense generated
+block (adc4_c2_blocks.py) contracted with a trial vector: for every C^(2)
+split and sector,
+
+    apply_c2_TAG_SPLIT(..., x)  ==  einsum('bra...,ket...->bra', dense_block, x)
+
+to machine precision. Both modules are generated into a temporary directory
+first (generated output is not part of the repository), so a divergence flags an emitter
+regression. Equivalence is purely algebraic, so the amplitude arrays fed to
+both sides need only be identical (real MPn amplitudes used here).
+"""
+import inspect
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import numpy as np
+import pytest
+from pyscf import gto, scf
+
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
+from src.Base.pyscf_interface import (
+    get_orbital_energies, get_two_electron_integrals_chemist,
+    get_antisymmetrized_spin_eri)
+
+SPLITS = ['vt2', 'l2ft2', 'ft1']   # the surviving C^(2) splits
+
+
+from src.Base.pdaggerq_interface import pdaggerq_available
+
+
+def _generate():
+    """(dense, appl): adc4_c2_blocks and adc4_c2_apply_blocks, generated into a temporary directory
+    (generated output is not part of the repository) and loaded from there."""
+    import importlib.util
+    import tempfile
+    from src.CodeGeneration import generate_adcn, sigma_codegen
+    out = tempfile.mkdtemp(prefix='sigma_codegen_')
+    saved = generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR
+    generate_adcn.OUT_DIR = sigma_codegen.OUT_DIR = out
+    try:
+        generate_adcn.generate_adc4_base_c2()
+        sigma_codegen.generate_adc4_base_c2_apply()
+    finally:
+        generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR = saved
+    mods = []
+    for name in ('adc4_c2_blocks', 'adc4_c2_apply_blocks'):
+        spec = importlib.util.spec_from_file_location(name, os.path.join(out, 'adc4', name + '.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mods.append(mod)
+    return tuple(mods)
+
+
+def main():
+    dense, appl = _generate()
+    all_ok = True
+    for atom, basis, label in [
+        ('Li 0 0 0; H 0 0 1.6', 'sto-3g', 'LiH/sto-3g'),
+        ('H 0 0 0; H 0 0 0.74; H 0 0 1.5; H 0 0 2.2', 'sto-3g', 'H4/sto-3g'),
+    ]:
+        mol = gto.M(atom=atom, basis=basis, verbose=0)
+        mf = scf.RHF(mol).run()
+        nocc = 2 * (mol.nelectron // 2)
+        eps = get_orbital_energies(mf, representation='spin')
+        eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+        g = get_antisymmetrized_spin_eri(eri)
+        norb, no = len(eps), nocc
+        nv = norb - nocc
+
+        mpn = MPnDensityDriver(eps, g, nocc)
+        t2_1 = mpn.compute_t2_1()
+        t1_2, t2_2, t3_2, _ = mpn.compute_order2_amplitudes(t2_1)
+        pool = {'f': np.diag(eps), 'g': g, 'kd': np.eye(norb),
+                'o': slice(0, nocc), 'v': slice(nocc, norb), 'no': no, 'nv': nv,
+                't2': t2_1, 'l2': _to_l(t2_1, 2),
+                't1': t1_2, 'l1': _to_l(t1_2, 1),
+                't3': t3_2, 'l3': _to_l(t3_2, 3)}
+        rng = np.random.default_rng(0)
+
+        print(f"\n=== {label}  (no={no}, nv={nv}) ===")
+        for tag in ('2h1p', '2p1h'):
+            for split in SPLITS:
+                dfn = getattr(dense, f'c2_{tag}_{split}')
+                afn = getattr(appl, f'apply_c2_{tag}_{split}')
+                dkw = {p: pool[p] for p in inspect.signature(dfn).parameters}
+                T = dfn(**dkw)
+                nbra = T.ndim // 2
+                x = rng.standard_normal(T.shape[nbra:])
+                ref = np.tensordot(T, x, axes=(list(range(nbra, T.ndim)),
+                                               list(range(x.ndim))))
+                akw = {p: pool[p] for p in inspect.signature(afn).parameters if p != 'x'}
+                y = afn(x=x, **akw)
+                diff = np.abs(y - ref).max()
+                ok = diff < 1e-11
+                all_ok &= ok
+                print(f"  [{'OK' if ok else 'FAIL'}] apply_c2_{tag}_{split:6s} "
+                      f"({T.ndim // 2}->bra):  max|apply - dense@x| = {diff:.2e}")
+
+    print("\nALL OK" if all_ok else "\nSOME FAILED")
+    return all_ok
+
+
+@pytest.mark.skipif(not pdaggerq_available(), reason='needs pdaggerq (optional)')
+def test_main():
+    assert main()
+
+
+if __name__ == '__main__':
+    if not pdaggerq_available():
+        print('SKIPPED: needs pdaggerq (optional)')
+        sys.exit(0)
+    sys.exit(0 if main() else 1)

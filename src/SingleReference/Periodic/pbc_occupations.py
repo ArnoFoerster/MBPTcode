@@ -55,7 +55,8 @@ import numpy as np
 
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.Periodic.pbc_amplitudes import get_chi_a, kpoint_minus_q
-from src.Base.constants import QP_Z_MIN
+from src.Base.constants import PBC_QP_Z_MIN
+from src.Solvers.qp_equation import SampledEquation, find_qp_root
 from src.SingleReference.Periodic.pbc_self_energy import q_grid
 
 #: Pairs whose occupation difference falls below this carry no useful weight
@@ -522,9 +523,11 @@ def qp_energy_g0w0_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
 
 def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
                        eta=1e-3, exchange_minus_vxc=0.0, half_width=0.5,
-                       npts=81, de=1e-3, z_min=QP_Z_MIN,
+                       npts=81, z_min=PBC_QP_Z_MIN,
                        threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Solve the QP equation w = eps + Sigma_c(w) + dVxc by scan and bisection.
+    """Solve the QP equation w = eps + Sigma_c(w) + dVxc by the one root finder
+    (`Solvers.qp_equation.find_qp_root`): a scan of eps +/- half_width on
+    `npts` points, every sign change bisected and weighed.
 
     `qp_energy_g0w0_occ` LINEARIZES about eps, which presumes one
     well-separated pole there. On a metal that presumption fails visibly --
@@ -536,7 +539,8 @@ def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     Returns a dict rather than a scalar, because on a metal the useful output
     is not only where the root is but HOW MANY there are:
 
-        qp       root nearest eps (the conventional choice)
+        qp       root of largest weight (the rule of every quasiparticle
+                 equation in the code base)
         Z        1/(1 - dSigma_c/domega) evaluated AT that root, not at eps
         nroots   roots surviving the pole-strength floor |Z| >= z_min
         n_rejected  roots discarded as pole artifacts (Z ~ 0)
@@ -544,8 +548,8 @@ def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
         bracketed  False if the window caught no sign change at all
 
     `nroots > 1` means the spectral weight is split and there is no single
-    quasiparticle to converge -- report it rather than silently taking the
-    nearest root and calling it converged. `bracketed=False` means the root is
+    quasiparticle to converge -- report it rather than silently taking one
+    root and calling it converged. `bracketed=False` means the root is
     outside eps +/- half_width, which is itself information: widen the window
     deliberately rather than trusting an extrapolation.
 
@@ -558,61 +562,42 @@ def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     ep = mo_energy[kn][n].real
     kw = dict(mo_energy=mo_energy, mo_occ=mo_occ, eta=eta, threshold=threshold)
 
-    grid = np.linspace(ep - half_width, ep + half_width, int(npts))
-    sig = np.real(np.asarray(sigma_c_diag_occ(dfints, eig_all_q, kn, n, grid,
-                                              **kw)))
-    f = grid - ep - sig - exchange_minus_vxc
+    def residual(w):
+        sig = np.real(np.asarray(sigma_c_diag_occ(dfints, eig_all_q, kn, n, w,
+                                                  **kw)))
+        return w - ep - sig - exchange_minus_vxc
 
-    idx = np.flatnonzero(np.sign(f[:-1]) * np.sign(f[1:]) < 0)
-    roots = []
-    for i in idx:
-        lo, hi, flo = grid[i], grid[i + 1], f[i]
-        for _ in range(60):                      # plain bisection: f is only
-            mid = 0.5 * (lo + hi)                # available pointwise and the
-            fm = float(np.real(sigma_c_diag_occ(  # bracket is already tight
-                dfints, eig_all_q, kn, n, mid, **kw)))
-            fm = mid - ep - fm - exchange_minus_vxc
-            if np.sign(fm) == np.sign(flo):
-                lo, flo = mid, fm
-            else:
-                hi = mid
-            if hi - lo < 1e-10:
-                break
-        roots.append(0.5 * (lo + hi))
-
-    if not roots:
+    # the one root finder (`Solvers.qp_equation.find_qp_root`) on this
+    # window: every sign change bisected, a pole of Sigma_c told from a root,
+    # every root weighed, the largest weight kept
+    source = SampledEquation(residual, vectorized=True, n_omega=npts,
+                             tol=1e-10,
+                             windows=[(ep - half_width, ep + half_width)])
+    got = find_qp_root(source, ep)
+    if not got.found:
         return dict(qp=float('nan'), Z=float('nan'), nroots=0, roots=[],
                     bracketed=False)
-    # Weigh every root before choosing one. A root sitting ON a pole of
-    # Sigma_c has dSigma/domega -> -inf and so Z -> 0: it solves the equation
-    # and carries no spectral weight, i.e. it is not a quasiparticle. Taking
-    # the root NEAREST eps without checking finds exactly those -- measured
-    # z_min = -3.2e-06 for bulk Al at 6x6x6, on a case that reported a single
-    # bracketed root and looked clean in every other column.
-    #
-    # The molecular solver has had this since the semicore work
-    # (Solvers/qp_equation.solve_qp_equation_pole_strength, QP_Z_MIN); this is
-    # the same floor on the periodic side rather than a new idea.
-    roots = sorted(roots)
-    weighted = []
-    for r in roots:
-        s0 = float(np.real(sigma_c_diag_occ(dfints, eig_all_q, kn, n, r, **kw)))
-        s1 = float(np.real(sigma_c_diag_occ(dfints, eig_all_q, kn, n, r + de,
-                                            **kw)))
-        weighted.append((r, float(1.0 / (1.0 - (s1 - s0) / de))))
-
+    # A root sitting ON a pole of Sigma_c has dSigma/domega -> -inf and so
+    # Z -> 0: it solves the equation and carries no spectral weight, i.e. it
+    # is not a quasiparticle -- measured z_min = -3.2e-06 for bulk Al at
+    # 6x6x6, on a case that reported a single bracketed root and looked clean
+    # in every other column. PBC_QP_Z_MIN is this scan's own artifact floor,
+    # not the molecular QP_WINDOW_Z_MIN; the choice among the roots kept is
+    # the one rule of every quasiparticle equation, the largest weight.
+    weighted = sorted(got.found)
     keep = [(r, z) for r, z in weighted if abs(z) >= z_min]
     rejected = [(r, z) for r, z in weighted if abs(z) < z_min]
-    if not keep:
+    if not keep or abs(got.z) < z_min:
         # Every root is a pole artifact. Report it rather than returning the
         # least-bad one: "no quasiparticle here" is the honest answer and the
         # caller can widen eta or refine the grid deliberately.
-        return dict(qp=float('nan'), Z=float('nan'), nroots=len(roots),
-                    roots=[float(r) for r in roots], bracketed=False,
+        return dict(qp=float('nan'), Z=float('nan'),
+                    nroots=len(weighted),
+                    roots=[float(r) for r, _ in weighted], bracketed=False,
                     n_rejected=len(rejected),
-                    reject_reason=f'all {len(roots)} roots have |Z| < {z_min}')
-    w, zw = min(keep, key=lambda rz: abs(rz[0] - ep))
-    return dict(qp=float(w), Z=float(zw), nroots=len(keep),
+                    reject_reason=f'all {len(weighted)} roots have |Z| < '
+                                  f'{z_min}')
+    return dict(qp=float(got.w), Z=float(got.z), nroots=len(keep),
                 roots=[float(r) for r, _ in keep], bracketed=True,
                 n_rejected=len(rejected),
                 all_roots=[(float(r), float(z)) for r, z in weighted])

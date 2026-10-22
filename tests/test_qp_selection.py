@@ -27,6 +27,7 @@ from src.SingleReference.GW.qp_selection import (AdaptivePartition,
 from src.SingleReference.GW.qp_states import (calibrate_scissor_tiers,
                                               resolve_qp_states)
 from src.gradients.bse_isdf import bse_solve
+from tests.pins import assert_same
 
 #: Hellmann-Feynman against a central difference in each eps (Ha per Ha).
 HF_FD_STEP = 1e-5
@@ -69,8 +70,8 @@ def test_weights_are_the_hellmann_feynman_derivative():
               - casida(dn, nocc, k_a, k_b)[0]) / (2 * HF_FD_STEP)
         assert np.max(np.abs(fd - n[:, p])) < HF_FD_TOL, (p, fd, n[:, p])
     # one root alone is the same row
-    assert np.array_equal(first_order_weights(xn[:, 0], yn[:, 0], nocc,
-                                              len(eps)), n[0])
+    assert_same(first_order_weights(xn[:, 0], yn[:, 0], nocc, len(eps)), n[0],
+                unit='1', quantity='root', label='one root alone')
 
 
 def synthetic():
@@ -121,7 +122,9 @@ def test_the_tolerance_is_per_target_not_on_the_gap():
     blocks = degenerate_blocks(eps, cand, DEG)
     tiers = matched_tiers(eps, nocc, a, shift, start, blocks)
     signed, budget, _ = error_terms(w, a, None, shift, tiers, blocks)
-    assert signed[('singlet', 0)] == signed[('triplet', 0)] != 0.0
+    assert_same(signed[('singlet', 0)], signed[('triplet', 0)],
+                label='one weight, two states')
+    assert signed[('singlet', 0)] != 0.0
     tol = 0.5 * budget[('singlet', 0)] * HARTREE_TO_MEV
     sel = select_explicit(eps, nocc, cand, a, w, tol, start=start,
                           degeneracy_tol=DEG)

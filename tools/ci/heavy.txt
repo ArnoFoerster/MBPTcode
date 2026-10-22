@@ -1,0 +1,12 @@
+pytest test_davidson_timings.py  # timing gates, run on the cluster (5 passed, 1 git-archive error on a cluster)
+script test_davidson_warm_start_mpi.py  # real MPI: mpirun script
+script test_distributed_fit_mpi.py  # real MPI: mpirun script
+script test_distributed_isdf_scf_mpi.py  # real MPI: mpirun script
+script test_elpa_casida.py  # real MPI: mpirun script (needs pyelpa)
+pytest test_fragment_diabatic.py  # 61 minutes on a cluster (20 passed)
+script test_fragment_diabatic_ranks.py  # real MPI: mpirun script
+script test_mpi_grid_distribution.py  # real MPI: mpirun -n 3 script; passes at 3 ranks (cluster); conftest.py ignores it
+script test_mpi_routes.py  # real MPI: mpirun script; passes at 3 ranks (cluster); conftest.py ignores it
+pytest test_protein_environment.py  # 13 minutes on a cluster (4 passed)
+script test_solvated_scf_mpi.py  # real MPI: mpirun script
+pytest test_laplace_df_twins.py  # generated ADC(5) Laplace DF twins, 16 minutes on a cluster (3 passed); skips without the generated modules

@@ -33,18 +33,20 @@ stop.
 import importlib
 import inspect
 import os
-import pathlib
 import pkgutil
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import pytest
-from pyscf import dft, gto, scf
+from pyscf import dft, gto
 
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   SurfacePhysics)
+from src.Base.numerics import Numerics
 from src.properties.surfaces import potential_energy_surface
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.reference_scf import rhf_tight
 
 #: The protocol's methods. `mol0` is data, checked separately.
 REQUIRED = ('total_energy', 'total_gradient', 'refreeze', 'label')
@@ -120,14 +122,6 @@ def water():
                  basis='cc-pvdz', verbose=0)
 
 
-def rhf(mol):
-    """A reference converged tightly enough to differentiate."""
-    mf = scf.RHF(mol)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-11, 200
-    mf.kernel()
-    return mf
-
-
 def pbe0(mol):
     """The Kohn-Sham starting point of the dft row."""
     mf = dft.RKS(mol)
@@ -142,16 +136,16 @@ def pbe0(mol):
 #: cubic space-time route and the dense quasi-boson oracle.
 DISPATCHED = {
     'mean field': (pbe0, dict(ground_state=GroundState('dft', 'pbe0'))),
-    'dRPA ground state': (rhf, dict(ground_state=GroundState('rpa', 'hf'))),
+    'dRPA ground state': (rhf_tight, dict(ground_state=GroundState('rpa', 'hf'))),
     'dense dRPA ground state': (
-        rhf, dict(ground_state=GroundState('rpa', 'hf'), chi0='dense-qb',
+        rhf_tight, dict(ground_state=GroundState('rpa', 'hf'), chi0='dense-qb',
                   factorization='four-index')),
     'dense BSE@GW': (
-        rhf, dict(ground_state=GroundState('rpa', 'hf'),
+        rhf_tight, dict(ground_state=GroundState('rpa', 'hf'),
                   excitation=Excitation('singlet'), chi0='dense-qb',
                   factorization='four-index')),
     'dense quasiparticle': (
-        rhf, dict(ground_state=GroundState('rpa', 'hf'),
+        rhf_tight, dict(ground_state=GroundState('rpa', 'hf'),
                   excitation=ChargedExcitation(4, -1), chi0='dense-qb',
                   factorization='four-index')),
 }
@@ -189,7 +183,7 @@ def test_a_dispatched_surface_declares_its_physics(dispatched, name, member):
 def references():
     """The two mean fields the direct constructions below share."""
     mol = water()
-    return mol, rhf(mol), pbe0(mol)
+    return mol, rhf_tight(mol), pbe0(mol)
 
 
 def direct_surfaces(mol, hf, ks):
@@ -217,30 +211,30 @@ def direct_surfaces(mol, hf, ks):
             MeanFieldSurface(mol, pbe0, mf=ks),
             SurfacePhysics(ks_pbe0, None)),
         'MeanFieldQPSurface': (
-            MeanFieldQPSurface(mol, pbe0, mf=ks, state=0),
+            MeanFieldQPSurface(mol, pbe0, mf=ks, state=0, numerics=g1_numerics(mol)),
             SurfacePhysics(ks_pbe0, ChargedExcitation(homo, -1))),
         'RPAGroundStateChain': (
-            RPAGroundStateChain(mol, rhf, mf=hf),
+            RPAGroundStateChain(mol, rhf_tight, mf=hf, numerics=Numerics(isdf={'counts': g1(mol)})),
             SurfacePhysics(rpa_hf, None)),
         'ExcitedStateChain': (
             ExcitedStateChain(mol, pbe0, mf=ks, spin='triplet', state=1,
-                              bse_tda=True),
+                              bse_tda=True, numerics=g1_numerics(mol)),
             SurfacePhysics(ks_pbe0, Excitation('triplet', root=2,
                                                kernel='bse-tda'))),
         'RPABSESurface': (
-            RPABSESurface(mol, rhf, mf=hf, state=0, spin='singlet'),
+            RPABSESurface(mol, rhf_tight, mf=hf, state=0, spin='singlet', numerics=g1_numerics(mol)),
             SurfacePhysics(rpa_hf, Excitation('singlet', root=1))),
         'RPAQPSurface': (
-            RPAQPSurface(mol, rhf, mf=hf, state=0),
+            RPAQPSurface(mol, rhf_tight, mf=hf, state=0, numerics=g1_numerics(mol)),
             SurfacePhysics(rpa_hf, ChargedExcitation(homo, -1))),
         'DenseRPASurface': (
-            DenseRPASurface(mol, rhf),
+            DenseRPASurface(mol, rhf_tight),
             SurfacePhysics(rpa_hf, None)),
         'DenseBSESurface': (
-            DenseBSESurface(mol, scf=rhf),
+            DenseBSESurface(mol, scf=rhf_tight),
             SurfacePhysics(rpa_hf, Excitation('singlet', root=1))),
         'QuasiparticleSurface': (
-            QuasiparticleSurface(mol, rhf, charge_change=-1, orbital=homo),
+            QuasiparticleSurface(mol, rhf_tight, charge_change=-1, orbital=homo),
             SurfacePhysics(rpa_hf, ChargedExcitation(homo, -1))),
     }
 

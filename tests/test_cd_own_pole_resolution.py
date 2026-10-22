@@ -14,7 +14,7 @@ on the plain grid, and the root and Z are the resolved ones there:
 - the guarded Newton converges instead of cycling across eps_6;
 - the root is +9.4 meV with Z = 0.931, not a zero read off an unresolved
   slope (+9.2 meV, Z = 0.20 by quadrature alone);
-- nothing is demoted.
+- no root is flagged at a pole strength outside (0, 1].
 
 Against the dense quasi-boson route the four frontier roots differ by 1.06,
 0.80, 0.54 and 0.54 meV (orbitals 6 to 9): orbital 6 is as good as the rest.
@@ -89,9 +89,9 @@ def qb(mol):
 
 def test_the_root_is_the_resolved_one_on_the_plain_grid(explicit):
     qp, chain = explicit
-    assert ORBITAL in qp['explicit'] and not qp['demoted'], qp
+    assert ORBITAL in qp['explicit'] and not qp['z_outside'], qp
     assert is_quasiparticle_root(qp['z'][ORBITAL]), qp['z']
-    assert chain.nfreq_cd == CD_NFREQ, chain.nfreq_cd
+    assert chain.conventions.nfreq_cd == CD_NFREQ, chain.conventions.nfreq_cd
     shift = 1e3 * (qp['qp_root_eV'][ORBITAL]
                    - qp['eps_mean_field_eV'][ORBITAL])
     assert abs(shift - RESOLVED_SHIFT_MEV) < 0.1, shift

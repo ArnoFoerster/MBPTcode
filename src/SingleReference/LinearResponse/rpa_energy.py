@@ -28,6 +28,8 @@ from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_fre
 from src.Base.utils.mpi_grid import lockstep
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.space_time import \
+    dielectric_log_determinant
 from src.SingleReference.GW.imaginary_axis import solve_screening_imaginary_axis
 
 
@@ -73,8 +75,9 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, nfreq=20, grid='minim
     """dRPA correlation energy via imaginary-frequency-axis integration (eqs 26-28, Spadetto et al., JCTC 2023, 19, 1499).
 
     E_c = (1/2pi) int dw Tr{log(1-Z(iw)) + Z(iw)} = sum_k w_k Tr{log(1-Z(i*wk)) + Z(i*wk)},
-    with Tr[log(1-Z)] via slogdet. Restricted spin, DF only. Should agree with
-    rpa_correlation_energy_casida to grid precision.
+    with Tr[log(1-Z)] from `space_time.dielectric_log_determinant`, which
+    refuses a frequency whose det(1 - Z) is not positive. Restricted spin, DF
+    only. Should agree with rpa_correlation_energy_casida to grid precision.
 
     grid: 'minimax' (default) or 'gauss_legendre' (uses w0, default gap_scaled_w0).
     """
@@ -93,13 +96,11 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, nfreq=20, grid='minim
         raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
 
     Z_grid = solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points)
-    naux = Z_grid.shape[-1]
-    eye = np.eye(naux)
 
     e_c = 0.0
     for k, Z in enumerate(Z_grid):
-        _, logdet = np.linalg.slogdet(eye - Z)
-        e_c += freq_weights[k] * (logdet + np.trace(Z))
+        e_c += freq_weights[k] * (dielectric_log_determinant(Z, k)
+                                  + np.trace(Z))
     return e_c / (2.0 * np.pi)
 
 

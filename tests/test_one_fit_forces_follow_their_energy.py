@@ -31,18 +31,17 @@ h = 4e-3 and 1e-7. The ISDF-K SCF's points follow `atomic_frames` at every
 geometry, whose curvature on the distorted formaldehyde needs Richardson
 steps of 2.5e-4 and 5e-4.
 """
-import os
 import sys
 
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.Base.constants import (ISDF_GRADIENT_FLOOR,
+from src.Base.numerics import numerics_of
+from src.Base.constants import (ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL,
                                 SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+                                SCF_DIFFERENTIABLE_GRAD_TOL,
+                                SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.distributed_df import distributed_mean_field
 from src.Base.distributed_isdf_jk import distributed_isdf_jk
@@ -53,6 +52,8 @@ from src.gradients.isdf_derivatives import product_pairs
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from src.gradients.rpa_ground_state import RPAGroundStateChain
 from src.properties.excitations import SurfaceSpec, surface_of
+from tests.isdf_test_grid import g1, g1_kw, g1_numerics
+from tests.pins import assert_same
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 MOLECULES = {
@@ -112,7 +113,9 @@ def at(mol, atom, axis, step):
 def chain_scf(mol):
     """A density-fitted Hartree-Fock mean field converged for gradient work."""
     mf = scf.RHF(mol).density_fit(auxbasis=AUX)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -135,15 +138,16 @@ class Route:
 
 
 def drpa(mol, **kw):
-    chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol), **kw)
+    chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol),
+                                numerics=numerics_of(g1_kw(mol, kw)))
     return Route(chain, lambda m: chain.energy(m)[0],
                  lambda: chain.total_gradient()[0])
 
 
-def bse(mol, **kw):
-    chain = ExcitedStateChain(mol, chain_scf, spin='singlet',
-                              solver='davidson', bse_conv_tol=BSE_CONV_TOL,
-                              mf=chain_scf(mol), **kw)
+def bse(mol, **layout):
+    chain = ExcitedStateChain(
+        mol, chain_scf, spin='singlet', mf=chain_scf(mol),
+        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': BSE_CONV_TOL})))
     return Route(chain, chain.excitation,
                  lambda: chain.excitation_gradient()[0])
 
@@ -201,7 +205,9 @@ def test_the_chain_force_follows_its_energy(route, name):
 
     for size in SIZES:
         out = run_simulated(rank, size)
-        assert all(np.array_equal(f, out[0]) for f in out), size
+        for f in out:
+            # each rank assembles its own force: rank 0's to a few ulp
+            assert_same(f, out[0], quantity='gradient', label=size)
         miss = misses(out[0], fd)
         apart = float(np.abs(out[0] - force).max())
         lines.append(f'rows at {size}: {np.array2string(miss, precision=2)}, '
@@ -218,7 +224,7 @@ def isdf_scf(name, xc, coords=None):
     if coords is not None:
         mol.set_geom_(coords, unit='Bohr')
     base = dft.RKS(mol, xc=xc) if xc != 'hf' else scf.RHF(mol)
-    mf = isdf_jk(base, auxbasis=AUX)
+    mf = isdf_jk(base, auxbasis=AUX, counts=g1(base))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = (MF_CONV_TOL,
                                                    MF_CONV_TOL_GRAD, 200)
     return mf
@@ -252,7 +258,7 @@ def test_the_isdf_k_mean_field_force_follows_its_energy(name, xc):
         mf.kernel()
         force = isdf_mean_field_gradient(mf, fit='rows')
     lines = [f'serial rows {np.array2string(misses(force, fd), precision=2)}']
-    assert np.abs(misses(force, fd)).max() < BAR, lines
+    assert np.abs(misses(force, fd)).max() < ISDF_ROW_FORCE_ENERGY_TOL, lines
 
     def rank(comm):
         mf = isdf_scf(name, xc)
@@ -262,12 +268,14 @@ def test_the_isdf_k_mean_field_force_follows_its_energy(name, xc):
 
     for size in SIZES:
         out = run_simulated(rank, size)
-        assert all(np.array_equal(f, out[0]) for f in out), size
+        for f in out:
+            # each rank assembles its own force: rank 0's to a few ulp
+            assert_same(f, out[0], quantity='gradient', label=size)
         miss = misses(out[0], fd)
         apart = float(np.abs(out[0] - force).max())
         lines.append(f'{size} ranks {np.array2string(miss, precision=2)}, '
                      f'serial {apart:.1e}')
-        assert np.abs(miss).max() < BAR, lines
+        assert np.abs(miss).max() < ISDF_ROW_FORCE_ENERGY_TOL, lines
         assert apart < ISDF_GRADIENT_FLOOR, lines
     print(f'\n{name}/{xc} ISDF-K mean field, analytic - FD: '
           + '; '.join(lines))

@@ -122,7 +122,6 @@ import json
 import os
 import tempfile
 import time
-import warnings
 
 import numpy as np
 import scipy.linalg
@@ -130,14 +129,20 @@ from scipy.optimize import minimize, basinhopping
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
-from src.Base.basis.ri_fallback import element_auxbasis, missing_row_hint
 from src.Base.constants import (AUX_METRIC_INDEFINITE_TOL,
                                 AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
                                 FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
-                                ISDF_DEFAULT_COUNTS, ISDF_GRID_ACCURACY,
-                                ISDF_GRID_N_START,
+                                FRAME_TURNING_RATE_BAR,
+                                ISDF_DENSITY_RESIDUAL_TOL, ISDF_GRID_ACCURACY,
+                                ISDF_FITTED_DENSITY_ROWS,
+                                ISDF_GRID_N_START, ISDF_ORBITAL_RESIDUAL_TOL,
+                                ISDF_REFUSED_ORBITALS_NAMED,
+                                ISDF_SPAN_OVERLAP_FLOOR, ISDF_TILE_GB,
                                 THREE_CENTER_BLOCK_BYTES)
-from src.Base.sliced_factors import GridTileRows
+from src.Base.numerics import numerics_or_default
+from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
+                                        missing_row_hint, paired_auxbasis)
+from src.Base.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.mpi_grid import (agreement, allgather_ranges, broadcast,
                                      broadcast_rows, contiguous_block,
                                      current_comm, cyclic_tiles_to_blocks,
@@ -146,33 +151,23 @@ from src.Base.utils.mpi_grid import (agreement, allgather_ranges, broadcast,
 from src.Base.utils.threads import (blas_single_threaded, openmp_threads,
                                     row_map)
 
-#: Pair-screening threshold: a test co-density is dropped when its peak
-#: amplitude anywhere on the interpolation grid falls below this times the
-#: global maximum. It is what makes the pair count linear in system size.
-#:
-#: Not a Schwarz bound, and not an accuracy target. A screened pair is not set
-#: to zero in the result (the factorization is dense in the pair index, so it
-#: still returns a value there, one no equation constrained), so the threshold
-#: says which constraints are redundant, and the failure is a cliff rather than
-#: a slope. On benzene and naphthalene at cc-pVTZ, fit error relative to 1e-10:
-#:
-#:     1e-06   1.00x        76% / 58% of columns kept
-#:     1e-05   1.37x/1.97x  65% / 47%
-#:     1e-04    102x/136x   45% / 29%
-#:
-#: At 1e-06 the BSE roots move under 0.03 meV at cc-pVDZ against the ~5 meV the
-#: grid itself contributes.
-DEFAULT_PAIR_TOL = 1e-6
-
-#: Their eq 9 regularization, "a reasonable parameter for double precision".
-#: Delesma, Golze and Rinke (separable-RI accuracy in the numeric-atomic-orbital
-#: framework, preprint, 2023), reimplementing this in FHI-aims, report that "the
-#: inversion is numerically stable without L2 regularization" -- so pass 0.0 if
-#: the balanced Gram matrix is well conditioned for your grid, and compare.
-DEFAULT_REGULARIZATION = 4e-7
-
 #: Emphasis on the low multipoles of the test co-densities (their Sec. II E).
 ANGULAR_WEIGHTS = {0: 4.0, 1: 2.0}
+
+
+def fit_settings(numerics, *names):
+    """The values of the fit's choices `names` -- 'l_max_second',
+    'pair_tol', 'regularization' (`IsdfNumerics`) and 'block_memory_gb', the
+    working set of its blocked loops (`LayoutNumerics.fit_gb`, ISDF_TILE_GB
+    where None) -- read off `numerics` (None: the defaults), as a tuple in
+    the order asked."""
+    numerics = numerics_or_default(numerics)
+    isdf, gb = numerics.isdf, numerics.layout.fit_gb
+    held = {'l_max_second': int(isdf.l_max_second),
+            'pair_tol': float(isdf.pair_tol),
+            'regularization': float(isdf.regularization),
+            'block_memory_gb': ISDF_TILE_GB if gb is None else float(gb)}
+    return tuple(held[name] for name in names)
 
 
 class RowFit:
@@ -301,19 +296,43 @@ class AdjointSeeds:
         it adds to X_bar C^T.
     metric_bar: an adjoint on the bare metric V from outside the fit (Z's
         own V), on rank 0 (None elsewhere), added before its derivative.
+    gauges: `GaugeSeeds` of further factors D_g = M^T (V + vtilde_g)^1/2 on
+        the same fit, each with its own dressed metric root.
     """
 
     def __init__(self, d_bar=None, x_bar=None, mo_coeff=None, mt_bar=None,
-                 x_bar_ao=None, metric_bar=None):
-        if d_bar is None and mt_bar is None:
+                 x_bar_ao=None, metric_bar=None, gauges=()):
+        if d_bar is None and mt_bar is None and not gauges:
             raise ValueError('the fit adjoint takes an adjoint on D (d_bar), '
-                             'on M^T (mt_bar), or both')
+                             'on M^T (mt_bar), on a dressed gauge (gauges), '
+                             'or several')
         if x_bar is not None and mo_coeff is None:
             raise ValueError('an adjoint on X_mo needs the orbitals C of '
                              'X_mo = X_ao C')
         self.d_bar, self.x_bar, self.mo_coeff = d_bar, x_bar, mo_coeff
         self.mt_bar, self.x_bar_ao = mt_bar, x_bar_ao
         self.metric_bar = metric_bar
+        self.gauges = tuple(gauges)
+
+
+class GaugeSeeds:
+    """The adjoint on one DRESSED gauge of the fit, D_g = M^T R_g with
+    R_g = (V + vtilde_g)^1/2 (`aux_metric_sqrt` with `environment`).
+
+    d_bar: (nk, naux) adjoint on D_g, whole or `GridTileRows` in the fit's
+        tiles.
+    environment: what dresses the metric (`aux_kernel`, `aux_kernel_adjoint`).
+    root_bar: an adjoint on R_g from a term reading the root without D,
+        on rank 0 (None elsewhere, or none at all).
+    kernel_bar: an adjoint on vtilde_g alone, on rank 0 (None elsewhere).
+    """
+
+    def __init__(self, d_bar, environment, root_bar=None, kernel_bar=None):
+        if environment is None:
+            raise ValueError('a dressed gauge needs the environment that '
+                             'dresses its metric; the bare gauge is d_bar')
+        self.d_bar, self.environment = d_bar, environment
+        self.root_bar, self.kernel_bar = root_bar, kernel_bar
 
 
 class FitTiles:
@@ -331,8 +350,7 @@ class FitTiles:
     route's factor stage read the SCF's fit instead of repeating it.
     """
 
-    def __init__(self, mol, auxmol, coords, block, mt, comm, held,
-                 l_max_second, pair_tol, regularization, block_memory_gb,
+    def __init__(self, mol, auxmol, coords, block, mt, comm, held, settings,
                  kept=None):
         self.keys = (_content_key(mol), _content_key(auxmol))
         self.kept = None if kept is None else _read_only(kept)
@@ -342,6 +360,9 @@ class FitTiles:
         self.ranks = ((1, 0) if comm is None
                       else (comm.Get_size(), comm.Get_rank()))
         self.held = dict(held)
+        # (l_max_second, pair_tol, regularization, block_memory_gb) of the
+        # fit (`fit_settings`)
+        l_max_second, pair_tol, regularization, block_memory_gb = settings
         self.settings = (int(l_max_second), float(pair_tol),
                          float(regularization), float(block_memory_gb))
 
@@ -385,6 +406,17 @@ class FitTiles:
                     reused_MT_tiles=_total_bytes(self.mt.values()))
         return RowFit(nk, block, comm, dict(self.mt), X_ext, (e0, e1), held,
                       kept=self.kept)
+
+
+class UnrepresentedOrbitals(RuntimeError):
+    """Orbital densities the separable-RI factors miss beyond the refusal
+    bound (`refuse_unrepresented_orbitals`): `orbitals` the indices of the
+    refused ones, worst first, and `residuals` the relative residual of every
+    orbital measured."""
+
+    def __init__(self, message, orbitals, residuals):
+        super().__init__(message)
+        self.orbitals, self.residuals = orbitals, residuals
 
 
 class KeptIntegrals:
@@ -637,8 +669,7 @@ def ao_blocks(mol, nk, n2, naux, block_memory_gb):
     return blocks
 
 
-def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
-              block_memory_gb=4.0):
+def build_D_F(mol, auxmol, coords, numerics=None):
     """The two matrices of their eq 7.
 
     D[k, rho] : test co-density rho evaluated at r_k
@@ -661,8 +692,10 @@ def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     accumulate. Column order is preserved (blocks in ascending mu), so D and F
     stay aligned.
 
-    block_memory_gb caps the per-block working set and is both a memory and a
-    speed knob. The total integral work does not depend on how the index is
+    The fit's choices are `numerics`' (`fit_settings`: l_max_second,
+    pair_tol; None for the defaults). Its working set `block_memory_gb`
+    (`LayoutNumerics.fit_gb`) caps the per-block working set and is both a
+    memory and a speed knob. The total integral work does not depend on how the index is
     cut, but the number of `aux_e2` calls does, and each call rebuilds a
     shell-pair list over mol.nbas x auxmol.nbas: invisible on a small molecule,
     dominant on a large one, where a small budget means thousands of calls.
@@ -670,6 +703,8 @@ def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     block and 2-AO blocks at pair_tol=1e-10. Lower it when peak memory is the
     constraint.
     """
+    l_max_second, pair_tol, block_memory_gb = fit_settings(
+        numerics, 'l_max_second', 'pair_tol', 'block_memory_gb')
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
     ao = mol.eval_gto('GTOval_sph', coords)              # (nk, nao)
@@ -716,98 +751,7 @@ def build_D_F(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     return D, F
 
 
-def test_set_layout(mol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL):
-    """(mu, nu, weight) of the AO-pair columns `build_D_F` keeps, in its order.
-
-    The test set is (all AOs) x (AOs with l <= l_max_second), angular-weighted
-    on the second index and screened on the pair density the grid samples,
-    max_k |chi_mu(r_k) chi_nu(r_k)| > pair_tol x a global reference. The
-    reference is global and the screen is per column, so the column set does
-    not depend on how `build_D_F` blocks the first index, and the order is
-    ascending mu then ascending position in the second set.
-
-    The auxiliary block that follows carries F = identity, so it contributes
-    nothing through F and only a collocation through D.
-
-    Screening is a discrete choice and is frozen with everything else: a
-    differentiated column set must be the reference geometry's, or the surface
-    steps where a pair crosses the tolerance.
-    """
-    ao = mol.eval_gto('GTOval_sph', coords)
-    l_ao = _ao_l_labels(mol)
-    second = np.where(l_ao <= l_max_second)[0]
-    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
-    ref = _screening_reference(ao, second, w)
-    mu_keep, nu_keep, w_keep = [], [], []
-    for mu in range(mol.nao_nr()):
-        blk = ao[:, mu][:, None] * ao[:, second] * w[None, :]
-        col_max = np.maximum(blk.max(axis=0), -blk.min(axis=0))
-        keep = np.flatnonzero(col_max > pair_tol * ref)
-        mu_keep.append(np.full(len(keep), mu, dtype=int))
-        nu_keep.append(second[keep])
-        w_keep.append(w[keep])
-    return (np.concatenate(mu_keep), np.concatenate(nu_keep),
-            np.concatenate(w_keep))
-
-
-def screened_layout(mol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
-                    comm=None, block=None):
-    """`test_set_layout` from each rank's grid tiles, the whole collocation
-    never formed: the pair maxima of `fit_rows`' own screen over this rank's
-    tiles of `block` points (tile t on rank t % size), max-reduced, which is
-    exact, so the layout is the same arrays at every rank count."""
-    comm = current_comm() if comm is None else comm
-    rank, nranks = ((0, 1) if comm is None
-                    else (comm.Get_rank(), comm.Get_size()))
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
-    if nranks > 1:
-        coords = lockstep(coords, comm)
-    nao, nk = mol.nao_nr(), len(coords)
-    l_ao = _ao_l_labels(mol)
-    second = np.where(l_ao <= l_max_second)[0]
-    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
-    n2 = len(second)
-    threads = openmp_threads()
-    s_ao = np.zeros(nao)
-    peaks = np.zeros(nao * n2)
-    for t in partition(-(-nk // block), rank, nranks):
-        X_t = _tile_collocation(mol, coords[t * block:min((t + 1) * block,
-                                                          nk)])
-        np.maximum(s_ao, np.abs(X_t).max(axis=0), out=s_ao)
-        np.maximum(peaks, _pair_peaks(X_t, 0, nao, second, w, threads),
-                   out=peaks)
-        del X_t
-    reduce_max(s_ao, comm)
-    reduce_max(peaks, comm)
-    ref = float(s_ao.max() * (w * s_ao[second]).max())
-    kept = np.flatnonzero(peaks > pair_tol * ref)
-    return kept // n2, second[kept % n2], w[kept % n2]
-
-
-def test_set_D(mol, auxmol, coords, layout):
-    """The D of `build_D_F` rebuilt from a frozen layout: pairs then auxiliaries.
-
-    Filled in blocks of `FIT_CHOLESKY_BLOCK` pair columns, so no transient
-    of the whole pair width is formed beside D; each element is the same
-    product. D keeps the collocations' memory order (pyscf's is grid-fastest),
-    which is the order every product of the fit reads it in.
-    """
-    mu, nu, w = layout
-    ao = mol.eval_gto('GTOval_sph', coords)
-    aux = auxmol.eval_gto('GTOval_sph', coords)
-    npair = len(mu)
-    D = np.empty((ao.shape[0], npair + aux.shape[1]),
-                 order='F' if ao.flags.f_contiguous else 'C')
-    for c0 in range(0, npair, FIT_CHOLESKY_BLOCK):
-        c1 = min(c0 + FIT_CHOLESKY_BLOCK, npair)
-        D[:, c0:c1] = ao[:, mu[c0:c1]] * ao[:, nu[c0:c1]] * w[None, c0:c1]
-    D[:, npair:] = aux
-    return D
-
-
-def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
-                    pair_tol=DEFAULT_PAIR_TOL,
-                    regularization=DEFAULT_REGULARIZATION, block_memory_gb=4.0,
+def fit_M_streaming(mol, auxmol, coords, numerics=None,
                     progress=False, comm=None, timings=None,
                     fit='replicated', block=None, layout=None, tiles=None):
     """M without ever holding D or F.
@@ -883,13 +827,15 @@ def fit_M_streaming(mol, auxmol, coords, l_max_second=2,
     here; the key is kept so the set of keys does not depend on how the solve
     is realized.
     """
+    l_max_second, pair_tol, regularization, block_memory_gb = fit_settings(
+        numerics, 'l_max_second', 'pair_tol', 'regularization',
+        'block_memory_gb')
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
     if fit == 'rows':
-        return fit_rows(mol, auxmol, coords, l_max_second=l_max_second,
-                        pair_tol=pair_tol, regularization=regularization,
-                        block_memory_gb=block_memory_gb, progress=progress,
-                        comm=comm, timings=timings, block=block,
+        return fit_rows(mol, auxmol, coords, numerics=numerics,
+                        progress=progress, comm=comm, timings=timings,
+                        block=block,
                         layout=layout, tiles=tiles)
     comm = current_comm() if comm is None else comm
     rank, nranks = (0, 1) if comm is None else (comm.Get_rank(), comm.Get_size())
@@ -1088,8 +1034,7 @@ def fit_M_whole(mol, auxmol, coords, layout):
         return fit_M_streaming(mol, auxmol, coords, layout=layout)
 
 
-def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
-             regularization=DEFAULT_REGULARIZATION, block_memory_gb=4.0,
+def fit_rows(mol, auxmol, coords, numerics=None,
              progress=False, comm=None, timings=None, block=None,
              layout=None, tiles=None):
     """`fit_M_streaming`'s estimator with the grid index distributed: M^T as
@@ -1152,6 +1097,9 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
     computed; read from `tiles`, `fit_collocation` is the collocation of
     this rank's rows and `fit_reused_tiles` the tiles read.
     """
+    l_max_second, pair_tol, regularization, block_memory_gb = fit_settings(
+        numerics, 'l_max_second', 'pair_tol', 'regularization',
+        'block_memory_gb')
     comm = current_comm() if comm is None else comm
     rank, nranks = ((0, 1) if comm is None
                     else (comm.Get_rank(), comm.Get_size()))
@@ -1396,13 +1344,13 @@ def fit_rows(mol, auxmol, coords, l_max_second=2, pair_tol=DEFAULT_PAIR_TOL,
 
 
 def fit_rows_adjoint(mol, auxmol, coords, d_bar, layout, x_bar=None,
-                     mo_coeff=None, l_max_second=2,
-                     regularization=DEFAULT_REGULARIZATION,
-                     block_memory_gb=4.0, comm=None, block=None, mt_bar=None,
-                     x_bar_ao=None, metric_bar=None):
+                     mo_coeff=None, numerics=None, comm=None, block=None,
+                     mt_bar=None,
+                     x_bar_ao=None, metric_bar=None, gauges=()):
     """The nuclear adjoint of `fit_rows`' factor D = M^T V^1/2 on the frozen
     `layout`, in the forward fit's own tiles: a `RowFitAdjoint`, the one
-    target of `fit_rows_adjoints` whose seeds are these (`AdjointSeeds`).
+    target of `fit_rows_adjoints` whose seeds are these (`AdjointSeeds`;
+    gauges: `GaugeSeeds` of dressed factors on the same fit).
 
     d_bar: (nk, naux) adjoint on D, the same bits on every rank (a kernel's
     all-reduced output); x_bar, mo_coeff: the adjoint on X_mo = X_ao C and
@@ -1417,17 +1365,14 @@ def fit_rows_adjoint(mol, auxmol, coords, d_bar, layout, x_bar=None,
     """
     seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff,
                          mt_bar=mt_bar, x_bar_ao=x_bar_ao,
-                         metric_bar=metric_bar)
+                         metric_bar=metric_bar, gauges=gauges)
     return fit_rows_adjoints(mol, auxmol, coords, layout, [seeds],
-                             l_max_second=l_max_second,
-                             regularization=regularization,
-                             block_memory_gb=block_memory_gb, comm=comm,
+                             numerics=numerics, comm=comm,
                              block=block)[0]
 
 
-def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
-                      regularization=DEFAULT_REGULARIZATION,
-                      block_memory_gb=4.0, comm=None, block=None):
+def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
+                      comm=None, block=None):
     """[RowFitAdjoint], one per target: the nuclear adjoint of `fit_rows`'
     factor D = M^T V^1/2 on the frozen `layout`, in the forward fit's own
     tiles, every target's in one pass. A target is an `AdjointSeeds`, or a
@@ -1494,7 +1439,20 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
     owners; a rank reads its tiles of them, and rank 0 receives each D_bar
     tile beside its M^T tile for M D_bar. The same values reach the same
     calls either way, so the two are the same bits.
+
+    DRESSED GAUGES (`AdjointSeeds.gauges`): a factor D_g = M^T R_g on the
+    same fit with R_g = (V + vtilde_g)^1/2 adds D_bar_g R_g to MT_bar (R_g
+    on rank 0, streamed in slabs, after the bare gauge), so everything below
+    MT_bar runs once for the gauges summed. Its root adjoint M D_bar_g
+    (+ root_bar) is summed on rank 0 like M D_bar; there its Frechet adjoint
+    Y_g on V + vtilde_g joins V_bar, and vtilde_g's own derivative,
+    `environment.aux_kernel_adjoint(Y_g + kernel_bar)`, joins fit_centre,
+    sent from rank 0. A gauge adds one (rows, naux) slab stream, one tile
+    pass to rank 0 and, on rank 0, the root and its adjoint
+    (`_dressed_root_adjoint`, four metric-sized arrays), one gauge at a time.
     """
+    l_max_second, regularization, block_memory_gb = fit_settings(
+        numerics, 'l_max_second', 'regularization', 'block_memory_gb')
     comm = current_comm() if comm is None else comm
     rank, nranks = ((0, 1) if comm is None
                     else (comm.Get_rank(), comm.Get_size()))
@@ -1556,34 +1514,42 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
     x_tiles = [_adjoint_tiles(s.x_bar, tiles, mine, block, nk)
                for s in targets]
     rooted = [g for g, s in enumerate(targets) if s.d_bar is not None]
+    g_tiles = [[_adjoint_tiles(q.d_bar, tiles, mine, block, nk)
+                for q in s.gauges] for s in targets]
     # an adjoint arriving on M^T alone needs no root, and nothing reaches it
-    MTb = [{t: s.mt_bar[t] for t in mine} if s.d_bar is None
+    MTb = [{t: s.mt_bar[t] for t in mine} if s.d_bar is None and not s.gauges
            else {t: np.empty((size_of[t], naux)) for t in mine}
+           if s.d_bar is not None
+           else {t: np.zeros((size_of[t], naux)) for t in mine}
            for s in targets]
     if rooted:
         # MT_bar = D_bar V^1/2, the root on rank 0 and streamed in slabs
-        root, failure = None, None
-        if rank == 0:
-            try:
-                root, nbytes = metric_root(auxmol)
-                hold('metric_root', nbytes)
-            except (RuntimeError, np.linalg.LinAlgError) as err:
-                failure = str(err)
-        failure = broadcast(failure, comm)
-        if failure is not None:
-            raise RuntimeError(failure)
-        for c0 in range(0, naux, block):
-            c1 = min(c0 + block, naux)
-            slab = _root_slab(root, slice(c0, c1), slice(0, naux), comm)
-            hold('metric_slab', slab.nbytes)
+        def assign(c0, c1, slab):
             for g in rooted:
                 for t in mine:
                     MTb[g][t][:, c0:c1] = d_tiles[g][t] @ slab.T
-        del root
+
+        _streamed_root(auxmol, None, block, rank, comm, hold, assign)
         for g in rooted:
             if targets[g].mt_bar is not None:
                 for t in mine:
                     MTb[g][t] += targets[g].mt_bar[t]
+    for g, s in enumerate(targets):
+        if s.d_bar is None and s.gauges and s.mt_bar is not None:
+            for t in mine:
+                MTb[g][t] += s.mt_bar[t]
+    # each dressed gauge adds D_bar_g R_g, R_g = (V + vtilde_g)^1/2, one root
+    # per environment, after the bare gauge
+    for env in _distinct(q.environment for s in targets for q in s.gauges):
+        pairs = [(g, j) for g, s in enumerate(targets)
+                 for j, q in enumerate(s.gauges) if q.environment is env]
+
+        def add(c0, c1, slab, pairs=pairs):
+            for g, j in pairs:
+                for t in mine:
+                    MTb[g][t][:, c0:c1] += g_tiles[g][j][t] @ slab.T
+
+        _streamed_root(auxmol, env, block, rank, comm, hold, add)
     hold('MT_bar_rows', total(MTb))
 
     # W = G^-1 d MT_bar, the forward substitution in the factorization sweep
@@ -1683,6 +1649,18 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
             if got is not None:
                 Vhbar[g] += got[0].T @ (got[1] if rows_in
                                         else d_bar[slice(*tiles[t])])
+    # each dressed gauge's root adjoint M D_bar_g, the same sum on rank 0
+    Rbar = [[None] * len(s.gauges) for s in targets]
+    for g, s in enumerate(targets):
+        for j, q in enumerate(s.gauges):
+            Rbar[g][j] = np.zeros((naux, naux)) if rank == 0 else None
+            rows_in = isinstance(q.d_bar, GridTileRows)
+            for t, got in _tiles_at_root([MT, g_tiles[g][j]] if rows_in
+                                         else [MT], tiles, rank, nranks,
+                                         comm, hold):
+                if got is not None:
+                    Rbar[g][j] += got[0].T @ (got[1] if rows_in
+                                              else q.d_bar[slice(*tiles[t])])
 
     # the (mu nu|P) adjoints, w U^T D_pair, by the block's owner
     three = _three_centre_rows_adjoint(
@@ -1788,20 +1766,37 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
             allgather_ranges(coll_tile[g], tile_ranges, comm)
             allgather_ranges(coll_points[g], point_ranges, comm)
 
-    # the metric: (V^1/2)'s adjoint on rank 0, (P|Q)' by slab
+    # the metric: (V^1/2)'s adjoint on rank 0, (P|Q)' by slab; each dressed
+    # gauge's root adjoint and its cavity derivative on rank 0
     V_bar = [None] * ntargets
+    cavity = [np.zeros(natm * 3) for _ in range(ntargets)]
     if rank == 0:
         for g, s in enumerate(targets):
             sums = {'root': Vhbar[g], 'fit': VbarF[g]}
             Vhbar[g] = VbarF[g] = None
             V_bar[g] = (sums.pop('fit') if sums['root'] is None
                         else _metric_root_adjoint(auxmol, sums, hold))
+            for j, q in enumerate(s.gauges):
+                # Y_g on V + vtilde_g reaches V and vtilde_g alike
+                rbar, Rbar[g][j] = Rbar[g][j], None
+                if q.root_bar is not None:
+                    rbar += q.root_bar
+                Y = _dressed_root_adjoint(auxmol, q.environment, rbar, hold)
+                del rbar
+                V_bar[g] += Y
+                if q.kernel_bar is not None:
+                    Y += q.kernel_bar
+                cavity[g] += np.asarray(q.environment.aux_kernel_adjoint(
+                    auxmol, Y)).ravel()
+                del Y
             if s.metric_bar is not None:
                 V_bar[g] += s.metric_bar
-    del Vhbar, VbarF
+    del Vhbar, VbarF, Rbar
     two = _two_centre_rows_adjoints(auxmol, V_bar, block, rank, nranks, comm,
                                     hold)
     del V_bar
+    if any(s.gauges for s in targets):
+        cavity = broadcast(cavity, comm)
 
     out = []
     for g in range(ntargets):
@@ -1810,6 +1805,8 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
             fit_centre += fit_tile[g][t]
         fit_centre += three[g]
         fit_centre += two[g]
+        if targets[g].gauges:
+            fit_centre += cavity[g]
         coll_centre = None
         if with_coll[g]:
             coll_centre = np.zeros(natm * 3)
@@ -1824,7 +1821,8 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, l_max_second=2,
 def summed_seeds(seeds):
     """One `AdjointSeeds` holding the sum of `seeds` kind by kind (D_bar,
     X_bar, MT_bar, the AO collocation's and the metric's adjoints), in the
-    order given: the first present copied, each next one added onto it.
+    order given: the first present copied, each next one added onto it;
+    dressed gauges, each on its own root, are listed side by side.
     The fit adjoint is linear in every seed, so its adjoint is theirs summed;
     an adjoint on X_mo joins only others on the same orbitals. Tiles are this
     rank's, metric_bar rank 0's (None elsewhere)."""
@@ -1862,7 +1860,8 @@ def summed_seeds(seeds):
         mo_coeff=orbitals[0] if orbitals else None,
         mt_bar=added([s.mt_bar for s in seeds]),
         x_bar_ao=added([s.x_bar_ao for s in seeds]),
-        metric_bar=added([s.metric_bar for s in seeds]))
+        metric_bar=added([s.metric_bar for s in seeds]),
+        gauges=[q for s in seeds for q in s.gauges])
 
 
 def _collocation_rows(seed, x_tiles, t):
@@ -1892,8 +1891,9 @@ def _adjoint_tiles(bar, tiles, mine, block, nk):
 
 
 def rows_transpose_product(rows, r0, x_bar, block=None, comm=None):
-    """Y = X^T X_bar, (ncol, ncol), from this rank's `contiguous_block` rows
-    of X, starting at grid row r0, with X_bar whole on every rank or as
+    """Y = X^T X_bar, (X's ncol, X_bar's ncol), from this rank's
+    `contiguous_block` rows of X, starting at grid row r0, with X_bar whole
+    on every rank or as
     `GridTileRows` in these tiles, each tile then broadcast by its owner
     beside the X tile (the same values into the same calls, so the same
     bits).
@@ -1910,6 +1910,7 @@ def rows_transpose_product(rows, r0, x_bar, block=None, comm=None):
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
     nk, ncol = x_bar.shape
+    nrow = rows.shape[1]
     tiled = isinstance(x_bar, GridTileRows)
     if tiled and x_bar.block != block:
         raise ValueError(f'X_bar is held in tiles of {x_bar.block} points and '
@@ -1917,15 +1918,15 @@ def rows_transpose_product(rows, r0, x_bar, block=None, comm=None):
     bounds = [contiguous_block(nk, r, size) for r in range(size)]
     slabs = [(c0, min(c0 + block, ncol)) for c0 in range(0, ncol, block)]
     mine = [slab for s, slab in enumerate(slabs) if s % size == rank]
-    yt = np.zeros((ncol, ncol))
+    yt = np.zeros((ncol, nrow))
     for t0 in range(0, nk, block):
         t1 = min(t0 + block, nk)
-        tile = np.empty((t1 - t0, ncol))
+        tile = np.empty((t1 - t0, nrow))
         for r, (s0, s1) in enumerate(bounds):
             lo, hi = max(t0, s0), min(t1, s1)
             if hi > lo:
                 piece = (np.ascontiguousarray(rows[lo - r0:hi - r0])
-                         if r == rank else np.empty((hi - lo, ncol)))
+                         if r == rank else np.empty((hi - lo, nrow)))
                 broadcast_rows(piece, r, comm)
                 tile[lo - t0:hi - t0] = piece
         xb = x_bar.broadcast_tile(t0 // block) if tiled else x_bar[t0:t1]
@@ -2571,6 +2572,63 @@ def _metric_root_adjoint(auxmol, sums, hold):
     V_bar += sums.pop('fit')
     return V_bar
 
+def _dressed_root_adjoint(auxmol, environment, root_bar, hold):
+    """Y = ((V + vtilde)^1/2)'s adjoint of `root_bar`, (naux, naux), the
+    root `metric_root(auxmol, environment)` forms: the Hadamard multiplier
+    1 / (w_i^1/2 + w_j^1/2) in the dressed metric's eigenbasis, over the
+    spectrum `_metric_spectrum` keeps. Y is the adjoint on V and on vtilde
+    alike."""
+    V = np.asfortranarray(auxmol.intor('int2c2e', aosym='s1'))
+    V += environment.aux_kernel(auxmol)
+    w, Z = scipy.linalg.eigh(V, lower=True, overwrite_a=True,
+                             check_finite=False, driver='evr')
+    hold('root_adjoint', 4 * Z.nbytes)
+    del V
+    keep = _metric_spectrum(w, True)
+    root = np.where(keep, np.sqrt(np.where(keep, w, 0.0)), np.inf)
+    E = Z.T @ root_bar
+    E = E @ Z
+    E += E.T
+    E *= 0.5
+    E /= root[:, None] + root[None, :]    # a dropped direction carries none
+    Y = Z @ E
+    del E
+    Y = Y @ Z.T
+    return Y
+
+
+def _streamed_root(auxmol, environment, block, rank, comm, hold, apply):
+    """`apply(c0, c1, slab)` for every slab of `block` rows of the metric
+    root (V + vtilde)^1/2 of `environment` (V^1/2 for None), the root
+    formed on rank 0 alone (`metric_root`) and each slab sent from it."""
+    naux = auxmol.nao_nr()
+    root, failure = None, None
+    if rank == 0:
+        try:
+            root, nbytes = metric_root(auxmol, environment)
+            hold('metric_root', nbytes)
+        except (RuntimeError, np.linalg.LinAlgError) as err:
+            failure = str(err)
+    failure = broadcast(failure, comm)
+    if failure is not None:
+        raise RuntimeError(failure)
+    for c0 in range(0, naux, block):
+        c1 = min(c0 + block, naux)
+        slab = _root_slab(root, slice(c0, c1), slice(0, naux), comm)
+        hold('metric_slab', slab.nbytes)
+        apply(c0, c1, slab)
+    del root
+
+
+def _distinct(items):
+    """`items` with repeats of one object dropped, in first-seen order."""
+    out = []
+    for item in items:
+        if not any(item is seen for seen in out):
+            out.append(item)
+    return out
+
+
 def _total_bytes(arrays):
     """Bytes of the arrays held together."""
     return sum(int(a.nbytes) for a in arrays)
@@ -2616,12 +2674,13 @@ def _root_slab(matrix, rows, cols, comm):
             if comm is None or comm.Get_rank() == 0 else np.empty(shape))
     return broadcast_rows(slab, 0, comm)
 
-def fit_M(D, F, regularization=DEFAULT_REGULARIZATION):
+def fit_M(D, F, numerics=None):
     """Their eqs 8-9: balanced, Tikhonov-regularized least-squares estimator.
 
     Cost is one (nk x nk) Gram matrix, one inversion and two products -- O(N^3)
     with the test set linear in system size.
     """
+    regularization, = fit_settings(numerics, 'regularization')
     scale = np.sqrt(np.einsum('kr,kr->k', D, D))
     scale[scale == 0] = 1.0
     d = 1.0 / scale
@@ -2631,7 +2690,7 @@ def fit_M(D, F, regularization=DEFAULT_REGULARIZATION):
     return ((F @ Dt.T) @ np.linalg.inv(G)) * d[None, :]
 
 
-def fit_M_stable(D, F, regularization=DEFAULT_REGULARIZATION):
+def fit_M_stable(D, F, numerics=None):
     """`fit_M` with the explicit inverse replaced by a Cholesky solve.
 
     The same estimator, a better numerical realization of it. `fit_M` forms
@@ -2642,6 +2701,7 @@ def fit_M_stable(D, F, regularization=DEFAULT_REGULARIZATION):
     adjoints formed whole rebuild `fit_M_streaming`'s estimator with it from D
     over every product pair and F zero on the screened ones.
     """
+    regularization, = fit_settings(numerics, 'regularization')
     s = np.sqrt(np.einsum('kr,kr->k', D, D))
     s = np.where(s == 0.0, 1.0, s)
     d = 1.0 / s
@@ -2653,9 +2713,7 @@ def fit_M_stable(D, F, regularization=DEFAULT_REGULARIZATION):
 
 
 def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
-                       regularization=DEFAULT_REGULARIZATION,
-                       l_max_second=2, streaming=True, block_memory_gb=4.0,
-                       pair_tol=DEFAULT_PAIR_TOL, comm=None, timings=None,
+                       numerics=None, streaming=True, comm=None, timings=None,
                        with_Z=True):
     """Returns (X, Z, M) with X[k, mu] = chi_mu(r_k) and Z = M^T V M.
 
@@ -2665,9 +2723,11 @@ def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
 
     X is returned grid-major, matching `space_time.py`.
 
-    block_memory_gb is forwarded to whichever of the two paths runs; it caps
-    their per-block working set and is the only handle on the peak (see
-    `fit_M_streaming`).
+    `numerics` is forwarded to whichever of the two paths runs; its working
+    set (`LayoutNumerics.fit_gb`, `fit_settings`' block_memory_gb) caps
+    their per-block working set and is the only handle on the peak, so it has
+    to be reachable from here -- see `fit_M_streaming` for what it does and
+    does not buy.
 
     streaming=True accumulates D D^T and F D^T blockwise instead of holding D
     (n_k x n_rho) and F. The two agree to the accuracy of the linear solve
@@ -2695,14 +2755,11 @@ def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
     if auxmol is None:
         auxmol = df.addons.make_auxmol(mol, auxbasis=auxbasis)
     if streaming:
-        M = fit_M_streaming(mol, auxmol, coords, l_max_second=l_max_second,
-                            regularization=regularization,
-                            block_memory_gb=block_memory_gb, pair_tol=pair_tol,
+        M = fit_M_streaming(mol, auxmol, coords, numerics=numerics,
                             comm=comm, timings=timings)
     else:
-        D, F = build_D_F(mol, auxmol, coords, l_max_second=l_max_second,
-                         block_memory_gb=block_memory_gb, pair_tol=pair_tol)
-        M = fit_M(D, F, regularization)                  # (naux, nk)
+        D, F = build_D_F(mol, auxmol, coords, numerics=numerics)
+        M = fit_M(D, F, numerics)                        # (naux, nk)
     _t = time.time()
     Z = None
     if with_Z:
@@ -2712,6 +2769,97 @@ def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
     if timings is not None:
         timings['fit_assembly'] = time.time() - _t
     return X, Z, M
+
+
+def test_set_layout(mol, coords, numerics=None):
+    """(mu, nu, weight) of the AO-pair columns `build_D_F` keeps, in its order.
+
+    The test set is (all AOs) x (AOs with l <= l_max_second), angular-weighted
+    on the second index and screened on the pair density the grid samples,
+    max_k |chi_mu(r_k) chi_nu(r_k)| > pair_tol x a global reference. The
+    reference is global and the screen is per column, so the column set does
+    not depend on how `build_D_F` blocks the first index, and the order is
+    ascending mu then ascending position in the second set.
+
+    The auxiliary block that follows carries F = identity, so it
+    contributes nothing through F and only a collocation through D.
+
+    Screening is a discrete choice and is frozen with everything else: a
+    differentiated column set must be the reference geometry's, or the surface
+    steps where a pair crosses the tolerance.
+    """
+    l_max_second, pair_tol = fit_settings(numerics, 'l_max_second', 'pair_tol')
+    ao = mol.eval_gto('GTOval_sph', coords)
+    l_ao = _ao_l_labels(mol)
+    second = np.where(l_ao <= l_max_second)[0]
+    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
+    ref = _screening_reference(ao, second, w)
+    mu_keep, nu_keep, w_keep = [], [], []
+    for mu in range(mol.nao_nr()):
+        blk = ao[:, mu][:, None] * ao[:, second] * w[None, :]
+        col_max = np.maximum(blk.max(axis=0), -blk.min(axis=0))
+        keep = np.flatnonzero(col_max > pair_tol * ref)
+        mu_keep.append(np.full(len(keep), mu, dtype=int))
+        nu_keep.append(second[keep])
+        w_keep.append(w[keep])
+    return (np.concatenate(mu_keep), np.concatenate(nu_keep),
+            np.concatenate(w_keep))
+
+
+def screened_layout(mol, coords, numerics=None,
+                    comm=None, block=None):
+    """`test_set_layout` from each rank's grid tiles, the whole collocation
+    never formed: the pair maxima of `fit_rows`' own screen over this rank's
+    tiles of `block` points (tile t on rank t % size), max-reduced, which is
+    exact, so the layout is the same arrays at every rank count."""
+    l_max_second, pair_tol = fit_settings(numerics, 'l_max_second', 'pair_tol')
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((0, 1) if comm is None
+                    else (comm.Get_rank(), comm.Get_size()))
+    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    if nranks > 1:
+        coords = lockstep(coords, comm)
+    nao, nk = mol.nao_nr(), len(coords)
+    l_ao = _ao_l_labels(mol)
+    second = np.where(l_ao <= l_max_second)[0]
+    w = np.array([ANGULAR_WEIGHTS.get(l_ao[j], 1.0) for j in second])
+    n2 = len(second)
+    threads = openmp_threads()
+    s_ao = np.zeros(nao)
+    peaks = np.zeros(nao * n2)
+    for t in partition(-(-nk // block), rank, nranks):
+        X_t = _tile_collocation(mol, coords[t * block:min((t + 1) * block,
+                                                          nk)])
+        np.maximum(s_ao, np.abs(X_t).max(axis=0), out=s_ao)
+        np.maximum(peaks, _pair_peaks(X_t, 0, nao, second, w, threads),
+                   out=peaks)
+        del X_t
+    reduce_max(s_ao, comm)
+    reduce_max(peaks, comm)
+    ref = float(s_ao.max() * (w * s_ao[second]).max())
+    kept = np.flatnonzero(peaks > pair_tol * ref)
+    return kept // n2, second[kept % n2], w[kept % n2]
+
+
+def test_set_D(mol, auxmol, coords, layout):
+    """The D of `build_D_F` rebuilt from a frozen layout: pairs then auxiliaries.
+
+    Filled in blocks of `FIT_CHOLESKY_BLOCK` pair columns, so no transient
+    of the whole pair width is formed beside D; each element is the same
+    product. D keeps the collocations' memory order (pyscf's is grid-fastest),
+    which is the order every product of the fit reads it in.
+    """
+    mu, nu, w = layout
+    ao = mol.eval_gto('GTOval_sph', coords)
+    aux = auxmol.eval_gto('GTOval_sph', coords)
+    npair = len(mu)
+    D = np.empty((ao.shape[0], npair + aux.shape[1]),
+                 order='F' if ao.flags.f_contiguous else 'C')
+    for c0 in range(0, npair, FIT_CHOLESKY_BLOCK):
+        c1 = min(c0 + FIT_CHOLESKY_BLOCK, npair)
+        D[:, c0:c1] = ao[:, mu[c0:c1]] * ao[:, nu[c0:c1]] * w[None, c0:c1]
+    D[:, npair:] = aux
+    return D
 
 
 def aux_metric_sqrt(auxmol, environment=None, V=None):
@@ -2783,14 +2931,188 @@ def _metric_spectrum(w, dressed):
     return w > AUX_METRIC_ROOT_FLOOR * w.max()
 
 
-def fit_error_coulomb(mol, auxmol, coords, M=None, l_max_second=2,
-                      regularization=DEFAULT_REGULARIZATION):
+def _ri_density_coefficients(mol, auxmol, orbitals, V, comm=None):
+    """V^-1 (P|pp) of the density |phi_p|^2 of each column of `orbitals`, the
+    three-centre integrals streamed over auxiliary shell blocks; over the
+    ranks of `comm` each rank takes every size-th block and the blocks are
+    summed (`reduce_sum`)."""
+    nao, n = orbitals.shape
+    offs = auxmol.ao_loc_nr()
+    per_function = max(1, THREE_CENTER_BLOCK_BYTES // (8 * nao * nao))
+    many = comm is not None and comm.Get_size() > 1
+    rank, size = (comm.Get_rank(), comm.Get_size()) if many else (0, 1)
+    out = np.zeros((auxmol.nao_nr(), n))
+    s0, block = 0, 0
+    while s0 < auxmol.nbas:
+        s1 = s0 + 1
+        while s1 < auxmol.nbas and offs[s1 + 1] - offs[s0] <= per_function:
+            s1 += 1
+        if block % size == rank:
+            g = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
+                                 shls_slice=(0, mol.nbas, 0, mol.nbas, s0, s1))
+            g = g.reshape(nao, nao, -1)
+            for q in range(g.shape[2]):
+                out[offs[s0] + q] = np.einsum('mp,mp->p', orbitals,
+                                              g[:, :, q] @ orbitals)
+        s0, block = s1, block + 1
+    if many:
+        reduce_sum(out, comm)
+    return scipy.linalg.solve(V, out, assume_a='pos')
+
+
+def orbital_density_residual(mol, auxmol, orbitals, X_ao, D, root=None,
+                             fitted=None, comm=None):
+    """(relative, absolute) Coulomb-norm error of the separable-RI factors on
+    the density |phi_p|^2 of each column of `orbitals` (AO coefficients):
+
+        B_p^ISDF = D^T (X_ao phi_p)^2,   B_p^RI = root V^-1 (P|pp)
+        absolute = ||B_p^ISDF - B_p^RI||^2 (Ha)
+        relative = absolute / ||B_p^RI||^2
+
+    against the RI-V fit on the same auxiliary basis, the target of the
+    Duchemin-Blase estimator (J. Chem. Phys. 150, 174120 (2019), eq 6). The fit
+    is made on AO-pair densities, so a near-null AO combination of overlap
+    eigenvalue w, which enters an S-normalized orbital with a coefficient up to
+    w^-1/2, carries the fit's AO-pair error into the orbital density amplified
+    by up to 1/w. root: the metric root D was formed with (the bare
+    `aux_metric_sqrt` when None; a dressed one for D in a continuum).
+    fitted: B_p^ISDF already formed, (naux, norb), by a caller that holds the
+    factors as grid rows and has summed them over the ranks
+    (`refuse_unrepresented_factors`); X_ao and D are not read then.
+    comm: divides the three-centre pass of B_p^RI over its ranks.
+    """
+    V = auxmol.intor('int2c2e', aosym='s1')
+    root = aux_metric_sqrt(auxmol, V=V) if root is None else root
+    orbitals = np.asarray(orbitals, float)
+    b_ri = root @ _ri_density_coefficients(mol, auxmol, orbitals, V, comm)
+    b_fit = D.T @ (X_ao @ orbitals) ** 2 if fitted is None else fitted
+    absolute = ((b_fit - b_ri) ** 2).sum(axis=0)
+    return absolute / (b_ri ** 2).sum(axis=0), absolute
+
+
+def represented_span(mol, auxmol, X_ao, D, root=None,
+                     tol=ISDF_DENSITY_RESIDUAL_TOL,
+                     floor=ISDF_SPAN_OVERLAP_FLOOR):
+    """(basis, record): the AO directions the separable-RI factors represent.
+
+    basis: (nao, m), the S-normalized overlap eigenfunctions u / sqrt(w) whose
+    densities the fit misses by at most `tol` (relative,
+    `orbital_density_residual`) and whose eigenvalue w exceeds `floor`, so
+    basis^T S basis = 1. A mean field solved in it (`isdf_jk.solve_in_span`)
+    holds no orbital that reaches a direction the factors miss. The floor drops
+    near-null eigenfunctions whose own density happens to fit: products of two
+    of them, with coefficients near w^-1/2, still do not.
+    record: counts kept and dropped, the smallest kept and largest dropped
+    eigenvalue.
+
+    The span is set by the grid and its radii, not by the basis alone: at the
+    same counts two radii rows of one basis can differ by two orders of
+    magnitude on these directions, and a denser row can do worse.
+    """
+    w, U = np.linalg.eigh(mol.intor('int1e_ovlp'))
+    phi = U / np.sqrt(w)
+    rel, _ = orbital_density_residual(mol, auxmol, phi, X_ao, D, root)
+    keep = (rel <= tol) & (w > floor)
+    record = {'n_kept': int(keep.sum()), 'n_dropped': int((~keep).sum()),
+              'smallest_kept_eigenvalue': float(w[keep].min()),
+              'largest_dropped_eigenvalue':
+                  float(w[~keep].max()) if (~keep).any() else 0.0,
+              'tol': float(tol), 'floor': float(floor)}
+    return phi[:, keep], record
+
+
+def refuse_unrepresented_orbitals(mol, auxmol, mo_coeff, X_ao, D, root=None,
+                                  tol=ISDF_ORBITAL_RESIDUAL_TOL, fitted=None,
+                                  nocc=None, comm=None):
+    """Refuse orbitals whose densities the separable-RI factors miss by more
+    than `tol` (relative, `orbital_density_residual`); returns the residuals
+    (relative, absolute) when every orbital passes.
+
+    Those orbitals carry near-null AO combinations with large coefficients,
+    and a BSE kernel built on them binds spurious pairs below the gap or turns
+    (A - B) indefinite with no other sign. A larger grid is no remedy (a
+    denser row of the same radii table can represent these directions worse),
+    and no span is cut by refusal (the 1e-3 span moves PXZ-TRZ aug-cc-pVDZ T1
+    by -29 and dEST by +30 meV against DF in the full basis): the molecule
+    runs on the density-fitted route in the full basis.
+
+    The refusal (`UnrepresentedOrbitals`) names the refused orbitals, worst
+    first (occupied or virtual where `nocc` is given), with each one's
+    residual and coefficient norm. fitted, comm: `orbital_density_residual`'s.
+    """
+    rel, absolute = orbital_density_residual(mol, auxmol, mo_coeff, X_ao, D,
+                                             root, fitted=fitted, comm=comm)
+    if comm is not None and comm.Get_size() > 1:
+        # one verdict: rank 0's residuals on every rank
+        rel, absolute = lockstep((rel, absolute), comm)
+    bad = np.flatnonzero(rel > tol)
+    if bad.size:
+        bad = bad[np.argsort(-rel[bad], kind='stable')]
+        norms = np.linalg.norm(mo_coeff, axis=0)
+
+        def kind(p):
+            return ('' if nocc is None else
+                    ' occupied' if p < nocc else ' virtual')
+
+        named = ', '.join(f'{int(p)}{kind(p)} ({rel[p]:.3g}, |C| '
+                          f'{norms[p]:.3g})'
+                          for p in bad[:ISDF_REFUSED_ORBITALS_NAMED])
+        more = ('' if bad.size <= ISDF_REFUSED_ORBITALS_NAMED else
+                f' and {bad.size - ISDF_REFUSED_ORBITALS_NAMED} more')
+        raise UnrepresentedOrbitals(
+            f'the separable-RI factors do not represent {bad.size} of '
+            f'{rel.size} orbital densities (relative Coulomb residual above '
+            f'{tol:g}; worst orbital {int(bad[0])}: {rel[bad[0]]:.3g}, '
+            f'coefficient norm {norms[bad[0]]:.3g}; summed error '
+            f'{absolute[bad].sum():.3g} Ha). Refused orbitals (residual, '
+            f'coefficient norm): {named}{more}. Their near-null AO '
+            f'combinations are beyond the fit, and a BSE on them binds '
+            f'spurious pairs. Run the density-fitted route in the full basis '
+            f'(a DF mean field and solve_bse_df), which has no such '
+            f'directions to miss; the basis is never cut by refusal. The '
+            f'bound ISDF_ORBITAL_RESIDUAL_TOL is a bar, not a keyword.',
+            [int(p) for p in bad], rel)
+    return rel, absolute
+
+
+def refuse_unrepresented_factors(mol, auxmol, mo_coeff, x_mo, d, root=None,
+                                 tol=ISDF_ORBITAL_RESIDUAL_TOL, nocc=None,
+                                 comm=None):
+    """`refuse_unrepresented_orbitals` on the factors as a chain or a front
+    end holds them: X_mo = X_ao C of `mo_coeff` and D in the gauge of the
+    metric root `root` (bare when None), whole (replicated over `comm`), or
+    this rank's grid rows of both as `SlicedFactors` (d None reads x_mo's D).
+    The fitted densities D^T X_mo^2 are summed over the grid rows in tiles,
+    and over the ranks where the factors are rows; the three-centre pass of
+    the RI densities is divided over `comm` (the factors' own where they are
+    rows); the verdict is rank 0's on every rank.
+    """
+    rows = isinstance(x_mo, SlicedFactors)
+    if rows:
+        comm = x_mo.comm
+        d = x_mo.D if d is None else d
+        x_mo = x_mo.X_mo
+    if isinstance(d, SlicedFactors):
+        d = d.D
+    x_mo, d = np.asarray(x_mo), np.asarray(d)
+    fitted = np.zeros((d.shape[1], x_mo.shape[1]))
+    for r0 in range(0, len(x_mo), ISDF_FITTED_DENSITY_ROWS):
+        r1 = r0 + ISDF_FITTED_DENSITY_ROWS
+        fitted += d[r0:r1].T @ x_mo[r0:r1] ** 2
+    if rows:
+        reduce_sum(fitted, comm)
+    return refuse_unrepresented_orbitals(mol, auxmol, mo_coeff, None, None,
+                                         root=root, tol=tol, fitted=fitted,
+                                         nocc=nocc, comm=comm)
+
+
+def fit_error_coulomb(mol, auxmol, coords, M=None, numerics=None):
     """Their eq 10 objective: ||F^RS(rho) - F^V(rho)|| in the Coulomb metric,
     which is what the grid radii are optimized against.
     """
-    D, F = build_D_F(mol, auxmol, coords, l_max_second=l_max_second)
+    D, F = build_D_F(mol, auxmol, coords, numerics=numerics)
     if M is None:
-        M = fit_M(D, F, regularization)
+        M = fit_M(D, F, numerics)
     V = auxmol.intor('int2c2e', aosym='s1')
     R = M @ D - F                                        # (naux, nrho)
     return float(np.sqrt(np.einsum('br,bc,cr->', R, V, R)))
@@ -2817,6 +3139,11 @@ def fit_error_coulomb(mol, auxmol, coords, M=None, l_max_second=2,
 #: Order of the sub-shells in the flat optimization vector. One spelling: a
 #: gradient concatenated in a different order is silently a different variable.
 _SHELL_ORDER = ('A1', 'A2', 'A3', 'B1')
+
+
+def shell_tuple(per_shell):
+    """{shell: count} as a tuple in `_SHELL_ORDER`."""
+    return tuple(int(per_shell[sh]) for sh in _SHELL_ORDER)
 
 
 def _radii_from_flat(x, counts):
@@ -2931,33 +3258,6 @@ def shipped_radii():
     return raw['rows']
 
 
-def element_basis_name(basis, element):
-    """The name of the basis one element carries, lower-cased, for a table key.
-
-    A basis is a name for every element or a dict of per-element names (pyscf
-    accepts both; a lithium-containing molecule in an augmented set needs the
-    dict, since the auxiliary sets that cover Li differ from the rest). A dict
-    gives this element's entry, or its 'default'. Lower-cased because the
-    table's keys are and pyscf's names are case-insensitive: 'cc-pVDZ' and
-    'cc-pvdz' are one basis and must be one row. An explicit basis definition
-    (shells, not a name) has no row to look up and is refused by name.
-    """
-    name = basis.get(element, basis.get('default')) if isinstance(basis, dict) \
-        else basis
-    if not isinstance(name, str):
-        raise TypeError(f'the basis for {element} is not a named set '
-                        f'({type(name).__name__}); the radii table is keyed on '
-                        f'basis names, so pass a name or explicit radii.')
-    return name.strip().lower()
-
-
-def default_auxbasis(basis):
-    """<basis>-ri, element by element for a per-element basis."""
-    if isinstance(basis, dict):
-        return {el: element_basis_name(basis, el) + '-ri' for el in basis}
-    return str(basis) + '-ri'
-
-
 def single_basis_name(basis):
     """The one basis name a whole molecule carries, for a per-basis setting.
 
@@ -3025,8 +3325,8 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
     the optimizer and takes recipe arguments this does not: the radii and
     whether the nuclear cusp is sampled, which together are the grid.
     """
-    auxbasis = auxbasis or default_auxbasis(basis)
-    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
+    auxbasis = auxbasis or paired_auxbasis(basis)
+    hit = shipped_radii_lookup(element, str(basis), str(auxbasis), counts)
     if hit is None:
         raise KeyError(
             f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
@@ -3037,30 +3337,41 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
     return radii, origin
 
 
-def runtime_atomic_radii(element, basis, auxbasis, counts, n_start=1):
-    """(radii, fit_error, origin): the shipped row, or a run-time optimization.
+class UntabulatedISDFGrid(ValueError):
+    """An ISDF grid asked for at (element, basis, auxbasis, counts) the
+    shipped radii table holds no row for, without the run-time grid declared
+    (`IsdfNumerics.runtime_radii`, the `runtime_radii` keyword)."""
 
-    A missing row is honoured, never silently: the warning says the grid is
-    not a validated one, and the search runs in the element's box
-    (`search_r_max` of a multi-start search, `ELEMENT_R_MAX`) rather than the
-    5 Bohr a single descent defaults to. The two coincide for H and the
-    second row; for the diffuse-valence elements (lithium, magnesium) the
-    5 Bohr box cuts the density off. The real remedy is a row in the table.
+
+def runtime_atomic_radii(element, basis, auxbasis, counts, n_start=1,
+                         runtime_radii=False):
+    """(radii, fit_error, origin): the shipped row, or a declared run-time
+    optimization.
+
+    A missing row is refused (`UntabulatedISDFGrid`): a re-optimized grid
+    lands on one local minimum of a multi-modal surface, nothing validated
+    it, and it is not reproducible from a clean checkout. `runtime_radii`
+    True declares it (a tool building a row, a test of the search); the
+    search then runs in the element's box (`search_r_max` of a multi-start
+    search, `ELEMENT_R_MAX`) rather than the 5 Bohr a single descent
+    defaults to. The two coincide for H and the second row; for the
+    diffuse-valence elements (lithium, magnesium) the 5 Bohr box cuts the
+    density off. The real remedy is a row in the table.
     """
     hit = shipped_radii_lookup(element, basis, auxbasis, counts)
     if hit is not None:
         return hit
+    if not runtime_radii:
+        raise UntabulatedISDFGrid(
+            f'no tabulated ISDF grid for {element}/{basis}/{auxbasis} at '
+            f'counts {sorted((counts or {}).items())} (held: '
+            f'{_tabulated_counts(element, basis, auxbasis)}). A grid '
+            f're-optimized at run time is not a validated one and is not '
+            f'reproducible from a clean checkout: ask for a tabulated level '
+            f'or counts, add the row to the table, or declare the run-time '
+            f'grid (IsdfNumerics(runtime_radii=True), or runtime_radii=True).'
+            + missing_row_hint(element, basis, auxbasis, counts))
     r_max = search_r_max(element, n_start=max(int(n_start), 2))
-    warnings.warn(
-        f'ISDF grid re-optimized at run time: no tabulated ISDF grid for '
-        f'{element}/{basis}/{auxbasis} at counts '
-        f'{sorted((counts or {}).items())} (held: '
-        f'{_tabulated_counts(element, basis, auxbasis)}); searching in a '
-        f'{r_max:g} Bohr box. That grid lands on one local '
-        f'minimum of a multi-modal surface, nothing validated it, and it is '
-        f'not reproducible from a clean checkout -- treat every number built '
-        f'on it as unvalidated until the row is in the table.',
-        RuntimeWarning, stacklevel=3)
     radii, fit_error = optimize_atomic_radii(element, basis, auxbasis,
                                              counts=counts, n_start=n_start,
                                              r_max=r_max)
@@ -3126,8 +3437,7 @@ def _radii_cache_path(element, basis, auxbasis, settings):
 
 
 def optimize_atomic_radii(element, basis, auxbasis, counts=None,
-                          r_min=0.05, r_max=None, l_max_second=2,
-                          regularization=DEFAULT_REGULARIZATION,
+                          r_min=0.05, r_max=None, numerics=None,
                           maxiter=200, seed=0, verbose=False,
                           basin_hopping=0, temperature=0.5, step=0.35,
                           n_start=1, origin=False, return_candidates=False):
@@ -3166,8 +3476,10 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         magnesium's density altogether; it is kept for n_start=1 only so that
         every existing cached and shipped grid keeps its key.
     """
+    l_max_second, regularization = fit_settings(
+        numerics, 'l_max_second', 'regularization')
 
-    counts = counts or ISDF_DEFAULT_COUNTS
+    require_grid(counts, None, 'optimize_atomic_radii')
 
     # Cache on disk: besides saving the recomputation, the result is not
     # reproducible across thread counts. The objective is evaluated with
@@ -3231,8 +3543,7 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         try:
             return fit_error_coulomb(atom, auxatom,
                                      atomic_points(decode(x), origin=origin),
-                                     l_max_second=l_max_second,
-                                     regularization=regularization)
+                                     numerics=numerics)
         except np.linalg.LinAlgError:
             return 1e6
 
@@ -3364,7 +3675,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
     else:
         counts = _explicit_counts(grid)
         asked = 'which is what was asked for explicitly'
-    auxbasis = auxbasis or default_auxbasis(basis)
+    auxbasis = auxbasis or paired_auxbasis(basis)
     # The counts naming a grid and the table holding one are two questions: a
     # level validated at a basis can still have no row for one of these
     # elements. The lookup is the physics key, so this asks what a fitting run
@@ -3390,6 +3701,94 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
     return counts, n_start
 
 
+def grid_identity(level, basis, elements, auxbasis=None, counts=None,
+                  radii=None):
+    """What an interpolation grid IS at `elements`: {level, counts,
+    radii_sha256}, the one stamp a checkpoint or record carries for its grid.
+
+    A level is a NAME for rows of the shipped table, and a re-cut table can put
+    other counts under the same name, so a stamp of the name alone would resume
+    or compare a run on another grid without a word. `counts` is each element's
+    four shell counts and `radii_sha256` the sha256 of the radii it places:
+    each element's table row (radii and the origin flag; a row the table does
+    not hold hashes as missing), or the radii handed in. `level` is the name
+    asked for (None for explicit counts or radii), resolved here through
+    `resolve_isdf_grid` when no counts are given. Compare two with
+    `refuse_other_grid`.
+    """
+    auxbasis = auxbasis or paired_auxbasis(basis)
+    elements = sorted(set(elements))
+    if counts is None and radii is None:
+        counts, _ = resolve_isdf_grid(level, basis, elements,
+                                      auxbasis=auxbasis)
+    if radii is not None:
+        rows = {'radii': json.loads(json.dumps(
+            radii, sort_keys=True, default=lambda a: np.asarray(a).tolist()))}
+    else:
+        rows = {}
+        for el in elements:
+            hit = shipped_radii_lookup(el, str(basis), str(auxbasis), counts)
+            rows[el] = (None if hit is None else
+                        [{k: np.asarray(v).tolist()
+                          for k, v in sorted(hit[0].items())}, hit[2]])
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode())
+    return {'level': None if level is None else str(level),
+            'counts': (None if counts is None else
+                       {el: [int(counts[sh]) for sh in _SHELL_ORDER]
+                        for el in elements}),
+            'radii_sha256': digest.hexdigest()}
+
+
+def require_grid(counts, radii, where):
+    """Refuse an interpolation grid nobody asked for: neither counts nor
+    radii (a level is resolved into counts before this). There is no default
+    grid: one nobody validated is a different factorization, not a coarse
+    one."""
+    if counts is None and radii is None:
+        raise ValueError(
+            f'{where}: no ISDF grid asked for. Pass the counts of a '
+            f'validated level (grid_accuracy= where the call takes it, else '
+            f'resolve_isdf_grid; SURFACE_GRID_ACCURACY is the surfaces\' '
+            f'default) or radii=.')
+
+
+def describe_grid(identity):
+    """A `grid_identity` (or a stamp holding less) in words, for a refusal."""
+    if identity is None:
+        return ('no grid identity (written before grids were stamped, so '
+                'which grid it stands on cannot be told)')
+    if not isinstance(identity, dict):
+        return repr(identity)
+    level = identity.get('level')
+    if 'radii_sha256' not in identity:
+        return (f'the level name {level!r} alone (its counts and radii were '
+                f'not stamped, so which grid it stands on cannot be told)')
+    counts = identity.get('counts') or {}
+    shells = '; '.join(f'{el} {",".join(str(n) for n in c)}'
+                       for el, c in sorted(counts.items()))
+    return (f'{level or "explicit"} ({shells or "no counts"}; radii sha256 '
+            f'{str(identity["radii_sha256"])[:12]})')
+
+
+def refuse_other_grid(stored, want, where):
+    """Raise unless the grid `stored` in the checkpoint or record `where` is
+    the grid `want` this run would use, naming both.
+
+    Both are `grid_identity` stamps compared whole (level, counts and radii
+    digest); a stamp missing, or holding only a name, is refused too, since a
+    name has stood for two grids. A JSON round trip of either side compares
+    equal to the original.
+    """
+    if stored == want:
+        return
+    raise RuntimeError(
+        f'{where} stands on the ISDF grid {describe_grid(stored)}, and this '
+        f'run would use {describe_grid(want)}: a resumed or compared stage '
+        f'would mix two grids. Point the run at a fresh directory, or ask '
+        f'for the grid it used (a level whose counts were re-cut '
+        f'names another grid; the earlier one may sit under another name).')
+
+
 # ---------------------------------------------------------------------------
 # Covariant atomic frames
 # ---------------------------------------------------------------------------
@@ -3413,6 +3812,8 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
 
 _FRAME_DECAY = 3.0          # bohr; smooth neighbour weighting
 _FRAME_DEGEN = 1e-6         # relative eigenvalue gap below which a frame is flagged
+_FRAME_COINCIDENT = 1e-8    # bohr; a neighbour closer than this is the atom itself
+_FRAME_SCALE_FLOOR = 1e-30  # floor of the largest eigenvalue a gap is scaled by
 
 #: Reference directions that fix the sign of each frame axis. Three linearly
 #: independent generic directions (cyclic shifts of 1, 1/phi, 1/phi^2; circulant
@@ -3423,6 +3824,20 @@ _FRAME_SIGN_REFS = np.array([[1.0, 0.6180339887498949, 0.38196601125010515],
                              [0.38196601125010515, 1.0, 0.6180339887498949],
                              [0.6180339887498949, 0.38196601125010515, 1.0]])
 _FRAME_SIGN_REFS /= np.linalg.norm(_FRAME_SIGN_REFS, axis=1)[:, None]
+
+
+def _neighbour_tensor(coords, i, decay):
+    """(keep, r, u, w, T) of atom i: the indices of the other atoms, every
+    distance, their unit vectors and weights w = exp(-r / decay), and
+    T_i = sum_j w u u^T; u, w and T are None for an isolated atom."""
+    d = coords - coords[i]
+    r = np.linalg.norm(d, axis=1)
+    keep = np.flatnonzero(r > _FRAME_COINCIDENT)
+    if len(keep) == 0:
+        return keep, r, None, None, None
+    u = d[keep] / r[keep, None]
+    w = np.exp(-r[keep] / decay)
+    return keep, r, u, w, np.einsum('j,ja,jb->ab', w, u, u)
 
 
 def atomic_frames(mol, decay=_FRAME_DECAY, degeneracy_tol=_FRAME_DEGEN):
@@ -3447,16 +3862,10 @@ def atomic_frames(mol, decay=_FRAME_DECAY, degeneracy_tol=_FRAME_DEGEN):
     degenerate = np.zeros(natm, dtype=bool)
 
     for i in range(natm):
-        d = coords - coords[i]
-        r = np.linalg.norm(d, axis=1)
-        keep = r > 1e-8
-        if not keep.any():
+        _, _, _, _, T = _neighbour_tensor(coords, i, decay)
+        if T is None:
             frames[i] = np.eye(3); degenerate[i] = True
             continue
-        dj = d[keep] / r[keep, None]
-        w = np.exp(-r[keep] / decay)
-
-        T = np.einsum('j,ja,jb->ab', w, dj, dj)
         evals, evecs = np.linalg.eigh(T)
         order = np.argsort(-evals)
         evals, evecs = evals[order], evecs[:, order]
@@ -3469,7 +3878,7 @@ def atomic_frames(mol, decay=_FRAME_DECAY, degeneracy_tol=_FRAME_DEGEN):
         # function of the determined axes, so the result is covariant up to a
         # rotation within the degenerate subspace, which is a symmetry of the
         # environment that created the degeneracy.
-        scale = max(evals[0], 1e-30)
+        scale = max(evals[0], _FRAME_SCALE_FLOOR)
         axes = evecs.T.copy()                       # rows are axes
         gaps = np.diff(evals) / scale
         degen_pair = np.abs(gaps) < degeneracy_tol
@@ -3514,6 +3923,60 @@ def atomic_frames(mol, decay=_FRAME_DECAY, degeneracy_tol=_FRAME_DEGEN):
             axes[2] = -axes[2]
         frames[i] = axes
     return frames, degenerate
+
+
+def frame_turning(coords, decay=_FRAME_DECAY):
+    """(gap, rate), per atom: the smallest relative gap between consecutive
+    eigenvalues of the neighbour tensor `atomic_frames` diagonalizes, and the
+    fastest rate (rad/Bohr) its frame axes turn at under any one nuclear
+    coordinate.
+
+    First-order perturbation of T_i = sum_j w(r_ij) u_ij u_ij^T: the axis a
+    turns by (sum_b omega_ab^2)^(1/2) per Bohr, omega_ab = e_a^T dT e_b /
+    (lambda_b - lambda_a), with dT/dR_j = -(w / decay) u_x u u^T +
+    (w / r) (p_x u^T + u p_x^T), p = 1 - u u^T, and dT_i/dR_i = -sum_j. An
+    exactly degenerate pair gives an infinite rate: the frame is not
+    determined there at all.
+    """
+    coords = np.asarray(coords, dtype=float)
+    natm = len(coords)
+    gap, rate = np.zeros(natm), np.zeros(natm)
+    eye = np.eye(3)
+    for i in range(natm):
+        keep, r, u, w, T = _neighbour_tensor(coords, i, decay)
+        if T is None:
+            gap[i], rate[i] = 0.0, np.inf
+            continue
+        lam, e = np.linalg.eigh(T)
+        lam, e = lam[::-1], e[:, ::-1]
+        gap[i] = np.abs(np.diff(lam)).min() / max(lam[0], _FRAME_SCALE_FLOOR)
+        dT = np.zeros((natm, 3, 3, 3))
+        for k, j in enumerate(keep):
+            p = eye - np.outer(u[k], u[k])
+            for x in range(3):
+                dT[j, x] = (-w[k] / decay * u[k, x] * np.outer(u[k], u[k])
+                            + w[k] / r[j] * (np.outer(p[:, x], u[k])
+                                             + np.outer(u[k], p[:, x])))
+        dT[i] = -dT[keep].sum(axis=0)
+        g = np.einsum('ak,jxab,bl->jxkl', e, dT, e)
+        den = lam[None, :] - lam[:, None]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            om = np.where(eye[None, None] > 0, 0.0, g / den[None, None])
+        rate[i] = float(np.sqrt((om ** 2).sum(axis=-1)).max())
+    return gap, rate
+
+
+def frame_turning_record(mol, bar=FRAME_TURNING_RATE_BAR):
+    """The turning report of `mol`'s covariant ISDF frames (`frame_turning`):
+    the largest rate, the bar, and every atom above it with its symbol,
+    relative gap and rate, fastest first. A report, not a refusal."""
+    gap, rate = frame_turning(mol.atom_coords())
+    above = [int(i) for i in np.argsort(-rate) if rate[i] > bar]
+    return {'bar_rad_per_bohr': float(bar),
+            'max_rate_rad_per_bohr': float(rate.max()),
+            'above_bar': [{'atom': i, 'symbol': mol.atom_pure_symbol(i),
+                           'gap': float(gap[i]), 'rate': float(rate[i])}
+                          for i in above]}
 
 
 def molecular_points_covariant(mol, radii_by_element, origin_by_element=None,

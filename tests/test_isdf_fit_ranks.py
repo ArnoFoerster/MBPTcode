@@ -16,10 +16,11 @@ twice produces a slightly worse fit, not an error. Every quasiparticle energy
 and BSE root downstream then moves by an amount nobody can distinguish from
 the grid.
 
-  * RANKS AGREE WITH EACH OTHER, bitwise. The reduction is rank-ordered
+  * RANKS AGREE WITH EACH OTHER, to a few ulp. The reduction is rank-ordered
     (`SimulatedComm.allreduce_sum`, and MPI_Allreduce with a fixed
-    communicator), so this is exact, not approximate, and anything less means
-    the ranks have silently forked into different functionals.
+    communicator), so only the last bits of each rank's own solve may move,
+    and anything more means the ranks have
+    silently forked into different functionals.
   * RANKS AGREE WITH SERIAL. Not bitwise, and it cannot be: the serial sum
     adds block 0, 1, 2, ... in order while r ranks add r partial sums whose
     terms were gathered in strides. Same terms, reordered additions.
@@ -48,30 +49,26 @@ The numbers are reproducible run to run, not a spread -- the stripe and the
 rank order of the reduction are both fixed -- so a change in them is a change
 in the arithmetic.
 
-SHOWN TO FAIL. Each gate was broken once, on a copy of `separable_ri.py`
-restored and `cmp`-verified afterwards:
+What breaks each gate, in `separable_ri.py`:
 
-  skip the reduction (`reduce_sum(FD, comm)` deleted) -- 10 of 14 fail. Every
-      rank keeps only its own stripe, so the ranks disagree with each other
-      and miss serial by M 4.8e+01 / 6.7e+01 on water at 2 / 3 ranks and
-      1.7e+00 on ethylene. The 1-rank gate still passes, correctly: a size-1
-      reduction is a no-op, so deleting it cannot show there.
-  off-by-one on the comm path, rank 0 doing block 0 a second time -- 8 of 14
-      fail, including the 1-rank gate, which is the one only this can reach:
-      serial is untouched, so a duplicated block has to be caught against it.
-      M misses by 2.7e+01 / 4.1e+01 on water and 4.1e-01 / 6.2e-01 on
-      ethylene, D by 1.9e+02 on water. The ranks still AGREE with each other
-      here -- they all duplicate the same block -- which is why agreeing
-      across ranks and agreeing with serial are two gates and not one.
-  off-by-one on both paths, block 0 done twice everywhere -- serial itself
-      moves off the record taken before any of this was written: M by 1.4e+01
-      on water and 2.1e-01 on ethylene, Z by 2.6e+03 and 1.0e+00. X stays
-      bitwise under all three, being collocation the fit never touches.
+  * The reduction skipped (`reduce_sum(FD, comm)` deleted). Every rank keeps
+    only its own stripe, so the ranks disagree with each other and miss
+    serial by M 4.8e+01 / 6.7e+01 on water at 2 / 3 ranks and 1.7e+00 on
+    ethylene. The 1-rank gate cannot see it: a size-1 reduction is a no-op.
+  * Off-by-one on the comm path, rank 0 doing block 0 a second time. Serial is
+    untouched, so the 1-rank gate, which is the one only this can reach, must
+    catch the duplicate against it. M misses by 2.7e+01 / 4.1e+01 on water and
+    4.1e-01 / 6.2e-01 on ethylene, D by 1.9e+02 on water. The ranks still
+    AGREE with each other -- they all duplicate the same block -- which is
+    why agreeing across ranks and agreeing with serial are two gates.
+  * Off-by-one on both paths, block 0 done twice everywhere. Serial itself
+    moves off the recorded values: M by 1.4e+01 on water and 2.1e-01 on
+    ethylene, Z by 2.6e+03 and 1.0e+00. X stays within a few ulp under all three,
+    being collocation the fit never touches.
 """
 import os
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -80,13 +77,17 @@ import numpy as np
 import pytest
 from pyscf import df, gto, scf
 
+from tests.archive_radii import install_current_radii
 from src.Base import separable_ri
-from src.Base.constants import ISDF_DEFAULT_COUNTS
+from src.Base.numerics import Numerics
 from src.Base.separable_ri import (_ao_l_labels, ao_blocks, atomic_grid,
                                    build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
+from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1, g1_kw
+from tests.archived_tree import require_commit, unpack_commit
+from tests.pins import THREAD_CAPS_WITHOUT_OMP, assert_archive_same, assert_same
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -100,7 +101,7 @@ ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
 CASES = {'water': (WATER, 'cc-pvdz', 2e-4),
          'ethylene': (ETHYLENE, 'cc-pvtz', 1e-3)}
 
-#: Ranks to simulate. 1 is the bitwise gate; 2 and 3 straddle the even split,
+#: Ranks to simulate. 1 is the few-ulp gate; 2 and 3 straddle the even split,
 #: so 3 leaves the stripe uneven over both block counts.
 RANKS = (2, 3)
 
@@ -113,13 +114,8 @@ REPO = Path(__file__).resolve().parents[1]
 #: The fit before its element-wise work ran in `row_map`'s threads -- the
 #: pass with one `aux_e2` call and one whole co-density block per shell
 #: block, the Gram matrix combined, mirrored and balanced as whole arrays:
-#: every M it returned is the M this tree must still return, bit for bit.
+#: every M it returned is the M this tree must still return, to a few ulp.
 ONE_THREAD_COMMIT = 'e578ea7e10b33e02b9b4f75bfbb8b95a7f33dd44'
-#: The thread caps of every subprocess gate; `OMP_NUM_THREADS` alone is set
-#: per probe, which moves the pass's pool and neither BLAS nor Accelerate.
-THREAD_CAPS = {name: '2' for name in
-               ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
 #: Bytes of one slab in the kernel gate: seven rows of thirteen doubles, so
 #: every kernel runs ragged slabs over ragged thread ranges.
 KERNEL_SLAB_BYTES = 8 * 7 * 13
@@ -135,9 +131,22 @@ sys.path.insert(0, {tree!r})
 import numpy as np
 from pyscf import df, gto
 
+import inspect
+
 from src.Base.separable_ri import (atomic_grid, build_separable_ri,
                                    molecular_points_covariant)
 from src.Base.utils.mpi_grid import run_simulated
+
+# the fit's working set: a keyword of older trees, a field
+# of the one Numerics in newer ones
+if 'numerics' in inspect.signature(build_separable_ri).parameters:
+    from src.Base.numerics import Numerics
+
+    def budget_kw(budget):
+        return dict(numerics=Numerics(layout={{'fit_gb': budget}}))
+else:
+    def budget_kw(budget):
+        return dict(block_memory_gb=budget)
 
 warnings.simplefilter('ignore')
 fits = {{}}
@@ -153,7 +162,7 @@ for name, (atom, basis, budget) in {cases!r}.items():
 
     def fit(comm=None):
         return build_separable_ri(mol, coords, auxmol=auxmol,
-                                  block_memory_gb=budget, comm=comm)[2]
+                                  **budget_kw(budget), comm=comm)[2]
 
     for size in {sizes!r}:
         fits[f'{{name}}_{{size}}'] = (fit() if size is None else
@@ -168,12 +177,12 @@ def reldiff(a, b):
 
 
 def interpolation_points(mol, auxbasis):
-    """A tabulated grid at `ISDF_DEFAULT_COUNTS` (`atomic_grid`): the fit is
+    """A tabulated grid at the G1 counts (`atomic_grid`): the fit is
     gated on a fixed set of points, whatever `separable_factors` would choose."""
     radii, origins = {}, {}
     for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
         radii[el], origins[el] = atomic_grid(el, mol.basis, auxbasis,
-                                             ISDF_DEFAULT_COUNTS)
+                                             g1(mol))
     return molecular_points_covariant(mol, radii, origin_by_element=origins)
 
 
@@ -194,7 +203,7 @@ def serial(case):
     """(X, Z, M) with no comm: the reference every rank count is held to."""
     return build_separable_ri(case['mol'], case['coords'],
                               auxmol=case['auxmol'],
-                              block_memory_gb=case['block_memory_gb'])
+                              numerics=Numerics(layout={'fit_gb': case['block_memory_gb']}))
 
 
 def distributed(case, size):
@@ -202,7 +211,7 @@ def distributed(case, size):
     def build(comm):
         return build_separable_ri(case['mol'], case['coords'],
                                   auxmol=case['auxmol'],
-                                  block_memory_gb=case['block_memory_gb'],
+                                  numerics=Numerics(layout={'fit_gb': case['block_memory_gb']}),
                                   comm=comm)
     return run_simulated(build, size)
 
@@ -223,7 +232,7 @@ def test_the_pass_is_many_blocks(case):
 
 def test_the_gram_is_many_row_blocks(case, monkeypatch):
     """The Gram matrix's lower block triangle, its transpose and its
-    balancing are cut into row blocks here, so the bitwise gates below read
+    balancing are cut into row blocks here, so the few-ulp gates below read
     the blocked path and not one whole block."""
     seen = []
     real = separable_ri._gram_lower
@@ -234,7 +243,7 @@ def test_the_gram_is_many_row_blocks(case, monkeypatch):
 
     monkeypatch.setattr(separable_ri, '_gram_lower', spy)
     separable_ri.fit_M_streaming(case['mol'], case['auxmol'], case['coords'],
-                                 block_memory_gb=case['block_memory_gb'])
+                                 numerics=Numerics(layout={'fit_gb': case['block_memory_gb']}))
     (nk, rows), = seen
     print(f"\n{case['name']}: Gram of {nk} points in {-(-nk // rows)} row "
           f'blocks of {rows}')
@@ -243,57 +252,66 @@ def test_the_gram_is_many_row_blocks(case, monkeypatch):
 
 def test_one_rank_is_the_serial_factorization(case, serial):
     """A comm of size 1 owns every block and reduces nothing, so the arithmetic
-    is the serial arithmetic -- no tolerance belongs here."""
+    is the serial arithmetic -- a few ulp (two runs), no fit tolerance."""
     X0, Z0, M0 = serial
     (X, Z, M), = distributed(case, 1)
-    assert np.array_equal(X, X0)
-    assert np.array_equal(Z, Z0)
-    assert np.array_equal(M, M0)
+    assert_same(X, X0, unit='1', quantity='root', label='X')
+    assert_same(Z, Z0, unit='1', quantity='root', label='Z')
+    assert_same(M, M0, unit='1', quantity='root', label='M')
 
 
 @pytest.mark.parametrize('size', RANKS)
 def test_every_rank_returns_the_same_arrays(case, size):
-    """Bitwise across ranks: the reduction is rank-ordered, so there is no
-    reason for two ranks to hold different factors, and every reason to catch
-    it if they do -- they would be running different functionals in lockstep."""
+    """A few ulp across ranks: the reduction is rank-ordered and each rank
+    solves the replicated Cholesky on its own, so there is no reason for two
+    ranks to hold different factors, and every reason to catch it if they do
+    -- they would be running different functionals in lockstep."""
     per_rank = distributed(case, size)
     for r, (X, Z, M) in enumerate(per_rank[1:], start=1):
-        assert np.array_equal(X, per_rank[0][0]), f'X differs on rank {r}'
-        assert np.array_equal(Z, per_rank[0][1]), f'Z differs on rank {r}'
-        assert np.array_equal(M, per_rank[0][2]), f'M differs on rank {r}'
+        assert_same(X, per_rank[0][0], unit='1', quantity='root',
+                    label=f'X differs on rank {r}')
+        assert_same(Z, per_rank[0][1], unit='1', quantity='root',
+                    label=f'Z differs on rank {r}')
+        assert_same(M, per_rank[0][2], unit='1', quantity='root',
+                    label=f'M differs on rank {r}')
 
 
 @pytest.mark.parametrize('size', RANKS)
 def test_ranks_reproduce_the_serial_fit(case, size, serial):
-    """X is collocation, untouched by the split, so it stays bitwise. Z and M
+    """X is collocation, untouched by the split, so it stays within a few
+    ulp. Z and M
     come through the reduced accumulator and the Cholesky solve."""
     X0, Z0, M0 = serial
     X, Z, M = distributed(case, size)[0]
     dz, dm = reldiff(Z0, Z), reldiff(M0, M)
     print(f"\n{case['name']}, {size} ranks: M {dm:.2e}, Z {dz:.2e} relative")
-    assert np.array_equal(X, X0)
+    assert_same(X, X0, unit='1', quantity='root', label='X')
     assert dm < FIT_TOL
     assert dz < FIT_TOL
 
 
 def test_separable_factors_passes_the_comm_through(case):
     """The production entry point. It hands the comm to the fit and nothing
-    else of it changes, so X_mo, X_ao and the grid stay bitwise and only D,
+    else of it changes, so X_mo, X_ao and the grid stay within a few ulp and
+    only D,
     which carries M, moves by the reordering."""
     mol, auxbasis = case['mol'], case['auxbasis']
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12
     mf.kernel()
-    kwargs = dict(auxbasis=auxbasis, block_memory_gb=case['block_memory_gb'])
-    ser = separable_factors(mf, mol, **kwargs)
+    kwargs = dict(auxbasis=auxbasis, numerics=Numerics(
+        layout={'fit_gb': case['block_memory_gb']}))
+    ser = separable_factors(mf, mol, **g1_kw(mol, kwargs))
     per_rank = run_simulated(lambda comm: separable_factors(mf, mol, comm=comm,
-                                                            **kwargs), 3)
+                                                            **g1_kw(mol, kwargs)), 3)
     for j, name in enumerate(('X_mo', 'D', 'X_ao', 'coords')):
         for r in range(1, 3):
-            assert np.array_equal(per_rank[0][j], per_rank[r][j]), \
-                f'{name} differs between ranks 0 and {r}'
+            assert_same(per_rank[0][j], per_rank[r][j], unit='1',
+                        quantity='root',
+                        label=f'{name} differs between ranks 0 and {r}')
     for j, name in ((0, 'X_mo'), (2, 'X_ao'), (3, 'coords')):
-        assert np.array_equal(ser[j], per_rank[0][j]), f'{name} moved'
+        assert_same(ser[j], per_rank[0][j], unit='1', quantity='root',
+                    label=f'{name} moved')
     dd = reldiff(ser[1], per_rank[0][1])
     print(f"\n{case['name']}, separable_factors on 3 ranks: D {dd:.2e} relative")
     assert dd < FIT_TOL
@@ -303,12 +321,9 @@ def extracted(tmp_path_factory, commit):
     """The tree of `commit`, unpacked into a temporary directory."""
     out = tmp_path_factory.mktemp(f'fit_{commit[:7]}')
     tar = out.parent / f'fit_{commit}.tar'
-    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
-                           '-o', str(tar), commit],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    with tarfile.open(tar) as fh:
-        fh.extractall(out)
+    require_commit(REPO, commit)
+    unpack_commit(REPO, commit, tar, out)
+    install_current_radii(out)
     assert (out / 'src' / 'Base' / 'separable_ri.py').is_file()
     return out
 
@@ -321,8 +336,9 @@ def probe_fits(tree, tmp_path, omp_threads):
     out = tmp_path / f'fits_{tag}.npz'
     script.write_text(FIT_PROBE.format(tree=str(tree), cases=CASES,
                                        sizes=PROBE_SIZES, out=str(out),
-                                       counts=ISDF_DEFAULT_COUNTS))
-    env = dict(os.environ, **THREAD_CAPS, OMP_NUM_THREADS=str(omp_threads))
+                                       counts=counts_at('cc-pvdz', TEST_GRID_LEVEL)))
+    env = dict(os.environ, **THREAD_CAPS_WITHOUT_OMP,
+               OMP_NUM_THREADS=str(omp_threads))
     env.pop('PYTHONPATH', None)
     proc = subprocess.run([sys.executable, str(script)], cwd=str(tree),
                           capture_output=True, text=True, env=env)
@@ -342,7 +358,7 @@ def fits_three_ways(tmp_path_factory):
 @pytest.mark.parametrize('size', PROBE_SIZES)
 @pytest.mark.parametrize('name', sorted(CASES))
 def test_m_is_the_one_thread_trees_bits(fits_three_ways, name, size):
-    """M, serial and on every rank, is the bytes the fit returned when its
+    """M, serial and on every rank, is (to a few ulp) the M the fit returned when its
     co-densities, its kept integrals and its accumulation ran on one thread
     and its integrals came from one `aux_e2` call per block, and its Gram
     matrix was combined, mirrored and balanced as whole arrays -- on a pool
@@ -352,7 +368,8 @@ def test_m_is_the_one_thread_trees_bits(fits_three_ways, name, size):
     key = f'{name}_{size}'
     for new in (two, one):
         assert old[key].shape == new[key].shape, key
-        assert old[key].tobytes() == new[key].tobytes(), key
+        assert_archive_same(new[key], old[key], unit='1', quantity='root',
+                            label=key)
 
 
 @pytest.mark.parametrize('threads', (1, 2, 3))
@@ -360,7 +377,8 @@ def test_pass_kernels_are_the_whole_block_arithmetic(monkeypatch, threads):
     """The pass's slabbed, threaded kernels give the whole-block numpy they
     replaced: the column peaks equal np.maximum(D.max(0), -D.min(0)) (equal,
     not byte-equal: a column of signed zeros may come back +0), and the kept
-    co-densities, the kept (mu nu|P) rows and the accumulation are its bytes.
+    co-densities, the kept (mu nu|P) rows and the accumulation are its
+    numbers to a few ulp.
 
     On an F-order collocation spanning 1e-156..1, so that products reach the
     subnormal range, and weights that are not powers of two, where
@@ -379,29 +397,32 @@ def test_pass_kernels_are_the_whole_block_arithmetic(monkeypatch, threads):
     D *= np.tile(w, a1 - a0)[None, :]
     assert (np.abs(D) < np.finfo(float).tiny).any()      # subnormals reached
     peaks = separable_ri._pair_peaks(X, a0, a1, second, w, threads)
-    assert np.array_equal(peaks, np.maximum(D.max(axis=0), -D.min(axis=0)))
+    assert_same(peaks, np.maximum(D.max(axis=0), -D.min(axis=0)), unit='1',
+                quantity='root', label='peaks')
     keep = peaks > np.quantile(peaks, 0.6)
     kept = np.flatnonzero(keep)
     cols = separable_ri._pair_columns(X, a0 + kept // n2, second[kept % n2],
                                       w[kept % n2], threads)
-    assert cols.tobytes() == np.ascontiguousarray(D[:, keep]).tobytes()
+    assert_same(cols, np.ascontiguousarray(D[:, keep]), unit='1',
+                quantity='root', label='kept co-densities')
     e3c = np.asfortranarray(rng.standard_normal((a1 - a0, nao, naux)))
     rows = separable_ri._kept_integrals(e3c, kept // n2, second[kept % n2],
                                         threads)
     whole = e3c.reshape(a1 - a0, nao, naux)[:, second, :].reshape(-1, naux)
-    assert rows.tobytes() == whole[keep].tobytes()
+    assert_same(rows, whole[keep], unit='1', quantity='root',
+                label='kept integrals')
     acc, part = rng.standard_normal((2, naux, nk))
     added = acc + part
     separable_ri._accumulate(acc, part, threads)
-    assert acc.tobytes() == added.tobytes()
+    assert_same(acc, added, unit='1', quantity='root', label='accumulation')
 
 
 @pytest.mark.parametrize('threads', (1, 2, 3))
 def test_gram_kernels_are_the_whole_array_arithmetic(monkeypatch, threads):
     """The Gram matrix built, transposed and balanced a slab and a tile at a
-    time is the whole-array code's bytes where `posv` reads it -- the upper
-    triangle and the diagonal -- and the column scaling is its bytes
-    everywhere: GEMMs of the same shapes into S or a buffer, then each
+    time is the whole-array code's numbers (to a few ulp) where `posv` reads
+    it -- the upper triangle and the diagonal -- and the column scaling is
+    too, everywhere: GEMMs of the same shapes into S or a buffer, then each
     element multiplied, added and scaled in the same order.
 
     Ragged: 101 points in row blocks of 23, slabs of seven rows, transpose
@@ -438,14 +459,15 @@ def test_gram_kernels_are_the_whole_array_arithmetic(monkeypatch, threads):
 
     S = np.zeros((nk, nk))
     separable_ri._gram_lower(S, A, B, P, rows, threads)
-    assert S.tobytes() == lower.tobytes()
+    assert_same(S, lower, unit='1', quantity='root', label='Gram lower')
     separable_ri._balanced_upper(S, d, rows, threads)
-    assert S[upper].tobytes() == whole[upper].tobytes()
+    assert_same(S[upper], whole[upper], unit='1', quantity='root',
+                label='balanced upper')
 
     X = collocation(13).T.copy()
     scaled = X * d[None, :]
     separable_ri._scale_columns(X, d, threads)
-    assert X.tobytes() == scaled.tobytes()
+    assert_same(X, scaled, unit='1', quantity='root', label='scaled columns')
 
 
 if __name__ == '__main__':

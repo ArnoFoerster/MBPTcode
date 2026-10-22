@@ -109,7 +109,7 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     """The one real advantage over the fitted route, on the real thing."""
     pyscf = pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.constants import HARTREE_TO_EV
+    from src.Base.constants import HARTREE_TO_MEV
     from src.Base.pyscf_interface import get_density_fitting_coefficients
     from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
     from src.SingleReference.base import get_occ_virt_indices
@@ -132,16 +132,15 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     p = 0                                              # the oxygen 1s
     bp = b[:, p, :]
     wc = wc_explicit(bp, c_ov, d, nu)
-    w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov,
-                              relax_offset=False)
+    w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov)
     ok, reach = compressible(w_cd, eps, nocc)
     assert not ok and reach > 10.0, f'the 1s should be far outside: {reach}'
     poles, amp = ab_from_factors(bp, c_ov, d)
-    w_ab, _ = qp_energy_sop(p, amp, poles, eps, nocc, w0=w_cd)
-    assert abs(w_ab - w_cd) * HARTREE_TO_EV * 1e3 < 5.0, (
-        f'AB on the core state: {(w_ab - w_cd) * HARTREE_TO_EV * 1e3:.1f} meV')
+    w_ab, _ = qp_energy_sop(p, amp, poles, eps, nocc)
+    assert abs(w_ab - w_cd) * HARTREE_TO_MEV < 5.0, (
+        f'AB on the core state: {(w_ab - w_cd) * HARTREE_TO_MEV:.1f} meV')
     sop_poles, sop_amp = sop_from_wc(wc, nu, eps, nocc, n_poles=24)
-    w_sop, _ = qp_energy_sop(p, sop_amp, sop_poles, eps, nocc, w0=w_cd)
-    assert abs(w_sop - w_cd) * HARTREE_TO_EV * 1e3 > 100.0, (
+    w_sop, _ = qp_energy_sop(p, sop_amp, sop_poles, eps, nocc)
+    assert abs(w_sop - w_cd) * HARTREE_TO_MEV > 100.0, (
         'the fitted route is supposed to FAIL here; if it stopped failing, the '
         'wall has moved and the guard needs re-measuring')

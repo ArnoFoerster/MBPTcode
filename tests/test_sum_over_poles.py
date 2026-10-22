@@ -12,14 +12,14 @@ become resonant, which is the one thing no M repairs.
 The physics gate at the end is the same comparison on water, where the fit is
 not exact and the residual is the compression error.
 """
-import warnings
 
 import numpy as np
 import pytest
 import scipy.linalg
 
-from src.Base.constants import (HARTREE_TO_EV, SOP_CLEARANCE_MIN,
-                                SOP_FIT_RCOND, SOP_POLE_MERGE_TOL)
+from src.Base.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                SOP_POLE_MERGE_TOL)
 from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW.contour_deformation import residue_set, sigma_cd
 from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
@@ -223,13 +223,12 @@ def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
     for p in (nocc - 1, nocc):
         bp = b[:, p, :]
         wc = wc_explicit(bp, c_ov, ov_energies(eps, nocc), nu)
-        w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov,
-                                  relax_offset=False)
+        w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov)
         poles, amp = sop_from_wc(wc, nu, eps, nocc, n_poles=n_poles, stride=3)
         ok, reach = compressible(w_cd, eps, nocc)
         assert ok, f'orbital {p} is outside the wall at reach {reach:.2f}'
-        w_sop, _ = qp_energy_sop(p, amp, poles, eps, nocc, w0=w_cd)
-        err = abs(w_sop - w_cd) * HARTREE_TO_EV * 1e3
+        w_sop, _ = qp_energy_sop(p, amp, poles, eps, nocc)
+        err = abs(w_sop - w_cd) * HARTREE_TO_MEV
         assert err < tol_mev, (f'orbital {p}: SOP {w_sop * HARTREE_TO_EV:.4f} '
                                f'vs CD {w_cd * HARTREE_TO_EV:.4f} eV, '
                                f'{err:.2f} meV at M = {n_poles}')

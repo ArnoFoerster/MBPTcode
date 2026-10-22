@@ -48,6 +48,9 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+
+#: `np.trapezoid` on numpy >= 2.0 (`np.trapz` is removed there), `np.trapz` below.
+trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 from pyscf.pbc import gto as pgto, scf as pscf
 from pyscf.pbc.df import ft_ao
 
@@ -68,6 +71,7 @@ from src.SingleReference.Periodic.pbc_smallq import (
 
 from src.Base.constants import HARTREE_TO_EV
 from src.Base.constants import BOHR_TO_ANGSTROM
+from tests.pins import RECORDING_BLAS, matches
 
 
 def check(ok, label, detail=''):
@@ -117,7 +121,8 @@ def check_stern_reference_limits():
     eps = 1.0 - (2.0 * np.pi / below) * Pi
     ok &= check(np.abs(eps - dielectric_head_2d(below, 2.0)).max() < 1e-13,
                 'eps = 1 - v Pi reproduces 1 + kappa/q with kappa = 2')
-    ok &= check(thomas_fermi_kappa_2d(dos) == KAPPA_2DEG_FREE_ELECTRON,
+    ok &= check(matches(thomas_fermi_kappa_2d(dos), KAPPA_2DEG_FREE_ELECTRON,
+                        RECORDING_BLAS, unit='1', quantity='root'),
                 'thomas_fermi_kappa_2d(1/pi) == KAPPA_2DEG_FREE_ELECTRON')
     # Density-independence, explicitly -- but only where every k_F keeps the
     # point below its own 2k_F, since that is where Pi is constant at all.
@@ -167,7 +172,7 @@ def check_minibz_measure():
     for kappa in (0.0, 0.5, 2.0, 10.0):
         q = np.linspace(1e-9, R, 200001)
         integrand = (2.0 * np.pi / (q + kappa)) * 2.0 * np.pi * q
-        num = np.trapz(integrand, q) / (np.pi * R ** 2)
+        num = trapezoid(integrand, q) / (np.pi * R ** 2)
         ana = head_average_2d(R, kappa)
         ok &= check(abs(num - ana) / abs(ana) < 1e-6,
                     f'disc average == 2D quadrature (kappa = {kappa})',
@@ -343,8 +348,9 @@ def check_minibz_polygon():
     ok &= check(abs(aniso / iso - 1.0) > 0.05,
                 'an angle-dependent kappa is not its angular mean',
                 f'{iso:.4f} -> {aniso:.4f}, {100 * (aniso / iso - 1):+.1f}%')
-    ok &= check(slab_head_value(sq_cell, [2, 2, 1],
-                                lambda phi: 2.0 + 0.0 * phi) == iso,
+    ok &= check(matches(slab_head_value(sq_cell, [2, 2, 1],
+                                        lambda phi: 2.0 + 0.0 * phi), iso,
+                        RECORDING_BLAS, unit='1', quantity='root'),
                 'a constant callable reproduces the scalar kappa')
     try:
         slab_head_value(sq_cell, [2, 2, 1], lambda phi: phi, shape='disc')
@@ -405,8 +411,9 @@ def check_constant_head_kernel():
         v_ca = ca(cell, np.zeros(3), Gv)
         head = np.linalg.norm(Gv, axis=1) < 1e-8
         ok &= check(head.sum() == 1, f'{n}x{n}: exactly one head point on the grid')
-        ok &= check(np.array_equal(v_base[~head], v_ca[~head]),
-                    f'{n}x{n}: every non-head point is bit-identical')
+        ok &= check(matches(v_ca[~head], v_base[~head], RECORDING_BLAS,
+                            unit='1', quantity='root'),
+                    f'{n}x{n}: every non-head point is the same to a few ulp')
         ok &= check((v_ca >= 0).all(), f'{n}x{n}: the kernel stays non-negative')
         ok &= check(v_ca[head][0] < v_base[head][0],
                     f'{n}x{n}: the head is reduced',
@@ -422,10 +429,10 @@ def check_constant_head_kernel():
     # mesh and the constant approximation is a fixed rescaling of the Gamma
     # head -- it does not vanish as the grid grows.
     ratios = np.array(ratios)
-    ok &= check(ratios.ptp() < 1e-6,
+    ok &= check(np.ptp(ratios) < 1e-6,
                 'the CA head ratio is the same at every k-mesh '
                 '(q_min * r0 is mesh-independent)',
-                f'{ratios[0]:.6f}, spread {ratios.ptp():.1e}')
+                f'{ratios[0]:.6f}, spread {np.ptp(ratios):.1e}')
 
     for n in (2, 4):
         kmesh = [n, n, 1]
