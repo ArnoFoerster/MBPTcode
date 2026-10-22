@@ -257,8 +257,7 @@ def _dij(be, X_vv, eye_o):
 
 def sigma_s_from_d(be, gb, amps, zint, Y, order):
     """W^a_i(D) -- A41 (first order) and A42 (second)."""
-    w = (_ovvv_ia(be, gb, Y)
-         + be.ein('jkib,jkab->ia', gb['ooov'], Y))
+    w = _ovvv_ia(be, gb, Y) + _ooov_ia(be, gb, Y)
     if order < 2:
         return w
     t1, ZA, ZB = amps['t2_1'], zint['ZA'], zint['ZB']
@@ -289,6 +288,38 @@ def sigma_d_from_s(be, gb, amps, zint, y1, order, keys=None):
                      + be.ein('jkab,ki->ijab', t1, w_oo), keys)
 
 
+def sigma_d_from_s_slab(be, gb, y1, j0, j1):
+    """W^ab_ij(S) of A54, first order, on the slab j0 <= j < j1 of the second
+    occupied index, for the closed-shell DF gb ('ovvv_ajbc' present).
+
+    y1 : SB with blocks 'aa' and 'bb', shape (no, nv), index order (i, a), without
+        a flip parity
+
+    Returns an SB of the six doubles blocks, shape (no, j1 - j0, nv, nv), index
+    order (i, j, a, b), arrays of its own, no two sharing memory:
+    sigma_d_from_s(be, gb, amps, zint, y1, 1) on the slab. The (a, b)
+    antisymmetrisation runs pair by pair, in place where a partner block is free,
+    and the ovvv term is added into the result, so at most one block more than the
+    six is alive."""
+    if 'ovvv_ajbc' not in gb:
+        raise NotImplementedError('the slab coupling needs the closed-shell DF gb')
+    ym = -(0.5 * y1)
+    G = _sb.SB({k: v[:, j0:j1] for k, v in gb['ooov'].items()})
+    # -1/2 sum_k <ij||ka> y_kb on the slab, then _p_ab block by block
+    E = dict(be.ein('ijka,kb->ijab', G, ym).items())
+    swap = (0, 1, 3, 2)
+    W = {}
+    for k in ('aaaa', 'bbbb'):
+        W[k] = _sb._ew(np.subtract, E[k], E[k].transpose(swap))
+        del E[k]
+    for k, kx in (('abab', 'abba'), ('baba', 'baab')):
+        W[k] = _sb._ew(np.subtract, E[k], E[kx].transpose(swap))
+        W[kx] = _sb._ew(np.subtract, E[kx], E.pop(k).transpose(swap), out=E[kx])
+        del E[kx]
+    # -1/2 (1 - P_ij) sum_c <ic||ab> y_jc on the slab, added into W
+    return _sb.ovvv_ijab_pij_slab(gb['ovvv_ajbc'], ym, j0, j1, out=_sb.SB(W))
+
+
 def sigma_d_from_d(be, gb, Y, d_ijab, order, vk=None, keys=None):
     """W^ab_ij(D) -- A61 (Fock diagonal) and A63 (first order); `keys` as in
     sigma_d_from_s."""
@@ -308,6 +339,14 @@ def _ovvv_ia(be, gb, X):
     if 'ovvv_ajbc' in gb:
         return _sb.ovvv_ia(gb['ovvv_ajbc'], X)
     return be.ein('jabc,ijbc->ia', gb['ovvv'], X)
+
+
+def _ooov_ia(be, gb, X):
+    """sum_jkb <jk||ib> X_jkab -> (i, a), routed as _ovvv_ia: the closed-shell DF
+    gb, whose 'ooov' is anti4's, takes ee_spin_blocks.ooov_ia."""
+    if 'ovvv_ajbc' in gb:
+        return _sb.ooov_ia(gb['ooov'], X)
+    return be.ein('jkib,jkab->ia', gb['ooov'], X)
 
 
 def _ovvv_ijab(be, gb, x):
