@@ -25,8 +25,7 @@ import resource
 
 from pyscf.data.elements import chemcore
 from src.SingleReference.CC.diis import DIIS
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.pyscf_interface import get_orbital_energies
 from src.Base.utils.time_frequency import (TimeFrequencyGrid)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
@@ -77,7 +76,7 @@ def density_matrix_ir(G, grid_f):
     G_greater_beta = G_even_beta + G_odd_beta
     return -G_greater_beta
 
-def galitskii_migdal_energy(G, sigma_mo, V, h_mo, grid_f, e_nuc):
+def galitskii_migdal_energy(G, sigma_mo, mf, h_mo, grid_f, e_nuc):
     """Closed-shell Galitskii-Migdal total energy from G and Sigma_c.
 
         E = E_nuc + Tr[gamma (h + F)] + (1/beta) sum_n Tr[Sigma_c(i.omega_n) G(i.omega_n)]
@@ -102,10 +101,11 @@ def galitskii_migdal_energy(G, sigma_mo, V, h_mo, grid_f, e_nuc):
     lambda, E_c / lambda^2 tends to twice the direct MP2 energy.
 
     G, sigma_mo: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
+    mf: the mean-field object, for J and K (see `build_new_F`).
     Returns (E, E_c): the total energy and its correlation part, both real.
     """
     gamma = density_matrix_ir(G, grid_f)
-    F = build_new_F(gamma, V, h_mo)
+    F = build_new_F(gamma, mf, h_mo)
     E_1b = np.einsum('pq,qp->', gamma, h_mo + F).real
 
     tr_sigma_G = np.einsum('wij,wji->w', sigma_mo, G)
@@ -113,17 +113,24 @@ def galitskii_migdal_energy(G, sigma_mo, V, h_mo, grid_f, e_nuc):
 
     return e_nuc + E_1b + E_c, E_c
 
-def build_new_F(gamma, V, h_mo):
+def build_new_F(gamma, mf, h_mo):
     """Closed-shell Fock matrix F = h + 2J[gamma] - K[gamma], in the MO basis.
 
+    J and K are built in the AO basis by mf.get_jk, so the (nmo^4) MO
+    integrals are never stored; whether pyscf keeps AO integrals in core,
+    works integral-direct or uses density fitting is decided by mf. With
+    hermi=0 pyscf's J and K equal the MO-basis contractions
+    J_ij = (ij|kl) gamma_kl and K_ij = (ik|jl) gamma_kl for any gamma, also
+    one that is not exactly symmetric.
+
     gamma: (nmo, nmo) density matrix per spin (occupations between 0 and 1).
-    V: two-electron integrals in chemist notation, (ij|kl).
+    mf: the mean-field object whose mo_coeff define the MO basis.
     h_mo: core Hamiltonian.
     """
-    J_ij = np.einsum('ijkl,kl->ij', V, gamma)
-    K_ij = np.einsum('ikjl,kl->ij', V, gamma)
+    C = mf.mo_coeff
+    J_ao, K_ao = mf.get_jk(mf.mol, C @ gamma @ C.T, hermi=0)
 
-    return h_mo + 2* J_ij - K_ij
+    return h_mo + C.T @ (2* J_ao - K_ao) @ C
 
 def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
     """Dyson equation on the imaginary axis:
@@ -454,11 +461,12 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         DIIS_START and LINEAR_MIXING; `mix` picks what is mixed, 'sigma_F'
         (default) or 'G' (see the comment at the cycle).
 
-    Returns (qpes, A, w_real, E_gm): the peak positions, the spectral
-    function, the real frequency axis it is on, and the Galitskii-Migdal
-    total energy of the converged G and Sigma (`galitskii_migdal_energy`).
+    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
+    function, the real frequency axis it is on, the Galitskii-Migdal
+    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
+    and the converged chemical potential.
     With skip_scf=True, returns
-    (G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D) instead.
+    (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
 
     if grid_kind.upper() != 'IR':
@@ -537,14 +545,13 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     sigma_new = calc_new_sigma_ir(G0, grid_f, grid_b, X_mo, D)
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
-    V = get_two_electron_integrals_chemist(mol,mf)
     e_nuc = mol.energy_nuc()
 
-    F = build_new_F(gamma, V, h_mo)
+    F = build_new_F(gamma, mf, h_mo)
     G = build_G_from_F(mu, grid_f.omega_points, sigma_new, F)
 
     if skip_scf:
-        return G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D
+        return G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D
     del G0
 
     # --- Self-consistency cycle ---
@@ -592,7 +599,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         if mix == 'sigma_F':
             # 1. Outputs from the current G
             sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
-            F_out = build_new_F(gamma, V, h_mo)
+            F_out = build_new_F(gamma, mf, h_mo)
 
             # 2. Residual
             r_sigma = sigma_out - sigma_in
@@ -612,7 +619,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         else:
             # 1. G_out from the current G_in
             sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
-            F_in = build_new_F(gamma, V, h_mo)
+            F_in = build_new_F(gamma, mf, h_mo)
             mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                                             grid_f=grid_f, grid_kind='IR')
 
@@ -661,7 +668,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
         # G_dyson is the Dyson solution for sigma_in, so this is the GM
         # energy of the current iterate; it converges with the cycle.
-        E_gm, E_c = galitskii_migdal_energy(G_dyson, sigma_in, V, h_mo, grid_f, e_nuc)
+        E_gm, E_c = galitskii_migdal_energy(G_dyson, sigma_in, mf, h_mo, grid_f, e_nuc)
         print(f'Step: {step}\nmu: {mu} (delta mu: {abs(mu - mu_old):.3e})\n'
               f'E_GM: {E_gm} (E_c: {E_c})\n\n')
         del G_dyson
@@ -675,12 +682,12 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     # axis so G, F and Sigma below stay consistent.
     sigma_new, F = sigma_in, F_in
 
-    E_gm, E_c = galitskii_migdal_energy(G, sigma_new, V, h_mo, grid_f, e_nuc)
+    E_gm, E_c = galitskii_migdal_energy(G, sigma_new, mf, h_mo, grid_f, e_nuc)
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
 
     # Nothing from the cycle is needed on the real axis; free it before the
     # (large) real-frequency arrays are allocated.
-    del V, h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
+    del h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest

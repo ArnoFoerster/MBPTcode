@@ -67,7 +67,7 @@ def test_sigma_zero_gives_hf(mol, mf_start, e_hf, name):
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
     try:
         with sigma_switched_off():
-            _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+            _, _, _, E_gm, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
                                                       factors=factors)
     except RuntimeError as err:
         print(f'\n=== {name} ===\n{err}\n{name}: FAIL')
@@ -112,7 +112,7 @@ def converged_gm_energy(mol, mf_start, **grid):
     """
     nocc = mol.nelectron // 2
     factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
-    _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
+    _, _, _, E_gm, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
                                               factors=factors, **grid)
     # _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
     #                                           factors=factors)
