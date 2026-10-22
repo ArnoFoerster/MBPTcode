@@ -29,7 +29,6 @@ from src.Base.pyscf_interface import get_orbital_energies
 from src.Base.utils.time_frequency import (TimeFrequencyGrid)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 from src.Base.utils.analyticalContinuation import pade_continue_elementwise
 
 # --- Convergence parameters ---
@@ -300,11 +299,14 @@ def project_tau_cross(src_grid, dst_grid, f_src, dim, parity):
 
     f_src: (ntau_src, dim, dim), on src_grid.tau_points.
     parity: 'even' or 'odd', the symmetry sector f_src belongs to.
-    Returns (ntau_dst, dim, dim), on dst_grid.tau_points.
+    Returns (ntau_dst, dim, dim), on dst_grid.tau_points, C-contiguous: the
+    transposed view would make every [t] slice strided, which matmul cannot
+    pass to BLAS (14 s instead of 0.5 s per Sigma build for CH4/cc-pVTZ).
     """
     ntau_src = len(src_grid.tau_points)
     flat = f_src.reshape(ntau_src, dim * dim).T               # (dim*dim, ntau_src)
-    return src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T.reshape(-1, dim, dim)
+    f_dst = src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T
+    return np.ascontiguousarray(f_dst).reshape(-1, dim, dim)
 
 def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
@@ -314,6 +316,14 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     inversion for W is done in frequency. G and Sigma live on the fermion
     grid, chi and W on the boson grid, and `project_tau_cross` moves
     quantities between the two.
+
+    Both products are local in tau, so each is done in a loop over tau that
+    takes the result straight back to a small basis, chi(tau) to the
+    auxiliary basis and Sigma(tau) to the MO basis, before the transform to
+    frequency. Only a few (ngrid, ngrid) slices are alive at once, never an
+    (ntau, ngrid, ngrid) array: ngrid is several times nmo and grows with
+    the number of atoms, so those arrays set the peak memory (2.2 GiB for
+    CH4/cc-pVTZ, against ~0.7 GiB with the loops).
 
     G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
     X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
@@ -336,20 +346,34 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     G_even_b = project_tau_cross(grid_f, grid_b, G_even_f, nmo, 'even')
     G_odd_b = project_tau_cross(grid_f, grid_b, G_odd_f, nmo, 'odd')
 
-    # MO basis -> ISDF/THC grid (lesser = even - odd, greater = even + odd).
-    Ghat_lesser_b = np.einsum('pi,tij,qj->tpq', X_mo, G_even_b - G_odd_b, X_mo, optimize=True)
-    Ghat_greater_b = np.einsum('pi,tij,qj->tpq', X_mo, G_even_b + G_odd_b, X_mo, optimize=True)
-    del G_even_b, G_odd_b
+    # chi(i.omega) = -2 sum_tau cosft_wt[w, tau] D^T [Go(tau) * Gv(tau)] D,
+    # the same as chi0_imaginary_frequency, with Go = Ghat_greater and
+    # Gv = -Ghat_lesser for the dressed G. The two minus signs cancel.
+    # Ghat = X_mo G X_mo^T is G on the ISDF/THC grid (lesser = even - odd,
+    # greater = even + odd).
+    #
+    # The (ngrid, ngrid) products are written into buffers reused over tau,
+    # and X^T, D^T are made contiguous: in benchmarks at ngrid = 740
+    # (OpenBLAS), fresh arrays and transposed views as left operand made
+    # these products up to 2-3x slower than the batched einsums.
+    naux = D.shape[1]
+    ngrid = X_mo.shape[0]
+    XT = np.ascontiguousarray(X_mo.T)
+    DT = np.ascontiguousarray(D.T)
+    buf_a = np.empty((ngrid, ngrid))
+    buf_b = np.empty((ngrid, ngrid))
 
-    # chi(i.omega) from the dressed G. The minus on Gv matches the sign
-    # convention chi0_imaginary_frequency uses for its bare Go/Gv. eps and
-    # nocc are not needed when Go/Gv are passed, hence None.
-    chi_omega = chi0_imaginary_frequency(X_mo, D, None, None, grid_b,
-                                         Go=Ghat_greater_b, Gv=-Ghat_lesser_b)
-    del Ghat_lesser_b, Ghat_greater_b
+    pi_aux = np.empty((len(grid_b.tau_points), naux, naux))
+    for t in range(len(grid_b.tau_points)):
+        np.matmul(X_mo @ (G_even_b[t] - G_odd_b[t]), XT, out=buf_a)
+        np.matmul(X_mo @ (G_even_b[t] + G_odd_b[t]), XT, out=buf_b)
+        buf_a *= buf_b
+        pi_aux[t] = (DT @ buf_a) @ D
+    del G_even_b, G_odd_b
+    chi_omega = 2.0 * np.tensordot(grid_b.cosft_wt, pi_aux, axes=(1, 0))
+    del pi_aux
 
     # W = [I - chi]^-1 at each frequency.
-    naux = chi_omega.shape[-1]
     eye_aux = np.eye(naux)
     W_omega = np.empty_like(chi_omega)
     for k in range(chi_omega.shape[0]):
@@ -367,37 +391,32 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     Wt_tau_f = project_tau_cross(grid_b, grid_f, Wt_tau_b, naux, 'even')
     del Wt_tau_b
 
-    # Auxiliary basis -> ISDF/THC grid.
-    Zt_tau = np.einsum('Pa,tab,Qb->tPQ', D, Wt_tau_f, D, optimize=True)
-    # print(f'Zt_tau: {Zt_tau.nbytes / 2**30:.3f} GiB')
-    del Wt_tau_f
-
-    # Sigma(tau) = G(tau) * W(tau), elementwise on the ISDF/THC grid. Unlike
-    # chi, no extra sign is needed here. G is taken on the ISDF/THC grid at
+    # Sigma(tau) = G(tau) * Z(tau) elementwise on the ISDF/THC grid, with
+    # Z = D (W - I) D^T; unlike chi, no extra sign is needed. G is taken at
     # the fermion tau points straight from the fermion-grid G rather than
-    # projecting the boson-grid copy back. Lesser and greater are done one
-    # after the other and multiplied in place, so at most two
-    # (ntau, ngrid, ngrid) arrays are alive at once.
-    sig_thc = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f - G_odd_f, X_mo, optimize=True)
-    sig_thc *= Zt_tau
-    sig_lesser = np.einsum('pi,tpq,qj->tij', X_mo, sig_thc, X_mo, optimize=True)
-    del sig_thc
+    # projecting the boson-grid copy back. Sigma_greater +- Sigma_lesser,
+    # the even and odd parts, need only the even and odd parts of G:
+    #     even = 2 X^T [(X G_even X^T) * Z] X,  odd = 2 X^T [(X G_odd X^T) * Z] X.
+    # Sigma(tau) -> Sigma(i.omega) with overall prefactor -0.5, the same
+    # normalization as self_energy_matrix_imaginary_time (imaginary_time.py);
+    # it cancels the 2 above, so even/odd below are the halves.
+    # Checked against that routine for the bare G0: agreement to 8e-9.
+    even = np.empty((len(grid_f.tau_points), nmo, nmo))
+    odd = np.empty_like(even)
+    Z_t = np.empty((ngrid, ngrid))
+    for t in range(len(grid_f.tau_points)):
+        np.matmul(D @ Wt_tau_f[t], DT, out=Z_t)
+        np.matmul(X_mo @ G_even_f[t], XT, out=buf_a)
+        buf_a *= Z_t
+        even[t] = (XT @ buf_a) @ X_mo
+        np.matmul(X_mo @ G_odd_f[t], XT, out=buf_a)
+        buf_a *= Z_t
+        odd[t] = (XT @ buf_a) @ X_mo
+    del Z_t, buf_a, buf_b, Wt_tau_f
 
-    sig_thc = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f + G_odd_f, X_mo, optimize=True)
-    sig_thc *= Zt_tau
-    sig_greater = np.einsum('pi,tpq,qj->tij', X_mo, sig_thc, X_mo, optimize=True)
-    del sig_thc, Zt_tau
-
-    even = sig_greater + sig_lesser
-    odd = sig_greater - sig_lesser
-    del sig_lesser, sig_greater
-
-    # Sigma(tau) -> Sigma(i.omega) on the fermion grid.
-    # Overall prefactor -0.5, the same normalization as
-    # self_energy_matrix_imaginary_time (imaginary_time.py). Checked against
-    # that routine for the bare G0: agreement to 8e-9.
-    sigma_new = -0.5 * (np.einsum('wt,tij->wij', grid_f.cosft_wt, even, optimize=True)
-                        + 1j * np.einsum('wt,tij->wij', grid_f.sinft_wt, odd, optimize=True))
+    sigma_new = -(np.tensordot(grid_f.cosft_wt, even, axes=(1, 0))
+                  + 1j * np.tensordot(grid_f.sinft_wt, odd, axes=(1, 0)))
+    del even, odd
 
     if not return_all:
         return sigma_new
