@@ -369,6 +369,7 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
 
     # Auxiliary basis -> ISDF/THC grid.
     Zt_tau = np.einsum('Pa,tab,Qb->tPQ', D, Wt_tau_f, D, optimize=True)
+    # print(f'Zt_tau: {Zt_tau.nbytes / 2**30:.3f} GiB')
     del Wt_tau_f
 
     # Sigma(tau) = G(tau) * W(tau), elementwise on the ISDF/THC grid. Unlike
@@ -588,6 +589,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     sigma_in, F_in = sigma_new, F
     del sigma_new, F, G, gamma
+    # print(f'Sigma_in: {sigma_in.nbytes / 2**30:.3f} GiB')
     mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                             grid_f=grid_f, grid_kind='IR')
 
@@ -697,7 +699,12 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     w_step = eta / 10
 
     eps_F = np.linalg.eigvalsh(F)
-    w_real = np.arange(eps_F[chemcore(mol)] - 0.5, eps_F[-1] + 0.5, w_step)
+
+    # These settings should be put in the documentation
+    A_window = kwargs.get('A_window') or 0.5
+    A_range = kwargs.get('A_range') or [eps_F[chemcore(mol)] - A_window , 2 * mu - eps_F[chemcore(mol)] + A_window]
+
+    w_real = np.arange(A_range[0], A_range[1], w_step)
     pade_max_order = 24
 
     z_fit = mu + 1j * grid_f.omega_points
@@ -705,6 +712,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     sigma_real = pade_continue_elementwise(z_fit, sigma_new, z_real, greedy=True,
                                         symmetric=True, max_order=pade_max_order) 
+    # print(f'SigmaReal: {sigma_real.nbytes / 2**30:.3f} GiB')
 
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
         f'eta = {eta}: shape {sigma_real.shape}')
