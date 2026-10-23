@@ -743,7 +743,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     A = -1/np.pi * tr_G_w.imag
 
     if save_file is not None:
-        np.savetxt(save_file, (w_real, A, mu), delimiter=',')
+        np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
 
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # height threshold is set as a minimum weight rather than a fixed number.
