@@ -35,13 +35,13 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics import Numerics
-from src.Base.numerics import numerics_of
-import src.gradients.qp_set as qp_set_module
-from src.Base.constants import (HARTREE_TO_MEV, QP_BLOCK_CORRECTION_TOL,
-                                QP_DEGENERACY_TOL)
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import numerics_of
+import src.gradients.gwbse.qp_set as qp_set_module
+from src.Base.numerics.constants import (HARTREE_TO_MEV, QP_BLOCK_CORRECTION_TOL,
+                                         QP_DEGENERACY_TOL)
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import qp_bookkeeping
 from src.SingleReference.GW.qp_selection import ac_quasiparticle_shifts
 from tests.isdf_test_grid import g1_numerics
@@ -113,7 +113,7 @@ def displaced(mol, atom, axis, step):
 
 def corrections(ch, mol):
     """eps^QP - eps per orbital of the set, and the set's blocks as orbitals."""
-    fwd = ch._shared_forward(mol, ch.mean_field(mol)[1])
+    fwd = ch.shared_forward(mol, ch.mean_field(mol)[1])
     states = np.asarray(ch.resolved.qp_set)
     return (fwd.eps_qp - fwd.eps)[states], [states[list(b)]
                                             for b in ch.resolved.qp_blocks[1]], fwd
@@ -132,7 +132,7 @@ def bare_chain(**kw):
 def test_an_accidental_near_degeneracy_keeps_its_own_corrections():
     ch = bare_chain()
     ws = SYNTHETIC_EPS + ACCIDENTAL
-    out = ch._block_shared(SYNTHETIC_EPS, ws)
+    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws)
     assert np.abs(out - ws).max() < ROUND_OFF
     assert ch.resolved.qp_blocks[1] == ()
     rec = ch.conventions.qp_block_record
@@ -145,14 +145,14 @@ def test_an_accidental_near_degeneracy_keeps_its_own_corrections():
     # with the correction gate off, the old rule averages them
     off = bare_chain()
     with correction_gate(NO_GATE):
-        shared = off._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
+        shared = off.quasiparticles._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
     assert np.ptp(shared[[1, 2]]) < ROUND_OFF
 
 
 def test_a_true_degeneracy_shares_one_correction():
     ch = bare_chain()
     ws = SYNTHETIC_EPS + DEGENERATE
-    out = ch._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
+    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
     assert ch.resolved.qp_blocks[1] == ((1, 2),)
     assert np.ptp(out[[1, 2]]) < ROUND_OFF
     assert abs(out[1] - DEGENERATE[[1, 2]].mean()) < ROUND_OFF
@@ -165,7 +165,7 @@ def test_a_true_degeneracy_shares_one_correction():
 def test_a_candidate_splits_into_the_members_whose_corrections_agree():
     ch = bare_chain()
     ws = TRIPLE_EPS + TRIPLE
-    out = ch._block_shared(TRIPLE_EPS, ws) - TRIPLE_EPS
+    out = ch.quasiparticles._block_shared(TRIPLE_EPS, ws) - TRIPLE_EPS
     assert ch.resolved.qp_blocks[1] == ((1, 2),)
     assert np.ptp(out[[1, 2]]) < ROUND_OFF
     assert abs(out[3] - TRIPLE[3]) < ROUND_OFF
@@ -178,7 +178,7 @@ def test_the_quasiparticle_hamiltonian_rejects_every_block():
     ch = bare_chain()
     ch.qp_hamiltonian = True
     ws = SYNTHETIC_EPS + DEGENERATE
-    out = ch._block_shared(SYNTHETIC_EPS, ws)
+    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws)
     assert np.abs(out - ws).max() < ROUND_OFF
     rej = ch.conventions.qp_block_record['rejected']
     assert [r['members'] for r in rej] == [[1, 2]]
@@ -264,7 +264,7 @@ def test_close_but_not_degenerate_orbitals_keep_their_own_corrections():
             ch = chain(FORMALDEHYDE, qp_window=window, degeneracy_tol=tol)
             ch.excitation()
         mol, mf = ch.mean_field(ch.mol0)
-        fwd = ch._shared_forward(mol, mf)
+        fwd = ch.shared_forward(mol, mf)
         out[tol, gate] = (ch, fwd)
     ch, fwd = out[QP_DEGENERACY_TOL, QP_BLOCK_CORRECTION_TOL]
     pair = list(CLOSE_PAIR)
@@ -274,7 +274,7 @@ def test_close_but_not_degenerate_orbitals_keep_their_own_corrections():
     roots = np.array([ch.resolved.qp_seeds[p] for p in pair]) - fwd.eps[pair]
     assert np.abs(own - roots).max() < ROUND_OFF
     assert np.ptp(own) * HARTREE_TO_MEV > OWN_SPLIT_MEV
-    xc = ch._xc_correction(fwd.mf, pair, None)
+    xc = ch.xc_correction(fwd.mf, pair, None)
     ac, _ = ac_quasiparticle_shifts(fwd.mf, fwd.mol, ch.nocc, pair,
                                     factors=(fwd.x_mo, fwd.d), xc_diagonal=xc,
                                     numerics=ch.settings)

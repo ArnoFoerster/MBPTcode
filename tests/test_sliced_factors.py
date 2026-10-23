@@ -55,21 +55,20 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.Base.utils.mpi_grid as mpi_grid
+import src.Base.utils.parallel.mpi_grid as mpi_grid
 from tests.pins import (RECORDING_BLAS, assert_same, matches, same_solution,
                         solution_miss)
-from src.Base import sliced_factors
-from src.Base.numerics import Numerics
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (SimulatedComm, allgather_blocks,
-                                     allgather_rows, contiguous_block,
-                                     distributed, reduce_scatter_rows,
-                                     reduce_sum, run_simulated)
+from src.Base.factorization import sliced_factors
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (
+    allgather_blocks, allgather_rows, contiguous_block, distributed,
+    reduce_scatter_rows, reduce_sum)
+from src.Base.utils.parallel.simulated_comm import SimulatedComm, run_simulated
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.probe import lowest_amb_eigenvalue
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -326,10 +325,10 @@ def test_bse_on_slices(water, size):
             f'rank {r}: not the whole layout\'s',
             solution_miss(out['sliced'], out['whole']))
         assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
-        # the GW diagonal once each; X_o and X_v once more for the static W
-        # (its own tau sweep); D and X_o once more for the Davidson's action,
-        # which the probe after it reuses rather than rebuilds
-        assert out['by_name'] == {'D': 2, 'X_o': 3, 'X_v': 2, 'X_ao': 1}
+        # the GW diagonal once each, its static W on the same branches; D and
+        # X_o once more for the Davidson's action, which the probe after it
+        # reuses rather than rebuilds
+        assert out['by_name'] == {'D': 2, 'X_o': 2, 'X_v': 1, 'X_ao': 1}
 
 
 @pytest.mark.parametrize('size', [3])

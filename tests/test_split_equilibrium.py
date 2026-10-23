@@ -1,5 +1,5 @@
 """Split equilibrium solvation: the state-specific response at eps_static, the
-transition-density exchange at eps_inf (`src/Base/split_equilibrium.py`).
+transition-density exchange at eps_inf (`src/environments/split_equilibrium.py`).
 
 WHAT EACH GATE IS FOR:
 
@@ -23,11 +23,11 @@ import pytest
 from pyscf import gto
 
 from tests.pins import assert_same
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_MEV, KAPPA
-from src.Base.environment import equilibrium_environment
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_MEV, KAPPA
+from src.environments.environment import equilibrium_environment
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.characters import ct_character, roots
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight

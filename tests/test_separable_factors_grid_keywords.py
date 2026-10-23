@@ -29,12 +29,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (ISDF_GRID_ACCURACY,
-                                ISDF_RADII_MATCH_TOL)
-from src.Base.separable_ri import (PUBLISHED_COUNTS, _SHELL_ORDER, atomic_grid,
-                                   UntabulatedISDFGrid, shipped_radii_lookup)
-from src.Base import separable_ri
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import (ISDF_GRID_ACCURACY,
+                                         ISDF_RADII_MATCH_TOL)
+from src.Base.factorization.separable_ri import (PUBLISHED_COUNTS, SHELL_ORDER, atomic_grid,
+                                                 UntabulatedISDFGrid, shipped_radii_lookup)
+from src.Base.factorization import separable_ri
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.space_time import separable_factors
 from tests.pins import assert_same
 
@@ -44,13 +44,13 @@ ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 # Three sizes the shipped table holds for BOTH C and H at this basis, so the
 # sweep exercises the lookup and never the run-time optimizer.
-G1_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G1']))
-G2_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
-G3_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
+G1_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G1']))
+G2_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
+G3_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
 SWEEP = (G1_COUNTS, G2_COUNTS, G3_COUNTS)
 # The published carbon grid is the one row that carries `origin`, and its
 # counts appear nowhere else in the table.
-CARBON_PUBLISHED_COUNTS = dict(zip(_SHELL_ORDER, PUBLISHED_COUNTS['C']))
+CARBON_PUBLISHED_COUNTS = dict(zip(SHELL_ORDER, PUBLISHED_COUNTS['C']))
 
 
 @pytest.fixture(scope='module')

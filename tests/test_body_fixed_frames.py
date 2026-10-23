@@ -2,7 +2,7 @@
 
 The interpolation clouds of the ISDF factors are turned by frames frozen at
 the reference geometry R0. The frames turn with the Kabsch rotation of the
-geometry onto R0 (`src.Base.body_frame`), and the force carries that
+geometry onto R0 (`src.Base.geometry.body_frame`), and the force carries that
 rotation's derivative. Held in the lab frame, a rigid rotation would move the
 molecule against its own clouds: the energy would change under the rotation
 and the force would carry a net torque.
@@ -34,20 +34,20 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import body_frame
-from src.Base.body_frame import BodyFrame, aligned_displacement, kabsch_rotation
-from src.Base.constants import (ISDF_GRADIENT_FLOOR,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.geometry import body_frame
+from src.Base.geometry.body_frame import BodyFrame, aligned_displacement, kabsch_rotation
+from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.state_manifold import StateManifold
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.properties.optimize import translation_rotation_basis
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
@@ -81,7 +81,7 @@ def isdf_rhf(mol):
     the orbitals, and at conv_tol_grad 1e-11 this SCF's residual puts 2e-8
     Ha/Bohr into the five-point difference of S1 along a rotation (9e-10 at
     1e-13)."""
-    mf = isdf_jk(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(mol))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(mol))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-13, 400
     mf.kernel()
     assert mf.converged
@@ -200,8 +200,8 @@ def production_surface(factory):
         GroundState('dft', 'hf'), environment=None, chi0='space-time',
         residues='sop', solver='davidson', factorization='isdf',
         qp_states=QPStates('admitted'),
-        numerics={'grid_accuracy': 'G1', 'bse_adjoint': 'grid', 'nroots': 4,
-                  'sliced': True, 'fit': 'rows'})
+        numerics=numerics_of({'grid_accuracy': 'G1', 'bse_adjoint': 'grid', 'nroots': 4,
+                  'sliced': True, 'fit': 'rows'}))
     mol = water()
     return mol, surface_of(spec, Excitation('singlet'), mol, factory)
 
@@ -283,7 +283,7 @@ def test_the_dense_df_route_is_invariant():
     surface = potential_energy_surface(
         mol, rhf, ground_state=GroundState('rpa', 'hf'),
         excitation=Excitation('singlet'), chi0='dense-qb', factorization='df',
-        auxbasis=BASIS + '-ri')
+        numerics=numerics_of({'auxbasis': BASIS + '-ri'}))
     e0, g0 = surface.total_energy(mol), surface.total_gradient(mol)[0]
     force, torque = rigid_part(mol, g0)
     assert force < RIGID_TOL and torque < RIGID_TOL, (force, torque)

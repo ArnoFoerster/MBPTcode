@@ -1,5 +1,5 @@
 """The tiled, distributed nuclear force of DF-MP2 and folded ADC(2) states
-(src.SingleReference.df_correlation_force_tiled through ee_gradient) against
+(src.gradients.df_correlation_force_tiled through ee_gradient) against
 the dense reference (ee_gradient.adc2_force). Water and formaldehyde
 cc-pVDZ (bent, non-symmetric geometries so that every coordinate moves),
 frozen core, correlation fit cc-pvdz-ri, JK fit cc-pvdz-jkfit. Tiles of one
@@ -31,14 +31,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf.mp import dfmp2_native
 
-from src.Base.reaction_field import ContinuumField
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference import df_correlation_force_tiled as tcf
+from src.environments.reaction_field import ContinuumField
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients import df_correlation_force_tiled as tcf
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
-from src.SingleReference.ADC.eeADC import ee_gradient as eg
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
-from src.SingleReference.state_models import HFState, MP2State
+from src.gradients.adc import ee_gradient as eg
+from src.gradients.adc.ee_state_model import ADC2State
+from src.gradients.state_models import HFState, MP2State
 from tests.adc_common import (ATOMS, AUX, FD_STEP_FORCE, JKFIT, SCF_GRAD_TILED,
                               SCF_TOL_TIGHT, check, df_rhf, molecule)
 from tests.pins import RECORDING_BLAS, matches

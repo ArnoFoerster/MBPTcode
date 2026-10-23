@@ -1,5 +1,7 @@
-# GENERATED CODE -- restricted (spin-blocked) CCSDT energy + T-residuals.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
+# Restricted (spin-blocked) CCSDT energy and T-residuals.
+# See that module's docstring for the equations/conventions.
 # allow numpy built with MKL to consume more threads for tensordot -- but only
 # if the caller hasn't already pinned the thread count (same convention as
 # amplitudes.py's generalized-pipeline counterpart)

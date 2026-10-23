@@ -1,7 +1,8 @@
 """Inputs the generated charged-ADC runtime cannot honour are refused before
 anything is built, so these checks need no generated module and run in CI:
-ADC(6) (never in MBPTcode), the non-Dyson n = 5 (MP5 numerators the generators
-do not emit), U^(5), more than one root on the one-root downfold routes, a
+ADC(6) (never in MBPTcode), the spin-orbital non-Dyson n = 5 (MP5 numerators the
+generators do not emit) and the restricted one above n = 5, DF at the ADC(5)
+cross blocks and on the non-Dyson route (no DF twins), U^(5), more than one root on the one-root downfold routes, a
 dense-diagonalization threshold on a matrix-free route, and a missing
 generated module (which names the call that writes it).
 """
@@ -17,7 +18,8 @@ from src.CodeGeneration.generate_adc import GenerateRuntime
 from src.SingleReference.ADC.base import ADCSolverRestricted, ADCSolverUnrestricted
 from src.SingleReference.ADC.generated_modules import generated
 from src.SingleReference.ADC.nondyson_isr import NonDysonISR
-from src.SingleReference.ADC.sigma_driver import u_raw_series
+from src.SingleReference.ADC.nondyson_restricted import NonDysonRestricted
+from src.SingleReference.ADC.sigma_driver import restricted_dyson_operator, u_raw_series
 
 
 def _toy_restricted(**opts):
@@ -55,11 +57,53 @@ def test_u5_raw_series_is_refused():
         u_raw_series(None, 'IP', 5)
 
 
-@pytest.mark.parametrize('opts', [dict(level='adc4'), dict(level='adc4', diagonal=True),
-                                  dict(level='adc4t2'), dict(level='adc5')])
+@pytest.mark.parametrize('opts', [dict(level='adc4', construction='twosector'),
+                                  dict(level='adc4', diagonal=True, construction='twosector'),
+                                  dict(level='adc4t2', construction='twosector'),
+                                  dict(level='adc5', construction='twosector')])
 def test_one_root_routes_refuse_nroots(opts):
     with pytest.raises(ValueError, match='one root per solve'):
         _toy_restricted(pdaggerq=True, **opts).solve(nroots=2)
+
+
+@pytest.mark.parametrize('level', ['adc4', 'adc4t2', 'adc5'])
+def test_adc4_and_higher_name_their_construction(level):
+    # From ADC(4) on the constructions differ and none
+    # is the default
+    with pytest.raises(ValueError, match='needs construction='):
+        _toy_restricted(pdaggerq=True, level=level)
+    with pytest.raises(ValueError, match='needs construction='):
+        ADCSolverUnrestricted.from_arrays(np.array([-1.0, -0.9, 0.3, 0.8]),
+                                          np.zeros((4, 4, 4, 4)), nocc=2,
+                                          pdaggerq=True, level='adc4')
+    assert _toy_restricted(pdaggerq=True, level='adc3').construction == 'twosector'
+
+
+@pytest.mark.parametrize('construction', ['union', 'diagrammatic'])
+def test_complete_adc5_refuses_df(construction):
+    # the ADC(5) cross blocks have no DF twins
+    leaves = {'B_aa': np.zeros((1, 4, 4)), 'B_bb': np.zeros((1, 4, 4))}
+    with pytest.raises(ValueError, match='no DF twins'):
+        restricted_dyson_operator(None, 'adc5', extra_leaves=leaves, construction=construction)
+
+
+@pytest.mark.parametrize('level,construction', [('adc5', 'union'), ('adc5', 'twosector'),
+                                                ('adc4', 'diagrammatic')])
+def test_decoupling_grid_is_diagrammatic_adc5_only(level, construction):
+    with pytest.raises(ValueError, match='decoupling_ntau'):
+        restricted_dyson_operator(None, level, construction=construction, decoupling_ntau=8)
+
+
+def test_nondyson_restricted_refuses_df_and_order6():
+    class _DF:
+        df = True
+    with pytest.raises(ValueError, match='no DF twins'):
+        NonDysonRestricted(_DF(), 'IP')
+
+    class _Dense:
+        df = False
+    with pytest.raises(ValueError, match='ADC\\(5\\)'):
+        NonDysonRestricted(_Dense(), 'IP').raw_series(6)
 
 
 def test_matrix_free_routes_refuse_a_dense_threshold():

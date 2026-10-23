@@ -58,18 +58,18 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates
-from src.Base.numerics import numerics_of
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.numerics import numerics_of
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.qp_selection import AdaptivePartition
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.sum_over_poles import compressible
-from src.gradients.dense_surfaces import QuasiparticleSurface
-from src.gradients.excited_state import ExcitedStateChain
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
@@ -152,7 +152,7 @@ def sigma_x_minus_vxc(mf):
 
 def snapshot(chain, mol, mf):
     """What one forward at `mol` assembled, orbital by orbital."""
-    sh = chain._shared_forward(mol, mf)
+    sh = chain.shared_forward(mol, mf)
     states = [int(p) for p in chain.resolved.qp_set]
     norb = len(sh.eps)
     env = (np.zeros(norb) if sh.shift is None

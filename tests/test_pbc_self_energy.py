@@ -29,7 +29,7 @@ from pyscf.pbc import gto, scf
 from src.SingleReference.Periodic.pbc_integrals import PBCDFIntegrals
 from src.SingleReference.Periodic import pbc_self_energy as pse
 from src.SingleReference.GW.self_energy import SelfEnergySolver
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
 from tests.pins import class_bar
 
 

@@ -26,9 +26,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
-from src.Base.pdaggerq_interface import OCC_LETTERS
 from src.CodeGeneration.diagrammatic.goldstone import (
-    _BLOCKS, build_skeletons, ordering_sector, _ordering_cuts)
+    BLOCKS, build_skeletons, ordering_sector, ordering_cuts)
 
 
 def missing_orderings(skel, order):
@@ -36,7 +35,7 @@ def missing_orderings(skel, order):
     width = 2 * (order // 2) + 1
     return [o for o in skel.orderings
             if any(d != 0 and len(h) + len(p) > width
-                   for d, h, p in _ordering_cuts(skel, o))]
+                   for d, h, p in ordering_cuts(skel, o))]
 
 
 def _tikz_ordering(skel, ordering, caption):
@@ -79,7 +78,7 @@ def _tikz_ordering(skel, ordering, caption):
                        f"({x:.2f},{y_dst:.2f}) "
                        f"node[midway,right] {{$\\scriptstyle {ln.idx}$}};")
     # omega-cut annotations
-    for k, (d, h, p) in enumerate(_ordering_cuts(skel, ordering)):
+    for k, (d, h, p) in enumerate(ordering_cuts(skel, ordering)):
         y = ys(k) + 0.55
         tag = (f"$\\omega^{{{'+' if d > 0 else '-'}}}$ {len(h)}h{len(p)}p"
                if d != 0 else f"{len(h)}h{len(p)}p")
@@ -113,7 +112,7 @@ def _formula(skel, ordering):
         return f"\\varepsilon_{{{lbl}}}"
 
     dens = []
-    for d, h, p in _ordering_cuts(skel, ordering):
+    for d, h, p in ordering_cuts(skel, ordering):
         terms = []
         if d != 0:
             terms.append('\\omega' if d > 0 else '-\\omega')
@@ -181,18 +180,13 @@ _PRE = """\\documentclass[10pt]{article}
 """
 
 
-def _esc(s):
-    return s.replace('<', '$\\langle$').replace('>', '$\\rangle$') \
-            .replace('||', '\\,\\|\\,').replace('_', '\\_')
-
-
 def emit_atlas(order, path, missing_only=False):
     out = [_PRE]
     title = (f"Goldstone diagrams of $M(\\omega;{order})$"
              + (" missing from ISR-ADC(%d)" % order if missing_only else ""))
     out.append(f"\\section*{{{title}}}")
     total = 0
-    for block in _BLOCKS:
+    for block in BLOCKS:
         skels, census = build_skeletons(order, block)
         items = []
         for skel in skels:
@@ -224,7 +218,7 @@ def emit_resummed(order, path):
            " --- the class beyond the ISR representation (sum of the four"
            " time orderings each; the 4p3h/4h3p pole is cancelled)}"]
     total = 0
-    for block in _BLOCKS:
+    for block in BLOCKS:
         groups = quartet_groups(block, order)
         out.append(f"\\subsection*{{block ({block[0]},{block[1]}): "
                    f"{len(groups)} groups}}")

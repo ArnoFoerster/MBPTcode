@@ -9,10 +9,10 @@ import time
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, eigsh
 
-from src.Base.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
-                                PROBE_START_MIX)
-from src.Base.utils.mpi_grid import current_comm, lockstep
-from src.SingleReference.LinearResponse.block_actions import _block_action
+from src.Base.numerics.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
+                                         PROBE_START_MIX)
+from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.SingleReference.LinearResponse.block_actions import block_action
 
 
 class AmbProbeNotConverged(RuntimeError):
@@ -55,20 +55,20 @@ def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
 
     comm: the communicator the ISDF action divides its rows over, by default
     the current `distributed` region's; every rank then runs the same Lanczos
-    and returns rank 0's value (`_lowest_amb_from_action`).
+    and returns rank 0's value (`lowest_amb_from_action`).
 
     Standalone the probe has no converged roots to try first, so it starts
     cold, from 1/d; `solve_bse_isdf` runs it after its Davidson instead, on
     the Davidson's own action, and under 'sign' tries the roots first.
     """
     comm = current_comm() if comm is None else comm
-    apply_AB, diag_d = _block_action(lr_solver, nocc, polarizability, W_aux,
+    apply_AB, diag_d = block_action(lr_solver, nocc, polarizability, W_aux,
                                      isdf_factors, comm=comm)
-    return _lowest_amb_from_action(apply_AB, diag_d, k=k, tol=tol,
+    return lowest_amb_from_action(apply_AB, diag_d, k=k, tol=tol,
                                    sign_only=sign_only, stats=stats, comm=comm)
 
 
-def _lowest_amb_from_action(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
+def lowest_amb_from_action(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
                             stats=None, comm=None, start=None):
     """The (A-B) probe, the same iteration on every rank, rank 0's value on each.
 

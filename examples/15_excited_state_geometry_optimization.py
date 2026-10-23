@@ -26,7 +26,7 @@ Two routes compute the same physics at two costs: the DENSE quasi-boson route
 (O(N^6), exact within the model) and the cubic-scaling ISDF/space-time route
 with the sum-over-poles continuation (`residues='sop'`), the one meant for
 systems where the dense route does not fit. Delta-E_ST agrees between them to
-~1 meV here -- tighter than either vertical gap alone, because the ISDF error
+~2 meV here -- tighter than either vertical gap alone, because the ISDF error
 common to both states' Omega mostly cancels in the difference.
 
 geomeTRIC's own progress log is suppressed below so only
@@ -44,6 +44,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.declaration import Excitation, GroundState
+from src.Base.numerics.numerics import numerics_of
 from src.properties.excitations import SurfaceSpec, calc_adiabatic_gap
 
 mol = gto.M(atom='C 0 0 0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588',
@@ -52,7 +53,7 @@ mol = gto.M(atom='C 0 0 0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588',
 
 def factory(m):
     mf = scf.RHF(m)
-    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     return mf
 
@@ -62,7 +63,7 @@ ROUTES = {
         SurfaceSpec(GroundState('rpa', 'hf'), chi0='dense-qb',factorization='four-index'),
     'ISDF/space-time + SOP, cubic':
         SurfaceSpec(GroundState('rpa', 'hf'), chi0='space-time',
-                    residues='sop', factorization='isdf',numerics={'auxbasis': 'cc-pvdz-ri'}),
+                    residues='sop', factorization='isdf',numerics=numerics_of({'auxbasis': 'cc-pvdz-ri'})),
 }
 
 logging.disable(logging.WARNING)          # geomeTRIC's own log, not ours

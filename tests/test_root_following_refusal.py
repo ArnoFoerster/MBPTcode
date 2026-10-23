@@ -14,17 +14,19 @@ The Casida step is planted: the roots are columns of one orthogonal matrix
 at one geometry, so every overlap is exactly 0 or 1 and the test reads the
 decision, not a solver.
 """
+import types
+
 import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (ROOT_FOLLOW_RESOLVE_FACTOR,
-                                ROOT_FOLLOW_WEIGHT_MIN)
-from src.gradients.conventions import FrozenConventions
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (ROOT_FOLLOW_RESOLVE_FACTOR,
+                                         ROOT_FOLLOW_WEIGHT_MIN)
+from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.evaluation import GeometryCache
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_following import ForwardPieces, RootFollowingLost
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_following import CasidaSolution, RootFollowingLost
 
 #: Roots a matrix-free solve returns; the planted pair space holds 10.
 NROOTS = 3
@@ -63,12 +65,13 @@ def follower(mol):
     return chain
 
 
-def pieces(mol, mf, x):
-    """`ForwardPieces` carrying the roots `x` (Y = 0) and the geometry."""
-    body = [None] * 17
-    body[0], body[1] = mol, mf
-    body[10], body[11] = x, np.zeros_like(x)
-    return ForwardPieces(tuple(body))
+def forward(mol, mf, x):
+    """(shared, `CasidaSolution`): the geometry, and the roots `x` (Y = 0)
+    with energies 0, 1, ..."""
+    shared = types.SimpleNamespace(mol=mol, mf=mf, x_mo=None, d=None,
+                                   eps_qp=None, w_aux=None, qp_h=None)
+    return shared, CasidaSolution(np.arange(x.shape[1], dtype=float), x,
+                                  np.zeros_like(x), {})
 
 
 def plant(chain, columns, calls):
@@ -77,14 +80,13 @@ def plant(chain, columns, calls):
         calls.append(chain.nroots)
         x = columns
         return np.arange(x.shape[1], dtype=float), x, np.zeros_like(x), {}
-    chain._casida = casida
+    chain.follower._casida = casida
 
 
 def anchored(mean_field, roots):
     mol, mf = mean_field
     chain = follower(mol)
-    chain.tracked_root(mol, mf, np.arange(NROOTS, dtype=float),
-                       pieces(mol, mf, roots[:, :NROOTS]))
+    chain.tracked_root(mol, mf, *forward(mol, mf, roots[:, :NROOTS]))
     return chain
 
 
@@ -97,12 +99,11 @@ def test_a_lost_state_is_found_by_the_wider_solve(mean_field, roots):
     wide = roots[:, [1, 2, 3, 0, 4, 5]]
     calls = []
     plant(chain, wide, calls)
-    root, om, found = chain.tracked_root(
-        mol, mf, np.arange(NROOTS, dtype=float), pieces(mol, mf, narrow))
+    root, found = chain.tracked_root(mol, mf, *forward(mol, mf, narrow))
     assert calls == [ROOT_FOLLOW_RESOLVE_FACTOR * NROOTS]
     assert chain.nroots == NROOTS, 'the wider solve must not stick'
     assert root == 3
-    assert found[10] is wide and len(om) == wide.shape[1]
+    assert found.x is wide and len(found.omega) == wide.shape[1]
     step = chain.follow_log[-1]
     assert step['weight'] > 1.0 - 1e-10
     assert step['widened_to'] == wide.shape[1]
@@ -114,8 +115,7 @@ def test_a_state_missing_from_the_wider_solve_is_refused(mean_field, roots):
     calls = []
     plant(chain, roots[:, 1:2 * NROOTS + 1], calls)
     with pytest.raises(RootFollowingLost, match='refused'):
-        chain.tracked_root(mol, mf, np.arange(NROOTS, dtype=float),
-                           pieces(mol, mf, roots[:, 1:NROOTS + 1]))
+        chain.tracked_root(mol, mf, *forward(mol, mf, roots[:, 1:NROOTS + 1]))
     assert calls == [ROOT_FOLLOW_RESOLVE_FACTOR * NROOTS]
     assert len(chain.follow_log) == 1, 'a refused step is not logged'
 
@@ -134,8 +134,7 @@ def test_every_root_solved_is_refused_without_a_resolve(mean_field, roots):
     full = roots @ q.T
     assert np.abs(roots[:, 0] @ full).max() < ROOT_FOLLOW_WEIGHT_MIN
     with pytest.raises(RootFollowingLost):
-        chain.tracked_root(mol, mf, np.arange(n, dtype=float),
-                           pieces(mol, mf, full))
+        chain.tracked_root(mol, mf, *forward(mol, mf, full))
     assert calls == []
 
 
@@ -147,7 +146,6 @@ def test_a_followed_state_is_returned_as_before(mean_field, roots):
     plant(chain, roots, calls)
     order = [2, 0, 1]
     x = roots[:, order]
-    root, om, found = chain.tracked_root(
-        mol, mf, np.arange(NROOTS, dtype=float), pieces(mol, mf, x))
-    assert root == 1 and calls == [] and found[10] is x
+    root, found = chain.tracked_root(mol, mf, *forward(mol, mf, x))
+    assert root == 1 and calls == [] and found.x is x
     assert 'widened_to' not in chain.follow_log[-1]

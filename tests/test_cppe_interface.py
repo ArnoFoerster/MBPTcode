@@ -19,9 +19,9 @@ from pyscf import df, gto
 
 cppe = pytest.importorskip('cppe', reason='pip install cppe')
 
-from src.Base.environment import Environment
-from src.Base.cppe_interface import polarizable_sites_from_potfile
-from src.Base.polarizable_sites import PolarizableSites
+from src.Base.environment_seam import Environment
+from src.environments.cppe_interface import polarizable_sites_from_potfile
+from src.environments.polarizable_sites import PolarizableSites
 
 ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: Bohr: outside the QM density, where two isotropic sites are built both by

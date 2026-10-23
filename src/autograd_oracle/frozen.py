@@ -38,6 +38,54 @@ _KEYS = {'x_mo', 'd', 'd_bare', 'eps', 'nocc', 'mu', 'states', 'xc_const',
          'outside_window', 'scissor', 'z_orbs', 'z_vals'}
 
 
+def frozen_conventions_of(chain, mol, mf, target, qp_orb):
+    """(`FrozenConventions`, `SharedForward`, `CasidaSolution`) of a production
+    chain at (mol, mf), read AFTER its first solve through its public stages
+    (`forward`, `xc_correction`, `qp_set_solve`, `outside_window`): the set,
+    with `qp_orb` added for a quasiparticle target, its roots, pole strengths
+    and residues, the static terms, the grids and the frozen scissor.
+
+    Production imports are local: this module is the torch side's too, which
+    loads numpy only. An orbital that took a residue route other than the
+    explicit backend is refused (`SystemExit`): the oracle ports that one.
+    """
+    from src.Base.numerics.constants import KAPPA
+    from src.SingleReference.GW.qp_states import frozen_scissor
+    from src.SingleReference.GW.real_screening import residue_set
+    shared, solution = chain.forward(mol, mf)
+    nocc, norb = chain.nocc, len(mf.mo_energy)
+    eps, shift = shared.eps, shared.shift
+    d_sigma = shared.d if shared.d_bare is None else shared.d_bare
+    states = [int(p) for p in chain.resolved.qp_set]
+    if target == 'qp' and qp_orb not in states:
+        states = sorted(set(states) | {qp_orb})
+    xc_set = chain.xc_correction(mf, states, shift)
+    (ws, _, _, _), ro = chain.quasiparticles.qp_set_solve(shared.x_mo, d_sigma, eps, shared.mu,
+                                           xc_set, np.zeros(len(states)),
+                                           states=states)
+    roots = {int(p): float(w) for p, w in zip(states, ws)}
+    z_prod = {int(p): float(z) for p, z in zip(states, ro['z'])}
+    residues = {p: residue_set(eps, nocc, roots[p]) for p in roots}
+    for p in roots:
+        route = ro['routes'].get(p)
+        if route not in ('explicit', 'none') and residues[p]:
+            raise SystemExit(f'orbital {p} took the {route!r} residue route; the '
+                             f'oracle ports the explicit backend only')
+    shift_vec = np.zeros(norb) if shift is None else np.asarray(shift, float)
+    xc_all = np.asarray(chain.xc_correction(mf, np.arange(norb), shift_vec),
+                        float)
+    conv = chain.conventions
+    fz = FrozenConventions(
+        nocc=nocc, mu=shared.mu, states=states, xc_const=xc_all, roots=roots,
+        residues=residues, gw_tau=conv.gw_grid.tau_points,
+        gw_cosft=conv.gw_grid.cosft_wt, nu=conv.nu, wt=conv.wt,
+        w_tau=chain.w_grid.tau_points, w_cosft=chain.w_grid.cosft_wt,
+        spin_kappa=KAPPA[chain.spin], bse_tda=chain.bse_tda, state=chain.state,
+        outside_window=chain.quasiparticles.outside_window(norb),
+        scissor=[frozen_scissor(chain.resolved.outside_shift, p) or 0.0
+                 for p in range(norb)], z_prod=z_prod)
+    return fz, shared, solution
+
 def dump(path, x_mo, d, d_bare, eps, fz, **extra):
     """The factors, the conventions, and whatever else the caller wants carried
     (production adjoints, say). None values travel as empty arrays."""

@@ -65,25 +65,24 @@ from pyscf import df, gto, scf
 
 from tests.archive_radii import install_current_radii
 from tests.archived_tree import require_commit, unpack_commit
-from src.Base import separable_ri
-from src.Base.constants import (FIT_CHOLESKY_BLOCK,
-                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
-from src.Base.constants import ISDF_FIT_PAIR_TOL
-from src.Base.numerics import Numerics
-from src.Base.polarizable_sites import PolarizableSites
-from src.Base.separable_ri import (KeptIntegrals, aux_metric_sqrt,
-                                   fit_M_streaming, metric_root)
-from src.Base.solvent_screening import SolventScreening
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (allgather_ranges, broadcast_rows,
-                                     contiguous_block, cyclic_tiles_to_blocks,
-                                     distributed, partition, reduce_max,
-                                     run_simulated)
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+                                         FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
+from src.Base.numerics.constants import ISDF_FIT_PAIR_TOL
+from src.Base.numerics.numerics import Numerics
+from src.environments.polarizable_sites import PolarizableSites
+from src.Base.factorization.separable_ri import (KeptIntegrals, aux_metric_sqrt,
+                                                 fit_M_streaming, metric_root)
+from src.environments.solvent_screening import SolventScreening
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (
+    allgather_ranges, broadcast_rows, contiguous_block,
+    cyclic_tiles_to_blocks, distributed, partition, reduce_max)
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from tests.test_distributed_fit_mpi import roots_resolution
 from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1
 from tests.pins import (RECORDING_BLAS, THREAD_CAPS_WITHOUT_OMP,
@@ -122,14 +121,30 @@ from pyscf import df, gto
 
 import inspect
 
-from src.Base.separable_ri import (atomic_grid, fit_M_streaming,
-                                   molecular_points_covariant)
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    from src.Base.factorization.separable_ri import (atomic_grid, fit_M_streaming,
+                                       molecular_points_covariant)
+except ImportError:  # an older tree's module layout
+    from src.Base.separable_ri import (atomic_grid, fit_M_streaming,
+                                       molecular_points_covariant)
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 
 # the fit's working set: a keyword of older trees, a field
 # of the one Numerics in newer ones
 if 'numerics' in inspect.signature(fit_M_streaming).parameters:
-    from src.Base.numerics import Numerics
+    try:
+        from src.Base.numerics.numerics import Numerics
+    except ImportError:  # an older tree's module layout
+        from src.Base.numerics import Numerics
 
     def budget_kw(budget):
         return dict(numerics=Numerics(layout={{'fit_gb': budget}}))
@@ -252,7 +267,7 @@ def test_each_rank_holds_rows_only(water, size):
     mol, mf, _ = water
     nao = mol.nao_nr()
     naux = df.addons.make_auxmol(mol, auxbasis=AUXBASIS).nao_nr()
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
 
     def rank(comm):
         part = row_factors(mol, mf)
@@ -424,7 +439,7 @@ def test_kept_integrals_are_the_whole_block_bits(atom, basis):
     ao_loc = mol.ao_loc_nr()
     integrals = KeptIntegrals(mol, auxmol)
     naux = auxmol.nao_nr()
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     blocks = (separable_ri.ao_blocks(mol, len(grid), n2, naux, 4.0)
               + [(s, s + 1) for s in range(mol.nbas)])
     rng = np.random.default_rng(7)
@@ -480,7 +495,7 @@ def test_shell_block_holds_the_kept_pairs(ethylene, size):
     mol, mf, _ = ethylene
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     naux, nao = auxmol.nao_nr(), mol.nao_nr()
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     widest = max(mol.ao_loc_nr()[s + 1] - mol.ao_loc_nr()[s]
                  for s in range(mol.nbas) if mol.bas_angular(s) <= 2)
     for pair_tol in (ISDF_FIT_PAIR_TOL, 1e-2):

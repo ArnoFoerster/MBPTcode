@@ -24,9 +24,9 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_MEV
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_MEV
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit_differentiable_checked
 
@@ -84,7 +84,7 @@ def chain(mol, mf, qp_hamiltonian=False):
 
 def pair_eigenvalues(ch, mol, mf):
     """S1 and the eigenvalues of the quasiparticle Hamiltonian on the pair."""
-    fwd = ch._shared_forward(mol, mf)
+    fwd = ch.shared_forward(mol, mf)
     idx = list(PAIR)
     h = np.diag(fwd.eps_qp[idx])
     if fwd.qp_h is not None:

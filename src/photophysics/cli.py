@@ -23,26 +23,26 @@ import.
 import argparse
 import pathlib
 
-from src.Base.constants import (ISDF_HESSIAN_MIN_GRID,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_OPTIMIZATION_CONV_TOL,
-                                SCF_OPTIMIZATION_GRAD_TOL, TADF_ALLOCATION_MB,
-                                TADF_GRID_ACCURACY, TADF_N_STATES,
-                                TADF_NROOTS, TADF_OUTSIDE_SCISSOR,
-                                TADF_QP_HALF_WIDTH, TADF_REFERENCE,
-                                TADF_THREADS, UISC_BLOCKS, UISC_DQ,
-                                UISC_LAMBDA_SAMANTA_EV, UISC_N_MODES)
+from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_OPTIMIZATION_CONV_TOL,
+                                         SCF_OPTIMIZATION_GRAD_TOL, TADF_ALLOCATION_MB,
+                                         TADF_GRID_ACCURACY, TADF_N_STATES,
+                                         TADF_NROOTS, TADF_OUTSIDE_SCISSOR,
+                                         TADF_QP_HALF_WIDTH, TADF_REFERENCE,
+                                         TADF_THREADS, UISC_BLOCKS, UISC_DQ,
+                                         UISC_LAMBDA_SAMANTA_EV, UISC_N_MODES)
 from src.Base.declaration import QPStates
-from src.Base.numerics import Numerics
-from src.Base.utils.memory import allocation_max_memory_mb
-from src.Base.utils.mpi_grid import distributed, grid_comm
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import allocation_max_memory_mb
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from src.photophysics.declaration import (ENGINES, GAS, GROUNDS,
                                           HESSIAN_ROUTES, RELAXED_SOLVATION,
                                           RESIDUES, SCF_FINISH, SCF_ROUTES,
                                           Declaration, FarStart, Policies,
                                           System, TadfModel, UiscModel)
 from src.photophysics.stages import run_tadf
-from src.properties.rates import MANIFOLD_GAP_RULES
+from src.photophysics.rates import MANIFOLD_GAP_RULES
 from src.photophysics.store import Store
 
 #: The --span word for the full basis; any other value is a declared cut.
@@ -165,6 +165,9 @@ def add_numerics(ap):
     num.add_argument('--bse-conv-tol', type=float, default=None,
                      help='omitted is BSE_DAVIDSON_CONV_TOL')
     num.add_argument('--no-probe', action='store_true')
+    num.add_argument('--xc-grid', type=int, default=None,
+                     help='pyscf\'s XC grid level of every Kohn-Sham mean '
+                          'field; omitted is XC_GRID_LEVEL')
     num.add_argument('--scf-conv-tol', type=float, default=None,
                      help='omitted is SCF_OPTIMIZATION_CONV_TOL')
     num.add_argument('--scf-grad-tol', type=float, default=None,
@@ -211,7 +214,8 @@ def production_numerics(args):
                           else args.scf_conv_tol),
              'conv_tol_grad': (SCF_OPTIMIZATION_GRAD_TOL
                                if args.scf_grad_tol is None
-                               else args.scf_grad_tol)},
+                               else args.scf_grad_tol),
+             **({} if args.xc_grid is None else {'xc_grid': args.xc_grid})},
         span={'cut': span_cut_of(args)},
         qp={'outside_scissor': args.outside_scissor,
             'hamiltonian': args.qp_hamiltonian,

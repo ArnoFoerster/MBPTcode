@@ -41,11 +41,11 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
                                                 '..')))
 from src.Base.declaration import Excitation, GroundState
-from src.Base.environment import solvent_scheme
-from src.Base.numerics import numerics_of
-from src.Base.solvent_screening import SolventScreening
-from src.Base.split_equilibrium import ClassicalStateSpecific
-from src.gradients.excited_state import ExcitedStateChain
+from src.environments.environment import solvent_scheme
+from src.Base.numerics.numerics import numerics_of
+from src.environments.solvent_screening import SolventScreening
+from src.environments.split_equilibrium import ClassicalStateSpecific
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.characters import roots
 from src.properties.excitations import SurfaceSpec, calc_vertical_excitation
 from tests.adc_common import five_point
@@ -196,8 +196,8 @@ def schemes(mol):
 def test_scheme_b_moves_no_quasiparticle_level(mol, schemes):
     chain_a, chain_b, mf, _, _ = schemes
     nocc = mol.nelectron // 2
-    shift_a = np.asarray(chain_a._shared_forward(mol, mf).shift)
-    shift_b = np.asarray(chain_b._shared_forward(mol, mf).shift)
+    shift_a = np.asarray(chain_a.shared_forward(mol, mf).shift)
+    shift_b = np.asarray(chain_b.shared_forward(mol, mf).shift)
     assert np.abs(shift_a).max() > 1e-3           # Eq. (18) moves the levels
     assert np.abs(shift_b).max() < 1e-12, np.abs(shift_b).max()
     assert chain_b.excitation(mol, mf) != chain_a.excitation(mol, mf)
@@ -270,7 +270,7 @@ def test_the_surface_entry_records_the_scheme(mol, equilibrium):
     for scheme in ('classical-ss', 'duchemin'):
         env = solvent_scheme(optical, scheme, ss_equilibrium=equilibrium)
         spec = SurfaceSpec(GroundState('dft', 'hf'), environment=env,
-                           solver='dense', numerics={'grid_accuracy': 'G1'})
+                           solver='dense', numerics=numerics_of({'grid_accuracy': 'G1'}))
         recs[scheme] = calc_vertical_excitation(spec, state, mol, factory,
                                                 gradient=False)
     b = recs['classical-ss']

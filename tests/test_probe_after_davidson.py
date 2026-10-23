@@ -43,13 +43,13 @@ as the oracle:
     fails tier (i) and tier (ii) certifies, from exactly the warm start; a
     Lanczos stalled at its first pass escalates to 1e-3 from 1/d; stalled at
     every pass, the sign is reported unproven;
-  * the roots and vectors of the whole solve, preconditioned by the bare d
-    the baseline knew, those of `BASELINE_COMMIT` to a few ulp,
-    whose probe ran BEFORE the Davidson on an action of its own, serially,
-    'sign' and True, water and ethylene; at 2, 3 and 8 simulated ranks, where
-    the Davidson's trial space is cut by pair rows and its reduced sums
-    re-associate, within the Davidson's resolution of the one-rank roots;
-    and the converged probe's value to a few ulp at every size;
+  * the roots and vectors of the whole solve, those of the same solve with
+    no probe to a few ulp, serially, 'sign' and True, water and ethylene; at
+    2, 3 and 8 simulated ranks, where the Davidson's trial space is cut by
+    pair rows and its reduced sums re-associate, within the Davidson's
+    resolution of the one-rank roots; and the converged probe's value the
+    standalone probe's, to a few ulp serially and within that resolution
+    over ranks;
   * every rank returns rank 0's roots, vectors, value and probe record,
     bitwise, at 2, 3 and 8 ranks, and at 16 on a 12-point grid where four
     ranks own no grid row; and one rank's certificate planted to fail alone is
@@ -59,12 +59,9 @@ as the oracle:
 """
 import copy
 import os
-import shutil
-import subprocess
 import sys
 import threading
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -72,27 +69,25 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from tests.archived_tree import require_commit, unpack_commit
-from src.Base.constants import PROBE_START_MIX, SEPARABLE_AUX_GAUGE
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import distributed, lockstep_stats, run_simulated
+from src.Base.numerics.constants import PROBE_START_MIX, SEPARABLE_AUX_GAUGE
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import distributed, lockstep_stats
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import unrefused_separable_factors
 from src.SingleReference.LinearResponse import (block_actions, davidson,
                                                 trial_space)
 from src.SingleReference.LinearResponse import probe as amb_probe
 from src.SingleReference.LinearResponse.casida import CasidaInstability
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_df_coefficients,
-                                                         solve_bse_isdf,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import (
+    isdf_bse_factors, isdf_df_coefficients, solve_bse_isdf)
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
-from src.SingleReference.LinearResponse.probe import (_lowest_amb_from_action,
+from src.SingleReference.LinearResponse.probe import (lowest_amb_from_action,
                                                       lowest_amb_eigenvalue)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.test_distributed_fit_mpi import relative, roots_resolution
 from tests.isdf_test_grid import g1, g1_kw
-from tests.pins import (RECORDING_BLAS, THREAD_CAPS, assert_archive_same,
-                        assert_same, bitwise, matches)
+from tests.pins import RECORDING_BLAS, assert_same, bitwise, matches
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -130,58 +125,14 @@ PLANT_WEIGHT = 0.1
 #: them without a row. Cuts of 12 and 13 points leave the fit rank-deficient on
 #: the shipped radii, so the solve amplifies round-off to 1e-6.
 CUT_POINTS, CUT_RANKS = 14, 16
-REPO = Path(__file__).resolve().parents[1]
-#: A commit before the probe moved behind the Davidson: its probe built an
-#: action of its own and ran first.
-BASELINE_COMMIT = '8b5d2820f5ecb5920440048cbe307382c9040aa4'
-#: The same solves on the extracted baseline, in their own process.
-BASELINE_SOLVES = '''
-import copy
-import sys
-import warnings
-
-sys.path.insert(0, {archive!r})
-
-import numpy as np
-from pyscf import gto, scf
-
-from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
-
-warnings.simplefilter('ignore')
-out = {{}}
-for name, (atom, nroots) in {molecules!r}.items():
-    mol = gto.M(atom=atom, basis='cc-pvdz', verbose=0)
-    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    mf.kernel()
-    nocc = mol.nelectron // 2
-    # the baseline predates the refusal of factors that miss an orbital
-    # density (benzene's virtual 86, 0.12 on this grid) and takes no keyword
-    # for it; this gate is the solver's, not the fit's
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
-
-    def one_rank(comm, probe):
-        rmf = copy.copy(mf)
-        rmf.mo_energy = np.asarray(mf.mo_energy, float).copy()
-        rmf.mo_coeff = np.asarray(mf.mo_coeff, float).copy()
-        return solve_bse_isdf(rmf, mol, nocc, nroots=nroots, qp=False,
-                              probe=probe, progress=False,
-                              factors=tuple(np.array(a) for a in factors),
-                              distribute=comm is not None, comm=comm)
-
-    for probe in {probes!r}:
-        for size in {sizes!r}:
-            omega, X, Y, info = (one_rank(None, probe) if size == 1 else
-                                 run_simulated(one_rank, size, probe)[0])
-            key = f'{{name}}_{{probe}}_{{size}}'
-            out['omega_' + key], out['X_' + key], out['Y_' + key] = omega, X, Y
-            out['amb_' + key] = np.float64(info['min_eig_amb'])
-np.savez({out!r}, **out)
-'''
 PINNED = ('water', 'ethylene')
 PINNED_PROBES = ('sign', True)
 PINNED_SIZES = [1, 2, 3, 8]
+#: The Davidson residual of the parent comparison, Ha: converged far enough
+#: that two rank splits stop on the same roots (`roots_resolution`) and not
+#: each at its own point within CONV_TOL (ethylene, bare: 5.1e-10 relative
+#: apart over 2 to 8 ranks at 1e-5, against a resolution of 8.8e-12).
+PARENT_CONV_TOL = 1e-10
 #: Pair rows per tile of the Davidson's distributed trial space in the pins
 #: over ranks: water's 95 pairs and ethylene's 320 fall into 12 and 40 tiles,
 #: so every rank of every size here holds some.
@@ -236,11 +187,16 @@ def rank_copy(s):
     return mf, tuple(np.array(a, copy=True) for a in s['factors'])
 
 
-def solve(s, comm=None, probe='sign', qp=False, **kw):
-    """BSE@HF on this rank's own copies, over `comm` where one is given."""
+def solve(s, comm=None, probe='sign', qp=False, preconditioner=None,
+          conv_tol=CONV_TOL, **kw):
+    """BSE@HF on this rank's own copies, over `comm` where one is given;
+    `preconditioner` None is the Davidson's default."""
     mf, factors = rank_copy(s)
     kw.setdefault('factors', factors)
-    return solve_bse_isdf(mf, s['mol'], s['nocc'], numerics=Numerics(bse={'nroots': s['nroots'], 'conv_tol': CONV_TOL}), qp=qp,
+    bse = {'nroots': s['nroots'], 'conv_tol': conv_tol}
+    if preconditioner is not None:
+        bse['preconditioner'] = preconditioner
+    return solve_bse_isdf(mf, s['mol'], s['nocc'], numerics=Numerics(bse=bse), qp=qp,
                           probe=probe, progress=False,
                           distribute=comm is not None, comm=comm, **g1_kw(s['mol'], kw))
 
@@ -375,7 +331,7 @@ def test_twisted_ethene_falls_through_and_is_refused(twisted, monkeypatch,
     the driver refuses the roots on every rank."""
     s = twisted
     lam = dense_amb(s, None)[0]
-    real = davidson._lowest_amb_from_action
+    real = davidson.lowest_amb_from_action
     records = {}
 
     def on_tdhf(apply_AB, diag_d, **kwargs):
@@ -383,7 +339,7 @@ def test_twisted_ethene_falls_through_and_is_refused(twisted, monkeypatch,
         records[0 if comm is None else comm.Get_rank()] = kwargs['stats']
         return real(*action(s, comm, W_aux=None), **kwargs)
 
-    monkeypatch.setattr(davidson, '_lowest_amb_from_action', on_tdhf)
+    monkeypatch.setattr(davidson, 'lowest_amb_from_action', on_tdhf)
 
     def one_rank(comm):
         try:
@@ -469,7 +425,7 @@ def test_a_root_that_does_not_certify_falls_through(systems, monkeypatch,
 
     def one_rank(comm):
         stats = {}
-        value = _lowest_amb_from_action(*action(s, comm), sign_only=True,
+        value = lowest_amb_from_action(*action(s, comm), sign_only=True,
                                         stats=stats, comm=comm, start=start)
         return float(value[0]), stats, lanczos.starts()
 
@@ -504,7 +460,7 @@ def test_a_lanczos_that_does_not_certify_escalates(systems, monkeypatch,
 
     def one_rank(comm):
         stats = {}
-        value = _lowest_amb_from_action(*action(s, comm), sign_only=True,
+        value = lowest_amb_from_action(*action(s, comm), sign_only=True,
                                         stats=stats, comm=comm, start=start)
         return float(value[0]), record({'stats': stats}), lanczos.starts()
 
@@ -525,37 +481,24 @@ def test_a_lanczos_that_does_not_certify_escalates(systems, monkeypatch,
             assert value - stats['probe_residual'] <= 0.0
 
 
-@pytest.fixture(scope='session')
-def baseline(tmp_path_factory):
-    """`BASELINE_COMMIT`'s roots and vectors, per molecule, probe and size."""
-    out = tmp_path_factory.mktemp('probe_after_davidson_baseline')
-    tar = out.parent / f'{BASELINE_COMMIT}.tar'
-    require_commit(REPO, BASELINE_COMMIT)
-    unpack_commit(REPO, BASELINE_COMMIT, tar, out)
-    # the archived code reads the shipped radii table: give it today's, so the
-    # comparison is of the code and not of two grids
-    shutil.copy(REPO / 'src' / 'Base' / 'data' / 'optimized_radii.json',
-                out / 'src' / 'Base' / 'data' / 'optimized_radii.json')
-    script, npz = out / 'baseline.py', out / 'roots.npz'
-    script.write_text(BASELINE_SOLVES.format(
-        archive=str(out), molecules={n: MOLECULES[n] for n in PINNED},
-        probes=PINNED_PROBES, sizes=PINNED_SIZES, out=str(npz)))
-    env = dict(os.environ, **THREAD_CAPS)
-    env.pop('PYTHONPATH', None)
-    proc = subprocess.run([sys.executable, str(script)], cwd=str(out),
-                          capture_output=True, text=True, env=env)
-    assert proc.returncode == 0, proc.stderr
-    return dict(np.load(npz))
+@pytest.fixture(scope='module')
+def parents(systems):
+    """Each pinned molecule's one-rank solve with no probe at all: the roots
+    and vectors a probe behind the Davidson must leave as they are."""
+    return {name: solve(systems[name], probe=False, preconditioner='bare',
+                        conv_tol=PARENT_CONV_TOL)
+            for name in PINNED}
 
 
 @pytest.mark.parametrize('size', PINNED_SIZES)
 @pytest.mark.parametrize('probe', PINNED_PROBES)
 @pytest.mark.parametrize('name', PINNED)
-def test_the_roots_are_bitwise_the_parents(systems, baseline, name, probe,
+def test_the_roots_are_bitwise_the_parents(systems, parents, name, probe,
                                            size, monkeypatch):
-    """The probe moved behind the Davidson and onto its action and reaches no
-    root: serially no root, vector or converged probe (from 1/d on the
-    action alone) moves by more than a few ulp of the parent's run.
+    """The probe runs behind the Davidson, on its action, and reaches no
+    root: serially the roots and vectors of a solve with the probe are those
+    of the same solve without it (`parents`) to a few ulp, and the converged
+    probe is the standalone probe's value (from 1/d on an action of its own).
 
     Over ranks the roots are NOT pinned bitwise: the Davidson's trial space
     is cut by pair rows there (`trial_space.casida_rows`), and its sums over
@@ -565,47 +508,47 @@ def test_the_roots_are_bitwise_the_parents(systems, baseline, name, probe,
     roots are held to the Davidson's resolution of the one-rank roots and
     the vectors to VECTOR_TOL of them. The probe's value, a Ritz value of
     (A - B) certified to the same residual floor, is held to that
-    resolution of the one-rank value: with the trial space's joins and the
-    static screening summed in a fixed order it sat 1.8e-13 (water) and
-    1.9e-14 (ethylene) relative from it at 2, 3 and 8 ranks, against
-    resolutions of order 1e-11, and a few ulp from the parent's bits at
-    each size, which the block action's rank sums still decide.
+    resolution of the one-rank value.
 
-    The solves ask for preconditioner='bare': the baseline's Davidson divided
-    by d, and the default preconditioner is the screened diagonal, which
-    takes another iteration path to the same roots: screened, the vectors
-    sat up to 7.4e-7 and the roots 1.3e-11 relative from the baseline's, both
-    within the solve's convergence to CONV_TOL but outside these gates."""
+    The solves ask for preconditioner='bare', on which VECTOR_TOL was
+    measured: the default screened diagonal takes another iteration path to
+    the same roots, and over 3 ranks it left ethylene's vectors 3.6e-10 from
+    the one-rank ones, within the solve's convergence to CONV_TOL but outside
+    VECTOR_TOL.
+
+    The parents were once an archived commit from before the probe moved
+    behind the Davidson (8b5d282). Its grid (the radii recut) and its
+    static W (eta-free) are not this tree's, so it sat 7e-5 to
+    1.5e-4 Ha from these roots: a comparison of two grids, not of where the
+    probe runs."""
     s = systems[name]
     if size > 1:
         monkeypatch.setattr(trial_space, 'DAVIDSON_PAIR_TILE', SPLIT_TILE)
     omega, X, Y, info = ranks(lambda comm: solve(s, comm, probe=probe,
-                                                 preconditioner='bare'),
+                                                 preconditioner='bare',
+                                                 conv_tol=PARENT_CONV_TOL),
                               size)[0]
-    key = f'{name}_{probe}_{size}'
-    one = f'{name}_{probe}_1'
+    om_p, X_p, Y_p, _ = parents[name]
     if size == 1:
-        assert_archive_same(omega, baseline['omega_' + key], quantity='root',
-                            label='omega')
-        assert_archive_same(X, baseline['X_' + key], unit='1',
-                            quantity='vector', label='X')
-        assert_archive_same(Y, baseline['Y_' + key], unit='1',
-                            quantity='vector', label='Y')
+        assert_same(omega, om_p, quantity='root', label='omega')
+        assert_same(X, X_p, unit='1', quantity='vector', label='X')
+        assert_same(Y, Y_p, unit='1', quantity='vector', label='Y')
     else:
-        assert relative(omega, baseline['omega_' + one]) <= roots_resolution(
-            info['eps'], s['nocc'], baseline['omega_' + one])
-        for got, want in zip(sign_fixed(X, Y),
-                             sign_fixed(baseline['X_' + one],
-                                        baseline['Y_' + one])):
+        assert relative(omega, om_p) <= roots_resolution(info['eps'],
+                                                         s['nocc'], om_p)
+        for got, want in zip(sign_fixed(X, Y), sign_fixed(X_p, Y_p)):
             assert np.abs(got - want).max() <= VECTOR_TOL
-    if probe is True and size == 1:
-        assert_archive_same(np.float64(info['min_eig_amb']),
-                            baseline['amb_' + key], quantity='root',
-                            label='min eig(A-B)')
-    elif probe is True:
-        amb_one = baseline['amb_' + one]
-        assert relative(info['min_eig_amb'], amb_one) <= roots_resolution(
-            info['eps'], s['nocc'], np.atleast_1d(amb_one))
+    if probe is True:
+        standalone = float(lowest_amb_eigenvalue(
+            LinearResponseSolver(s['eps'], spin_mode='restricted'), s['nocc'],
+            'BSE', s['W_aux'], s['factors'])[0])
+        if size == 1:
+            assert_same(np.float64(info['min_eig_amb']), standalone,
+                        quantity='root', label='min eig(A-B)')
+        else:
+            assert relative(info['min_eig_amb'], standalone) <= (
+                roots_resolution(info['eps'], s['nocc'],
+                                 np.atleast_1d(standalone)))
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -681,7 +624,7 @@ def test_one_ranks_drifted_certificate_is_rank_zeros(systems, size):
         stats = {}
         with distributed(comm, audit=True):
             lockstep_stats(reset=True)
-            value = _lowest_amb_from_action(drifted, diag_d, sign_only=True,
+            value = lowest_amb_from_action(drifted, diag_d, sign_only=True,
                                             stats=stats, comm=comm,
                                             start=start)
             return float(value[0]), stats, lockstep_stats()

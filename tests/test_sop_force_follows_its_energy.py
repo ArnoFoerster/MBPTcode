@@ -42,12 +42,13 @@ from pyscf import dft, gto
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,         # noqa: E402
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,         # noqa: E402
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates   # noqa: E402
-from src.Base.isdf_jk import isdf_jk                                 # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force                                 # noqa: E402
+from src.Base.numerics.numerics import numerics_of
 from src.properties.excitations import SurfaceSpec, surface_of       # noqa: E402
-import src.gradients.qp_space_time as qp_space_time                  # noqa: E402
+import src.gradients.gwbse.qp_space_time as qp_space_time                  # noqa: E402
 from tests.isdf_test_grid import g1
 
 #: The seeded distortion of formaldehyde and ethylene, Bohr: no symmetry is
@@ -94,7 +95,7 @@ def molecule(name):
 
 def factory(xc, reference='df'):
     def scf_factory(mol):
-        mf = (isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
+        mf = (isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
               if reference == 'isdf-k' else dft.RKS(mol, xc=xc).density_fit())
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -109,8 +110,8 @@ def sop_chain(mol, xc, reference='df'):
     spec = SurfaceSpec(GroundState('dft', xc), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'sliced': True, 'fit': 'rows',
-                                 'bse_adjoint': 'grid'})
+                       numerics=numerics_of({'sliced': True, 'fit': 'rows',
+                                 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       factory(xc, reference))
 

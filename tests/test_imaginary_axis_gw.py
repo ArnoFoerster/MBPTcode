@@ -7,7 +7,7 @@ from pyscf import gto, scf, df
 
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 benzene_geom = """
 C  0.000  1.396  0.000

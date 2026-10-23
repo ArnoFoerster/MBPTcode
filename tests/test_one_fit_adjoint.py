@@ -56,22 +56,24 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.numerics import Numerics
-from src.Base import separable_ri
-from src.Base.constants import (ISDF_ROW_FORCE_ENERGY_TOL,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (ISDF_ROW_FORCE_ENERGY_TOL,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.distributed_isdf_jk import DistributedISDFJK
-from src.Base.isdf_jk import isdf_grid, isdf_jk
-from src.Base.separable_ri import (AdjointSeeds, fit_M_streaming,
-                                   fit_rows_adjoint, fit_rows_adjoints,
-                                   resolve_isdf_grid)
-from src.Base.sliced_factors import GridTileRows, SlicedFactors
-from src.Base.utils.mpi_grid import (current_comm, distributed, partition,
-                                     run_simulated)
-from src.gradients import factor_chain, isdf_derivatives
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import (AdjointSeeds, fit_M_streaming,
+                                                 fit_rows_adjoint, fit_rows_adjoints,
+                                                 resolve_isdf_grid)
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa import factor_chain
+from src.gradients import isdf_derivatives
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import (PendingFitAdjoint,
                                             isdf_fock_partial_exchange,
                                             one_fit_adjoint)
@@ -128,7 +130,7 @@ def isdf_factory(xc, grid_accuracy=None):
                                for i in range(mol.natm)})
             kw['counts'], kw['n_start'] = resolve_isdf_grid(
                 grid_accuracy, BASIS, elements, auxbasis=AUX)
-        mf = isdf_jk(base, auxbasis=AUX, **g1_kw(base, kw))
+        mf = isdf_jk_with_force(base, auxbasis=AUX, **g1_kw(base, kw))
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
         mf.max_cycle = 200
@@ -146,8 +148,8 @@ def ladder_chain(xc):
     spec = SurfaceSpec(GroundState('dft', xc), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': 'G1', 'sliced': True,
-                                 'fit': 'rows', 'bse_adjoint': 'grid'})
+                       numerics=numerics_of({'grid_accuracy': 'G1', 'sliced': True,
+                                 'fit': 'rows', 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       isdf_factory(xc, 'G1'))
 
@@ -332,7 +334,7 @@ def test_the_handed_tiles_are_the_fit(size, tile, request):
     def rank(comm):
         warnings.simplefilter('ignore')
         mol = molecule('water')
-        mf = isdf_jk(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')))
+        mf = isdf_jk_with_force(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')))
         handle = DistributedISDFJK(mf.with_df, comm=comm, tile=tile)
         handle.build()
         tiles = handle.fit_tiles()

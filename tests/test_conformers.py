@@ -22,10 +22,10 @@ import pytest
 from pyscf import gto, scf
 from pyscf.data import radii
 
-from src.Base.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
-                                CONFORMER_RMSD_TOL,
-                                CONFORMER_SINGLE_BOND_RATIO,
-                                CONFORMER_TEMPERATURE, HARTREE_TO_EV)
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
+                                         CONFORMER_RMSD_TOL,
+                                         CONFORMER_SINGLE_BOND_RATIO,
+                                         CONFORMER_TEMPERATURE, HARTREE_TO_EV)
 from src.properties.conformers import (Conformer, Torsion, bond_in_ring,
                                        boltzmann_weights, conformer_average,
                                        conformer_rmsd, deduplicate, dihedral,
@@ -36,7 +36,7 @@ from src.properties.conformers import (Conformer, Torsion, bond_in_ring,
                                        torsion_starts, torsion_values)
 from src.Base.step_failed import StepFailed
 from src.properties import conformers
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.mean_field_surface import MeanFieldSurface
 
 # s-trans 1,3-butadiene, idealized and planar: C=C 1.34, C-C 1.46, CCC 122.8 deg.
 # Atoms 0-3 are the carbon chain, so the one rotatable bond is 1-2.

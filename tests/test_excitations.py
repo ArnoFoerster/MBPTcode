@@ -70,13 +70,13 @@ import pytest
 from pyscf import gto
 
 from tests.pins import assert_same
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   PhysicsMismatch, QPStates)
 from src.properties.excitations import (SurfaceSpec, calc_adiabatic_excitation,
                                         calc_adiabatic_gap,
                                         calc_vertical_excitation, surface_of)
-from src.properties.surfaces import Realization, compare_surfaces
+from src.gradients.gwbse.surface_factory import Realization, compare_surfaces
 from src.properties.vibronic import adiabatic_gap
 from tests.reference_scf import rhf_tight
 

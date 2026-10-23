@@ -1,5 +1,5 @@
 """One shared evaluation for several states at one geometry
-(`StateManifold.evaluate`, `ExcitedStateChain._shared_forward`/`spin_view`).
+(`StateManifold.evaluate`, `ExcitedStateChain.shared_forward`/`spin_view`).
 
 G1, to a few ulp (`tests.blas_bar.same`). On ONE mean field and ONE `FrozenFactorization`, chains of each
 target (spin, root) evaluated alone, and one manifold over all of them: every
@@ -44,20 +44,21 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates  # noqa: E402
-from src.Base.isdf_jk import isdf_jk  # noqa: E402
-from src.Base.numerics import numerics_of  # noqa: E402
-from src.Base.separable_ri import resolve_isdf_grid  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated  # noqa: E402
-from src.gradients import qp_space_time  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.numerics.numerics import numerics_of  # noqa: E402
+from src.Base.factorization.separable_ri import resolve_isdf_grid  # noqa: E402
+from src.environments.solvent_screening import SolventScreening  # noqa: E402
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse import qp_space_time  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
 from src.gradients.reference_mean_field import converged_factory
-from src.gradients.rpa_bse_surface import RPABSESurface  # noqa: E402
-from src.gradients.state_manifold import StateManifold  # noqa: E402
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface  # noqa: E402
+from src.gradients.gwbse.state_manifold import StateManifold  # noqa: E402
 from src.properties.excitations import (SurfaceSpec, calc_vertical_excitation,  # noqa: E402
                                         calc_vertical_states, surface_of)
 from tests.blas_bar import same, same_solution  # noqa: E402
@@ -118,7 +119,7 @@ def isdf_lrc(mol):
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid(GRID_ACCURACY, BASIS, elements,
                                         auxbasis=AUX)
-    mf = isdf_jk(base, auxbasis=AUX, counts=counts, n_start=n_start)
+    mf = isdf_jk_with_force(base, auxbasis=AUX, counts=counts, n_start=n_start)
     mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
     mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
@@ -145,9 +146,9 @@ PRODUCTION = SurfaceSpec(GroundState('dft', 'lrc-wpbeh'), environment=None,
                          chi0='space-time', residues='sop', solver='davidson',
                          factorization='isdf',
                          qp_states=QPStates(kind='frontier'),
-                         numerics={'grid_accuracy': GRID_ACCURACY,
+                         numerics=numerics_of({'grid_accuracy': GRID_ACCURACY,
                                    'sliced': True, 'fit': 'rows',
-                                   'bse_adjoint': 'grid'})
+                                   'bse_adjoint': 'grid'}))
 
 
 def prototype(case, mol):
@@ -180,19 +181,19 @@ def watched(chain):
     """`chain` keeping every spectrum its Casida step returns and every
     mean-field force it computes, in the order made."""
     seen = {'spectra': [], 'g0': []}
-    casida, g0 = chain._casida_forward, chain.mean_field_gradient
+    casida, g0 = chain.solve_casida, chain.mean_field_gradient
 
-    def kept_casida(shared):
-        om, pieces = casida(shared)
-        seen['spectra'].append((om, pieces[10], pieces[11]))
-        return om, pieces
+    def kept_casida(shared, warm=True):
+        solution = casida(shared, warm=warm)
+        seen['spectra'].append((solution.omega, solution.x, solution.y))
+        return solution
 
     def kept_g0(mf):
         out = g0(mf)
         seen['g0'].append(out)
         return out
 
-    chain._casida_forward, chain.mean_field_gradient = kept_casida, kept_g0
+    chain.solve_casida, chain.mean_field_gradient = kept_casida, kept_g0
     return seen
 
 
@@ -402,13 +403,13 @@ def test_a_first_point_is_answered_once_without_a_forward(monkeypatch):
         proto = prototype('hf-dense', molecule())
         man = StateManifold(fresh(proto, S0), states=(S0, T0))
         ev = man.evaluate(gradients=(S0, T0))
-        forwards, shared = [], ExcitedStateChain._shared_forward
+        forwards, shared = [], ExcitedStateChain.shared_forward
 
         def counted(self, *args):
             forwards.append(1)
             return shared(self, *args)
 
-        monkeypatch.setattr(ExcitedStateChain, '_shared_forward', counted)
+        monkeypatch.setattr(ExcitedStateChain, 'shared_forward', counted)
         walk = man.surface(T0, first_point=ev)
         assert (walk.spin, walk.state) == T0
         first = walk.total_gradient(molecule())

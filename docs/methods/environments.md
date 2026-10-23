@@ -7,7 +7,9 @@ ground state relaxes inside PCM(ε_static), since the solvent nuclei have had
 time to reorient around it, and only the *response* is optical. One
 `SolventScreening` carries both — `env.mean_field(mol, factory)` applies the
 first, `attach_environment(mf, env)` the second, which substitutes v → v + ṽ
-at the integral chokepoints.
+at the integral chokepoints. A continuum without `eps_static` models only the
+optical response around a bare ground state; `env.mean_field` refuses it
+unless that limit is declared (`frozen_polarization=True`).
 
 Inside GW the reaction field is then Duchemin, Guido, Jacquemin and Blase,
 Chem. Sci. 9, 4430 (2018), Eq. (18): the
@@ -15,7 +17,9 @@ self-polarization of the orbital carrying the added charge in the *screened*
 reaction field, on every route — the contour-deformation, Laplace and
 sum-over-poles continuations of the space-time route included — with Σ itself
 screened by the bare interaction; screening Σ dynamically as well counts the
-same polarization twice. The
+same polarization twice. The shift is added to each G0W0 quasiparticle energy
+whole, after the quasiparticle equation is solved; inside the equation the
+self-energy would scale it down by the pole strength Z. The
 static COHSEX operator remains the fallback for the routes that never form W
 (ADC); the two differ by 0.39 eV of quasiparticle gap on water in water. An
 unrestricted reference takes Eq. (18) too, per spin orbital against the one W
@@ -47,8 +51,8 @@ response at ε∞, and the force needs no extra input:
 from pyscf import gto
 
 from src.Base.declaration import GroundState
-from src.Base.environment import equilibrium_environment
-from src.Base.solvent_screening import SolventScreening
+from src.environments.environment import equilibrium_environment
+from src.environments.solvent_screening import SolventScreening
 from src.properties.excitations import SurfaceSpec
 
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
@@ -57,6 +61,40 @@ env = SolventScreening(mol, solvent='dichloromethane')
 relaxed = equilibrium_environment(env)      # split: the default
 spec = SurfaceSpec(GroundState('dft', 'pbe0'), environment=relaxed)
 ```
+
+**State-specific solvation** — the linear-response treatment above lets the
+solvent answer the transition density of an excitation. A state that lives
+long enough also polarizes the solvent through the change of its own density.
+`solvent_scheme(env, 'classical-ss')` (scheme B) adds that term classically,
+E_SS = ½ ΔV·Q·ΔV of the excitation's orbital-relaxed density difference, on
+top of the bare-interaction response, vertical or at equilibrium; every
+vertical and emission record carries omega, E_SS and their sum.
+
+The full self-consistent treatment is the solvation loop
+(`src/environments/solvation_loop.py`). It knows two objects and nothing
+else: a medium (`reaction_field.ContinuumField`, a PCM cavity answering at
+ε_static and ε∞) and a state model, which gives the state's energy in a
+given external potential and its orbital-relaxed density. The loop
+equilibrates the surface charges with that density and reports the free
+energy G; with the slow charges of another state held, it gives the
+non-equilibrium energy of an absorption or emission. State models exist for
+Hartree-Fock and Kohn-Sham (`HFState`), MP2 (`MP2State`), ADC(2)
+(`ADC2State`) and GW-BSE (`GWBSEState`), so the same loop serves every
+method. A loop writes a checkpoint after every cycle and resumes from it to
+the same bits; a loop that runs out of cycles keeps its last cycle, warns
+(`SolvationNotConverged`) and is flagged.
+
+Each state model also gives its nuclear force in the fixed field, so
+`SolvatedSurface` (`src/gradients/solvated_surface.py`) makes an
+equilibrium-solvated state a surface that `optimize.relax` can walk: the
+solvated S1 and T1 minima of an emitter, and with them solvated emission and
+adiabatic energies. A GW-BSE state keeps one excited-state chain along the
+whole walk and refreezes at the minimum as the gas-phase walks do
+([properties](properties.md)). The force reads the relaxed density the loop
+already converged, and a GW-BSE state model asked again at the same geometry
+and field returns its stored answer instead of solving again. `python -m
+src.photophysics solvated` runs all of this for one molecule
+([properties](properties.md)).
 
 An explicit polarizable first shell inside the continuum is
 `ContinuumWithSites(SolventScreening(mol, ..., cavity_atoms=shell),

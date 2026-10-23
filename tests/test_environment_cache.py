@@ -34,9 +34,9 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM, ENVIRONMENT_CACHE_SIZE
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.factor_chain import FactorChain
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, ENVIRONMENT_CACHE_SIZE
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.rpa.factor_chain import FactorChain
 
 
 class Holder:

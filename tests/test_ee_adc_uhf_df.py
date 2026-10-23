@@ -15,12 +15,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals
+from src.Base.pyscf.pyscf_interface import DFIntegrals
 from src.SingleReference.ADC.eeADC import (ee_driver, ee_utils, ee_u_dense_full,
                                      ee_spin_blocks as sb)
 from src.SingleReference.ADC.eeADC import ee_u_r_sigma_df as u
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3')
 

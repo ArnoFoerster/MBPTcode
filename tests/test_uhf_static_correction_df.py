@@ -14,7 +14,7 @@ Two tiers, same split as tests/test_mp2_density_df.py:
    tests/test_uhf_mp2_relaxed_finite_field.py). Both solves are taken to
    CORRELATION_CPHF_TOL, and the bar is that same number: the test compares
    the two builders, not the solver's stop points. At that tolerance both
-   routes' solves stop in the same refinement round of src.Base.utils.cphf
+   routes' solves stop in the same refinement round of src.Base.pyscf.cphf
    (OH relaxed EN 1.0e-14 apart, workstation). A tighter tolerance measures
    the solver instead: OH's orbital Hessian is nearly singular (lowest
    eigenvalue about 2.5e-10, tests/test_cphf_residual.py), so the last bits
@@ -43,8 +43,8 @@ from src.SingleReference.ADC.static_correction import (
     build_static_correction,
     build_mp2_static_correction, build_mp2_static_correction_uhf_df,
 )
-from src.Base.constants import CORRELATION_CPHF_TOL
-from src.Base.pyscf_interface import get_uhf_spin_orbital_df_factor_blockstacked
+from src.Base.numerics.constants import CORRELATION_CPHF_TOL
+from src.Base.pyscf.pyscf_interface import get_uhf_spin_orbital_df_factor_blockstacked
 
 
 if __name__ == '__main__':

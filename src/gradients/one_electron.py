@@ -1,9 +1,9 @@
 """The one-electron and nuclear terms every nuclear force shares.
 
 The mean-field force (`isdf_mean_field`) and every correlated Lagrangian
-(`grad_engine`, `isdf_derivatives`, `derivative_coupling`) contract a density
-and an energy-weighted density with dh/dR and dS/dR, external potentials
-included; both halves read one gradient object.
+(`grad_engine`, `mean_field_response`, `derivative_coupling`) contract a
+density and an energy-weighted density with dh/dR and dS/dR, external
+potentials included; both halves read one gradient object.
 """
 import numpy as np
 from pyscf.grad import rhf as rhf_grad

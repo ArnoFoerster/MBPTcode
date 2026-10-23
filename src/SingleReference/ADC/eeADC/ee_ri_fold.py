@@ -89,18 +89,18 @@ import numpy as np
 from pyscf import df as pyscf_df
 from pyscf import lib
 
-from src.Base.constants import (BYTES_PER_GB, EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
-                                EE_RI_EXCHANGE_ARRAYS, EE_RI_EXCHANGE_CHUNK,
-                                EE_RI_FOLD_DIAG_EXPONENT, EE_RI_FOLD_DIAG_GAP,
-                                EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
-                                EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
-                                EE_RI_FOLD_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics import Numerics
-from src.Base.utils.memory import tile_width
-from src.Base.utils.mpi_grid import (NodeShared, allgather_ranges, current_comm,
-                                     exchange_blocks, ordered_chain_sum, ordered_sum,
-                                     reduce_sum)
-from src.Base.utils.threads import openmp_threads, row_map
+from src.Base.numerics.constants import (BYTES_PER_GB, EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
+                                         EE_RI_EXCHANGE_ARRAYS, EE_RI_EXCHANGE_CHUNK,
+                                         EE_RI_FOLD_DIAG_EXPONENT, EE_RI_FOLD_DIAG_GAP,
+                                         EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
+                                         EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
+                                         EE_RI_FOLD_TILE_ARRAYS, EE_RI_TILE_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import tile_width
+from src.Base.utils.parallel.mpi_grid import (NodeShared, allgather_ranges, current_comm,
+                                              exchange_blocks, ordered_chain_sum, ordered_sum,
+                                              reduce_sum)
+from src.Base.utils.parallel.threads import openmp_threads, row_map
 
 try:
     import cupy as cp
@@ -1272,7 +1272,7 @@ def drive(op, solve):
     runs `solve` on a stand-in whose products every rank computes together,
     the other ranks serve them; rank 0's return value (keep it to arrays and
     lists: it is pickled) comes back on every rank. Serially, solve(op)."""
-    from src.Base.utils.krylov import root_driven_solve
+    from src.Base.utils.linear_algebra.krylov import root_driven_solve
     comm = op.comm
     if comm is None or comm.Get_size() == 1:
         return solve(op)

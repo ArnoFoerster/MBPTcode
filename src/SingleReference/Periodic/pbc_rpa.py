@@ -19,34 +19,29 @@ rho_ia^k(q+G) = < i_k | e^{-i(q+G).r} | a_{k+q} > are MO pair densities in G-spa
 because v is diagonal in G; a damped kernel is just a different multiplier.
 
 The G-sum is blocked for memory. Imaginary-frequency integration uses the repo
-grids (src.Base.utils.grids), not pyscf's.
+grids (src.Base.utils.grids.grids), not pyscf's.
 """
+import warnings
+
 import numpy as np
 from pyscf import lib
 from pyscf.pbc import tools
 from pyscf.pbc.df import ft_ao
 from pyscf.df import addons
 
-from src.Base.utils.grids import (gauss_legendre_grid, minimax_frequency_grid,
+from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_frequency_grid,
                                    minimax_supported_sizes)
-from src.Base.utils.matsubara import beta_from_mf, thermal_e_min
+from src.Base.utils.grids.matsubara import beta_from_mf, thermal_e_min
 from src.SingleReference.Periodic.pbc_occupations import (build_chi0_aux_occ,
                                                           is_integer_occupation,
+                                                          split_transition_window,
                                                           transition_window)
 from src.SingleReference.Periodic.pbc_casida import build_chi0_aux
+from src.SingleReference.Periodic.pbc_integrals import (bz_index,
+                                                        get_momentum_transfer_map)
 from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
 
 einsum = lib.einsum
-
-
-def _transition_window(mo_energy, nocc):
-    """(e_min, e_max) = smallest/largest occ->vir orbital-energy transition over
-    all k-points (fundamental gap and max transition); used to scale the grids."""
-    occ = np.concatenate([e[:nocc] for e in mo_energy])
-    vir = np.concatenate([e[nocc:] for e in mo_energy])
-    e_min = vir.min() - occ.max()          # fundamental (possibly indirect) gap
-    e_max = vir.max() - occ.min()
-    return e_min, e_max
 
 
 def build_freq_grid(mo_energy, nocc, nw, grid='gauss_legendre', beta=None,
@@ -59,7 +54,7 @@ def build_freq_grid(mo_energy, nocc, nw, grid='gauss_legendre', beta=None,
     The metallic case. Two things go wrong for a metal and only the second
     one announces itself:
 
-    * `_transition_window` applies ONE integer occupied count at every k-point,
+    * `split_transition_window` applies ONE integer occupied count at every k-point,
       so for a metal it measures a gap across an artificial boundary. Depending
       on how ragged the collapse is, that comes out either NEGATIVE -- on a Li
       monolayer with gth-dzvp, where per-k nocc is [8, 9, 11], it gives
@@ -83,7 +78,7 @@ def build_freq_grid(mo_energy, nocc, nw, grid='gauss_legendre', beta=None,
     if mo_occ is not None and not is_integer_occupation(mo_occ):
         e_min, e_max = transition_window(mo_energy, mo_occ)
     else:
-        e_min, e_max = _transition_window(mo_energy, nocc)
+        e_min, e_max = split_transition_window(mo_energy, nocc)
     if beta is not None:
         e_min = thermal_e_min(beta, e_min)
     if grid == 'minimax':
@@ -93,6 +88,28 @@ def build_freq_grid(mo_energy, nocc, nw, grid='gauss_legendre', beta=None,
     elif grid == 'gauss_legendre':
         return gauss_legendre_grid(nw, w0=0.5 * e_min)
     raise ValueError(f"unknown grid '{grid}'")
+
+
+def rpa_log_determinant(one_minus_pi, q, w, flags=None):
+    """log det(1 - Pi) of the dRPA energy at transfer q, frequency index w.
+
+    On the imaginary axis Pi is negative semidefinite, so 1 - Pi >= 1 and the
+    determinant is positive. One that is not is a numerical outcome (a broken
+    Pi, or a convention error) rather than an input to refuse: log|det| is
+    returned with a RuntimeWarning, and (q, w) is appended to
+    flags['nonpositive_det'] when a dict is passed. Either way the energy built
+    on it is not the dRPA correlation energy.
+    """
+    sign, logdet = np.linalg.slogdet(one_minus_pi)
+    if not sign.real > 0:
+        warnings.warn(f"det(1 - Pi) is not positive at q={q}, w={w} (sign "
+                      f"{sign}): the RPA dielectric has been driven singular, "
+                      f"which on a gapped system means a convention error "
+                      f"rather than physics; log|det| is used.",
+                      RuntimeWarning, stacklevel=3)
+        if flags is not None:
+            flags.setdefault('nonpositive_det', []).append((int(q), int(w)))
+    return logdet
 
 
 def make_auxcell(cell, auxbasis='weigend'):
@@ -147,15 +164,86 @@ def coulomb_metric_inv_sqrt(J, tol=1e-10):
     return (U[:, keep] * (e[keep] ** -0.5)) @ U[:, keep].conj().T
 
 
-def _bz_index(kscaled, kvec):
-    """Return (idx, G0scaled) so that kvec == kscaled[idx] + G0scaled (integers)."""
-    diff = kvec - kscaled
-    frac = diff - np.round(diff)
-    idx = np.where(np.linalg.norm(frac, axis=1) < 1e-8)[0]
-    assert len(idx) == 1, f"no BZ match for {kvec}"
-    i = idx[0]
-    G0 = np.round(kvec - kscaled[i])
-    return i, G0
+def kernel_cell(cell, kpts, coulG_fn=None, mesh=None, check_support=True):
+    """(cell, coulG_fn) for a G-space RI build: the cell on `mesh` (a copy if
+    one is given), the kernel (bare pyscf get_coulG by default), and the
+    check that a damped kernel's support fits the cell at this k-mesh.
+
+    A damped kernel's real-space support must still fit the cell along every
+    unsampled direction at THIS k-mesh -- r0 grows with the grid while the
+    vacuum does not, so a slab that was fine on a coarse mesh can silently
+    stop being fine on a finer one. No-op for any non-damped kernel.
+    """
+    if mesh is not None:
+        cell = cell.copy()
+        cell.mesh = mesh
+        cell.build(False, False)
+    if coulG_fn is None:
+        coulG_fn = lambda c, q, Gv: tools.get_coulG(c, k=q, mesh=c.mesh, Gv=Gv)
+    if check_support:
+        assert_damping_fits(cell, kpts, coulG_fn)
+    return cell, coulG_fn
+
+
+def gspace_ri_factors(cell, aux, mo_coeff, kpts, coulG_fn, bra=slice(None),
+                      ket=slice(None), blk=None, extra=None, inv_sqrt=None):
+    """Yield (q, Lhalf) per momentum transfer, the RI-V factor of the pairs
+    (bra @ k, ket @ k+q) in the Coulomb metric of the kernel v:
+
+        B_{P,pr}(k) = sum_G chi_P(q+G)^* v(q+G) <p_k|e^{-i(q+G)r}|r_{k+q}>
+        J_{PQ}(q)   = sum_G chi_P(q+G)^* v(q+G) chi_Q(q+G)
+        Lhalf       = J^{-1/2} B,   shape (naux, nkpts, nbra, nket).
+
+    bra / ket select the orbitals (slices of mo_coeff's last axis); blk the
+    G block size (None: all G at once). extra(auxG, rho, qtrue) -> (dJ, dB)
+    adds a further kernel to J and to B[:, k] for each block (the slab
+    reaction field, which needs all G at once); inv_sqrt(J, q) replaces
+    `coulomb_metric_inv_sqrt` (to explain a refusal).
+    """
+    nkpts = len(kpts)
+    naux = aux.nao_nr()
+    nmo = mo_coeff.shape[-1]
+    kscaled = cell.get_scaled_kpts(kpts)
+    kscaled -= kscaled[0]
+    b = cell.reciprocal_vectors()
+    Gv, _, kws = cell.get_Gv_weights(cell.mesh)          # kws = grid weight
+    kws = np.asarray(kws)
+    nG = len(Gv)
+    blk = nG if blk is None else blk
+    nb = len(range(nmo)[bra])
+    nk = len(range(nmo)[ket])
+
+    for iq in range(nkpts):
+        J = np.zeros((naux, naux), dtype=np.complex128)
+        B = np.zeros((naux, nkpts, nb, nk), dtype=np.complex128)
+        for ki in range(nkpts):
+            kj, G0 = bz_index(kscaled, kscaled[ki] + kscaled[iq])
+            qtrue = (kscaled[kj] + G0 - kscaled[ki]).dot(b)     # = qscaled . b
+            kptj = kscaled[kj].dot(b)                            # BZ image
+            ci = mo_coeff[ki][:, bra].conj()
+            cj = mo_coeff[kj][:, ket]
+            for p0 in range(0, nG, blk):
+                p1 = min(p0 + blk, nG)
+                Gblk = Gv[p0:p1]
+                kw_blk = kws if kws.ndim == 0 else kws[p0:p1]
+                vG = coulG_fn(cell, qtrue, Gblk) * kw_blk       # v(q+G) x weight
+                auxG = ft_ao.ft_ao(aux, Gblk, kpt=qtrue)         # chi_P(q+G)
+                pqG = ft_ao.ft_aopair(cell, Gblk, aosym='s1',
+                                      kpti_kptj=(kpts[ki], kptj), q=qtrue)
+                pqG = pqG.reshape(p1 - p0, nmo, nmo)
+                rho = einsum('gpq,pi,qa->gia', pqG, ci, cj)
+                w_auxG = auxG.conj() * vG[:, None]               # chi_P^* v
+                J += einsum('gP,gQ->PQ', w_auxG, auxG)
+                B[:, ki] += einsum('gP,gia->Pia', w_auxG, rho)
+                if extra is not None:
+                    dJ, dB = extra(auxG, rho, qtrue)
+                    J += dJ
+                    B[:, ki] += dB
+        # J(q) depends only on q: each of the nkpts ki-terms adds the identical
+        # J(q) (aux/Coulomb are invariant under q -> q+G0), so undo the overcount.
+        J /= nkpts
+        Jm12 = coulomb_metric_inv_sqrt(J) if inv_sqrt is None else inv_sqrt(J, iq)
+        yield iq, einsum('PQ,Qkia->Pkia', Jm12, B)
 
 
 def build_Pi_all(cell, aux, mo_coeff, mo_energy, nocc, kpts, coulG_fn,
@@ -167,53 +255,16 @@ def build_Pi_all(cell, aux, mo_coeff, mo_energy, nocc, kpts, coulG_fn,
     """
     nkpts = len(kpts)
     naux = aux.nao_nr()
-    nmo = mo_coeff.shape[-1]
-    nvir = nmo - nocc
-    kscaled = cell.get_scaled_kpts(kpts)
-    kscaled -= kscaled[0]
-    b = cell.reciprocal_vectors()
-    Gv, Gvbase, kws = cell.get_Gv_weights(cell.mesh)   # kws = grid weight
-    kws = np.asarray(kws)
-    nG = len(Gv)
+    kconserv = get_momentum_transfer_map(cell, kpts)
     nw = len(freqs)
 
     Pi_out = []
-    for iq in range(nkpts):
-        qscaled = kscaled[iq]
-        J = np.zeros((naux, naux), dtype=np.complex128)
-        B = np.zeros((naux, nkpts, nocc, nvir), dtype=np.complex128)
-        for ki in range(nkpts):
-            kjscaled = kscaled[ki] + qscaled
-            kj, G0 = _bz_index(kscaled, kjscaled)
-            qtrue = (kscaled[kj] + G0 - kscaled[ki]).dot(b)     # = qscaled . b
-            kpti = kpts[ki]
-            kptj = kscaled[kj].dot(b)                            # BZ image
-            ci = mo_coeff[ki]
-            cj = mo_coeff[kj]
-            for p0 in range(0, nG, blk):
-                p1 = min(p0 + blk, nG)
-                Gblk = Gv[p0:p1]
-                vG = coulG_fn(cell, qtrue, Gblk)                 # raw kernel v(q+G)
-                kw_blk = kws if kws.ndim == 0 else kws[p0:p1]
-                vG = vG * kw_blk                                 # apply grid weight
-                auxG = ft_ao.ft_ao(aux, Gblk, kpt=qtrue)         # chi_P(q+G)
-                pqG = ft_ao.ft_aopair(cell, Gblk, aosym='s1',
-                                      kpti_kptj=(kpti, kptj), q=qtrue)
-                pqG = pqG.reshape(p1 - p0, nmo, nmo)
-                rho = einsum('gpq,pi,qa->gia', pqG, ci[:, :nocc].conj(),
-                             cj[:, nocc:])
-                w_auxG = auxG.conj() * vG[:, None]               # chi_P^* v
-                J += einsum('gP,gQ->PQ', w_auxG, auxG)
-                B[:, ki] += einsum('gP,gia->Pia', w_auxG, rho)
-        # J(q) depends only on q: each of the nkpts ki-terms adds the identical
-        # J(q) (aux/Coulomb are invariant under q -> q+G0), so undo the overcount.
-        J /= nkpts
-        Jm12 = coulomb_metric_inv_sqrt(J)
-        Lhalf = einsum('PQ,Qkia->Pkia', Jm12, B)
+    for iq, Lhalf in gspace_ri_factors(cell, aux, mo_coeff, kpts, coulG_fn,
+                                       bra=slice(0, nocc),
+                                       ket=slice(nocc, None), blk=blk):
         Pi_q = np.zeros((nw, naux, naux), dtype=np.complex128)
         for ki in range(nkpts):
-            kjscaled = kscaled[ki] + qscaled
-            kj, _ = _bz_index(kscaled, kjscaled)
+            kj = kconserv[iq, ki]
             eia = (mo_energy[ki][:nocc, None] - mo_energy[kj][None, nocc:]).ravel()  # <0
             L = Lhalf[:, ki].reshape(naux, -1)
             for w in range(nw):
@@ -225,7 +276,7 @@ def build_Pi_all(cell, aux, mo_coeff, mo_energy, nocc, kpts, coulG_fn,
 
 def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
                              mo_energy=None, verbose=False, return_per_q=False,
-                             beta=None, mo_occ=None):
+                             beta=None, mo_occ=None, flags=None):
     """Direct-RPA correlation energy from a prebuilt integrals object, with the
     momentum-transfer sum taken over WHATEVER transfer grid that object carries.
 
@@ -246,6 +297,9 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
     as build_Pi_all's (2/nkpts) * [2 e/(w^2+e^2)] -- or, when `mo_occ` is
     fractional, from pbc_occupations.build_chi0_aux_occ, which reduces to it
     exactly for integer occupations.
+
+    flags: a dict that receives the numerical flags (`rpa_log_determinant`:
+    'nonpositive_det', the (Q, w) whose det(1 - Pi) was not positive).
     """
     if mo_energy is None:
         mo_energy = dfints.mo_energy
@@ -284,7 +338,7 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
                 Pi = build_chi0_aux(dfints, kconserv, freqs[w],
                                     mo_energy=mo_energy, imaginary=True)
             naux = Pi.shape[0]
-            sign, logdet = np.linalg.slogdet(np.eye(naux) - Pi)
+            logdet = rpa_log_determinant(np.eye(naux) - Pi, Q, w, flags)
             ec_q += wts[w] / (2 * np.pi) * (logdet + np.trace(Pi).real)
         per_q[Q] = ec_q.real
         if verbose:
@@ -297,26 +351,16 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
 
 def ri_rpa_ecorr(mf, auxbasis='weigend', nw=32, coulG_fn=None, mesh=None,
                  grid='gauss_legendre', verbose=False, check_support=True,
-                 beta=None):
+                 beta=None, flags=None):
     """Direct-RPA correlation energy per unit cell for a KRHF/KRKS mean field.
 
     coulG_fn(cell, q, Gv) -> v(q+G): the (raw, unweighted) Coulomb kernel.
     Default is the bare pyscf get_coulG; pass a damped kernel for AUTO damping.
+    flags: a dict that receives the numerical flags, as in
+    `ri_rpa_ecorr_from_dfints`.
     """
-    cell = mf.cell
-    if mesh is not None:
-        cell = cell.copy()
-        cell.mesh = mesh
-        cell.build(False, False)
-    if coulG_fn is None:
-        coulG_fn = lambda c, q, Gv: tools.get_coulG(c, k=q, mesh=c.mesh, Gv=Gv)
     kpts = mf.kpts
-    # A damped kernel's real-space support must still fit the cell along
-    # every unsampled direction at THIS k-mesh -- r0 grows with the grid while
-    # the vacuum does not, so a slab that was fine on a coarse mesh can silently
-    # stop being fine on a finer one. No-op for any non-damped kernel.
-    if check_support:
-        assert_damping_fits(cell, kpts, coulG_fn)
+    cell, coulG_fn = kernel_cell(mf.cell, kpts, coulG_fn, mesh, check_support)
     nkpts = len(kpts)
     mo_coeff = np.asarray(mf.mo_coeff)
     mo_energy = mf.mo_energy
@@ -344,7 +388,7 @@ def ri_rpa_ecorr(mf, auxbasis='weigend', nw=32, coulG_fn=None, mesh=None,
         ec_q = 0.0
         for w in range(nw):
             Pi = Pi_all[iq][w]
-            sign, logdet = np.linalg.slogdet(np.eye(naux) - Pi)
+            logdet = rpa_log_determinant(np.eye(naux) - Pi, iq, w, flags)
             ec_q += wts[w] / (2 * np.pi) * (logdet + np.trace(Pi).real)
         if verbose:
             print(f"  q={iq:3d}  Ec(q) = {ec_q.real: .10f}")

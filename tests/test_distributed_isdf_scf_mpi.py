@@ -51,16 +51,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import numpy as np
 from pyscf import dft, gto, lib
 
-from src.Base import distributed_isdf_jk as dist_isdf
-from src.Base.constants import COMPOSED_GRAD_K
-from src.Base.distributed_df import (distributed_mean_field,
-                                     release_distributed)
-from src.Base.distributed_isdf_jk import (ISDF_BLAS_KEYS, distributed_isdf_jk,
-                                          distributed_isdf_storage)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import (distributed, grid_comm,
-                                     lockstep_mean_field)
-from src.Base.utils.threads import blas_threads
+from src.Base.factorization import distributed_isdf_jk as dist_isdf
+from src.Base.numerics.constants import COMPOSED_GRAD_K
+from src.Base.factorization.distributed_df import (distributed_mean_field,
+                                                   release_distributed)
+from src.Base.factorization.distributed_isdf_jk import (ISDF_BLAS_KEYS, distributed_isdf_jk,
+                                                        distributed_isdf_storage)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
+                                              lockstep_mean_field)
+from src.Base.utils.parallel.threads import blas_threads
 from tests.reduction_bounds import (ULP, exact_offset, regrouped,
                                     rounding_bound)
 from tests.test_distributed_fit_mpi import Gate, serial
@@ -81,7 +81,7 @@ OMEGA = 0.2
 def fresh(xc):
     """An unrun ISDF mean field on water/cc-pVDZ, the default grid."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc)))
+    mf = isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc)))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
 

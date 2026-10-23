@@ -58,12 +58,14 @@ count.
 """
 import numpy as np
 
-from src.Base.constants import (EE_RI_DENSITY_OCC_TILE_ARRAYS,
-                                EE_RI_DENSITY_VIRT_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics import Numerics
-from src.Base.utils.memory import tile_width
-from src.Base.utils.mpi_grid import ordered_sum
+from src.Base.numerics.constants import (EE_RI_DENSITY_OCC_TILE_ARRAYS,
+                                         EE_RI_DENSITY_VIRT_TILE_ARRAYS, EE_RI_TILE_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import tile_width
+from src.Base.utils.parallel.mpi_grid import ordered_sum
+from src.SingleReference.common.df_amplitudes import doubles_denominator
 from src.SingleReference.ADC.eeADC.ee_density import assemble
+from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
 
 def tile_ranges(n, per, tile_gb, ranks):
@@ -106,8 +108,7 @@ def _amplitudes(op, k0, k1):
     """(tau, ts) of the occupied rows k0..k1-1, shape (kt, nv, no, nv)."""
     f = op.f
     I = op._ints(k0, k1)
-    D = (f.ev[None, :, None, None] + f.ev[None, None, None, :]
-         - f.eo[k0:k1, None, None, None] - f.eo[None, None, :, None])
+    D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
     tau = I / D
     del I
     return tau, tau - tau.transpose(0, 3, 2, 1)
@@ -118,8 +119,7 @@ def _doubles(op, BtT, k0, k1, omega, scale, s):
     auxiliary-major dressed factor BtT (naux, no nv)."""
     f = op.f
     H, HT = op._pair(BtT, k0, k1)
-    D = (f.ev[None, :, None, None] + f.ev[None, None, None, :]
-         - f.eo[k0:k1, None, None, None] - f.eo[None, None, :, None])
+    D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
     w = scale / (omega - D)
     del D
     if s > 0:
@@ -199,9 +199,9 @@ def _pass_amplitudes(op, x, s, p1_oo, p1_vv):
     p0_ov = num / (2.0 * d_ia)
     return {
         'oo_ru': -r @ r.T, 'vv_ru': r.T @ r,
-        'oo_p0': _sym(p1_oo @ a['p0_oo']), 'vv_p0': -_sym(p1_vv @ a['p0_vv']),
-        'oo_tt_v': _sym(a['oo_tt_v']), 'vv_tt_v': _sym(a['vv_tt_v']),
-        'vv_tt_o': _sym(a['vv_tt_o']),
+        'oo_p0': symmetrize(p1_oo @ a['p0_oo']), 'vv_p0': -symmetrize(p1_vv @ a['p0_vv']),
+        'oo_tt_v': symmetrize(a['oo_tt_v']), 'vv_tt_v': symmetrize(a['vv_tt_v']),
+        'vv_tt_o': symmetrize(a['vv_tt_o']),
         'ov_p0v': -p0_ov @ p1_vv, 'ov_p0o': p1_oo @ p0_ov,
     }, r
 
@@ -248,7 +248,7 @@ def _pass_t_products(op, x, s, r, p2_ov, mine):
         del tau, ts
         p3.add(t, {'tr': tr, 'tp': tp})
     c = p3.total()
-    return {'oo_tru': -_sym(x @ c['tr'].T), 'vv_tru': _sym(c['tr'].T @ x),
+    return {'oo_tru': -symmetrize(x @ c['tr'].T), 'vv_tru': symmetrize(c['tr'].T @ x),
             'ov_tsd': -c['tp']}
 
 
@@ -276,7 +276,7 @@ def _pass_virtual_tiles(op, p1_oo, tile_gb, ranks, rank):
             S += wgt * (X.reshape(no, -1) @ R.reshape(no, -1).T)
         del tau, ts
         p4.add(t, {'s': S})
-    return -0.5 * _sym(p4.total()['s'])
+    return -0.5 * symmetrize(p4.total()['s'])
 
 
 def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
@@ -309,10 +309,6 @@ def difference_density(op, y, omega, t1, terms=False, tile_gb=EE_RI_TILE_GB):
     out.update(_pass_t_products(op, x, s, r, p2_ov, mine))
     out['oo_tt_o'] = _pass_virtual_tiles(op, p1_oo, tile_gb, ranks, rank)
     return _finish(out, no, nv, terms)
-
-
-def _sym(A):
-    return 0.5 * (A + A.T)
 
 
 def _finish(alpha, no, nv, terms):

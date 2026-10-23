@@ -1,6 +1,6 @@
 # torch.autograd oracle for the solvated ISDF / contour-deformation BSE@GW gradient
 
-The production chain (`src/gradients/excited_state.py` and what it calls:
+The production chain (`src/gradients/gwbse/excited_state.py` and what it calls:
 `qp_space_time`, `contour_deformation`, `space_time_adjoint`, `bse_isdf`,
 `reaction_field_adjoint`) is a hand-written reverse pass from the factors
 (eps, X_mo, D_dressed, D_bare) to a BSE@GW excitation energy or a

@@ -32,12 +32,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base import isdf_jk
-from src.Base.constants import (ISDF_GRID_ACCURACY,
-                                ISDF_RADII_MATCH_TOL)
-from src.Base.isdf_jk import isdf_grid
-from src.Base.separable_ri import (PUBLISHED_COUNTS, _SHELL_ORDER, atomic_grid,
-                                   UntabulatedISDFGrid, shipped_radii_lookup)
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (ISDF_GRID_ACCURACY,
+                                         ISDF_RADII_MATCH_TOL)
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.Base.factorization.separable_ri import (PUBLISHED_COUNTS, SHELL_ORDER, atomic_grid,
+                                                 UntabulatedISDFGrid, shipped_radii_lookup)
 from tests.pins import assert_same
 
 BASIS = 'cc-pvtz'
@@ -46,13 +46,13 @@ ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 # Three sizes the shipped table holds for BOTH C and H at this basis, so the
 # sweep exercises the lookup and never the run-time optimizer.
-G1_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G1']))
-G2_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
-G3_COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
+G1_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G1']))
+G2_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G2']))
+G3_COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY[BASIS]['G3']))
 SWEEP = (G1_COUNTS, G2_COUNTS, G3_COUNTS)
 # The published carbon grid is the one row that carries `origin`, and its
 # counts appear nowhere else in the table.
-CARBON_PUBLISHED_COUNTS = dict(zip(_SHELL_ORDER, PUBLISHED_COUNTS['C']))
+CARBON_PUBLISHED_COUNTS = dict(zip(SHELL_ORDER, PUBLISHED_COUNTS['C']))
 
 
 @pytest.fixture(scope='module')
@@ -222,7 +222,7 @@ def test_untabulated_counts_without_radii_name_what_the_table_holds(ethylene,
         asked.append(element)
         return atomic_grid(element, basis, auxbasis, G2_COUNTS)[0], 0.0
 
-    monkeypatch.setattr(isdf_jk, 'optimize_atomic_radii', stub)
+    monkeypatch.setattr(separable_ri, 'optimize_atomic_radii', stub)
     with pytest.raises(UntabulatedISDFGrid) as refused:
         isdf_grid(ethylene, counts=counts)
     assert asked == [], 'searched before refusing'
@@ -246,7 +246,7 @@ def test_declared_untabulated_counts_are_searched_at_those_counts(
         asked.append((element, dict(counts)))
         return atomic_grid(element, basis, auxbasis, G2_COUNTS)[0], 0.0
 
-    monkeypatch.setattr(isdf_jk, 'optimize_atomic_radii', stub)
+    monkeypatch.setattr(separable_ri, 'optimize_atomic_radii', stub)
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
         isdf_grid(ethylene, counts=counts, runtime_radii=True)

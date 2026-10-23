@@ -37,19 +37,19 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import (dfactor_adjoint,
                                             dfactor_adjoint_gauges)
-from src.gradients.reaction_field_adjoint import (reaction_field_backward,
-                                                  reaction_field_shift,
-                                                  static_screening)
+from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
+                                                        reaction_field_shift,
+                                                        static_screening)
 from src.properties.characters import ct_character, roots
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import RECORDING_BLAS, matches

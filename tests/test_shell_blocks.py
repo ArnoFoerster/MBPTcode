@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import DERIV_BLOCK_BYTES
+from src.Base.numerics.constants import DERIV_BLOCK_BYTES
 from src.gradients.grad_engine import _shell_blocks
 
 #: Big enough that per_ao * a whole-molecule block overflows int32; benzene at

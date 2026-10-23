@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (HESSIAN_ASYMMETRY_WORST, NUCLEAR_FD_STEP,
-                                PIN_CROSS_BLAS_GRADIENT_BAR)
+from src.Base.numerics.constants import (HESSIAN_ASYMMETRY_WORST, NUCLEAR_FD_STEP,
+                                         PIN_CROSS_BLAS_GRADIENT_BAR)
 from src.properties.hessian import surface_hessian
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.blas_bar import assert_same_within
 
 

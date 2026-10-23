@@ -29,8 +29,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (get_antisymmetrized_spin_integrals,
-                                      get_orbital_energies)
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_integrals,
+                                            get_orbital_energies)
 from src.CodeGeneration.diagrammatic import exact_oracle as EO
 from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
 from src.SingleReference.ADC import (build_mp3_static_correction,

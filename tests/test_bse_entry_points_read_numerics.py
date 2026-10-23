@@ -18,11 +18,12 @@ import inspect
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base import constants
-from src.Base.numerics import Numerics
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.SingleReference.LinearResponse import (block_actions, bse, davidson,
+from src.Base.numerics import constants
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.SingleReference.BSE import solve as bse
+from src.SingleReference.LinearResponse import (block_actions, davidson,
                                                 trial_space)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
@@ -33,8 +34,8 @@ H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def test_the_entry_points_take_the_object():
-    for fn in (davidson.solve_casida_davidson, davidson.solve_bse_isdf,
-               davidson.solve_bse_df, bse.solve_bse):
+    for fn in (davidson.solve_casida_davidson, bse.solve_bse_isdf,
+               bse.solve_bse_df, bse.solve_bse):
         params = inspect.signature(fn).parameters
         assert 'numerics' in params, fn.__name__
         assert not set(CHOICES) & set(params), fn.__name__
@@ -70,7 +71,7 @@ def test_a_stand_alone_solve_reaches_the_chains_residual():
         spin_mode='restricted')
     om, X, Y = davidson.solve_casida_davidson(lr, nocc)
     assert len(om) == constants.BSE_DAVIDSON_NROOTS
-    act, diag = block_actions._block_action(lr, nocc, 'RPA', None, None)
+    act, diag = block_actions.block_action(lr, nocc, 'RPA', None, None)
     shape = (-1,) + diag.shape
     Ax, Bx = act(X.T.reshape(shape))
     Ay, By = act(Y.T.reshape(shape))

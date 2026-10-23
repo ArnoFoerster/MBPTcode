@@ -57,13 +57,11 @@ and one Z-vector per coupling pair (T1-T2, S1-S2).
 """
 import numpy as np
 
-from src.Base.pyscf_interface import occupied_count
-from src.gradients.derivative_coupling import evaluated_coupling
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       GROUND_SPIN_FACTOR,
-                                       ground_state_element,
-                                       interstate_element)
-from src.properties.rates import require_vibrational_modes
+from src.Base.pyscf.pyscf_interface import occupied_count
+from src.gradients.gwbse.derivative_coupling import evaluated_coupling
+from src.properties.spin_orbit import ground_state_element, interstate_element
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
+from src.properties.franck_condon import require_vibrational_modes
 from src.properties.vibronic import project_coupling
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization)

@@ -19,11 +19,11 @@ from pyscf.solvent.grad import pcm as pcm_grad
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import pcm_derivatives
-from src.Base.pcm_derivatives import (LIBCINT_BLOCK_LIMIT,
-                                      PYSCF_PCM_MAX_MEMORY_MB, cavity_blocks)
-from src.Base.pcm_derivatives import solvation_gradient
-from src.Base.solvent_screening import SolventScreening
+from src.environments import pcm_derivatives
+from src.environments.pcm_derivatives import (LIBCINT_BLOCK_LIMIT,
+                                              PYSCF_PCM_MAX_MEMORY_MB, cavity_blocks)
+from src.environments.pcm_derivatives import solvation_gradient
+from src.environments.solvent_screening import SolventScreening
 
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: cavity points per block once the limit is lowered

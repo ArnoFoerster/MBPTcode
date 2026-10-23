@@ -34,9 +34,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import (BOLTZMANN_HARTREE_PER_KELVIN, HARTREE_TO_EV,
-                                RATE_FC_LAMBDA_RATIO_MAX, TRIPLET_SUBLEVELS)
-from src.properties import rates
+from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN, HARTREE_TO_EV,
+                                         RATE_FC_LAMBDA_RATIO_MAX, TRIPLET_SUBLEVELS)
+from src.photophysics import rates
+from src.properties import franck_condon
 
 TEMPERATURE = 300.0
 LAMBDA_ENV = 0.002
@@ -109,7 +110,7 @@ def test_risc_runs_through_a_dark_singlet_within_reach():
     assert set(pairs) == {'T1->S1', 'T1->S2'}
     assert pairs['T1->S1']['k'] == out['channels']['RISC T1->S1'][
         'A4_fc_condon_ht']
-    rho = (lambda e: rates.fc_weighted_dos(e, huang_rhys(LAMBDA), OMEGA,
+    rho = (lambda e: franck_condon.fc_weighted_dos(e, huang_rhys(LAMBDA), OMEGA,
                                            TEMPERATURE,
                                            lambda_classical=LAMBDA_ENV))
     de = (E_S1 - E_T1) + split

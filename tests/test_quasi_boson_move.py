@@ -52,16 +52,17 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-import src.Base.eri_blocks as production_eri
+import src.SingleReference.common.eri_blocks as production_eri
 import src.SingleReference.GW.quasi_boson as production_qb
-import src.SingleReference.LinearResponse.quasi_boson_bse as production_bse
+import src.SingleReference.BSE.quasi_boson_bse as production_bse
 import src.gradients.df_assembly as df_assembly
-import src.gradients.quasi_boson_adjoint as adjoint
-from src.Base.constants import (QP_WINDOW_Z_MIN, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.pyscf_interface import get_two_electron_integrals_chemist
+import src.gradients.gwbse.quasi_boson_adjoint as adjoint
+from src.Base.numerics.constants import (QP_WINDOW_Z_MIN, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.pyscf.pyscf_interface import get_two_electron_integrals_chemist
 from src.SingleReference.GW.qp_energy import _two_electron_integrals
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.dense_qp import dense_max_weight_root
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida
 from tests.pins import (assert_same, bitwise, blas_identity, pin_bar,
                         recorded_blas)
@@ -199,7 +200,7 @@ def test_the_adjoint_quasiparticle_solve_is_bitwise_the_forward_one(tag, h4,
     p = nocc - 1
     assert_same(adj.supermatrix_diag(p), prod.supermatrix_diag(p),
                 quantity='root', label='supermatrix diagonal')
-    assert_same(adj.solve_diag_dense(p), prod.solve_diag_dense(p),
+    assert_same(dense_max_weight_root(adj, p), dense_max_weight_root(prod, p),
                 label='dense root, Z')
 
 
@@ -360,11 +361,13 @@ def test_from_mol_is_not_the_dense_four_index_builder_bitwise(tag, h4, water):
     occ, virt = slice(0, nocc), slice(nocc, norb)
     diff = np.abs(blocks.oovv - eri_prod[occ, occ, virt, virt]).max()
     expected = FROM_MOL_VS_DENSE[tag]
-    if expected == 0.0:
+    if expected != 0.0 and RECORDING_BLAS == blas_identity():
+        assert 0.3 * expected < diff < 3.0 * expected
+    else:
+        # the recorded difference is the recording BLAS's rounding; elsewhere
+        # the two builders are the same integrals within the class bar
         assert_same(blocks.oovv, eri_prod[occ, occ, virt, virt],
                     quantity='root', label='oovv')
-    else:
-        assert 0.3 * expected < diff < 3.0 * expected
 
 
 def test_mo_eri_is_the_bare_interaction_and_not_the_environment_aware_one(h4):
@@ -410,8 +413,8 @@ def test_production_imports_nothing_from_the_gradients_package():
     """A fresh interpreter reaches all three production modules without it."""
     code = ('import sys; '
             'import src.SingleReference.GW.quasi_boson; '
-            'import src.SingleReference.LinearResponse.quasi_boson_bse; '
-            'import src.Base.eri_blocks; '
+            'import src.SingleReference.BSE.quasi_boson_bse; '
+            'import src.SingleReference.common.eri_blocks; '
             "print(sorted(m for m in sys.modules if m.startswith('src.gradients')))")
     repo = pathlib.Path(__file__).resolve().parent.parent
     out = subprocess.run([sys.executable, '-c', code], capture_output=True,

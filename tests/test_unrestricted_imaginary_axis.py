@@ -40,9 +40,10 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.solvent_screening import (attach_solvent_screening,
-                                        detach_solvent_screening)
-from src.Base.utils.mpi_grid import partition, run_simulated
+from src.environments.solvent_screening import (attach_solvent_screening,
+                                                detach_solvent_screening)
+from src.Base.utils.parallel.mpi_grid import partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.GW.space_time import (separable_factors,

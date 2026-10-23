@@ -1,5 +1,5 @@
 """The mean-field skeleton derivatives in fixed tiles over the ranks
-(`src/Base/skeleton_tiles.py`), on water, ethylene and formaldehyde/cc-pVDZ
+(`src/gradients/skeleton_tiles.py`), on water, ethylene and formaldehyde/cc-pVDZ
 (C1-distorted, so no force component cancels by symmetry), PBE0 and
 LRC-wPBEh, on density-fitted (cc-pVDZ-JKFIT) and ISDF-K (cc-pVDZ-RI)
 references, at 1, 2, 3 and 8 simulated ranks:
@@ -51,25 +51,27 @@ from pyscf.df import incore
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from src.Base import skeleton_tiles  # noqa: E402
-from src.Base import separable_ri  # noqa: E402
-from src.Base.constants import (FIT_REALIZATION_FORCE_TOL,  # noqa: E402
-                                ISDF_GRADIENT_FLOOR)
-from src.Base.distributed_df import distributed_mean_field  # noqa: E402
-from src.Base.distributed_isdf_jk import distributed_isdf_jk  # noqa: E402
-from src.Base.isdf_jk import isdf_grid, isdf_jk  # noqa: E402
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (RowFit, RowFitAdjoint,  # noqa: E402
-                                   screened_layout)
-from src.Base.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
-                                     fitted_fock_skeleton,
-                                     isdf_exchange_rows)
-from src.Base.utils.mpi_grid import (current_comm, distributed,  # noqa: E402
-                                     run_simulated)
+from src.gradients import skeleton_tiles  # noqa: E402
+from src.Base.factorization import separable_ri  # noqa: E402
+from src.Base.numerics.constants import (FIT_REALIZATION_FORCE_TOL,  # noqa: E402
+                                         ISDF_GRADIENT_FLOOR)
+from src.Base.factorization.distributed_df import distributed_mean_field  # noqa: E402
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk  # noqa: E402
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import (RowFit, RowFitAdjoint,  # noqa: E402
+                                                 screened_layout)
+from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
+                                          fitted_fock_skeleton,
+                                          isdf_exchange_rows)
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_derivatives import (  # noqa: E402
-    _auxmol_of, exchange_channel_skeleton, fock_partial_skeleton_df,
-    isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
+    auxmol_of, isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
     two_centre_adjoint)
+from src.gradients.mean_field_response import (  # noqa: E402
+    exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa
 from src.SingleReference.LinearResponse.rpa_energy import (  # noqa: E402
     exchange_channels)
@@ -118,7 +120,7 @@ def unrun(name, xc, route, coords=None):
     mol = molecule(name, coords)
     base = dft.RKS(mol, xc=xc) if xc != 'hf' else scf.RHF(mol)
     mf = (base.density_fit(auxbasis=DF_AUX) if route == 'df'
-          else isdf_jk(base, auxbasis=ISDF_AUX, counts=g1(base)))
+          else isdf_jk_with_force(base, auxbasis=ISDF_AUX, counts=g1(base)))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-9, 200
     return mf
 
@@ -189,7 +191,7 @@ def fitted_addends(mf, gamma, channels, coulomb=True):
     g = C @ (0.5 * (gamma + gamma.T)) @ C.T
     full = sum(w for o, w in channels if o == 0.0)
     Cd = C[:, occ > 0] * np.sqrt(occ[occ > 0])
-    args = (mf.mol, _auxmol_of(mf), g, mf.make_rdm1())
+    args = (mf.mol, auxmol_of(mf), g, mf.make_rdm1())
     kw = dict(occ=Cd if full else None, coulomb=coulomb, exchange=full)
     sk = FittedFockSkeleton(*args, **kw)
     sk.prepare(range(len(sk.tiles)), None)
@@ -205,7 +207,7 @@ def fitted_over_ranks(case, size, plant=None):
     def rank(comm):
         mf = mean_field(name, xc, 'df')
         chan, _ = channels_of(mf)
-        return fock_partial_skeleton_df(mf, _auxmol_of(mf), partial_of(mf),
+        return fock_partial_skeleton_df(mf, auxmol_of(mf), partial_of(mf),
                                         0, channels=chan)
 
     if plant is None:
@@ -235,7 +237,7 @@ def fitted_distances(case, size, plant=None):
     chan, _ = channels_of(mf)
     whole, _, _ = fitted_addends(mf, partial_of(mf), chan)
     with distributed(None):
-        serial = fock_partial_skeleton_df(mf, _auxmol_of(mf), partial_of(mf),
+        serial = fock_partial_skeleton_df(mf, auxmol_of(mf), partial_of(mf),
                                           0, channels=chan)
     res = fitted_over_ranks(case, size, plant)
     # the four-centre long-range channel rides beside the reduction
@@ -256,7 +258,7 @@ CASES = [(name, xc) for name in GEOMS for xc in XCS]
 def test_fitted_skeleton_is_the_whole_contraction(case):
     name, xc = case
     mf = mean_field(name, xc, 'df')
-    auxmol, gamma = _auxmol_of(mf), partial_of(mf)
+    auxmol, gamma = auxmol_of(mf), partial_of(mf)
     chan, delta = channels_of(mf)
     for label, kw in (('fock', dict(channels=chan)),
                       ('xc', dict(channels=delta, coulomb=False))):
@@ -308,7 +310,7 @@ def rows_kernel(mf, dm, dm_other, prefactor, channels, block=ROW_BLOCK,
         wd.build()
     layout = screened_layout(mf.mol, wd.coords, block=block)
     centre, points, _ = isdf_exchange_rows(
-        mf.mol, _auxmol_of(mf), wd.coords, layout, dm, dm_other=dm_other,
+        mf.mol, auxmol_of(mf), wd.coords, layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, block=block,
         numerics=numerics)
     return np.concatenate([centre.ravel(), points.ravel()])
@@ -444,7 +446,7 @@ def test_the_distributed_scf_tiles_are_reused(size):
         runs = []
         for mt, X in ((handle.MT, handle.X), (None, None)):
             centre, points, _ = isdf_exchange_rows(
-                mf.mol, _auxmol_of(mf), crd, layout, dm, channels=chan,
+                mf.mol, auxmol_of(mf), crd, layout, dm, channels=chan,
                 mt=mt, X=X, block=ROW_BLOCK)
             runs.append(np.concatenate([centre.ravel(), points.ravel()]))
         return (force, wd._built,
@@ -495,7 +497,7 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
     def rank(comm):
         out = {}
         mf = mean_field('water', 'pbe0', 'df')
-        aux = _auxmol_of(mf)
+        aux = auxmol_of(mf)
         chan, _ = channels_of(mf)
         dims = (0, aux.nao_nr(), mf.mol.nao_nr())
         out['fitted'] = census_of(
@@ -507,7 +509,7 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
             whole_fitted_skeleton.__code__, *dims)
         mi = mean_field('water', 'pbe0', 'isdf')
         mi.with_df.build()
-        dims = (len(mi.with_df.coords), _auxmol_of(mi).nao_nr(),
+        dims = (len(mi.with_df.coords), auxmol_of(mi).nao_nr(),
                 mi.mol.nao_nr())
         dm, other, p, chan = row_densities(mi)['fock partial']
         # one shell per block of the fit, so water's AO range is not one block
@@ -557,17 +559,17 @@ def shape_main(size, plant=False):
     row kernel and the fitted skeleton's partials at one and `size` ranks;
     `plant` routes the row fit's M^T through a rank-shaped product."""
     shaped.import_src_on_the_shape_sensitive_blas()
-    grid = importlib.import_module('src.Base.utils.mpi_grid')
-    tiles = importlib.import_module('src.Base.skeleton_tiles')
-    sep = importlib.import_module('src.Base.separable_ri')
+    sim = importlib.import_module('src.Base.utils.parallel.simulated_comm')
+    tiles = importlib.import_module('src.gradients.skeleton_tiles')
+    sep = importlib.import_module('src.Base.factorization.separable_ri')
     if plant:
         tiles.fit_rows = rank_shaped_fit(tiles.fit_rows)
     ref = mean_field('ethylene', 'lrc-wpbeh', 'isdf')
     ref.with_df.build()
-    crd, aux = ref.with_df.coords, _auxmol_of(ref)
+    crd, aux = ref.with_df.coords, auxmol_of(ref)
     dm, other, p, chan = row_densities(ref)['fock partial']
     dmf = mean_field('ethylene', 'pbe0', 'df')
-    daux = _auxmol_of(dmf)
+    daux = auxmol_of(dmf)
     C, occ = dmf.mo_coeff, dmf.mo_occ
     g = C @ partial_of(dmf) @ C.T
     Cd = C[:, occ > 0] * np.sqrt(occ[occ > 0])
@@ -589,12 +591,12 @@ def shape_main(size, plant=False):
             partial += sk.addend(t)
         return np.concatenate([centre.ravel(), points.ravel()]), partial, mine
 
-    one = grid.run_simulated(rank, 1)[0]
+    one = sim.run_simulated(rank, 1)[0]
     sk = tiles.FittedFockSkeleton(dmf.mol, daux, g, dmf.make_rdm1(), occ=Cd,
                                   exchange=full)
     sk.prepare(range(len(sk.tiles)), None)
     addends = [sk.addend(t) for t in range(len(sk.tiles))]
-    res = grid.run_simulated(rank, size)
+    res = sim.run_simulated(rank, size)
     partial_ok = []
     for got, partial, mine in res:
         want = np.zeros_like(partial)

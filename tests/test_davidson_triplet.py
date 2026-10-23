@@ -23,16 +23,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import BSE_DENSE_MAX_NOV
-from src.Base.numerics import Numerics
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
+from src.Base.numerics.constants import BSE_DENSE_MAX_NOV
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 
 NROOTS = 3

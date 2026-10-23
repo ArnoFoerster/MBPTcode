@@ -1,4 +1,4 @@
-"""Forces of equilibrium-solvated states (src.Base.solvation_loop.force): the
+"""Forces of equilibrium-solvated states (src.environments.solvation_loop.force): the
 state's force in the fixed charges + the medium's force at the relaxed density
 + the medium's part of the LR term. Water 6-31G (bent, non-symmetric), toluene
 IEF-PCM, frozen 1, cc-pvdz-ri / cc-pvdz-jkfit.
@@ -24,11 +24,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base import solvation_loop as sl
-from src.Base.reaction_field import ContinuumField
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.environments import solvation_loop as sl
+from src.environments.reaction_field import ContinuumField
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.state_models import HFState, MP2State
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import (ATOMS, AUX, FD_STEP_SOLVATION, NF, ROOT_CONV_TOL,
                               SOLVATION_TIGHT, check, make_scf_tight, molecule)
 

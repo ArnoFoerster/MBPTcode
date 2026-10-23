@@ -1,4 +1,4 @@
-"""K-diagonal-preconditioned Davidson (solve_symmetric, through sigma_driver._eigs) on
+"""K-diagonal-preconditioned Davidson (solve_symmetric, through solve.follow_roots) on
 the restricted matrix-free operators -- item #4.
 
 Validates, on the restricted ADC(4)-base sector operator and the FULL multi-class
@@ -25,8 +25,9 @@ c2r = lazy('adc4_c2_apply_restricted_blocks')
 s2r = lazy('adc4_c2_s2c_apply_restricted_blocks')
 k2r = lazy('adc4_k2_apply_restricted_blocks')
 from src.SingleReference.ADC.sigma_driver import (
-    restricted_sector_operator, restricted_full_operator, _eigs)
-from src.Base.pyscf_interface import (
+    restricted_sector_operator, restricted_full_operator)
+from src.SingleReference.ADC.solve import follow_roots
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri)
 from tests.generated_runtime import requires_runtime
 
@@ -57,7 +58,7 @@ def check(op, diag, homo_idx, label, all_ok, kroots=5):
 
     # -- lowest-k Davidson vs dense, + residuals + matvec count --
     cnt = Counter(op)
-    w_dav, X, conv = _eigs(cnt, diag, nroots=kk, tol=1e-9)
+    w_dav, X, conv = follow_roots(cnt, diag, None, nroots=kk, tol=1e-9, follow=False)
     assert conv.all()
     lowdiff = np.abs(np.sort(w_dav) - w_dense[:kk]).max()
     res = max(np.linalg.norm(op.matvec(X[:, i]) - w_dav[i] * X[:, i]) for i in range(kk))
@@ -73,7 +74,7 @@ def check(op, diag, homo_idx, label, all_ok, kroots=5):
     # -- root-following: seed on the HOMO orbital, follow that root --
     v0 = np.zeros(n)
     v0[homo_idx] = 1.0
-    wf, Xf, convf = _eigs(op, diag, v0=v0, follow=True, tol=1e-9)
+    wf, Xf, convf = follow_roots(op, diag, v0, tol=1e-9)
     assert convf.all()
     resf = np.linalg.norm(op.matvec(Xf[:, 0]) - wf[0] * Xf[:, 0])
     is_eig = np.abs(w_dense - wf[0]).min()          # matches a true eigenvalue?

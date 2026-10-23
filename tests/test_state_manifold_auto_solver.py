@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from src.Base.numerics import Numerics
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 
 #: A small pair space: 5 occupied, 20 orbitals, which 'auto' solves densely.
 NOCC, NMO = 5, 20

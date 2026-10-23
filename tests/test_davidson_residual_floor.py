@@ -26,9 +26,9 @@ import pytest
 from pyscf import gto, scf
 
 import src.SingleReference.LinearResponse.davidson as davidson
-from src.Base.numerics import Numerics
-from src.Base.constants import BSE_DAVIDSON_CONV_TOL, BSE_DAVIDSON_NROOTS
-from src.gradients import excited_state, state_following
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BSE_DAVIDSON_CONV_TOL, BSE_DAVIDSON_NROOTS
+from src.gradients.gwbse import excited_state, state_following
 from src.SingleReference.LinearResponse.davidson import (DavidsonNotConverged,
                                                          solve_casida_davidson)
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
@@ -67,7 +67,7 @@ def model(monkeypatch):
         calls.append(nocc)
         return apply_AB, diag
 
-    monkeypatch.setattr(davidson, '_block_action', block_action)
+    monkeypatch.setattr(davidson, 'block_action', block_action)
     # (A - B)^1/2 (A + B) (A - B)^1/2 has the eigenvalues omega^2.
     sqrt_d = np.sqrt(diag.ravel())
     m = sqrt_d[:, None] * (np.diag(diag.ravel()) + 4 * V.T @ V) * sqrt_d[None, :]

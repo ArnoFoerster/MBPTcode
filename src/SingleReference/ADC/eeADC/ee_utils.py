@@ -29,7 +29,36 @@ opposite sign, and the singles denominator additionally carries a factor 2.
 """
 import numpy as np
 
+from src.SingleReference.ADC import adc_order_rule
 from src.SingleReference.CC.cached_einsum import einsum as _einsum
+
+
+# ----------------------------------------------------------------------
+# levels
+# ----------------------------------------------------------------------
+
+LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2')
+
+
+def _rule_orders(n):
+    """(ph/ph, ph/2p2h, 2p2h/2p2h) orders of ADC(n) by Schirmer's rule; None
+    for a block ADC(n) does not have."""
+    orders = {(mu_i, mu_j): o for mu_i, mu_j, o in adc_order_rule.blocks_at(n)}
+    return tuple(orders.get(b) for b in ((0, 0), (0, 1), (1, 1)))
+
+
+# (ph/ph order, ph/2p2h order, 2p2h/2p2h order) per level; None = block absent.
+# adc2x carries the doubles block at first order. gf2 is the symmetrised
+# one-doubles-set GF2 supermatrix of Monino and Loos, J. Chem. Phys. 159,
+# 034105 (2023), eq 53: ADC(2)'s first-order coupling and bare doubles
+# diagonal under the first-order singles block A^HF (eq 54a), i.e. ADC(2)
+# without the three static second-order singles terms of eq 57; HF energies.
+BLOCK_ORDERS = {'adc1': _rule_orders(1), 'adc2': _rule_orders(2),
+                'adc2x': (2, 1, 1), 'adc3': _rule_orders(3),
+                'gf2': (1, 1, 0)}
+
+# the order through which each level needs the MP amplitudes
+AMPLITUDE_ORDER = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}
 
 
 # ----------------------------------------------------------------------
@@ -178,19 +207,50 @@ def g_blocks(g, nocc, norb):
 # MP amplitudes (paper A3-A5) and the second-order density (A21-A23)
 # ----------------------------------------------------------------------
 
-def _denominators(eps, nocc):
+def excitation_denominator(occ, vir):
+    """sum(eps_vir) - sum(eps_occ) on the (i, j, ..., a, b, ...) grid.
+
+    occ, vir: equal-length sequences of 1-D orbital-energy arrays, one per
+    occupied and per virtual index (rank 1 for singles, 2 for doubles, ...);
+    the arrays of a rank may differ, as they do between spins of an
+    unrestricted reference. The virtuals are added in order and the occupied
+    then subtracted in order, so the doubles case is exactly
+    eps_a + eps_b - eps_i - eps_j as every route writes it."""
+    rank = len(occ)
+    if len(vir) != rank:
+        raise ValueError(f'{rank} occupied but {len(vir)} virtual indices')
+
+    def axis(e, k):
+        shape = [1] * (2 * rank)
+        shape[k] = -1
+        return np.reshape(e, shape)
+
+    d = axis(vir[0], rank)
+    for k in range(1, rank):
+        d = d + axis(vir[k], rank + k)
+    for k in range(rank):
+        d = d - axis(occ[k], k)
+    return d
+
+
+def orbital_denominators(eps, nocc):
     """(d_ijab, d_ia, d_ph): the spin-free weight arrays every route shares.
 
     Paper Appendix-A preamble: the doubles denominator is
     eps_a + eps_b - eps_i - eps_j while singles carry the opposite sign AND an
     extra factor 2. d_ph holds eps_a - eps_i on the ph diagonal."""
     eo, ev = eps[:nocc], eps[nocc:]
-    d_ijab = (ev[None, None, :, None] + ev[None, None, None, :]
-              - eo[:, None, None, None] - eo[None, :, None, None])
-    d_ia = 2.0 * (eo[:, None] - ev[None, :])
-    d_ph = np.broadcast_to((ev[None, :] - eo[:, None])[:, :, None, None],
+    d_ijab = excitation_denominator((eo, eo), (ev, ev))
+    d_ai = excitation_denominator((eo,), (ev,))
+    d_ia = -2.0 * d_ai
+    d_ph = np.broadcast_to(d_ai[:, :, None, None],
                            (nocc, len(ev), nocc, len(ev)))
     return d_ijab, d_ia, d_ph
+
+
+def symmetrize(A):
+    """(A + A^T) / 2 of a two-index block (an array or an SB)."""
+    return 0.5 * (A + A.transpose(1, 0))
 
 
 def mp_amplitudes(eps, g, nocc, norb, order=3, denominators=None):
@@ -200,7 +260,7 @@ def mp_amplitudes(eps, g, nocc, norb, order=3, denominators=None):
     Epstein-Nesbet dressing uses (ee_en.en_denominators)."""
     from src.SingleReference.ADC.eeADC import ee_equations as _eq
     gb = g_blocks(g, nocc, norb)
-    d_ijab, d_ia, _ = _denominators(eps, nocc)
+    d_ijab, d_ia, _ = orbital_denominators(eps, nocc)
     en_shift = None
     if denominators is not None:
         d_en, d_ia = denominators

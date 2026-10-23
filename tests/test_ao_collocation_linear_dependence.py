@@ -23,11 +23,11 @@ import pytest
 from pyscf import gto, scf
 from pyscf.scf import hf as scf_hf
 
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.space_time import (_ao_collocation,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -100,6 +100,6 @@ def test_the_curve_chain_places_both_curves(water):
     chain = ExcitedStateChain(
         mol, factory, mf=mf,
         numerics=g1_numerics(mol, Numerics(qp={'outside_scissor': 'curve'})))
-    om, _ = chain._forward(mol, mf)
+    om = chain.forward(mol, mf)[1].omega
     assert np.all(np.isfinite(om))
     assert set(chain.resolved.outside_curve) == {'occupied', 'virtual'}

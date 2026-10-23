@@ -73,21 +73,21 @@ from collections import OrderedDict
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (CD_NFREQ, CD_NTAU, HARTREE_TO_EV,
-                                ISDF_TILE_GB, QP_CD_NEWTON_MAX_ITER,
-                                QP_CD_NEWTON_TOL,
-                                RESIDUE_FREQ_MARGIN, RESIDUE_ON_CONTOUR_TOL,
-                                SOP_FIT_STRIDE)
+from src.Base.numerics.constants import (CD_NFREQ, CD_NTAU, HARTREE_TO_EV,
+                                         ISDF_TILE_GB, QP_CD_NEWTON_MAX_ITER,
+                                         QP_CD_NEWTON_TOL,
+                                         RESIDUE_FREQ_MARGIN, RESIDUE_ON_CONTOUR_TOL,
+                                         SOP_FIT_STRIDE)
 from pyscf import scf as pyscf_scf
 
-from src.Base.environment import environment_of
-from src.Base.numerics import numerics_or_default
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      require_closed_shell_or_unrestricted,
-                                      spin_index)
-from src.Base.utils.grids import gap_scaled_w0, gauss_legendre_grid
-from src.Base.utils.time_frequency import TimeFrequencyGrid
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.environment_seam import environment_of
+from src.Base.numerics.numerics import numerics_or_default
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            require_closed_shell_or_unrestricted,
+                                            spin_index)
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
+from src.Base.orbital_spaces import particle_hole_window
 from src.SingleReference.GW.qp_solve import (add_reaction_field,
                                              static_exchange_diagonal)
 from src.SingleReference.GW.reaction_field import (
@@ -108,7 +108,7 @@ from src.SingleReference.LinearResponse.space_time import (
 from src.Solvers.qp_equation import qp_start, solve_qp_equation_scan
 
 
-def _need(C_ov, what):
+def require_three_index(C_ov, what):
     if C_ov is None:
         raise ResidueRefused(
             f"{what} needs C_ov = B[:, occ, virt] as (naux, nocc*nvirt) and it "
@@ -120,7 +120,7 @@ def residue_backend(real_screening, C_ov, eps, nocc, eta):
     """The backend the residue term uses: the one given, else explicit from C_ov."""
     if real_screening is not None:
         return real_screening
-    _need(C_ov, 'the residue term')
+    require_three_index(C_ov, 'the residue term')
     return ExplicitRealScreening(C_ov, eps, nocc, eta)
 
 
@@ -355,7 +355,7 @@ def sigma_cd(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues=None,
     de = omega - eps
     if wc is None:
         if wbp is None:
-            _need(C_ov, 'the imaginary-axis screening without wbp or wc')
+            require_three_index(C_ov, 'the imaginary-axis screening without wbp or wc')
             wc = wc_explicit(Bp, C_ov, ov_energies(eps, nocc), nu_points)
         else:
             wc = screening_contraction(Bp, wbp)
@@ -440,7 +440,7 @@ def qp_energy_cd(p, Bp, eps, nocc, nu_points, nu_weights, xc_correction=0.0,
         if wbp is not None:
             wc = screening_contraction(Bp, wbp)
         else:
-            _need(C_ov, 'the imaginary-axis screening without wbp or wc')
+            require_three_index(C_ov, 'the imaginary-axis screening without wbp or wc')
             wc = wc_explicit(Bp, C_ov, ov_energies(eps, nocc), nu_points)
     if real_screening is not None or C_ov is not None:
         real_screening = _PointApplies(
@@ -488,9 +488,7 @@ def cd_grid_range(eps, nocc, e_min_below_gap=None, pair_energies=None):
         shift = 0.5 * gap if e_min_below_gap is None else float(e_min_below_gap)
     else:
         eps = np.asarray(eps, float)
-        occ, virt = get_occ_virt_indices(eps, nocc)
-        gap = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
+        gap, e_max, _ = particle_hole_window(eps, nocc)
         shift = (gap_scaled_w0(eps, nocc) if e_min_below_gap is None
                  else float(e_min_below_gap))
     if gap - shift <= 0:
@@ -553,19 +551,24 @@ def static_term(xc_correction, si):
 
 def contour_state_root(route, p, Bp, wc, eps, nocc, nu_points, nu_weights,
                        xc_correction, real_screening=None, pole_model=None,
-                       tol=QP_CD_NEWTON_TOL):
+                       tol=QP_CD_NEWTON_TOL, follow=None, branch=None,
+                       rescan=True):
     """(root, Z, residues swept) of orbital p on one contour grid: the pole
     model's roots on pole_model = (poles, amplitudes) for route 'sop', the
     contour's equation on wc with `real_screening` for the residues
-    otherwise; both by the one root finder of `Solvers.qp_equation`."""
+    otherwise; both by the one root finder of `Solvers.qp_equation`.
+    follow, branch: a walk's previous root and the dict its branch is handed
+    to, on either route; rescan: `qp_energy_cd`'s, the contour's only."""
     if route == 'sop':
         poles, amplitudes = pole_model
         w_star, z = qp_energy_sop(p, amplitudes, poles, eps, nocc,
-                                  xc_correction=xc_correction, tol=tol)
+                                  xc_correction=xc_correction, tol=tol,
+                                  follow=follow, branch=branch)
         return w_star, z, []
     return qp_energy_cd(
         p, Bp, eps, nocc, nu_points, nu_weights, xc_correction=xc_correction,
-        tol=tol, wc=wc, real_screening=real_screening)
+        tol=tol, wc=wc, real_screening=real_screening, follow=follow,
+        branch=branch, rescan=rescan)
 
 
 def _laplace_representation_error(real_screening, eps, omega, residues):
@@ -720,7 +723,7 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                                 for e, n in zip(spectra, noccs)])
         eps, nocc = spectra[spin], noccs[spin]
     states = np.atleast_1d(states).astype(int)
-    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
+    mu = particle_hole_window(eps, nocc)[2]
 
     # The start points, and the compression test taken on them. Eq. (27)
     # needs the spectrum alone, so a state the pole model cannot carry is
@@ -743,7 +746,8 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
 
     parts = (tuple(factors) if factors is not None else
              separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
-                               counts=counts, grid_accuracy=grid_accuracy))
+                               counts=counts, grid_accuracy=grid_accuracy,
+                               numerics=numerics))
     X_mo, D = parts[:2]
     if unrestricted:
         if len(parts) < 3 or parts[2] is None:
@@ -849,3 +853,8 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                                            else continuation),
                    'states': records}
     return roots * HARTREE_TO_EV, pole_strengths, diagnostics
+
+
+# The old private name, read by the gradients layer until it imports the
+# public one; nothing in this layer reads it.
+_need = require_three_index

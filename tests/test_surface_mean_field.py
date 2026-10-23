@@ -23,13 +23,14 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.environment import PointCharges
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    surface_mean_field)
+from src.environments.environment import PointCharges
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.surface import MissingIngredient
+from src.gradients.surface import (FiniteDifferenceGradient,
+                                   surface_mean_field)
 from src.properties.vibronic import energy_at, relax_state
 from tests.isdf_test_grid import g1, g1_numerics
 
@@ -102,16 +103,19 @@ def test_the_helper_returns_the_surfaces_own_mean_field(water, solvated):
     assert not hasattr(solvated.scf_factory(water), 'with_solvent')
 
 
-def test_the_helper_falls_back_to_the_factory(water):
-    """A surface with no environment to build one through -- the toy surfaces
-    and the dense route -- must still answer."""
+def test_a_surface_without_the_accessor_is_refused_by_name(water):
+    """`mean_field` is a declared ingredient of the surface protocol: a
+    surface that lacks it is refused by name at the call, and its raw
+    `scf_factory` is never read in its place."""
     class NoMeanField:
         mol0 = None
 
         def scf_factory(self, mol):
             return 'factory'
 
-    assert surface_mean_field(NoMeanField(), water) == 'factory'
+    with pytest.raises(MissingIngredient, match='NoMeanField provides no '
+                                                'mean_field'):
+        surface_mean_field(NoMeanField(), water)
 
 
 def test_the_composed_surfaces_expose_their_mean_field():

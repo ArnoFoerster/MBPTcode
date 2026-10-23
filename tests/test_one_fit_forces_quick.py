@@ -25,10 +25,11 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_derivatives import product_pairs
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests import directional_difference as dd

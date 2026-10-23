@@ -15,20 +15,22 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from src.Base.constants import EVALUATION_CACHE_SIZE
+from src.Base.numerics.constants import EVALUATION_CACHE_SIZE
 
 
 @dataclass(eq=False)
 class Evaluation:
-    """What a chain computed at one geometry on one mean field: the spectrum
-    `om` and the forward `pieces` (None once dropped), how many of the lowest
+    """What a chain computed at one geometry on one mean field: the forward
+    `shared` (a `SharedForward`, None once dropped) and its Casida `solution`
+    (a `CasidaSolution`, the spectrum kept when the forward is dropped), how
+    many of the lowest
     roots the solve guaranteed converged (`read`, None for all), the forces
     asked for there, by root, and the state each chain sharing the cache
     matched there, by its token (what `ExcitedStateChain.commit` adopts)."""
 
     mf: object
-    om: object = None
-    pieces: object = None
+    shared: object = None
+    solution: object = None
     read: object = None
     forces: dict = field(default_factory=dict)
     followed: dict = field(default_factory=dict)

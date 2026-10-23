@@ -59,7 +59,7 @@ def spinorb_system(mol, mf):
 # determinant space with Slater-Condon rules
 # --------------------------------------------------------------------------
 
-def _dets(norb, nelec):
+def determinants(norb, nelec):
     return [frozenset(c) for c in itertools.combinations(range(norb), nelec)]
 
 
@@ -69,7 +69,7 @@ def _phase(det_sorted, p):
     return -1.0 if sum(1 for q in det_sorted if q < p) % 2 else 1.0
 
 
-def _h_element(d1, d2, h1, g):
+def h_element(d1, d2, h1, g):
     """<d1|H|d2> by Slater-Condon (frozensets of spin orbitals)."""
     diff1 = d1 - d2
     if len(diff1) > 2:
@@ -96,7 +96,7 @@ def _sector_h(dets, h1, g):
     H = np.zeros((n, n))
     for i in range(n):
         for j in range(i, n):
-            H[i, j] = H[j, i] = _h_element(dets[i], dets[j], h1, g)
+            H[i, j] = H[j, i] = h_element(dets[i], dets[j], h1, g)
     return H
 
 
@@ -118,9 +118,9 @@ class ExactSelfEnergy:
     def __init__(self, eps, h1, g, nocc):
         self.eps, self.h1, self.g, self.nocc = eps, h1, g, nocc
         self.norb = len(eps)
-        self.dets_n = _dets(self.norb, nocc)
-        self.dets_m = _dets(self.norb, nocc - 1)
-        self.dets_p = _dets(self.norb, nocc + 1)
+        self.dets_n = determinants(self.norb, nocc)
+        self.dets_m = determinants(self.norb, nocc - 1)
+        self.dets_p = determinants(self.norb, nocc + 1)
         self.ann = _annihilation_map(self.dets_n, self.dets_m, self.norb)
         self.ann_p = _annihilation_map(self.dets_p, self.dets_n, self.norb)
         self.hf_index = self.dets_n.index(frozenset(range(nocc)))

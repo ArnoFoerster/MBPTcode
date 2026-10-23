@@ -12,13 +12,13 @@ import warnings
 
 import numpy as np
 
-from src.Base.constants import (EVALUATION_CACHE_SIZE, SCF_GRAD_TOL,
-                                SCF_OPTIMIZATION_GRAD_TOL)
-from src.Base.distributed_df import distributed_fock, distributed_mean_field
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import (frozen_frames, frozen_pair_layout, frozen_span,
-                              reference_frames)
-from src.Base.utils.mpi_grid import lockstep_mean_field
+from src.Base.numerics.constants import (EVALUATION_CACHE_SIZE, SCF_GRAD_TOL,
+                                         SCF_OPTIMIZATION_GRAD_TOL)
+from src.Base.factorization.distributed_df import distributed_fock, distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.Base.factorization.isdf_jk import (frozen_frames, frozen_pair_layout, frozen_span,
+                                            reference_frames)
+from src.Base.utils.parallel.mpi_grid import lockstep_mean_field
 from src.gradients.evaluation import GeometryCache
 
 

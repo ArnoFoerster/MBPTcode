@@ -64,25 +64,25 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.utils import mpi_grid
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import (agreement, distributed,
-                                     lockstep_mean_field, lockstep_stats,
-                                     run_simulated)
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel import mpi_grid
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import (
+    agreement, distributed, lockstep_mean_field, lockstep_stats)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import (replicate_factors,
                                                replicate_mean_field,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
-from src.gradients.reaction_field_adjoint import static_grid, static_screening
-from src.gradients.space_time_adjoint import (polarizability_tau,
-                                              rpa_energy_and_adjoint,
-                                              screened_interaction_tau_backward,
-                                              selfenergy_diag,
-                                              selfenergy_diag_backward,
-                                              sigma_transforms)
+from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
+from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
+                                                  rpa_energy_and_adjoint,
+                                                  screened_interaction_tau_backward,
+                                                  selfenergy_diag_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
+from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.SingleReference.GW.imaginary_time import screened_interaction_tau
 from tests.test_isdf_fit_ranks import FIT_TOL
 from tests.test_simulated_ranks import NFREQ, NTAU, REL, SIGMA_REL, close
@@ -491,9 +491,9 @@ def test_mpi_grid_imports_no_gw():
     """Replicating a mean field does not reach into GW: `mpi_grid` alone
     loads no `SingleReference` module, so `distributed_df` can take
     `lockstep_mean_field` from it outside the environment import cycle."""
-    code = ('import sys; import src.Base.utils.mpi_grid; '
+    code = ('import sys; import src.Base.utils.parallel.mpi_grid; '
             'print(sorted(m for m in sys.modules if "SingleReference" in m '
-            'or m.startswith("src.Base.environment")))')
+            'or m.startswith("src.environments.environment")))')
     env = dict(os.environ, MBPT_USE_MPI='0')
     env.pop('PYTHONPATH', None)
     out = subprocess.run([sys.executable, '-c', code], cwd=REPO, env=env,

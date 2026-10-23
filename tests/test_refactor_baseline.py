@@ -32,10 +32,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.isdf_test_grid import g1
 from tests.pins import assert_pin, recorded_blas
 

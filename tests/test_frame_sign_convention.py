@@ -31,12 +31,12 @@ from pyscf import df as pyscf_df
 from pyscf import dft, gto
 from scipy.spatial.transform import Rotation
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.separable_ri import (_FRAME_DECAY, _FRAME_SIGN_REFS,
-                                   atomic_frames, atomic_points,
-                                   build_separable_ri,
-                                   molecular_points_covariant,
-                                   optimize_atomic_radii)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.factorization.separable_ri import (FRAME_DECAY, _FRAME_SIGN_REFS,
+                                                 atomic_frames, atomic_points,
+                                                 build_separable_ri,
+                                                 molecular_points_covariant,
+                                                 optimize_atomic_radii)
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 
 COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
@@ -55,7 +55,7 @@ def _water(theta=0.0):
                  basis='cc-pvdz', unit='Angstrom', verbose=0)
 
 
-def _old_sign_rule(mol, axes_by_atom, decay=_FRAME_DECAY):
+def _old_sign_rule(mol, axes_by_atom, decay=FRAME_DECAY):
     """The environment-moment sign rule, for comparison only.
 
     Takes the axes as LINES (which the convention does not change) and applies

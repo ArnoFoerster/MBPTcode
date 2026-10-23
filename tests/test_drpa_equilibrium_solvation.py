@@ -32,14 +32,14 @@ from pyscf import df, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.environment import equilibrium_environment
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.solvated_rpa_energy import solvated_correlation_energies
+from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.environments.environment import equilibrium_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.rpa.solvated_energy import solvated_correlation_energies
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
 

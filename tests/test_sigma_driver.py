@@ -31,7 +31,7 @@ c2dense = lazy('adc4_c2_blocks')
 c2appl = lazy('adc4_c2_apply_blocks')
 from src.SingleReference.ADC.sigma_driver import sigma_matvec, local_configs
 from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from tests.generated_runtime import requires_runtime

@@ -41,18 +41,18 @@ import pytest
 from pyscf import gto
 
 from tests.pins import assert_same
-from src.Base.numerics import Numerics
-from src.SingleReference.LinearResponse.davidson import oscillator_strengths
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.state_manifold import StateManifold
-from src.Base.constants import (NUCLEAR_FD_STEP,
-                                ROOT_FOLLOW_MARGIN_MIN)
-from src.properties.nonadiabatic import (aligned_overlap,
-                                         follow_state,
-                                         derivative_couplings, mo_overlap,
-                                         nabla_mo, spectrum_solve,
-                                         state_overlap, translational_sum)
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.BSE.solve import oscillator_strengths
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.state_following import CasidaSolution
+from src.gradients.gwbse.state_manifold import StateManifold
+from src.Base.numerics.constants import (NUCLEAR_FD_STEP,
+                                         ROOT_FOLLOW_MARGIN_MIN)
+from src.properties.nonadiabatic import (derivative_couplings, nabla_mo,
+                                         spectrum_solve, translational_sum)
+from src.gradients.state_identity import (aligned_overlap, follow_state,
+                                          mo_overlap, state_overlap)
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight_default_cycles
 
@@ -494,11 +494,9 @@ def test_a_displaced_geometry_keeps_the_state_and_logs_its_overlap(mol):
     assert step['margin'] > ROOT_FOLLOW_MARGIN_MIN
 
 
-def _pieces_with(xn, yn):
-    """The 16-tuple `_forward` returns, carrying only what following reads."""
-    pieces = [None] * 16
-    pieces[10], pieces[11] = xn, yn
-    return tuple(pieces)
+def _solution_with(om, xn, yn):
+    """The `CasidaSolution` following reads."""
+    return CasidaSolution(np.asarray(om), xn, yn, {})
 
 
 def test_the_surface_follows_the_state_through_an_index_SWAP(mol, reference):
@@ -514,10 +512,10 @@ def test_the_surface_follows_the_state_through_an_index_SWAP(mol, reference):
         mol, rhf_tight_default_cycles, mf=mf,
         numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
     assert chain.nocc == nocc
-    chain.tracked_state(mol, mf, om, _pieces_with(x, y))     # anchors on 0
+    chain.tracked_state(mol, mf, _solution_with(om, x, y))     # anchors on 0
     order = [2, 0, 1]                     # state 0 comes back as column 1
-    index = chain.tracked_state(mol, mf, np.asarray(om)[order],
-                                _pieces_with(x[:, order], y[:, order]))
+    index = chain.tracked_state(mol, mf, _solution_with(
+        np.asarray(om)[order], x[:, order], y[:, order]))
     assert index == 1, 'the follower must move off the stale index'
     assert chain.follow_log[-1]['weight'] > 1.0 - 1e-10
     assert chain.state == 0, 'and must not mutate the state it was asked for'
@@ -531,9 +529,9 @@ def test_a_refrozen_chain_inherits_the_FOLLOWED_index(mol, reference):
     chain = ExcitedStateChain(
         mol, rhf_tight_default_cycles, mf=mf,
         numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense', 'track': 'overlap'})))
-    chain.tracked_state(mol, mf, om, _pieces_with(x, y))
+    chain.tracked_state(mol, mf, _solution_with(om, x, y))
     order = [2, 0, 1]
-    chain.tracked_state(mol, mf, np.asarray(om)[order],
-                        _pieces_with(x[:, order], y[:, order]))
+    chain.tracked_state(mol, mf, _solution_with(
+        np.asarray(om)[order], x[:, order], y[:, order]))
     assert chain.refreeze(mol).state == 1
     assert chain.refreeze(mol).track == 'overlap'

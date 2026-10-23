@@ -15,7 +15,8 @@ import pytest
 from pyscf import gto
 
 from src.Base.declaration import GroundState, QPStates
-from src.Base.separable_ri import grid_identity, refuse_other_grid
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import grid_identity, refuse_other_grid
 from src.properties.excitations import SurfaceSpec, grid_record
 
 BASIS = 'cc-pvdz'
@@ -58,7 +59,7 @@ def spec(level):
     return SurfaceSpec(GroundState('rpa', 'hf'), chi0='space-time',
                        residues='sop', factorization='isdf',
                        qp_states=QPStates('frontier'),
-                       numerics={'grid_accuracy': level})
+                       numerics=numerics_of({'grid_accuracy': level}))
 
 
 def test_grid_record_carries_the_identity():

@@ -2,8 +2,8 @@
 
 Three routines that describe a mean field rather than a derivative of one
 (its response kernel, its Fock in the MO basis, the pseudo-inverse of an
-auxiliary metric) live in `src.Base.pyscf_interface`, and the mean field with
-its exact exchange removed lives in `src.Base.isdf_jk`. The gradient package
+auxiliary metric) live in `src.Base.pyscf.pyscf_interface`, and the mean field with
+its exact exchange removed lives in `src.Base.factorization.isdf_jk`. The gradient package
 imports them, so there is one implementation; every check below holds to a
 few ulp (`assert_same`; the class bar on a BLAS other than the recording one)
 against the expression the routine encodes, evaluated independently here.
@@ -28,8 +28,6 @@ Each gate rejects a perturbation:
     response kernel              the operator scaled by 1 + 1e-12  yes
     MO Fock                      one element moved by 1e-12        yes
     auxiliary pseudo-inverse     lindep raised to 1e-2              yes
-    static exchange diagonal     exchange='df-direct' in place     yes
-                                 of the mean field's own K
     exchange-free reference      the reference left with its       yes
                                  exact exchange in place
     placed interpolation points  one local point moved by 1e-12    yes
@@ -50,22 +48,22 @@ import subprocess
 import sys
 
 import numpy as np
-from pyscf import df as pyscf_df, dft, gto, scf
+from pyscf import dft, gto, scf
 
-import src.Base.pyscf_interface as production_interface
+import src.Base.pyscf.pyscf_interface as production_interface
 import src.gradients.isdf_derivatives as derivatives
 import src.gradients.isdf_mean_field as mean_field_module
-from src.Base.constants import AUX_METRIC_LINDEP
-from src.Base.isdf_jk import exchange_free_reference, isdf_jk, range_coulomb
-from src.Base.pyscf_interface import (aux_metric_inverse, fock_mo,
-                                      response_kernel)
-from src.Base.separable_ri import atomic_frames, molecular_points_covariant
-from src.SingleReference.GW.qp_solve import static_exchange_diagonal
+import src.gradients.mean_field_response as response
+from src.Base.factorization.isdf_jk import exchange_free_reference
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.pyscf.pyscf_interface import (fock_mo,
+                                            response_kernel)
+from src.Base.factorization.separable_ri import atomic_frames, molecular_points_covariant
 from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
 from src.gradients.isdf_derivatives import (continued_frames,
                                             isdf_exchange_skeleton,
                                             isdf_fock_partial_exchange,
-                                            point_layout, qp_xc_correction)
+                                            point_layout)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
@@ -76,10 +74,6 @@ AUXBASIS = 'cc-pvdz-ri'
 EXACT_SPLIT_BAR = 1e-12
 GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
             ('H', (0.0, -0.7572, -0.4692)))
-#: The long-range channel whose auxiliary metric is numerically singular: 50 of
-#: 84 functions survive `AUX_METRIC_LINDEP` on this basis, against all 84 on the
-#: bare Coulomb metric.
-OMEGA = 0.2
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 #: Bound on |M_stable - M_streaming| / |M_stable|max on water/cc-pVDZ, G1:
@@ -123,10 +117,10 @@ def interpolated(xc):
     """A mean field whose exchange comes from the ISDF factors."""
     mol = water()
     if xc is None:
-        return converged(isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol))))
+        return converged(isdf_jk_with_force(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol))))
     mf = dft.RKS(mol, xc=xc)
     mf.grids.prune = None
-    return converged(isdf_jk(mf, auxbasis=AUXBASIS, counts=g1(mf)))
+    return converged(isdf_jk_with_force(mf, auxbasis=AUXBASIS, counts=g1(mf)))
 
 
 def symmetric_direction(nao, seed=7):
@@ -135,29 +129,11 @@ def symmetric_direction(nao, seed=7):
     return 0.5 * (x + x.T)
 
 
-def metrics():
-    """(auxmol, bare metric, long-range metric) of the auxiliary basis."""
-    mol = water()
-    auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
-    bare = auxmol.intor('int2c2e', aosym='s1')
-    with range_coulomb(mol, auxmol, OMEGA):
-        attenuated = auxmol.intor('int2c2e', aosym='s1')
-    return auxmol, bare, attenuated
-
-
-def tikhonov_inverse(V, lindep):
-    """The inverse the production routine encodes, written out here."""
-    V = 0.5 * (np.asarray(V, float) + np.asarray(V, float).T)
-    w, u = np.linalg.eigh(V)
-    keep = w > lindep * w.max()
-    return (u[:, keep] / w[keep]) @ u[:, keep].T
-
-
 def test_the_moved_routines_are_one_object_and_not_a_copy():
     """The gradient package's names are production's objects, by identity,
     so no second spelling can drift."""
-    assert derivatives.response_kernel is production_interface.response_kernel
-    assert derivatives.fock_mo is production_interface.fock_mo
+    assert response.response_kernel is production_interface.response_kernel
+    assert response.fock_mo is production_interface.fock_mo
     # the tiled fitted skeleton inverts no attenuated metric, so the gradient
     # package does not hold the name
     assert not hasattr(derivatives, 'aux_metric_inverse')
@@ -199,43 +175,6 @@ def test_the_mo_fock_is_the_transformed_fock():
     assert fock_mo(fitted(None)) is fock_mo(fitted(None))
 
 
-def test_the_auxiliary_inverse_is_tikhonov_and_not_a_truncation():
-    """The bare Coulomb metric is full rank and this is an ordinary inverse;
-    the long-range metric is not, and the eigenvalue cut keeps the object a
-    true inverse on the kept space, so -V^-1 dV V^-1 is exact."""
-    auxmol, bare, attenuated = metrics()
-    naux = auxmol.nao_nr()
-    for V in (bare, attenuated):
-        assert_same(aux_metric_inverse(V),
-                    tikhonov_inverse(V, AUX_METRIC_LINDEP), unit='1',
-                    quantity='root', label='auxiliary inverse')
-    w_bare = np.linalg.eigvalsh(bare)
-    w_lr = np.linalg.eigvalsh(0.5 * (attenuated + attenuated.T))
-    assert int((w_bare > AUX_METRIC_LINDEP * w_bare.max()).sum()) == naux
-    assert int((w_lr > AUX_METRIC_LINDEP * w_lr.max()).sum()) < naux
-    assert np.abs(aux_metric_inverse(bare) @ bare - np.eye(naux)).max() < 1e-9
-
-
-def test_the_quasiparticle_correction_is_the_static_exchange_diagonal():
-    """<p|Sigma_x - v_xc|p> is production's own one-body term, so the chain
-    differentiates the function `calc_qp_energy` evaluates; the wrapper adds
-    only the all-states default."""
-    for xc in (None, 'pbe0'):
-        mf = fitted(xc)
-        nmo = mf.mo_coeff.shape[1]
-        every = np.arange(nmo)
-        assert_same(
-            qp_xc_correction(mf),
-            static_exchange_diagonal(mf, mf.mol, every, exchange='mf'),
-            quantity='root', label=('static exchange diagonal', xc))
-        shift = np.arange(nmo, dtype=float) * 1e-3
-        assert_same(
-            qp_xc_correction(mf, [3, 5], reaction_field=shift),
-            static_exchange_diagonal(mf, mf.mol, [3, 5], exchange='mf',
-                                     reaction_field=shift),
-            quantity='root', label=('with a reaction field', xc))
-
-
 def test_the_exchange_free_reference_carries_none_of_the_exact_exchange():
     """The reference keeps the orbitals, quadrature and auxiliary basis and
     drops a_x K; its gradient plus the ISDF exchange skeleton is the whole
@@ -256,7 +195,7 @@ def test_the_exchange_free_reference_carries_none_of_the_exact_exchange():
             assert ref.grids is mf.grids
             base = dft.RKS(water(), xc=xc)
             base.grids.prune, base.small_rho_cutoff = None, 0.0
-            mf = converged(isdf_jk(base, auxbasis=AUXBASIS, counts=g1(base)))
+            mf = converged(isdf_jk_with_force(base, auxbasis=AUXBASIS, counts=g1(base)))
             ref = exchange_free_reference(mf)
         g0 = ref.Gradients()
         g0.grid_response = True
@@ -323,7 +262,7 @@ def test_the_skeletons_fit_from_the_mean_field_moves_the_force(monkeypatch):
 def test_the_production_homes_import_without_the_gradient_package():
     """Each production module imports without any src.gradients module, in
     a fresh interpreter."""
-    for module in ('src.Base.pyscf_interface', 'src.Base.isdf_jk'):
+    for module in ('src.Base.pyscf.pyscf_interface', 'src.Base.factorization.isdf_jk'):
         code = (f'import sys, {module}; '
                 "assert not [m for m in sys.modules "
                 "if m.startswith('src.gradients')], "
@@ -360,17 +299,6 @@ def test_every_gate_rejects_its_own_perturbation():
     F_mo = fock_mo(mf).copy()
     F_mo[0, 0] += 1e-12
     assert not np.array_equal(fock_mo(mf), F_mo)
-
-    # the auxiliary pseudo-inverse: a different lindep is a different operator
-    _, _, attenuated = metrics()
-    assert not np.array_equal(aux_metric_inverse(attenuated),
-                              tikhonov_inverse(attenuated, 1e-2))
-
-    # the static exchange diagonal: the mean field's own K, not a refitted one
-    every = np.arange(mf.mo_coeff.shape[1])
-    assert not np.array_equal(
-        qp_xc_correction(mf),
-        static_exchange_diagonal(mf, mol, every, exchange='df-direct'))
 
     # the exchange-free reference: leaving the exact exchange in place
     interp = interpolated('pbe0')

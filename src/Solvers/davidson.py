@@ -26,10 +26,12 @@ import numpy as np
 from pyscf import lib as pyscf_lib
 from pyscf.lib.linalg_helper import LinearDependenceError
 
-from src.Base.constants import DAVIDSON_COMPLETION_SEED, DAVIDSON_FOLLOW_OVERLAP_TIE
+from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
+                                         DAVIDSON_DENOMINATOR_FLOOR,
+                                         DAVIDSON_FOLLOW_OVERLAP_TIE)
 
 
-def jacobi_davidson_precond(diag, floor=1e-8):
+def jacobi_davidson_precond(diag, floor=DAVIDSON_DENOMINATOR_FLOOR):
     """Diagonal (K) preconditioner with the Jacobi-Davidson projection:
 
         t = K^-1 r - alpha K^-1 u,   alpha = (u.K^-1 r) / (u.K^-1 u)

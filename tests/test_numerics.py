@@ -11,12 +11,12 @@ from dataclasses import FrozenInstanceError, fields
 import pytest
 
 from src.Base.declaration import QPStates
-from src.Base.numerics import (FLAT_FIELDS, IDENTITY_EXCLUDED, IDENTITY_FIELDS,
-                               SECTIONS,
-                               BSENumerics, IsdfNumerics, LayoutNumerics,
-                               Numerics, numerics_of)
-from src.Base.record_io import record_hash
-from src.Base import separable_ri
+from src.Base.numerics.numerics import (FLAT_FIELDS, IDENTITY_EXCLUDED, IDENTITY_FIELDS,
+                                        SECTIONS,
+                                        BSENumerics, IsdfNumerics, LayoutNumerics,
+                                        Numerics, numerics_of)
+from src.Base.utils.record_io import record_hash
+from src.Base.factorization import separable_ri
 
 #: A value other than the default, per field, for the identity test.
 OTHER = {bool: lambda v: not v, int: lambda v: v + 1,

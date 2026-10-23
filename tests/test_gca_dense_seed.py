@@ -17,8 +17,8 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.geometry import molecule_at
-from src.gradients.dense_surfaces import QuasiparticleSurface, tight_rhf
+from src.Base.geometry.geometry import molecule_at
+from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface, tight_rhf
 from tests.pins import assert_same
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'

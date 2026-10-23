@@ -20,11 +20,11 @@ import pytest
 from pyscf import gto, scf
 from pyscf.solvent.grad.pcm import grad_solver
 
-from src.Base.numerics import Numerics
-from src.Base.constants import BOHR_TO_ANGSTROM, PCM_CROSS_TERM_STEP
-from src.Base.pcm_derivatives import (frozen_surface,
-                                      reaction_field_fock_skeleton,
-                                      solver_bilinear_gradient)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, PCM_CROSS_TERM_STEP
+from src.environments.pcm_derivatives import (frozen_surface,
+                                              reaction_field_fock_skeleton,
+                                              solver_bilinear_gradient)
 from tests.isdf_test_grid import g1_numerics
 
 #: pyscf's PCM has FOUR branches, not three: COSMO is its own, with
@@ -150,7 +150,7 @@ def test_aux_kernel_adjoint_against_finite_differences(method):
     whose two centres move independently, and through the cavity response Q.
     Getting either alone would still leave a plausible-looking force.
     """
-    from src.Base.solvent_screening import SolventScreening
+    from src.environments.solvent_screening import SolventScreening
 
     c0 = gto.M(atom=ATOM, basis='sto-3g', verbose=0).atom_coords() * BOHR_TO_ANGSTROM
     mol0 = water_at(c0)
@@ -194,7 +194,7 @@ def test_static_self_energy_skeleton_against_finite_differences(method):
     v leaves M v Gamma, and Gamma M v passes the forward check while giving a
     force 64% wrong.
     """
-    from src.Base.solvent_screening import SolventScreening
+    from src.environments.solvent_screening import SolventScreening
 
     c0 = gto.M(atom=ATOM, basis='sto-3g', verbose=0).atom_coords() * BOHR_TO_ANGSTROM
     mol0 = water_at(c0)
@@ -239,7 +239,7 @@ def test_the_forward_identity_the_skeleton_differentiates():
     and because it holds for the WRONG matrix order too -- so it is necessary
     and nowhere near sufficient.
     """
-    from src.Base.solvent_screening import SolventScreening
+    from src.environments.solvent_screening import SolventScreening
 
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
@@ -272,7 +272,7 @@ def test_static_self_energy_response_against_a_rotation(method):
     operator depends on -- which is the whole reason there are two terms.
     """
     from scipy.linalg import expm
-    from src.Base.solvent_screening import SolventScreening
+    from src.environments.solvent_screening import SolventScreening
 
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
@@ -306,7 +306,7 @@ def test_the_operator_form_reproduces_cohsex():
     needs; if it drifted from `cohsex_correction`, Y would be the response of
     something else.
     """
-    from src.Base.solvent_screening import SolventScreening
+    from src.environments.solvent_screening import SolventScreening
 
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
@@ -326,7 +326,7 @@ def test_the_solvent_Y_matches_the_convention_of_the_existing_one():
     from scipy.linalg import expm
     from pyscf import dft
     from src.SingleReference.GW.qp_solve import static_exchange_diagonal
-    from src.gradients.isdf_derivatives import qp_xc_correction_Y
+    from src.gradients.mean_field_response import qp_xc_correction_Y
 
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = dft.RKS(mol)
@@ -365,8 +365,8 @@ def test_the_solvated_excitation_gradient_matches_finite_differences():
     refreezing instead differentiates a different surface and lands at 2.7e-3
     even in the gas phase, which reads as a solvent bug and is not one.
     """
-    from src.Base.solvent_screening import SolventScreening
-    from src.gradients.excited_state import ExcitedStateChain
+    from src.environments.solvent_screening import SolventScreening
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
 
     def factory(m):
         mf = scf.RHF(m)
@@ -405,7 +405,7 @@ def test_the_solvation_gradient_is_exactly_quadratic_in_its_density():
     and the step cancels identically. A step-dependent answer would mean the
     energy is not the quadratic form the derivation assumes.
     """
-    from src.Base.pcm_derivatives import solvation_gradient
+    from src.environments.pcm_derivatives import solvation_gradient
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).PCM()
     mf.with_solvent.method, mf.with_solvent.eps = 'IEF-PCM', EPS

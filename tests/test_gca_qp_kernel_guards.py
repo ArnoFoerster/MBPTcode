@@ -16,10 +16,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
+from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
 from tests.isdf_test_grid import g1
 
 NTAU, NFREQ = 8, 16

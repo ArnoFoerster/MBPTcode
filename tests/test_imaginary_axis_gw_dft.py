@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 
 ETHENE = '''

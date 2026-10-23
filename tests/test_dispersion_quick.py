@@ -15,8 +15,8 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.Base.numerics import numerics_of
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.Base.numerics.numerics import numerics_of
 from tests import directional_difference as dd
 from tests.isdf_test_grid import g1
 from tests.test_dispersion import FD_STEPS, H2O_C1, isdf_kohn_sham

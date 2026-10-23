@@ -1,11 +1,11 @@
 """Matrix-free Casida/RPA/BSE Davidson, with two ways of applying the same A/B.
 
-`solve_bse_isdf` and `solve_bse_df` are the two drivers on them (mean
-field in, excitations out) and share every convention, so they differ
-only in how the interaction is represented. The block actions are in
-`block_actions`, the (A-B) probe in `probe`, the Tamm-Dancoff loop in
-`davidson_tda` and what both loops share in `davidson_shared`; the Casida
-loop and the drivers stay here.
+The drivers on it (mean field in, excitations out) are
+`BSE.solve.solve_bse_isdf` and `solve_bse_df`. The block actions are in
+`block_actions`, the (A-B) probe in `probe` and what the loops share in
+`davidson_shared`; the Casida loop and the Tamm-Dancoff solve (the one
+symmetric Davidson of `Solvers.davidson`, on the A half of the block action)
+are here, and so is the walk's warm start of either (`DavidsonWarmStart`).
 
 The DF route contracts pyscf's three-index factor directly. What sets its cost
 is `apply_exchange_direct`, which needs a (naux, nvirt, nvirt) intermediate --
@@ -62,92 +62,34 @@ import warnings
 import numpy as np
 from pyscf import gto
 from pyscf.lib import logger, param
-from scipy.linalg import solve_triangular
 from scipy.sparse.linalg import ArpackNoConvergence
 
-from src.Base.constants import (BSE_DENSE_MAX_NOV,
-                                DAVIDSON_FLOOR_EPS_MULTIPLE,
-                                DAVIDSON_GUESS_FACTOR, DAVIDSON_LINDEP,
-                                DAVIDSON_MIN_NEW_FRACTION,
-                                DAVIDSON_PRECONDITIONER,
-                                DAVIDSON_SIZED_RESIDUAL,
-                                DAVIDSON_SPACE_FRACTION, DAVIDSON_SPACE_GB,
-                                DAVIDSON_WARM_START_MAX_SHIFT,
-                                HARTREE_TO_EV, SEPARABLE_AUX_GAUGE)
-from src.Base.numerics import numerics_or_default
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies,
-                                      require_closed_shell_or_unrestricted)
-from src.Base.sliced_factors import SlicedFactors
+from src.Base.numerics.constants import (
+    BYTES_PER_GB, BSE_DENSE_MAX_NOV, DAVIDSON_FLOOR_EPS_MULTIPLE,
+    DAVIDSON_GUESS_FACTOR, DAVIDSON_LINDEP, DAVIDSON_MIN_NEW_FRACTION,
+    DAVIDSON_PRECONDITIONER, DAVIDSON_SIZED_RESIDUAL, DAVIDSON_SPACE_FRACTION,
+    DAVIDSON_SPACE_GB, DAVIDSON_WARM_START_MAX_SHIFT)
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.step_failed import DavidsonNotConverged, DavidsonRefusal, StepFailed
-from src.Base.utils.memory import allocation_max_memory_mb
-from src.Base.utils.mpi_grid import (broadcast, current_comm, grid_comm,
-                                     lockstep, lockstep_stats, reduce_sum,
-                                     replicate)
-from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
-from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
-from src.SingleReference.GW.space_time import (_unpack_factors,
-                                               replicate_factors,
-                                               replicate_mean_field,
-                                               separable_factors,
-                                               solve_qp_diagonal_space_time)
+from src.Base.utils.parallel.memory import allocation_max_memory_mb
+from src.Base.utils.parallel.mpi_grid import (
+    broadcast, current_comm, lockstep, lockstep_stats, reduce_sum)
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Solvers.davidson import solve_symmetric
 from src.SingleReference.LinearResponse.block_actions import (
-    ACTION_PIECES, COMM_KINDS, _block_action, bse_pair_diagonal)
-from src.SingleReference.LinearResponse.casida import CasidaInstability
+    ACTION_PIECES, COMM_KINDS, block_action, bse_pair_diagonal)
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                       casida_eigensolve)
 from src.SingleReference.LinearResponse.davidson_shared import (
-    _action_working_bytes, _check_preconditioner, _correction, _guess_indices,
-    _preconditioner_diagonal, _real_eig_space, _tracked_roots,
-    _trial_space_memory)
-from src.SingleReference.LinearResponse.davidson_tda import _tda_davidson_root
-from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
-from src.SingleReference.LinearResponse.linear_response import (
-    LinearResponseSolver, check_normalization)
+    action_working_bytes, check_preconditioner, correction, guess_indices,
+    preconditioner_diagonal, real_eig_space, tracked_roots,
+    trial_space_memory)
 from src.SingleReference.LinearResponse.probe import (
-    AmbProbeNotConverged, _lowest_amb_from_action, lowest_amb_eigenvalue)
-from src.SingleReference.LinearResponse.space_time import (
-    static_screening_grid, static_screening_matrix)
+    AmbProbeNotConverged, lowest_amb_from_action)
 from src.SingleReference.LinearResponse.trial_space import (SUBSPACE_PIECES,
                                                             PairRows,
                                                             casida_rows,
                                                             warm_trial_space)
-
-
-#: `GW/space_time.py`'s own `timings` keys, renamed for `info['timings']`'s
-#: `qp_` prefix: `t_qp_static`/`t_qp_states` fold their `t_qp_` in with the
-#: shared prefix rather than doubling it. `t_qp` -- `_finish_qp`'s own total,
-#: static + states -- carries nothing beyond the two keys it sums and is not
-#: re-exposed under a third name.
-QP_TIMING_RENAME = {'t_chi0': 'qp_chi0', 't_dyson': 'qp_dyson',
-                    't_sigma': 'qp_sigma', 't_qp_static': 'qp_static',
-                    't_qp_states': 'qp_states'}
-
-
-class _QPStageTimings:
-    """`timings=` target for the space-time QP solve, G0W0 or one evGW cycle.
-
-    `solve_qp_energy_space_time`/`_qp_blocked`/`_finish_qp` write each
-    per-stage key once per call with a plain assignment, and evGW re-enters
-    that call once per cycle on the same object (`gw_kwargs['timings']` is
-    fixed for the whole loop in `evgw_eigenvalues`), so a plain dict would
-    keep only the last cycle's numbers. `__setitem__` sums the per-stage keys
-    instead: one call for `qp='G0W0'`, one per evGW cycle. Everything else
-    (`nranks`, `ntau_auto`, `tau_fit_error`) takes the latest write. A
-    caller-supplied dict (`gw_kwargs['timings']`) is written into directly,
-    never copied, so it carries the final numbers under its own name.
-    """
-    _ADDITIVE = frozenset({'t_chi0', 't_dyson', 't_sigma', 't_qp_static',
-                           't_qp_states', 't_qp'})
-
-    def __init__(self, target=None):
-        self.target = target if target is not None else {}
-
-    def __setitem__(self, key, value):
-        if key in self._ADDITIVE:
-            self.target[key] = self.target.get(key, 0.0) + value
-        else:
-            self.target[key] = value
 
 
 class DavidsonWarmStart:
@@ -278,7 +220,7 @@ def _nuclei(mol):
             np.asarray(mol.atom_charges()).tobytes())
 
 
-class _CasidaBreakdown(StepFailed):
+class CasidaBreakdown(StepFailed):
     """A projected (A-B) block that is not positive definite, carrying the
     min eig(A-B) the probe measured on the whole pair space, or None where
     that probe did not converge (`_casida_breakdown`)."""
@@ -297,16 +239,6 @@ class UnstableReference(CasidaInstability):
     def __init__(self, message, min_eig_amb=None):
         super().__init__(message)
         self.min_eig_amb = min_eig_amb
-
-
-def refuse_second_numerics(gw_kwargs):
-    """Refuse a `Numerics` inside `gw_kwargs`: an entry point holds ONE and
-    hands it to its GW stage itself, so a second would be two answers to
-    which grid the self-energy ran on."""
-    if gw_kwargs and 'numerics' in gw_kwargs:
-        raise TypeError('gw_kwargs holds a numerics of its own; pass the one '
-                        "Numerics as the entry point's `numerics`, which its "
-                        'GW stage reads too')
 
 
 def bse_settings(numerics, *names):
@@ -330,7 +262,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
 
     For a handful of low-lying states; vertex-correction sums still need the
     full spectrum (use build_casida_matrices + CasidaSolver for that).
-    Iteration by our Casida Davidson (`_run_davidson`); the A/B matrix-free action is ours,
+    Iteration by our Casida Davidson (`run_davidson`); the A/B matrix-free action is ours,
     validated against build_casida_matrices to machine precision on both routes.
 
     polarizability: 'RPA' (Hartree-only), 'TDHF' (bare exchange), or 'BSE'
@@ -351,10 +283,10 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     comm: an MPI communicator whose ranks all run this solver together, by
     default the current `distributed` region's; the ISDF block action divides
     the rows of Zt between them (`isdf_block_action`) and every rank runs the
-    same iteration on its lockstepped output (`_run_davidson`); the DF action
+    same iteration on its lockstepped output (`run_davidson`); the DF action
     is not divided and runs whole on every rank on lockstepped inputs.
     timings: optional dict, filled with the `davidson_*` breakdown of
-    `_run_davidson` -- the same keys serially and under a comm, so the two are
+    `run_davidson` -- the same keys serially and under a comm, so the two are
     comparable -- plus `davidson_setup`, the action's own build: the collocation
     slices and this rank's rows of the screened kernel, paid once before the
     first trial vector and therefore invisible in `davidson_block_action`.
@@ -369,15 +301,15 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     wrong by its residual.
     read_roots, read_tol: with refuse_unconverged, the lowest `read_roots`
     roots are the ones the caller differentiates and `read_tol` the residual
-    it needs of them; `_run_davidson`'s.
+    it needs of them; `run_davidson`'s.
     max_memory: MB this rank may hold, which sizes the trial space;
-    `_run_davidson`'s.
+    `run_davidson`'s.
     preconditioner: 'bare' (d) or 'screened' (d - (ii|W|aa)), the diagonal
-    the corrections divide by; `_run_davidson`'s.
+    the corrections divide by; `run_davidson`'s.
     guess: (X, Y), (n_pair, k) each -- a previous geometry's roots carried
     into these orbitals (`DavidsonWarmStart.guess`) -- started from with
     the unit vectors; None starts from the unit vectors alone.
-    `_run_davidson`'s.
+    `run_davidson`'s.
     tda: the Tamm-Dancoff problem A X = omega X with B = 0, solved by a
     Hermitian Davidson on the A half of the same block action
     (`_tda_davidson_root`); Y is returned zero. Its roots lie at or above
@@ -385,7 +317,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     one_body: the off-diagonal one-body blocks a quasiparticle Hamiltonian
     adds to A (`with_one_body`), or None for the diagonal eps alone.
     tracked: optional dict, filled with the requested roots and the tracked
-    Ritz pairs above them (`_run_davidson`'s), for a warm start to carry.
+    Ritz pairs above them (`run_davidson`'s), for a warm start to carry.
     probe: off (False) by default. True or 'sign' measures min eig(A - B)
     after the solve on the same block action (`probe_after_solve`, the
     probe `solve_bse_isdf` runs) and refuses the roots (`UnstableReference`)
@@ -396,17 +328,17 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     nroots, conv_tol, max_cycle, guess_factor, preconditioner = bse_settings(
         numerics, 'nroots', 'conv_tol', 'max_cycle', 'guess_factor',
         'preconditioner')
-    _check_preconditioner(preconditioner)
+    check_preconditioner(preconditioner)
     if tda and orbsym is not None:
         raise ValueError('the Tamm-Dancoff Davidson takes no pair symmetry: '
                          'its trial space is one Hermitian block')
     comm = current_comm() if comm is None else comm
-    apply_AB, diag_d = _casida_action(lr_solver, nocc, polarizability, W_aux,
+    apply_AB, diag_d = casida_action(lr_solver, nocc, polarizability, W_aux,
                                       isdf_factors, conv_tol, spin=spin,
                                       comm=comm, timings=timings, tda=tda)
     apply_AB = with_one_body(apply_AB, one_body)
     occ, virt = get_occ_virt_indices(lr_solver.eps, nocc)
-    omega, X, Y = _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle,
+    omega, X, Y = run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle,
                                 _pair_symmetry(orbsym, occ, virt),
                                 guess_factor, stats=stats, comm=comm,
                                 timings=timings,
@@ -434,15 +366,15 @@ def probe_after_solve(apply_AB, diag_d, omega, X, Y, probe, stats=None,
     sign_only = isinstance(probe, str) and probe.lower() == 'sign'
     # The roots' X - Y, lowest first: nothing here reaches the roots.
     order = np.argsort(omega, kind='stable')
-    amb = float(_lowest_amb_from_action(
+    amb = float(lowest_amb_from_action(
         apply_AB, diag_d, sign_only=sign_only, stats=stats, comm=comm,
         start=(X - Y)[:, order] if sign_only else None)[0])
     if amb <= 0:
-        raise _unstable_reference(amb)
+        raise unstable_reference(amb)
     return amb
 
 
-def _casida_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
+def casida_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
                    conv_tol, spin='singlet', comm=None, timings=None,
                    tda=False):
     """(apply_AB, diag_d): the Davidson's block action, built once the
@@ -454,14 +386,14 @@ def _casida_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
     """
     check_residual_floor(conv_tol, bse_pair_diagonal(lr_solver.eps, nocc))
     t0 = time.time()
-    apply_AB, diag_d = _block_action(lr_solver, nocc, polarizability, W_aux,
+    apply_AB, diag_d = block_action(lr_solver, nocc, polarizability, W_aux,
                                      isdf_factors, spin=spin, comm=comm,
                                      tda=tda)
     setup_s = time.time() - t0
     if timings is not None:
         timings['davidson_setup'] = setup_s
         # Every rank arrives here off the same straight-line code, so the
-        # gather is the one `_run_davidson` already makes, nranks doubles, and
+        # gather is the one `run_davidson` already makes, nranks doubles, and
         # it says which rank's row block cost what to build.
         if comm is not None and comm.Get_size() > 1:
             timings['davidson_setup_by_rank'] = _block_action_by_rank(setup_s,
@@ -529,6 +461,117 @@ def _correction_length(r, floor):
     return np.sqrt(DAVIDSON_LINDEP) / new_min
 
 
+def _tda_davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle,
+                       guess_factor=DAVIDSON_GUESS_FACTOR, stats=None,
+                       counters=None, max_memory=None,
+                       preconditioner=DAVIDSON_PRECONDITIONER, guess=None,
+                       tracked=None, extra_roots=None):
+    """(omega, X, Y, converged, cycles, None, unconfirmed): the `nroots`
+    lowest roots of the Tamm-Dancoff problem A X = omega X, Y = 0,
+    <X|X> = 1, by the one symmetric Davidson of the code base
+    (`Solvers.davidson.solve_symmetric`) on the A half of the block action.
+
+    A is real symmetric: the roots are bounded from above by their Ritz
+    values and no (A-B) definiteness enters, so the solve has no breakdown
+    regime. The operator is the A half of `apply_AB` on a batch of trial
+    vectors, the preconditioner the Jacobi-Davidson one on the diagonal
+    `preconditioner` names (`preconditioner_diagonal`), the first space the
+    lowest diagonal pairs (`guess_indices`), led by the X columns of
+    `guess` (X, Y). The subspace is held within the trial pairs the Casida
+    loop's budget gives (`trial_space_memory`). Every decision is dense
+    arithmetic on the action's output, which an MPI action locksteps, so
+    every rank runs the same iteration.
+
+    The solve converges `tracked_roots` pairs, more than `nroots`: a root
+    whose Ritz value starts above the next root up is otherwise never
+    corrected and the solve converges past it. After it, an extra pair left
+    unconverged with theta - |r| below the highest requested root, where an
+    eigenvalue it approximates may lie, marks the requested roots above
+    that bound `unconfirmed`. `tracked`, a dict, receives 'omega', 'X' and
+    'Y' of every tracked pair. `cycles` counts the batches the operator was
+    applied to; the solver's restarts are its own (`collapses` 0).
+    """
+    no, nv = diag_d.shape
+    n_pair = no * nv
+    t0 = time.time()
+    precond_d = preconditioner_diagonal(apply_AB, diag_d, preconditioner)
+    t_precond = time.time() - t0 if precond_d is not diag_d else 0.0
+    order = guess_indices(diag_d, nroots, guess_factor, counters=counters)
+    space_inc = real_eig_space(param.MAX_MEMORY, nroots, n_pair)[0]
+    if max_memory is None:
+        max_memory = allocation_max_memory_mb()
+    working = action_working_bytes(apply_AB, max(len(order), space_inc),
+                                    n_pair, False)
+    max_space = real_eig_space(
+        trial_space_memory(nroots, n_pair, None, max_memory, working),
+        nroots, n_pair)[1]
+    track = tracked_roots(nroots, n_pair, extra_roots)
+    applied = {'s': 0.0, 'calls': 0, 'vectors': 0}
+
+    class _AHalf:
+        """A on columns, through the block action."""
+
+        def matmat(self, V):
+            t = time.time()
+            k = V.shape[1]
+            out = apply_AB(np.ascontiguousarray(V.T).reshape(k, no, nv))[0]
+            applied['s'] += time.time() - t
+            applied['calls'] += 1
+            applied['vectors'] += k
+            return out.reshape(k, n_pair).T
+
+        def matvec(self, v):
+            return self.matmat(np.asarray(v, float).reshape(n_pair, 1))[:, 0]
+
+    x0 = np.zeros((n_pair, len(order)))
+    x0[order, np.arange(len(order))] = 1.0
+    warm = 0
+    if guess is not None:
+        gx = np.asarray(guess[0], float).reshape(n_pair, -1)
+        warm = gx.shape[1]
+        x0 = np.hstack([gx, x0])
+    t_loop0 = time.time()
+    op = _AHalf()
+    omega, X, converged = solve_symmetric(
+        op, np.asarray(precond_d, float).ravel(), nroots=track, x0=x0,
+        tol_residual=conv_tol, max_cycle=max_cycle, max_subspace=max_space,
+        warn_unconverged=False, complete_lowest=False,
+        label='Tamm-Dancoff Davidson', max_memory=max_memory)
+    unconfirmed = np.zeros(nroots, bool)
+    extra = np.flatnonzero(~converged[nroots:]) + nroots
+    if extra.size:
+        # the extra pairs left unconverged: no eigenvalue they approximate
+        # lies below theta - |r|
+        r = np.linalg.norm(op.matmat(X[:, extra]) - X[:, extra] * omega[extra],
+                           axis=0)
+        lower = np.min(omega[extra] - r)
+        unconfirmed = omega[:nroots] > lower
+    cycles = applied['calls']
+    t_loop = time.time() - t_loop0         # the iteration, action included
+    if stats is not None:
+        stats.update({'davidson_vind_calls': cycles,
+                      'davidson_block_actions': applied['vectors'],
+                      'davidson_action_s': applied['s'],
+                      'davidson_vind_s': applied['s'],
+                      'davidson_dense_completion': False})
+    if counters is not None:
+        counters.update(
+            action_s=applied['s'], loop_s=t_loop, precond_s=t_precond,
+            warm_start=warm, iterations=cycles, vectors=applied['vectors'],
+            space_max=max_space, space_bound=max_space, collapses=0,
+            space_bytes=16 * n_pair * max_space,
+            space_budget_bytes=(
+                DAVIDSON_SPACE_GB * BYTES_PER_GB if max_memory is None
+                else DAVIDSON_SPACE_FRACTION * max_memory * 1e6 - working),
+            working_bytes=working)
+    if tracked is not None:
+        tracked.update(omega=omega.copy(), X=X.copy(),
+                       Y=np.zeros((n_pair, len(omega))))
+    X = X[:, :nroots].copy()
+    return (omega[:nroots], X, np.zeros_like(X), converged[:nroots], cycles,
+            None, unconfirmed)
+
+
 def _davidson_counters():
     """Where one rank's Davidson time and traffic go.
 
@@ -542,7 +585,7 @@ def _davidson_counters():
     `lockstep_skipped_bytes` what the checked ones did not move because every
     rank's digest agreed; every rank reports the same two numbers.
     `space_bound` is the trial pairs the loop holds before it collapses its
-    subspace (`_trial_space_memory`), rank 0's on every rank, and `collapses`
+    subspace (`trial_space_memory`), rank 0's on every rank, and `collapses`
     how often it did. `space_budget_bytes` is what this rank's budget let its
     holders take (the whole holders' DAVIDSON_SPACE_GB without an allocation)
     and `working_bytes` the block action's working set it was sized beside.
@@ -553,10 +596,10 @@ def _davidson_counters():
     `subspace_by_piece` splits the pair-row loop's subspace work
     (`trial_space.SUBSPACE_PIECES`), zero under Tamm-Dancoff, and
     `trace` is that loop's decisions, one dict per cycle. `precond_s` is
-    the preconditioner's diagonal (`_preconditioner_diagonal`), formed once
+    the preconditioner's diagonal (`preconditioner_diagonal`), formed once
     before the loop. `warm_start` counts the guess vectors the first batch
     kept, and `guess_truncated` whether the unit-vector guess was cut inside
-    a degenerate cluster (`_guess_indices`).
+    a degenerate cluster (`guess_indices`).
     """
     return {'action_s': 0.0, 'comm_s': 0.0, 'loop_s': 0.0, 'precond_s': 0.0,
             'warm_start': 0, 'guess_truncated': False,
@@ -579,741 +622,6 @@ def _block_action_by_rank(value, comm):
     return [float(x) for x in buf]
 
 
-def isdf_df_coefficients(X_mo, D):
-    """The (naux, norb, norb) DF factor the separable factorization implies,
-    B[A,p,q] = sum_k X[k,p] X[k,q] D[k,A].
-
-    O(M naux norb^2) to build and naux norb^2 to hold, so it defeats the point
-    of the factorization at scale. It is the bridge to every DF consumer:
-    `build_casida_matrices`, `static_screening_aux` and the dense CasidaSolver
-    all speak B, and feeding them this B puts them in the ISDF factorization's
-    own gauge, the only setting in which they and the matrix-free ISDF path
-    compare the same operator.
-    """
-    return np.einsum('Pp,Pq,PA->Apq', X_mo, X_mo, D, optimize=True)
-
-
-def oscillator_strengths(mf, mol, nocc, omega, X, Y):
-    """Length-gauge oscillator strengths and transition dipoles for the
-    solver's roots:
-
-        f_n = (2/3) omega_n |<0|r|n>|^2,
-        <0|r|n> = sqrt(2) sum_ia (X + Y)_{ia,n} <i|r|a>
-
-    the spin-adapted singlet with this module's <X|X>-<Y|Y>=1 spatial
-    normalization (validated against pyscf's TDHF `oscillator_strength` on the
-    same DF operator). Transition moments are origin-independent, so the gauge
-    origin is fixed at zero only for definiteness.
-
-    Returns (f, dip) with shapes (nroots,) and (nroots, 3), atomic units.
-
-    The normalization is checked, not assumed: the sqrt(2) above belongs to
-    <X|X> - <Y|Y> = 1, pySCF returns 1/2, and f is quadratic in the vector, so
-    the mismatch is a silent factor of two in every oscillator strength.
-    """
-    X, Y = check_normalization(X, Y)
-    eps = get_orbital_energies(mf, representation='spatial')
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    with mol.with_common_orig((0.0, 0.0, 0.0)):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-    mo = mf.mo_coeff
-    d_ov = np.einsum('xmn,mi,na->xia', ao_dip, mo[:, occ], mo[:, virt],
-                     optimize=True).reshape(3, -1)
-    dip = np.sqrt(2.0) * (d_ov @ (X + Y)).T                  # (nroots, 3)
-    f = (2.0 / 3.0) * np.asarray(omega) * np.einsum('nx,nx->n', dip, dip)
-    return f, dip
-
-
-def _takes_comm(distribute, comm):
-    """Whether an entry point runs over a communicator: `distribute` None
-    follows `comm`, True asks for one (COMM_WORLD failing `comm`), False
-    takes none."""
-    return bool(distribute) or (distribute is None and comm is not None)
-
-
-def solve_bse_isdf(mf, mol, nocc, numerics=None, qp='G0W0', factors=None,
-                   auxbasis=None, radii=None, counts=None, probe=False,
-                   gw_kwargs=None, progress=None, n_start=1,
-                   self_consistency='G0W0', screen_at='mean-field',
-                   spin='singlet', grid_accuracy=None, distribute=None,
-                   comm=None, sigma_x_matrix=None, W_aux=None,
-                   W_aux_gauge=None, guess=None, tda=False,
-                   refuse_unconverged=False):
-    """BSE by the ISDF matrix-free Davidson: mean field in, excitations out.
-
-    The calling sequence:
-
-        mf = dft.RKS(mol, xc=...).density_fit(auxbasis=...); mf.kernel()
-        omega, X, Y, info = solve_bse_isdf(mf, mol, nocc)
-
-    The discipline the pieces demand lives here so the caller cannot violate
-    it: one ISDF fit is built (or taken from `factors`) and shared by the GW
-    and BSE stages; the static W comes from that fit at the eigenvalues the
-    level of theory screens with (the mean field's for G0W0, the standard
-    split, and the converged ones under evGW); and W and the block action
-    cannot mix auxiliary gauges.
-
-    self_consistency: 'G0W0' (default) evaluates the self-energy once on the
-        mean field's eigenvalues. 'evGW' runs the eigenvalue-self-consistent
-        loop first (all eigenvalues updated, DIIS, convergence on the HOMO
-        and LUMO), puts its fixed point on the BSE diagonal and builds the
-        static W from it, so the kernel screens with the same spectrum the
-        self-energy did. It overrides `qp` and shares the ISDF fit.
-    screen_at: which spectrum builds the static W when `qp` is an explicit
-        energy array. The convention is the level of theory, not the
-        diagonal: G0W0 screens W0 at the mean-field eigenvalues and evGW at
-        the converged ones. 'mean-field' (default) is the standard G0W0-BSE
-        split, for an array of G0W0 energies computed elsewhere. 'qp' screens
-        at the array instead, for an array that is a self-consistent spectrum
-        (evGW energies from a separate loop). The two differ: on water
-        /cc-pVDZ the full-integral and DF routes agree to +0.6 meV when the
-        screening and the diagonal match and drift -65 meV when they do not.
-
-        Quasiparticle energies plus a further shift are neither: evGW
-        energies carrying a static reaction-field correction on top are not
-        the evGW spectrum, so screening at them satisfies no convention
-        (119 meV on acrolein's n->pi*). Leave the default and let the
-        reference object carry the spectrum.
-
-        Neither value touches `qp='G0W0'`, whose W comes from the GW step's own
-        chi0 at mean-field energies, nor `self_consistency='evGW'`, which always
-        screens at its fixed point.
-
-    qp: 'G0W0' (default) puts every quasiparticle energy from one space-time
-    self-energy on the BSE diagonal (`solve_qp_diagonal_space_time`, which
-    applies <Sigma_x - v_xc> per state for a KS reference); an array of
-    energies is used as the diagonal directly (an evGW result, say, or the
-    G0W0 diagonal a caller already solved, handed over with `W_aux`);
-    False/None solves BSE@mean-field.
-    spin: 'singlet' (kappa = 2) or 'triplet' (kappa = 0); the screened term is
-    spin-independent, so both read the same W.
-    probe: off (False) by default. True or 'sign' measures min eig(A-B) after
-    the Davidson, on its own block action, and refuses the roots while it is
-    negative (the instability regime, where the omega^2 reduction is
-    invalid); on large DF/ISDF runs it can cost more than the solve. An
-    unstable reference is refused anyway, probe or not, when the Davidson's
-    projected (A-B) block stops being positive definite, and the measurement
-    that breakdown runs names the reference. True converges the eigenvalue by
-    the Lanczos from 1/d. 'sign' stops once the sign is proven by the
-    residual bound: first by Rayleigh-Ritz on the span of the roots' X - Y
-    (which proves an eigenvalue in that span, not the minimum over pair
-    irreps no root lies in), then by a Lanczos from the lowest root with
-    PROBE_START_MIX of 1/d at 1e-2, then from 1/d at escalating tolerances.
-    The quantity is a property of the SCF solution, not the molecule, so
-    probe once per reference that is in doubt.
-    gw_kwargs: forwarded to `solve_qp_diagonal_space_time` (the shared factors
-    are always passed).
-    sigma_x_matrix: <p|Sigma_x - v_xc|q> already built for this mean field. It
-    depends on the density and orbitals alone, so one build (one K plus the xc
-    potential) serves this BSE, an earlier quasiparticle window and every
-    evGW cycle. Left None, the GW stage builds it once here, timed as its own
-    `sigma_x` stage.
-    W_aux: the kernel's static screening W(omega = 0) on `factors`, already
-    built: `extras['w_static']` of the `solve_qp_diagonal_space_time` call
-    whose diagonal is handed in as `qp`, which then gives the same roots bit
-    for bit without a second chi0 and self-energy sweep. Refused beside
-    `qp='G0W0'`, `self_consistency='evGW'` and `screen_at='qp'`, which each
-    build their own W.
-    W_aux_gauge: the auxiliary gauge W_aux was built in, required beside it and
-    refused unless SEPARABLE_AUX_GAUGE: a W from pyscf's cderi (`solve_bse_df`)
-    has the factors' naux and a rotated auxiliary index.
-    distribute, comm: split the M^2 work over the ranks of `comm`, by default
-    the current `distributed` region's. None (the default) follows that
-    communicator; True also falls back to COMM_WORLD; False gives this call no
-    communicator of its own (no replication, no COMM_WORLD), while the kernels
-    it calls still follow a `distributed` region around it -- a serial solve
-    inside one is `with distributed(None):`. What is divided is the tau axis of
-    chi0 and Sigma in the GW stage and of the static W, and the rows of Zt in
-    the block action, so the one M^2 object's per-rank memory falls with the
-    rank count. Exact up to summation order; one rank prints.
-
-    The answer is rank 0's. Everything the ranks contract into a reduced sum
-    is replicated from rank 0 first -- the mean field, the ISDF factors, the
-    quasiparticle diagonal and the static W -- and their own copies are
-    overwritten, because partials of two slightly different calculations do
-    not add. The Davidson and the (A-B) probe then run on every rank on the
-    block action's lockstepped output, and their results are lockstepped from
-    rank 0 at the end, as is the probe's decision whether the roots alone
-    proved the sign. The trial space is sized from the job's memory: inside a
-    SLURM allocation from `mf.max_memory`, which a job sets to the
-    allocation's share, less the block action's working set, counted on the
-    pair rows a rank holds (`_trial_space_memory`); outside one within
-    DAVIDSON_SPACE_GB. On a slow interconnect weigh the GW stage's
-    all-reduce of nfreq x naux^2 first: on 1 GbE it costs more than it saves
-    (`Base.utils.mpi_grid`).
-    grid_accuracy: the named way to ask for the interpolation grid: an
-    accuracy level of `ISDF_GRID_ACCURACY`, measured on this quantity
-    (the three lowest BSE roots against `solve_bse_df`), or four explicit shell
-    counts. It reaches `separable_factors`, sets `counts` and `n_start`
-    together, and aborts on anything the radii table has not got.
-    Factors built here are refused where they miss an orbital density of
-    `mf` (`separable_factors`, at the bar ISDF_ORBITAL_RESIDUAL_TOL); factors
-    handed in were measured where they were built.
-
-    progress: stamp each stage to stdout as it begins and ends, so a long job
-    says which stage it is in while it is in it (the returned timings arrive
-    only if the run finishes). None follows `mol.verbose`.
-
-    numerics.bse.preconditioner: the diagonal the Davidson's corrections
-    divide by, 'bare' (the pair energies d) or 'screened' (d - (ii|W|aa) in
-    the fit's own gauge, one reduction of this rank's grid rows' partial);
-    refused before the mean field is touched when it is neither
-    (`_run_davidson`).
-
-    guess: (X, Y) of this spin to warm-start the Davidson from, carried into
-    this mean field's orbitals (`DavidsonWarmStart.guess`); `_run_davidson`'s.
-
-    tda: the Tamm-Dancoff BSE, A X = omega X with B = 0 and Y returned zero,
-    on the A half of the same block action (`solve_casida_davidson`);
-    `probe` is skipped, as on the dense route, since that problem makes no
-    omega^2 reduction.
-
-    refuse_unconverged: False (the default) returns a root left above
-    conv_tol as solved, warned about and named in info['davidson_flags']
-    (`davidson_flags`); True raises `DavidsonNotConverged`.
-    `_run_davidson`'s.
-
-    Returns (omega, X, Y, info); info carries eps / eps_mf / factors / W_aux /
-    min_eig_amb (None when the probe did not run; under 'sign' the Ritz value
-    whose sign was proven, an upper bound on the minimum), length-gauge
-    oscillator_strength and transition_dipole per root
-    (`oscillator_strengths`), exciton_descriptors, per-stage timings in
-    seconds and `nranks`; `stats` holds the probe's record (`probe_source`,
-    `probe_matvecs`). info['tracked'] holds 'omega', 'X' and 'Y' of the roots
-    and the tracked Ritz pairs above them, what a `DavidsonWarmStart` carries
-    to the next geometry; info['davidson_flags'] names roots left
-    unconverged or unconfirmed (`davidson_flags`, empty when clean). The
-    Davidson stage carries its breakdown
-    (`_run_davidson`); the `qp` stage, when the space-time solve runs,
-    carries `qp_chi0`, `qp_dyson`, `qp_sigma`, `qp_static` and `qp_states`
-    (`_QPStageTimings`, summed over evGW's `qp_cycles`).
-    """
-    require_closed_shell_or_unrestricted(mf, 'solve_bse_isdf', mol=mol)
-    nroots, conv_tol, max_cycle, guess_factor, preconditioner = bse_settings(
-        numerics, 'nroots', 'conv_tol', 'max_cycle', 'guess_factor',
-        'preconditioner')
-    t = {}
-    stats = {}
-    tracked = {}
-    _check_preconditioner(preconditioner)
-    if W_aux is not None and (isinstance(qp, str) or screen_at == 'qp' or
-                              str(self_consistency).lower() in ('evgw', 'ev')):
-        raise ValueError(
-            f'W_aux handed in beside qp={qp!r}, screen_at={screen_at!r}, '
-            f'self_consistency={self_consistency!r}, each of which builds its '
-            'own W; hand the G0W0 diagonal in as qp= with the W(0) its solve '
-            'carried out.')
-    if W_aux is not None and W_aux_gauge != SEPARABLE_AUX_GAUGE:
-        raise ValueError(
-            f'W_aux handed in with W_aux_gauge={W_aux_gauge!r}: the kernel '
-            f'contracts it with the separable factors, whose auxiliary index '
-            f'is in the {SEPARABLE_AUX_GAUGE!r} (V^-1/2) gauge, and a W from '
-            f"pyscf's L^-1-whitened cderi has the same shape and is wrong. "
-            f'Hand a W built on these factors (`isdf_bse_factors`, the '
-            f"space-time GW's extras['w_static']) with "
-            f'W_aux_gauge={SEPARABLE_AUX_GAUGE!r}.')
-    if W_aux is None and W_aux_gauge is not None:
-        raise TypeError('W_aux_gauge is read only beside W_aux')
-    comm = current_comm() if comm is None else comm
-    mpi_comm, rank, nranks = (grid_comm(comm) if _takes_comm(distribute, comm)
-                              else (None, 0, 1))
-    # Rank 0's mean field, before a grid size or an interpolation point count
-    # is read off it anywhere below.
-    if nranks > 1:
-        replicate_mean_field(mf, mpi_comm)
-    if progress is None:
-        progress = getattr(mol, 'verbose', 0) > 0
-    progress = bool(progress) and rank == 0        # lockstep ranks, one voice
-    # the GW stage and the static W read the one object
-    refuse_second_numerics(gw_kwargs)
-    gw_kw = dict(gw_kwargs or {}, numerics=numerics)
-    if nranks > 1:
-        gw_kw.update(distribute=True, comm=mpi_comm)
-
-    def _begin(name):
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] {name} ...', flush=True)
-        return time.time()
-
-    def _end(name, t0):
-        t[name] = time.time() - t0
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] {name} done, '
-                  f'{t[name]:.1f} s', flush=True)
-
-    if progress:
-        print(f'[bse {time.strftime("%H:%M:%S")}] natm={mol.natm} '
-              f'nao={mol.nao_nr()} nocc={nocc} nroots={nroots} qp={qp}',
-              flush=True)
-
-    if factors is None:
-        t0 = _begin('factors')
-        factors = separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
-                                    counts=counts, n_start=n_start,
-                                    grid_accuracy=grid_accuracy)
-        _end('factors', t0)
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] ISDF M={factors[1].shape[0]} '
-                  f'({factors[1].shape[0] // mol.natm}/atom)', flush=True)
-    # Rank 0's fit, whether it was built here or handed in: every rank owns a
-    # block of the rows of Zt, and rows built from two different point sets are
-    # not partials of one matrix.
-    if nranks > 1:
-        replicate_factors(factors, mpi_comm)
-
-    # <Sigma_x - v_xc> is a functional of the density and the orbitals, so it
-    # is built once, from the mean field before any spectrum shifts it, and
-    # handed to every quasiparticle call below -- the G0W0 diagonal, or each
-    # evGW cycle, which would otherwise rebuild the same K and the same
-    # DFT-grid potential per cycle. 'df-direct' forms no such matrix.
-    runs_gw = (str(self_consistency).lower() in ('evgw', 'ev')
-               or isinstance(qp, str))
-    # chi0/Dyson/sigma/static-exchange/root-search timings from the space-time
-    # QP solve below, merged into `t` under a `qp_` prefix once the spectrum
-    # is settled. `_QPStageTimings` sums across evGW's cycles rather than
-    # keeping only the last one's numbers.
-    qp_stage = _QPStageTimings(gw_kw.get('timings')) if runs_gw else None
-    if qp_stage is not None:
-        gw_kw['timings'] = qp_stage
-    if (runs_gw and sigma_x_matrix is None
-            and gw_kw.get('sigma_x', 'mf') != 'df-direct'):
-        t0 = _begin('sigma_x')
-        sigma_x_matrix = static_exchange_mean_field_matrix(
-            mf, mol, dm_correction=gw_kw.get('dm_correction'),
-            exchange=gw_kw.get('sigma_x', 'mf'))
-        _end('sigma_x', t0)
-    if runs_gw and sigma_x_matrix is not None:
-        gw_kw['sigma_x_matrix'] = sigma_x_matrix
-
-    evgw_info = None
-    if str(self_consistency).lower() in ('evgw', 'ev'):
-        t0 = _begin('evgw')
-        # The fit is geometry-only, so the loop reuses the one above rather
-        # than rebuilding it every cycle.
-        qp, evgw_info = evgw_eigenvalues(mf, mol, mode='space-time',
-                                         factors=factors, **gw_kw)
-        # W must screen with the spectrum the self-energy converged on, not the
-        # mean field's; shifting the reference is what carries that downstream.
-        mf = shifted_mean_field(mf, qp)
-        _end('evgw', t0)
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] evGW '
-                  f'{"converged" if evgw_info["converged"] else "NOT converged"}'
-                  f' in {evgw_info["cycles"]} cycles', flush=True)
-    elif str(self_consistency).lower() not in ('g0w0', 'none'):
-        raise ValueError(f"self_consistency={self_consistency!r}; choose "
-                         f"'G0W0' or 'evGW'.")
-
-    eps_mf = get_orbital_energies(mf, representation='spatial')
-    gw_extras = {}
-    if qp is None or qp is False:
-        eps = eps_mf
-    elif isinstance(qp, str):
-        if qp.upper() != 'G0W0':
-            raise ValueError(f"qp='{qp}'; choose 'G0W0', an energy array, or False.")
-        t0 = _begin('qp')
-        gw_extras = {}
-        eps, _ = solve_qp_diagonal_space_time(mf, mol, nocc, factors=factors,
-                                              extras=gw_extras, **gw_kw)
-        _end('qp', t0)
-    else:
-        eps = np.asarray(qp, dtype=float)
-        if eps.shape != eps_mf.shape:
-            raise ValueError(f'qp energies have shape {eps.shape}, the mean '
-                             f'field has {eps_mf.shape}.')
-        if screen_at not in ('qp', 'mean-field'):
-            raise ValueError(f"screen_at={screen_at!r}; choose 'qp' or "
-                             f"'mean-field'.")
-        if screen_at == 'qp':
-            # An array that is a self-consistent spectrum: W follows it, the
-            # way evGW's does. The standard G0W0 split is the default above.
-            mf = shifted_mean_field(mf, eps)
-
-    if qp_stage is not None:
-        for key, value in qp_stage.target.items():
-            if key == 't_qp':
-                continue
-            t[QP_TIMING_RENAME.get(key, 'qp_' + key)] = value
-        if evgw_info is not None:
-            t['qp_cycles'] = evgw_info['cycles']
-
-    t0 = _begin('W')
-    # The GW route built W(0) with the same `static_screening_matrix` on the
-    # same grid, so a second sweep would repeat it bit for bit.
-    w_shared = gw_extras.get('w_static')
-    if W_aux is not None:
-        naux = (factors.naux if isinstance(factors, SlicedFactors)
-                else factors[1].shape[1])
-        if np.shape(W_aux) != (naux, naux):
-            raise ValueError(f'W_aux has shape {np.shape(W_aux)}; the factors '
-                             f'screen in naux = {naux}.')
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] static W handed in, not '
-                  'rebuilt', flush=True)
-    elif w_shared is not None:
-        W_aux = w_shared
-        if progress:
-            print(f'[bse {time.strftime("%H:%M:%S")}] static W taken from the '
-                  f"GW stage (ntau={gw_extras.get('w_static_ntau')}), "
-                  'not rebuilt', flush=True)
-    else:
-        if progress and gw_extras.get('w_static_unavailable'):
-            print(f'[bse {time.strftime("%H:%M:%S")}] rebuilding the static W: '
-                  f"{gw_extras['w_static_unavailable']}", flush=True)
-        _, _, W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors,
-                                       numerics=numerics,
-                                       distribute=nranks > 1, comm=mpi_comm)
-    _end('W', t0)
-    # The last two objects the block action reads: the BSE diagonal, and the
-    # kernel each rank dresses its own rows of Zt with. Both come off a
-    # replicated solve on reduced data -- a Dyson inversion, a Pade
-    # continuation and a Newton -- which is bitwise across ranks only while
-    # their dense arithmetic is. naux^2 and nmo doubles to make certain.
-    if nranks > 1:
-        eps, W_aux = replicate(np.asarray(eps, float), W_aux, comm=mpi_comm)
-
-    lr = LinearResponseSolver(eps, spin_mode='restricted')
-    # No communicator of the call's own leaves the kernels to the region's.
-    action_comm = current_comm() if mpi_comm is None else mpi_comm
-    t0 = _begin('davidson')
-    # One block action for the Davidson and the (A-B) probe after it: Zt, and
-    # the D and X_o sliced factors gather whole, are built once for both.
-    apply_AB, diag_d = _casida_action(lr, nocc, 'BSE', W_aux, factors,
-                                      conv_tol, spin=spin, comm=action_comm,
-                                      timings=t, tda=tda)
-    try:
-        omega, X, Y = _run_davidson(apply_AB, diag_d, nroots, conv_tol,
-                                    max_cycle, None, guess_factor, stats=stats,
-                                    comm=action_comm, timings=t,
-                                    max_memory=_job_max_memory(mf),
-                                    preconditioner=preconditioner,
-                                    guess=guess, tda=tda, tracked=tracked,
-                                    refuse_unconverged=refuse_unconverged)
-    except _CasidaBreakdown as exc:
-        # The projected (A-B) broke down and the measurement it ran says the
-        # reference, not the subspace, is what failed; named with or without
-        # `probe`, since the breakdown has already paid for it.
-        if exc.min_eig_amb is not None and exc.min_eig_amb <= 0:
-            raise _unstable_reference(exc.min_eig_amb) from exc
-        raise
-    _end('davidson', t0)
-    amb = None
-    if probe and not tda:
-        t0 = _begin('probe')
-        try:
-            amb = probe_after_solve(apply_AB, diag_d, omega, X, Y, probe,
-                                    stats=stats, comm=action_comm)
-        finally:
-            _end('probe', t0)
-    if progress and stats:
-        print(f'[bse {time.strftime("%H:%M:%S")}] ' + '  '.join(
-            f'{k}={v:.4g}' if isinstance(v, float) else f'{k}={v}'
-            for k, v in sorted(stats.items())), flush=True)
-    f_osc, trans_dip = oscillator_strengths(mf, mol, nocc, omega, X, Y)
-    info = dict(eps=eps, eps_mf=eps_mf, factors=factors, W_aux=W_aux,
-                min_eig_amb=amb, oscillator_strength=f_osc,
-                transition_dipole=trans_dip,
-                exciton_descriptors=exciton_descriptors(mf, mol, nocc, X, Y),
-                timings=t, stats=stats, evgw=evgw_info, nranks=nranks,
-                tracked=tracked, davidson_flags=davidson_flags(t),
-                numerics_identity=numerics_or_default(numerics).identity())
-    return omega, X, Y, info
-
-
-def solve_bse_df(mf, mol, nocc, numerics=None, qp='G0W0', probe=False,
-                 gw_kwargs=None, progress=None, self_consistency='G0W0',
-                 screen_at='mean-field', spin='singlet', tda=False,
-                 refuse_unconverged=False):
-    """BSE by the density-fitted matrix-free Davidson: mean field in, excitations out.
-
-    The twin of `solve_bse_isdf` on pyscf's own Coulomb-fitted three-index
-    factor, so the two routes share every convention and differ
-    only in how the interaction is represented:
-
-        mf = dft.RKS(mol, xc=...).density_fit(auxbasis=...); mf.kernel()
-        omega, X, Y, info = solve_bse_df(mf, mol, nocc)
-
-    The quasiparticle diagonal comes from the Casida GW route -- the dense RPA
-    spectrum in the same auxiliary basis, `calc_qp_energy(mode='casida')` for
-    every orbital -- and `self_consistency='evGW'` drives that route through
-    the eigenvalue loop, `gw_kwargs` going to `evgw_eigenvalues` (its own
-    keywords and the Casida step's; `screening` is refused, the loop here is
-    evGW). The static W is built from the same three-index
-    factor: at the mean-field spectrum for `qp='G0W0'`, the standard G0W0-BSE
-    split, and at the fixed point under evGW, since that is the spectrum the
-    self-energy was built with. `qp` as an energy array and `screen_at` follow
-    the ISDF twin's rules (see there).
-
-    An attached environment reaches the kernel through the dressed factor
-    (`SolventScreening.whitened_transform`, v -> v + vtilde) and the diagonal
-    through Duchemin, Guido, Jacquemin and Blase, Chem. Sci. 9, 4430 (2018)
-    Eq. (18) inside the GW route, whose self-energy screens with the bare
-    interaction. Both halves of the reaction field, the ground-state one at
-    eps_static and the response at eps_inf, are the caller's two calls on one
-    environment object: `env.mean_field(mol, factory)` then
-    `attach_environment(mf, env)`.
-
-    Inside a `distributed` region every rank runs the whole route: the DF
-    action is not divided, and it locksteps its inputs so that every rank's
-    Davidson is rank 0's (`df_block_action`).
-
-    numerics.bse.preconditioner: 'bare' or 'screened', as for the ISDF twin;
-    the screened diagonal comes from the factor's own C_oo[:, i, i] and
-    C_vv[:, a, a].
-
-    probe: off by default. True or 'sign' measures min eig(A-B) matrix-free
-    BEFORE the Davidson and refuses an unstable reference up front; on large
-    DF runs it can cost more than the solve. Without it an unstable reference
-    is still refused when the Davidson's projected (A-B) breaks down.
-    min_eig_amb is None when the probe did not run.
-
-    tda: the Tamm-Dancoff BSE, A X = omega X with B = 0 and Y returned zero
-    (`solve_casida_davidson`); `probe` is skipped, as on the dense route,
-    since that problem makes no omega^2 reduction.
-
-    refuse_unconverged: as for the ISDF twin.
-
-    Returns (omega, X, Y, info) with the ISDF twin's fields: eps / eps_mf /
-    coeff_df / W_aux / min_eig_amb, length-gauge oscillator_strength,
-    transition_dipole and exciton_descriptors per root, per-stage timings (the
-    Davidson's breakdown among them), the evGW record and the tracked Ritz
-    pairs.
-    """
-    require_closed_shell_or_unrestricted(mf, 'solve_bse_df', mol=mol)
-    nroots, conv_tol, max_cycle, guess_factor, preconditioner = bse_settings(
-        numerics, 'nroots', 'conv_tol', 'max_cycle', 'guess_factor',
-        'preconditioner')
-    t = {}
-    stats = {}
-    tracked = {}
-    _check_preconditioner(preconditioner)
-    if progress is None:
-        progress = getattr(mol, 'verbose', 0) > 0
-    if getattr(mf, 'with_df', None) is None:
-        raise ValueError('solve_bse_df reads the mean field\'s own density '
-                         'fitting: build it with mf.density_fit(auxbasis=...) '
-                         'or use solve_bse_isdf, which fits for itself')
-    if np.asarray(mf.mo_coeff).ndim == 3:
-        raise NotImplementedError('solve_bse_df is restricted-spin only, like '
-                                  'the Casida GW route that feeds its diagonal')
-
-    def _begin(name):
-        if progress:
-            print(f'[bse-df {time.strftime("%H:%M:%S")}] {name} ...', flush=True)
-        return time.time()
-
-    def _end(name, t0):
-        t[name] = time.time() - t0
-        if progress:
-            print(f'[bse-df {time.strftime("%H:%M:%S")}] {name} done, '
-                  f'{t[name]:.1f} s', flush=True)
-
-    if progress:
-        print(f'[bse-df {time.strftime("%H:%M:%S")}] natm={mol.natm} '
-              f'nao={mol.nao_nr()} nocc={nocc} nroots={nroots} qp={qp}',
-              flush=True)
-
-    evgw_info = None
-    if str(self_consistency).lower() in ('evgw', 'ev'):
-        if 'screening' in (gw_kwargs or {}):
-            # the kernel below screens at the fixed point, which is evGW's W;
-            # evGW0 keeps the mean field's, and this route does not build that
-            raise ValueError("gw_kwargs: self_consistency='evGW' screens the BSE "
-                             "at the loop's fixed point, so 'screening' has no "
-                             "place here")
-        t0 = _begin('evgw')
-        qp, evgw_info = evgw_eigenvalues(mf, mol, mode='casida',
-                                         **(gw_kwargs or {}))
-        mf = shifted_mean_field(mf, qp)
-        _end('evgw', t0)
-        if progress:
-            print(f'[bse-df {time.strftime("%H:%M:%S")}] evGW '
-                  f'{"converged" if evgw_info["converged"] else "NOT converged"}'
-                  f' in {evgw_info["cycles"]} cycles', flush=True)
-    elif str(self_consistency).lower() not in ('g0w0', 'none'):
-        raise ValueError(f"self_consistency={self_consistency!r}; choose "
-                         f"'G0W0' or 'evGW'.")
-
-    eps_mf = get_orbital_energies(mf, representation='spatial')
-    if qp is None or qp is False:
-        eps = eps_mf
-    elif isinstance(qp, str):
-        if qp.upper() != 'G0W0':
-            raise ValueError(f"qp='{qp}'; choose 'G0W0', an energy array, or False.")
-        t0 = _begin('qp')
-        out = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
-                             mode='casida', state=list(range(len(eps_mf))),
-                             **(gw_kwargs or {}))
-        eps = np.array([out[p]['GW'] for p in range(len(eps_mf))]) / HARTREE_TO_EV
-        _end('qp', t0)
-    else:
-        eps = np.asarray(qp, dtype=float)
-        if eps.shape != eps_mf.shape:
-            raise ValueError(f'qp energies have shape {eps.shape}, the mean '
-                             f'field has {eps_mf.shape}.')
-        if screen_at not in ('qp', 'mean-field'):
-            raise ValueError(f"screen_at={screen_at!r}; choose 'qp' or "
-                             f"'mean-field'.")
-        if screen_at == 'qp':
-            mf = shifted_mean_field(mf, eps)
-
-    t0 = _begin('W')
-    # One factor for W and the kernel, dressed by whatever is attached to mf;
-    # the screening spectrum is the one mf carries (mean field, or shifted).
-    coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
-    W_aux = LinearResponseSolver(get_orbital_energies(mf, representation='spatial'),
-                                 coeff_df=coeff,
-                                 spin_mode='restricted').static_screening_aux(nocc)
-    _end('W', t0)
-
-    lr = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted')
-    amb = None
-    # Opt-in: before the solve, refusing an unstable reference up front.
-    if probe and not tda:
-        t0 = _begin('probe')
-        amb = float(lowest_amb_eigenvalue(
-            lr, nocc, polarizability='BSE', W_aux=W_aux,
-            sign_only=(isinstance(probe, str) and probe.lower() == 'sign'),
-            stats=stats)[0])
-        _end('probe', t0)
-        if amb <= 0:
-            raise UnstableReference(
-                f'BSE refused before the solve: min eig(A-B) = {amb:.6f} Ha '
-                '<= 0 -- the mean-field reference is singlet/triplet unstable '
-                'and the Casida omega^2 reduction is invalid there.', amb)
-
-    t0 = _begin('davidson')
-    try:
-        omega, X, Y = solve_casida_davidson(
-            lr, nocc, numerics=numerics, polarizability='BSE', W_aux=W_aux,
-            stats=stats, spin=spin, timings=t,
-            max_memory=_job_max_memory(mf),
-            tda=tda, tracked=tracked, refuse_unconverged=refuse_unconverged)
-    except _CasidaBreakdown as exc:
-        # As on the ISDF twin: the breakdown's own measurement names an
-        # unstable reference whether or not `probe` was asked for.
-        if exc.min_eig_amb is not None and exc.min_eig_amb <= 0:
-            raise _unstable_reference(exc.min_eig_amb) from exc
-        raise
-    _end('davidson', t0)
-    f_osc, trans_dip = oscillator_strengths(mf, mol, nocc, omega, X, Y)
-    info = dict(eps=eps, eps_mf=eps_mf, coeff_df=coeff, W_aux=W_aux,
-                min_eig_amb=amb, oscillator_strength=f_osc,
-                transition_dipole=trans_dip,
-                exciton_descriptors=exciton_descriptors(mf, mol, nocc, X, Y),
-                timings=t, stats=stats, evgw=evgw_info, tracked=tracked,
-                davidson_flags=davidson_flags(t),
-                numerics_identity=numerics_or_default(numerics).identity())
-    return omega, X, Y, info
-
-
-def isdf_bse_factors(mf, mol, nocc, eps=None,
-                     auxbasis=None, radii=None, counts=None, factors=None,
-                     screening='imaginary-time', numerics=None, n_start=1,
-                     grid_accuracy=None, distribute=None, comm=None):
-    """(X_mo, D, W_aux) for the ISDF Davidson BSE, all from ONE auxiliary fit.
-
-    The point is the gauge. `LinearResponseSolver.static_screening_aux` returns
-    W_aux in whatever gauge its `coeff_df` came in, so W_aux is built here from
-    the separable factors themselves and never from pyscf's cderi -- see the
-    module docstring for what pairing the two costs.
-
-    eps: orbital energies the RPA screening is built at, defaulting to the mean
-    field's. A BSE@GW run passes the quasiparticle energies to
-    `solve_casida_davidson` through `lr_solver.eps`, but W is normally still the
-    G0W0 one, i.e. RPA at the mean-field energies -- so the two are separate
-    arguments on purpose.
-    counts: Lebedev sub-shell replica counts, i.e. the grid size -- the knob the
-    factorization error responds to. The radii come from the one shipped table,
-    looked up per element at these counts; nothing is substituted for a caller
-    who named no size, so the published Duchemin-Blase cc-pVTZ grids are
-    reached by asking for their counts rather than by default.
-    grid_accuracy: the same grid asked for by name: an accuracy level of
-    `ISDF_GRID_ACCURACY` or four explicit shell counts (`resolve_isdf_grid`),
-    which refuses instead of substituting.
-    Factors built here are refused where they miss an orbital density of
-    `mf` (`separable_factors`).
-    factors: pre-built (X_mo, D), to reuse a factorization across states, or
-    `SlicedFactors` over `comm`: the sweep gathers what it reads whole once,
-    and the return is then (the sliced factors, None, W_aux) -- D is whole
-    for W alone and is not handed back.
-
-    screening:
-      'imaginary-time'  chi0(i.0) built from the separable factors in imaginary
-            time by `LinearResponse/space_time.py`, which is tiled and cubic and
-            touches nothing bigger than (naux, naux): the route for large
-            systems. `static_screening_matrix` on
-            `static_screening_grid`, so any other consumer of the same static
-            screening builds it identically.
-      'df'  chi0 from the three-index factor these factors imply. Exact for the
-            given factors, and the reference the imaginary-time route was
-            checked against -- 1e-8 relative on the W entries at ntau=18 on
-            water and ethene / cc-pVDZ -- but it forms B and then a
-            (naux, n_occ, n_vir) array. Small systems only.
-
-    numerics: the choices (`Numerics`; None for the defaults): the static
-    W's `quadrature.ntau_w` imaginary-time points, None sizing the grid from
-    the Kaltak-Klimes-Kresse test integral over the chi0 transition range at
-    `quadrature.tau_target`, exactly as the GW space-time route does, on the
-    one object `solve_bse_isdf` hands its GW stage too -- but over that one
-    range alone, since nothing here transforms a self-energy. More points are
-    monotonically safe and then stop paying: measured against the 'df'
-    reference on water / cc-pVDZ, W(i.omega = 0) is off by 4.6e-7 at ntau=12,
-    1.0e-8 at 18, 2.5e-10 at 24 and 1.8e-10 at 34, the last two sitting on the
-    tabulated coefficients' own precision.
-    distribute, comm: split the tau points over the ranks of `comm`, by
-    default the current `distributed` region's (None follows it, True also
-    falls back to COMM_WORLD, False takes none -- as in `solve_bse_isdf`),
-    replicate the mean field, the factors and `eps` from rank 0 before the
-    grid is sized from them, and all-reduce one (naux, naux) matrix. This is
-    the best compute-per-byte sweep in the code: every tau point is an M^2
-    sweep and the whole result is a single naux^2 block. Exact up to
-    summation order.
-    """
-    comm = current_comm() if comm is None else comm
-    mpi_comm = grid_comm(comm)[0] if _takes_comm(distribute, comm) else None
-    nranks = mpi_comm.Get_size() if mpi_comm is not None else 1
-    # Before the grid: `ntau='auto'` is an integer read off the spectrum.
-    if nranks > 1:
-        replicate_mean_field(mf, mpi_comm)
-    factors = (factors if factors is not None
-               else separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
-                                      counts=counts, n_start=n_start,
-                                      grid_accuracy=grid_accuracy,
-                                      numerics=numerics))
-    if nranks > 1:
-        replicate_factors(factors, mpi_comm)
-    sliced = isinstance(factors, SlicedFactors)
-    if sliced:
-        factors.require(mpi_comm)
-        if screening == 'df':
-            raise ValueError("screening='df' forms the three-index factor "
-                             'from X_mo and D whole; sliced factors take the '
-                             "'imaginary-time' route")
-        # The sweep gathers the branches of X_mo itself; D is whole for it
-        # alone and is not handed back.
-        X_mo, D = factors, factors.gather('D')
-    else:
-        X_mo, D = _unpack_factors(factors)[:2]
-    if eps is None:
-        eps = get_orbital_energies(mf, representation='spatial')
-    elif nranks > 1:
-        eps = replicate(np.asarray(eps, float), comm=mpi_comm)
-
-    if screening == 'df':
-        lr = LinearResponseSolver(eps, coeff_df=isdf_df_coefficients(X_mo, D),
-                                  spin_mode='restricted')
-        return X_mo, D, np.asarray(lr.static_screening_aux(nocc))
-    if screening != 'imaginary-time':
-        raise ValueError(f"screening='{screening}'; choose 'imaginary-time' or 'df'.")
-
-    q = numerics_or_default(numerics).quadrature
-    grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
-                                 tau_target=q.tau_target)
-    W_aux = static_screening_matrix(X_mo, D, eps, nocc, grid, comm=mpi_comm)
-    return X_mo, (None if sliced else D), W_aux
-
-
 def _pair_symmetry(orbsym, occ, virt):
     """Irrep label of every occupied-virtual pair, for the symmetry-block guess."""
     if orbsym is None:
@@ -1322,30 +630,23 @@ def _pair_symmetry(orbsym, occ, virt):
     return (orbsym_d2h[occ][:, None] ^ orbsym_d2h[virt][None, :]).ravel()
 
 
-def _job_max_memory(mf):
-    """MB this rank's job gave it -- the mean field's max_memory, which a job
-    sets from its allocation's share (`allocation_max_memory_mb`) -- inside a
-    SLURM allocation; None outside one, where max_memory is pyscf's process
-    default and says nothing of the memory the machine has."""
-    return (float(mf.max_memory) if allocation_max_memory_mb() is not None
-            else None)
-
-
-def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
+def run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
                   guess_factor=DAVIDSON_GUESS_FACTOR, stats=None, comm=None,
                   timings=None, refuse_unconverged=False, pair_tile=None,
                   pair_rows=None, max_memory=None,
                   preconditioner=DAVIDSON_PRECONDITIONER, read_roots=None,
-                  read_tol=None, guess=None, tda=False, tracked=None):
+                  read_tol=None, guess=None, tda=False, tracked=None,
+                  extra_roots=None):
     """The Casida Davidson from a block action (`_davidson_root`, the loop
     `trial_space.casida_rows`), the same iteration on every rank -- or, under
     `tda`, the Hermitian Davidson on its A half (`_tda_davidson_root`),
     replicated on every rank. Over more than one rank the Casida trial space
     is cut by pair rows (`pair_tile` rows a tile, DAVIDSON_PAIR_TILE by
     default; `pair_rows` True cuts it so on any comm, None included);
-    serially it is one tile, pyscf's real_eig iteration.
+    serially it is one tile, pyscf's real_eig arithmetic, correcting the
+    tracked Ritz pairs a cycle rather than real_eig's twenty.
 
-    Both iterations track `_tracked_roots` Ritz pairs, more than `nroots`,
+    Both iterations track `tracked_roots` Ritz pairs, more than `nroots`,
     so a root whose Ritz value starts above the next root up is corrected
     rather than converged past: an extra pair is iterated on until it
     converges or its residual interval clears the highest requested root --
@@ -1353,12 +654,12 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     S = [[A, B], [B, A]] for the Casida problem (`casida_rows`).
 
     max_memory: MB this rank may hold, which sizes the trial space
-    (`_trial_space_memory`); None reads the SLURM allocation's share
+    (`trial_space_memory`); None reads the SLURM allocation's share
     (`allocation_max_memory_mb`), and outside one the whole trial space is
     held within DAVIDSON_SPACE_GB.
 
     preconditioner: the diagonal the corrections divide by
-    (DAVIDSON_PRECONDITIONERS, `_preconditioner_diagonal`): 'bare', the pair
+    (DAVIDSON_PRECONDITIONERS, `preconditioner_diagonal`): 'bare', the pair
     energies d, or 'screened', d - (ii|W|aa) from the action's own factors.
     Only the path to the roots moves: A, B and the convergence test are the
     action's.
@@ -1395,7 +696,7 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     `davidson_subspace_max` is the largest trial subspace in pairs,
     `davidson_max_space` the bound the loop collapses it at, one number on
     every rank, and `davidson_collapses` how often it did
-    (`_trial_space_memory`); `davidson_space_budget_mb` is what this rank's
+    (`trial_space_memory`); `davidson_space_budget_mb` is what this rank's
     budget let its holders take and `davidson_action_working_mb` the block
     action's working set it was sized beside.
     `davidson_comm_<kind>` splits `davidson_comm` by collective (COMM_KINDS),
@@ -1455,8 +756,12 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     tracked: optional dict, filled with 'omega', 'X' and 'Y' of the requested
     roots and the tracked Ritz pairs above them, rank 0's on every rank: the
     vectors a warm start of the next geometry carries (`DavidsonWarmStart`).
+
+    extra_roots: the Ritz pairs carried above the nroots asked for (None:
+    the `tracked_roots` rule), for a problem whose diagonal is a poorer
+    guide to its spectrum than the screened pair diagonal.
+    `preconditioner` is checked by the entry points that reach here.
     """
-    _check_preconditioner(preconditioner)
     nranks = comm.Get_size() if comm is not None else 1
     counters = _davidson_counters()
     comm_clock = getattr(apply_AB, 'comm_clock', None)   # the ISDF action's
@@ -1473,13 +778,14 @@ def _run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
                                guess_factor, stats, counters,
                                max_memory=max_memory,
                                preconditioner=preconditioner, guess=guess,
-                               tracked=held))
+                               tracked=held, extra_roots=extra_roots))
     else:
         omega, X, Y, converged, cycles, limit, unconfirmed = _davidson_root(
             apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym, guess_factor,
             stats, counters, comm=comm, pair_tile=pair_tile,
             pair_rows=pair_rows, max_memory=max_memory,
-            preconditioner=preconditioner, guess=guess, tracked=held)
+            preconditioner=preconditioner, guess=guess, tracked=held,
+            extra_roots=extra_roots)
     if piece_clock is not None:
         for piece in ACTION_PIECES:
             counters['action_by_piece'][piece] = (piece_clock.by_piece[piece]
@@ -1697,25 +1003,26 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
                    guess_factor=DAVIDSON_GUESS_FACTOR, stats=None, counters=None,
                    comm=None, pair_tile=None, pair_rows=None, max_memory=None,
                    preconditioner=DAVIDSON_PRECONDITIONER, guess=None,
-                   tracked=None):
+                   tracked=None, extra_roots=None):
     """One Casida Davidson (`trial_space.casida_rows`): (omega, X, Y,
     converged, cycles, limit, unconfirmed), the same on every rank of
     `comm`, which reaches the (A-B) probe run when the projected problem
     breaks down, the dense completion when the pair space ran out, and over
     more than one rank (or with `pair_rows` True) the trial space cut by pair
-    rows; serially the loop holds one tile, real_eig's iteration. `limit` is
+    rows; serially the loop holds one tile, real_eig's arithmetic, and a
+    cycle corrects the tracked pairs (`tracked_roots`) alone. `limit` is
     None, or (pairs held, corrections asked, whether the solve was completed
     densely) at the last cycle that ran out; `unconfirmed` marks the roots
     above the residual interval of a tracked extra Ritz pair
-    (`_tracked_roots`) still unsettled where the solve stopped. `tracked`, a
+    (`tracked_roots`) still unsettled where the solve stopped. `tracked`, a
     dict, receives 'omega', 'X' and 'Y' of the requested roots and the
     tracked pairs above them. `max_memory`, `preconditioner` and `guess` are
-    `_run_davidson`'s."""
+    `run_davidson`'s."""
     no, nv = diag_d.shape
     n_pair = no * nv
     nranks = comm.Get_size() if comm is not None else 1
     t0 = time.time()
-    precond_d = _preconditioner_diagonal(apply_AB, diag_d, preconditioner)
+    precond_d = preconditioner_diagonal(apply_AB, diag_d, preconditioner)
     t_precond = time.time() - t0 if precond_d is not diag_d else 0.0
     split = nranks > 1 if pair_rows is None else pair_rows
     rows = (PairRows(n_pair, comm, pair_tile) if split
@@ -1725,21 +1032,29 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     nvec = [0]
     t_action = [0.0]
     t_total = [0.0]
-    order = _guess_indices(diag_d, nroots, guess_factor, counters=counters)
-    space_inc = _real_eig_space(param.MAX_MEMORY, nroots, n_pair)[0]
+    order = guess_indices(diag_d, nroots, guess_factor, counters=counters)
+    # A cycle corrects the tracked Ritz pairs alone, not real_eig's
+    # max(nroots, MAX_SPACE_INC = 20) lowest: a correction of a pair above
+    # them costs a block action and settles nothing the solve reads.
+    # benzene/cc-pVDZ BSE@RHF-DF, conv_tol 1e-8, screened: 2 roots 672 ->
+    # 156 vectors applied, 5 roots 704 -> 242, 12 roots 604 -> 568, cycles
+    # 19-21 either way; the fragment partition's full BSE (320 pairs, 2
+    # roots, bare diagonal, 4 extra pairs) 642 -> 360, where 20 corrections
+    # a cycle had filled its whole pair space.
+    ntrack = tracked_roots(nroots, n_pair, extra_roots)
     if max_memory is None:
         max_memory = allocation_max_memory_mb()
     held_rows = rows.rows[1] - rows.rows[0]
-    working = _action_working_bytes(apply_AB, max(len(order), space_inc),
+    working = action_working_bytes(apply_AB, max(len(order), ntrack),
                                     n_pair, not split)
-    eig_memory = _trial_space_memory(nroots, n_pair, held_rows, max_memory,
+    eig_memory = trial_space_memory(nroots, n_pair, held_rows, max_memory,
                                      working)
     # The bound is a decision: every rank restarts at the same cycle only if
     # it holds the same bound, so rank 0's (the rank of the most pair rows
     # and kernel rows, whose budget binds first) is every rank's.
     if nranks > 1:
         eig_memory = broadcast(eig_memory, comm)
-    max_space = _real_eig_space(eig_memory, nroots, n_pair)[1]
+    max_space = real_eig_space(eig_memory, nroots, n_pair)[1]
     space = [0]                      # trial pairs held at the last cycle
     batch_max = [0]                  # the widest batch the action was handed
     # The pair space can run out before the tolerance does. The loop adds each
@@ -1791,7 +1106,7 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         space[0] = trace[-1]['m1']
         if len(e) > n_pair - space[0]:
             limit[0] = (space[0], len(e))
-        t = [_correction(block, h, e) for h, block in zip(hdiag_tiles, dx)]
+        t = [correction(block, h, e) for h, block in zip(hdiag_tiles, dx)]
         # The length of a correction is its acceptance test: the loop keeps
         # one while its squared norm outside the subspace exceeds lindep, read
         # before normalizing, so at the raw length r / (d - omega) |r| stalls
@@ -1843,8 +1158,8 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
     try:
         converged, e, xy, lower = casida_rows(
             vind_rows, x0, precond_rows, rows, tol_residual=conv_tol,
-            nroots=nroots, ntrack=_tracked_roots(nroots, n_pair), x0sym=x0sym,
-            max_cycle=max_cycle, space_inc=space_inc, max_space=max_space,
+            nroots=nroots, ntrack=ntrack, x0sym=x0sym,
+            max_cycle=max_cycle, space_inc=ntrack, max_space=max_space,
             verbose=logger.Logger(sys.stdout, 0),
             trace=trace,
             resize=lambda dx, e: precond_rows(dx, e, size_all=True))
@@ -1874,8 +1189,8 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         try:
             dense = _dense_casida(action, diag_d, nroots, conv_tol,
                                   batch_max[0])
-        except np.linalg.LinAlgError as exc:
-            raise _casida_breakdown(apply_AB, diag_d, conv_tol, comm) from exc
+        except CasidaInstability as exc:
+            raise UnstableReference(f'completed densely: {exc}', None) from exc
         ncall[0] += 1
         cycles += 1
         nvec[0] += n_pair
@@ -1899,7 +1214,7 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         counters['collapses'] = collapses
         counters['space_bytes'] = rows.held_bytes
         counters['space_budget_bytes'] = (
-            DAVIDSON_SPACE_GB * 1e9 if max_memory is None
+            DAVIDSON_SPACE_GB * BYTES_PER_GB if max_memory is None
             else DAVIDSON_SPACE_FRACTION * max_memory * 1e6 - working)
         counters['working_bytes'] = working
         counters['subspace_by_piece'] = dict(rows.clock)
@@ -1929,7 +1244,7 @@ def _davidson_root(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
 
 
 def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
-    """The `_CasidaBreakdown` for a projected (A-B) block that is not positive
+    """The `CasidaBreakdown` for a projected (A-B) block that is not positive
     definite, telling a stable reference's numerical breakdown from an
     unstable reference (`UnstableReference`, min eig(A-B) <= 0 measured) by
     the (A-B) probe, run cold over `comm`. Only the probe's own failures --
@@ -1938,7 +1253,7 @@ def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
     "did not converge" breakdown; any other exception is a defect and raises
     as itself rather than being reported as an instability."""
     try:
-        amb = float(_lowest_amb_from_action(apply_AB, diag_d, comm=comm)[0])
+        amb = float(lowest_amb_from_action(apply_AB, diag_d, comm=comm)[0])
         detail = f'measured min eig(A-B) = {amb:.6f} Ha'
     except (ArpackNoConvergence, AmbProbeNotConverged, ValueError):
         amb = None
@@ -1948,7 +1263,7 @@ def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
     # with the reference stable it is the subspace that failed: the loop's
     # projected problem loses accuracy as |r| nears round-off.
     if amb is not None and amb > 0:
-        return _CasidaBreakdown(
+        return CasidaBreakdown(
             'Casida-form Davidson broke down numerically: the projected '
             '(A-B) block is not positive definite although (A-B) itself '
             f'is ({detail}), so the reference is stable and the trial '
@@ -1957,8 +1272,8 @@ def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
             f'({_residual_floor(diag_d):.1e} Ha on this pair space). '
             'Loosen conv_tol.', amb)
     if amb is not None:
-        return _unstable_reference(amb)
-    return _CasidaBreakdown(
+        return unstable_reference(amb)
+    return CasidaBreakdown(
         'Casida-form Davidson failed: the projected (A-B) block is not '
         'positive definite, the signature of a singlet/triplet '
         f'instability of the mean-field reference ({detail}). The '
@@ -1969,11 +1284,11 @@ def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
         'exactly this failure.', amb)
 
 
-def _unstable_reference(amb):
+def unstable_reference(amb, when='before the solve returned its roots'):
     """The `UnstableReference` an unstable reference is refused with,
-    min eig(A-B) = `amb` <= 0, before any root is returned."""
+    min eig(A-B) = `amb` <= 0, `when` (before any root is returned)."""
     return UnstableReference(
-        f'BSE refused before the solve returned its roots: min eig(A-B) = '
+        f'BSE refused {when}: min eig(A-B) = '
         f'{amb:.6f} Ha <= 0 -- the mean-field reference is singlet/triplet '
         'unstable and the Casida omega^2 reduction is invalid there. Check '
         'first that the SCF is the LOWEST solution (vary the initial guess, '
@@ -1992,11 +1307,11 @@ def _dense_casida(apply_AB, diag_d, nroots, conv_tol, batch):
     after the Davidson's 68. The unit vectors go through the action in batches
     of `batch`, the widest trial batch the Davidson already handed it, and
     are lockstepped at its entry like any other, so every rank builds the same
-    A and B. The roots come from the Hermitian form L^T (A + B) L = Z w^2 Z^T
-    with A - B = L L^T, whose Cholesky raises LinAlgError where (A - B) is not
-    positive definite; X + Y = L Z w^-1/2 and X - Y = L^-T Z w^1/2 carry
-    <X|X> - <Y|Y> = 1. `converged` is each root's Casida residual against
-    conv_tol, as the Davidson's is.
+    A and B. The roots are the one dense Casida eigensolve's
+    (`casida.casida_eigensolve`, A - B factored, on every rank whole), which
+    raises `CasidaInstability` where the reference is unstable.
+    `converged` is each root's Casida residual against conv_tol, as the
+    Davidson's is.
     """
     no, nv = diag_d.shape
     n_pair = no * nv
@@ -2012,26 +1327,8 @@ def _dense_casida(apply_AB, diag_d, nroots, conv_tol, batch):
         B[c0:c1] = Bz.reshape(c1 - c0, n_pair)
     A = 0.5 * (A + A.T)
     B = 0.5 * (B + B.T)
-    try:
-        L = np.linalg.cholesky(A - B)
-    except np.linalg.LinAlgError as exc:
-        raise UnstableReference(
-            'Casida problem completed densely: (A - B) is not positive '
-            'definite, the mean-field reference is unstable and the omega^2 '
-            'reduction is invalid there.', None) from exc
-    w2, Z = np.linalg.eigh(L.T @ (A + B) @ L)
-    if w2[0] <= 0.0:
-        # (A - B) positive definite, (A + B) not: the other instability.
-        raise UnstableReference(
-            f'Casida problem completed densely has omega^2 = {w2[0]:.3e} '
-            '<= 0 Ha^2: the mean-field reference is unstable and the omega^2 '
-            'reduction is invalid there.', None)
-    omega = np.sqrt(w2[:nroots])
-    Z = Z[:, :nroots]
-    xpy = (L @ Z) / np.sqrt(omega)[None, :]
-    xmy = solve_triangular(L, Z, lower=True, trans='T') * np.sqrt(omega)[None, :]
-    X = 0.5 * (xpy + xmy)
-    Y = 0.5 * (xpy - xmy)
+    omega, X, Y, _, _ = casida_eigensolve([A + B, A - B], 'amb', lowest=nroots,
+                                          threshold=np.inf)
     r = np.sqrt(np.sum((A @ X + B @ Y - X * omega)**2, axis=0)
                 + np.sum((B @ X + A @ Y + Y * omega)**2, axis=0))
     return omega, X, Y, r <= conv_tol

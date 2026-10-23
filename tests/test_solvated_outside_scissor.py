@@ -31,10 +31,10 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import HARTREE_TO_EV  # noqa: E402
-from src.Base.numerics import Numerics  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
+from src.Base.numerics.constants import HARTREE_TO_EV  # noqa: E402
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.environments.solvent_screening import SolventScreening  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
 from src.properties.excitations import qp_bookkeeping  # noqa: E402
 from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
@@ -73,7 +73,7 @@ def water():
                       ('toluene', SolventScreening(mol, solvent='toluene'))):
         ch = chain(mol, mf, env)
         ch.excitation(mol, mf)
-        out[name] = (ch, ch._shared_forward(mol, mf))
+        out[name] = (ch, ch.shared_forward(mol, mf))
     return mol, out
 
 

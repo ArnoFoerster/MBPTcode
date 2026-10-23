@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.gradients import rpa_bse_surface
+from src.gradients.gwbse import rpa_bse_surface
 from src.properties import characters, spin_vibronic
 from src.SingleReference.GW import quasi_boson
 from src.SingleReference.GW.qp_energy import calc_qp_energy

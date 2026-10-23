@@ -3,8 +3,8 @@ builders, finite differences, a stand-in for a killed job."""
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.numerics import Numerics
 
 #: Water, bent and non-symmetric so that every nuclear coordinate moves (Angstrom).
 ATOMS = [('O', (0.02, -0.01, 0.1173)), ('H', (0.0, 0.7672, -0.4592)),

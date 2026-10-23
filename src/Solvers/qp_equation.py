@@ -17,14 +17,14 @@ import warnings
 from typing import NamedTuple
 
 import numpy as np
-from src.Base.constants import (
+from src.Base.numerics.constants import (
     QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL,
-    QP_NEWTON_TOL, QP_NEWTON_MAX_ITER, QP_SEARCH_WINDOW_TIERS,
+    QP_SEARCH_WINDOW_TIERS,
     QP_GRAPHICAL_TOL, QP_GRAPHICAL_N_OMEGA, QP_GRAPHICAL_MAX_BISECTION,
     QP_POLE_OFFSET, QP_SUBSPACE_TOL, QP_SUBSPACE_MAX_ITER,
     QP_WINDOW_Z_MIN, QP_Z_DERIV_STEP,
     QB_QP_END_BLOCK_BYTES, QB_QP_ROOT_TOL, QP_POLE_INTERVAL_SAMPLES,
-    QP_SCAN_SECANT_MIN, QP_SCAN_SPLIT_DEPTH,
+    QP_SCAN_SECANT_MIN, QP_SCAN_SPLIT_DEPTH, QP_WEIGHT_SUM_SLACK,
 )
 from src.Base.step_failed import StepFailed
 
@@ -44,11 +44,26 @@ class QPRootNotConverged(StepFailed):
         self.last = last
 
 
+class QPNoRoot(RuntimeWarning):
+    """A quasiparticle equation without a root in its widest scan window:
+    the root is NaN, and a caller's `out` dict carries 'no_root'
+    (refuse inputs, warn numerics; a number that does not
+    exist is a flagged NaN)."""
+
+
+class QPWeightOutside(RuntimeWarning):
+    """The root of largest weight of a positive-weight pole sum with Z
+    outside (0, 1], which no root of such a self-energy has: a numerical
+    event, kept with a warning and 'z_outside' in a caller's `out` dict
+    (no demotion, no refusal)."""
+
+
 def _report(message, reason, last, refuse):
-    """Raise QPRootNotConverged when the caller refuses this case, warn otherwise."""
+    """Raise QPRootNotConverged when the caller refuses this case, warn
+    (`QPNoRoot`) otherwise."""
     if refuse:
         raise QPRootNotConverged(message, reason, last)
-    warnings.warn(message, RuntimeWarning, stacklevel=3)
+    warnings.warn(message, QPNoRoot, stacklevel=3)
 
 
 def qp_start(eps, p, nocc, offset=QP_POLE_OFFSET):
@@ -127,7 +142,10 @@ def find_qp_root(source, a, follow=None, z_min=QP_WINDOW_Z_MIN, label='',
     Without `follow`, in each window of `source.windows(a)`, narrowest first,
     the brackets are refined in decreasing order of the upper bound on Z the
     source gives each, until no bound exceeds the largest valid weight found
-    (`_weighed_roots`); `select_qp_root` keeps that root. A weight above z_min
+    (`_weighed_roots`); a source whose weights sum to one (a positive-weight
+    Sigma) has its grid walked outward from a instead, until the weights
+    found leave no more for the rest (`_weighed_outward`). `select_qp_root`
+    keeps that root. A weight above z_min
     ends the search; otherwise the window widens, and the widest keeps its
     largest valid weight (the root nearest a if none is valid), flagged as no
     quasiparticle. A source whose bounds are not all exact (`PoleSum` with
@@ -189,8 +207,11 @@ def find_qp_root(source, a, follow=None, z_min=QP_WINDOW_Z_MIN, label='',
 def _largest_root(source, a, z_min, label, refuse_unconverged):
     """`find_qp_root` without `follow`: the root of largest valid weight."""
     found, k, window = [], None, None
-    for window in source.windows(a):
-        found = _weighed_roots(source, *window)
+    windows = list(source.windows(a))
+    for i, window in enumerate(windows):
+        # a window widened past only has to show it holds no quasiparticle
+        found = _weighed_roots(source, *window, a, z_min if i + 1 < len(
+            windows) else -np.inf)
         k = select_qp_root([w for w, _, _ in found], [z for _, z, _ in found])
         if k is not None and quasiparticle_weight(found[k][1], z_min):
             return _rooted(found, k, True)
@@ -219,7 +240,7 @@ def _rooted(found, k, quasiparticle):
                   tuple((w, z) for w, z, _ in found), found[k][2])
 
 
-def _weighed_roots(source, lo, hi):
+def _weighed_roots(source, lo, hi, a, enough=-np.inf):
     """[(root, Z, labels)] of the brackets of [lo, hi] that can hold the root
     of largest valid weight, in increasing order of the brackets.
 
@@ -227,8 +248,12 @@ def _weighed_roots(source, lo, hi):
     double, so the best Z found rises before the source's costlier tightening
     (`source.tighten`) reaches the long tail of weak brackets; a bracket is
     passed over only when a bound puts it at or below a valid Z already found.
-    No bound under-estimates, so the largest valid weight is exact.
+    No bound under-estimates, so the largest valid weight is exact. A source
+    with `weight_sum` is searched by `_weighed_outward` from a, which ends
+    once no root left can carry more than `enough` either.
     """
+    if getattr(source, 'weight_sum', None) is not None:
+        return _weighed_outward(source, lo, hi, a, enough)
     brackets, bound = source.brackets(lo, hi)
     bound = np.asarray(bound, float)
     order = np.argsort(-bound, kind='stable')
@@ -251,14 +276,46 @@ def _weighed_roots(source, lo, hi):
     return [rz for i in sorted(solved) for rz in solved[i]]
 
 
+def _weighed_outward(source, lo, hi, a, enough=-np.inf):
+    """`_weighed_roots` for a source whose roots' weights sum to
+    `source.weight_sum` (a positive-weight Sigma: one): the brackets of the
+    grid cells of [lo, hi], nearest a first (`source.outward`), each refined,
+    until what the valid weights found leave of that sum, plus
+    QP_WEIGHT_SUM_SLACK for the error in each Z, is at most the largest of
+    them, or than `enough` (a window `_largest_root` widens past where it
+    holds no weight above z_min, which it then need not search for): no
+    root not yet found can then carry more. A quasiparticle near
+    the bare level ends the walk within a few cells; a state without one
+    walks the whole window, every bracket refined, as the full scan would.
+    The cells and their brackets are the full scan's, so each root found is
+    the same bits; only the roots no longer needed go unrefined."""
+    found, best, weighed = [], -np.inf, 0.0
+    for brackets in source.outward(lo, hi, a):
+        for bracket in brackets:
+            got = source.solve(bracket)
+            labels = source.labels_of(bracket)
+            found.append((bracket[0], [(w, z, labels) for w, z in got]))
+            for _, z in got:
+                if quasiparticle_weight(z, 0.0):
+                    weighed += z
+                    best = max(best, z)
+        if (source.weight_sum - weighed + QP_WEIGHT_SUM_SLACK
+                <= max(best, enough)):
+            break
+    found.sort(key=lambda lr: lr[0])
+    return [rz for _, got in found for rz in got]
+
+
 def _note_branch(got, label, tol, out):
     """Hand a followed root's branch to `out` (a dict: 'labels', 'largest',
-    'followed', 'flipped'), or, with no `out`, warn where the largest weight
-    has moved to another root (`QPRoot.flipped`)."""
+    'followed', 'flipped', and 'no_root' for a NaN root), or, with no
+    `out`, warn where the largest weight has moved to another root
+    (`QPRoot.flipped`)."""
     flipped = got.flipped(tol)
     if out is not None:
         out.update(labels=got.labels, largest=got.largest,
-                   followed=got.followed, flipped=flipped)
+                   followed=got.followed, flipped=flipped,
+                   no_root=not np.isfinite(got.w))
         return
     if flipped:
         warnings.warn(branch_warning(label, got), RuntimeWarning,
@@ -282,17 +339,26 @@ def branch_warning(label, got):
             f'{got.z:.4f};{big}{low} the branch is kept.')
 
 
-def _safeguarded_newton(fval, l, r, sl, tol, max_iter):
+def _bracketed_newton(fval, l, r, sl, tol, max_iter, to_last_bit=False):
     """The root of f in (l, r), f of sign sl at l and -sl at r, by Newton on
-    the slope fval returns with f, safeguarded by the bracket: a step leaving
-    it is a bisection, and so is every second step that has not halved it. An
-    end may be a pole, where f is never evaluated. sl = 0 is a root at l.
-    A converged step that rounds onto the end it has just moved fails the
-    test inside the bracket, and the root is then bisected to its last bit;
-    `_bracketed_newton` stops there instead, for a costly f."""
+    the slope fval returns with f, safeguarded by the bracket: a step that
+    would leave it is a bisection. An end may be a pole, where f is never
+    evaluated. sl = 0 is a root at l.
+
+    to_last_bit, for a cheap f (`PoleSum`): every second step that has not
+    halved the bracket is a bisection too, and a converged step (below
+    `tol`) ends the loop only strictly inside the bracket; one that rounds
+    onto the end it has just moved has the root bisected to its last bit.
+    Otherwise, for a costly f (`SampledEquation`, each evaluation a
+    self-energy): a step that is not under half the step before the last (a
+    stalled or oscillating Newton) is a bisection, Newton steps that converge
+    are never interrupted, and a step below `tol` that stays in the closed
+    bracket ends it (the last point evaluated is an end of the bracket, and
+    the step may round to it), so a root costs a few evaluations of f."""
     if sl == 0.0:
         return float(l)
-    w, width = 0.5 * (l + r), r - l
+    w = 0.5 * (l + r)
+    width = step = old = r - l
     for it in range(int(max_iter)):
         f, fp = fval(w)
         if f == 0.0:
@@ -302,54 +368,22 @@ def _safeguarded_newton(fval, l, r, sl, tol, max_iter):
         else:
             r = w
         dw = -f / fp
-        if abs(dw) < tol and l < w + dw < r:
+        if abs(dw) < tol and ((l < w + dw < r) if to_last_bit
+                              else (l <= w + dw <= r)):
             return float(w + dw)
         mid = 0.5 * (l + r)
         if not l < mid < r:
             break                                 # bracket one ulp wide
-        newton = l < w + dw < r and np.isfinite(dw)
-        if it % 2 and r - l > 0.5 * width:
-            newton = False
-        if it % 2:
-            width = r - l
-        w = w + dw if newton else mid
-    return float(w)
-
-
-def _bracketed_newton(fval, l, r, sl, tol, max_iter):
-    """The root of f in (l, r), f of sign sl at l and -sl at r, by Newton on
-    the slope fval returns with f, safeguarded by the bracket: a step that
-    would leave it, or that is not under half the step before the last (a
-    stalled or oscillating Newton), is a bisection. Newton steps that
-    converge are never interrupted, and a step below `tol` that stays in the
-    closed bracket ends it (the last point evaluated is an end of the
-    bracket, and the step may round to it), so a root costs a few
-    evaluations of f: the refinement of a self-energy known pointwise
-    (`SampledEquation`), where each evaluation is a self-energy. Where f is
-    cheap (`PoleSum`), `_safeguarded_newton` refines to the bracket's last
-    bit instead. An end may be a pole, where f is never evaluated. sl = 0 is
-    a root at l."""
-    if sl == 0.0:
-        return float(l)
-    w = 0.5 * (l + r)
-    step = old = r - l
-    for _ in range(int(max_iter)):
-        f, fp = fval(w)
-        if f == 0.0:
-            return float(w)
-        if np.sign(f) == sl:
-            l = w
+        if to_last_bit:
+            newton = l < w + dw < r and np.isfinite(dw)
+            if it % 2 and r - l > 0.5 * width:
+                newton = False
+            if it % 2:
+                width = r - l
         else:
-            r = w
-        dw = -f / fp
-        if abs(dw) < tol and l <= w + dw <= r:
-            return float(w + dw)
-        mid = 0.5 * (l + r)
-        if not l < mid < r:
-            break                                 # bracket one ulp wide
-        newton = (np.isfinite(dw) and l < w + dw < r
-                  and abs(dw) <= 0.5 * abs(old))
-        old, step = step, (dw if newton else mid - w)
+            newton = (np.isfinite(dw) and l < w + dw < r
+                      and abs(dw) <= 0.5 * abs(old))
+            old, step = step, (dw if newton else mid - w)
         w = w + dw if newton else mid
     return float(w)
 
@@ -535,7 +569,7 @@ class PoleSum:
 
     def _interval_roots(self, m):
         """Every root in interval m, by `_interval_brackets` and
-        `_safeguarded_newton` on the closed-form slope."""
+        `_bracketed_newton` to the last bit on the closed-form slope."""
         num, pol, a, n = self.num, self.pol, self.a, self.n
         fval = lambda w: secular(num, pol, a, w)
         if m >= 0:
@@ -556,8 +590,8 @@ class PoleSum:
         sf = np.concatenate([[sl], np.sign(f), [sr]])
         sfp = np.concatenate([[spl], np.sign(fp), [spr]])
         curve = lambda w: _secular_curvature(num, pol, a, w)
-        return [_safeguarded_newton(fval, lb, rb, s, self.tol,
-                                    QP_GRAPHICAL_MAX_BISECTION)
+        return [_bracketed_newton(fval, lb, rb, s, self.tol,
+                                  QP_GRAPHICAL_MAX_BISECTION, to_last_bit=True)
                 for lb, rb, s in _interval_brackets(curve, x, sf, sfp,
                                                     self.tol)]
 
@@ -777,12 +811,6 @@ def end_value_bounds(num, pol, a, intervals, slack=None):
     return 1.0 / np.maximum(1.0, 1.0 - slack + lift)
 
 
-def weight_bounds(num, pol, a, neighbours=16):
-    """Upper bound on Z of the root in each interval (pol[m], pol[m+1]) of a
-    positive-weight pole sum; `_interval_bounds` for any sign."""
-    return _interval_bounds(num, pol, a, neighbours)[0]
-
-
 def _interval_bounds(num, pol, a, neighbours=16, window=None):
     """(bound on Z, slack, certified) of each interval (pol[m], pol[m+1]).
 
@@ -998,7 +1026,11 @@ class SampledEquation:
         largest weight beside a root below QP_WINDOW_Z_MIN; the root's
         `QPRoot.largest` is then None (not searched), and no warning is
         raised for it.
-    No bound on Z is known, so every bracket of a window is solved.
+    No bound on one bracket's Z is known. With positive_weight the weights
+    of all roots sum to one (`weight_sum`): the grid is walked outward from
+    the bare level (`outward`) and ends once the weights found leave no
+    more for the rest (`_weighed_outward`), mostly at the quasiparticle a
+    few cells away; otherwise every bracket of a window is solved.
     """
 
     def __init__(self, func, fprime=None, vectorized=False,
@@ -1006,6 +1038,7 @@ class SampledEquation:
                  max_iter=QP_GRAPHICAL_MAX_BISECTION, windows=None,
                  refusals=(), positive_weight=False, rescan=True):
         self.positive_weight, self.rescan = positive_weight, rescan
+        self.weight_sum = 1.0 if positive_weight else None
         self.vectorized = vectorized
         self.n_omega, self.tol, self.max_iter = int(n_omega), tol, max_iter
         self._windows = None if windows is None else list(windows)
@@ -1041,6 +1074,25 @@ class SampledEquation:
 
     def tighten(self, brackets, batch):
         return np.full(len(batch), np.inf)
+
+    def outward(self, lo, hi, a, f=None):
+        """The brackets of each cell of the grid `brackets` scans on [lo, hi]
+        (a list per cell, as `_cells` gives them), the cells in increasing
+        distance from the one holding a; f is evaluated on a grid point when
+        a cell first reaches it. f: the grid's values known already ({index:
+        f} or, vectorized, the whole grid's), filled in place."""
+        grid = np.linspace(lo, hi, self.n_omega)
+        if f is None:
+            f = _grid_shifts(self.func, grid, True) if self.vectorized else {}
+        value = (f.__getitem__ if self.vectorized else
+                 lambda j: f[j] if j in f else f.setdefault(
+                     j, float(self.func(grid[j]))))
+        c0 = min(max(int(np.searchsorted(grid, a)) - 1, 0), grid.size - 2)
+        for d in range(grid.size - 1):
+            for c in sorted({c0 - d, c0 + d}):
+                if 0 <= c < grid.size - 1:
+                    yield self._cells(grid[c], grid[c + 1], value(c),
+                                      value(c + 1), QP_SCAN_SPLIT_DEPTH)
 
     def solve(self, bracket):
         """[(root, Z)] of a bracket (l, r, f(l), f(r)); empty for a pole."""
@@ -1081,9 +1133,12 @@ class SampledEquation:
 
         The largest weight: a root of Z above QP_WINDOW_Z_MIN is the largest
         of a positive-weight self-energy, the weights of its roots summing
-        to one. Below, the whole window is bracketed and its other brackets
-        refined where the weight estimated at their secant root can beat the
-        best so far (`_largest_beside`), unless `rescan` is off: () then,
+        to one. Below, the window's other brackets are refined where the
+        weight estimated at their secant root can beat the best so far
+        (`_largest_beside`): with positive_weight cell by cell outward from
+        a on the grid points evaluated already, until the weights refined
+        leave no more for the rest; otherwise the whole window bracketed.
+        Unless `rescan` is off: () then,
         not searched (`find_qp_root` records no largest weight and runs no
         search of its own)."""
         windows = self.windows(a)
@@ -1123,32 +1178,45 @@ class SampledEquation:
                     or i == len(windows) - 1):
                 largest = best
                 if not quasiparticle_weight(best[1]):
-                    largest = (self._largest_beside(
-                        self.brackets(lo, hi)[0], solved, best)
-                        if self.rescan else ())
+                    cells = (self.outward(lo, hi, a, f)
+                             if self.weight_sum is not None
+                             else [self.brackets(lo, hi)[0]])
+                    largest = (self._largest_beside(cells, solved, best)
+                               if self.rescan else ())
                 return best[0], best[1], None, largest
         return None
 
-    def _largest_beside(self, brackets, solved, best):
-        """(w, Z) of the largest valid weight among `brackets`: those in
-        `solved` ({bracket: roots}) as found, every other refined where the
-        weight estimated at its secant root (1/f' there) exceeds the largest
-        so far."""
-        top = best
+    def _largest_beside(self, cells, solved, best):
+        """(w, Z) of the largest valid weight among the brackets of `cells`
+        (lists of brackets): those in `solved` ({bracket: roots}) as found,
+        every other refined where the weight estimated at its secant root
+        (1/f' there) exceeds the largest so far. With `weight_sum`, the
+        cells end once the weights refined, plus QP_WEIGHT_SUM_SLACK, leave
+        no more of that sum than the largest of them."""
+        top, weighed = best, 0.0
         for got in solved.values():
             for w, z in got:
-                if quasiparticle_weight(z, 0.0) and z > top[1]:
-                    top = (w, z)
-        for l, r, fl, fr in brackets:
-            if (l, r, fl, fr) in solved:
-                continue
-            x = l if l == r else l - fl * (r - l) / (fr - fl)
-            z = self._weight(x)
-            if not quasiparticle_weight(z, 0.0) or z <= top[1]:
-                continue
-            for w, z in self.solve((l, r, fl, fr)):
-                if quasiparticle_weight(z, 0.0) and z > top[1]:
-                    top = (w, z)
+                if quasiparticle_weight(z, 0.0):
+                    weighed += z
+                    if z > top[1]:
+                        top = (w, z)
+        for brackets in cells:
+            if self.weight_sum is not None and (
+                    self.weight_sum - weighed + QP_WEIGHT_SUM_SLACK
+                    <= top[1]):
+                break
+            for l, r, fl, fr in brackets:
+                if (l, r, fl, fr) in solved:
+                    continue
+                x = l if l == r else l - fl * (r - l) / (fr - fl)
+                z = self._weight(x)
+                if not quasiparticle_weight(z, 0.0) or z <= top[1]:
+                    continue
+                for w, z in self.solve((l, r, fl, fr)):
+                    if quasiparticle_weight(z, 0.0):
+                        weighed += z
+                        if z > top[1]:
+                            top = (w, z)
         return top
 
     def _cells(self, l, r, fl, fr, depth):
@@ -1250,6 +1318,9 @@ def pole_strength(func, w, h=QP_Z_DERIV_STEP):
 def solve_qp_equation(func, e_start, method='pole_strength', **kwargs):
     """The quasiparticle root of func(w) = w - eps - Sigma(w) about e_start
     for a self-energy known pointwise: `solve_qp_equation_pole_strength`.
+    Kept for its one caller outside this layer's sweep,
+    `gradients.space_time_adjoint`; every other caller reads
+    `solve_qp_equation_pole_strength`, and this goes with that caller's switch.
 
     method names the selection rule and has one value, 'pole_strength' (the
     largest valid weight); the nearest-root and fixed-bracket rules are
@@ -1320,8 +1391,9 @@ def solve_qp_equation_scan(residual, fprime, a, follow=None,
     contour deformation's equation. `find_qp_root` on a `SampledEquation`
     scanned about the bare level a, each bracket refined by Newton
     safeguarded by it to `tol`, Z = 1/fprime at the root: the exact
-    derivative of the equation solved. No root at all is refused; refusals:
-    `SampledEquation`'s, the exceptions that mark a point unevaluable.
+    derivative of the equation solved. No root at all is (NaN, NaN) with a
+    `QPNoRoot` warning and 'no_root' in `out`; refusals: `SampledEquation`'s,
+    the exceptions that mark a point unevaluable.
     follow: a walk's previous root, (w, None) or w (`find_qp_root`); out: a
     dict that receives its branch (`_note_branch`), else a warning where the
     largest weight has left it. positive_weight: `SampledEquation`'s, a
@@ -1331,8 +1403,7 @@ def solve_qp_equation_scan(residual, fprime, a, follow=None,
     source = SampledEquation(residual, fprime=fprime, tol=tol,
                              max_iter=max_iter, refusals=refusals,
                              positive_weight=positive_weight, rescan=rescan)
-    got = find_qp_root(source, a, follow=follow, label=label,
-                       refuse_unconverged=True)
+    got = find_qp_root(source, a, follow=follow, label=label)
     _note_branch(got, label, tol, out)
     return float(got.w), float(got.z)
 
@@ -1352,15 +1423,15 @@ def solve_qp_equation_poles(num, pol, a, tol=QP_CD_NEWTON_TOL, label='',
 
     The largest valid weight is kept (the root nearest a if none is valid);
     the caller reads from Z whether it is a quasiparticle. No real root at all
-    is refused.
+    is (NaN, NaN) with a `QPNoRoot` warning and 'no_root' in `out`.
     """
     got = find_qp_root(PoleSum(num, pol, a, tol), a, follow=follow,
-                       label=label, refuse_unconverged=True)
+                       label=label)
     _note_branch(got, label, tol, out)
     return float(got.w), float(got.z)
 
 
-def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL):
+def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL, out=None):
     """(w*, Z) of f(w) = w - a - sum_i num_i/(w - pol_i) = 0 with the largest Z,
     for positive weights (the quasi-boson supermatrix): `find_qp_root` on a
     `PoleSum` that drops the weakest couplings while their norm stays below
@@ -1368,21 +1439,28 @@ def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL):
 
     f rises from -inf to +inf between neighbouring poles, so each interval
     holds one root, Z = 1/f'(w) there, and the weights of all roots sum to
-    one. Most intervals are excluded without a solve by `weight_bounds`, most
-    of the rest by `end_value_bounds`; the survivors are solved in decreasing
-    order of their bound until no bound exceeds the best Z found. Exact: no
-    bound under-estimates.
+    one. Most intervals are excluded without a solve by `_interval_bounds`,
+    most of the rest by `end_value_bounds`; the survivors are solved in
+    decreasing order of their bound until no bound exceeds the best Z found.
+    Exact: no bound under-estimates.
+
+    Every root of a positive-weight self-energy has 0 < Z <= 1; one outside
+    is a numerical event, kept with a `QPWeightOutside` warning and
+    'z_outside' True in `out` (a dict, when given), as is no root at all
+    (NaN, `QPNoRoot`, 'no_root').
     """
-    got = find_qp_root(PoleSum(num, pol, a, tol, prune=True), a, label=label,
-                       refuse_unconverged=True)
-    best_w, best_z = got.w, got.z
-    if not (np.isfinite(best_w) and 0.0 < best_z <= 1.0):
-        raise RuntimeError(
-            f'quasiparticle root of {label or "the secular equation"} not '
-            f'found: w = {best_w!r}, Z = {best_z!r}. Every root of a positive-'
-            f'weight self-energy has 0 < Z <= 1, so this is a numerical '
-            f'failure, not a satellite to demote.')
-    return float(best_w), float(best_z)
+    got = find_qp_root(PoleSum(num, pol, a, tol, prune=True), a, label=label)
+    best_w, best_z = float(got.w), float(got.z)
+    outside = bool(np.isfinite(best_w) and not 0.0 < best_z <= 1.0)
+    if outside:
+        warnings.warn(
+            f'the quasiparticle root of {label or "the secular equation"} '
+            f'{best_w!r} Ha has Z = {best_z!r}, outside (0, 1], which no root '
+            f'of a positive-weight self-energy has: kept', QPWeightOutside,
+            stacklevel=2)
+    if out is not None:
+        out.update(z_outside=outside, no_root=not np.isfinite(best_w))
+    return best_w, best_z
 
 
 def bracketed_root(num, pol, a, w0, tol=QB_QP_ROOT_TOL, out=None):
@@ -1452,45 +1530,3 @@ def solve_qp_hamiltonian(newton_step, seed, tol=QP_SUBSPACE_TOL,
         if res <= tol:
             return h, it, True
     return h, int(max_iter), False
-
-
-def solve_fixed_point(step, x0, carry=None, tol=QP_NEWTON_TOL, max_iter=QP_NEWTON_MAX_ITER):
-    """Direct iteration x_{n+1} = step(x_n) for a self-consistent eigenvalue problem.
-
-    The root search for an operator that depends on the energy it is evaluated at:
-    build H(x), diagonalize, take the target eigenvalue as the next x. Used by the
-    dynamical downfolded Hamiltonians (solve_dynamical_hamiltonian).
-
-    step(x, carry) -> (x_new, carry_new). `carry` threads auxiliary state between
-    iterations -- typically the eigenvector, so the next step can follow the SAME
-    root by overlap instead of re-picking by eigenvalue proximity -- and whatever
-    the last step returned comes back to the caller.
-
-    Returns (x, carry, converged, n_iter). n_iter is the number of steps taken;
-    converged is False if max_iter was exhausted.
-    """
-    x, it, converged = x0, 0, False
-    for it in range(1, max_iter + 1):
-        x_new, carry = step(x, carry)
-        if not np.isfinite(x_new):
-            return x_new, carry, False, it
-        if abs(x_new - x) < tol:
-            return x_new, carry, True, it
-        x = x_new
-    return x, carry, converged, it
-
-
-def calculate_z_factor(dsigma_dw):
-    """Quasiparticle renormalization Z = 1 / (1 - dSigma/dw)."""
-    return 1.0 / (1.0 - dsigma_dw)
-
-def spectral_function(w_grid, eps_hf, sigma_func, eta):
-    """Spectral function A(w) = -1/pi * Imag(G(w)), G(w) = 1/(w - eps_hf - Sigma(w))."""
-    a_grid = []
-    for w in w_grid:
-        sig = sigma_func(w)
-        denom = w - eps_hf - sig + 1j * eta
-        g = 1.0 / denom
-        a = -1.0 / np.pi * g.imag
-        a_grid.append(a)
-    return np.array(a_grid)

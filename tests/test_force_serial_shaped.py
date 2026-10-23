@@ -70,16 +70,16 @@ from pyscf import dft, gto, scf
 from pyscf.df.grad import rhf as pyscf_df_grad
 from pyscf.lib import numpy_helper
 
-from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
-                                FIT_REALIZATION_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.numerics import numerics_of
-from src.Base.utils.mpi_grid import (current_comm, lockstep_mean_field,
-                                     run_simulated)
-from src.gradients.dense_surfaces import DenseRPASurface
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.properties.optimize import mean_field_force
+from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                         FIT_REALIZATION_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import numerics_of
+from src.Base.utils.parallel.mpi_grid import current_comm, lockstep_mean_field
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse.dense_surfaces import DenseRPASurface
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.mean_field_surface import mean_field_force
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import pin_bar, recorded_blas
@@ -335,7 +335,7 @@ def layout_numbers(surface_class, mol, mf, here, mf_here, **kw):
     """(composed force, energy, dRPA force) of one layout at `here`, on the
     mean fields it is handed."""
     # the settings records of the src copy `surface_class` came from
-    settings = importlib.import_module('src.Base.chain_settings')
+    settings = importlib.import_module('src.gradients.rpa.chain_settings')
     surface = surface_class(
         mol, chain_scf, spin='singlet', mf=mf,
         numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **kw, 'bse_conv_tol': BSE_CONV_TOL})))
@@ -465,9 +465,9 @@ def shape_main(mode, size):
     """(b) or (c) here: src imported afresh on the shape-sensitive BLAS, the
     free memory rank-dependent and, for 'all', pyscf racing."""
     import_src_on_the_shape_sensitive_blas()
-    fresh_grid = importlib.import_module('src.Base.utils.mpi_grid')
+    fresh_grid = importlib.import_module('src.Base.utils.parallel.mpi_grid')
     surface_class = importlib.import_module(
-        'src.gradients.rpa_bse_surface').RPABSESurface
+        'src.gradients.gwbse.rpa_bse_surface').RPABSESurface
     pyscf_df_grad.lib = RankMemoryLib(pyscf_df_grad.lib,
                                       fresh_grid.current_comm)
     if mode == 'all':
@@ -478,7 +478,8 @@ def shape_main(mode, size):
         out['raw'] = np.asarray(fields[3].Gradients().kernel())
         return out
 
-    res = fresh_grid.run_simulated(rank, size)
+    res = importlib.import_module('src.Base.utils.parallel.simulated_comm').run_simulated(
+        rank, size)
     verdict = {'perturbed': SHAPE_STATE['perturbed'],
                'raced': distinct([r['raw'] for r in res]),
                'not rank 0s': not_rank_0s(res, LAYOUTS)}

@@ -22,8 +22,10 @@ asserts coverage).
 
 Current state:
   * plan/coverage/dispatch: order-general, this file.
-  * per-family generators: order-general for (0,1) [generate_adc_u_restricted];
-    per-order functions for the rest (general emitters are Phase 1 work).
+  * per-family generators: order-general, their dressing structures derived
+    from adc_order_rule (generate_adcn.generate_adc_u, generate_adc_class_pair,
+    generate_adc_u_k2, ...; one emitter for the spin-orbital, restricted and
+    DF twins); the undressed first-order blocks are per class.
   * runtime assembly: hand-wired per order up to ADC(4)+ADC(5)-blocks; the
     order-general series assembly (sequential class-GS + Loewdin convolutions
     mirroring validation/lambda_oracle/exact_isr_order5.py) is Phase 2.
@@ -42,30 +44,26 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.SingleReference.ADC.adc_order_rule import (
-    kmax, block_order, blocks_at, u_order_terms, s_order_terms,
+    kmax, blocks_at, u_order_terms, s_order_terms,
     amplitude_rank_surviving, cross_blocks_at, cross_block_leading_order,
     refuse_above_max_order)
-from src.SingleReference.ADC.precursor_classes import nondyson_module_name
+from src.SingleReference.ADC.precursor_classes import (
+    cross_module_name, nondyson_apply_module_name, nondyson_module_name)
+from src.CodeGeneration import codegen_common
 from src.SingleReference.ADC.generated_modules import (RUNTIME_MODULES, is_generated,
                                                     dotted as generated_dotted)
 
-_GEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        '..', 'SingleReference', 'ADC', 'generatedADC')
-_MPN_GEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', 'SingleReference', 'DensityMatrix',
-                            'generated_mpn')
+_MPN_GEN_DIR = os.path.join(codegen_common.DM_OUT_DIR, 'generated_mpn')
 
 
 def _module_path(mod):
-    """Path to a generatedADC module, mirroring generate_adcn._module_subdir
-    (adc{N}_....py lives in generatedADC/adc{N}/, never the flat root --
-    this used to be a flat lookup and reported every already-generated module
-    as a gap)."""
+    """Path to a generatedADC module: generatedADC/adc{N}/<mod>.py, the layout
+    every writer uses (codegen_common.module_subdir)."""
     m = re.match(r'adc(\d+)_', mod)
     if not m:
         raise ValueError(f"cannot derive an adc{{N}} subpackage from module "
                          f"name {mod!r} (expected an 'adc<N>_...' prefix)")
-    return os.path.join(_GEN_DIR, f'adc{m.group(1)}', mod + '.py')
+    return os.path.join(codegen_common.ADC_OUT_DIR, f'adc{m.group(1)}', mod + '.py')
 
 
 def _amp_census():
@@ -120,36 +118,34 @@ REGISTRY = {
                                'adc2_blocks_restricted_df'],
                       generator='generate_adcn.generate_adc2', note='U^(1)',
                       calls=[('generate_adcn.generate_adc2', {}),
-                             ('generate_adcn.generate_adc2_restricted', {}),
-                             ('generate_adcn.generate_adc2_restricted',
-                              {'df': True})]),
+                             ('generate_adcn.generate_adc2', {'restricted': True}),
+                             ('generate_adcn.generate_adc2',
+                              {'restricted': True, 'df': True})]),
     # the _df twins are not optional extras: the g-free DF ADC(3) route
     # (ADCSolverRestricted with df=True + amplitudes=, the only one that fits
     # aug-cc-pVQZ) builds EVERY block from them.
     ('U_k1', 2): dict(modules=['adc3_u_blocks', 'adc3_u_blocks_restricted',
                                'adc3_u_blocks_restricted_df'],
-                      generator='generate_adcn.generate_adc3_u', note='U^(2)+S^(2)',
-                      calls=[('generate_adcn.generate_adc3_u', {}),
-                             ('generate_adcn.generate_adc3_u_restricted',
-                              {'df': False}),
-                             ('generate_adcn.generate_adc3_u_restricted',
-                              {'df': True})]),
+                      generator='generate_adcn.generate_adc_u', note='U^(2)+S^(2)',
+                      calls=[('generate_adcn.generate_adc_u', {'u_order': 2}),
+                             ('generate_adcn.generate_adc_u',
+                              {'u_order': 2, 'restricted': True, 'df': False}),
+                             ('generate_adcn.generate_adc_u',
+                              {'u_order': 2, 'restricted': True, 'df': True})]),
     ('U_k1', 3): dict(modules=['adc4_u3_blocks', 'adc4_u3_blocks_restricted'],
-                      generator='generate_adcn.generate_adc4_u3',
+                      generator='generate_adcn.generate_adc_u',
                       note='U^(3)+S^(3); laplace l3 twin exists',
-                      calls=[('generate_adcn.generate_adc4_u3', {}),
-                             ('generate_adcn.generate_adc4_u3_restricted',
-                              {'df': False})]),
+                      calls=[('generate_adcn.generate_adc_u', {'u_order': 3}),
+                             ('generate_adcn.generate_adc_u',
+                              {'u_order': 3, 'restricted': True, 'df': False})]),
     ('U_k1', 4): dict(modules=['adc5_u4_blocks_restricted',
                                'adc5_u4_blocks_restricted_df'],
-                      generator='generate_adcn.generate_adc_u_restricted',
-                      note='ORDER-GENERAL generator (u_order arg); restricted+DF '
-                           '(the _df twin is sigma_codegen.generate_adc5_u4_'
-                           'restricted_df -- generate_adc_u_restricted has no '
-                           'df flag)',
-                      calls=[('generate_adcn.generate_adc_u_restricted',
-                              {'u_order': 4}),
-                             ('sigma_codegen.generate_adc5_u4_restricted_df', {})]),
+                      generator='generate_adcn.generate_adc_u',
+                      note='U^(4)+S^(4), restricted and restricted DF',
+                      calls=[('generate_adcn.generate_adc_u',
+                              {'u_order': 4, 'restricted': True, 'df': False}),
+                             ('generate_adcn.generate_adc_u',
+                              {'u_order': 4, 'restricted': True, 'df': True})]),
     ('C_k1', 0): dict(modules=['adc2_blocks'], generator='generate_adcn.generate_adc2',
                       note='K (f part)',
                       calls=[('generate_adcn.generate_adc2', {})]),
@@ -157,46 +153,51 @@ REGISTRY = {
                       note='C^(1) (v part)',
                       calls=[('generate_adcn.generate_adc2', {})]),
     ('C_k1', 2): dict(modules=['adc4_c2_blocks', 'adc4_c2_blocks_restricted'],
-                      generator='generate_adcn.generate_adc4_base_c2',
+                      generator='generate_adcn.generate_adc_class_pair',
                       note='C^(2)+s2c; apply+df twins exist',
-                      calls=[('generate_adcn.generate_adc4_base_c2', {}),
-                             ('generate_adcn.generate_adc4_base_c2_restricted', {})]),
+                      calls=[('generate_adcn.generate_adc_class_pair', {'order': 2}),
+                             ('generate_adcn.generate_adc_class_pair',
+                              {'order': 2, 'restricted': True})]),
     ('C_k1', 3): dict(modules=['adc5_c3_blocks', 'adc5_c3_blocks_restricted',
                                'adc5_c3_apply_restricted_blocks'],
-                      generator='generate_adcn.generate_adc5_c3',
+                      generator='generate_adcn.generate_adc_class_pair',
                       note='C^(3); runtime adds orbital-GS cross (n=3 only); '
                            'apply twin is sigma_codegen.generate_adc5_c3_'
                            'apply_restricted',
-                      calls=[('generate_adcn.generate_adc5_c3', {}),
-                             ('generate_adcn.generate_adc5_c3_restricted', {}),
-                             ('sigma_codegen.generate_adc5_c3_apply_restricted',
-                              {'df': False})]),
+                      calls=[('generate_adcn.generate_adc_class_pair', {'order': 3}),
+                             ('generate_adcn.generate_adc_class_pair',
+                              {'order': 3, 'restricted': True}),
+                             ('sigma_codegen.generate_adc_class_pair_apply',
+                              {'order': 3, 'restricted': True, 'df': False,
+                               'drop_fov_zero': True})]),
     ('C_1_2', 1): dict(modules=['adc4_k2_blocks', 'adc4_k2_blocks_restricted'],
                       generator='generate_adcn.generate_adc4_base_k2',
                       note='k1<->k2 C^(1) (+ U^(2)_k2/S^(2)_k2 legs)',
                       calls=[('generate_adcn.generate_adc4_base_k2', {}),
-                             ('generate_adcn.generate_adc4_base_k2_restricted', {})]),
+                             ('generate_adcn.generate_adc4_base_k2', {'restricted': True})]),
     ('C_1_2', 2): dict(modules=['adc5_c12_blocks'],
-                      generator='generate_adcn.generate_adc5_c12',
+                      generator='generate_adcn.generate_adc_class_pair',
                       note='k1<->k2 order-2 (l1f/l2v/l2ft2) + runtime '
                            'c12_o2_generated (sequential class-GS assembly, '
                            'arbiter 6e-10/6e-9) -- the gap generateADC(5) '
                            'found, closed 2026-07-21.',
-                      calls=[('generate_adcn.generate_adc5_c12', {})]),
+                      calls=[('generate_adcn.generate_adc_class_pair',
+                              {'order': 2, 'pair': 'k1k2', 'kinds': ('u',),
+                               'fname': 'adc5_c12_blocks.py'})]),
     ('U_k2', 2): dict(modules=['adc4_k2_blocks', 'adc4_k2_blocks_restricted'],
                       generator='generate_adcn.generate_adc4_base_k2',
                       note='U^(2)_k2 + S^(2)_k2 (module SHARED with '
                            "('C_1_2',1) -- same calls, deduped by GenerateADC)",
                       calls=[('generate_adcn.generate_adc4_base_k2', {}),
-                             ('generate_adcn.generate_adc4_base_k2_restricted', {})]),
+                             ('generate_adcn.generate_adc4_base_k2', {'restricted': True})]),
     ('U_k2', 3): dict(modules=['adc5_u3_k2_blocks', 'adc5_s_k1k2_blocks'],
-                      generator='generate_adcn.generate_adc5_u3_k2',
+                      generator='generate_adcn.generate_adc_u_k2',
                       note='U^(3)_k2 incl. S_{k1,k2} cross term (arbiter 1e-10); '
                            "adc5_s_k1k2_blocks is generate_adc5_s_k1k2 (also "
                            "listed under ('S_1_2',2), which plan()/coverage() "
                            "never visits -- this key is its only real dispatch "
                            "path)",
-                      calls=[('generate_adcn.generate_adc5_u3_k2', {}),
+                      calls=[('generate_adcn.generate_adc_u_k2', {'orders': (1, 2, 3)}),
                              ('generate_adcn.generate_adc5_s_k1k2', {})]),
     ('S_1_2', 2): dict(modules=['adc5_s_k1k2_blocks'],
                       generator='generate_adcn.generate_adc5_s_k1k2',
@@ -211,11 +212,11 @@ REGISTRY = {
                                'adc5_k2k2_apply_restricted_blocks'],
                       generator='generate_adcn.generate_adc5_k2k2',
                       note='(2,2) C^(1): the ADC(5) block; every required property (apply twin '
-                           'is sigma_codegen.generate_adc5_k2k2_apply_'
-                           "restricted; dense call SHARED with ('C_k2',0))",
+                           'is sigma_codegen.generate_c1_self_apply(k=2); dense '
+                           "call SHARED with ('C_k2',0))",
                       calls=[('generate_adcn.generate_adc5_k2k2', {}),
-                             ('sigma_codegen.generate_adc5_k2k2_apply_restricted',
-                              {'df': False})]),
+                             ('sigma_codegen.generate_c1_self_apply',
+                              {'k': 2, 'restricted': True, 'df': False})]),
     # ---- union-space D x C cross blocks (X_{kI}_{kJ}: (kI+1)h kI p-dagger bra,
     # (kJ+1)p kJ h ket), the Hamiltonian blocks the two-sector convention
     # deletes; needed by construction='union'/'diagrammatic' only, so the ones
@@ -231,38 +232,48 @@ REGISTRY = {
                       union_only=True,
                       calls=[('generate_adcn.generate_adc_cross_pair',
                               {'order': 2, 'pair': 'k1k1'}),
-                             ('generate_adcn.generate_adc_cross_pair_restricted',
-                              {'order': 2, 'pair': 'k1k1', 'df': False}),
-                             ('generate_adcn.generate_adc_cross_pair_restricted',
-                              {'order': 2, 'pair': 'k1k1', 'df': True}),
+                             ('generate_adcn.generate_adc_cross_pair',
+                              {'order': 2, 'pair': 'k1k1', 'restricted': True, 'df': False}),
+                             ('generate_adcn.generate_adc_cross_pair',
+                              {'order': 2, 'pair': 'k1k1', 'restricted': True, 'df': True}),
                              ('sigma_codegen.generate_adc_cross_pair_apply_restricted',
                               {'order': 2, 'pair': 'k1k1', 'df': False}),
                              ('sigma_codegen.generate_adc_cross_pair_apply_restricted',
                               {'order': 2, 'pair': 'k1k1', 'df': True})]),
-    ('X_1_1', 3): dict(modules=['adc5_x3_k1k1_blocks'], generator=None, union_only=True,
-                      note='X^(3) 2h1p x 2p1h (union-space ADC(5)); not emitted'),
-    ('X_1_2', 2): dict(modules=['adc5_x2_k1k2_blocks'], generator=None, union_only=True,
-                      note='X^(2) 2h1p x 3p2h (union-space ADC(5)); not emitted, must be '
-                           'matrix-free'),
-    ('X_2_1', 2): dict(modules=['adc5_x2_k2k1_blocks'], generator=None, union_only=True,
-                      note='X^(2) 3h2p x 2p1h (union-space ADC(5)); not emitted'),
 }
+# ADC(5)'s cross blocks: 2h1p x 2p1h through order 3, 2h1p x 3p2h and 3h2p x 2p1h
+# at order 2 (manifold rule); the matrix-free apply form is all the union and
+# diagrammatic ADC(5) operators read (sigma_driver._decoupling_maps)
+for _fam, _order, _pair, _what in (('X_1_1', 3, 'k1k1', '2h1p x 2p1h'),
+                                   ('X_1_2', 2, 'k1k2', '2h1p x 3p2h'),
+                                   ('X_2_1', 2, 'k2k1', '3h2p x 2p1h')):
+    REGISTRY[(_fam, _order)] = dict(
+        modules=[cross_module_name(_order, _pair, apply=True)[:-3]],
+        generator='sigma_codegen.generate_adc_cross_pair_apply_restricted',
+        note=f'X^({_order}) {_what} (union-space ADC(5)); apply form',
+        union_only=True,
+        calls=[('sigma_codegen.generate_adc_cross_pair_apply_restricted',
+                {'order': _order, 'pair': _pair, 'max_rank': 4, 'df': False})])
 
 # ---- non-Dyson (single-sector, ordinary-metric) ISR blocks, ND_{k_i}_{k_j} at
 # a given order, both sectors in one module (generate_adcn.generate_nondyson_pair;
 # the generated-ADC runtime). Emitted through ADC(5); listed by
-# nondyson_plan()/nondyson_coverage(), never by the Dyson plan() ----
+# nondyson_plan(), never by the Dyson plan() ----
 _NONDYSON_EMITTED = [(m, 0, 0) for m in range(6)] + [(m, 0, 1) for m in range(1, 5)] + \
     [(m, 1, 1) for m in range(4)] + [(m, 0, 2) for m in range(1, 4)] + \
     [(m, 1, 2) for m in range(1, 3)] + [(m, 2, 2) for m in range(2)]
 for _m, _ki, _kj in _NONDYSON_EMITTED:
     REGISTRY[(f'ND_{_ki}_{_kj}', _m)] = dict(
-        modules=[nondyson_module_name(_m, _ki, _kj)[:-3]],
+        modules=[nondyson_module_name(_m, _ki, _kj)[:-3],
+                 nondyson_apply_module_name(_m, _ki, _kj)[:-3]],
         generator='generate_adcn.generate_nondyson_pair',
-        note=f'non-Dyson class ({_ki},{_kj}) block at order {_m}, both sectors',
+        note=(f'non-Dyson class ({_ki},{_kj}) block at order {_m}, both sectors: dense '
+              f'spin-orbital and restricted apply'),
         nondyson=True,
         calls=[('generate_adcn.generate_nondyson_pair',
-                {'order': _m, 'k_i': _ki, 'k_j': _kj})])
+                {'order': _m, 'k_i': _ki, 'k_j': _kj}),
+               ('sigma_codegen.generate_nondyson_pair_apply_restricted',
+                {'order': _m, 'k_i': _ki, 'k_j': _kj, 'df': False})])
 
 
 def nondyson_plan(order):
@@ -277,30 +288,6 @@ def nondyson_plan(order):
         out.append(dict(i=i, j=j, family=f'ND_{i}_{j}', carried=o,
                         orders=list(range(start, o + 1))))
     return out
-
-
-def nondyson_coverage(order, verbose=True):
-    """(have, gaps) of the non-Dyson plan by existing generated modules."""
-    have, gaps = [], []
-    for blk in nondyson_plan(order):
-        for m in blk['orders']:
-            key = (blk['family'], m)
-            reg = REGISTRY.get(key)
-            if reg is None:
-                gaps.append((key, 'NO REGISTRY ENTRY (never derived)'))
-                continue
-            missing = [mod for mod in reg['modules'] if not os.path.exists(_module_path(mod))]
-            if missing:
-                gaps.append((key, f"modules missing: {missing} (generator: {reg['generator']})"))
-            else:
-                have.append((key, reg['note']))
-    if verbose:
-        print(f"=== non-Dyson ADC({order}): {len(nondyson_plan(order))} blocks ===")
-        for k, note in have:
-            print(f"  [have] {str(k):16s} {note}")
-        for k, why in gaps:
-            print(f"  [GAP ] {str(k):16s} {why}")
-    return have, gaps
 
 
 def _family(i, j):
@@ -545,21 +532,29 @@ def GenerateRuntime(orders=(2, 3, 4), verbose=True):
         _resolve_call(func_name)(**kwargs)
         importlib.invalidate_caches()
         done.add(sig)
-    # MP order o amplitude numerators (generated_mpn/mpn_amp_numerators_o{o}),
-    # first consumed by ADC(o + 1): the order-4 amplitudes of the ADC(5)
-    # accessors (norm series, non-Dyson blocks); orders <= 3 are hand-chained
-    numerators = [o for o in range(4, max(orders))]
-    for o in numerators:
-        if not os.path.exists(os.path.join(_MPN_GEN_DIR, f'mpn_amp_numerators_o{o}.py')):
-            from src.CodeGeneration.generate_mpn_density import (  # lazy: see _resolve_call
-                generate_amplitude_numerator_module)
+    # DensityMatrix-side modules: the MP order o amplitude numerators
+    # (generated_mpn/mpn_amp_numerators_o{o}), first consumed by ADC(o + 1): the
+    # order-4 amplitudes of the ADC(5) accessors (norm series, spin-orbital
+    # non-Dyson blocks; orders <= 3 are hand-chained); with ADC(5) the restricted
+    # order-4 ground state of non-Dyson ADC(5) (_amps_order(5))
+    dm_modules = [(os.path.join(_MPN_GEN_DIR, f'mpn_amp_numerators_o{o}.py'),
+                   'generate_mpn_density.generate_amplitude_numerator_module',
+                   dict(orders=[o], basename=f'mpn_amp_numerators_o{o}'))
+                  for o in range(4, max(orders))]
+    if 5 in orders:
+        from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import ORDER4_MODULE
+        dm_modules.append((os.path.join(codegen_common.DM_OUT_DIR, 'generated_mpn_restricted',
+                                        f'{ORDER4_MODULE}.py'),
+                           'generate_mpn_density_spin.generate_order4_ground_state_restricted',
+                           {}))
+    for path, func_name, kwargs in dm_modules:
+        if not os.path.exists(path):
             if verbose:
-                print(f'GenerateRuntime: mpn_amp_numerators_o{o}', flush=True)
-            generate_amplitude_numerator_module([o], f'mpn_amp_numerators_o{o}')
+                print(f'GenerateRuntime: {os.path.basename(path)} <- {func_name}', flush=True)
+            _resolve_call(func_name)(**kwargs)
             importlib.invalidate_caches()
     missing = [generated_dotted(m) for m in wanted if not is_generated(m)]
-    missing += [f'generated_mpn/mpn_amp_numerators_o{o}' for o in numerators
-                if not os.path.exists(os.path.join(_MPN_GEN_DIR, f'mpn_amp_numerators_o{o}.py'))]
+    missing += [path for path, _, _ in dm_modules if not os.path.exists(path)]
     if missing:
         raise RuntimeError('GenerateRuntime: still missing after their producers ran:\n  '
                            + '\n  '.join(missing))

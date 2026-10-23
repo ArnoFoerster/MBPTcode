@@ -35,8 +35,10 @@ in q, Condon term included). Here V^2 is the Frobenius
 sum |<S_i|H_SO|T_j>|^2 over the lowest `s_block` singlets and `t_block`
 triplets: the root that carries the coupling can change its index under a
 displacement, so the pair is not assumed. Each displaced root is matched to
-the centre's by the overlap of its Casida vector (`follow`), a sign being
-arbitrary and an index meaningless across geometries.
+the centre's by the one rule for the same state at another geometry
+(`follow`, `state_identity.transported_overlap`), a sign being arbitrary, an
+index meaningless across geometries, and an orbital free to come back from
+the displaced SCF with the other sign.
 
 The displaced manifolds are solved on the chain of the run (the declared
 mean field, the quasiparticle set, the continuum and the frozen conventions),
@@ -54,19 +56,20 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.constants import HARTREE_TO_CM, HARTREE_TO_EV
-from src.Base.pyscf_interface import occupied_count
+from src.Base.numerics.constants import HARTREE_TO_CM, HARTREE_TO_EV
+from src.Base.pyscf.pyscf_interface import occupied_count
 from src.photophysics import rate_models
 from src.photophysics.declaration import UiscModel
 from src.photophysics.minimum import GroundModes
 from src.photophysics.rate_models import RateRefused, aligned_minima
 from src.photophysics.records import StageRefused, log
-from src.properties import rates
-from src.properties.nonadiabatic import align_roots
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       interstate_vectors, slope_from_squares,
+from src.photophysics import rates
+from src.properties import franck_condon
+from src.properties.spin_orbit import (interstate_vectors, slope_from_squares,
                                        soc_operator_mo)
-from src.properties.surface import lockstep_geometry
+from src.gradients.state_identity import align_roots, transported_overlap
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
+from src.gradients.surface import lockstep_geometry
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.vibronic import displace_along_mode
 
@@ -122,30 +125,29 @@ def t_vectors(h_mo, nocc, singlet, triplet):
         * EXCITED_SPIN_FACTOR
 
 
-def follow(reference, displaced):
+def follow(reference_at, reference, displaced_at, displaced):
     """(order, phase, cosine) matching the roots of `displaced` to those of
-    `reference`, both (omega, X, Y) triples.
+    `reference`, both (omega, X, Y) triples solved on the orbitals of
+    `reference_at` and `displaced_at`, each (mol, mo_coeff, nocc)
+    (`solve_at`).
 
     A Casida eigenvector's sign is arbitrary and its index means nothing
     across geometries, so the pair being differenced is identified by the
-    overlap of the full (X, Y) vectors rather than assumed: root i of the
-    reference is root order[i] of the displaced set, up to the sign
-    phase[i], with cosine[i] the size of the overlap (1 is the same root).
-    Each displaced root is assigned once (`nonadiabatic.align_roots`, the
-    largest overlap first), so two reference roots never take the same one.
+    transported overlap of the full (X, Y) vectors
+    (`state_identity.transported_overlap`, the chain's own rule) rather than
+    assumed: root i of the reference is root order[i] of the displaced set,
+    up to the sign phase[i], with cosine[i] the size of the overlap (1 is the
+    same root). Each displaced root is assigned once
+    (`state_identity.align_roots`, the largest overlap first), so two
+    reference roots never take the same one. A plain dot product of the two
+    vectors has no orbital transport: an orbital the displaced SCF returns
+    with the other sign reorders it (CH2O/cc-pVDZ, 0.01 Bohr: singlet roots 2
+    and 4 swapped at a cosine of 0.73).
     """
-    ref_x, ref_y = reference[1], reference[2]
-    x, y = displaced[1], displaced[2]
-    ref_y = np.zeros_like(ref_x) if ref_y is None else ref_y
-    y = np.zeros_like(x) if y is None else y
-    ov = ref_x.T @ x + ref_y.T @ y
-    nr = np.sqrt((ref_x ** 2 + ref_y ** 2).sum(axis=0))
-    nd = np.sqrt((x ** 2 + y ** 2).sum(axis=0))
-    # align_roots reads the excited block of an overlap with the ground
-    # state in row and column 0
-    s = np.zeros((ov.shape[0] + 1, ov.shape[1] + 1))
-    s[1:, 1:] = ov / np.outer(nr, nd)
-    order, phase, _ = align_roots(s, ov.shape[0])
+    s = transported_overlap(reference_at[:2], displaced_at[:2],
+                            reference_at[2], reference[1], reference[2],
+                            displaced[1], displaced[2])
+    order, phase, _ = align_roots(s, s.shape[0] - 1)
     return order, phase, np.abs(s[1:, 1:])[np.arange(len(order)), order]
 
 
@@ -159,16 +161,18 @@ def chain_at(run, centre, record):
 
 
 def solve_at(run, chain_, mol):
-    """(singlet, triplet, T) at the geometry `mol` on `chain_`: both
+    """(singlet, triplet, T, at) at the geometry `mol` on `chain_`: both
     manifolds as (omega, X, Y) triples from ONE quasiparticle set and one W,
-    and `t_vectors` of them. The spin-orbit operator is the mean-field one of
-    the spin-orbit stage ('somf')."""
+    `t_vectors` of them, and the (mol, mo_coeff, nocc) they were solved on,
+    which `follow` matches them by. The spin-orbit operator is the mean-field one
+    of the spin-orbit stage ('somf')."""
     manifold = run.manifold(run.s_key, run.t_key, chain=chain_)
     ev = manifold.evaluate(mol)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     h_mo = soc_operator_mo(ev.mf, ev.mol, two_electron='somf')
-    return singlet, triplet, t_vectors(h_mo, occupied_count(ev.mf), singlet,
-                                       triplet)
+    nocc = occupied_count(ev.mf)
+    return (singlet, triplet, t_vectors(h_mo, nocc, singlet, triplet),
+            (ev.mol, np.asarray(ev.mf.mo_coeff, float), nocc))
 
 
 # ------------------------------------------------------------ the derivative
@@ -176,8 +180,8 @@ def promoting_modes(s_k, omega, model):
     """The indices of the `model.n_modes` modes of largest Huang-Rhys
     weight `s_k`, largest first. An imaginary mode is not a displacement
     direction at a minimum and is refused
-    (`rates.require_vibrational_modes`)."""
-    rates.require_vibrational_modes(omega, 'promoting_modes')
+    (`franck_condon.require_vibrational_modes`)."""
+    franck_condon.require_vibrational_modes(omega, 'promoting_modes')
     order = [int(k) for k in np.argsort(-np.asarray(s_k), kind='stable')]
     return order[:model.n_modes]
 
@@ -195,7 +199,7 @@ def crossing_derivative(run, chain_, centre, modes, picked, model, label):
     Condon |V| of the block, |dV/dq_k| for each picked mode k by the
     difference of V^2 (module docstring), and the smallest overlap of any
     followed root with its centre root, per mode."""
-    singlet0, triplet0, t0 = solve_at(run, chain_, centre)
+    singlet0, triplet0, t0, at0 = solve_at(run, chain_, centre)
     v0, ns, nt = block_norm(t0, model)
     dv, overlap = [], []
     for k in picked:
@@ -206,9 +210,9 @@ def crossing_derivative(run, chain_, centre, modes, picked, model, label):
             m = lockstep_geometry(displace_along_mode(
                 centre, modes.modes, modes.masses, modes.omega, k,
                 sign * model.dq))
-            singlet, triplet, t_vec = solve_at(run, chain_, m)
-            o_s, p_s, c_s = follow(singlet0, singlet)
-            o_t, p_t, c_t = follow(triplet0, triplet)
+            singlet, triplet, t_vec, at = solve_at(run, chain_, m)
+            o_s, p_s, c_s = follow(at0, singlet0, at, singlet)
+            o_t, p_t, c_t = follow(at0, triplet0, at, triplet)
             worst = min(worst, float(c_s[:ns].min()), float(c_t[:nt].min()))
             t_vec = (t_vec[np.ix_(o_s, o_t)] * p_s[:, None, None]
                      * p_t[None, :, None])

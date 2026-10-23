@@ -6,8 +6,9 @@ state with their own copy of the route branch (pole model or contour
 equation), their own start point (`qp_starts` vs `frozen_start`) and their
 own reading of the per-state static term. The forward holds the one version
 of each (`contour_state_root`, `Solvers.qp_equation.qp_start`,
-`static_term`); these tests pin the gradient's copies equal to them until it
-calls them, and the two passes equal on a window of water/cc-pVDZ states.
+`static_term`); the gradient calls `static_term` itself, these tests pin its
+remaining copies equal to the forward's until it calls them too, and the two
+passes equal on a window of water/cc-pVDZ states.
 """
 import os
 import sys
@@ -20,12 +21,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import CD_NTAU, HARTREE_TO_EV
+from src.Base.numerics.constants import CD_NTAU, HARTREE_TO_EV
 import src.SingleReference.GW.contour_deformation as cd
 from src.Solvers.qp_equation import qp_start
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.GW.space_time import separable_factors
-import src.gradients.qp_space_time as qst
+import src.gradients.gwbse.qp_space_time as qst
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 
@@ -45,10 +46,10 @@ def test_one_start_point(w0, p):
                                                                NOCC)
 
 
-@pytest.mark.parametrize('xc', [0.0, 0.02, np.array([0.01, -0.03, 0.002])])
-def test_one_static_term(xc):
-    for si in range(3):
-        assert qst.static_term(xc, si) == cd.static_term(xc, si)
+def test_one_static_term():
+    """The gradient reads the per-state static term with the forward's own
+    function, not a copy of it."""
+    assert qst.static_term is cd.static_term
 
 
 @pytest.fixture(scope='module')

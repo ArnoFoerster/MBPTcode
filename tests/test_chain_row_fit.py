@@ -62,32 +62,34 @@ import pytest
 import scipy.linalg
 from pyscf import df as pyscf_df, gto
 
-from src.Base.constants import ISDF_FIT_REGULARIZATION
-from src.Base.chain_settings import with_setting
-from src.Base.numerics import Numerics, numerics_of
-from src.Base.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIATION_K,
-                                HARTREE_TO_EV,
-                                ISDF_GRADIENT_FLOOR)
+from src.Base.numerics.constants import ISDF_FIT_REGULARIZATION
+from src.gradients.rpa.chain_settings import with_setting
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIATION_K,
+                                         HARTREE_TO_EV,
+                                         ISDF_GRADIENT_FLOOR)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
-from src.Base import separable_ri
-from src.Base.separable_ri import aux_metric_sqrt, fit_M_stable
-from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
-                                     whole_factor)
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import (contiguous_block, distributed, lockstep,
-                                     partition, run_simulated)
-from src.gradients import factor_chain, state_following
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
+from src.Base.factorization import separable_ri
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_stable
+from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
+                                                   whole_factor)
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, distributed, lockstep, partition)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa import factor_chain
+from src.gradients.gwbse import state_following
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
                                             pair_positions, product_pairs)
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
-from src.properties.surface import evaluate
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.surface import evaluate
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from tests.test_chain_sliced_factors import (COMPOSED_GATHERS, H2O,
                                              H2O_DISPLACED, chain_scf,
@@ -256,7 +258,7 @@ def adjoint_widths(chain):
     mol = chain.mol0
     nao, naux = mol.nao, chain.naux
     ngram = len(product_pairs(mol)[0])
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     budget, = separable_ri.fit_settings(None, 'block_memory_gb')
     cut = len(separable_ri.ao_blocks(mol, chain.M, n2, naux, budget)) > 1
     return (chain.M, {chain.mf0.mo_coeff.shape[1], nao, naux, chain.M, n2,
@@ -333,7 +335,7 @@ def adjoint_ledger_faults(held, chain, rank, size, block=TILE):
         return ['a force without the adjoint ledger: the whole adjoint']
     mol = chain.mol0
     npts, nao, naux = chain.M, mol.nao, chain.naux
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     own = [(t * block, min((t + 1) * block, npts))
            for t in partition(-(-npts // block), rank, size)]
     rows = sum(b - a for a, b in own)
@@ -422,7 +424,7 @@ def observables(surface, log=None, rank=0, size=1):
     if log is not None:
         watch(surface, log, rank, size)
     ex = surface.excited
-    roots = ex._forward(ex.mol0, ex.mf0)[0]
+    roots = ex.forward(ex.mol0, ex.mf0)[1].omega
     force, energy, diags = evaluate(surface, own_water(H2O_DISPLACED))
     drpa = surface.ground.total_gradient(own_water(H2O_DISPLACED))[0]
     mol_opt, info = optimize(surface, max_cycle=1, verbose=False)
@@ -632,8 +634,8 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
         def rank(comm):
             surface = state_pair(ETHYLENE, bse_conv_tol=GATE_BSE_CONV_TOL,
                                  **kw)
-            roots = surface.excited._forward(surface.excited.mol0,
-                                             surface.excited.mf0)[0]
+            roots = surface.excited.forward(surface.excited.mol0,
+                                            surface.excited.mf0)[1].omega
             force, energy, diags = evaluate(surface,
                                             molecule(ETHYLENE_DISPLACED))
             drpa = surface.ground.total_gradient(
@@ -738,7 +740,7 @@ def test_the_dispatcher_carries_the_fit():
         mol = own_water()
         surface = potential_energy_surface(mol, chain_scf, ground_state=ground,
                                            excitation=Excitation('singlet'),
-                                           **row_kw())
+                                           numerics=numerics_of(row_kw()))
         fac = surface.ground.factorization
         assert fac is surface.excited.factorization
         assert (fac.fit, fac.fit_block) == ('rows', TILE)
@@ -751,7 +753,7 @@ def test_the_dispatcher_carries_the_fit():
         potential_energy_surface(own_water(), chain_scf, ground_state=ground,
                                  excitation=Excitation('singlet'),
                                  chi0='dense-qb', factorization='four-index',
-                                 fit='rows')
+                                 numerics=numerics_of({'fit': 'rows'}))
 
 
 def test_what_the_row_fit_cannot_serve_is_refused():

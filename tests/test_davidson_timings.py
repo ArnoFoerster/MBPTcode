@@ -32,13 +32,20 @@ search `qp_states` (`GW/space_time.py`'s own `timings` dict, merged by
 parts stay inside the `qp` stage; evGW's cycles sum into those keys, with
 `qp_cycles` saying how many.
 
-The timers move no number: serially, the roots and vectors are to a few ulp
-(`assert_archive_same` of tests/pins.py) those
-of a pinned tree without the `qp_*` timers, extracted with `git archive` and
-run in its own process with its W frequency axis moved onto rW, the range its
-transform is fitted over. The pinned tree has no communicator, and a
-distributed run sums in rank order, so the distributed gates compare every
-rank with rank 0 instead.
+The timers move no number: serially, the quasiparticle energies, roots and
+vectors are to a few ulp (`assert_archive_same` of tests/pins.py) those of a
+pinned tree without the `qp_*` timers, extracted with `git archive` and run in
+its own process with its W frequency axis moved onto rW, the range its
+transform is fitted over. Two later changes of the physics are handed to it
+rather than compared: the interpolation points (the radii table was recut on
+2026-10-14, so the pinned tree's default grid is another grid; it gets this
+tree's G1 radii) and the BSE kernel's static W (built eta-free on its own
+time grid, which moves water's roots by 1.1e-8 Ha; it gets this
+tree's W). Its Davidson is not this tree's (it has changed since, and the
+two stop 1e-14 Ha apart even at a residual of 1e-10), so the roots and vectors
+are gated by this tree's Davidson run again on the pinned tree's quasiparticle
+energies. The pinned tree has no communicator, and a distributed run sums in
+rank order, so the distributed gates compare every rank with rank 0 instead.
 """
 import copy
 import json
@@ -55,12 +62,13 @@ import pytest
 from pyscf import gto, scf
 
 from tests.archived_tree import require_commit, unpack_commit
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import SEPARABLE_AUX_GAUGE
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import shipped_radii_lookup
 from tests.archive_radii import install_current_radii
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import (_QPStageTimings,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import _QPStageTimings, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import (ACTION_PIECES,
                                                               COMM_KINDS)
 from src.SingleReference.LinearResponse.trial_space import SUBSPACE_PIECES
@@ -111,8 +119,15 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
 
 import src.SingleReference.GW.space_time as _archived_space_time
-from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
-from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
+import src.SingleReference.LinearResponse.davidson as _archived_davidson
+try:
+    from src.Base.utils.grids.grids import minimax_frequency_grid as _minimax_frequency_grid
+except ImportError:  # an older tree's module layout
+    from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
+try:
+    from src.Base.utils.grids.time_frequency import SELF_ENERGY_PAD as _PAD
+except ImportError:  # an older tree's module layout
+    from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
 
 # the one change since the pinned commit: W's frequencies span rW, the range
 # its transform back to tau is fitted over, not the bare window
@@ -120,16 +135,34 @@ _archived_space_time.minimax_frequency_grid = (
     lambda n, e_min, e_max: _minimax_frequency_grid(n, _PAD[0] * e_min,
                                                     _PAD[1] * e_max))
 
+# the BSE kernel's static W is this tree's (built eta-free): it
+# replaces the one the GW stage shares, after that stage has run
+W_STATIC = np.load({w_static!r})
+_archived_qp = _archived_davidson.solve_qp_diagonal_space_time
+
+
+def _qp_with_this_trees_w(*args, extras=None, **kwargs):
+    out = _archived_qp(*args, extras=extras, **kwargs)
+    extras['w_static'] = W_STATIC
+    return out
+
+
+_archived_davidson.solve_qp_diagonal_space_time = _qp_with_this_trees_w
+
 warnings.simplefilter('ignore')
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
 mf.kernel()
 nocc = mol.nelectron // 2
-factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
-omega, X, Y, _ = solve_bse_isdf(mf, mol, nocc, nroots={nroots}, probe=True,
-                                progress=False, factors=factors)
-np.savez({out!r}, omega=np.asarray(omega), X=np.asarray(X), Y=np.asarray(Y))
+# this tree's G1 points: the pinned tree's default counts are another grid
+radii = {{el: {{shell: np.asarray(r) for shell, r in rows.items()}}
+         for el, rows in {radii!r}.items()}}
+factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', radii=radii)
+omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, nroots={nroots}, probe=True,
+                                   progress=False, factors=factors)
+assert info['W_aux'] is W_STATIC, 'the static W was not the one handed in'
+np.savez({out!r}, eps=np.asarray(info['eps']), coords=np.asarray(factors[3]))
 '''
 
 
@@ -336,19 +369,38 @@ def archive(tmp_path_factory):
     return out
 
 
-def _archived_bse_roots(archive_dir, tmp_path):
-    """(omega, X, Y) from the pinned tree, run as its own process."""
+def _g1_radii(mol):
+    """The shell radii of the G1 grid the `water` fixture builds, per element,
+    as plain lists for the pinned tree's probe."""
+    radii = {}
+    for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)}):
+        rows, _, origin = shipped_radii_lookup(el, mol.basis, 'cc-pvdz-ri',
+                                               g1(mol))
+        # the pinned tree places no nuclear point for radii handed in
+        assert not origin, el
+        radii[el] = {shell: np.atleast_1d(r).astype(float).tolist()
+                     for shell, r in rows.items()}
+    return radii
+
+
+def _archived_qp_energies(archive_dir, tmp_path, mol, w_static):
+    """The pinned tree's {eps, coords} (quasiparticle energies, points) on the
+    G1 points of `mol` and with the static W `w_static`, run as its own
+    process."""
     script = tmp_path / 'probe.py'
     out = tmp_path / 'roots.npz'
+    w_path = tmp_path / 'w_static.npy'
+    np.save(w_path, np.asarray(w_static))
     script.write_text(BITWISE_PROBE.format(archive=str(archive_dir),
-                                           nroots=NROOTS, out=str(out)))
+                                           nroots=NROOTS, out=str(out),
+                                           radii=_g1_radii(mol),
+                                           w_static=str(w_path)))
     env = dict(os.environ, **THREAD_CAPS)
     env.pop('PYTHONPATH', None)
     proc = subprocess.run([sys.executable, str(script)], cwd=str(archive_dir),
                           capture_output=True, text=True, env=env)
     assert proc.returncode == 0, proc.stderr
-    data = np.load(out)
-    return data['omega'], data['X'], data['Y']
+    return dict(np.load(out))
 
 
 
@@ -359,12 +411,23 @@ def test_qp_timings_move_no_bits(water, tmp_path_factory, archive):
 
     This tree is asked for the bare diagonal preconditioner, the only one the
     pinned tree has; the default screened diagonal moves the roots' last bits.
+    The pinned tree runs on this tree's points and static W (module
+    docstring), so its quasiparticle energies, the stage the `qp_*` timers
+    sit in, are compared as computed; the roots and vectors are this tree's
+    Davidson on the pinned tree's energies, everything else held.
     """
     tmp = tmp_path_factory.mktemp('qp_timings_bitwise')
-    omega_old, X_old, Y_old = _archived_bse_roots(archive, tmp)
-    omega_new, X_new, Y_new, _ = solve_bse_isdf(
-        water['mf'], water['mol'], water['nocc'],
-        numerics=Numerics(bse={'nroots': NROOTS, 'preconditioner': 'bare'}),
+    bse = Numerics(bse={'nroots': NROOTS, 'preconditioner': 'bare'})
+    omega_new, X_new, Y_new, info = solve_bse_isdf(
+        water['mf'], water['mol'], water['nocc'], numerics=bse,
+        probe=True, progress=False, factors=water['factors'])
+    old = _archived_qp_energies(archive, tmp, water['mol'], info['W_aux'])
+    # one grid, or this compares two grids and not two codes
+    assert np.array_equal(old['coords'], water['factors'][3])
+    assert_archive_same(info['eps'], old['eps'], label='eps')
+    omega_old, X_old, Y_old, _ = solve_bse_isdf(
+        water['mf'], water['mol'], water['nocc'], numerics=bse,
+        qp=old['eps'], W_aux=info['W_aux'], W_aux_gauge=SEPARABLE_AUX_GAUGE,
         probe=True, progress=False, factors=water['factors'])
     assert_archive_same(omega_new, omega_old, quantity='root', label='omega')
     assert_archive_same(X_new, X_old, unit='1', quantity='vector', label='X')

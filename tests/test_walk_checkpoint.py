@@ -30,11 +30,12 @@ import pytest
 from pyscf import gto, scf
 
 from tests.blas_bar import assert_same
-from src.Base.constants import GEOM_OPT_CONV
-from src.Base.record_io import read_record, write_record
-from src.Base.body_frame import aligned_displacement
-from src.properties.optimize import MeanFieldSurface, relax
-from src.properties.surfaces import reference_mean_field
+from src.Base.numerics.constants import GEOM_OPT_CONV
+from src.Base.utils.record_io import read_record, write_record
+from src.Base.geometry.body_frame import aligned_displacement
+from src.properties.optimize import relax
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.photophysics_cases import run_of
 
 #: The walk's thresholds: GEOM_OPT_CONV ten times looser.

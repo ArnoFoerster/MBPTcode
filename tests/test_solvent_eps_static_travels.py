@@ -10,7 +10,7 @@ only. A lost eps_static reads the table's 78.36 for water in every check below.
 import pytest
 from pyscf import gto
 
-from src.Base.solvent_screening import SolventScreening, solvent_dielectrics
+from src.environments.solvent_screening import SolventScreening, solvent_dielectrics
 
 #: A static constant that is not water's table value.
 EPS_STATIC = 50.0

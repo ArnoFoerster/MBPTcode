@@ -51,15 +51,15 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (CD_NFREQ, HARTREE_TO_EV,
-                                LAPLACE_SCREENING_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (CD_NFREQ, HARTREE_TO_EV,
+                                         LAPLACE_SCREENING_TOL)
 from src.SingleReference.GW.real_screening import ResidueRefused
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         solve_qp_energy_contour)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import (assert_pin, assert_same, matches, pin_bar,
                         recorded_blas)
@@ -527,8 +527,8 @@ def test_validity_table_refuses_and_admits_each_pair():
             calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
                            continuation='pade', **dict(isdf, **{keyword: 1}), counts=g1(mf))
 
-    # one root rule for every route: qp_solver has one value
-    with pytest.raises(ValueError, match='qp_solver'):
+    # one root rule for every route: there is no qp_solver to choose
+    with pytest.raises(TypeError, match='qp_solver'):
         calc_qp_energy(mf, state=rec['orbital'], mode='space-time',
                        continuation='cd', qp_solver='graphical', **isdf, counts=g1(mf))
 

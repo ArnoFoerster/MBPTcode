@@ -46,11 +46,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.DensityMatrix.density_matrix import (
-    MP3DensityMatrixSolver, compute_mp3_density_matrix_ao,
-    MP3DensityMatrixSolverUnrestricted,
-)
-from src.Base.pyscf_interface import (
+from src.SingleReference.DensityMatrix.density_matrix import (compute_mp3_density_matrix_ao)
+from tests.mpn_density_oracle import (MP3DensityMatrixSolver, MP3DensityMatrixSolverUnrestricted)
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri,
@@ -146,7 +144,7 @@ if __name__ == '__main__':
 
         # relax=False AO density, folded back to MO basis, must reproduce
         # MP3DensityMatrixSolver.compute_gamma3_blocks_spatial exactly
-        from src.SingleReference.DensityMatrix.density_matrix import MP2DensityMatrixSolver
+        from tests.mpn_density_oracle import (MP2DensityMatrixSolver)
         mp2_solver = MP2DensityMatrixSolver(eps_spin, g_anti_spin, nocc_spin=2 * nocc)
         oo2_so, ov2_so, vv2_so = mp2_solver.compute_blocks()
         oo2_sp = oo2_so[0::2, 0::2] * 2.0

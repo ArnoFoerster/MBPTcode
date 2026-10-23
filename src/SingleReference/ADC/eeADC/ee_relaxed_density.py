@@ -38,7 +38,7 @@ basis, active orbitals) and Gamma^P_pq = dPhi/dB^P_pq, a rotation C -> C
 Gs^P_pq = Gamma^P_pq + Gamma^P_qp, plus the change of the Fock matrix through
 the occupied orbitals, sum_pq gamma_pq [4 (pq|ai) - (pa|qi) - (pi|qa)].
 Stationarity of L = Phi + sum z_ai f_ai (all occupied i, frozen core
-included) is the CPHF equation (solved by src.Base.utils.cphf)
+included) is the CPHF equation (solved by src.Base.pyscf.cphf)
 
     (e_a - e_i) z_ai + sum_bj [4 (ai|bj) - (ab|ij) - (aj|ib)] z_bj = -X_ai,
 
@@ -67,17 +67,19 @@ import numpy as np
 from pyscf import lib, scf
 from pyscf import df as pyscf_df
 
-from src.Base.constants import (CORRELATION_CPHF_TOL, CPHF_MAX_CYCLE,
-                                DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics import Numerics
-from src.Base.utils import cphf
-from src.Base.utils.mpi_grid import (allgather_ranges, ordered_chain_sum,
-                                     reduce_sum)
-from src.SingleReference.df_correlation_force import (PAIR, amplitude_fock,
-                                                     doubles_denominator,
-                                                     tile_amplitude_fock)
+from src.Base.numerics.constants import (CORRELATION_CPHF_TOL, CPHF_MAX_CYCLE,
+                                         DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf import cphf
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
+                                              reduce_sum)
+from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
+                                                      doubles_denominator,
+                                                      tile_amplitude_fock)
 from src.SingleReference.ADC.eeADC.ee_ri_density import (Pass, oo_contract, tile_ranges,
                                                      vv_contract)
+# symmetrize is also read from here (df_correlation_force_tiled: erd.symmetrize)
+from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
 SWAP = (2, 3, 0, 1)        # X^T_kcld = X_ldkc
 
@@ -422,10 +424,6 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
 def _tile_ints(op, k0, k1):
     """(kc|ld) of the tile's rows, (kt, nv, no, nv)."""
     return op._ints(k0, k1)
-
-
-def symmetrize(X):
-    return 0.5 * (X + X.T)
 
 
 # ----------------------------------------------------------------------

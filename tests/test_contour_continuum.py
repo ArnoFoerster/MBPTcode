@@ -31,16 +31,16 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              static_exchange_matrix,
                                              static_exchange_mean_field_matrix)
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'

@@ -1,9 +1,9 @@
-"""The solvation loop over MPI ranks (src.Base.solvation_loop with the state
-models of src.SingleReference.state_models and eeADC.ee_state_model): every
+"""The solvation loop over MPI ranks (src.environments.solvation_loop with the state
+models of src.gradients.state_models and eeADC.ee_state_model): every
 rank runs the loop with its own molecule, medium and state objects, and every
 rank must come back with the serial loop's numbers to a few ulp (each rank
 computes them). Two and three simulated ranks
-(mpi_grid.run_simulated; the fold and the relaxed densities shared out over
+(simulated_comm.run_simulated; the fold and the relaxed densities shared out over
 them), water 6-31G (bent, non-symmetric), frozen 1, cc-pvdz-ri /
 cc-pvdz-jkfit, toluene IEF-PCM.
 
@@ -28,12 +28,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base import solvation_loop as sl
-from src.Base.reaction_field import ContinuumField
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.environments import solvation_loop as sl
+from src.environments.reaction_field import ContinuumField
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.state_models import HFState, MP2State
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT, check,
                               make_scf_loop, molecule)
 from tests.pins import RECORDING_BLAS, matches

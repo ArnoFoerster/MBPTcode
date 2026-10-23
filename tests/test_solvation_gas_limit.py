@@ -1,5 +1,5 @@
-"""The gas-phase limit of state-specific solvation (src.Base.solvation_loop with
-src.Base.reaction_field.ContinuumField): a continuum with eps_static = eps_inf
+"""The gas-phase limit of state-specific solvation (src.environments.solvation_loop with
+src.environments.reaction_field.ContinuumField): a continuum with eps_static = eps_inf
 = 1 holds no charges, so every quantity must be the gas phase's (NoMedium, the
 same loop with no sites) to a few ulp (`matches` of tests/pins.py: the two
 loops stand on two sets of SCFs, and two SCF runs are never bitwise), and a
@@ -31,11 +31,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base import solvation_loop as sl
-from src.Base.reaction_field import ContinuumField, NoMedium
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.environments import solvation_loop as sl
+from src.environments.reaction_field import ContinuumField, NoMedium
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.state_models import HFState, MP2State
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT,
                               check, make_scf_loop, molecule)
 from tests.pins import RECORDING_BLAS, matches

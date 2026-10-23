@@ -16,18 +16,18 @@ import pytest
 from pyscf import dft, gto, scf
 
 from tests.pins import assert_same, same_solution
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
-                                 dispersion_gradient, dispersion_version,
-                                 refuse_dispersion_under_rpa)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.pyscf.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
+                                       dispersion_gradient, dispersion_version,
+                                       refuse_dispersion_under_rpa)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse.rpa_energy import (reference_energy,
-                                                           exx_double_counting)
-from src.gradients.dense_surfaces import kohn_sham_gradient_correction
-from src.gradients.isdf_derivatives import (exx_double_counting_skeleton,
-                                            rsh_split)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+                                                           exx_double_counting,
+                                                           rsh_split)
+from src.gradients.gwbse.dense_surfaces import kohn_sham_gradient_correction
+from src.gradients.mean_field_response import exx_double_counting_skeleton
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 
 #: Fragments in van der Waals contact, which is the case dispersion decides.
@@ -115,7 +115,7 @@ def test_direct_rpa_refuses_a_dispersion_corrected_reference():
     with pytest.raises(ValueError, match='counted twice'):
         refuse_dispersion_under_rpa(corrected, 'a caller')
     # the skeleton guards itself, for a chain built before the reference moved
-    from src.gradients.isdf_derivatives import exx_double_counting_skeleton
+    from src.gradients.mean_field_response import exx_double_counting_skeleton
     with pytest.raises(ValueError, match='skeleton'):
         exx_double_counting_skeleton(corrected, mol)
     # and a plain functional passes both
@@ -126,7 +126,7 @@ def test_a_functional_fitted_with_dispersion_refuses_a_second_helping():
     """Unlike the direct-RPA case, nothing downstream would notice this one:
     the correction would simply be added twice and the geometry would come out
     over-bound."""
-    from src.Base.dispersion import (functional_carries_dispersion,
+    from src.Base.pyscf.dispersion import (functional_carries_dispersion,
                                      refuse_double_dispersion)
     for name in ('wB97X-D3', 'wB97X-D4', 'wB97X-V', 'wB97M-V', 'r2SCAN-3c',
                  'B97-3c'):
@@ -147,7 +147,7 @@ def test_the_pcm_factorization_changes_nothing_it_computes():
     upstream shows as a disagreement rather than as silence."""
     from pyscf.solvent import pcm
 
-    from src.Base.pcm_factorization import factorize_once
+    from src.environments.pcm_factorization import factorize_once
 
     mol = gto.M(atom='O 0 0 0; C 0 0 1.21; H 0 0.94 1.80; H 0 -0.94 1.80',
                 basis='def2-svp', verbose=0)
@@ -225,7 +225,7 @@ def isdf_kohn_sham(xc, level):
     guess = []
 
     def factory(m):
-        mf = isdf_jk(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
+        mf = isdf_jk_with_force(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
         mf.grids.level = level
         mf.conv_tol = SCF_TIGHT_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -276,11 +276,11 @@ def test_the_reported_hartree_fock_energy_is_the_mean_fields_own():
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     nocc = mol.nelectron // 2
     for xc in ('pbe0', 'lrc-wpbeh'):
-        mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
+        mf = isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
         mf.kernel()
         want = mf.e_tot + exx_double_counting(mf, mol)
         assert reference_energy(mf, mol) == pytest.approx(want, abs=1e-12), xc
-    hf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
+    hf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
     hf.kernel()
     assert reference_energy(hf, mol) == float(hf.e_tot)
     y, g = kohn_sham_gradient_correction(mol, hf, nocc)

@@ -5,8 +5,8 @@ cycle cap); the name says which.
 """
 from pyscf import scf
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 
 #: The orbital basis the differentiable references below are built in; its
 #: `-ri` and `-jkfit` partners are the auxiliary basis.

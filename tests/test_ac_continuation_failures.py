@@ -9,7 +9,7 @@ defect and propagates; before this test a RuntimeError or ValueError raised
 inside the continuation also came back as NaN with nothing said.
 
 Water/cc-pVDZ DF-RHF, G1 ISDF factors, the two frontier orbitals, with the
-failure planted in `space_time.solve_qp_from_imaginary_axis` for the LUMO.
+failure planted in `qp_solve.solve_qp_from_imaginary_axis` for the LUMO.
 """
 import warnings
 
@@ -17,9 +17,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.SingleReference.GW.space_time as space_time
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
+import src.SingleReference.GW.qp_solve as qp_solve
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.qp_selection import (ac_quasiparticle_shifts,
                                                  ac_unjudgeable)
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
@@ -49,13 +49,13 @@ def water():
 
 def _plant(monkeypatch, exc, lumo):
     """The continuation of `lumo` raises `exc`; every other state is solved."""
-    real = space_time.solve_qp_from_imaginary_axis
+    real = qp_solve.solve_qp_from_imaginary_axis
 
     def continuation(eps, p, *args, **kwargs):
         if p == lumo:
             raise exc
         return real(eps, p, *args, **kwargs)
-    monkeypatch.setattr(space_time, 'solve_qp_from_imaginary_axis',
+    monkeypatch.setattr(qp_solve, 'solve_qp_from_imaginary_axis',
                         continuation)
 
 

@@ -29,12 +29,12 @@ import numpy as np
 import pytest
 from pyscf import df, gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM, MIN_SITE_TO_QM_DISTANCE
-from src.Base.environment import Environment
-from src.Base.polarizable_sites import (PolarizableSites, response_matrix,
-                                        site_field)
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, MIN_SITE_TO_QM_DISTANCE
+from src.Base.environment_seam import Environment
+from src.environments.polarizable_sites import (PolarizableSites, response_matrix,
+                                                site_field)
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import SolventScreening
 
 #: Bohr, on the auxiliary centres. Central, so the residual is O(h^2).
 H = 1e-4

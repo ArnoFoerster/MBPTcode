@@ -20,8 +20,8 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import WALK_STEP_SHRINK, WALK_TRUST_MIN_BOHR
-from src.gradients.conventions import ConventionsLost
+from src.Base.numerics.constants import WALK_STEP_SHRINK, WALK_TRUST_MIN_BOHR
+from src.gradients.gwbse.conventions import ConventionsLost
 from src.properties.optimize import optimize_geometric
 
 pytest.importorskip('geometric')

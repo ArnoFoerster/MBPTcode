@@ -38,8 +38,8 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (GEOM_OPT_CONV, HARTREE_TO_MEV,
-                                REFREEZE_MAX_PASSES, REFREEZE_TOL_MEV)
+from src.Base.numerics.constants import (GEOM_OPT_CONV, HARTREE_TO_MEV,
+                                         REFREEZE_MAX_PASSES, REFREEZE_TOL_MEV)
 from src.properties.optimize import (HAVE_GEOMETRIC, RefreezeNotConverged, optimize,
                                      optimize_geometric, relax,
                                      translation_rotation_basis,

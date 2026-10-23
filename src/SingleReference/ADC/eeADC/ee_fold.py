@@ -52,20 +52,20 @@ import numpy as np
 
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
-from src.Base.constants import (EE_FOLD_AEFF_SEED_RESIDUAL, EE_FOLD_BLOCK_BRACKET,
-                                EE_FOLD_BLOCK_BUFFER, EE_FOLD_BLOCK_FOLD_BOUND,
-                                EE_FOLD_BLOCK_LINDEP, EE_FOLD_BLOCK_MARGIN,
-                                EE_FOLD_BLOCK_MAX_ITER, EE_FOLD_BLOCK_MAX_MOVES,
-                                EE_FOLD_BLOCK_MAX_NODES, EE_FOLD_BLOCK_MODEL_RESIDUAL,
-                                EE_FOLD_BLOCK_NODE_TARGET, EE_FOLD_CHECK_RESIDUAL,
-                                EE_FOLD_CHECK_SEEDS, EE_FOLD_CHECK_SHIFT,
-                                EE_FOLD_COUNT_ROUNDS, EE_FOLD_DEGENERATE,
-                                EE_FOLD_DUPLICATE, EE_FOLD_FOLLOW, EE_FOLD_HEARTBEAT,
-                                EE_FOLD_INNER_CAP, EE_FOLD_INNER_RATIO,
-                                EE_FOLD_MODEL_ROOT_MAX_ITER, EE_FOLD_MODEL_ROOT_STEP,
-                                EE_FOLD_M_SEED_RESIDUAL, EE_FOLD_RECENTRE,
-                                EE_FOLD_SEED_RESIDUAL, EE_FOLD_SEED_SPLIT, EE_FOLD_SPAN)
-from src.Base.utils.linearAlgebra.orthogonalization import extend_orthonormal
+from src.Base.numerics.constants import (EE_FOLD_AEFF_SEED_RESIDUAL, EE_FOLD_BLOCK_BRACKET,
+                                         EE_FOLD_BLOCK_BUFFER, EE_FOLD_BLOCK_FOLD_BOUND,
+                                         EE_FOLD_BLOCK_LINDEP, EE_FOLD_BLOCK_MARGIN,
+                                         EE_FOLD_BLOCK_MAX_ITER, EE_FOLD_BLOCK_MAX_MOVES,
+                                         EE_FOLD_BLOCK_MAX_NODES, EE_FOLD_BLOCK_MODEL_RESIDUAL,
+                                         EE_FOLD_BLOCK_NODE_TARGET, EE_FOLD_CHECK_RESIDUAL,
+                                         EE_FOLD_CHECK_SEEDS, EE_FOLD_CHECK_SHIFT,
+                                         EE_FOLD_COUNT_ROUNDS, EE_FOLD_DEGENERATE,
+                                         EE_FOLD_DUPLICATE, EE_FOLD_FOLLOW, EE_FOLD_HEARTBEAT,
+                                         EE_FOLD_INNER_CAP, EE_FOLD_INNER_RATIO,
+                                         EE_FOLD_MODEL_ROOT_MAX_ITER, EE_FOLD_MODEL_ROOT_STEP,
+                                         EE_FOLD_M_SEED_RESIDUAL, EE_FOLD_RECENTRE,
+                                         EE_FOLD_SEED_RESIDUAL, EE_FOLD_SEED_SPLIT, EE_FOLD_SPAN)
+from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
 from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
                                   overlap_pick, solve_symmetric)
 

@@ -31,7 +31,7 @@ s2rd = lazy('adc4_c2_s2c_apply_restricted_df_blocks')
 k2rd = lazy('adc4_k2_apply_restricted_df_blocks')
 from src.SingleReference.ADC.sigma_driver import (
     restricted_sector_operator, restricted_full_operator)
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri,
     get_density_fitting_coefficients)
 from tests.generated_runtime import requires_runtime

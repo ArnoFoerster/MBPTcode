@@ -48,7 +48,7 @@ import numpy as np
 from pyscf import gto, scf
 from pyscf.cc.addons import spatial2spin
 
-from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC import (ADCSolver, ADCSolverRestricted,
                                      ADCSolverUnrestricted)
 from src.SingleReference.ADC import adc_r_faddeev as FR
@@ -203,7 +203,7 @@ def check_eh_treatments(sr, so, nocc, W):
     eps, B_aa = sr.eps, sr.B_aa
     ch_r = FR.first_order_channels(eps, nocc, B_aa=B_aa)
     for spin in ('singlet', 'triplet'):
-        ch_r['eh'][spin] = FR._eh_channel(eps, nocc, spin, B_aa, None, 'riccati', 'off')
+        ch_r['eh'][spin] = FR.eh_channel(eps, nocc, spin, B_aa, None, 'riccati', 'off')
     ch_s = FU.first_order_channels(so.eps, so.g, 2 * nocc)
     A, _ = FU.build_tdhf_matrices(so.eps, so.g, 2 * nocc)
     n = A.shape[0]
@@ -216,7 +216,7 @@ def check_eh_treatments(sr, so, nocc, W):
     d = np.abs(W.T @ Hs @ W - Hr).max()
     ok &= check(d < 1e-12, "eh pair 'off' in both spin channels == spin-orbital "
                 "reference with the eh channel off", f'{d:.1e}')
-    t1 = FR._eh_channel(eps, nocc, 'triplet', B_aa, None, 'riccati', 'first_order')
+    t1 = FR.eh_channel(eps, nocc, 'triplet', B_aa, None, 'riccati', 'first_order')
     d = np.abs(t1['T'] - FR.first_order_channels(eps, nocc, B_aa=B_aa)['eh']['triplet']['T']).max()
     ok &= check(d < 1e-14 and not t1['dH'].any(), "eh_triplet='first_order' is the "
                 "ADC(3) triplet channel", f'{d:.1e}')
@@ -333,8 +333,8 @@ def check_solver_api(mf, nocc):
     e_mf, e_d = [], None
     for route in ('phonon', 'riccati'):
         s = ADCSolver(mf, level='faddeev_adc3', df=True, pair_route=route)
-        e, Z = s.solve(nroots=1, homo_index=nocc - 1, conv_tol=1e-7)
-        ok &= check(bool(np.all(s.last_result['converged'])),
+        e, Z = s.solve(nroots=1, homo_index=nocc - 1, tol=1e-7)
+        ok &= check(bool(np.all(s.last_result['conv'])),
                     f'Davidson converged ({route})')
         e_mf.append(e[0])
     s = ADCSolver(mf, level='faddeev_adc3', df=True, pair_route='ccd')
@@ -372,8 +372,8 @@ def check_drpa(mf, sr, nocc, scaling=False):
     ok = True
     eps, B = mf.mo_energy, sr.B_aa
     for route in ('riccati', 'phonon'):
-        a = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'drpa')
-        b = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'off')
+        a = FR.eh_channel(eps, nocc, 'triplet', B, None, route, 'drpa')
+        b = FR.eh_channel(eps, nocc, 'triplet', B, None, route, 'off')
         d = max(np.abs(a[k] - b[k]).max() for k in ('T', 'dH', 'dN'))
         ok &= check(d < 1e-12, f"dRPA triplet == non-interacting 'off' pair ({route})",
                     f'{d:.1e}')

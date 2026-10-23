@@ -21,7 +21,7 @@ The transform is used one way only, on the model space it is fitted for
 (Pi(i.tau) is a sum of e^{-Delta_ia tau} with Delta_ia in [e_min, e_max]), so
 the minimax transform's lack of matrix duality costs nothing.
 
-Sign convention follows `imaginary_frequency._f_rpa`: f(i.w) = -2 d/(d^2 + w^2)
+Sign convention follows `imaginary_frequency.f_rpa`: f(i.w) = -2 d/(d^2 + w^2)
 and chi0 = 2 (C_ov f) C_ov^T; the cosine transform maps e^{-d tau} to
 2d/(d^2 + w^2), hence the leading -2 below.
 
@@ -79,16 +79,17 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.constants import DEFAULT_TAU_TARGET, ISDF_TILE_GB
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (agreement, allgather_rows,
-                                     contiguous_block, current_comm,
-                                     exchange_rows, ordered_chain_sum,
-                                     ordered_sum, partition,
-                                     reduce_scatter_rows, reduce_sum)
-from src.Base.utils.time_frequency import (TimeFrequencyGrid,
-                                           minimax_points_for_accuracy)
-from src.SingleReference.base import get_occ_virt_indices, transition_range
+from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
+                                              contiguous_block, current_comm,
+                                              exchange_rows, ordered_chain_sum,
+                                              ordered_sum, partition,
+                                              reduce_scatter_rows, reduce_sum)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
+                                                 minimax_points_for_accuracy)
+from src.Base.orbital_spaces import (get_occ_virt_indices,
+                                     particle_hole_window, transition_range)
 
 
 @dataclass(frozen=True)
@@ -411,7 +412,7 @@ class ProjRows:
 def tile_rows(M, tile_memory_gb, per_row_bytes):
     """Grid rows per tile so that `per_row_bytes` x rows fits in
     tile_memory_gb: at least one row, at most all M of them."""
-    return max(1, min(M, int(tile_memory_gb * 1e9 / max(per_row_bytes, 1))))
+    return max(1, min(M, int(tile_memory_gb * BYTES_PER_GB / max(per_row_bytes, 1))))
 
 
 def polarizability_work(M, tile_memory_gb=ISDF_TILE_GB):
@@ -443,7 +444,7 @@ def wave_items(k0, k1, nitems, rank, size):
     return [(k0 + i // nitems, i % nitems) for i in range(i0, i1)]
 
 
-def split_branches(X, eps, nocc, mu=None):
+def split_branches(X, eps, nocc, mu=None, branches=None):
     """(X_o, X_v, e_o, e_v, mu, occ, virt): the collocation split at the gap.
 
     The energies come back shifted by mu, which defaults to the middle of the
@@ -456,12 +457,17 @@ def split_branches(X, eps, nocc, mu=None):
     ranks' grid rows of X_mo, one collective each, and the whole X_mo never
     exists -- every kernel that reads the collocation only through this split
     takes sliced factors in its place.
+
+    branches: (X_o, X_v) a caller already split from X, returned in their
+    place, so two sweeps on one route gather a sliced X once.
     """
     eps = np.asarray(eps, float)
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    if isinstance(X, SlicedFactors):
+        mu = particle_hole_window(eps, nocc)[2]
+    if branches is not None:
+        X_o, X_v = branches
+    elif isinstance(X, SlicedFactors):
         X_o, X_v = X.branches(occ, virt)
     else:
         X_o, X_v = np.ascontiguousarray(X[:, occ]), np.ascontiguousarray(X[:, virt])
@@ -687,7 +693,7 @@ def polarizability_rows_sweep(X_o, X_v, e_o, e_v, D, tau_points, comm=None,
 
 
 def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
-                        tile_memory_gb=ISDF_TILE_GB):
+                        tile_memory_gb=ISDF_TILE_GB, branches=None):
     """chi0(i.omega) held by auxiliary rows, `ProjRows` over the frequency
     axis: this rank's rows of every frequency, (nfreq, r1 - r0, naux).
 
@@ -699,13 +705,13 @@ def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
     `chi0_imaginary_frequency`, bitwise.
 
     X: the MO collocation or `SlicedFactors`, whose two branches
-    `split_branches` gathers whole once; D whole. comm: None is
-    `current_comm()`.
+    `split_branches` gathers whole once (or `branches`, as split there); D
+    whole. comm: None is `current_comm()`.
     """
     comm = current_comm() if comm is None else comm
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
-    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
     naux = D.shape[1]
     r0, r1 = contiguous_block(naux, rank, size)
     chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
@@ -720,7 +726,7 @@ def frequency_blocks(nfreq, naux, tile_gb, live):
     """(k0, k1) ranges over the frequency axis such that `live` (naux, naux)
     arrays per frequency fit in tile_gb. The one knob for both the M-row tiles
     and the frequency blocks: a working-set budget, not a count."""
-    nb = max(1, min(nfreq, int(tile_gb * 1e9 / max(live * naux * naux * 8, 1))))
+    nb = max(1, min(nfreq, int(tile_gb * BYTES_PER_GB / max(live * naux * naux * 8, 1))))
     return [(k0, min(k0 + nb, nfreq)) for k0 in range(0, nfreq, nb)]
 
 
@@ -780,7 +786,7 @@ def spin_summed(kernel, X_mos, D, spectra, noccs, *args, **kwargs):
     out = None
     for X, eps, nocc in zip(X_mos, spectra, noccs):
         part = kernel(X, D, eps, nocc, *args,
-                      mu=0.5 * (eps[nocc - 1] + eps[nocc]), **kwargs)
+                      mu=particle_hole_window(eps, nocc)[2], **kwargs)
         if out is None:
             out = part
         else:
@@ -924,6 +930,28 @@ def laplace_representation_error(grid, eps, nocc, freq, pair_energies=None):
     return float(np.abs(q * y - 1.0).max())
 
 
+def chi0_aux(blocks, spin_factor=1.0, scratch=None):
+    """chi0 = spin_factor sum_s (C_s f_s) C_s^T in the auxiliary basis: the
+    independent-particle response of the particle-hole blocks
+    `blocks` = [(C_ov, f)], C_ov (naux, n_ov) and f its pairs' frequency
+    factor (`frequency_factor`). spin_factor 2 is the restricted singlet's
+    spin sum; an unrestricted chi0 sums its two spins' blocks at 1. scratch:
+    a buffer of one block's shape, filled in place of a fresh C_ov f."""
+    out = None
+    for C, f in blocks:
+        # C f stays a temporary (no name), so no second (naux, n_ov) array
+        # is held next to C_ov
+        if scratch is None:
+            term = (spin_factor * (C * f) if spin_factor != 1.0
+                    else C * f) @ C.T
+        else:
+            np.multiply(C, f, out=scratch)
+            term = (spin_factor * scratch if spin_factor != 1.0
+                    else scratch) @ C.T
+        out = term if out is None else out + term
+    return out
+
+
 def dyson_screening(chi0, transform=None, correlation=False):
     """W = [I - T^T chi0 T]^-1 at one frequency: the Dyson step of every
     imaginary-axis screening route.
@@ -948,10 +976,8 @@ def minimax_points_for_bse(eps, nocc, tau_target=DEFAULT_TAU_TARGET):
     records the grid used can call the resolver `isdf_bse_factors` uses,
     instead of re-deriving a number that could silently drift from it.
     """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    return minimax_points_for_accuracy(eps[virt].min() - eps[occ].max(),
-                                       eps[virt].max() - eps[occ].min(),
-                                       target=tau_target)
+    gap, span, _ = particle_hole_window(eps, nocc)
+    return minimax_points_for_accuracy(gap, span, target=tau_target)
 
 
 def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
@@ -966,17 +992,15 @@ def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
     ntau: None or 'auto' sizes the grid from the chi0 transition range through
     `minimax_points_for_bse`.
     """
-    eps = np.asarray(eps, float)
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    e_min = eps[virt].min() - eps[occ].max()
-    e_max = eps[virt].max() - eps[occ].min()
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
     if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
         ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
     return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
                                            with_sine=False, with_inverse=False)
 
 
-def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
+def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,
+                            tile_memory_gb=ISDF_TILE_GB, branches=None):
     """W = [1 - chi0(i.omega = 0)]^-1 in the auxiliary basis, from the
     separable factors in imaginary time.
 
@@ -1003,7 +1027,9 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
     that owns a point.
 
     X may be `SlicedFactors` over `comm` (`split_branches` gathers its
-    branches); D is then the whole, gathered array.
+    branches, or takes `branches` already gathered); D is then the whole,
+    gathered array. tile_memory_gb: the grid-row tile budget of each tau
+    point's sweep (`polarizability_projected_tau`).
     """
     comm = current_comm() if comm is None else comm
     grid = static_screening_grid(eps, nocc) if grid is None else grid
@@ -1013,20 +1039,14 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None):
     owners = [r for r in range(nranks)
               for _ in range(*contiguous_block(grid.ntau, r, nranks))]
     t0, t1 = contiguous_block(grid.ntau, rank, nranks)
-    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
     terms = dict(chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid,
-                                range(t0, t1)))
+                                range(t0, t1), tile_memory_gb))
     naux = D.shape[1]
     # chi0's tau addends in tau order (`ordered_chain_sum`): the one-rank bits
     chi0 = ordered_chain_sum(terms, owners, comm,
                              np.zeros((grid.nfreq, naux, naux)))[0]
     return dyson_screening(chi0)
-
-
-def screening_space_time(X, D, eps, nocc, grid, mu=None):
-    """W(i.omega) = [I - chi0(i.omega)]^-1, via the imaginary-time route."""
-    chi0 = chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=mu)
-    return np.array([dyson_screening(c) for c in chi0])
 
 
 def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,

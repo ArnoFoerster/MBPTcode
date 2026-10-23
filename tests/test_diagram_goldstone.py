@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 pytestmark = pytest.mark.skipif(not pdaggerq_available(),
                                 reason='needs pdaggerq (optional)')

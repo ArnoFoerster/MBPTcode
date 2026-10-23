@@ -3,15 +3,15 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.environment import PointCharges
-from src.Base.isdf_jk import isdf_jk
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling)
-from src.gradients.isdf_derivatives import (fock_partial_skeleton,
-                                            qp_xc_correction_skeleton)
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.environments.environment import PointCharges
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling)
+from src.gradients.mean_field_response import (fock_partial_skeleton,
+                                               qp_xc_correction_skeleton)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            mean_field_exchange_wanted)
 from tests.isdf_test_grid import g1, g1_numerics
@@ -36,7 +36,7 @@ def water(shift=None, basis='cc-pvdz'):
 
 def isdf_rhf(mol):
     """A tightly converged ISDF-K Hartree-Fock mean field."""
-    mf = isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol)))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol)))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-10, 200
     mf.kernel()
     assert mf.converged
@@ -45,7 +45,7 @@ def isdf_rhf(mol):
 
 def isdf_hse(mol):
     """ISDF-K HSE06: no long-range exact exchange (alpha = 0), 0.25 short-range."""
-    mf = isdf_jk(dft.RKS(mol, xc='hse06'), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc='hse06')))
+    mf = isdf_jk_with_force(dft.RKS(mol, xc='hse06'), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc='hse06')))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-10, 200
     mf.kernel()
     assert mf.converged
@@ -88,7 +88,7 @@ def test_screened_hybrid_force_carries_its_short_range_exchange():
 
 def test_lagrangian_skeletons_refuse_an_interpolated_coulomb():
     """j_route='isdf' has no Coulomb derivative: every skeleton refuses it."""
-    mf = isdf_jk(dft.RKS(water(), xc='pbe0'), auxbasis=AUXBASIS,
+    mf = isdf_jk_with_force(dft.RKS(water(), xc='pbe0'), auxbasis=AUXBASIS,
                  j_route='isdf', counts=g1(dft.RKS(water(), xc='pbe0')))
     mf.kernel()
     nocc = mf.mol.nelectron // 2

@@ -25,11 +25,16 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from src.Base.pdaggerq_interface import (pq_helper, raw_terms_to_einsum,
-                                    assemble_function, infer_free_indices,
-                                    infer_output_order)
+from src.CodeGeneration.pdaggerq_interface import pq_helper, assemble_function, infer_output_order
+from src.CodeGeneration.codegen_common import (
+    CC_OUT_DIR, DENSITY_BLOCKS, density_insert, density_out_idx, density_shape, generated_header, write_module)
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'SingleReference', 'CC', 'generated_eom')
+OUT_DIR = os.path.join(CC_OUT_DIR, 'generated_eom')
+
+_IMPORTS = ("import numpy as np\n\n"
+            "from ..cached_einsum import einsum\n"
+            "from ..parallel_accum import pacc\n")
+_HEADER = generated_header('generate_eom_ccsdt.py', "See that module's docstring for the equations/conventions.")
 
 R_ARGS = ['r1', 'r2', 'r3', 't1', 't2', 't3', 'f', 'g', 'o', 'v']
 L_ARGS = ['l1', 'l2', 'l3', 't1', 't2', 't3', 'f', 'g', 'o', 'v']
@@ -72,7 +77,7 @@ EE_KET = {
 }
 
 
-def _generate(op_type, bra_or_none, right_or_none, left_leaf, right_leaf):
+def _generate(op_type, bra_or_none, right_or_none):
     """One pdaggerq call: <bra_or_none| Hbar |right_or_none>. Exactly one side is
     a manifold projector; the other is the generic r1/r2/r3 or l1/l2/l3 superposition."""
     pq = pq_helper('fermi')
@@ -95,8 +100,8 @@ def _generate(op_type, bra_or_none, right_or_none, left_leaf, right_leaf):
     return terms
 
 
-def _right_sigma(op_type, bra_ops, rank, shape_expr):
-    terms = _generate(op_type, bra_ops, None, None, None)
+def _right_sigma(op_type, bra_ops, rank):
+    terms = _generate(op_type, bra_ops, None)
     # anchor axis order to how r{rank} is referenced as a leaf elsewhere --
     # NOT infer_free_indices' naive first-occurrence-in-term[0] heuristic,
     # which is unrelated to r{rank}'s own canonical slot convention and
@@ -106,8 +111,8 @@ def _right_sigma(op_type, bra_ops, rank, shape_expr):
     return terms, out_idx
 
 
-def _left_sigma(op_type, ket_ops, rank, shape_expr):
-    terms = _generate(op_type, None, ket_ops, None, None)
+def _left_sigma(op_type, ket_ops, rank):
+    terms = _generate(op_type, None, ket_ops)
     out_idx = infer_output_order(terms, f'l{rank}', type_order=('occ', 'vir'))
     return terms, out_idx
 
@@ -129,33 +134,21 @@ def generate_sector(name):
     spec = SECTORS[name]
     funcs = []
     for rank in (1, 2, 3):
-        terms, out_idx = _right_sigma(spec['op_type'], spec['bra'][rank], rank,
-                                      spec['right_shapes'][rank])
+        terms, out_idx = _right_sigma(spec['op_type'], spec['bra'][rank], rank)
         print(f"{name} right sigma{rank}: {len(terms)} terms, out_indices={out_idx}")
         funcs.append(assemble_function(f'{name}_sigma{rank}', R_ARGS, 'sigma',
                                        spec['right_shapes'][rank], terms, out_idx,
                                        accumulator='pacc'))
 
     for rank in (1, 2, 3):
-        terms, out_idx = _left_sigma(spec['op_type'], spec['ket'][rank], rank,
-                                     spec['left_shapes'][rank])
+        terms, out_idx = _left_sigma(spec['op_type'], spec['ket'][rank], rank)
         print(f"{name} left sigma{rank}: {len(terms)} terms, out_indices={out_idx}")
         funcs.append(assemble_function(f'{name}_sigma{rank}_left', L_ARGS, 'sigma',
                                        spec['left_shapes'][rank], terms, out_idx,
                                        accumulator='pacc'))
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    path = os.path.join(OUT_DIR, f'{name}_sigma.py')
-    with open(path, 'w') as fh:
-        fh.write("# GENERATED CODE -- do not edit by hand.\n")
-        fh.write("# Produced by src/CodeGeneration/generate_eom_ccsdt.py; see that\n")
-        fh.write("# module's docstring for the equations/conventions.\n")
-        fh.write("import numpy as np\n\n"
-                 "from ..cached_einsum import einsum\n"
-                 "from ..parallel_accum import pacc\n\n\n")
-        fh.write("\n\n".join(funcs))
-        fh.write("\n")
-    print(f"wrote {path}")
+    write_module(os.path.join(OUT_DIR, f'{name}_sigma.py'), funcs, _HEADER, imports=_IMPORTS,
+                 package_init=True)
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +171,6 @@ def generate_sector(name):
 DENSITY_ARGS_RHO = ['lam1', 'lam2', 'lam3', 'r1', 'r2', 'r3', 't1', 't2', 't3', 'kd', 'o', 'v']
 DENSITY_ARGS_RHO_STAR = ['l1', 'l2', 'l3', 't1', 't2', 't3', 'kd', 'o', 'v']
 
-DENSITY_BLOCKS = {
-    'oo': 'e1(m,n)',
-    'vv': 'e1(e,f)',
-    'ov': 'e1(m,e)',
-    'vo': 'e1(e,m)',
-}
-DENSITY_SHAPES = {'oo': '(no,no)', 'vv': '(nv,nv)', 'ov': '(no,nv)', 'vo': '(nv,no)'}
 
 
 def _density_generate(left_ops, right_ops, insert_op):
@@ -198,20 +184,15 @@ def _density_generate(left_ops, right_ops, insert_op):
     return terms
 
 
-def _insert_op_indices(insert_op):
-    """out_indices for a density block = the e1(p,q) insertion operator's OWN
-    argument order, not a first-occurrence guess -- needed because e.g. the
-    'vv' block's two free indices are both virtual-type, so infer_free_indices
-    can't tell rho[e,f] from rho[f,e] apart from letter-type alone, and only
-    one of those matches e1(e,f)'s actual row/col meaning."""
-    return insert_op[insert_op.index('(') + 1:-1].split(',')
-
-
 def generate_density():
     funcs = []
-    for block, insert_op in DENSITY_BLOCKS.items():
-        terms = _density_generate([['1'], ['l1'], ['l2'], ['l3']], [['r1'], ['r2'], ['r3']], insert_op)
-        out_idx = _insert_op_indices(insert_op)
+    # out_indices are the e1(p,q) insertion's own argument order (density_out_idx),
+    # not a first-occurrence guess: the 'vv' block's two free indices are both
+    # virtual, so letter type alone cannot tell rho[e,f] from rho[f,e]
+    for block in DENSITY_BLOCKS:
+        terms = _density_generate([['1'], ['l1'], ['l2'], ['l3']], [['r1'], ['r2'], ['r3']],
+                                  density_insert(block))
+        out_idx = density_out_idx(block)
         print(f"rho_{block}: {len(terms)} terms, out_indices={out_idx}")
         # rename l1/l2/l3 -> lam1/lam2/lam3 inside the raw terms too (ground
         # Lambda, distinct from the EOM left-eigenvector l1/l2/l3 used by
@@ -219,34 +200,27 @@ def generate_density():
         renamed_terms = [[tok.replace('l1(', 'lam1(').replace('l2(', 'lam2(').replace('l3(', 'lam3(')
                           for tok in term] for term in terms]
         funcs.append(assemble_function(f'rho_{block}', DENSITY_ARGS_RHO, 'rho',
-                                       DENSITY_SHAPES[block], renamed_terms, out_idx,
+                                       density_shape(block), renamed_terms, out_idx,
                                        accumulator='pacc'))
 
-    for block, insert_op in DENSITY_BLOCKS.items():
-        terms = _density_generate([['l1'], ['l2'], ['l3']], [['1']], insert_op)
-        out_idx = _insert_op_indices(insert_op)
+    for block in DENSITY_BLOCKS:
+        terms = _density_generate([['l1'], ['l2'], ['l3']], [['1']], density_insert(block))
+        out_idx = density_out_idx(block)
         print(f"rho_star_{block}: {len(terms)} terms, out_indices={out_idx}")
         funcs.append(assemble_function(f'rho_star_{block}', DENSITY_ARGS_RHO_STAR, 'rho',
-                                       DENSITY_SHAPES[block], terms, out_idx,
+                                       density_shape(block), terms, out_idx,
                                        accumulator='pacc'))
 
-    os.makedirs(OUT_DIR, exist_ok=True)
-    path = os.path.join(OUT_DIR, 'ee_density.py')
-    with open(path, 'w') as fh:
-        fh.write("# GENERATED CODE -- do not edit by hand.\n")
-        fh.write("# Produced by src/CodeGeneration/generate_eom_ccsdt.py; see that\n")
-        fh.write("# module's docstring for the equations/conventions.\n")
-        fh.write("import numpy as np\n\n"
-                 "from ..cached_einsum import einsum\n"
-                 "from ..parallel_accum import pacc\n\n\n")
-        fh.write("\n\n".join(funcs))
-        fh.write("\n")
-    print(f"wrote {path}")
+    write_module(os.path.join(OUT_DIR, 'ee_density.py'), funcs, _HEADER, imports=_IMPORTS,
+                 package_init=True)
 
 
-if __name__ == '__main__':
-    os.makedirs(OUT_DIR, exist_ok=True)
-    open(os.path.join(OUT_DIR, '__init__.py'), 'a').close()
+def generate():
+    """Write the ip/ea/ee sigma modules and ee_density.py into OUT_DIR."""
     for name in ('ip', 'ea', 'ee'):
         generate_sector(name)
     generate_density()
+
+
+if __name__ == '__main__':
+    generate()

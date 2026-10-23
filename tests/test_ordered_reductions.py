@@ -43,21 +43,21 @@ from pyscf import df, gto, lib, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base import skeleton_tiles  # noqa: E402
-from src.Base.utils import mpi_grid  # noqa: E402
-from src.Base.utils.grids import gauss_legendre_grid  # noqa: E402
-from src.Base.utils.mpi_grid import (current_comm, distributed,  # noqa: E402
-                                     ordered_chain_sum, ordered_sum,
-                                     run_simulated)
-from src.Base.utils.time_frequency import TimeFrequencyGrid  # noqa: E402
+from src.gradients import skeleton_tiles  # noqa: E402
+from src.Base.utils.parallel import mpi_grid  # noqa: E402
+from src.Base.utils.grids.grids import gauss_legendre_grid  # noqa: E402
+from src.Base.utils.parallel.mpi_grid import (
+    current_comm, distributed, ordered_chain_sum, ordered_sum)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid  # noqa: E402
 from src.SingleReference.GW.space_time import separable_factors  # noqa: E402
 from src.SingleReference.LinearResponse import space_time  # noqa: E402
 from src.SingleReference.LinearResponse import trial_space  # noqa: E402
 from src.SingleReference.LinearResponse.space_time import (  # noqa: E402
     rpa_correlation_energy_space_time, static_screening_matrix)
 from src.SingleReference.LinearResponse.trial_space import PairRows  # noqa: E402
-from src.gradients import qp_space_time  # noqa: E402
-from src.gradients.qp_space_time import qp_set_gradient  # noqa: E402
+from src.gradients.gwbse import qp_space_time  # noqa: E402
+from src.gradients.gwbse.qp_space_time import qp_set_gradient  # noqa: E402
 from tests.test_mpi_routes import WATER  # noqa: E402
 from tests.isdf_test_grid import g1  # noqa: E402
 from tests.pins import RECORDING_BLAS, assert_same, matches  # noqa: E402

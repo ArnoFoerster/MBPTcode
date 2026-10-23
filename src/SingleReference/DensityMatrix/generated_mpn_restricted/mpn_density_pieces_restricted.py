@@ -1,7 +1,7 @@
-# GENERATED CODE -- restricted (spin-blocked) MPn amplitude-numerator,
-# overlap, and density cross-term pieces, order-generic recursion.
-# Combined through the MPn density recursion in
-# mpn_density_driver_restricted.py. Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_mpn_density_spin.py (generate_restricted).
+# Restricted (spin-blocked) MPn amplitude-numerator, overlap and density cross-term
+# pieces of the order-generic pdaggerq recursion (generate_mpn_density.py).
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

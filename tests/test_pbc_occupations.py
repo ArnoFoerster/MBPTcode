@@ -67,7 +67,7 @@ from src.SingleReference.Periodic.pbc_occupations import (
     build_chi0_aux_occ, build_rpa_matrices_occ, solve_rpa_spectral_occ,
     build_W_aux_spectral_occ, solve_rpa_all_q_occ, sigma_c_diag_occ,
     qp_energy_g0w0_occ, qp_energy_root_occ)
-from src.Base.utils.matsubara import beta_from_mf
+from src.Base.utils.grids.matsubara import beta_from_mf
 from pyscf.pbc import scf as pbcscf
 
 
@@ -270,8 +270,9 @@ def test_casida_is_well_posed(dfints_metal):
     for q in (0, 1):
         A, B = build_rpa_matrices_occ(dfints_metal, dfints_metal.kconserv_pair[q])
         AmB = A - B
-        offdiag = np.sqrt(max(np.linalg.norm(AmB) ** 2
-                              - np.linalg.norm(np.diag(AmB)) ** 2, 0.0))
+        # measured on the off-diagonal itself: |A - B|^2 - |diag|^2 cancels to
+        # sqrt(eps) |A - B|, 3e-7 here, whatever the off-diagonal holds
+        offdiag = np.linalg.norm(AmB - np.diag(np.diag(AmB)))
         d = np.diag(AmB).real
         ok &= check(offdiag < 1e-12 * max(np.linalg.norm(AmB), 1.0),
                     f'q={q}: A - B is diagonal', f'offdiag {offdiag:.1e}')
@@ -346,19 +347,23 @@ def test_reduction_to_integer_path(dfints_gapped):
     # The pole-strength floor. A root ON a pole of Sigma_c solves the equation
     # with Z -> 0 and carries no spectral weight -- it is not a quasiparticle.
     # Bulk Al at 6x6x6 returned exactly that: a single bracketed root with
-    # z_min = -3.2e-06, clean in every other column. Driving z_min above this
-    # system's honest Z proves the filter FIRES without needing a pathological
-    # system to hand.
-    strict = qp_energy_root_occ(dfints_gapped,
-                                solve_rpa_all_q_occ(dfints_gapped), 0,
-                                nocc - 1, z_min=0.999)
-    ok &= check(not strict['bracketed'] and strict['n_rejected'] >= 1,
-                'a root below the pole-strength floor is REJECTED, not '
-                'returned as the least-bad option',
-                f"n_rejected={strict['n_rejected']}, "
-                f"reason={strict.get('reject_reason', '')[:44]}")
-    ok &= check(np.isnan(strict['qp']),
-                'and the caller gets NaN rather than a plausible number')
+    # Z = -3.2e-06, clean in every other column. Driving z_min above this
+    # system's honest Z proves the flag FIRES without needing a pathological
+    # system to hand; the root itself is kept (warn and flag, no
+    # refusal), so it is the same root as above.
+    with pytest.warns(RuntimeWarning, match='no quasiparticle'):
+        strict = qp_energy_root_occ(dfints_gapped,
+                                    solve_rpa_all_q_occ(dfints_gapped), 0,
+                                    nocc - 1, z_min=0.999)
+    ok &= check(not strict['quasiparticle'] and strict['n_small_z'] >= 1,
+                'a root below the pole-strength floor is FLAGGED and warned',
+                f"n_small_z={strict['n_small_z']}, Z={strict['Z']:.4f}")
+    ok &= check(strict['bracketed'] and abs(strict['qp'] - root['qp']) < 1e-12
+                and set(strict) == set(root),
+                'and the caller still gets the root, with the same keys',
+                f"{strict['qp']:.8f} vs {root['qp']:.8f} Ha")
+    ok &= check(root['quasiparticle'] and root['n_small_z'] == 0,
+                'while the default floor passes it as a quasiparticle')
     assert ok
 
 
@@ -368,7 +373,7 @@ def test_integer_collapse_costs(dfints_metal):
     f = np.asarray(dfints_metal.mo_occ, dtype=float)
     nocc = (f > 1e-8).sum(axis=1)
     kc = dfints_metal.kconserv_pair[0]
-    n_int = pc._transition_layout(dfints_metal, kc)[1]
+    n_int = pc.transition_layout(dfints_metal, kc)[1]
     _, _, n_occ = transition_layout(dfints_metal, kc)
 
     dead = int((nocc >= dfints_metal.nmo).sum())

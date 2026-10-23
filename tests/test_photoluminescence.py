@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import HARTREE_TO_EV
-from src.properties.rates import photoluminescence, radiative_rate
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.photophysics.rates import photoluminescence, radiative_rate
 
 
 def dipole_for(f, omega):

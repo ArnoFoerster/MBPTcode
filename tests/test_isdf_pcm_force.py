@@ -25,8 +25,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, solvent
 
-from src.Base.isdf_jk import isdf_jk, mean_field_skeleton_force
-from src.Base.solvent_screening import SolventScreening
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.environments.solvent_screening import SolventScreening
 from tests.isdf_test_grid import g1
 
 WATER = [['O', (0.0, 0.0, 0.117)], ['H', (0.0, 0.757, -0.469)],
@@ -44,7 +45,7 @@ def _mol(atoms):
 
 def _isdf_pcm(atoms):
     mol = _mol(atoms)
-    mf = solvent.PCM(isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri',
+    mf = solvent.PCM(isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri',
                              counts=g1(mol)))
     mf.with_solvent.eps = EPS_STATIC
     mf.conv_tol = 1e-12
@@ -79,7 +80,7 @@ def test_mean_field_wrapping_rebinds_the_gradient(reference):
     _, fd = reference
     mol = _mol(WATER)
     env = SolventScreening(mol, eps=1.78, eps_static=EPS_STATIC, method='C-PCM')
-    mf = env.mean_field(mol, lambda m: isdf_jk(scf.RHF(m),
+    mf = env.mean_field(mol, lambda m: isdf_jk_with_force(scf.RHF(m),
                                                auxbasis='cc-pvdz-ri',
                                                counts=g1(m)).run())
     g = mf.Gradients().kernel()

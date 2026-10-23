@@ -41,14 +41,14 @@ def entries(record):
 
 def off_pole_model(ch, member):
     """`ch` reports `member`'s route off the pole model from here on."""
-    taken = ch._routes_taken
+    taken = ch.quasiparticles._routes_taken
 
     def routes(route_out):
         out = taken(route_out)
         if member in out:
             out[member] = OFF_ROUTE
         return out
-    ch._routes_taken = routes
+    ch.quasiparticles._routes_taken = routes
 
 
 def test_a_member_lost_inside_a_frozen_set_is_dropped_and_recorded():

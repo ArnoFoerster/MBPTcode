@@ -78,12 +78,12 @@ import pytest
 from pyscf import df, gto, scf
 
 from tests.archive_radii import install_current_radii
-from src.Base import separable_ri
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (_ao_l_labels, ao_blocks, atomic_grid,
-                                   build_separable_ri,
-                                   molecular_points_covariant)
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.factorization import separable_ri
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import (ao_l_labels, ao_blocks, atomic_grid,
+                                                 build_separable_ri,
+                                                 molecular_points_covariant)
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
 from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1, g1_kw
 from tests.archived_tree import require_commit, unpack_commit
@@ -133,14 +133,30 @@ from pyscf import df, gto
 
 import inspect
 
-from src.Base.separable_ri import (atomic_grid, build_separable_ri,
-                                   molecular_points_covariant)
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    from src.Base.factorization.separable_ri import (atomic_grid, build_separable_ri,
+                                       molecular_points_covariant)
+except ImportError:  # an older tree's module layout
+    from src.Base.separable_ri import (atomic_grid, build_separable_ri,
+                                       molecular_points_covariant)
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 
 # the fit's working set: a keyword of older trees, a field
 # of the one Numerics in newer ones
 if 'numerics' in inspect.signature(build_separable_ri).parameters:
-    from src.Base.numerics import Numerics
+    try:
+        from src.Base.numerics.numerics import Numerics
+    except ImportError:  # an older tree's module layout
+        from src.Base.numerics import Numerics
 
     def budget_kw(budget):
         return dict(numerics=Numerics(layout={{'fit_gb': budget}}))
@@ -219,7 +235,7 @@ def distributed(case, size):
 def test_the_pass_is_many_blocks(case):
     """The stripe is only a stripe if there are blocks to spread."""
     mol, auxmol = case['mol'], case['auxmol']
-    n2 = int((_ao_l_labels(mol) <= 2).sum())
+    n2 = int((ao_l_labels(mol) <= 2).sum())
     blocks = ao_blocks(mol, len(case['coords']), n2, auxmol.nao_nr(),
                        case['block_memory_gb'])
     widths = [mol.ao_loc_nr()[s1] - mol.ao_loc_nr()[s0] for s0, s1 in blocks]

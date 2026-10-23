@@ -20,10 +20,13 @@
     df_check       the ISDF-vs-DF acceptance check of a stage's geometry
     cli            the command line: arguments into a declaration
     launch         the thread environment, set before numpy loads
+    solvated       gas and continuum absorption, emission and adiabatic
+                   S1/T1 energies of one molecule, ADC(2) or GW-BSE, as one
+                   JSON record (`python -m src.photophysics solvated`)
 
 A run, in Python:
 
-    from src.Base.utils.mpi_grid import distributed
+    from src.Base.utils.parallel.mpi_grid import distributed
     from src.photophysics.stages import run_tadf
     from src.photophysics.store import Store
 

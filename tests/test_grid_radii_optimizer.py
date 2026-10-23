@@ -37,12 +37,12 @@ import numpy as np
 from pyscf import df, gto
 from threadpoolctl import threadpool_limits
 
-from src.Base.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
-                                   _shipped_key, _start_radii, atomic_points,
-                                   fit_error_coulomb, lebedev_subshells,
-                                   optimize_atomic_radii, published_grids,
-                                   search_r_max, shipped_radii,
-                                   shipped_radii_lookup)
+from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
+                                                 _shipped_key, _start_radii, atomic_points,
+                                                 fit_error_coulomb, lebedev_subshells,
+                                                 optimize_atomic_radii, published_grids,
+                                                 search_r_max, shipped_radii,
+                                                 shipped_radii_lookup)
 
 #: The production grid: 148 points/atom, which is where the collapse showed up.
 COUNTS_148 = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}

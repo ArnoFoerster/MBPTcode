@@ -18,8 +18,8 @@ Every check asserts: pytest discards a returned verdict and passes on False.
 import numpy as np
 import pytest
 
-from src.Base.constants import (SADDLE_CURVATURE_TOL, START_NUDGE_BOHR,
-                                START_NUDGE_SEED)
+from src.Base.numerics.constants import (SADDLE_CURVATURE_TOL, START_NUDGE_BOHR,
+                                         START_NUDGE_SEED)
 from src.properties.hessian import surface_hessian
 from src.properties.optimize import (escape_saddle, internal_modes,
                                      nudge_vector, optimize,

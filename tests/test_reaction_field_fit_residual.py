@@ -15,8 +15,8 @@ from pyscf import df, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import SOLVENT_RI_RESIDUAL_MAX
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import SOLVENT_RI_RESIDUAL_MAX
+from src.environments.solvent_screening import SolventScreening
 
 H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 

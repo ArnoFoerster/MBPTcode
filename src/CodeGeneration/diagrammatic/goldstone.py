@@ -7,7 +7,7 @@ diagram (typed skeleton + vertex linear order) as the central data structure.
 Pipeline per external (bra, ket) o/v block:
 
   1. pdaggerq fixed-end stream <ext| (0.25 g)^n |ext'> with the operator
-     placement that is nonzero for that block (see _BLOCKS; the forward
+     placement that is nonzero for that block (see BLOCKS; the forward
      product vanishes identically for occupied externals -- verified
      empirically, probe P2a/P2c).  Bare 'g' is used and every diagram
      containing a within-vertex loop (a repeated index inside one integral
@@ -28,7 +28,7 @@ Pipeline per external (bra, ket) o/v block:
      per-ordering weight is coeff / n_extensions: distinct fixed-end Wick
      contractions of one skeleton are exactly its linear extensions, and
      pdaggerq merges them into one coefficient (verified: the operator
-     placements in _BLOCKS impose no constraint beyond the internal DAG, so
+     placements in BLOCKS impose no constraint beyond the internal DAG, so
      every linear extension corresponds to one nonzero contraction).
   4. Cut denominators by construction: the cut between consecutive vertices
      of an ordering crosses internal lines; D = dir*omega + sum eps(holes) -
@@ -52,14 +52,13 @@ gates and then frozen -- see tests/test_diagram_goldstone_n2.py):
 Everything here is validation-scale dense numerics (explicit index arrays);
 production emission reuses the matched ADC objects, not this evaluator.
 """
-import itertools
 import re
 from dataclasses import dataclass, field
 
 import networkx as nx
 import numpy as np
 
-from src.Base.pdaggerq_interface import pq_helper, OCC_LETTERS, VIR_LETTERS
+from src.CodeGeneration.pdaggerq_interface import pq_helper, OCC_LETTERS, VIR_LETTERS
 from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
 
 
@@ -72,7 +71,7 @@ from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
 # placements are the unique (up to equivalence) ones with a nonzero stream:
 # an annihilator acting directly on |HF> must hit an occupied level, a
 # creator an unoccupied one (probes P2a-P2e).
-_BLOCKS = {
+BLOCKS = {
     ('v', 'v'): dict(bra='e', ket='f', left=['a(e)'], right=['a*(f)']),
     ('o', 'o'): dict(bra='m', ket='n', left=['a*(n)'], right=['a(m)']),
     ('v', 'o'): dict(bra='e', ket='n', left=['a(e)', 'a*(n)'], right=['1']),
@@ -87,7 +86,7 @@ def raw_stream(order, block):
     Returns (terms, bra_label, ket_label); each term is [coeff_str, fac, ...].
     """
     refuse_above_max_order(order, 'raw_stream')
-    spec = _BLOCKS[block]
+    spec = BLOCKS[block]
     pq = pq_helper('fermi')
     pq.set_left_operators([spec['left']])
     pq.set_right_operators([spec['right']])
@@ -240,11 +239,11 @@ def parse_term(term, bra_label, ket_label):
         if separated:
             return 'reducible'
 
-    _enumerate_orderings(skel)
+    enumerate_orderings(skel)
     return skel
 
 
-def _enumerate_orderings(skel):
+def enumerate_orderings(skel):
     """All Goldstone time orderings = linear extensions of the h/p DAG.
 
     DAG edge u -> v means u is EARLIER.  Particle line: created before
@@ -349,7 +348,7 @@ def ordering_sign(skel, sector):
     return 1.0 if skel.ket_label in VIR_LETTERS else -1.0
 
 
-def _ordering_cuts(skel, ordering):
+def ordering_cuts(skel, ordering):
     """Cut data for one ordering: list of (dir, holes, particles) with
     holes/particles = index labels of internal lines crossing the cut.
     Ordering is earliest-first; cut k separates ordering[:k+1] (earlier)
@@ -450,7 +449,7 @@ class BlockEvaluator:
             if ordering_filter is not None and not ordering_filter(skel, ordering):
                 continue
             val = num.astype(complex)
-            for cut in _ordering_cuts(skel, ordering):
+            for cut in ordering_cuts(skel, ordering):
                 val = val / self._cut_denominator(cut, dummies, omega, sec)
             w = weight * ordering_sign(skel, sec)
             total += w * val.sum(axis=tuple(range(2, val.ndim)))
@@ -476,7 +475,7 @@ def assemble_m(eps, g, nocc, order, omega_values, sectors=(+1, -1),
     ev = BlockEvaluator(eps, g, nocc)
     out = np.zeros((len(omega_values), norb, norb), dtype=complex)
     ranges = {'o': np.arange(nocc), 'v': np.arange(nocc, norb)}
-    for block in _BLOCKS:
+    for block in BLOCKS:
         skels, _ = build_skeletons(order, block)
         if not skels:
             continue
@@ -494,4 +493,4 @@ def sevenline_filter(skel, ordering):
     the SCW83 Appendix-A quartet class that carries the content missing
     from the ISR-ADC(4) representation (delta = diagram - ISR)."""
     return any(d != 0 and len(h) + len(p) >= 7
-               for d, h, p in _ordering_cuts(skel, ordering))
+               for d, h, p in ordering_cuts(skel, ordering))

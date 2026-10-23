@@ -30,12 +30,12 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.numerics import Numerics  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
+from src.Base.numerics.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.environments.solvent_screening import SolventScreening  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
 from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
 H2CO = 'C 0 0 -0.5296; O 0 0 0.6763; H 0 0.9339 -1.1088; H 0 -0.9339 -1.1088'
@@ -90,12 +90,12 @@ def case(request):
     mf = factory(mol)
     chain = build(mol, factory, mf, solvent, 'calibrate')
     chain.excitation()
-    at_r0 = chain._shared_forward(chain.mol0, chain.mf0)
+    at_r0 = chain.shared_forward(chain.mol0, chain.mf0)
     # The same set with no tier: the refused states stay on the quadrature,
     # which is the route the calibration solved them by.
     plain = build(mol, factory, mf, solvent, None)
     plain.excitation()
-    explicit = plain._shared_forward(plain.mol0, plain.mf0).eps_qp
+    explicit = plain.shared_forward(plain.mol0, plain.mf0).eps_qp
     return chain, at_r0, explicit
 
 
@@ -120,7 +120,7 @@ def test_an_inside_scissor_state_sits_on_its_explicit_root(case):
 def test_a_displaced_geometry_moves_it_by_eps_and_the_static_term(case):
     chain, at_r0, _ = case
     mol = displaced(chain.mol0)
-    there = chain._shared_forward(mol, chain.mean_field(mol)[1])
+    there = chain.shared_forward(mol, chain.mean_field(mol)[1])
     states = [int(p) for p in chain.resolved.qp_set]
     for p in sorted(chain.resolved.scissor_map):
         i = states.index(p)

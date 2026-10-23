@@ -16,11 +16,12 @@ H2/cc-pVDZ Hartree-Fock on the G1 grid, three singlet roots.
 import pytest
 from pyscf import gto
 
-import src.gradients.state_manifold as state_manifold
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+import src.gradients.gwbse.state_manifold as state_manifold
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_following import StateFollower
+from src.gradients.gwbse.state_manifold import StateManifold
 from tests.reference_scf import rhf_df_differentiable_checked
 
 BASIS = 'cc-pvdz'
@@ -31,6 +32,8 @@ ROOTS = (0, 1, 2)
 class Unsplit:
     """A surface holding an excited chain whose manifold does not share the
     split forward (no `composed`): E = E_KS + Omega through the chain."""
+
+    DRIVEN_HALF = 'excited'
 
     def __init__(self, excited):
         self.excited, self.mol0 = excited, excited.mol0
@@ -65,12 +68,12 @@ def test_one_forward_solved_for_the_highest_root(h2, chain, monkeypatch):
     man = StateManifold(Unsplit(chain), states=ROOTS)
     assert not man.shares_forward
     solved_for = []
-    original = ExcitedStateChain._forward_pass
+    original = StateFollower._forward_pass
 
     def spy(self, mol, mf):
-        solved_for.append(int(self.state))
+        solved_for.append(int(self.chain.state))
         return original(self, mol, mf)
-    monkeypatch.setattr(ExcitedStateChain, '_forward_pass', spy)
+    monkeypatch.setattr(StateFollower, '_forward_pass', spy)
     energies = man.energies(h2)
     assert solved_for == [max(ROOTS)], solved_for
     assert list(energies) == list(ROOTS)

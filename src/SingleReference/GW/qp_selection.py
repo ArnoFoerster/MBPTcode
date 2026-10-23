@@ -61,9 +61,9 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from src.Base.constants import (ADAPTIVE_HOLE_MAX_EV, HARTREE_TO_EV,
-                                HARTREE_TO_MEV, QP_HAMILTONIAN_WINDOW)
-from src.Base.environment import NoEnvironment, attached_environment
+from src.Base.numerics.constants import (ADAPTIVE_HOLE_MAX_EV, HARTREE_TO_EV,
+                                         HARTREE_TO_MEV, QP_HAMILTONIAN_WINDOW)
+from src.Base.environment_seam import NoEnvironment, attached_environment
 from src.SingleReference.GW.qp_states import (continuation_failed,
                                              is_quasiparticle_root,
                                              nearest_probe)

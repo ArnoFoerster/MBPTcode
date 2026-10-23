@@ -29,7 +29,6 @@ each flag test shows the warning and the named flag where the code refused befor
   - the loop refuses a state whose LR continuum is not its field's
   - a state model refuses an SCF whose orbital gradient is not converged
 """
-import importlib.util
 import json
 import os
 import sys
@@ -42,19 +41,19 @@ import numpy as np
 import pytest
 from pyscf import dft
 
-from src.Base import solvation_loop as sl
-from src.Base.numerics import Numerics
-from src.Base.reaction_field import ContinuumField, NoMedium
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC import ee_fold, ee_state_model
+from src.environments import solvation_loop as sl
+from src.Base.numerics.numerics import Numerics
+from src.environments.reaction_field import ContinuumField, NoMedium
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.state_models import HFState, MP2State
+from src.SingleReference.ADC.eeADC import ee_fold
+from src.gradients.adc import ee_state_model
 from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, FollowingWarning,
                                                      transition_amplitudes)
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.gradients.adc.ee_state_model import ADC2State
+from src.photophysics import solvated
 from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT,
                               SOLVATION_TIGHT_LOOP, df_rhf, make_scf_loop, molecule)
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 
 def toluene(mol):
@@ -67,12 +66,8 @@ def adc(mol, spin='singlet', nroots=3, root=0, follow='overlap', lr=None):
 
 
 def driver():
-    spec = importlib.util.spec_from_file_location(
-        'solvated_photophysics', os.path.join(ROOT, 'tools', 'solvation',
-                                              'solvated_photophysics.py'))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """The solvated driver (`python -m src.photophysics solvated`)."""
+    return solvated
 
 
 # ------------------------------------------------------------------------------
@@ -102,8 +97,9 @@ def test_driver_keeps_an_unconverged_walk_flagged(tmp_path, monkeypatch):
     rec = {}
     R = rec.setdefault('gas', {})
     args = SimpleNamespace(out=out)
-    with pytest.warns(RuntimeWarning, match='walk_not_converged'):
-        mod._ground_state(args, rec, R, 'gas', None, None, lambda kind: None, {})
+    # the walk itself warns (`_minimum`, excitations.relaxation_flags); the
+    # store keeps the entry and its flag
+    mod._ground_state(args, rec, R, 'gas', None, None, lambda kind: None, {})
     saved = json.load(open(out))['gas']['S0']
     assert saved['converged'] is False and saved['flags'] == ['walk_not_converged']
     # a rerun walks it again: the entry and everything built on it go
@@ -302,7 +298,7 @@ def test_a_surface_that_freezes_nothing_is_its_own_refreeze(kind):
     """HF, MP2 and ADC(2) (overlap following) in toluene carry no
     surface_key: SolvatedSurface.refreeze returns the surface itself, so
     their walks are what they were."""
-    from src.properties.solvated_surface import SolvatedSurface
+    from src.gradients.solvated_surface import SolvatedSurface
     mol = molecule(ATOMS)
 
     def make_state(m, field):
@@ -481,7 +477,7 @@ def test_a_refrozen_surface_shares_the_walks_flag_log():
     """SolvatedSurface.refreeze builds a new surface on a model that freezes
     conventions; its flags go into the same log, so a minimum's flags_at
     reads the walk's and the refrozen walk's evaluations alike."""
-    from src.properties.solvated_surface import SolvatedSurface
+    from src.gradients.solvated_surface import SolvatedSurface
     mol = molecule(ATOMS)
     surf = SolvatedSurface(mol, toluene, lambda m, f: None, label='stand-in')
     state = SimpleNamespace(surface_key=object(), lr_environment=None,
@@ -492,3 +488,26 @@ def test_a_refrozen_surface_shares_the_walks_flag_log():
     again = surf.refreeze(mol)
     assert again is not surf and again.flags is surf.flags
     assert again.flags_at(mol) == ['solvation_loop_not_converged']
+
+
+def test_driver_walk_warns_through_the_one_walk_policy(tmp_path, monkeypatch):
+    """An unconverged walk is warned about by the policy every walk of the
+    code follows (`excitations.relaxation_flags`, `WalkNotRelaxed`), and the
+    saddle check is not taken at its last geometry."""
+    from src.properties.excitations import WalkNotRelaxed
+    mod = driver()
+
+    def relax(surf, at, **kw):
+        return at, dict(converged=False, cycles=1, opt_grad_max=1e-2,
+                        status='trust radius collapsed')
+
+    def no_check(*a, **k):
+        raise AssertionError('a walk that did not relax is not checked')
+    monkeypatch.setattr(mod, 'relax', relax)
+    monkeypatch.setattr(mod, 'saddle_check', no_check)
+    monkeypatch.setattr(mod, '_geom', lambda m: m)
+    args = _args(tmp_path, **GWBSE_ARGS, saddle_check=True)
+    mod._check_args(args, None)
+    with pytest.warns(WalkNotRelaxed, match='did not relax'):
+        out = mod._minimum(args, _Surface(-1.0), 'R0', 0.0, 'triplet')[1]
+    assert out['flags'] == ['walk_not_converged'] and out['converged'] is False

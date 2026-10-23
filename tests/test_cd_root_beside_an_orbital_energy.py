@@ -20,11 +20,11 @@ import warnings
 import numpy as np
 import pytest
 
-from src.Base.constants import (QP_CD_NEWTON_TOL, QP_POLE_OFFSET,
-                                QP_WINDOW_Z_MIN)
+from src.Base.numerics.constants import (QP_CD_NEWTON_TOL, QP_POLE_OFFSET,
+                                         QP_WINDOW_Z_MIN)
 from src.SingleReference.GW.contour_deformation import qp_energy_cd
 from src.SingleReference.GW.real_screening import ResidueRefused
-from src.Solvers.qp_equation import (QPRootNotConverged, SampledEquation,
+from src.Solvers.qp_equation import (QPNoRoot, SampledEquation,
                                      quasiparticle_weight,
                                      solve_qp_equation_scan)
 
@@ -105,13 +105,14 @@ def test_a_pole_of_sigma_is_no_root():
     retired guard then fell back to a linearized energy of another
     approximation). Here f = x + 1e-6/x, x = w - eps_q, has no real root at
     all: the scan sees the sign change across the pole, |f| growing under
-    refinement tells it from a root, and the search is refused, 'no_root',
-    rather than answered with the pole."""
+    refinement tells it from a root, and the search returns a NaN flagged
+    'no_root' with a QPNoRoot warning rather than the pole."""
     f, fprime = model(**CAPTURE)
     a = MODEL_EPS[MODEL_P] + CAPTURE['s0']
-    with pytest.raises(QPRootNotConverged) as refused:
-        solve_qp_equation_scan(f, fprime, a)
-    assert refused.value.reason == 'no_root'
+    out = {}
+    with pytest.warns(QPNoRoot, match='no root'):
+        w, z = solve_qp_equation_scan(f, fprime, a, out=out)
+    assert np.isnan(w) and np.isnan(z) and out['no_root']
     assert every_root(f, fprime, a) == []
 
 

@@ -17,7 +17,9 @@ routes stay separable; the solver's methods delegate here.
 """
 import numpy as np
 
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.SingleReference.LinearResponse.space_time import (chi0_aux,
+                                                           dyson_screening)
 
 
 def frequency_factor(d, w, imaginary, eta=0.0, slopes=False):
@@ -57,7 +59,7 @@ def frequency_factor(d, w, imaginary, eta=0.0, slopes=False):
             (eta ** 2 - a ** 2) / da ** 2 - (eta ** 2 - b ** 2) / db ** 2)
 
 
-def _f_rpa(lr, d, w, is_imaginary):
+def f_rpa(lr, d, w, is_imaginary):
     """`frequency_factor` at this solver's broadening, for the RPA builds below.
 
     Two branches do not go through it. w = 0 on the real axis is the static
@@ -102,14 +104,10 @@ def solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary=False):
             C_ov_a = lr.coeff_a[:, occ_a[:, None], virt_a].reshape(lr.naux, -1)
             C_ov_b = lr.coeff_b[:, occ_b[:, None], virt_b].reshape(lr.naux, -1)
         
-        W_grid = []
-        for w in omega_grid:
-            f_a = _f_rpa(lr, d_a, w, is_imaginary)
-            f_b = _f_rpa(lr, d_b, w, is_imaginary)
-            chi0 = (C_ov_a * f_a) @ C_ov_a.T + (C_ov_b * f_b) @ C_ov_b.T
-            W_w = np.linalg.inv(np.eye(lr.naux) - chi0)
-            W_grid.append(W_w)
-        return np.array(W_grid)
+        return np.array([dyson_screening(chi0_aux(
+            [(C_ov_a, f_rpa(lr, d_a, w, is_imaginary)),
+             (C_ov_b, f_rpa(lr, d_b, w, is_imaginary))]))
+            for w in omega_grid])
     else:
         occ, virt = get_occ_virt_indices(lr.eps, nocc)
         d = (lr.eps[virt][None, :] - lr.eps[occ][:, None]).ravel()
@@ -120,14 +118,9 @@ def solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary=False):
         # One reused scratch buffer for C_ov * f; allocating inside the loop
         # keeps C_ov and its scaled copy live at once, doubling the peak.
         scaled = np.empty_like(C_ov)
-        W_grid = []
-        eye = np.eye(lr.naux)
-        for w in omega_grid:
-            f = _f_rpa(lr, d, w, is_imaginary)
-            np.multiply(C_ov, f, out=scaled)
-            chi0 = 2.0 * scaled @ C_ov.T
-            W_grid.append(np.linalg.inv(eye - chi0))
-        return np.array(W_grid)
+        return np.array([dyson_screening(chi0_aux(
+            [(C_ov, f_rpa(lr, d, w, is_imaginary))], 2.0, scratch=scaled))
+            for w in omega_grid])
 
 
 def solve_rpa_screening_full(lr, omega_grid, nocc, is_imaginary=False):
@@ -154,8 +147,8 @@ def solve_rpa_screening_full(lr, omega_grid, nocc, is_imaginary=False):
         
         W_grid = []
         for w in omega_grid:
-            f_a = _f_rpa(lr, d_a, w, is_imaginary)
-            f_b = _f_rpa(lr, d_b, w, is_imaginary)
+            f_a = f_rpa(lr, d_a, w, is_imaginary)
+            f_b = f_rpa(lr, d_b, w, is_imaginary)
             chi0_trans = np.diag(np.concatenate([f_a, f_b]))
             W_w = V_trans @ np.linalg.inv(np.eye(n_pair) - chi0_trans @ V_trans)
             W_grid.append(W_w)
@@ -169,7 +162,7 @@ def solve_rpa_screening_full(lr, omega_grid, nocc, is_imaginary=False):
         
         W_grid = []
         for w in omega_grid:
-            f = _f_rpa(lr, d, w, is_imaginary)
+            f = f_rpa(lr, d, w, is_imaginary)
             chi0_trans = np.diag(2.0 * f)
             W_w = V_trans @ np.linalg.inv(np.eye(n_pair) - chi0_trans @ V_trans)
             W_grid.append(W_w)

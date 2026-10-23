@@ -14,9 +14,9 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (BSE_DAVIDSON_CONV_TOL, BSE_FORCE_RESIDUAL_TOL,
-                                ISDF_GRADIENT_FLOOR)
-from src.Base.utils.mpi_grid import distributed
+from src.Base.numerics.constants import (BSE_DAVIDSON_CONV_TOL, BSE_FORCE_RESIDUAL_TOL,
+                                         ISDF_GRADIENT_FLOOR)
+from src.Base.utils.parallel.mpi_grid import distributed
 from tests import directional_difference as dd
 from tests.test_bse_force_residual_tolerance import chain
 from tests.test_one_fit_forces_follow_their_energy import BAR, STEP, molecule

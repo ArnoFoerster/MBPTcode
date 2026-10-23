@@ -23,16 +23,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment
-from src.Base.numerics import Numerics
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.isdf_test_grid import g1
 

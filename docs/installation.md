@@ -6,9 +6,11 @@ Requires Python 3.10+, NumPy, SciPy, PySCF, opt_einsum and threadpoolctl:
 pip install numpy scipy pyscf opt_einsum threadpoolctl
 ```
 
-`threadpoolctl` pins BLAS to one thread inside the quasiparticle root scan's
-thread pool and is imported at module load by `GW/qp_energy.py`. Thread
-settings are under [Threads](parallel.md#threads).
+`threadpoolctl` pins BLAS to one thread inside the thread pools of the
+quasiparticle root scan and similar per-state loops
+(`Base/utils/parallel/threads.py`). Without it the code runs and gives the
+same results, but those loops may oversubscribe the cores. Thread settings are
+under [Threads](parallel.md#threads).
 
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
@@ -47,8 +49,8 @@ the DMRG sweep.
 
 `psutil` is optional: off Linux, where pyscf cannot read a process's resident
 size, the memory budgets of the ISDF and DF builds and of the EE-ADC Davidson
-(`Base.utils.memory.current_memory_mb`) subtract what the process already holds
-only when it is installed.
+(`Base.utils.parallel.memory.current_memory_mb`) subtract what the process
+already holds only when it is installed.
 
 ```bash
 pip install psutil
@@ -91,10 +93,11 @@ from pyscf import gto, scf
 from src.CodeGeneration.generate_adc import GenerateRuntime
 from src.SingleReference.ADC import ADCSolver
 
-GenerateRuntime(orders=(2, 3, 4))          # once per machine, about five minutes
+GenerateRuntime(orders=(2, 3, 4))          # once per machine, about 15 minutes
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.467; H 0 -0.757 -0.467', basis='sto-3g')
 mf = scf.RHF(mol).run()
-e, Z = ADCSolver(mf, level='adc4', pdaggerq=True, ntau=12).solve()
+e, Z = ADCSolver(mf, level='adc4', pdaggerq=True, ntau=12,
+                 construction='diagrammatic').solve()   # ADC(4)+ names its construction
 print(e, Z)                                # the HOMO ionization pole (Hartree) and its weight
 ```
 The generator tests skip when pdaggerq is missing. The diagram engine

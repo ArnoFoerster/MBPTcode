@@ -37,7 +37,7 @@ eventually violated by refining the k-mesh alone -- e.g. for MgO(001) with
 Check it per k-mesh; do not assume a vacuum chosen for a coarse grid still works.
 """
 import numpy as np
-from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 
 
 def fermi_dirac_theta(r, r0, beta):

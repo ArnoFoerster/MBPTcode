@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 pytestmark = pytest.mark.skipif(not pdaggerq_available(),
                                 reason='needs pdaggerq (optional)')
@@ -43,7 +43,7 @@ def _engine_by_class(eps, g, nocc, order, omega, want):
     ev = GS.BlockEvaluator(eps, g, nocc)
     out = np.zeros((norb, norb), complex)
     ranges = {'o': np.arange(nocc), 'v': np.arange(nocc, norb)}
-    for block in GS._BLOCKS:
+    for block in GS.BLOCKS:
         skels, _ = GS.build_skeletons(order, block)
         rb, rk = ranges[block[0]], ranges[block[1]]
         blk = np.zeros((len(rb), len(rk)), complex)
@@ -52,7 +52,7 @@ def _engine_by_class(eps, g, nocc, order, omega, want):
             weight = skel.coeff / skel.n_ext
             for ordering in skel.orderings:
                 sec = GS.ordering_sector(skel, ordering)
-                cuts = GS._ordering_cuts(skel, ordering)
+                cuts = GS.ordering_cuts(skel, ordering)
                 cls = 'C' if all(c[0] != 0 for c in cuts) else 'U'
                 if cls != want:
                     continue

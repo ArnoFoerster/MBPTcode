@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.properties.excitations as excitations
-from src.properties.excitations import saddle_checked_state
+from src.properties.excitations import WalkNotRelaxed, saddle_checked_state
 from src.properties.vibronic import relax_state
 from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
                                       pyramidalization)
@@ -77,7 +77,9 @@ def test_a_true_minimum_is_kept():
     assert record['second'] is None and 'saddle_walk' not in record
 
 
-def test_a_second_saddle_is_refused(at_saddle, monkeypatch):
+def test_a_second_saddle_is_warned_and_flagged(at_saddle, monkeypatch):
+    """A numerical event: the escape walk's state
+    is returned, warned about and flagged; it was refused."""
     real = excitations.surface_hessian
     calls = []
 
@@ -87,11 +89,13 @@ def test_a_second_saddle_is_refused(at_saddle, monkeypatch):
         h = real(surface, mol, **kw)
         return h if len(calls) == 1 else -1.0 * h
     monkeypatch.setattr(excitations, 'surface_hessian', planted)
-    with pytest.raises(RuntimeError, match='second saddle'):
-        saddle_checked_state(at_saddle, **WALK)
+    with pytest.warns(WalkNotRelaxed, match='second saddle'):
+        state, record = saddle_checked_state(at_saddle, **WALK)
+    assert record['numerical_flags']['saddle_check'].startswith('second saddle')
+    assert state['mol'] is not at_saddle['mol']
 
 
-def test_an_unconverged_walk_is_refused_before_its_hessian(monkeypatch):
+def test_an_unconverged_walk_is_flagged_before_its_hessian(monkeypatch):
     x = PLANAR.copy()
     x[0, 2] = 0.4
     surface = Relaxable(molecule(x))
@@ -101,7 +105,9 @@ def test_an_unconverged_walk_is_refused_before_its_hessian(monkeypatch):
     calls = []
     monkeypatch.setattr(excitations, 'surface_hessian',
                         lambda *a, **kw: calls.append(a))
-    with pytest.raises(RuntimeError, match='the walk did not converge'):
-        saddle_checked_state(relaxed, **WALK)
-    # refused at the walk's status: none of the 6N forces were spent
-    assert calls == []
+    with pytest.warns(WalkNotRelaxed, match='did not relax'):
+        state, record = saddle_checked_state(relaxed, **WALK)
+    # not checked at the walk's status: none of the 6N forces were spent
+    assert calls == [] and state is relaxed
+    assert record['status'] == 'not run: the walk did not relax'
+    assert 'walk_not_converged' in record['numerical_flags']

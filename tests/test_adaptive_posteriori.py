@@ -20,14 +20,14 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-import src.gradients.qp_set as qp_set_module
-from src.Base.numerics import Numerics
-from src.Base.constants import ADAPTIVE_QP_TOL_MEV, HARTREE_TO_MEV
+import src.gradients.gwbse.qp_set as qp_set_module
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import ADAPTIVE_QP_TOL_MEV, HARTREE_TO_MEV
 from src.Base.declaration import QPStates
-from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.qp_selection import first_order_weights
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import adaptive_check
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
@@ -86,8 +86,8 @@ def test_the_check_records_and_stays_quiet_inside_the_budget(walked):
 def test_posteriori_check_warns(walked, monkeypatch):
     chain, end = walked
     part = chain.resolved.qp_partition
-    om, pieces = chain._forward(end, chain.mean_field(end)[1])
-    n = first_order_weights(pieces[10][:, 0], pieces[11][:, 0], chain.nocc,
+    solution = chain.forward(end, chain.mean_field(end)[1])[1]
+    n = first_order_weights(solution.x[:, 0], solution.y[:, 0], chain.nocc,
                             len(chain.mf0.mo_energy))
     hole = max(part.holes, key=lambda p: abs(n[p]))
     kick = HOLE_KICK_TOLS * ADAPTIVE_QP_TOL_MEV / HARTREE_TO_MEV / abs(n[hole])

@@ -34,11 +34,11 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, qmmm
 
-from src.Base.composite_environment import CompositeEnvironment
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import (Environment, NoEnvironment, PointCharges,
-                                  attached_environment)
-from src.Base.polarizable_sites import PolarizableSites
+from src.environments.composite_environment import CompositeEnvironment
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.environment import PointCharges
+from src.Base.environment_seam import Environment, NoEnvironment, attached_environment
+from src.environments.polarizable_sites import PolarizableSites
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from tests.pins import assert_same

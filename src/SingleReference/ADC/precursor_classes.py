@@ -70,6 +70,13 @@ def nondyson_module_name(order, k_i, k_j):
     return f'adc{max(order + k_i + k_j, 2)}_nd{order}_k{k_i}k{k_j}_blocks.py'
 
 
+def nondyson_apply_module_name(order, k_i, k_j, df=False):
+    """adc{N}_nd{order}_k{i}k{j}_apply_restricted[_df]_blocks.py: the restricted
+    sigma-vector twin of nondyson_module_name's dense spin-orbital module."""
+    tail = '_apply_restricted_df_blocks.py' if df else '_apply_restricted_blocks.py'
+    return nondyson_module_name(order, k_i, k_j).replace('_blocks.py', tail)
+
+
 def cross_module_name(order, pair, restricted=False, df=False, apply=False):
     """Module basename of the D x C cross block at `order`: adc{N}_x{order}_{pair}
     with N = order + k_i + k_j the ADC order at which the block first enters
@@ -85,7 +92,7 @@ def cross_module_name(order, pair, restricted=False, df=False, apply=False):
     return f'{stem}_blocks{"_restricted" if restricted else ""}{"_df" if df else ""}.py'
 
 
-def _nh_np(k, sector):
+def nh_np(k, sector):
     if sector == 'IP':
         return k + 1, k
     if sector == 'EA':
@@ -105,7 +112,7 @@ def class_configs(nocc, norb, k, sector='IP'):
       class_configs(nocc, norb, 1, 'EA')  == base.py's _configs_2p1h(nocc)
       class_configs(nocc, norb, 2, 'EA')  == base.py's _configs_3p2h(nocc)
     """
-    nh, np_ = _nh_np(k, sector)
+    nh, np_ = nh_np(k, sector)
     # Spin-orbital indices are < norb, so a narrow int dtype suffices and keeps
     # the (n_h x n_p) outer-product flattening -- the O(nv^3 nocc^2) k=2 (3p2h)
     # manifold, the downfold's peak-memory driver -- as small as possible
@@ -127,7 +134,7 @@ def class_configs(nocc, norb, k, sector='IP'):
 
 def class_dimension(nocc, nvirt, k, sector='IP'):
     """dim of precursor class k (sector) = C(nocc,nh)*C(nvirt,np)."""
-    nh, np_ = _nh_np(k, sector)
+    nh, np_ = nh_np(k, sector)
     return math.comb(nocc, nh) * math.comb(nvirt, np_)
 
 
@@ -173,7 +180,7 @@ def class_letters(k, sector='IP', occ_offset=0, vir_offset=0):
     offsets -- the offsets exist so a bra class and a ket class in the SAME
     pdaggerq call can use disjoint letters (e.g. C-block bra 2h1p = i,j/a,
     ket 2h1p = k,l/b via occ_offset=2, vir_offset=1)."""
-    nh, np_ = _nh_np(k, sector)
+    nh, np_ = nh_np(k, sector)
     _check_letter_budget(nh, np_, occ_offset, vir_offset)
     return (list(OCC_LETTERS[occ_offset:occ_offset + nh]),
             list(VIR_LETTERS[vir_offset:vir_offset + np_]))
@@ -257,7 +264,7 @@ def class_index_convention(k, sector='IP'):
     returned tuple presents them -- the single fixed convention
     generate_adcn.py (symbolic) and the generated-ADC runtime (numeric) must both read
     off of, so they can never silently disagree."""
-    nh, np_ = _nh_np(k, sector)
+    nh, np_ = nh_np(k, sector)
     return {
         'nh': nh, 'np': np_,
         'hole_letters': list(OCC_LETTERS[:nh]),

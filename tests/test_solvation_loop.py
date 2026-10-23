@@ -1,6 +1,6 @@
-"""Self-consistent state-specific solvation (src.Base.solvation_loop) with the
-continuum adapter (src.Base.reaction_field.ContinuumField) and the state models
-(src.SingleReference.state_models, eeADC.ee_state_model). Water 6-31G, toluene
+"""Self-consistent state-specific solvation (src.environments.solvation_loop) with the
+continuum adapter (src.environments.reaction_field.ContinuumField) and the state models
+(src.gradients.state_models, eeADC.ee_state_model). Water 6-31G, toluene
 IEF-PCM unless stated; frozen 1, aux cc-pvdz-ri, JK cc-pvdz-jkfit.
 
   1. the medium adapter: Hartree-Fock equilibrated by the generic loop is
@@ -39,11 +39,11 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base import solvation_loop as sl
-from src.Base.reaction_field import ContinuumField
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.environments import solvation_loop as sl
+from src.environments.reaction_field import ContinuumField
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.state_models import HFState, MP2State
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import (AUX, ROOT_CONV_TOL, SCF_TOL_TIGHT,
                               SOLVATION_TIGHT, WATER_C2V, check, df_rhf,
                               five_point)

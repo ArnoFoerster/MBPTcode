@@ -58,23 +58,18 @@ def main():
     p2 = {nm for nm, *_ in u_order_terms(2) if nm in SURVIVING_U}
     all_ok &= check('U^(2) rule reaches l2v/l2ft2/l1f', {'l2v', 'l2ft2', 'l1f'} <= p2)
 
-    # GENERATION superset: the order rule's structures through order 2 cover
-    # every hand-written _u2_split_defs split the ADC(3) U generator emits
-    # (extras are fine -- pdaggerq prunes them)
-    from src.SingleReference.ADC.adc_order_rule import structures_up_to
-    from src.CodeGeneration.generate_adcn import _u2_split_defs
-    hand2 = {s[0] for s in _u2_split_defs()}
+    # GENERATION superset: the order rule's structures cover every split the
+    # hand-written tables of the ADC(3) U^(2) and ADC(4) U^(3) generators
+    # carried before the generators derived them from this rule (extras are
+    # fine -- pdaggerq prunes them)
+    from src.SingleReference.ADC.adc_order_rule import structures_up_to, new_structures_at
+    hand2 = {'vt2', 'l2v', 'l2ft2', 'ft1', 'l1f', 'ft2', 'l2f', 'ft3', 'l3f'}
     rule2 = set(structures_up_to(2))
-    all_ok &= check('generation: structures_up_to(2) covers _u2_split_defs',
+    all_ok &= check('generation: structures_up_to(2) covers the U^(2) splits',
                     hand2 <= rule2, f"  (missing {sorted(hand2 - rule2) or '-'})")
-
-    # and new_structures_at(3) covers every hand-written _u3_split_defs
-    # structure of the ADC(4) U^(3) generator
-    from src.SingleReference.ADC.adc_order_rule import new_structures_at
-    from src.CodeGeneration.generate_adcn import _u3_split_defs
-    hand3 = {s[0] for s in _u3_split_defs()}
+    hand3 = {'l2vt2', 'vt1', 'vt3', 'l1v', 'l3v', 'l2ft1', 'l2ft3', 'l1ft2', 'l3ft2'}
     rule3 = set(new_structures_at(3))
-    all_ok &= check('generation: new_structures_at(3) covers _u3_split_defs',
+    all_ok &= check('generation: new_structures_at(3) covers the U^(3) splits',
                     hand3 <= rule3, f"  (missing {sorted(hand3 - rule3) or '-'})")
 
     print("\nALL OK" if all_ok else "\nSOME FAILED")

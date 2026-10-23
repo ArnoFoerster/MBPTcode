@@ -11,8 +11,8 @@ builds them with `space_time.unrefused_separable_factors`.
 import ast
 import pathlib
 
-from src.Base.numerics import Numerics
-from src.properties.surfaces import GRID_NUMERICS
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.surface_factory import GRID_READS
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -32,4 +32,4 @@ def test_no_src_signature_takes_the_bound():
 
 def test_no_record_or_spec_holds_the_bound():
     assert not hasattr(Numerics(), 'orbital_tol')
-    assert 'orbital_tol' not in GRID_NUMERICS
+    assert not any(part.endswith('orbital_tol') for part in GRID_READS)

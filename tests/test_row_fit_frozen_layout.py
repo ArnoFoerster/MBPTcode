@@ -14,10 +14,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base import separable_ri
-from src.Base.numerics import Numerics
-from src.gradients.factor_chain import FrozenFactorization
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.factorization import separable_ri
+from src.Base.numerics.numerics import Numerics
+from src.gradients.rpa.factor_chain import FrozenFactorization
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 

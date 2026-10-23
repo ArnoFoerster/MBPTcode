@@ -3,7 +3,7 @@
 `isdf_block_action` locksteps its trial vectors at entry (`mpi_grid.lockstep`:
 rank 0's batch written into every rank's, in place) and gathers or all-reduces
 every term it returns, so its output is the same on every rank by
-construction. `_run_davidson` and the (A-B) probe therefore run replicated,
+construction. `run_davidson` and the (A-B) probe therefore run replicated,
 with no protocol between the ranks, and the converged roots and vectors are
 lockstepped once at the end.
 
@@ -61,15 +61,15 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import DAVIDSON_ACTION_SYMMETRY_TOL
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import distributed, lockstep_stats, run_simulated
+from src.Base.numerics.constants import DAVIDSON_ACTION_SYMMETRY_TOL
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import distributed, lockstep_stats
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import block_actions, trial_space
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_df,
-                                                         solve_bse_isdf,
-                                                         static_screening_matrix)
+from src.SingleReference.LinearResponse.space_time import static_screening_matrix
+from src.SingleReference.BSE.solve import (
+    isdf_bse_factors, solve_bse_df, solve_bse_isdf)
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.probe import (_lanczos_lowest,
                                                       lowest_amb_eigenvalue)

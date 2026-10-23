@@ -1,7 +1,7 @@
 """The code generators are optional and stop at ADC(5).
 
 Checks, none of which needs pdaggerq:
-  1. every module of src/CodeGeneration and src/Base/pdaggerq_interface.py
+  1. every module of src/CodeGeneration and src/CodeGeneration/pdaggerq_interface.py
      imports with pdaggerq absent (simulated by MBPT_NO_PDAGGERQ=1 in a child
      process), and pq_helper then raises ImportError instead of failing later;
   2. every producer the generation REGISTRY dispatches (dotted names,
@@ -26,12 +26,12 @@ _CHILD = r'''
 import importlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(root))
-names = ['src.Base.pdaggerq_interface'] + [
+names = ['src.CodeGeneration.pdaggerq_interface'] + [
     '.'.join(f.relative_to(root).with_suffix('').parts)
     for f in sorted((root / 'src' / 'CodeGeneration').rglob('*.py'))]
 for name in names:
     importlib.import_module(name)
-from src.Base.pdaggerq_interface import pdaggerq_available, pq_helper
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available, pq_helper
 assert not pdaggerq_available()
 try:
     pq_helper('fermi')
@@ -67,7 +67,7 @@ def test_the_ceiling_is_adc5():
 
 @pytest.mark.parametrize('call', [
     lambda: __import__('src.CodeGeneration.generate_adcn', fromlist=['x'])
-    .generate_adc_u_restricted(5),
+    .generate_adc_u(5, restricted=True),
     lambda: __import__('src.CodeGeneration.generate_adcn', fromlist=['x'])
     .generate_nondyson_pair(2, 2, 2),
     lambda: __import__('src.CodeGeneration.generate_adcn', fromlist=['x'])
@@ -85,7 +85,7 @@ def test_the_ceiling_is_adc5():
     lambda: __import__('src.CodeGeneration.generate_mpn_density', fromlist=['x'])
     .generate_amplitude_numerator_module([5], 'never_written'),
     lambda: __import__('src.CodeGeneration.generate_adcn', fromlist=['x'])
-    .generate_adc_u_k2(4),
+    .generate_adc_u_k2((4,)),
     lambda: __import__('src.CodeGeneration.generate_adcn', fromlist=['x'])
     .generate_adc_class_pair(2, 'k2k2'),
     lambda: __import__('src.CodeGeneration.sigma_codegen', fromlist=['x'])
@@ -94,8 +94,8 @@ def test_the_ceiling_is_adc5():
         'nondyson_plan', 'skeletons', 'goldstone', 'mp5_density', 'mp5_amplitudes',
         'u_k2', 'class_pair', 'u_k2_apply'])
 def test_adc6_is_refused(call, tmp_path, monkeypatch):
-    from src.CodeGeneration import generate_adcn
-    monkeypatch.setattr(generate_adcn, 'OUT_DIR', str(tmp_path))
+    from src.CodeGeneration import codegen_common
+    monkeypatch.setattr(codegen_common, 'ADC_OUT_DIR', str(tmp_path))
     with pytest.raises(ValueError, match='ADC\\(5\\)'):
         call()
     assert not any(tmp_path.iterdir())

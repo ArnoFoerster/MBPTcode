@@ -20,12 +20,12 @@ import numpy as np
 import scipy.linalg
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import (EVGW_TOL, HARTREE_TO_EV, HARTREE_TO_MEV,
-                                QSGW_DM_TOL, QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL,
-                                get_method_info)
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.SingleReference.GW.evGW import evgw_eigenvalues, rotated_mean_field
+from src.Base.numerics.constants import (EVGW_TOL, HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         QSGW_DM_TOL, QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL,
+                                         get_method_info)
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
 from src.SingleReference.GW.qsGW import qsgw_eigenvalues
 from src.SingleReference.GW.self_energy import (SelfEnergySolver,
                                                 _srg_laplace_quadrature)
@@ -33,6 +33,16 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 import src.SingleReference.GW.qp_energy as qpe
 
 GEOMETRY = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+
+
+def rotated_mean_field(mf, eps, mo_coeff):
+    """`mf` carrying `eps` and `mo_coeff` in place of its own, the occupations
+    kept: `shifted_mean_field`'s shallow copy with rotated orbitals, whose DF
+    factors and density are the rotated ones."""
+    out = shifted_mean_field(mf, eps)
+    out.mo_coeff = np.asarray(mo_coeff, float)
+    out.mo_occ = np.asarray(mf.mo_occ)
+    return out
 
 
 def check(ok, label, detail=''):
@@ -55,14 +65,14 @@ def build_reference(xc='pbe0', atom=GEOMETRY, basis='cc-pvdz', symmetry=False):
 
 def mean_field_casida(mf):
     """(eps, coeff, nocc, spectrum, w_aux): the RPA Casida solution of `mf` as
-    _casida_spectrum returns it, a dict with 'singlet' and 'rpa', and the
+    casida_spectrum returns it, a dict with 'singlet' and 'rpa', and the
     static RPA W in the auxiliary basis of its DF factors `coeff`."""
     mol = mf.mol
     nocc = mol.nelectron // 2
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
     lr = LinearResponseSolver(eps, coeff_df=coeff, spin_mode='restricted')
-    spectrum = qpe._casida_spectrum(lr, nocc, 'RPA', None, False,
+    spectrum = qpe.casida_spectrum(lr, nocc, 'RPA', None, False,
                                     {'GW': get_method_info('GW')}, ['GW'], False, True)
     return eps, coeff, nocc, spectrum, lr.static_screening_aux(nocc)
 
@@ -82,7 +92,7 @@ def check_the_blocked_static_self_energy_is_the_dense_one(mf):
     diagonal, which is what makes mode A's diagonal the G0W0 self-energy."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
     se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
-    rho = se._rho_a_df(nocc, X, Y)
+    rho = se.rho_a_df(nocc, X, Y)
     chi = se.get_chi_a(nocc, X, Y)
     dense = se.calculate_self_energy_matrix(nocc, omega, chi)
     blocked = se.static_self_energy_matrix(nocc, omega, rho, block_elems=1)
@@ -144,7 +154,7 @@ def check_the_srg_static_self_energy(mf):
     the prefactor."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
     se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
-    rho = se._rho_a_df(nocc, X, Y)
+    rho = se.rho_a_df(nocc, X, Y)
     chi = se.get_chi_a(nocc, X, Y)
     flow = QSGW_SRG_FLOW
     sign = np.where(np.arange(len(eps)) < nocc, 1.0, -1.0)
@@ -213,7 +223,7 @@ def check_a_preset_transition_density_feeds_the_amplitudes(mf):
     field's, instead of forming its own: the qsGW0 amplitudes chi' = rho^T B'."""
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
     se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
-    rho = se._rho_a_df(nocc, X, Y)
+    rho = se.rho_a_df(nocc, X, Y)
     rng = np.random.default_rng(1)
     U, _ = np.linalg.qr(rng.standard_normal((len(eps), len(eps))))
     coeff_rot = np.einsum('rq, Prs, sp -> Pqp', U, coeff, U)
@@ -247,13 +257,13 @@ def check_both_flavors_converge_and_open_the_gap(mf):
     round-off."""
     nocc = mf.mol.nelectron // 2
     builds = []
-    original = qpe._casida_spectrum
+    original = qpe.casida_spectrum
 
     def counted(*args, **kw):
         builds.append(1)
         return original(*args, **kw)
 
-    qpe._casida_spectrum = counted
+    qpe.casida_spectrum = counted
     try:
         eps_qs, c_qs, qs = qsgw_eigenvalues(mf, screening='updated')
         n_qs = len(builds)
@@ -261,7 +271,7 @@ def check_both_flavors_converge_and_open_the_gap(mf):
         eps_qs0, c_qs0, qs0 = qsgw_eigenvalues(mf, screening='fixed')
         n_qs0 = len(builds)
     finally:
-        qpe._casida_spectrum = original
+        qpe.casida_spectrum = original
     states = list(range(len(eps_qs)))
     g0w0 = qpe.calc_qp_energy(mf, mode='casida', state=states)
     g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
@@ -373,7 +383,7 @@ def check_a_mean_field_without_density_fitting(mf):
                 f"{d_front['fixed'] * 1e3:.3f} meV, qsGW {d_front['updated'] * 1e3:.3f}"
                 ' meV')
     eps, coeff, nocc, omega, X, Y = mean_field_spectrum(mf)
-    rho = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')._rho_a_df(
+    rho = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted').rho_a_df(
         nocc, X, Y)
     spectrum = {'singlet': (omega, X, Y)}
     try:
@@ -549,7 +559,7 @@ def check_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
             eps0, coeff0, _, spectrum0, _ = mean_field_casida(mf)
             _, X0, Y0 = spectrum0['singlet']
             rho0 = SelfEnergySolver(eps0, df_coeff=coeff0,
-                                    spin_mode='restricted')._rho_a_df(nocc, X0, Y0)
+                                    spin_mode='restricted').rho_a_df(nocc, X0, Y0)
             # an eigenvector is fixed up to its sign, so compare
             # sum_S rho_PS rho_QS / Omega_S, the combination Sigma reads
             omega0 = spectrum0['singlet'][0]

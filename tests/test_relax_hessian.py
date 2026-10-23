@@ -20,7 +20,8 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.properties.optimize import MeanFieldSurface, relax  # noqa: E402
+from src.properties.optimize import relax
+from src.gradients.mean_field_surface import MeanFieldSurface  # noqa: E402
 
 DISTORTED = 'O 0 0 0.25; H 0 0.92 -0.40; H 0 -0.70 -0.52'
 

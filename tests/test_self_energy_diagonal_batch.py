@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver

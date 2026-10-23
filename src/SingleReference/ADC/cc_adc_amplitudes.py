@@ -11,7 +11,7 @@ Hermiticity. The generated blocks take the ket amplitude (`t*` tags) and the
 bra amplitude (`l*` tags) as separate arguments. Coupled-cluster theory would
 put the Lambda amplitudes in the bra slots, which is what makes EOM-CC
 non-Hermitian. ADC's secular matrix is Hermitian, so this module sets the bra
-amplitude to the adjoint of the ket amplitude (`_to_l(t)`, the same map the MP
+amplitude to the adjoint of the ket amplitude (`to_l(t)`, the same map the MP
 pools use), never to Lambda. The supermatrix stays symmetric, as in
 ADC(3)/EN-ADC(3): CC amplitudes inside the ADC/ISR representation, not EOM-CC.
 
@@ -23,17 +23,17 @@ i.e. mpn_density_driver{,_restricted}'s own [vir..., occ...] storage.
 
 cc_amplitudes.py (the Faddeev-ADC(3) CCD channel amplitude and the Brueckner
 reference) is the other CC module of this package; both run their CC
-through its _run_cc.
+through its run_cc.
 """
 import numpy as np
 from pyscf.cc import addons as _cc_addons
 
-from src.Base.pyscf_interface import (get_antisymmetrized_spin_block_eri,
-                                      get_orbital_energies)
-from src.SingleReference.ADC.cc_amplitudes import _run_cc
-from src.SingleReference.DensityMatrix.mpn_density_driver import _to_l
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_block_eri,
+                                            get_orbital_energies)
+from src.SingleReference.ADC.cc_amplitudes import run_cc
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
-    MPnDensityDriverRestricted, _to_l_restricted)
+    MPnDensityDriverRestricted)
+from src.SingleReference.common.mp_amplitudes import to_l
 
 
 def cc_amplitudes_spinorbital(mf, method='ccsd', frozen=None,
@@ -42,11 +42,11 @@ def cc_amplitudes_spinorbital(mf, method='ccsd', frozen=None,
     converged RHF-based CCSD/CCD. `l*` are the adjoints of `t*` (see the
     module docstring on Hermiticity), not the CC Lambda amplitudes.
     return_energy=True gives (pool, e_corr), the CC correlation energy."""
-    mycc = _run_cc(mf, method, frozen, **cc_opts)
+    mycc = run_cc(mf, method, frozen, **cc_opts)
     t1 = _cc_addons.spatial2spin(mycc.t1).T                  # (nv, no)
     t2 = _cc_addons.spatial2spin(mycc.t2).transpose(2, 3, 0, 1)   # (nv,nv,no,no)
-    pool = {'t1': t1, 'l1': _to_l(t1, 1),
-            't2': t2, 'l2': _to_l(t2, 2)}
+    pool = {'t1': t1, 'l1': to_l(t1, 1),
+            't2': t2, 'l2': to_l(t2, 2)}
     return (pool, mycc.e_corr) if return_energy else pool
 
 
@@ -54,19 +54,19 @@ def _restricted_pool(t1_aa, t2_aaaa, t2_abab):
     """The restricted amplitude pool keyed by spin block (closed shell: the
     _bbbb/_bb blocks alias the _aaaa/_aa ones; bra = ket adjoint)."""
     return {'t1_aa': t1_aa, 't1_bb': t1_aa,
-            'l1_aa': _to_l_restricted(t1_aa, 1, 'aa'),
-            'l1_bb': _to_l_restricted(t1_aa, 1, 'aa'),
+            'l1_aa': to_l(t1_aa, 1, 'aa'),
+            'l1_bb': to_l(t1_aa, 1, 'aa'),
             't2_aaaa': t2_aaaa, 't2_bbbb': t2_aaaa, 't2_abab': t2_abab,
-            'l2_aaaa': _to_l_restricted(t2_aaaa, 2, 'aaaa'),
-            'l2_bbbb': _to_l_restricted(t2_aaaa, 2, 'aaaa'),
-            'l2_abab': _to_l_restricted(t2_abab, 2, 'abab')}
+            'l2_aaaa': to_l(t2_aaaa, 2, 'aaaa'),
+            'l2_bbbb': to_l(t2_aaaa, 2, 'aaaa'),
+            'l2_abab': to_l(t2_abab, 2, 'abab')}
 
 
 def cc_amplitudes_restricted(mf, method='ccsd', frozen=None,
                              return_energy=False, **cc_opts):
     """Spin-block twin of cc_amplitudes_spinorbital, keyed for the restricted
     amplitude pool."""
-    mycc = _run_cc(mf, method, frozen, **cc_opts)
+    mycc = run_cc(mf, method, frozen, **cc_opts)
     t1_aa = np.asarray(mycc.t1).T                            # (nv, no)
     t2_abab = np.asarray(mycc.t2).transpose(2, 3, 0, 1)      # (nv,nv,no,no)
     t2_aaaa = t2_abab - t2_abab.transpose(1, 0, 2, 3)

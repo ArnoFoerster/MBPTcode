@@ -68,6 +68,7 @@ from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_utils
+from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
 TERMS = {
     'oo': ('oo_ss0', 'oo_dd', 'oo_ru', 'oo_p0', 'oo_tt_o', 'oo_tt_v', 'oo_tru'),
@@ -75,10 +76,6 @@ TERMS = {
     'ov': ('ov_sd', 'ov_tsd', 'ov_p0v', 'ov_p0o', 'ov_tdv', 'ov_tdo'),
 }
 ALL_TERMS = TERMS['oo'] + TERMS['vv'] + TERMS['ov']
-
-
-def _sym(A):
-    return 0.5 * (A + A.transpose(1, 0))
 
 
 def difference_density_terms(be, u1, u2=None, t2=None, p0=None):
@@ -103,16 +100,16 @@ def difference_density_terms(be, u1, u2=None, t2=None, p0=None):
     out.update({
         'oo_dd': -2.0 * ein('ikab,jkab->ij', u2, u2),
         'oo_ru': -ein('ia,ja->ij', r, r),
-        'oo_p0': _sym(ein('ik,kj->ij', p1_oo, p0['oo'])),
-        'oo_tt_o': -0.5 * _sym(ein('ikcd,lk,jlcd->ij', t2, p1_oo, t2)),
-        'oo_tt_v': _sym(ein('ikcd,jkcb,db->ij', t2, t2, p1_vv)),
-        'oo_tru': -_sym(ein('ia,jkac,kc->ij', u1, t2, r)),
+        'oo_p0': symmetrize(ein('ik,kj->ij', p1_oo, p0['oo'])),
+        'oo_tt_o': -0.5 * symmetrize(ein('ikcd,lk,jlcd->ij', t2, p1_oo, t2)),
+        'oo_tt_v': symmetrize(ein('ikcd,jkcb,db->ij', t2, t2, p1_vv)),
+        'oo_tru': -symmetrize(ein('ia,jkac,kc->ij', u1, t2, r)),
         'vv_dd': 2.0 * ein('ijac,ijbc->ab', u2, u2),
         'vv_ru': ein('ia,ib->ab', r, r),
-        'vv_p0': -_sym(ein('ac,cb->ab', p1_vv, p0['vv'])),
-        'vv_tt_v': -0.5 * _sym(ein('klbc,klad,cd->ab', t2, t2, p1_vv)),
-        'vv_tt_o': _sym(ein('klbc,jk,jlac->ab', t2, p1_oo, t2)),
-        'vv_tru': _sym(ein('ikac,kc,ib->ab', t2, r, u1)),
+        'vv_p0': -symmetrize(ein('ac,cb->ab', p1_vv, p0['vv'])),
+        'vv_tt_v': -0.5 * symmetrize(ein('klbc,klad,cd->ab', t2, t2, p1_vv)),
+        'vv_tt_o': symmetrize(ein('klbc,jk,jlac->ab', t2, p1_oo, t2)),
+        'vv_tru': symmetrize(ein('ikac,kc,ib->ab', t2, r, u1)),
         'ov_sd': p2_ov,
         'ov_tsd': -ein('ijab,jb->ia', t2, p2_ov),
         'ov_p0v': -ein('ib,ba->ia', p0['ov'], p1_vv),
@@ -169,7 +166,7 @@ def spin_free_difference_density(eps, V, no, v, level='adc2', parity=None,
         out = spin_summed(difference_density_terms(be, u1))
     else:
         gb = _sb.g_blocks_sb(V, no, norb)
-        d_ijab, d_ia, _ = ee_utils._denominators(np.asarray(eps, float), no)
+        d_ijab, d_ia, _ = ee_utils.orbital_denominators(np.asarray(eps, float), no)
         amps = _eq.amplitudes(be, gb, d_ijab, d_ia, order=2)
         p0 = _eq.density2(be, amps)
         out = spin_summed(difference_density_terms(be, u1, u2, amps['t2_1'], p0))

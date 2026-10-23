@@ -19,7 +19,7 @@ import warnings
 import pytest
 from pyscf import gto, scf
 
-import src.Base.separable_ri as sri
+import src.Base.factorization.separable_ri as sri
 from src.properties.optimize import (UnconvergedRelaxation,
                                      relax_ground_state)
 

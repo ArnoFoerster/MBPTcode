@@ -5,7 +5,7 @@
 # Do not edit by hand.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
-from src.Base.utils.grids import minimax_time_grid
+from src.Base.utils.grids.grids import minimax_time_grid
 
 
 def t1_3_aa_t3crossspin_laplace(g_aaaa, g_abab, g_bbbb, d_aa, o, v, nv, no, eps_a, t2_1_aaaa, t2_1_abab, ntau=6):

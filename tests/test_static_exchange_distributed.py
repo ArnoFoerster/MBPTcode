@@ -47,12 +47,12 @@ import numpy as np
 import pytest
 
 from tests.pins import assert_same, assert_within_class, class_bar
-from src.Base import distributed_df
-from src.Base.distributed_df import (DistributedDF, distributed_handles,
-                                     distributed_mean_field,
-                                     release_distributed)
-from src.Base.utils.mpi_grid import (current_comm, distributed,
-                                     lockstep_stats, run_simulated)
+from src.Base.factorization import distributed_df
+from src.Base.factorization.distributed_df import (DistributedDF, distributed_handles,
+                                                   distributed_mean_field,
+                                                   release_distributed)
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, lockstep_stats
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import qp_solve
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              static_exchange_mean_field_matrix)

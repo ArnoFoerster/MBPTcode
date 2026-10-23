@@ -28,15 +28,16 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.numerics import Numerics
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.isdf_jk import isdf_jk
-from src.gradients.isdf_derivatives import (_auxmol_of, exchange_channels,
-                                            fock_partial_skeleton,
-                                            fock_partial_skeleton_df,
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.isdf_derivatives import (auxmol_of,
                                             isdf_exchange_adjoints,
-                                            isdf_fock_partial_exchange,
-                                            xc_hybrid_coeff)
+                                            isdf_fock_partial_exchange)
+from src.gradients.mean_field_response import (fock_partial_skeleton,
+                                               fock_partial_skeleton_df)
+from src.SingleReference.LinearResponse.rpa_energy import (exchange_channels,
+                                                           xc_hybrid_coeff)
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
@@ -58,7 +59,7 @@ def water(shift=None):
 
 
 def mean_field(shift=None, xc='b3lyp'):
-    mf = isdf_jk(dft.RKS(water(shift), xc=xc), auxbasis=AUXBASIS, counts=g1(water(shift)))
+    mf = isdf_jk_with_force(dft.RKS(water(shift), xc=xc), auxbasis=AUXBASIS, counts=g1(water(shift)))
     mf.grids.prune = None
     # the partial assumes the occupied-virtual Fock block vanishes
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
@@ -86,7 +87,7 @@ def bilinear(g_ao, dm, a_x, shift):
     The exchange term of the folded two-particle density
     Gamma_abcd = gamma_ab D_cd - gamma_ac D_bd / 2. Only the integrals move.
     """
-    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
+    mf = isdf_jk_with_force(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
     vk = mf.with_df.get_jk(dm, hermi=1, with_j=False)[1]
     return -0.5 * a_x * float(np.einsum('ab,ab->', g_ao, vk))
 
@@ -138,7 +139,7 @@ def test_it_agrees_with_the_fitted_skeleton(reference):
     mf, gamma, _, _ = reference
     nocc = mf.mol.nelectron // 2
     isdf = isdf_fock_partial_exchange(mf, gamma)
-    fitted = fock_partial_skeleton_df(mf, _auxmol_of(mf), gamma, nocc,
+    fitted = fock_partial_skeleton_df(mf, auxmol_of(mf), gamma, nocc,
                                       coulomb=False,
                                       channels=exchange_channels(mf))
     big = np.abs(fitted) > 1e-3 * np.abs(fitted).max()
@@ -181,7 +182,7 @@ def exx_minus_xc(dm, a_x, shift):
     grid moves with the atoms, which is the `grid_response` term the analytic
     side sets.
     """
-    mf = isdf_jk(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
+    mf = isdf_jk_with_force(dft.RKS(water(shift), xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(water(shift)))
     mf.grids.prune = None
     mf.grids.build()
     vk = mf.with_df.get_jk(dm, hermi=1, with_j=False)[1]
@@ -197,7 +198,7 @@ def test_the_double_counting_follows_its_own_energy(reference):
     the interpolation, which is a different function and shows here as a
     residual that does not fall.
     """
-    from src.gradients.isdf_derivatives import exx_double_counting_skeleton
+    from src.gradients.mean_field_response import exx_double_counting_skeleton
 
     mf, _, _, dm = reference
     a_x = xc_hybrid_coeff(mf)[1]
@@ -216,7 +217,7 @@ def test_the_double_counting_sums_to_zero_over_atoms(reference):
     """Both members are translationally invariant, so their difference is too
     -- and to machine precision, because the two ISDF gradients share one fit
     and cancel term by term rather than nearly."""
-    from src.gradients.isdf_derivatives import exx_double_counting_skeleton
+    from src.gradients.mean_field_response import exx_double_counting_skeleton
 
     mf = reference[0]
     g = np.asarray(exx_double_counting_skeleton(mf))
@@ -234,14 +235,14 @@ def test_the_excited_state_gradient_follows_its_own_surface():
     but that it differentiates its own energy as well as the fitted one
     differentiates its own.
     """
-    from src.gradients.excited_state import ExcitedStateChain
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
 
     steps = (4e-3, 2e-3, 1e-3)
     out = {}
     for route in ('df', 'isdf'):
         def build(m, route=route):
             mf = dft.RKS(m, xc='b3lyp')
-            mf = (isdf_jk(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
+            mf = (isdf_jk_with_force(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
                   else mf.density_fit(auxbasis=AUXBASIS))
             mf.grids.prune = None
             mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11

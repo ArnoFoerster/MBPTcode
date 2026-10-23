@@ -1,6 +1,6 @@
 """The exact block fold of the dRPA correlation energy in a continuum.
 
-`src/gradients/solvated_rpa_energy.py` evaluates three members of one
+`src/gradients/rpa/solvated_energy.py` evaluates three members of one
 functional on ONE set of factors and ONE frequency grid: the bare interaction
 (A), today's dressed one (B), and the fold F -- the solvent's single-pole
 g(iw) = Omega_p^2/(w^2 + Omega_p^2) inside the logarithm with the BARE
@@ -31,19 +31,19 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (HARTREE_TO_EV, HARTREE_TO_KCAL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.environment import NoEnvironment
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.solvated_rpa_energy import (dynamic_screening_factor,
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_KCAL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.environment_seam import NoEnvironment
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.rpa.solvated_energy import (dynamic_screening_factor,
                                                screening_matrix,
                                                solvated_correlation_energies,
                                                solvent_plasmon_energy)
-from src.gradients.space_time_adjoint import rpa_energy_and_adjoint
+from src.gradients.rpa.space_time_adjoint import rpa_energy_and_adjoint
 from src.SingleReference.LinearResponse.solvated_rpa_energy import (
     solute_solvent_dispersion_energy)
 from src.SingleReference.LinearResponse.space_time import three_index_ov
@@ -423,7 +423,7 @@ def test_the_solvent_carries_its_own_pole_energy():
 def test_an_environment_that_does_not_respond_is_adiabatic():
     """g is part of the contract, and an environment with no dynamics of its
     own returns 1: fixed charges do not respond at any frequency."""
-    from src.Base.environment import PointCharges
+    from src.environments.environment import PointCharges
     w = np.array([0.0, 1.0, 100.0])
     for env in (NoEnvironment(), PointCharges([[0.0, 0.0, 3.0]], [1.0])):
         assert env.dynamic_factor(w) == pytest.approx(1.0)

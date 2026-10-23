@@ -22,11 +22,13 @@ shift. G0W0 adds the shift after its solve instead (`reaction_field.
 shift_after_solve`, keyed on the anchor every cycle hands the route); doing
 that here too would count it a second time on top of the shifted levels.
 """
+import warnings
+
 import numpy as np
 
-from src.Base.constants import (EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
-                                EVGW_MAX_CYCLE, EVGW_TOL, HARTREE_TO_EV)
-from src.Base.pyscf_interface import get_orbital_energies
+from src.Base.numerics.constants import (EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
+                                         EVGW_MAX_CYCLE, EVGW_TOL, HARTREE_TO_EV)
+from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.SingleReference.CC.diis import DIIS
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
 
@@ -35,14 +37,10 @@ from src.SingleReference.GW import qp_energy  # module import: it imports this f
 SCREENINGS = ('updated', 'fixed')
 
 
-class EvGWNotConverged(RuntimeError):
-    """The evGW loop ended without a fixed point: its spectrum is the last
-    iterate, a wrong number. `eps` and `info` are that iterate and its
-    record, for diagnosis only."""
-
-    def __init__(self, message, eps, info):
-        super().__init__(message)
-        self.eps, self.info = eps, info
+class EvGWNotConverged(RuntimeWarning):
+    """The evGW loop ended without a fixed point: the spectrum returned is the
+    last iterate and its record says info['converged'] False
+    (refuse inputs, warn numerics; as qsGW)."""
 
 
 def shifted_mean_field(mf, eps):
@@ -57,21 +55,6 @@ def shifted_mean_field(mf, eps):
     """
     out = mf.copy()
     out.mo_energy = np.asarray(eps, float)
-    return out
-
-
-def rotated_mean_field(mf, eps, mo_coeff):
-    """
-    `mf` carrying `eps` and `mo_coeff` in place of its own; the occupations stay.
-
-    The shallow copy of `shifted_mean_field`, so the integrals, the DF object
-    and the direct-SCF optimizer are shared. `get_density_fitting_coefficients`
-    reads `mo_coeff`, so the DF factors of the view are the rotated ones, and
-    `make_rdm1` on the view gives the rotated density.
-    """
-    out = shifted_mean_field(mf, eps)
-    out.mo_coeff = np.asarray(mo_coeff, float)
-    out.mo_occ = np.asarray(mf.mo_occ)
     return out
 
 
@@ -110,8 +93,9 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
     converge_on: orbitals whose movement decides convergence. Default is the
         HOMO and the LUMO.
     tol:    convergence on max |delta eps| over `converge_on`, in Hartree.
-        A loop that has not reached it in `max_cycle` cycles is refused
-        (`EvGWNotConverged`).
+        A loop that has not reached it in `max_cycle` cycles returns its last
+        iterate with info['converged'] False and an `EvGWNotConverged`
+        warning.
     diis_size: DIIS subspace; 0 falls back to linear mixing through `damping`.
     damping: linear mixing, eps <- (1 - d) eps_new + d eps_old, used only when
         DIIS is off.
@@ -228,10 +212,11 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
             'residual_untested': untested_history[-1],
             'eps_mean_field': eps0, 'shift': eps - eps0}
     if not converged:
-        raise EvGWNotConverged(
-            f'{label} refused: not converged after {len(history)} of '
+        warnings.warn(
+            f'{label} not converged after {len(history)} of '
             f'max_cycle = {max_cycle} cycles, max |delta eps| = '
             f'{history[-1]:.3e} Ha ({history[-1] * HARTREE_TO_EV:.4f} eV) '
-            f'against tol = {tol:.3e} Ha. The last iterate is not a fixed '
-            f'point; raise max_cycle or damping.', eps, info)
+            f'against tol = {tol:.3e} Ha. The spectrum returned is the last '
+            f'iterate, not a fixed point; raise max_cycle or damping.',
+            EvGWNotConverged, stacklevel=2)
     return eps, info

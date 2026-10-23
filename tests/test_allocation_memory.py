@@ -21,10 +21,10 @@ import pytest
 from pyscf import gto, scf
 from pyscf import lib as pyscf_lib
 
-from src.Base.constants import ALLOCATION_MEMORY_FRACTION
-from src.Base.utils import memory
-from src.Base.utils.memory import (allocation_max_memory_mb, current_memory_mb,
-                                   describe_df_storage, tasks_per_node)
+from src.Base.numerics.constants import ALLOCATION_MEMORY_FRACTION
+from src.Base.utils.parallel import memory
+from src.Base.utils.parallel.memory import (allocation_max_memory_mb, current_memory_mb,
+                                            describe_df_storage, tasks_per_node)
 
 #: SLURM_* variables the parser reads; cleared before every case so a test
 #: run under an actual allocation does not leak into these, and cleared after

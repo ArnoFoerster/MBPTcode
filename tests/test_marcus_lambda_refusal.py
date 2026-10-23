@@ -19,12 +19,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (HARTREE_TO_CM, HARTREE_TO_EV,
-                                HARTREE_TO_MEV, RATE_LAMBDA_REMAINDER_MIN_MEV,
-                                RATE_MLJ_N_MAX)
+from src.Base.numerics.constants import (HARTREE_TO_CM, HARTREE_TO_EV,
+                                         HARTREE_TO_MEV, RATE_LAMBDA_REMAINDER_MIN_MEV,
+                                         RATE_MLJ_N_MAX)
 from src.photophysics import rate_models
 from src.photophysics.minimum import from_gw_bse_record
-from src.properties import rates
+from src.photophysics import rates
 from tests.photophysics_cases import gw_bse_props, unit_modes
 
 WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'

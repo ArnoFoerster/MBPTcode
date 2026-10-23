@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base.pdaggerq_interface import raw_terms_to_einsum
+from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum
 from src.CodeGeneration.df_codegen import dress_integral_factor
 
 

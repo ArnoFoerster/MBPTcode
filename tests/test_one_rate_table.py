@@ -16,7 +16,11 @@ third of its rate (the sublevel average); the TADF table reproduces the TADF
 driver's on both inputs, and the UISC table the UISC driver's on the inputs
 where its one-geometry reading coincides with the rule (the same table,
 derivative and lambda at both minima), with the per-mode derivative its vib
-record held.
+record held. Two runs are not bitwise: every frozen
+number holds to PIN_SAME_ULPS ulp of itself under the recording BLAS and to
+PIN_CROSS_BLAS_BAR of itself, relative, under another (`same_numbers`), where
+the random modes' QR and the Franck-Condon sums round differently (a cluster's
+MKL: 28 of 160 numbers moved, k_ic most, 1.2e-14 relative).
 
 The frozen numbers predate the Franck-Condon and decay guards
 (`rates.fc_lambda_guard`), which refuse this synthetic displacement (its sum
@@ -31,13 +35,15 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (AMU_TO_ME, BOHR_TO_ANGSTROM, HARTREE_TO_CM,
-                                HARTREE_TO_EV)
+from src.Base.numerics.constants import (AMU_TO_ME, BOHR_TO_ANGSTROM, HARTREE_TO_CM,
+                                         HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
+                                         PIN_SAME_ULPS)
 from src.photophysics import rate_models, uisc
 from src.photophysics.declaration import UiscModel
 from src.photophysics.minimum import GroundModes, from_gw_bse_record
-from src.properties import rates
+from src.photophysics import rates
 from src.properties.vibronic import huang_rhys_from_displacement
+from tests.pins import RECORDING_BLAS, blas_identity
 
 WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
 #: Hartree; dyadic so that every energy difference below is exact
@@ -181,17 +187,23 @@ def unhex(value):
     return value
 
 
-def same_bits(got, want, where=''):
-    """Every number of `want` in `got`, bit for bit."""
+def same_numbers(got, want, where=''):
+    """Every number of `want` in `got`: to PIN_SAME_ULPS ulp of it under the
+    recording BLAS, to PIN_CROSS_BLAS_BAR of it, relative, under another (the
+    rates span 1e-28 to 1e6 s^-1, so the bar scales with each)."""
     if isinstance(want, dict):
         for k, v in want.items():
-            same_bits(got[k], v, f'{where}.{k}')
+            same_numbers(got[k], v, f'{where}.{k}')
     elif isinstance(want, list):
         assert len(got) == len(want), where
         for i, (g, w) in enumerate(zip(got, want)):
-            same_bits(g, w, f'{where}[{i}]')
+            same_numbers(g, w, f'{where}[{i}]')
     elif isinstance(want, float):
-        assert float(got).hex() == want.hex(), where
+        bar = (PIN_SAME_ULPS * np.spacing(abs(want))
+               if RECORDING_BLAS == blas_identity()
+               else PIN_CROSS_BLAS_BAR * abs(want))
+        assert abs(float(got) - want) <= bar, (where, float(got).hex(),
+                                               want.hex())
     else:
         assert got == want, where
 
@@ -206,7 +218,7 @@ def test_the_tadf_table_is_the_frozen_one(guards_pass):
         # record always does, and a StateMinimum carries it
         assert want.pop('relaxed_solvation') is None
         assert got['relaxed_solvation'] == 'gas'
-        same_bits(got, want, case)
+        same_numbers(got, want, case)
         assert got['pl_omits'] == []
 
 
@@ -216,19 +228,19 @@ def test_the_uisc_table_is_the_frozen_one(guards_pass):
     want = unhex(FROZEN['uisc'])
     for name, key in (('ISC S1->T1', 'ISC'), ('RISC T1->S1', 'RISC')):
         ch, old = got['channels'][name], want[key]
-        same_bits([ch['A1_marcus'], ch['A2_mlj'], ch['A3_fc_condon'],
+        same_numbers([ch['A1_marcus'], ch['A2_mlj'], ch['A3_fc_condon'],
                    ch['A4_fc_condon_ht'], ch['A4_ht_part']],
                   [old['A1'], old['A2'], old['A3'], old['A4'], old['HT']],
                   name)
-        same_bits(ch['marcus_mlj'], old['lams'], name)
-    same_bits([got['k_ic'], got['k_nr_t1'], got['k_r']],
+        same_numbers(ch['marcus_mlj'], old['lams'], name)
+    same_numbers([got['k_ic'], got['k_nr_t1'], got['k_r']],
               [want['k_ic'], want['k_nr_t'], want['k_r']])
-    same_bits(got['pl'], want['pl'])
+    same_numbers(got['pl'], want['pl'])
     # the two models agree wherever their readings coincide
     tadf = unhex(FROZEN['tadf_uisc_shaped'])
     for name in ('ISC S1->T1', 'RISC T1->S1'):
         for k in ('A1_marcus', 'A2_mlj', 'A3_fc_condon', 'marcus_mlj'):
-            same_bits(got['channels'][name][k], tadf['channels'][name][k])
+            same_numbers(got['channels'][name][k], tadf['channels'][name][k])
 
 
 def test_uisc_reads_isc_at_the_s1_minimum():
@@ -272,13 +284,13 @@ def test_a_crossing_out_of_a_triplet_takes_a_third(monkeypatch, guards_pass):
     rows = ('A1_marcus', 'A2_mlj', 'A3_fc_condon', 'A4_fc_condon_ht',
             'A4_ht_part')
     for k in rows:
-        same_bits(averaged['channels']['ISC S1->T1'][k],
+        same_numbers(averaged['channels']['ISC S1->T1'][k],
                   summed['channels']['ISC S1->T1'][k], k)
         assert averaged['channels']['RISC T1->S1'][k] == pytest.approx(
             summed['channels']['RISC T1->S1'][k] / 3, rel=1e-13), k
     for k in ('k_risc_t2', 'k_nr_t1'):
         assert averaged[k] == pytest.approx(summed[k] / 3, rel=1e-13), k
-    same_bits(averaged['k_isc_t2'], summed['k_isc_t2'])
+    same_numbers(averaged['k_isc_t2'], summed['k_isc_t2'])
     for name in ('ISC S1->T1', 'RISC T1->S1'):
         assert (averaged['channels'][name]['v_condon_cm']
                 == summed['channels'][name]['v_condon_cm'])

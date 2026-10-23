@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics, Stamped
-from src.SingleReference.LinearResponse.bse import solve_bse
+from src.Base.numerics.numerics import Numerics, Stamped
+from src.SingleReference.BSE.solve import solve_bse
 from src.photophysics import df_check
 from src.properties import spin_orbit
 from tests.photophysics_cases import run_of

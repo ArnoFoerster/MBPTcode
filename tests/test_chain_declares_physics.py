@@ -21,8 +21,8 @@ spectrum can feed it at any size.
 
 NO IMPORT ORDER. `src.properties` and `src.gradients` import cleanly in either
 order in a fresh interpreter: `driven_chain` and the root-attribute vocabulary
-live in `src.properties.surface`, below both, so `nonadiabatic` reaches into
-`src.gradients.state_manifold` nowhere.
+live in `src.gradients.surface`, below both, so `nonadiabatic` reaches into
+`src.gradients.gwbse.state_manifold` nowhere.
 
 What breaks each gate:
 
@@ -39,7 +39,7 @@ What breaks each gate:
     test_a_spec_takes_no_communicator. A spec is a declaration, and a
     communicator travelling in one is a second way to the ranks that the
     context would have to agree with.
-  * `nonadiabatic` importing `driven_chain` from `src.gradients.state_manifold`
+  * `nonadiabatic` importing `driven_chain` from `src.gradients.gwbse.state_manifold`
     at module scope, which is a cycle: only the properties-first order of
     test_either_import_order_works_in_a_fresh_interpreter fails, the
     gradients-first one resolves. That asymmetry is the content of the gate.
@@ -56,17 +56,17 @@ import pytest
 from pyscf import dft, gto, scf
 
 from tests.pins import assert_same
-from src.Base.numerics import Numerics
-from src.Base.constants import (BSE_DENSE_MAX_NOV, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (BSE_DENSE_MAX_NOV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   SurfacePhysics)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.LinearResponse.bse import solver_choice
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.SingleReference.LinearResponse.casida import solver_choice
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import SurfaceSpec, surface_of
-from src.properties.surfaces import declare_physics, potential_energy_surface
+from src.gradients.gwbse.surface_factory import declare_physics, potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_tight
 
@@ -278,16 +278,16 @@ def test_the_casida_quasiparticle_route_has_no_matrix_free_solve(mol, hf):
 def test_either_import_order_works_in_a_fresh_interpreter(order):
     """The cycle is gone, so neither package has to be imported first.
 
-    `nonadiabatic` does not reach `src.gradients.state_manifold` from inside
+    `nonadiabatic` does not reach `src.gradients.gwbse.state_manifold` from inside
     `spectrum_solve`; `driven_chain` and the root-attribute vocabulary live
-    in `src.properties.surface`, below both. A subprocess, because an import
+    in `src.gradients.surface`, below both. A subprocess, because an import
     order can only be tested on an interpreter that has imported neither.
     """
     first, second = order
     out = subprocess.run(
         [sys.executable, '-c',
          f'import {first}; import {second}; '
-         f'from src.properties.surface import driven_chain; print("ok")'],
+         f'from src.gradients.surface import driven_chain; print("ok")'],
         cwd=REPO, capture_output=True, text=True, env=dict(os.environ))
     assert out.returncode == 0, out.stderr[-2000:]
     assert 'ok' in out.stdout

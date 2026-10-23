@@ -29,9 +29,9 @@ import math
 import numpy as np
 import scipy.linalg
 
-from src.Base.eri_blocks import MOEriBlocks
-from src.Base.utils.grids import minimax_time_grid
-from src.Base.utils.time_frequency import minimax_points_for_accuracy
+from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.Base.utils.grids.grids import minimax_time_grid
+from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb

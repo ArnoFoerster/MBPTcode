@@ -22,13 +22,13 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.Base.declaration import QPStates
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import run_simulated
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import separable_factors
-import src.gradients.qp_space_time as qp_space_time
-from src.gradients.qp_space_time import qp_set_gradient
+import src.gradients.gwbse.qp_space_time as qp_space_time
+from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 

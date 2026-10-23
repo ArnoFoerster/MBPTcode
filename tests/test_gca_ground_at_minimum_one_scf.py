@@ -10,7 +10,7 @@ A ground surface whose `refreeze` takes no mean field is rebuilt with it alone.
 from pyscf import gto, scf
 
 from src.properties.excitations import ground_at_minimum
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.mean_field_surface import MeanFieldSurface
 
 
 class Ground:

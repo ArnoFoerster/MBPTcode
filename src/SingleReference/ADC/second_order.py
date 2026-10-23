@@ -13,7 +13,7 @@ orbital.
 """
 import numpy as np
 
-from src.Base.eri_blocks import g_slice
+from src.SingleReference.common.eri_blocks import g_slice
 
 
 def sigma2_poles(eps, nocc, p, B_aa=None, eri_chemist=None):

@@ -22,14 +22,14 @@ import pytest
 from pyscf import gto, scf
 from pyscf.hessian import thermo
 
-from src.Base.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_CM,
-                                HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_CM,
+                                         HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.optimize import optimize, translation_rotation_basis
-from src.properties.rates import marcus_levich_jortner_rate, marcus_rate
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    PotentialEnergySurface)
+from src.photophysics.rates import marcus_levich_jortner_rate, marcus_rate
+from src.gradients.surface import (FiniteDifferenceGradient,
+                                   PotentialEnergySurface)
 from src.properties.vibronic import (adiabatic_gap, align_to,
                                      huang_rhys_from_displacement,
                                      huang_rhys_from_gradient, normal_modes,
@@ -43,7 +43,7 @@ CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 
 
-class HarmonicToySurface:
+class HarmonicToySurface(PotentialEnergySurface):
     """E = k (r - r_e)^2 / 2 in the bond length of a diatomic, and nothing else.
 
     A `PotentialEnergySurface` with no integrals behind it: the protocol's
@@ -58,6 +58,10 @@ class HarmonicToySurface:
     def scf_factory(self, mol):
         """No mean field is involved; the surface is a function of the nuclei."""
         return None
+
+    def mean_field(self, mol=None, mf=None):
+        """(mol, None): there is no mean field behind the toy."""
+        return (self.mol0 if mol is None else mol), None
 
     def _displacement(self, mol):
         mol = self.mol0 if mol is None else mol
@@ -118,17 +122,20 @@ def ch2o():
 
 # -------------------------------------------------------------- the protocol
 def test_toy_surface_satisfies_the_protocol(h2_toy):
-    """A surface is what has the five members, not what inherits from anything.
+    """A surface inherits `PotentialEnergySurface` and has its five members.
 
-    The protocol is structural on purpose: the BSE chain, the dRPA chain and an
-    embedded root are unrelated classes, and a property routine must not have to
-    know which one it was handed.
+    The BSE chain, the dRPA chain and an embedded root share nothing else, and
+    a property routine never has to know which one it was handed; a class
+    lacking a member is refused when it is created.
     """
     assert isinstance(h2_toy, PotentialEnergySurface)
     assert isinstance(FiniteDifferenceGradient(h2_toy), PotentialEnergySurface)
 
-    class NoRefreeze:
+    class NoRefreeze(PotentialEnergySurface):
         mol0 = None
+
+        def mean_field(self, mol=None, mf=None):
+            return mol, None
 
         def scf_factory(self, mol):
             return None
@@ -144,7 +151,8 @@ def test_toy_surface_satisfies_the_protocol(h2_toy):
 
     # An energy and a gradient are not enough: without `refreeze` the optimizer
     # cannot rebuild the frozen conventions and has no error bar on its minimum.
-    assert not isinstance(NoRefreeze(), PotentialEnergySurface)
+    with pytest.raises(TypeError, match='refreeze'):
+        NoRefreeze()
 
 
 def test_toy_surface_refreeze_rebuilds_at_the_new_geometry(h2_toy):

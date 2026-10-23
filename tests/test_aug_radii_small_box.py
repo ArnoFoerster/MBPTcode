@@ -21,13 +21,13 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base.isdf_jk import canonical_basis, solve_in_span
-from src.Base.separable_ri import (orbital_density_residual,
-                                   shipped_radii, shipped_radii_lookup)
+from src.Base.factorization.isdf_jk import canonical_basis, solve_in_span
+from src.Base.factorization.separable_ri import (orbital_density_residual,
+                                                 shipped_radii, shipped_radii_lookup)
 from src.SingleReference.GW.space_time import unrefused_separable_factors
 
 TABLE = pathlib.Path(__file__).resolve().parent.parent / 'src' / 'Base' / \
-    'data' / 'optimized_radii.json'
+    'factorization' / 'data' / 'optimized_radii.json'
 G3 = {'A1': 24, 'A2': 15, 'A3': 9, 'B1': 3}
 #: Outermost radius (bohr) of the small-box (24, 15, 9, 3) aug-cc-pVDZ row.
 OUTER_SMALL_BOX = {'H': 4.999999999999999, 'C': 9.259174525425674,

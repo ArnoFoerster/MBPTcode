@@ -18,10 +18,10 @@ ulp, and its record hashes as the original's.
 import numpy as np
 import pytest
 
-from src.Base.record_io import read_record, record_hash, write_record
-from src.Base.geometry import molecule_at
+from src.Base.utils.record_io import read_record, record_hash, write_record
+from src.Base.geometry.geometry import molecule_at
 from src.properties.optimize import nudge_vector
-from src.properties.surface import commit
+from src.gradients.surface import commit
 from tests.photophysics_cases import production
 from tests.pins import assert_same
 

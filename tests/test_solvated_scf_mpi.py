@@ -42,18 +42,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import numpy as np
 from pyscf import dft, gto
 
-from src.Base.constants import (FIT_REALIZATION_FORCE_TOL,
-                                RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (FIT_REALIZATION_FORCE_TOL,
+                                         RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.scf_convergence import newton_finished
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import current_comm, distributed, grid_comm
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.pyscf.scf_convergence import newton_finished
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, grid_comm
 from src.gradients.reference_mean_field import converged_factory
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.test_distributed_fit_mpi import Gate, bitwise, serial
 from tests.pins import RECORDING_BLAS, matches
 
@@ -68,7 +69,7 @@ def factory(route, newton=False):
     def build(mol):
         mf = dft.RKS(mol, xc='pbe0')
         mf = (mf.density_fit(auxbasis='cc-pvdz-ri') if route == 'df'
-              else isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=COUNTS,
+              else isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=COUNTS,
                            n_start=N_START))
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -101,8 +102,9 @@ def force(mf=None, rows=False):
         environment=SolventScreening(mol, solvent='toluene'),
         chi0='space-time', residues='sop', solver='davidson',
         factorization='isdf', qp_states=QPStates('frontier'),
-        grid_accuracy='G1', bse_adjoint='grid', nroots=5, mf=mf,
-        **(dict(sliced=True, fit='rows') if rows else {}))
+        mf=mf, numerics=numerics_of(dict(
+            grid_accuracy='G1', bse_adjoint='grid', nroots=5,
+            **(dict(sliced=True, fit='rows') if rows else {}))))
     g = np.array(chain.total_gradient()[0])
     poles = np.concatenate([chain.resolved.sop_poles[k]
                             for k in sorted(chain.resolved.sop_poles)])

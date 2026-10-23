@@ -15,19 +15,19 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.excited_state import ExcitedStateChain
-from src.properties.surfaces import potential_energy_surface
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from src.SingleReference.GW.space_time import unrefused_separable_factors
-from src.SingleReference.LinearResponse.bse import solve_bse
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_casida_davidson)
+from src.SingleReference.BSE.solve import solve_bse
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.block_actions import (df_block_action,
                                                               isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import (
@@ -66,9 +66,10 @@ def system(request):
 
 def lowest_roots(chain, mol, mf):
     """The chain's lowest NROOTS roots and its Y amplitudes."""
-    om, pieces = chain._forward(mol, mf)
+    solution = chain.forward(mol, mf)[1]
+    om = solution.omega
     order = np.argsort(om)[:NROOTS]
-    return np.asarray(om)[order], pieces[11][:, order]
+    return np.asarray(om)[order], solution.y[:, order]
 
 
 @pytest.mark.parametrize('environment', ['gas', 'toluene'])

@@ -59,7 +59,7 @@ Bra/ket conventions:
     and of T_BRA[3]'s 'e3(i,j,k,c,b,a)' (occ normal i,j,k / vir reversed
     c,b,a, pairing (i,a),(j,b),(k,c)). Letters chosen from pdaggerq's own
     safe sets (PDAGGERQ_SAFE_VIR = a-f, PDAGGERQ_SAFE_OCC = i-n in
-    src/Base/pdaggerq_interface.py) -- NOT g/o as a naive continuation of the
+    src/CodeGeneration/pdaggerq_interface.py) -- NOT g/o as a naive continuation of the
     rank-2 letters might suggest; g is outside the safe virtual set and o is
     outside the safe occupied set, so d (vir) and l (occ) are used instead.
   D1 blocks: insert_op = e1(...) alone (rank 1, always exact), same pattern
@@ -74,10 +74,12 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from src.Base.pdaggerq_interface import (pq_helper, assemble_function,
-                                    OCC_LETTERS, VIR_LETTERS)
+from src.CodeGeneration.pdaggerq_interface import pq_helper, assemble_function, VIR_LETTERS
+from src.CodeGeneration.codegen_common import (
+    CC_OUT_DIR, DENSITY_BLOCKS, EINSUM_IMPORTS, density_insert, density_out_idx, density_shape,
+    density_spin_labels, generated_header, write_module)
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'SingleReference', 'CC', 'generated_restricted')
+OUT_DIR = os.path.join(CC_OUT_DIR, 'generated_restricted')
 
 
 def _spin_grouped_order(spin_labels, type_order=('vir', 'occ')):
@@ -151,13 +153,6 @@ LAMBDA_PROJ = {
     }),
 }
 
-DENSITY_BLOCKS = {
-    'oo': ('e1(m,n)', {'m': 'a', 'n': 'a'}),
-    'vv': ('e1(e,f)', {'e': 'a', 'f': 'a'}),
-    'ov': ('e1(m,e)', {'m': 'a', 'e': 'a'}),
-    'vo': ('e1(e,m)', {'e': 'a', 'm': 'a'}),
-}
-DENSITY_SHAPES = {'oo': '(no, no)', 'vv': '(nv, nv)', 'ov': '(no, nv)', 'vo': '(nv, no)'}
 
 
 def _t_residual_terms(bra, spin_labels):
@@ -321,15 +316,14 @@ def generate_lambda_residuals():
 
 def generate_density():
     funcs = []
-    for block, (insert_op, spin_labels) in DENSITY_BLOCKS.items():
-        terms = _density_terms(insert_op, spin_labels)
-        out_idx = list(spin_labels.keys())
-        # insert_op's own arg order IS the dict insertion order above (Python
-        # dicts preserve insertion order); matches generate_eom_ccsdt.py's
-        # _insert_op_indices convention (out_indices = insertion op's own args).
+    for block in DENSITY_BLOCKS:
+        # the alpha block (off-diagonal spin blocks vanish); out_indices are the
+        # insertion's own argument order
+        terms = _density_terms(density_insert(block), density_spin_labels(block, 'a'))
+        out_idx = density_out_idx(block)
         print(f"d1_{block}_aa: {len(terms)} terms, out_indices={out_idx}")
         funcs.append(assemble_function(f'd1_{block}_aa', D_ARGS, f'd1_{block}',
-                                       DENSITY_SHAPES[block], terms, out_idx,
+                                       density_shape(block), terms, out_idx,
                                        shape_source='t1_aa'))
     return funcs
 
@@ -369,22 +363,18 @@ MKL_THREADING_PREAMBLE = (
 )
 
 
-def _write(path, funcs, header, mkl_threading=False):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(path, 'w') as fh:
-        fh.write(header)
-        if mkl_threading:
-            fh.write(MKL_THREADING_PREAMBLE)
-        fh.write("import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n\n\n")
-        fh.write("\n\n".join(funcs))
-        fh.write("\n")
-    print(f"wrote {path}")
+def _write(fname, funcs, *notes, mkl_threading=False):
+    write_module(os.path.join(OUT_DIR, fname), funcs,
+                 generated_header('generate_restricted_ccsdt.py', *notes,
+                                  "See that module's docstring for the equations/conventions."),
+                 imports=(MKL_THREADING_PREAMBLE if mkl_threading else '') + EINSUM_IMPORTS,
+                 package_init=True)
 
 
-if __name__ == '__main__':
-    os.makedirs(OUT_DIR, exist_ok=True)
-    open(os.path.join(OUT_DIR, '__init__.py'), 'a').close()
-
+def generate():
+    """Write amplitudes_restricted.py, lambda_residual_restricted.py and
+    d1_blocks_restricted.py into OUT_DIR, after checking that the order-6
+    correction of the rank-3 Lambda projector vanishes."""
     # Safety check first (cheap, symbolic): the order-6 (hextuple) commutator
     # correction for the rank-3 Lambda projector must vanish identically --
     # verify this rather than merely assume it before generating/trusting
@@ -402,23 +392,19 @@ if __name__ == '__main__':
           f"{len(order6_terms)} terms (vanishes, as expected) -- OK")
 
     t_funcs = generate_energy() + generate_t_residuals()
-    _write(os.path.join(OUT_DIR, 'amplitudes_restricted.py'), t_funcs,
-          "# GENERATED CODE -- restricted (spin-blocked) CCSDT energy + T-residuals.\n"
-          "# Produced by src/CodeGeneration/generate_restricted_ccsdt.py; see\n"
-          "# that module's docstring for equations/conventions. Do not edit by hand.\n",
-          mkl_threading=True)
+    _write('amplitudes_restricted.py', t_funcs,
+           'Restricted (spin-blocked) CCSDT energy and T-residuals.', mkl_threading=True)
 
     l_funcs = generate_lambda_residuals()
-    _write(os.path.join(OUT_DIR, 'lambda_residual_restricted.py'), l_funcs,
-          "# GENERATED CODE -- restricted (spin-blocked) Lambda-CCSDT residuals\n"
-          "# (Lambda1/Lambda2/Lambda3, full Lambda-CCSDT) -- see this module's\n"
-          "# generator script's docstring for equations/conventions.\n"
-          "# Do not edit by hand.\n",
-          mkl_threading=True)
+    _write('lambda_residual_restricted.py', l_funcs,
+           'Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).',
+           mkl_threading=True)
 
     d_funcs = generate_density()
-    _write(os.path.join(OUT_DIR, 'd1_blocks_restricted.py'), d_funcs,
-          "# GENERATED CODE -- restricted (spin-blocked) 1-RDM oo/vv/ov/vo blocks,\n"
-          "# _aa only (off-diagonal spin blocks vanish; final spatial density is\n"
-          "# 2x this block). Includes full Lambda1/Lambda2/Lambda3 feedback.\n"
-          "# Do not edit by hand.\n")
+    _write('d1_blocks_restricted.py', d_funcs,
+           'Restricted 1-RDM oo/vv/ov/vo blocks, _aa only (off-diagonal spin blocks vanish; '
+           'the spatial density is', '2x this block), with the full Lambda1/Lambda2/Lambda3 feedback.')
+
+
+if __name__ == '__main__':
+    generate()

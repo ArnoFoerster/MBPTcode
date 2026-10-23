@@ -35,10 +35,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import BOHR_TO_ANGSTROM, HARTREE_TO_EV
-from src.Base.environment import attached_environment
-from src.Base.polarizable_sites import PolarizableSites
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, HARTREE_TO_EV
+from src.Base.environment_seam import attached_environment
+from src.environments.polarizable_sites import PolarizableSites
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 
 #: Bohr^3, one site on the C2 axis of water at the distances below (Bohr).

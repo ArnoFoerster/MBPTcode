@@ -32,16 +32,18 @@ from pyscf.grad import rhf as rhf_grad
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
-from src.Base.dispersion import dispersion_gradient
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.isdf_jk import exchange_free_reference, isdf_jk
-from src.Base.skeleton_tiles import (fitted_coulomb_energy_skeleton,
-                                     one_electron_energy_skeleton, tile_sum,
-                                     xc_energy_grid_skeleton)
-from src.Base.utils.mpi_grid import distributed, run_simulated
-from src.gradients.isdf_derivatives import _auxmol_of
+from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
+from src.Base.pyscf.dispersion import dispersion_gradient
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
+from src.Base.factorization.isdf_jk import exchange_free_reference
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
+                                          one_electron_energy_skeleton, tile_sum,
+                                          xc_energy_grid_skeleton)
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.isdf_derivatives import auxmol_of
 from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient)
 from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
@@ -79,7 +81,7 @@ def unrun(name, xc, cutoff=None, coords=None):
     base = scf.RHF(mol) if xc == 'hf' else dft.RKS(mol, xc=xc)
     if cutoff is not None and xc != 'hf':
         base.small_rho_cutoff = cutoff
-    mf = isdf_jk(base, auxbasis=AUX, counts=g1(base))
+    mf = isdf_jk_with_force(base, auxbasis=AUX, counts=g1(base))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = CONV_TOL, CONV_TOL_GRAD, 200
     return mf
 
@@ -215,7 +217,7 @@ def terms(mf, xc_tile=None):
     hcore = rhf_grad.Gradients(mf).hcore_generator(mol.copy())
     return np.stack([
         one_electron_energy_skeleton(mol, hcore, dm, dme),
-        fitted_coulomb_energy_skeleton(mol, _auxmol_of(mf), dm),
+        fitted_coulomb_energy_skeleton(mol, auxmol_of(mf), dm),
         xc_energy_grid_skeleton(mol, mf.grids, mf._numint, mf.xc, dm,
                                 tile=xc_tile),
         isdf_mean_field_gradient(mf)])

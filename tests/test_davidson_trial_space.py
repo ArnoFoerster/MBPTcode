@@ -41,14 +41,15 @@ from pyscf.lib import logger
 
 import src.SingleReference.LinearResponse.davidson as davidson
 import src.SingleReference.LinearResponse.davidson_shared as davidson_shared
-from src.Base.constants import (DAVIDSON_SPACE_CYCLES, DAVIDSON_SPACE_FRACTION,
-                                DAVIDSON_SPACE_GB)
-from src.Base.numerics import Numerics
-from src.Base.utils.memory import allocation_max_memory_mb
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
+import src.SingleReference.BSE.solve as bse_solve
+from src.Base.numerics.constants import (DAVIDSON_SPACE_CYCLES, DAVIDSON_SPACE_FRACTION,
+                                         DAVIDSON_SPACE_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import allocation_max_memory_mb
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import unrefused_separable_factors
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import (bse_pair_diagonal,
                                                               isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -88,7 +89,7 @@ TRACE_SLACK = 64 << 10
 SLURM_NODE_MB, SLURM_TASKS = 40, 2
 
 
-#: What makes `_run_davidson` read a SLURM allocation for its budget
+#: What makes `run_davidson` read a SLURM allocation for its budget
 #: (`allocation_max_memory_mb`) in place of the DAVIDSON_SPACE_GB fallback the
 #: forced caps below patch; inside a SLURM allocation the budget is the
 #: allocation's share and the cycles bound then binds at 1000 pairs, so every
@@ -144,20 +145,20 @@ def solve(model, timings):
     apply_AB, diag, _ = model
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        return davidson._run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100,
+        return davidson.run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100,
                                       None, timings=timings)
 
 
 def bound(nroots, n_pair, rows=None, max_memory=None, working=0):
-    """The trial pairs real_eig holds for the MB `_trial_space_memory` hands it."""
-    return davidson_shared._real_eig_space(
-        davidson_shared._trial_space_memory(nroots, n_pair, rows, max_memory,
+    """The trial pairs real_eig holds for the MB `trial_space_memory` hands it."""
+    return davidson_shared.real_eig_space(
+        davidson_shared.trial_space_memory(nroots, n_pair, rows, max_memory,
                                      working), nroots, n_pair)[1]
 
 
 def parent_memory(nroots, n_pair):
     """The MB the parent handed real_eig: DAVIDSON_SPACE_GB of whole holders."""
-    space_inc = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, nroots,
+    space_inc = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, nroots,
                                          n_pair)[0]
     target = min(DAVIDSON_SPACE_CYCLES * space_inc,
                  int(DAVIDSON_SPACE_GB * 1e9 / (32 * n_pair)))
@@ -170,7 +171,7 @@ def formula(nroots, n_pair, rows, max_memory, working):
     rows of the holders and one increment within DAVIDSON_SPACE_FRACTION of
     max_memory less the working set, DAVIDSON_SPACE_CYCLES increments at
     most, pyscf's own bound and 4 nroots at least."""
-    space_inc, own = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY,
+    space_inc, own = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY,
                                               nroots, n_pair)
     fits = int((DAVIDSON_SPACE_FRACTION * max_memory * 1e6 - working)
                / (32 * rows) - space_inc)
@@ -188,7 +189,7 @@ def first_rows(n_pair, size, tile=None):
 def memory_for(pairs, n_pair, rows, working, nroots):
     """The max_memory MB whose budget holds `pairs` trial pairs of `rows`,
     half a pair clear of the rounding."""
-    space_inc = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, nroots,
+    space_inc = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, nroots,
                                          n_pair)[0]
     return ((pairs + space_inc + 0.5) * 32 * rows + working) / (
         DAVIDSON_SPACE_FRACTION * 1e6)
@@ -217,10 +218,10 @@ def action(s, comm=None):
 
 
 def guess_width(diag, nroots, n_pair):
-    """The widest batch the Davidson applies: its guess or one increment."""
-    return max(len(davidson_shared._guess_indices(diag, nroots)),
-               davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, nroots,
-                                        n_pair)[0])
+    """The widest batch the Davidson applies: its guess or one cycle's
+    corrections, the tracked Ritz pairs."""
+    return max(len(davidson_shared.guess_indices(diag, nroots)),
+               davidson_shared.tracked_roots(nroots, n_pair))
 
 
 @pytest.fixture(scope='module')
@@ -250,8 +251,8 @@ def benzene_runs(benzene):
         mp.setattr(davidson.param, 'MAX_MEMORY', 1)
         mp.setattr(davidson_shared, 'DAVIDSON_SPACE_GB',
                    (BENZENE_CAP + 0.5) * 32 * n_pair / 1e9)
-        space_inc = davidson_shared._real_eig_space(1, BENZENE_ROOTS, n_pair)[0]
-        working = davidson_shared._action_working_bytes(
+        space_inc = davidson_shared.real_eig_space(1, BENZENE_ROOTS, n_pair)[0]
+        working = davidson_shared.action_working_bytes(
             act, guess_width(diag, BENZENE_ROOTS, n_pair), n_pair, True)
         mm = memory_for(BENZENE_BUDGET, n_pair, n_pair, working,
                         BENZENE_ROOTS)
@@ -261,7 +262,7 @@ def benzene_runs(benzene):
             t = {}
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                om = davidson._run_davidson(
+                om = davidson.run_davidson(
                     act, diag, BENZENE_ROOTS, BENZENE_TOL, 100, None,
                     comm=comm, timings=t, pair_tile=BENZENE_TILE,
                     max_memory=max_memory, preconditioner='bare')[0]
@@ -281,7 +282,7 @@ def benzene_runs(benzene):
 def test_the_bound_is_never_below_pyscfs_own(n_pair):
     """Raised to the cycles-or-memory target where pyscf's own is smaller,
     and pyscf's own, bit for bit, everywhere else."""
-    own = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, NROOTS, n_pair)
+    own = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, NROOTS, n_pair)
     space_inc = own[0]
     target = min(DAVIDSON_SPACE_CYCLES * space_inc,
                  int(DAVIDSON_SPACE_GB * 1e9 / (32 * n_pair)))
@@ -294,7 +295,7 @@ def test_the_bound_is_never_below_pyscfs_own(n_pair):
 def test_the_dimer_pair_space_is_no_longer_collapsed_every_few_cycles():
     """At the pair space where pyscf's own bound is a handful of cycles, the
     fallback is DAVIDSON_SPACE_GB's worth of trial pairs."""
-    own = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, NROOTS,
+    own = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, NROOTS,
                                    DIMER_PAIRS)
     assert own[1] < 10 * NROOTS
     assert bound(NROOTS, DIMER_PAIRS) == int(DAVIDSON_SPACE_GB * 1e9
@@ -309,8 +310,8 @@ def test_the_fallback_is_the_parents_rule(n_pair, nroots):
     whatever rows or working set are passed beside it -- a single machine's
     solves run as they did."""
     parent = parent_memory(nroots, n_pair)
-    assert davidson_shared._trial_space_memory(nroots, n_pair) == parent
-    assert davidson_shared._trial_space_memory(nroots, n_pair, 17, None,
+    assert davidson_shared.trial_space_memory(nroots, n_pair) == parent
+    assert davidson_shared.trial_space_memory(nroots, n_pair, 17, None,
                                         1e12) == parent
 
 
@@ -334,7 +335,7 @@ def test_the_budget_is_the_formula(n_pair, nroots, max_memory, size, working,
     expected, fits, cycles = formula(nroots, n_pair, rows, max_memory,
                                      working)
     got = bound(nroots, n_pair, rows, max_memory, working)
-    own = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, nroots,
+    own = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, nroots,
                                    n_pair)[1]
     assert got == expected
     if binds == 'cycles':
@@ -348,7 +349,7 @@ def test_the_budget_is_the_formula(n_pair, nroots, max_memory, size, working,
 def test_more_ranks_hold_no_fewer_trial_pairs():
     """Rows fall with the rank count, so the same allocation and working set
     hold as many trial pairs or more, up to the cycles bound."""
-    space_inc = davidson_shared._real_eig_space(davidson.param.MAX_MEMORY, 12,
+    space_inc = davidson_shared.real_eig_space(davidson.param.MAX_MEMORY, 12,
                                          DIMER_TZ_PAIRS)[0]
     got = [bound(12, DIMER_TZ_PAIRS, first_rows(DIMER_TZ_PAIRS, size),
                  30000, 8e9) for size in (2, 4, 8, 16, 32, 64)]
@@ -365,7 +366,7 @@ def test_every_rank_holds_rank_zeros_bound(model, monkeypatch, size):
     monkeypatch.setattr(davidson.param, 'MAX_MEMORY', 1)
     apply_AB, diag, _ = model
     n_pair = diag.size
-    working = davidson_shared._action_working_bytes(
+    working = davidson_shared.action_working_bytes(
         apply_AB, guess_width(diag, NROOTS, n_pair), n_pair, False)
     rows0 = first_rows(n_pair, size, MODEL_TILE)
     mm = memory_for(MODEL_BUDGET, n_pair, rows0, working, NROOTS)
@@ -375,7 +376,7 @@ def test_every_rank_holds_rank_zeros_bound(model, monkeypatch, size):
         t = {}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            davidson._run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100,
+            davidson.run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100,
                                    None, comm=comm, timings=t,
                                    pair_tile=MODEL_TILE,
                                    max_memory=mm * (1 + rank))
@@ -394,9 +395,6 @@ def test_every_rank_holds_rank_zeros_bound(model, monkeypatch, size):
     assert any(rows == 0 for _, rows, _ in out) == (size == 16)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'the premise was tuned to the retired 148-point grid: on G1 the solve '
-    'collapses at three subspace sizes, not one'))
 def test_a_collapsing_solve_is_held_whole_at_every_rank_count(benzene_runs):
     """Benzene collapses under the forced cap; under the budget it is held
     whole at every rank count: no collapse, its subspace within the bound,
@@ -507,11 +505,11 @@ def test_the_allocation_sizes_the_space_inside_slurm(model, monkeypatch):
     for key in ('SLURM_JOB_ID', 'SLURM_MEM_PER_NODE', 'SLURM_MEM_PER_CPU'):
         monkeypatch.delenv(key, raising=False)
     outside = {}
-    davidson._run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100, None,
+    davidson.run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100, None,
                            timings=outside)
     assert outside['davidson_max_space'] == bound(NROOTS, n_pair)
     assert outside['davidson_space_budget_mb'] == DAVIDSON_SPACE_GB * 1e3
-    assert davidson._job_max_memory(types.SimpleNamespace(
+    assert bse_solve._job_max_memory(types.SimpleNamespace(
         max_memory=12345)) is None
     slurm_job(monkeypatch)
     share = allocation_max_memory_mb()
@@ -519,7 +517,7 @@ def test_the_allocation_sizes_the_space_inside_slurm(model, monkeypatch):
     inside = {}
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        davidson._run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100, None,
+        davidson.run_davidson(apply_AB, diag, NROOTS, CONV_TOL, 100, None,
                                timings=inside)
     working = inside['davidson_action_working_mb'] * 1e6
     expected, fits, _ = formula(NROOTS, n_pair, n_pair, share, working)
@@ -527,7 +525,7 @@ def test_the_allocation_sizes_the_space_inside_slurm(model, monkeypatch):
     assert expected != outside['davidson_max_space']
     assert inside['davidson_space_budget_mb'] * 1e6 == pytest.approx(
         DAVIDSON_SPACE_FRACTION * share * 1e6 - working, rel=1e-12)
-    assert davidson._job_max_memory(types.SimpleNamespace(
+    assert bse_solve._job_max_memory(types.SimpleNamespace(
         max_memory=12345)) == 12345.0
 
 

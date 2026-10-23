@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.linear_response import (
     static_screened_coulomb_aux, static_screened_coulomb_chemist)
 from src.SingleReference.ADC import ADCSolver

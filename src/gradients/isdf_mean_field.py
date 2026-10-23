@@ -1,6 +1,6 @@
 """The nuclear force of a mean field whose exchange comes from ISDF factors.
 
-`src.Base.isdf_jk.ISDFJK` gives an SCF integral-direct DF Coulomb and an
+`src.Base.factorization.isdf_jk.ISDFJK` gives an SCF integral-direct DF Coulomb and an
 exchange built from the interpolative separable density fit,
 
     K = X^T [Z .* (X D X^T)] X,   X[P,mu] = chi_mu(r_P),   Z = M^T V M.
@@ -14,7 +14,7 @@ as the finite-difference step shrinks). Only the exchange term is replaced:
           + dE_disp,        W = C n eps C^T,
 
 every two-electron and grid term at fixed density, each in fixed tiles over
-the ranks (`src.Base.skeleton_tiles`): the one-electron and overlap terms by
+the ranks (`src.gradients.skeleton_tiles`): the one-electron and overlap terms by
 atoms, the Coulomb term (the Coulomb half of the fitted Fock skeleton at
 g = D) by auxiliary tiles, the xc energy on the moving Becke grid by grid
 tiles, and the exchange on the row fit's tiles. Tile addends are summed in
@@ -61,15 +61,14 @@ from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import rks as rks_grad
 from pyscf.solvent import pcm as pyscf_pcm
 
-from src.Base.dispersion import dispersion_gradient
-from src.Base.pcm_derivatives import solvation_gradient
-from src.Base.isdf_jk import (ISDFJK, _base_functional,
-                              mean_field_skeleton_force)
-from src.Base.skeleton_tiles import (fitted_coulomb_energy_skeleton,
-                                     one_electron_energy_skeleton,
-                                     xc_energy_grid_skeleton)
+from src.Base.pyscf.dispersion import dispersion_gradient
+from src.environments.pcm_derivatives import solvation_gradient
+from src.Base.factorization.isdf_jk import ISDFJK, base_functional, isdf_jk
+from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
+                                          one_electron_energy_skeleton,
+                                          xc_energy_grid_skeleton)
 from src.gradients.isdf_derivatives import (
-    _auxmol_of, exchange_fit, isdf_exchange_skeleton, isdf_scf_handle,
+    auxmol_of, exchange_fit, isdf_exchange_skeleton, isdf_scf_handle,
     mean_field_exchange_wanted, require_fitted_coulomb)
 from src.gradients.one_electron import one_electron_gradient
 
@@ -139,7 +138,32 @@ def attach_isdf_gradient(mf):
 
     mf.nuc_grad_method = types.MethodType(lambda m: _ISDFGradients(m), mf)
     mf.Gradients = mf.nuc_grad_method
+    # the hook a continuum wrapped around this mean field rebinds the force
+    # with (`SolventScreening`), without importing this layer
+    mf.force_hook = attach_isdf_gradient
     return mf
+
+
+def isdf_jk_with_force(mf, **kwargs):
+    """`isdf_jk(mf, **kwargs)` with the ISDF force attached: the mean field
+    every route that takes a nuclear force from it builds."""
+    return attach_isdf_gradient(isdf_jk(mf, **kwargs))
+
+
+def mean_field_skeleton_force(mf):
+    """dE/dR of the energy this mean field reported, whatever built its exchange.
+
+    One call site for every correlated chain that adds a Lagrangian on top of
+    the mean-field force. pyscf's gradient is right for a fitted reference and
+    wrong for an interpolated one, and the correct interpolated force exists,
+    so the choice is a dispatch and not a refusal.
+    """
+    if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+        return np.asarray(isdf_mean_field_gradient(mf))
+    g0 = mf.Gradients()
+    if hasattr(mf, 'xc'):
+        g0.grid_response = True
+    return np.asarray(g0.kernel())
 
 
 def isdf_mean_field_gradient(mf, fit=None):
@@ -160,7 +184,7 @@ def isdf_mean_field_gradient(mf, fit=None):
     dm = np.asarray(mf.make_rdm1(mf.mo_coeff, mf.mo_occ))
     dme = rhf_grad.make_rdm1e(mf.mo_energy, mf.mo_coeff, mf.mo_occ)
     handle = isdf_scf_handle(mf)
-    auxmol = handle.auxmol if handle is not None else _auxmol_of(mf)
+    auxmol = handle.auxmol if handle is not None else auxmol_of(mf)
     one_electron = one_electron_gradient(mf)
     grad = one_electron.grad_nuc(mol)
     # the generator's with_rinv_at_nucleus writes its molecule: a private one
@@ -169,7 +193,7 @@ def isdf_mean_field_gradient(mf, fit=None):
     grad = grad + fitted_coulomb_energy_skeleton(mol, auxmol, dm)
     if hasattr(mf, 'xc'):
         grad = grad + xc_energy_grid_skeleton(
-            mol, mf.grids, mf._numint, _base_functional(mf.xc), dm)
+            mol, mf.grids, mf._numint, base_functional(mf.xc), dm)
         if mf.do_nlc():
             grad = grad + _nlc_gradient(mf, dm)
     grad = grad + dispersion_gradient(mf)

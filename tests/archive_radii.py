@@ -10,12 +10,16 @@ import pathlib
 import shutil
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-RADII = pathlib.Path('src') / 'Base' / 'data' / 'optimized_radii.json'
+RADII = pathlib.Path('src') / 'Base' / 'factorization' / 'data' / 'optimized_radii.json'
+#: Where an extracted tree keeps its table: as above in current trees,
+#: under src/Base/data.
+ARCHIVED_RADII = (RADII, pathlib.Path('src') / 'Base' / 'data' / 'optimized_radii.json')
 
 
 def install_current_radii(tree):
     """Overwrite the radii table of the extracted tree `tree` with this
     checkout's."""
-    target = pathlib.Path(tree) / RADII
-    assert target.parent.is_dir(), f'{tree} is not an extracted src tree'
+    target = next((pathlib.Path(tree) / p for p in ARCHIVED_RADII
+                   if (pathlib.Path(tree) / p).parent.is_dir()), None)
+    assert target is not None, f'{tree} is not an extracted src tree'
     shutil.copy(REPO / RADII, target)

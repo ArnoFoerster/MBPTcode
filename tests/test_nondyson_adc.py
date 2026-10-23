@@ -27,8 +27,8 @@ from pyscf import gto, scf, adc
 
 from src.SingleReference.ADC.nondyson_isr import NonDysonISR
 from src.SingleReference.ADC.precursor_classes import class_configs
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_antisymmetrized_spin_integrals)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_antisymmetrized_spin_integrals)
 from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.generated_runtime import requires_runtime
 

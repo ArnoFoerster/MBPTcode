@@ -7,7 +7,7 @@ adjoint does (G_bar = -W Z^T, `separable_ri.fit_rows_adjoints`). On
 water/cc-pVDZ RHF, the BSE@GW excitation force of a sliced Davidson chain:
 the four Casida-level seeds at its reverse call, every element moved one ulp
 up or down by `ULP_DRAWS` fixed draws, are folded through the chain's own
-fold on its own forward pieces (which, unmoved, give the force to a few
+fold on its own forward (which, unmoved, give the force to a few
 ulp), and
 the force moves at most `FIT_ADJOINT_ULP_RESPONSE_MAX`, on the whole fit and
 on the row fit alike (6.5e-13 to 1.0e-12 and 2.7e-13 to 5.2e-13 Ha/Bohr).
@@ -23,12 +23,12 @@ import pytest
 import scipy.linalg
 from pyscf import gto
 
-from src.Base.separable_ri import fit_settings
-from src.Base.constants import (FIT_ADJOINT_ULP_RESPONSE_MAX,
-                                FIT_CHOLESKY_BLOCK)
-from src.Base.numerics import numerics_of
+from src.Base.factorization.separable_ri import fit_settings
+from src.Base.numerics.constants import (FIT_ADJOINT_ULP_RESPONSE_MAX,
+                                         FIT_CHOLESKY_BLOCK)
+from src.Base.numerics.numerics import numerics_of
 from src.gradients import isdf_derivatives
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.test_chain_sliced_factors import BASIS, H2O, chain_scf
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
@@ -78,20 +78,20 @@ def ulp_responses(**fit):
         mol, chain_scf, mf=chain_scf(mol),
         numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': True, **fit})))
     rec = {}
-    seeds_of = chain._casida_seeds
+    seeds_of = chain.follower._casida_seeds
 
-    def probed(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        rec.update(pieces=pieces,
+    def probed(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        rec.update(shared=shared,
                    seeds=tuple(np.array(a, copy=True) for a in out))
         return out
 
-    chain._casida_seeds = probed
+    chain.follower._casida_seeds = probed
     g = np.asarray(chain.excitation_gradient()[0])
 
     def fold(seeds):
-        return np.asarray(chain._fold_to_nuclei(
-            rec['pieces'], *[np.array(a, copy=True) for a in seeds])[0])
+        return np.asarray(chain.reverse.fold_to_nuclei(
+            rec['shared'], *[np.array(a, copy=True) for a in seeds])[0])
 
     assert_same(fold(rec['seeds']), g, quantity='gradient',
                 label='the unmoved seeds refolded')

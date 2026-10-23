@@ -50,7 +50,7 @@ if __name__ == '__main__':
     # --- worker count: the keyword, else OMP_NUM_THREADS, else the affinity
     # mask; never above the mask (with a warning) or the state count; Slurm's
     # variables are not read ---
-    from src.SingleReference.GW.qp_energy import _resolve_workers
+    from src.SingleReference.GW.qp_energy import resolve_workers
     saved_env = {k: os.environ.get(k) for k in ('SLURM_CPUS_PER_TASK',
                                                  'OMP_NUM_THREADS')}
     saved_mask = getattr(os, 'sched_getaffinity', None)
@@ -76,7 +76,7 @@ if __name__ == '__main__':
                     os.environ[name] = value
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter('always')
-                got = _resolve_workers(keyword, n_states)
+                got = resolve_workers(keyword, n_states)
             warned = any('OMP_PROC_BIND' in str(w.message) for w in caught)
             all_ok &= check(
                 got == expected and warned == warns,
@@ -96,11 +96,11 @@ if __name__ == '__main__':
             os.sched_getaffinity = saved_mask
 
     from pyscf import gto, scf, dft, df
-    from src.Base.constants import HARTREE_TO_EV, get_method_info
-    from src.Base.pyscf_interface import (get_orbital_energies,
+    from src.Base.numerics.constants import HARTREE_TO_EV, get_method_info
+    from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                           get_density_fitting_coefficients)
     from src.SingleReference.GW.qp_energy import (
-        calc_qp_energy, _casida_spectrum, _self_energy_amplitudes,
+        calc_qp_energy, casida_spectrum, _self_energy_amplitudes,
         qp_energies_from_spectrum, _static_correction)
     from src.SingleReference.GW.self_energy import SelfEnergySolver
     from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -116,7 +116,7 @@ if __name__ == '__main__':
         se = SelfEnergySolver(eps, df_coeff=coeff, spin_mode='restricted')
         w_aux = lr.static_screening_aux(nocc)
         infos = {'GW': get_method_info('GW')}
-        spectrum = _casida_spectrum(lr, nocc, 'RPA', w_aux, False, infos,
+        spectrum = casida_spectrum(lr, nocc, 'RPA', w_aux, False, infos,
                                     ['GW'], False, True)
         out = {}
         for i, p in enumerate(states):
@@ -178,7 +178,7 @@ if __name__ == '__main__':
                                        spin_mode='restricted')
             w_aux_ = lr_.static_screening_aux(nocc)
             infos = {'GW': get_method_info('GW')}
-            spectrum_ = _casida_spectrum(lr_, nocc, 'RPA', w_aux_, False, infos,
+            spectrum_ = casida_spectrum(lr_, nocc, 'RPA', w_aux_, False, infos,
                                          ['GW'], False, True)
             xc_orb = _static_correction(mf, mol, None, None, 'alpha', False)
             subset = [nocc, 2, nocc - 1]
@@ -221,20 +221,22 @@ if __name__ == '__main__':
     qp_module.qp_energies_from_spectrum = recording_scan
     try:
         from src.SingleReference.GW.evGW import EvGWNotConverged
-        try:
+        with warnings.catch_warnings():
+            # two cycles need not converge; the scans are counted
+            warnings.simplefilter('ignore', EvGWNotConverged)
             calc_qp_energy(mf, mode='casida', self_consistency='evGW',
                            n_workers=3, max_cycle=2)
-        except EvGWNotConverged:
-            pass        # two cycles need not converge; the scans are counted
     finally:
         qp_module.qp_energies_from_spectrum = real_scan
     all_ok &= check(len(seen) > 0 and set(seen) == {3},
                     "evGW: n_workers=3 reaches every cycle's scan",
                     f'{len(seen)} scans, n_workers seen {sorted(map(str, set(seen)))}')
 
-    # --- threadpoolctl is a hard dependency, bound when the module loads ---
-    all_ok &= check(getattr(qp_module, 'threadpool_limits', None) is not None,
-                    'threadpoolctl: imported at module load, no serial fallback')
+    # --- the state pool is the process's row pool under the BLAS guard ---
+    all_ok &= check(getattr(qp_module, 'row_map', None) is not None
+                    and getattr(qp_module, 'blas_single_threaded', None) is not None,
+                    'the scan runs on Base.utils.threads: row_map under '
+                    'blas_single_threaded, bound at module load')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     sys.exit(0 if all_ok else 1)

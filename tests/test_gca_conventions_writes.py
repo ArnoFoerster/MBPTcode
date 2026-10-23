@@ -6,7 +6,7 @@ pole-strength flags and the outside curve THROUGH the resolved view, which is th
 storage while every orbital holds its own slot and a re-indexed copy
 otherwise, puts a first solve's seed at a geometry where two orbitals have
 traded slots into a discarded copy: `_freeze_qp_branch` says "frozen here
-for the first time" on every repeat and `_qp_set_solve`'s loop never ends.
+for the first time" on every repeat and `qp_set_solve`'s loop never ends.
 The view is read-only, every write is a method of `FrozenConventions` that
 takes the view, and a
 write through a view whose indices are not the slots is refused.
@@ -16,9 +16,9 @@ Planted: six orbitals, slots 2 and 3 held by each other's index (`perm`).
 import numpy as np
 import pytest
 
-from src.Base.numerics import Numerics
-from src.gradients.conventions import FrozenConventions, ResolvedConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.conventions import FrozenConventions, ResolvedConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 
 NORB, NOCC = 6, 3
 #: slot -> index here: the HOMO and LUMO slots traded places
@@ -42,7 +42,7 @@ def test_a_first_seed_at_a_permuted_geometry_is_refused_not_lost():
     route_out = {'roots': {2: -0.31}, 'weights': {2: 0.9},
                  'sop_poles': {2: [0.5, 0.9]}}
     with pytest.raises(AssertionError, match='other slots'):
-        chain._freeze_qp_branch(route_out, np.zeros(NORB), 0.0, [2])
+        chain.quasiparticles._freeze_qp_branch(route_out, np.zeros(NORB), 0.0, [2])
     assert not chain.conventions.qp_seeds
     assert not chain.conventions.qp_seed_weights
 
@@ -52,7 +52,7 @@ def test_a_seed_already_frozen_is_read_at_a_permuted_geometry():
     chain.conventions.qp_seeds[3] = -0.31
     chain.conventions.qp_seed_weights[3] = 0.9
     route_out = {'roots': {2: -0.30}, 'weights': {2: 0.8}}
-    assert chain._freeze_qp_branch(route_out, np.zeros(NORB), 0.0,
+    assert chain.quasiparticles._freeze_qp_branch(route_out, np.zeros(NORB), 0.0,
                                        [2]) is False
     assert chain.conventions.qp_seeds == {3: -0.31}
     assert dict(chain.resolved.qp_seeds) == {2: -0.31}
@@ -106,8 +106,8 @@ def test_a_view_of_another_object_is_refused():
 def test_writes_through_the_storage_view_land_in_the_storage():
     chain = planted(perm=None)
     route_out = {'roots': {2: -0.31}, 'weights': {2: 0.9}}
-    assert chain._freeze_qp_branch(route_out, np.zeros(NORB), 0.0, [2])
+    assert chain.quasiparticles._freeze_qp_branch(route_out, np.zeros(NORB), 0.0, [2])
     assert chain.conventions.qp_seeds == {2: -0.31}
     assert chain.conventions.qp_seed_weights == {2: 0.9}
-    assert not chain._freeze_qp_branch(route_out, np.zeros(NORB), 0.0,
+    assert not chain.quasiparticles._freeze_qp_branch(route_out, np.zeros(NORB), 0.0,
                                            [2])

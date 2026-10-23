@@ -9,13 +9,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import SEPARABLE_AUX_GAUGE
-from src.Base.numerics import Numerics
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
+from src.Base.numerics.constants import SEPARABLE_AUX_GAUGE
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from tests.isdf_test_grid import g1

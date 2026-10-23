@@ -44,22 +44,22 @@ import pytest
 from pyscf import gto, scf
 from pyscf.solvent.pcm import modified_Bondi
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV, HARTREE_TO_MEV
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import HARTREE_TO_EV, HARTREE_TO_MEV
 from src.Base.declaration import ChargedExcitation, Excitation, GroundState
-from src.Base.environment import (NoEnvironment, PointCharges, attach_environment,
-                                  equilibrium_environment)
-from src.Base.solvent_screening import SolventScreening, attach_solvent_screening
+from src.environments.environment import PointCharges, equilibrium_environment
+from src.Base.environment_seam import NoEnvironment, attach_environment
+from src.environments.solvent_screening import SolventScreening, attach_solvent_screening
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import (
     environment_quasiparticle_shift, equilibrium_level_shift,
     equilibrium_solvation_energy)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import MeanFieldQPSurface, RPAQPSurface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.rpa_bse_surface import MeanFieldQPSurface, RPAQPSurface
 from src.properties.characters import ct_character, roots
 from src.properties.excitations import SurfaceSpec, surface_of
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from src.properties.vibronic import reorganization_four_point
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1, g1_numerics
@@ -434,7 +434,7 @@ def test_the_switch_reaches_a_declared_surface(water):
     energies = {}
     for e in (env, equilibrium_environment(env)):
         spec = SurfaceSpec(GroundState('dft', 'hf'), environment=e,
-                           numerics={'nroots': 3})
+                           numerics=numerics_of({'nroots': 3}))
         surface = surface_of(spec, Excitation('triplet', root=1), water, rhf_tight)
         named = 'equilibrium' in surface.physics.environment
         assert named == bool(e.equilibrium)

@@ -12,14 +12,14 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import QPStates
 from src.SingleReference.LinearResponse import davidson
 from src.SingleReference.LinearResponse.davidson import UnstableReference
-from src.gradients.excited_state import ExcitedStateChain
-from src.properties.surfaces import EXCITED_NUMERICS, excited_numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.surface_factory import EXCITED_READS, excited_numerics
 from src.photophysics.chain import chain_spec
 from src.photophysics.cli import parser
 from tests.isdf_test_grid import g1_numerics
@@ -47,11 +47,11 @@ def test_the_probe_is_a_default_of_every_chain():
     """On by default for every chain (and so every SurfaceSpec), a numeric a
     spec may name, recorded only where it is not the default."""
     assert Numerics().bse.probe is True
-    assert 'probe' in EXCITED_NUMERICS
+    assert 'bse.probe' in EXCITED_READS
     spec = chain_spec(declaration(qp_states=QPStates()), None)
-    assert 'probe' not in dict(spec.numerics)
+    assert spec.numerics.bse.probe is True
     off = chain_spec(declaration('--no-probe', qp_states=QPStates()), None)
-    assert dict(off.numerics)['probe'] is False
+    assert off.numerics.bse.probe is False
 
 
 def _negative_probe(*args, **kwargs):
@@ -69,7 +69,7 @@ def test_a_chain_step_is_refused_by_the_probe(water, monkeypatch):
     omega = real.excitation()
     assert omega > 0
     assert 'probe' not in excited_numerics(real)
-    monkeypatch.setattr(davidson, '_lowest_amb_from_action', _negative_probe)
+    monkeypatch.setattr(davidson, 'lowest_amb_from_action', _negative_probe)
     chain = ExcitedStateChain(mol, scf_factory, mf=mf,
                               numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'nroots': 4})))
     with pytest.raises(UnstableReference):

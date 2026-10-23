@@ -8,8 +8,8 @@ since that pipeline is independently validated against NWChem's CCSDT.
 import numpy as np
 import pyscf
 from pyscf import scf
-from src.Base.environment import environment_of
-from src.Base.pyscf_interface import (
+from src.Base.environment_seam import environment_of
+from src.Base.pyscf.pyscf_interface import (
     get_effective_one_electron_integrals,
     get_antisymmetrized_spin_block_eri,
     get_orbital_energies,
@@ -148,7 +148,7 @@ def build_restricted_integrals_from_mf(mf):
     spin-restricted closed-shell pyscf mean-field object.
 
     Thin wrapper -- all the actual integral math already lives in
-    src/Base/pyscf_interface.py: get_effective_one_electron_integrals (spatial
+    src/Base/pyscf/pyscf_interface.py: get_effective_one_electron_integrals (spatial
     Fock), get_antisymmetrized_spin_block_eri (spatial physicist g_aaaa/
     g_bbbb/g_abab -- g_bbbb == g_aaaa for RHF, not returned here since the
     restricted CCSDT equations never need it as a separate array, see

@@ -22,14 +22,15 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.distributed_df import distributed_mean_field, release_distributed
-from src.Base import separable_ri
-from src.Base.distributed_isdf_jk import distributed_isdf_jk, scf_pair_layout
-from src.Base.isdf_jk import frozen_pair_layout, isdf_grid, isdf_jk
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import run_simulated
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
+from src.Base.factorization.distributed_df import distributed_mean_field, release_distributed
+from src.Base.factorization import separable_ri
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk, scf_pair_layout
+from src.Base.factorization.isdf_jk import frozen_pair_layout, isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.isdf_test_grid import g1
 
 ATOM = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.58; H 0 -0.94 -0.58'
@@ -54,7 +55,7 @@ def _reference():
 
 
 def _unrun(mol):
-    mf = isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol)))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=AUXBASIS, counts=g1(scf.RHF(mol)))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     return mf
 

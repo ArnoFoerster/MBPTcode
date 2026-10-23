@@ -35,15 +35,16 @@ from dataclasses import dataclass, field
 import numpy as np
 from pyscf.data import radii
 
-from src.Base.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
-                                CONFORMER_BOND_SCALE, CONFORMER_ENERGY_TOL,
-                                CONFORMER_MAX_AUTOMORPHISMS,
-                                CONFORMER_MAX_STARTS, CONFORMER_RMSD_TOL,
-                                CONFORMER_SCREEN_CONV,
-                                CONFORMER_SINGLE_BOND_RATIO,
-                                CONFORMER_TEMPERATURE, CONFORMER_TORSION_GRID,
-                                HARTREE_TO_EV)
-from src.Base.geometry import molecule_at
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
+                                         CONFORMER_BOND_SCALE, CONFORMER_ENERGY_TOL,
+                                         CONFORMER_MAX_AUTOMORPHISMS,
+                                         CONFORMER_MAX_STARTS, CONFORMER_RMSD_TOL,
+                                         CONFORMER_SCREEN_CONV,
+                                         CONFORMER_SINGLE_BOND_RATIO,
+                                         CONFORMER_TEMPERATURE, CONFORMER_TORSION_GRID,
+                                         HARTREE_TO_EV)
+from src.Base.geometry.body_frame import centred, kabsch_rotation
+from src.Base.geometry.geometry import molecule_at
 from src.Base.step_failed import StepFailed
 from src.properties.optimize import relax
 
@@ -368,13 +369,8 @@ def kabsch_rmsd(a, b):
     with its mirror image in every comparison, including the ones where that is
     a different molecule.
     """
-    a0 = np.asarray(a, float) - np.asarray(a, float).mean(0)
-    b0 = np.asarray(b, float) - np.asarray(b, float).mean(0)
-    u, _, vt = np.linalg.svd(b0.T @ a0)
-    # A planar or collinear pair makes the determinant vanish, where np.sign
-    # would return 0 and turn the rotation into a projection.
-    d = 1.0 if np.linalg.det(u @ vt) >= 0.0 else -1.0
-    rot = u @ np.diag([1.0, 1.0, d]) @ vt
+    a0, b0 = centred(a), centred(b)
+    rot = kabsch_rotation(b, a)
     return float(np.sqrt(((b0 @ rot - a0) ** 2).sum(1).mean()))
 
 

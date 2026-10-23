@@ -1,9 +1,8 @@
 """Small pieces every stage shares: state labels, the log line, and what a
 walk's record keeps of its optimizer's."""
 import time
-import warnings
 
-from src.Base.utils.mpi_grid import is_root
+from src.Base.utils.parallel.mpi_grid import is_root
 from src.properties.excitations import relaxation_fields
 
 
@@ -77,33 +76,3 @@ def refreeze_summary(record):
                if record.get('refreeze') == 'not converged' else ''))
 
 
-class WalkNotRelaxed(RuntimeWarning):
-    """A walk that stopped short of a minimum: its last pass did not
-    converge, its refreeze drift stayed above REFREEZE_TOL_MEV, or its saddle
-    check did not end on a minimum. The stage carries on where the walk
-    stopped and its record says so (`numerical_flags`)."""
-
-
-def relaxation_flags(stage, info):
-    """{flag: what it says} of the walk of `stage` ('s0', 's1', 't1', or a
-    saddle check's escape walk) whose record is `info`, each warned about
-    (`WalkNotRelaxed`): 'walk_not_converged' (the last walk's status) and
-    'refreeze_not_converged' (the drift, meV). Empty for a relaxed walk; the stage
-    carries on where the walk stopped (refuse
-    inputs, warn numerics)."""
-    name = stage.upper()
-    last = info.get('refreeze_info') or info
-    flags = {}
-    if not last.get('converged'):
-        flags['walk_not_converged'] = str(last.get('status'))
-        warnings.warn(f'{name} did not relax: {last.get("status")}; the '
-                      f'stage carries on where the walk stopped and its '
-                      f'record is flagged', WalkNotRelaxed, stacklevel=2)
-    if info.get('refreeze') == 'not converged':
-        drift = info.get('refreeze_drift_meV')
-        flags['refreeze_not_converged'] = drift
-        warnings.warn(f'{name}: the conventions rebuilt at its minimum move '
-                      f'its energy by {drift:+.3f} meV, above '
-                      f'REFREEZE_TOL_MEV; the stage carries on and its '
-                      f'record is flagged', WalkNotRelaxed, stacklevel=2)
-    return flags

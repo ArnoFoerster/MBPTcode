@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.Base.constants import (DF_CHECK_ORBITAL_MATCH_TOL_EV, EV_TO_MEV,
-                                HARTREE_TO_EV, ISDF_GRID_ACCURACY_TARGET_EV)
+from src.Base.numerics.constants import (DF_CHECK_ORBITAL_MATCH_TOL_EV, EV_TO_MEV,
+                                         HARTREE_TO_EV, ISDF_GRID_ACCURACY_TARGET_EV)
 from src.photophysics import df_check, stages
 from src.photophysics.cli import declaration_of, parser
 from tests.photophysics_cases import FORMALDEHYDE, run_in

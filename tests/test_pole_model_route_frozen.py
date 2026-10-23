@@ -30,15 +30,15 @@ from pyscf import dft, gto
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.numerics import Numerics  # noqa: E402
-from src.Base.constants import (QP_CD_NEWTON_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.Base.numerics.constants import (QP_CD_NEWTON_TOL,  # noqa: E402
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates  # noqa: E402
 from src.SingleReference.GW.qp_states import resolve_qp_states  # noqa: E402
 from src.SingleReference.GW.sum_over_poles import compressible  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.gradients.qp_space_time import (  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
+from src.gradients.gwbse.qp_space_time import (  # noqa: E402
     FALLBACK_ROUTE, frozen_on_pole_model, pole_model_route)
 from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
@@ -60,8 +60,8 @@ def factory(mol):
 def set_solve(chain, mol, mf):
     """(roots, routes) of one solve of the chain's set at `mol`."""
     x_mo, d, eps, mu = chain._factors_for(mol, mf)[:4]
-    out, _ = chain._qp_set_solve(
-        x_mo, d, eps, mu, chain._xc_correction(mf, chain.resolved.qp_set),
+    out, _ = chain.quasiparticles.qp_set_solve(
+        x_mo, d, eps, mu, chain.xc_correction(mf, chain.resolved.qp_set),
         np.zeros(len(chain.resolved.qp_set)))
     return np.asarray(out[0], float), dict(chain.qp_diagnostics['routes'])
 

@@ -43,22 +43,21 @@ import time
 
 import numpy as np
 
-from src.Base.constants import (DF_CHECK_BSE_CONV_TOL,
-                                DF_CHECK_ORBITAL_MATCH_TOL_EV,
-                                DF_CHECK_ROOTS_ABOVE_FOLLOWED, EV_TO_MEV,
-                                HARTREE_TO_EV,
-                                ISDF_GRID_ACCURACY_TARGET_EV,
-                                SCF_ENERGY_CONV_TOL, SCF_ENERGY_GRAD_TOL)
-from src.Base.environment import attach_environment
-from src.Base.geometry import molecule_at
-from src.Base.pyscf_interface import occupied_count
-from src.Base.separable_ri import UnrepresentedOrbitals
+from src.Base.numerics.constants import (DF_CHECK_BSE_CONV_TOL,
+                                         DF_CHECK_ORBITAL_MATCH_TOL_EV,
+                                         DF_CHECK_ROOTS_ABOVE_FOLLOWED, EV_TO_MEV,
+                                         HARTREE_TO_EV,
+                                         ISDF_GRID_ACCURACY_TARGET_EV,
+                                         SCF_ENERGY_CONV_TOL, SCF_ENERGY_GRAD_TOL)
+from src.Base.environment_seam import attach_environment
+from src.Base.geometry.geometry import molecule_at
+from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.factorization.separable_ri import UnrepresentedOrbitals
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from src.photophysics import chain
 from src.photophysics.records import label, log
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 
 #: The spins whose followed root each checked stage compares: the stage's
 #: followed state(s) (the vertical stage holds both).

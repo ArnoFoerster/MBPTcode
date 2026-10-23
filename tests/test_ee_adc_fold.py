@@ -96,10 +96,10 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       application of the operator (with solver='newton' the matvecs
       solve_symmetric received), a zero heartbeat interval prints heartbeats, and
       no trace outlives a call, one that raises included.
-  26. ee_spin_blocks._ew, the elementwise pass split over the thread pin, equals the
+  26. ee_spin_blocks.ew, the elementwise pass split over the thread pin, equals the
       plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
       difference with an (a, b)-transposed operand, an in-place sum, a scalar
-      product, a quotient, and a broadcast shape it leaves to NumPy; _ew and _ksum
+      product, a quotient, and a broadcast shape it leaves to NumPy; ew and ksum
       on two or three rows use the pin's one executor, none keyed by the row count.
   27. ee_spin_blocks.ooov_ia and ovvv_ia, their products summed over j-slabs on 4
       threads, equal the block-wise einsum on anti4's blocks for an X without a
@@ -138,16 +138,16 @@ The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
 solver='newton' in checks 4, 5, 8, 12, 13, 18, 19, 21 and 23, where the default meets
 the same inputs without it, as their added lines check.
-  33. ee_spin_blocks._stream runs fn once per slab of an index range, the last
+  33. ee_spin_blocks.stream runs fn once per slab of an index range, the last
       slab shorter than the width, with more workers than slabs, and sums the
-      outputs exactly; slabs that split their own _ew over as many threads as
-      there are workers return; _slab_plan gives one slab when the budget holds
+      outputs exactly; slabs that split their own ew over as many threads as
+      there are workers return; slab_plan gives one slab when the budget holds
       every index, else workers x width within it, never below one index.
   34. the slab forms ovvv_ijab_pij_slab, ovvv_ia_slab and ooov_ia_slab (no 5, nv 7,
       slabs of width 2 over the second occupied index) equal (1 - P_ij) ovvv_ijab
       restricted to the slab, ovvv_ia and ooov_ia summed over the slabs, to 1e-13
       relative; one slab over every j takes one product against <ic|ab>, both
-      spins at once; _ksum splits a product on the main thread and keeps it whole
+      spins at once; ksum splits a product on the main thread and keeps it whole
       off it.
   35. build_operator's pieces['K'] at adc2 and gf2, the kernel streamed over slabs of
       the doubles' second occupied index, equals the V, divide, Vt path at 0.3 Ha
@@ -177,8 +177,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df, ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from tests.adc_common import check
 from tests.pins import same_bar
@@ -235,7 +235,7 @@ def check_gf2(eps, B, no):
                                                     pieces=True)
     aop1, _, _ = ee_r_sigma_df.build_operator(eps, B, no, level='adc1')
     ok &= check(d_gf2 == d_adc2, 'gf2 dimensions equal adc2')
-    ok &= check(ee_r_sigma._BLOCK_ORDERS['gf2'] == (1, 1, 0),
+    ok &= check(ee_utils.BLOCK_ORDERS['gf2'] == (1, 1, 0),
                 'gf2 block order (1, 1, 0)')
     be = P2['be']
     rng = np.random.default_rng(11)
@@ -1602,10 +1602,10 @@ def check_trace(eps, B, no):
 
 
 def check_threaded_elementwise():
-    """_ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
-    array above the size where the pass is split; _ew and _ksum over fewer rows
+    """ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
+    array above the size where the pass is split; ew and ksum over fewer rows
     than the pin take the pin's executor, so one pool serves every slab width."""
-    from src.Base.utils import threads as th
+    from src.Base.utils.parallel import threads as th
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     rng = np.random.default_rng(3)
     a = rng.standard_normal((64, 32, 32, 32))
@@ -1615,19 +1615,19 @@ def check_threaded_elementwise():
     os.environ['OMP_NUM_THREADS'] = '4'
     try:
         split = a.size >= sb._EW_MIN and sb._threads() == 4
-        z = sb._ew(np.subtract, a, b.transpose(0, 1, 3, 2))
+        z = sb.ew(np.subtract, a, b.transpose(0, 1, 3, 2))
         s = a.copy()
-        sb._ew(np.add, s, b, out=s)
+        sb.ew(np.add, s, b, out=s)
         cases = {'difference, transposed operand': (z, a - b.transpose(0, 1, 3, 2)),
                  'in-place sum': (s, a + b),
-                 'scalar product': (sb._ew(np.multiply, a, -1.0), -a),
-                 'quotient': (sb._ew(np.true_divide, a, d), a / d),
-                 'broadcast, left to NumPy': (sb._ew(np.multiply, a, d[0]), a * d[0])}
+                 'scalar product': (sb.ew(np.multiply, a, -1.0), -a),
+                 'quotient': (sb.ew(np.true_divide, a, d), a / d),
+                 'broadcast, left to NumPy': (sb.ew(np.multiply, a, d[0]), a * d[0])}
         pid = os.getpid()
         before = {k for k in th._ROW_POOLS if k[0] == pid}
-        sb._ew(np.add, a.reshape(2, -1), 1.0)
-        sb._ew(np.add, rng.standard_normal((3, 400000)), 1.0)
-        sb._ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
+        sb.ew(np.add, a.reshape(2, -1), 1.0)
+        sb.ew(np.add, rng.standard_normal((3, 400000)), 1.0)
+        sb.ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
         pools = {k[1] for k in th._ROW_POOLS if k[0] == pid} - {k[1] for k in before}
     finally:
         if keep is None:
@@ -1639,13 +1639,13 @@ def check_threaded_elementwise():
                'the threaded elementwise pass equals the plain ufunc bit for bit',
                f'split {split}, differing {bad}')
     ok &= check(pools <= {4},
-                '_ew and _ksum on 2 and 3 rows take the pin\'s executor, none keyed '
+                'ew and ksum on 2 and 3 rows take the pin\'s executor, none keyed '
                 'by the row count', f'new pools keyed {sorted(pools)}')
     return ok
 
 
 def check_split_contractions():
-    """ooov_ia and ovvv_ia, summed over j-slabs by _ksum with the pin at 4 threads,
+    """ooov_ia and ovvv_ia, summed over j-slabs by ksum with the pin at 4 threads,
     against the block-wise einsum on anti4's blocks, for an X without a flip
     parity and with each one, to 1e-12 relative."""
     from src.SingleReference.ADC.eeADC import ee_equations as eq
@@ -2094,8 +2094,8 @@ def check_default_polish():
 
 
 def check_stream():
-    """_stream sums fn over slabs exactly once each, with a last slab shorter than
-    the width and more workers than slabs; a slab whose own _ew pass splits over
+    """stream sums fn over slabs exactly once each, with a last slab shorter than
+    the width and more workers than slabs; a slab whose own ew pass splits over
     as many threads as there are workers returns (on row_map's pool it hangs)."""
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     seen = []
@@ -2104,45 +2104,45 @@ def check_stream():
         seen.append((j0, j1))
         return [sb.SB({'aa': np.full((2, 2), float(j1 - j0))})], float(j1 - j0)
 
-    out, tot = sb._stream(fn, 5, 2, workers=24)
+    out, tot = sb.stream(fn, 5, 2, workers=24)
     ok = check(sorted(seen) == [(0, 2), (2, 4), (4, 5)] and tot == 5.0
                and np.array_equal(out[0].get('aa'), np.full((2, 2), 5.0)),
-               '_stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
+               'stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
                f'{sorted(seen)}, {tot}')
     a = np.ones((3, 1 << 19))
 
     def fn_ew(j0, j1):
-        return [sb._ew(np.multiply, a, 2.0)], float(j1 - j0)
+        return [sb.ew(np.multiply, a, 2.0)], float(j1 - j0)
 
     keep = os.environ.get('OMP_NUM_THREADS')
     os.environ['OMP_NUM_THREADS'] = '3'
     try:
-        out, tot = sb._stream(fn_ew, 3, 1, workers=3)
+        out, tot = sb.stream(fn_ew, 3, 1, workers=3)
     finally:
         if keep is None:
             del os.environ['OMP_NUM_THREADS']
         else:
             os.environ['OMP_NUM_THREADS'] = keep
     ok &= check(tot == 3.0 and np.array_equal(out[0], np.full(a.shape, 6.0)),
-                '_stream: slabs that split their own _ew over 3 threads, 3 workers',
+                'stream: slabs that split their own ew over 3 threads, 3 workers',
                 f'{tot}')
-    # _slab_plan(44 indices, 1000 elements per index, 10 blocks per slab), 3 workers
+    # slab_plan(44 indices, 1000 elements per index, 10 blocks per slab), 3 workers
     keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
     sb._stream_workers = lambda: 3
     try:
         plans = {}
         for fit in (12500, 10, 4, 0):
             sb._STREAM_GB = (fit + 0.5) * 8 * 1000 * 10 / 1e9
-            plans[fit] = sb._slab_plan(44, 1000, 10)
+            plans[fit] = sb.slab_plan(44, 1000, 10)
     finally:
         sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
     ok &= check(plans == {12500: (44, 1), 10: (3, 3), 4: (1, 3), 0: (1, 1)},
-                '_slab_plan: one slab when the budget holds all, else workers x width '
+                'slab_plan: one slab when the budget holds all, else workers x width '
                 'within it, never below one index', str(plans))
     # the budget follows MBPT_STREAM_GB of the environment, read at import; the
     # child finds src through the repository root this file put on sys.path
     code = ('from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb; '
-            'print(sb._STREAM_GB, sb._slab_plan(44, 1000, 10))')
+            'print(sb._STREAM_GB, sb.slab_plan(44, 1000, 10))')
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     path = os.pathsep.join(p for p in (root, os.environ.get('PYTHONPATH', '')) if p)
     knob = dict(os.environ, MBPT_STREAM_GB='0.0001', PYTHONPATH=path)   # 0.1 MB
@@ -2240,9 +2240,9 @@ def check_slab_contractions():
     keep = os.environ.get('OMP_NUM_THREADS')
     os.environ['OMP_NUM_THREADS'] = '4'
     try:
-        sb._ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
+        sb.ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
         th = threading.Thread(
-            target=lambda: sb._ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
+            target=lambda: sb.ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
         th.start()
         th.join()
     finally:
@@ -2251,7 +2251,7 @@ def check_slab_contractions():
         else:
             os.environ['OMP_NUM_THREADS'] = keep
     ok &= check(len(calls['main']) == 4 and calls['pool'] == [(0, 8)],
-                '_ksum splits on the main thread, keeps a product whole off it',
+                'ksum splits on the main thread, keeps a product whole off it',
                 str(calls))
     return ok
 
@@ -2308,7 +2308,7 @@ def check_streamed_kernel(eps, B, no):
             keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
             sb._STREAM_GB, sb._stream_workers = gb, (lambda w=workers: w)
             try:
-                plan = sb._slab_plan(no, per, live)
+                plan = sb.slab_plan(no, per, live)
                 ws, n2 = P['K'](y1, om, (1, 2))
                 ws0, n20 = P['K'](y1, om, ())
             finally:

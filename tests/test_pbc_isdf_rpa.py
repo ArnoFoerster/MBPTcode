@@ -26,11 +26,12 @@ from pyscf.pbc import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.utils.mpi_grid import run_simulated
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.Periodic import pbc_isdf_rpa as thcrpa
 from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
 from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts
+from src.SingleReference.Periodic.pbc_occupations import transition_window
 
 KMESH = [2, 2, 1]
 
@@ -129,6 +130,23 @@ def test_polarizability_is_negative_semidefinite(thc):
                                                np.array([0.5]))
         w = np.linalg.eigvalsh(Pi[0])
         assert w.max() < 1e-10 * max(1.0, abs(w).max())
+
+
+def test_a_nonpositive_determinant_is_warned_and_flagged():
+    """det(1 - V Pi) <= 0 is a numerical outcome (a broken Pi), not an input:
+    the block energy is still returned, from log|det|, with a RuntimeWarning
+    and the (q, w) recorded under flags['nonpositive_det'] (warn and flag,
+    never raise on numerics). Synthetic, so no SCF is needed:
+    V = 1 and Pi = diag(2, -1) give 1 - V Pi = diag(-1, 2)."""
+    Vq = np.eye(2)
+    Pi = np.array([np.diag([-0.5, -1.0]), np.diag([2.0, -1.0])])
+    flags = {}
+    with pytest.warns(RuntimeWarning, match='not positive'):
+        acc = thcrpa.ecorr_q_from_pi(Pi, Vq, np.array([1.0, 1.0]), q=3,
+                                     flags=flags)
+    assert flags == {'nonpositive_det': [(3, 1)]}
+    expected = (np.log(1.5 * 2.0) - 1.5 + np.log(2.0) + 1.0) / (2.0 * np.pi)
+    assert abs(acc - expected) < 1e-14
 
 
 #: `pbc_rpa.ri_rpa_ecorr(mf, nw=32)` on the KMESH fixture above. Pinned
@@ -419,7 +437,7 @@ def test_weighted_tau_route_matches_weighted_frequency(thc):
     T -> 0 limit stresses the IR representation, which is the right trade.
     """
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    _, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
+    _, e_max = transition_window(mo_energy, mo_occ)
     grid = TimeFrequencyGrid.ir(100.0, 1.5 * e_max, statistics='boson')
     Pi_t = thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
                                                           grid, KMESH)
@@ -441,7 +459,7 @@ def test_symmetrizing_tau_is_the_same_object(thc):
     deviation from the frequency route was exactly 0.500 at every beta.
     """
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    _, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
+    _, e_max = transition_window(mo_energy, mo_occ)
     grid = TimeFrequencyGrid.ir(100.0, 1.5 * e_max, statistics='boson')
     A = thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
                                                        grid, KMESH)
@@ -457,7 +475,7 @@ def test_weighted_tau_refuses_a_t0_grid(thc):
     (1 - e^{-beta Delta}) factor, and the two fail separately. So it is
     refused rather than silently used."""
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    e_min, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
+    e_min, e_max = transition_window(mo_energy, mo_occ)
     minimax = TimeFrequencyGrid.minimax(18, e_min, e_max)
     with pytest.raises(ValueError, match='bosonic IR grid'):
         thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,

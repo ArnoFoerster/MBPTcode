@@ -1,6 +1,6 @@
 """Every distributed route reproduces the serial answer under simulated ranks.
 
-`mpi_grid.simulated_world` runs each rank in a thread of this process and
+`simulated_comm.simulated_world` runs each rank in a thread of this process and
 reduces through shared memory, so the whole distributed code path (the tau
 partitions, the frequency partitions, the row split of Zt, every reduction
 and its placement) runs here without MPI. The wire protocol is tested by
@@ -95,22 +95,22 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base import separable_ri
-from src.Base.constants import (COMPOSED_GRAD_K, QP_GRAPHICAL_TOL,
-                                RANK_SPLIT_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL, SEPARABLE_AUX_GAUGE,
-                                TRANSFORM_FIT_RCOND)
-from src.Base.numerics import Numerics
-from src.Base.utils import time_frequency
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import (contiguous_block, distributed,
-                                     lockstep_stats, partition, replicate,
-                                     run_simulated)
-from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
-                                           TimeFrequencyGrid,
-                                           minimax_transform_weights,
-                                           sigma_fit_ranges)
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (COMPOSED_GRAD_K, QP_GRAPHICAL_TOL,
+                                         RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL, SEPARABLE_AUX_GAUGE,
+                                         TRANSFORM_FIT_RCOND)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.grids import time_frequency
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, distributed, lockstep_stats, partition, replicate)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
+                                                 TimeFrequencyGrid,
+                                                 minimax_transform_weights,
+                                                 sigma_fit_ranges)
 from src.SingleReference.GW import imaginary_time
 from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screened_interaction_rows,
@@ -127,20 +127,19 @@ from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_frequency_rows, chi0_imaginary_frequency,
     polarizability_rows_sweep, split_branches, static_screening_grid,
     static_screening_matrix, wave_items)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
-from src.gradients import factor_chain
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
-from src.gradients.qp_space_time import (qp_gradient_space_time,
-                                         qp_set_gradient)
-from src.gradients.reaction_field_adjoint import static_grid, static_screening
-from src.gradients.space_time_adjoint import (polarizability_tau,
-                                              rpa_energy_and_adjoint,
-                                              selfenergy_block_backward,
-                                              selfenergy_diag,
-                                              selfenergy_diag_backward,
-                                              sigma_transforms)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
+from src.gradients.rpa import factor_chain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.gwbse.qp_space_time import (qp_gradient_space_time,
+                                               qp_set_gradient)
+from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
+                                                  rpa_energy_and_adjoint,
+                                                  selfenergy_block_backward,
+                                                  selfenergy_diag_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
+from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from tests.pins import assert_same
 from tests.reduction_bounds import reduced_sum_verdict
 from tests.isdf_test_grid import g1

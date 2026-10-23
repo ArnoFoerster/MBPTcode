@@ -14,10 +14,10 @@ import types
 import pytest
 from pyscf import gto
 
-from src.Base.constants import HARTREE_TO_MEV, REFREEZE_TOL_MEV
+from src.Base.numerics.constants import HARTREE_TO_MEV, REFREEZE_TOL_MEV
 from src.photophysics import stages
-from src.photophysics.records import (WalkNotRelaxed, refreeze_summary,
-                                      relaxation_flags, walk_fields)
+from src.photophysics.records import refreeze_summary, walk_fields
+from src.properties.excitations import WalkNotRelaxed, relaxation_flags
 from tests.photophysics_cases import run_of
 
 

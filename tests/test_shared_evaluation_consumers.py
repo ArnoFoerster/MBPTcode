@@ -26,26 +26,26 @@ from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (ISDF_HESSIAN_MIN_GRID,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling,
-                                               configuration_coupling,
-                                               state_to_state_density)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling,
+                                                     configuration_coupling,
+                                                     state_to_state_density)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.blas_bar import assert_same, bar_with_drift
 from tests.pins import RECORDING_BLAS, matches
 from src.properties.hessian import require_hessian_counts
 from src.properties.optimize import relax
 from src.properties.spin_orbit import chain_manifolds
-from src.properties.surface import surface_mean_field
+from src.gradients.surface import surface_mean_field
 from src.properties.vibronic import relax_state
 from tests.isdf_test_grid import g1_numerics
 
@@ -59,8 +59,8 @@ PRODUCTION = SurfaceSpec(GroundState('dft', 'lrc-wpbeh'), environment=None,
                          chi0='space-time', residues='sop', solver='davidson',
                          factorization='isdf',
                          qp_states=QPStates(kind='frontier'),
-                         numerics={'grid_accuracy': GRID_ACCURACY,
-                                   'bse_adjoint': 'grid', 'nroots': 4})
+                         numerics=numerics_of({'grid_accuracy': GRID_ACCURACY,
+                                   'bse_adjoint': 'grid', 'nroots': 4}))
 
 
 def molecule(atom=H2O):
@@ -85,7 +85,7 @@ def isdf_lrc(mol):
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid(GRID_ACCURACY, BASIS, elements,
                                         auxbasis=AUX)
-    return converged(isdf_jk(base, auxbasis=AUX, counts=counts,
+    return converged(isdf_jk_with_force(base, auxbasis=AUX, counts=counts,
                              n_start=n_start))
 
 
@@ -142,8 +142,8 @@ def coupling_before(chain, m, n):
     forward, then a second for the vectors."""
     mol, mf = chain.mean_field()
     num, diags = chain.interstate_gradient(m, n, mol=mol, mf=mf)
-    _, pieces = chain._forward(mol, mf)
-    xn, yn = pieces[10], pieces[11]
+    solution = chain.forward(mol, mf)[1]
+    xn, yn = solution.x, solution.y
     goo, gvv = state_to_state_density(chain.nocc, xn[:, m], yn[:, m],
                                       xn[:, n], yn[:, n])
     return (num / diags['gap']
@@ -198,13 +198,13 @@ def test_analytic_ground_coupling_off_the_evaluation(case):
 def counted_forwards(chain):
     """`chain` counting its shared forward passes."""
     seen = {'n': 0}
-    shared = chain._shared_forward
+    shared = chain.shared_forward
 
     def counted(mol, mf):
         seen['n'] += 1
         return shared(mol, mf)
 
-    chain._shared_forward = counted
+    chain.shared_forward = counted
     return seen
 
 
@@ -250,7 +250,8 @@ def test_track_reaches_the_production_surface():
         PRODUCTION.ground_state, chi0='space-time', residues='sop',
         solver='davidson', factorization='isdf',
         qp_states=QPStates(kind='frontier'),
-        numerics=dict(PRODUCTION.numerics, track='overlap'))
+        numerics=PRODUCTION.numerics.derive('follow the state by overlap',
+                                            bse={'track': 'overlap'}))
     surfaces = [surface_of(spec, Excitation('singlet', root=1), mol, factory,
                            mf=factory(mol))
                 for spec in (PRODUCTION, tracked_spec)]
@@ -271,13 +272,9 @@ def test_track_reaches_the_production_surface():
 
 
 def test_track_is_refused_where_no_state_is_followed():
-    mol = molecule()
-    spec = SurfaceSpec(PRODUCTION.ground_state, chi0='space-time',
-                       residues='sop', solver='davidson', factorization='isdf',
-                       qp_states=QPStates(kind='frontier'),
-                       numerics=dict(PRODUCTION.numerics, track='index'))
     with pytest.raises(ValueError, match='track'):
-        surface_of(spec, Excitation('singlet', root=1), mol, isdf_lrc)
+        PRODUCTION.numerics.derive('follow by a name that is no mode',
+                                   bse={'track': 'index'})
 
 
 def test_hessian_grid_floor_is_checked_on_counts_before_any_scf():

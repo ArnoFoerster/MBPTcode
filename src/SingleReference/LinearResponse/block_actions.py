@@ -4,21 +4,21 @@
 `isdf_block_action` does Fock-like builds on the interpolation grid and divides
 the rows of the screened kernel over MPI ranks. Both return `(apply_AB, diag_d)`
 and carry the clocks and `screened_diagonal` the Davidson reads off them.
-`_block_action` dispatches on the polarizability and the factorization.
+`block_action` dispatches on the polarizability and the factorization.
 """
 import time
 
 import numpy as np
 
-from src.Base.constants import DAVIDSON_DIAGONAL_TILE, ISDF_TILE_GB, KAPPA
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (allgather_blocks, contiguous_block,
-                                     current_comm, lockstep,
-                                     ordered_chain_sum, reduce_scatter_rows,
-                                     reduce_sum)
-from src.Base.utils.threads import openmp_threads, row_map
-from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.GW.space_time import _unpack_factors
+from src.Base.numerics.constants import BYTES_PER_GB, DAVIDSON_DIAGONAL_TILE, ISDF_TILE_GB, KAPPA
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (allgather_blocks, contiguous_block,
+                                              current_comm, lockstep,
+                                              ordered_chain_sum, reduce_scatter_rows,
+                                              reduce_sum)
+from src.Base.utils.parallel.threads import openmp_threads, row_map
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Base.factorization.sliced_factors import unpack_factors
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import GridTiles
 
 
@@ -70,7 +70,7 @@ class _PieceClock:
         return t1
 
 
-def _block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
+def block_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
                   spin='singlet', comm=None, tda=False):
     """Mode dispatch shared by the solver and the (A-B) instability probe;
     `tda` returns the A half alone (Bz None)."""
@@ -148,7 +148,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     roots are bitwise the serial ones. The returned action carries the
     `comm_clock` its entry lockstep is timed on, and `screened_diagonal()`,
     d - (ii|W|aa) from the factor's own diagonals, formed only when a
-    Davidson preconditions with it (`_preconditioner_diagonal`).
+    Davidson preconditions with it (`preconditioner_diagonal`).
     """
     comm = current_comm() if comm is None else comm
     nranks = comm.Get_size() if comm is not None else 1
@@ -189,7 +189,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     naux = C_ov.shape[0]
     no, nv = len(occ), len(virt)
     per_vec = 8 * naux * nv * max(no, nv)
-    chunk = max(1, int(tile_memory_gb * 1e9 / max(per_vec, 1)))
+    chunk = max(1, int(tile_memory_gb * BYTES_PER_GB / max(per_vec, 1)))
 
     def apply_exchange_direct(z):
         # Explicit 2-step contraction (a single 3-operand einsum silently costs
@@ -206,7 +206,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     # (naux, n_occ, n_occ) overlap of C_ov with z it is naux n_occ^2 n_vir.
     # The first association is kept wherever its temporary fits a tile, so
     # the solves that fit keep their bits
-    swap_through_oo = 8 * naux * nv * nv > tile_memory_gb * 1e9
+    swap_through_oo = 8 * naux * nv * nv > tile_memory_gb * BYTES_PER_GB
 
     def apply_exchange_swap(z):
         out = np.empty_like(z)
@@ -261,7 +261,7 @@ def _screened_vv(coeff, virt, W_aux, tile_memory_gb=ISDF_TILE_GB):
     straight out of the full factor `coeff`: no unscreened naux n_vir^2 copy
     is held beside the screened one."""
     naux, nv = coeff.shape[0], len(virt)
-    rows = max(1, int(tile_memory_gb * 1e9 / (8 * naux * nv)))
+    rows = max(1, int(tile_memory_gb * BYTES_PER_GB / (8 * naux * nv)))
     if rows >= nv:
         # one tile: the product exactly as it was formed whole
         return np.einsum('PQ,Qab->Pab', W_aux, coeff[:, virt[:, None], virt],
@@ -453,7 +453,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         (ii|W|aa) = [D^T (X_o o X_o)]^T W [D^T (X_v o X_v)]
 
     formed only when a Davidson preconditions with it
-    (`_preconditioner_diagonal`): each rank adds its rows' tiles
+    (`preconditioner_diagonal`): each rank adds its rows' tiles
     (DAVIDSON_DIAGONAL_TILE) and one reduction of (naux, n_occ + n_vir)
     completes them; the remaining contractions are replicated.
     """
@@ -465,7 +465,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         isdf_factors.require(comm)
         nmo, naux = isdf_factors.nmo, isdf_factors.naux
     else:
-        X_mo, D = _unpack_factors(isdf_factors)[:2]
+        X_mo, D = unpack_factors(isdf_factors)[:2]
         nmo, naux = X_mo.shape[1], D.shape[1]
     occ, virt = get_occ_virt_indices(lr_solver.eps, nocc)
     if nmo != len(lr_solver.eps):
@@ -528,7 +528,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         Zt = _screened_rows(D_mine, isdf_factors.gather('D') if sliced else D,
                             W_aux, comm)                # (nmine, M)
         rows = max(1, min(max(nmine, 1),
-                          int(tile_memory_gb * 1e9 / max(npts * 8, 1))))
+                          int(tile_memory_gb * BYTES_PER_GB / max(npts * 8, 1))))
         S = np.empty((rows, npts))            # one row block of Zt * P
         # X_o^T (Zt * P), accumulated; under a rank count in owner order, rank
         # s's (n_occ, its columns) block in rows [s0, s1) of an (M, n_occ) one

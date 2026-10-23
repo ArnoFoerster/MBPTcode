@@ -4,28 +4,22 @@ import numpy as np
 
 from pyscf import scf
 
-from src.Base.constants import DEFAULT_BROADENING_ETA
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
-from src.Base.utils.matsubara import (beta_from_mf, ir_continuation_order,
-                                      self_energy_range, thermal_e_min)
-from src.Base.pyscf_interface import (get_orbital_energies,
+from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
+from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
+                                            self_energy_range, thermal_e_min)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      get_density_fitting_coefficients,
                                      get_df_coefficients_ov,
                                      require_closed_shell_or_unrestricted,
                                      spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.SingleReference.base import get_occ_virt_indices, transition_range
+from src.Base.orbital_spaces import (get_occ_virt_indices,
+                                     particle_hole_window, transition_range)
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift, shift_after_solve)
-from src.SingleReference.GW.qp_solve import (add_reaction_field,
-                                             static_exchange_diagonal,
-                                             solve_qp_from_imaginary_axis,
+from src.SingleReference.GW.qp_solve import (finish_qp,
                                              imaginary_axis_sample_points)
-
-
-def solve_screening_imaginary_axis(lr_solver, nocc, freq_points):
-    """W(i*omega_k) = [I - P(i*omega_k)]^-1 on the imaginary-frequency grid"""
-    return lr_solver.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
 
 
 def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_weights,
@@ -95,7 +89,7 @@ def _unrestricted_screening(mol, mf, nocc, states, spin):
 
 
 def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
-                                    solver_mode='pole_strength', greedy=True,
+                                    greedy=True,
                                     dm_correction=None, timings=None, beta=None,
                                     eps_anchor=None, spin_channel='alpha',
                                     with_z=False, pade_freq=None):
@@ -184,9 +178,7 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         e_min, e_max = transition_range(spectra, nocc)
         eps, nocc = spectra[spin], nocc[spin]
     else:
-        occ, virt = get_occ_virt_indices(eps, nocc)
-        e_min = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
     if beta is not None:
         e_min = thermal_e_min(beta, e_min)
 
@@ -203,12 +195,13 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
 
     # calculate W on imaginary axis - This is the integration gird  
     _t = _time.time()
-    W_grid = solve_screening_imaginary_axis(lr, screening_nocc, freq_points)
+    W_grid = lr.solve_rpa_screening(freq_points, screening_nocc,
+                                    is_imaginary=True)
     if timings is not None:
         timings['t_W'] = _time.time() - _t
 
     # chemical potential, mid gap
-    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
+    mu = particle_hole_window(eps, nocc)[2]
 
     # imaginary axis sampling point
     w_sigma = self_energy_range(eps, mu, e_max)
@@ -222,31 +215,17 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     if unrestricted and anchor.ndim == 2:
         anchor = anchor[spin]
 
-    _t = _time.time()
-    # Eq. (18) after the solve in G0W0, in the static term on an evGW cycle
-    after = reaction_field is not None and shift_after_solve(eps_anchor)
-    xc_diag = static_exchange_diagonal(
-        mf, mol, states, dm_correction=dm_correction,
-        reaction_field=None if after else reaction_field, spin=spin,
-        reaction_field_after_solve=after)
-    out = []
-    for i, p in enumerate(states):
-        z_fit, iw_query = imaginary_axis_sample_points(
-            freq_points if pade_freq is None else pade_freq, nocc, int(p), mu)
-        sigma_iw = self_energy_imaginary_axis(C_row[:, [i], :], eps - mu, nocc,
-                                              0, freq_points, freq_weights,
-                                              W_grid, iw_query)
-        out.append(solve_qp_from_imaginary_axis(
-            anchor, int(p), float(xc_diag[i]), z_fit, sigma_iw, greedy=greedy,
-            solver_mode=solver_mode, max_order=pade_order, with_z=with_z))
-    if timings is not None:
-        timings['t_qp'] = _time.time() - _t
-    shift = reaction_field if after else None
-    if with_z:
-        roots = add_reaction_field(np.array([r for r, _ in out], float),
-                                   shift, states, spin)
-        z = np.array([zz for _, zz in out], float)
-        return (roots[0], z[0]) if scalar else (roots, z)
-    roots = add_reaction_field(np.asarray(out, float), shift, states, spin)
-    return roots[0] if scalar else roots
+    # Eq. (18) after the solve in G0W0, in the static term on an evGW cycle;
+    # each state's Sigma_c sampled on its own branch of the axis
+    z_points = freq_points if pade_freq is None else pade_freq
+    sigma = [self_energy_imaginary_axis(
+        C_row[:, [i], :], eps - mu, nocc, 0, freq_points, freq_weights, W_grid,
+        imaginary_axis_sample_points(z_points, nocc, int(p), mu)[1])
+        for i, p in enumerate(states)]
+    return finish_qp(sigma[0] if scalar else sigma, anchor, nocc,
+                     states[0] if scalar else states, mu, z_points, mf, mol,
+                     dm_correction, greedy, timings,
+                     reaction_field=reaction_field, spin=spin, with_z=with_z,
+                     after_solve=shift_after_solve(eps_anchor),
+                     max_order=pade_order, branch_sampled=True)
 

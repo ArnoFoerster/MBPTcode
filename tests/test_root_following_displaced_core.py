@@ -17,14 +17,14 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, tdscf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import ROOT_FOLLOW_WEIGHT_MIN
-from src.gradients.conventions import FrozenConventions
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import ROOT_FOLLOW_WEIGHT_MIN
+from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.evaluation import GeometryCache
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_following import ForwardPieces
-from src.properties.nonadiabatic import (mo_overlap, relative_overlap,
-                                         state_overlap)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_following import CasidaSolution
+from src.gradients.state_identity import (mo_overlap, relative_overlap,
+                                          state_overlap)
 from src.SingleReference.LinearResponse.linear_response import from_pyscf
 
 #: Rigid translation, Bohr: far enough that D is well below the weight floor.
@@ -58,10 +58,8 @@ def follower(mol):
     return chain
 
 
-def pieces(mol, mf, x, y):
-    body = [None] * 17
-    body[0], body[1], body[10], body[11] = mol, mf, x, y
-    return ForwardPieces(tuple(body))
+def solution(om, x, y):
+    return CasidaSolution(om, x, y, {})
 
 
 def translated(mol, shift):
@@ -85,10 +83,10 @@ def test_a_translated_state_is_followed(reference, shift):
     mol, mf, x, y = reference
     chain = follower(mol)
     om = np.arange(NROOTS, dtype=float)
-    chain.tracked_root(mol, mf, om, pieces(mol, mf, x, y))
+    chain.tracked_root(mol, mf, None, solution(om, x, y))
     moved = translated(mol, shift)
     # without the wider re-solve: the state is among these roots
-    root = chain.tracked_state(moved, mf, om, pieces(moved, mf, x, y))
+    root = chain.tracked_state(moved, mf, solution(om, x, y))
     step = chain.follow_log[-1]
     assert root == 0
     assert step['weight'] > (1.0 - 1e-5 if shift < 1e-2 else 0.9)

@@ -5,7 +5,7 @@ imports nothing numerical."""
 import argparse
 import os
 
-from src.Base.constants import OPENBLAS_MAX_THREADS, TADF_THREADS
+from src.Base.numerics.constants import OPENBLAS_MAX_THREADS, TADF_THREADS
 
 #: The thread variables every launch sets to its count.
 THREAD_VARIABLES = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS',

@@ -7,7 +7,7 @@ converges, every residual below conv_tol, on the next root instead:
 formaldehyde/cc-pVDZ triplet in toluene on the excited-state chain's own
 spectrum, 4 Tamm-Dancoff roots, gave 0.366009 Ha for a fourth root at
 0.363695 Ha. The Tamm-Dancoff Davidson tracks extra Ritz pairs
-(`_tracked_roots`) until their residual intervals clear the highest root.
+(`tracked_roots`) until their residual intervals clear the highest root.
 
 The full (Casida) Davidson (`trial_space.casida_rows`) tracks the same extra
 Ritz pairs. A solver that corrects max(nroots, 20) Ritz pairs a cycle but
@@ -25,9 +25,9 @@ Gated here, against eigensolutions of the same action built whole:
     full at 4 and 24 roots, and the full one at 2 and 3 simulated ranks, the
     same bits on every rank;
   * every residual interval the full loop measured holds an eigenvalue;
-  * a solve stopped at the cycle cap with an extra pair unsettled refuses
-    (DavidsonRefusal) under refuse_unconverged and warns otherwise, full and
-    Tamm-Dancoff;
+  * a full solve stopped at the cycle cap with an extra pair unsettled
+    refuses (DavidsonRefusal) under refuse_unconverged and warns otherwise,
+    and a Tamm-Dancoff one is refused or warned about as unconverged;
   * an unstable (A - B) is refused as the dense CasidaSolver refuses it
     (CasidaInstability);
 """
@@ -35,14 +35,15 @@ import numpy as np
 import pytest
 from pyscf import scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse import davidson
 from src.SingleReference.LinearResponse.casida import (CasidaInstability,
                                                        CasidaSolver)
-from src.SingleReference.LinearResponse.davidson import (DavidsonRefusal,
+from src.SingleReference.LinearResponse.davidson import (DavidsonNotConverged,
+                                                         DavidsonRefusal,
                                                          _dense_casida,
-                                                         _run_davidson)
+                                                         run_davidson)
 
 BASIS = 'cc-pvdz'
 MOLECULES = {
@@ -92,7 +93,7 @@ def test_tda_davidson_finds_a_root_dressed_below_its_diagonal(nroots):
     def apply_a(z):
         return (z.reshape(len(z), -1) @ a).reshape(len(z), no, nv), None
 
-    om = _run_davidson(apply_a, np.diag(a).reshape(no, nv).copy(), nroots,
+    om = run_davidson(apply_a, np.diag(a).reshape(no, nv).copy(), nroots,
                        CONV_TOL, 100, None, preconditioner='bare',
                        tda=True)[0]
     assert np.abs(np.sort(om) - ref).max() < ROOT_TOL
@@ -135,7 +136,7 @@ def test_full_davidson_finds_a_root_dressed_below_its_diagonal(nroots, b_diag,
     a, b, no, nv = trapped_casida(nroots, b_diag, noise)
     apply_ab, diag = casida_action(a, b, no, nv)
     ref = _dense_casida(apply_ab, diag, no * nv, 1.0, 256)[0][:nroots]
-    om = _run_davidson(apply_ab, diag, nroots, CONV_TOL, 100, None,
+    om = run_davidson(apply_ab, diag, nroots, CONV_TOL, 100, None,
                        preconditioner='bare')[0]
     assert np.abs(np.sort(om) - ref).max() < ROOT_TOL
 
@@ -149,7 +150,7 @@ def test_full_trap_is_found_at_every_rank_count(size):
     ref = _dense_casida(apply_ab, diag, no * nv, 1.0, 256)[0][:4]
 
     def one_rank(comm):
-        return _run_davidson(apply_ab, diag, 4, CONV_TOL, 100, None,
+        return run_davidson(apply_ab, diag, 4, CONV_TOL, 100, None,
                              comm=comm, pair_tile=TRAP_TILE,
                              preconditioner='bare')
 
@@ -178,30 +179,50 @@ def test_every_residual_interval_holds_an_eigenvalue():
                 assert np.abs(dense - th).min() <= r
 
 
-@pytest.mark.parametrize('tda', [True, False], ids=['tda', 'full'])
-def test_unsettled_extra_pair_at_the_cap_is_loud(tda):
+def test_unsettled_extra_pair_at_the_cap_is_loud():
     """Stopped after one cycle, the requested roots of the trap are exact
     eigenpairs (|r| = 0) while the trapped extra pair is unsettled: the solve
     refuses under refuse_unconverged, whatever the read roots' residuals,
     and with refuse_unconverged=False warns and records the doubted roots
     unconverged."""
-    a, b, no, nv = trapped_casida(4, 0.0 if tda else 0.05)
+    a, b, no, nv = trapped_casida(4, 0.05)
     apply_ab, diag = casida_action(a, b, no, nv)
-    if tda:
-        def apply_ab(z):
-            return (z.reshape(len(z), -1) @ a).reshape(len(z), no, nv), None
-
-    kw = dict(preconditioner='bare', tda=tda)
+    kw = dict(preconditioner='bare')
     with pytest.raises(DavidsonRefusal, match='could not confirm'):
-        _run_davidson(apply_ab, diag, 4, CONV_TOL, 1, None,
+        run_davidson(apply_ab, diag, 4, CONV_TOL, 1, None,
                       refuse_unconverged=True, read_roots=2, read_tol=1e-3,
                       **kw)
     timings = {}
     with pytest.warns(RuntimeWarning, match='could not confirm'):
-        _run_davidson(apply_ab, diag, 4, CONV_TOL, 1, None, timings=timings,
+        run_davidson(apply_ab, diag, 4, CONV_TOL, 1, None, timings=timings,
                       refuse_unconverged=False, **kw)
     assert timings['davidson_verdict'] == 'unconfirmed'
     assert not all(timings['davidson_converged'])
+
+
+def test_the_tda_trap_at_the_cap_is_loud_and_converges_past_it():
+    """The Tamm-Dancoff solve is the one symmetric Davidson, which corrects
+    every tracked pair each cycle and calls no root converged in its first:
+    stopped there it refuses under refuse_unconverged and warns otherwise,
+    and four cycles converge every requested root, the trapped one
+    included."""
+    a, _, no, nv = trapped_casida(4, 0.0)
+
+    def apply_a(z):
+        return (z.reshape(len(z), -1) @ a).reshape(len(z), no, nv), None
+
+    diag = np.diag(a).reshape(no, nv).copy()
+    kw = dict(preconditioner='bare', tda=True)
+    with pytest.raises(DavidsonNotConverged):
+        run_davidson(apply_a, diag, 4, CONV_TOL, 1, None,
+                      refuse_unconverged=True, **kw)
+    timings = {}
+    with pytest.warns(RuntimeWarning, match='unconverged'):
+        run_davidson(apply_a, diag, 4, CONV_TOL, 1, None, timings=timings,
+                      refuse_unconverged=False, **kw)
+    assert timings['davidson_verdict'] == 'unconverged'
+    om = run_davidson(apply_a, diag, 4, CONV_TOL, 4, None, **kw)[0]
+    assert np.abs(np.sort(om) - np.linalg.eigvalsh(a)[:4]).max() < ROOT_TOL
 
 
 def test_an_unstable_problem_is_refused_as_the_dense_solver_refuses():
@@ -213,7 +234,7 @@ def test_an_unstable_problem_is_refused_as_the_dense_solver_refuses():
         CasidaSolver(a, b).solve()
     apply_ab, diag = casida_action(a, b, no, nv)
     with pytest.raises(CasidaInstability, match=r'min eig\(A-B\)'):
-        _run_davidson(apply_ab, diag, 4, CONV_TOL, 100, None,
+        run_davidson(apply_ab, diag, 4, CONV_TOL, 100, None,
                       preconditioner='bare')
 
 

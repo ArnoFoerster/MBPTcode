@@ -29,7 +29,7 @@ side that has to be matched on the other, not a tolerance:
     (water/cc-pVDZ), and `QPqb.delta` is zeros, so NEITHER side adds an
     explicit exchange term. Both solve
     w = eps_p + Sigma_c(w) with Sigma_x already inside eps_p.
-  * qp_solver='pole_strength', the global largest-weight rule, as `QPqb`'s
+  * the global largest-weight rule, as `QPqb`'s
     secular solve. No root selection is in play: every Z below is > 0.94,
     so there is one quasiparticle and no satellite to choose between.
 
@@ -86,14 +86,15 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.Base.constants import (DEFAULT_BROADENING_ETA, HARTREE_TO_EV,
-                                QP_GRAPHICAL_TOL, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.pyscf_interface import get_orbital_energies
+from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, HARTREE_TO_EV,
+                                         QP_GRAPHICAL_TOL, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.SingleReference.GW.qp_energy import (_static_correction,
                                               _two_electron_integrals,
                                               calc_qp_energy)
-from src.SingleReference.GW.quasi_boson import QPqb, build_rpa_AB
+from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
@@ -219,7 +220,7 @@ def gate():
         stack = casida_stack(mol, mf, nocc, 0.0)
         states = sorted(orbitals(nocc).values())
         driver = calc_qp_energy(mf, df=False, eta=0.0, mode='casida',
-                                qp_solver='pole_strength', state=states)
+                                state=states)
         rows[name] = {'mol': mol, 'mf': mf, 'eri': eri, 'nocc': nocc,
                       'qp': qp, 'stack': stack,
                       'driver': {p: driver[p]['GW'] for p in states}}

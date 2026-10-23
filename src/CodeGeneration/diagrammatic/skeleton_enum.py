@@ -41,12 +41,12 @@ import itertools
 from collections import defaultdict
 from functools import lru_cache
 
-from src.Base.pdaggerq_interface import OCC_LETTERS, VIR_LETTERS
+from src.CodeGeneration.pdaggerq_interface import VIR_LETTERS
 from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
 from src.CodeGeneration.diagrammatic.goldstone import (
-    _BLOCKS, Line, Skeleton, _enumerate_orderings)
+    BLOCKS, Line, Skeleton, enumerate_orderings)
 
-# external letters (per _BLOCKS) are excluded from the dummy pools;
+# external letters (per BLOCKS) are excluded from the dummy pools;
 # uppercase members of the same index families extend the pools far enough
 # for every order this package emits (up to 2n-1 lines of one kind)
 _EXTERNALS = {'e', 'f', 'm', 'n'}
@@ -233,7 +233,7 @@ def arrangement_parity(factors, lines, bra_label, ket_label):
 
 def _emit(edges, block, n):
     """One canonical edge multiset -> a Skeleton the engine can evaluate."""
-    spec = _BLOCKS[block]
+    spec = BLOCKS[block]
     bra, ket = spec['bra'], spec['ket']
     occ_iter = iter(_OCC_POOL)
     vir_iter = iter(_VIR_POOL)
@@ -258,7 +258,7 @@ def _emit(edges, block, n):
                     bra_vertex=0, ket_vertex=1,
                     lines=tuple(lines),
                     raw='enum ' + ' '.join(f'{s}{k}{d}' for s, d, k in edges))
-    _enumerate_orderings(skel)
+    enumerate_orderings(skel)
 
     groups = defaultdict(int)
     for s, d, k in edges:

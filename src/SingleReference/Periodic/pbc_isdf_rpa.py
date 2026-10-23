@@ -49,14 +49,20 @@ import os
 
 import numpy as np
 
-from src.Base.separable_ri import write_json_atomic
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.matsubara import beta_from_mf, thermal_e_min
-from src.Base.utils.time_frequency import TimeFrequencyGrid
-from src.SingleReference.Periodic.pbc_isdf import (isdf_prepare, isdf_vq,
+from src.Base.factorization.separable_ri import write_json_atomic
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.matsubara import beta_from_mf, thermal_e_min
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
+from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
+from src.SingleReference.Periodic.pbc_isdf import (build_isdf_kpts,
+                                                   isdf_prepare, isdf_vq,
                                                    resolve_grid,
                                                    resolve_npoints)
-from src.SingleReference.Periodic.pbc_occupations import is_integer_occupation
+from src.SingleReference.Periodic.pbc_occupations import (
+    DEFAULT_OCCUPATION_THRESHOLD, is_integer_occupation,
+    split_transition_window, transition_pairs, transition_window)
+from src.SingleReference.Periodic.pbc_rpa import rpa_log_determinant
+from src.SingleReference.Periodic.pbc_rpa_damping import kmesh_from_kpts
 
 
 def require_integer_occupation(mo_occ, who='THC-RPA'):
@@ -211,35 +217,33 @@ def polarizability_all_q_imaginary_time(X, mo_energy, nocc, grid, kmesh,
     return Pi
 
 
-def rpa_ecorr_from_pi(Pi_all_q, V, omega_weights):
+def rpa_ecorr_from_pi(Pi_all_q, V, omega_weights, flags=None):
     """E_c = (1/Nq) sum_q (1/2pi) int dw [logdet(1 - V^q Pi^q) + Tr(V^q Pi^q)].
 
     Pi_all_q[q] is (nfreq, npts, npts). Returns (E_c, per-q contributions).
+    flags: a dict that receives the numerical flags (`ecorr_q_from_pi`).
     """
     nq = len(V)
-    per_q = np.array([ecorr_q_from_pi(Pi_all_q[q], V[q], omega_weights, q=q)
+    per_q = np.array([ecorr_q_from_pi(Pi_all_q[q], V[q], omega_weights, q=q,
+                                      flags=flags)
                       for q in range(nq)])
     return per_q.sum() / nq, per_q
 
 
-def ecorr_q_from_pi(Pi_block, Vq, weights_block, q=0):
+def ecorr_q_from_pi(Pi_block, Vq, weights_block, q=0, flags=None):
     """The (q, omega-block) contribution to E_c, unnormalized by 1/Nq.
 
     Pulled out of `rpa_ecorr_from_pi` so the streaming route can call it on a
     BLOCK of frequencies and then discard them; the all-q function is a thin
-    loop over this.
+    loop over this. A det(1 - V Pi) that is not positive is warned and
+    flagged, not refused (`pbc_rpa.rpa_log_determinant`; w counts within the
+    block).
     """
     eye = np.eye(Vq.shape[0])
     acc = 0.0
     for w, Pi in enumerate(Pi_block):
         M = Vq @ Pi
-        sign, logdet = np.linalg.slogdet(eye - M)
-        if sign.real <= 0:
-            raise RuntimeError(
-                f"det(1 - V Pi) is non-positive at q={q}, w={w} "
-                f"(sign {sign}) -- the RPA dielectric has been driven "
-                f"singular, which on a gapped system means a convention "
-                f"error rather than physics.")
+        logdet = rpa_log_determinant(eye - M, q, w, flags)
         acc += weights_block[w] * (logdet.real + np.trace(M).real)
     return acc / (2.0 * np.pi)
 
@@ -300,7 +304,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
                             freq_block=None, q_list=None, mesh=None,
                             ke_cutoff=None, coulG_fn=None, threshold=None,
                             checkpoint_dir=None, return_per_q=False,
-                            beta=None):
+                            beta=None, flags=None):
     """dRPA correlation energy with the q-OUTER, omega-blocked loop.
 
     Same number as `rpa_ecorr_thc(route='frequency')` -- pinned bit-for-bit in
@@ -323,9 +327,9 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
     all-q route divided by Nq. Any block size gives the same energy; the
     molecular counterpart (`GW/space_time.py`) measures its equivalent exact
     to 6e-15.
-    """
-    from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
 
+    flags: a dict that receives the numerical flags (`ecorr_q_from_pi`).
+    """
     kpts = np.asarray(mf.kpts)
     mo = [np.asarray(c) for c in mf.mo_coeff]
     mo_energy = np.asarray(mf.mo_energy)
@@ -339,7 +343,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
     # grid; beta=0 forces the old unfloored grid.
     if beta is None:
         beta = beta_from_mf(mf)
-    freqs, wts, _, _ = frequency_grid_occ(mo_energy, mo_occ, kplus, nw,
+    freqs, wts, _, _ = frequency_grid_occ(mo_energy, mo_occ, nw,
                                           beta=beta, threshold=threshold)
     nq = len(kpts)
     q_list = list(range(nq)) if q_list is None else list(q_list)
@@ -384,7 +388,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
                 Pi = polarizability_q_frequency_occ(X, mo_energy, mo_occ,
                                                     kplus, q, freqs[lo:hi],
                                                     **kw)
-                acc += ecorr_q_from_pi(Pi, Vq, wts[lo:hi], q=q)
+                acc += ecorr_q_from_pi(Pi, Vq, wts[lo:hi], q=q, flags=flags)
                 del Pi                                   # and DISCARD
             per_q[q] = acc
             del Vq
@@ -419,11 +423,10 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
     to a lattice FFT, so a mesh that disagrees with the k-points it is indexing
     would reorder the transform silently. It stays in the signature only so an
     explicit value can be CHECKED; passing a wrong one raises.
-    """
-    from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
-    from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts
-    from src.SingleReference.Periodic.pbc_rpa_damping import kmesh_from_kpts
 
+    Returns (E_c, diagnostics); diagnostics['numerical_flags']['nonpositive_det']
+    lists the (q, w) whose det(1 - V Pi) was not positive (warned, not refused).
+    """
     kpts = np.asarray(mf.kpts)
     mo = [np.asarray(c) for c in mf.mo_coeff]
     mo_energy = np.asarray(mf.mo_energy)
@@ -450,30 +453,30 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
         if beta is None:
             beta = beta_from_mf(mf)
         freqs, wts, e_min, e_max = frequency_grid_occ(
-            mo_energy, mo_occ, kplus, nw, beta=beta, threshold=threshold)
+            mo_energy, mo_occ, nw, beta=beta, threshold=threshold)
         Pi = [polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q,
                                              freqs, **kw)
               for q in range(len(kpts))]
     elif route == 'time':
         if beta is not None:
-            e_min, e_max = transition_window_occ(mo_energy, mo_occ, kplus, **kw)
+            e_min, e_max = transition_window(mo_energy, mo_occ, **kw)
             grid = TimeFrequencyGrid.ir(beta, 1.5 * e_max, statistics='boson')
             Pi = polarizability_all_q_imaginary_time_occ(
                 X, mo_energy, mo_occ, grid, kmesh, kplus=kplus)
         else:
             nocc = require_integer_occupation(mo_occ, who="rpa_ecorr_thc(route='time')")
-            e_o, e_v = _energies(mo_energy, nocc)
-            grid = TimeFrequencyGrid.minimax(ntau or 18, e_v.min() - e_o.max(),
-                                             e_v.max() - e_o.min())
+            grid = TimeFrequencyGrid.minimax(
+                ntau or 18, *split_transition_window(mo_energy, nocc))
             Pi = polarizability_all_q_imaginary_time(X, mo_energy, nocc, grid,
                                                     kmesh, kplus=kplus)
         freqs, wts = grid.omega_points, grid.omega_weights
     else:
         raise ValueError(f"route={route!r}; choose 'frequency' or 'time'.")
 
-    e_c, per_q = rpa_ecorr_from_pi(Pi, V, wts)
+    flags = {'nonpositive_det': []}
+    e_c, per_q = rpa_ecorr_from_pi(Pi, V, wts, flags=flags)
     return e_c, {'per_q': per_q, 'npoints': len(info['points']),
-                 'freqs': freqs, 'info': info}
+                 'freqs': freqs, 'info': info, 'numerical_flags': flags}
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +518,6 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
 # therefore moves it out of the prefactor, which becomes (1/N_k). Derived from
 # the integer limit here; the GDF route reaches the same displacement
 # independently by matching spectral W against (1 - Pi0)^-1.
-
-from src.SingleReference.Periodic.pbc_occupations import (
-    DEFAULT_OCCUPATION_THRESHOLD, transition_pairs)
 
 
 def pair_factor_q(X, mo_energy, mo_occ, kplus, q, k,
@@ -562,7 +562,7 @@ def polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q, freqs,
     return Pi
 
 
-def frequency_grid_occ(mo_energy, mo_occ, kplus, nw, beta=None, threshold=None):
+def frequency_grid_occ(mo_energy, mo_occ, nw, beta=None, threshold=None):
     """Gauss-Legendre frequency grid scaled by the occupation-weighted window.
 
     The scale is floored at the first Matsubara frequency, pi/beta, whenever
@@ -576,32 +576,11 @@ def frequency_grid_occ(mo_energy, mo_occ, kplus, nw, beta=None, threshold=None):
     beta=0 selects the unfloored grid, since `thermal_e_min` rejects it.
     """
     kw = {} if threshold is None else {'threshold': threshold}
-    e_min, e_max = transition_window_occ(mo_energy, mo_occ, kplus, **kw)
+    e_min, e_max = transition_window(mo_energy, mo_occ, **kw)
     if beta is not None and beta > 0:
         e_min = thermal_e_min(beta, e_min)
     freqs, wts = gauss_legendre_grid(nw, w0=0.5 * e_min)
     return freqs, wts, e_min, e_max
-
-
-def transition_window_occ(mo_energy, mo_occ, kplus,
-                          threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """(e_min, e_max) over the WEIGHTED transition set, for grid construction.
-
-    Computed here from `transition_pairs` over the THC route's momentum map
-    `kplus`; `pbc_occupations.transition_window` is the GDF route's
-    counterpart, over all k-pairs.
-    """
-    gaps = []
-    for q in range(len(kplus)):
-        for k in range(len(kplus)):
-            _, _, _, g = transition_pairs(mo_energy, mo_occ, k, kplus[q, k],
-                                          threshold=threshold)
-            if len(g):
-                gaps.append(g)
-    if not gaps:
-        raise ValueError("no transitions above the occupation threshold")
-    g = np.concatenate(gaps)
-    return float(g.min()), float(g.max())
 
 
 def green_functions_tau_occ(X, mo_energy, mo_occ, tau, mu):

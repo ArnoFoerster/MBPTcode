@@ -30,18 +30,18 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.environment import attach_environment
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time)
-from src.SingleReference.LinearResponse.bse import solve_bse
-from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+from src.SingleReference.BSE.solve import solve_bse
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.space_time import (
     minimax_points_for_bse, static_screening_grid, static_screening_matrix)
-from src.gradients.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 
@@ -199,7 +199,7 @@ def test_production_does_not_import_the_gradient_package():
     `src.gradients` in: the dependency runs the other way."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     code = ('import sys; sys.path.insert(0, %r);'
-            'import src.SingleReference.LinearResponse.davidson as d;'
+            'import src.SingleReference.BSE.solve as d;'
             'assert hasattr(d, "static_screening_matrix");'
             'print([m for m in sys.modules if m.startswith("src.gradients")])'
             % root)

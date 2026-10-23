@@ -1,4 +1,6 @@
 # GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_eom_ccsdt.py.
+# See that module's docstring for the equations/conventions.
 import numpy as np
 
 from ..cached_einsum import einsum

@@ -28,18 +28,18 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics import numerics_of
-from src.Base.constants import (CD_NFREQ, CD_NFREQ_SOP, ISDF_TILE_GB, SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.constants import (CD_NFREQ, CD_NFREQ_SOP, ISDF_TILE_GB, SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates
 from src.SingleReference.GW.contour_deformation import (
     cd_screening_contraction_multi, screening_solver)
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.LinearResponse.space_time import (
     owned_frequency_blocks, polarizability_projected_rows, three_index_slice)
-import src.gradients.qp_set as qp_set_module
-import src.gradients.qp_space_time as qp_space_time
-from src.gradients.excited_state import ExcitedStateChain
+import src.gradients.gwbse.qp_set as qp_set_module
+from src.SingleReference.GW import contour_deformation
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 #: Cholesky against LU on the same chi0(i.nu): both backward stable on a
@@ -136,7 +136,7 @@ def test_a_pole_model_set_takes_the_fixed_grid_once(water, monkeypatch):
     chain, args = chain_on(water, qp_window=admitted, residue_route='sop')
     assert chain.conventions.nfreq_cd == CD_NFREQ
     calls = recorded_solves(monkeypatch)
-    chain._qp_set_solve(*args)
+    chain.quasiparticles.qp_set_solve(*args)
     assert set(chain.qp_diagnostics['routes'].values()) == {'sop'}
     # the freezing solve and its repeat from the roots it froze, one grid
     assert calls == [CD_NFREQ_SOP] * 2, calls
@@ -156,7 +156,7 @@ def test_an_asked_grid_is_a_floor_under_the_pole_model_grid(water,
         chain, args = chain_on(water, qp_window=admitted, residue_route='sop',
                                nfreq_cd=asked)
         calls = recorded_solves(monkeypatch)
-        chain._qp_set_solve(*args)
+        chain.quasiparticles.qp_set_solve(*args)
         assert calls == [solved] * 2, (asked, calls)
 
 
@@ -167,7 +167,7 @@ def test_a_set_on_the_quadrature_takes_the_plain_grid_once(water,
     there from the roots it froze."""
     chain, args = chain_on(water, qp_window=[0, 3, 4], residue_route='sop')
     calls = recorded_solves(monkeypatch)
-    chain._qp_set_solve(*args)
+    chain.quasiparticles.qp_set_solve(*args)
     assert chain.qp_diagnostics['routes'][0] not in ('sop', 'scissor')
     assert calls == [CD_NFREQ] * 2, calls
     assert chain.conventions.nfreq_cd == CD_NFREQ and chain.conventions.cd_sized
@@ -183,7 +183,8 @@ def scripted(monkeypatch, chain, script):
         asked.append((int(p), len(nu_points)))
         w, z = script[int(p)]
         return w, z, []
-    monkeypatch.setattr(qp_space_time, 'qp_energy_cd', newton)
+    # the gradient's state solve reaches it through contour_state_root
+    monkeypatch.setattr(contour_deformation, 'qp_energy_cd', newton)
     return asked
 
 
@@ -209,7 +210,7 @@ def test_a_root_beside_its_own_pole_is_solved_on_the_one_grid(quadrature_set,
     script = {p: (far(eps, p), 0.9) for p in STATES}
     script[2] = (near(eps, 2), 0.9)
     asked = scripted(monkeypatch, chain, script)
-    chain._qp_set_solve(*args)
+    chain.quasiparticles.qp_set_solve(*args)
     assert asked == [(p, CD_NFREQ) for p in STATES] * 2
     assert chain.conventions.nfreq_cd == CD_NFREQ and chain.conventions.cd_sized
 
@@ -221,7 +222,7 @@ def test_a_root_outside_the_bounds_is_kept_on_the_same_grid(quadrature_set,
     script[2] = (far(eps, 2), -0.5)
     asked = scripted(monkeypatch, chain, script)
     with pytest.warns(RuntimeWarning, match='pole strength outside'):
-        chain._qp_set_solve(*args)
+        chain.quasiparticles.qp_set_solve(*args)
     assert list(chain.resolved.qp_set) == list(STATES)
     assert list(chain.resolved.qp_z_outside) == [2]
     assert chain.resolved.qp_z_outside[2]['z'] == -0.5

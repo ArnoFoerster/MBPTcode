@@ -1,4 +1,4 @@
-"""Gates for src/gradients/excited_state.py -- the BSE@GW surface itself.
+"""Gates for src/gradients/gwbse/excited_state.py -- the BSE@GW surface itself.
 
 Fast tier (seconds to a couple of minutes on H2O, cc-pVDZ): the total
 excited-state gradient against finite differences of E_0 + Omega, the energy
@@ -14,9 +14,9 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'

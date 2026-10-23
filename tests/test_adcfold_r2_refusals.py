@@ -40,16 +40,18 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base import solvation_loop as sl
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
+from src.environments import solvation_loop as sl
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
 from src.Base.step_failed import StepFailed
-from src.Base.utils.linearAlgebra.orthogonalization import extend_orthonormal
-from src.Base.utils.mpi_grid import distributed, simulated_world
-from src.SingleReference import df_correlation_force_tiled as tcf
-from src.SingleReference.ADC.eeADC import ee_driver, ee_fold, ee_gradient, ee_spin_blocks
+from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import simulated_world
+from src.gradients import df_correlation_force_tiled as tcf
+from src.SingleReference.ADC.eeADC import ee_driver, ee_fold, ee_spin_blocks
+from src.gradients.adc import ee_gradient
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
-from src.SingleReference.ADC.eeADC import ee_state_model
+from src.gradients.adc import ee_state_model
 from src.SingleReference.ADC.eeADC.ee_follow import FollowingWarning, root_missing
 from src.SingleReference.BSE import bse_upfolded as B
 from tests.adc_common import ATOMS, df_rhf_converged, molecule
@@ -110,7 +112,7 @@ def test_on_root_returns_rank_0s_arrays(size):
 def water_pieces():
     mf = df_rhf_converged(molecule(ATOMS))
     from src.SingleReference.ADC.eeADC import ee_ri_fold
-    from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+    from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
     no = mf.mol.nelectron // 2
     F = ee_ri_fold.RIFactors.from_full(np.asarray(get_orbital_energies(mf), float),
                                        DFIntegrals.from_scf(mf.mol, mf).B_aa, no)
@@ -399,7 +401,7 @@ def test_equilibrium_without_eps_static_is_refused_before_the_solve(monkeypatch)
 
     def ran(*a, **k):
         raise AssertionError('the solve ran')
-    monkeypatch.setattr(ee_driver, '_solve_folded_ri', ran)
+    monkeypatch.setattr(ee_driver, 'solve_folded_ri', ran)
     with pytest.raises(ValueError, match='eps_static'):
         solve_ee_adc(mf, level='adc2', nroots=2, spin='singlet', fold=True,
                      environment=SolventScreening(mol, eps=2.4),

@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri, get_antisymmetrized_spin_block_eri)
 from tests.generated_runtime import requires_runtime

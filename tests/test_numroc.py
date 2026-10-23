@@ -33,7 +33,7 @@ for name, attrs in (('pyelpa', {'Elpa': object}),
         mod.__dict__.update(attrs)
         sys.modules[name] = mod
 
-from src.Base.utils.linearAlgebra.elpa import ElpaEigensolver
+from src.Base.utils.linear_algebra.elpa import ElpaEigensolver
 
 numroc = ElpaEigensolver._numroc
 
@@ -78,7 +78,7 @@ def main():
     print('\n=== 4. __init__ passes all five arguments ===')
     # the original defect: 4 args against a 5-parameter signature, which
     # byte-compiles and raises TypeError only when the solver is constructed.
-    src = pathlib.Path('src/Base/utils/linearAlgebra/elpa.py').read_text()
+    src = pathlib.Path('src/Base/utils/linear_algebra/elpa.py').read_text()
     calls = [n for n in ast.walk(ast.parse(src))
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
              and n.func.attr == '_numroc']

@@ -51,26 +51,27 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
-                                FIT_REALIZATION_FORCE_TOL,
-                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                FIT_REALIZATION_REL_TOL,
-                                RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL)
+from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                         FIT_REALIZATION_FORCE_TOL,
+                                         FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         FIT_REALIZATION_REL_TOL,
+                                         RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (GaugeSeeds, fit_rows_adjoint,
-                                   resolve_isdf_grid)
-from src.Base.sliced_factors import GridTileRows
-from src.Base.solvent_screening import SolventScreening
-from src.Base.split_equilibrium import SplitEquilibrium
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
-from src.gradients.factor_chain import FrozenFactorization
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.factorization.separable_ri import (GaugeSeeds, fit_rows_adjoint,
+                                                 resolve_isdf_grid)
+from src.Base.factorization.sliced_factors import GridTileRows
+from src.environments.solvent_screening import SolventScreening
+from src.environments.split_equilibrium import SplitEquilibrium
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import (GaugeAdjoint,
                                             dfactor_adjoint_gauges,
                                             point_chain, product_pairs)
 from src.properties.excitations import SurfaceSpec, surface_of
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.test_chain_row_fit import (TILE, adjoint_ledger_faults,
                                       adjoint_widths, ledger_faults, molecule,
                                       relative, traced, whole_fit_arrays)
@@ -116,9 +117,10 @@ def production(mol, equilibrium, layout, mf=None):
         excitation=Excitation('singlet', root=2, kernel='bse'),
         environment=environment(mol, equilibrium), chi0='space-time',
         residues='sop', solver='davidson', factorization='isdf',
-        qp_states=QPStates('frontier'), grid_accuracy='G1',
-        bse_adjoint='grid', nroots=5, mf=mf,
-        **(ROWS if layout == 'rows' else {}))
+        qp_states=QPStates('frontier'), mf=mf,
+        numerics=numerics_of(dict(grid_accuracy='G1', bse_adjoint='grid',
+                                  nroots=5,
+                                  **(ROWS if layout == 'rows' else {}))))
 
 
 def observed(chain):
@@ -280,7 +282,7 @@ def isdf_pbe0(mol):
     """PBE0 on ISDF-K at the G3 grid, converged."""
     counts, n_start = resolve_isdf_grid('G3', 'cc-pvdz', ['H', 'O'],
                                         auxbasis='cc-pvdz-ri')
-    mf = isdf_jk(dft.RKS(mol, xc='pbe0'), auxbasis='cc-pvdz-ri',
+    mf = isdf_jk_with_force(dft.RKS(mol, xc='pbe0'), auxbasis='cc-pvdz-ri',
                  counts=counts, n_start=n_start)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
@@ -316,8 +318,8 @@ def test_row_fit_force_is_the_energy_derivative():
                        residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
-                                 'nroots': 4, **ROWS})
+                       numerics=numerics_of({'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
+                                 'nroots': 4, **ROWS}))
     with distributed(None):
         chain = surface_of(spec, Excitation('singlet', root=1), mol0,
                            isdf_pbe0)

@@ -30,12 +30,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
-from src.properties.nonadiabatic import mo_overlap, state_overlap
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
+from src.gradients.state_identity import mo_overlap, state_overlap
 from src.properties.spin_orbit import soc_operator_mo
 from src.properties.spin_vibronic import soc_vector, spin_vibronic_coupling
 from tests.isdf_test_grid import g1_numerics
@@ -129,7 +129,12 @@ def case(request):
             'gap_tt': ev.omega[T2] - ev.omega[T1],
             'analytic': np.einsum('ax,axe->e', u, out['dv_cart']),
             'single': (4.0 * fd[fine] - fd[coarse]) / 3.0,
-            'block': old[fine]}
+            # the coarse step: a second difference of the block norm squared,
+            # 5.7e-14 on 4.5e-8 at the fine one, where the Davidson
+            # stops moves it by 1e-15 (|block - single| / single 0.045 to 0.061
+            # at 1.45 A); 2.3e-13 at the coarse one (0.0704, 0.0703 at
+            # conv_tol 1e-8, 1e-10)
+            'block': old[coarse]}
 
 
 def test_t2_truncation_is_the_derivative_near_the_degeneracy(case):

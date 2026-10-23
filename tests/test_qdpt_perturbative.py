@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.active_space import ActiveSpace
+from src.SingleReference.common.active_space import ActiveSpace
 from src.MultiReference.QDPT.perturbative import build_effective_hamiltonian, run_pipeline
 from src.Solvers.active_space import solve
 from tests.blas_bar import same

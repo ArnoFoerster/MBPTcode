@@ -1,5 +1,7 @@
-# GENERATED CODE -- MPn amplitude-numerator, overlap, and density cross-term
-# pieces (spin-orbital), order-generic recursion. Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_mpn_density.py.
+# MPn amplitude-numerator, overlap and density cross-term pieces
+# (spin-orbital) of the order-generic pdaggerq recursion.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

@@ -6,7 +6,7 @@
 # consumed by MPnDensityDriverRestricted.compute_t2_3_laplace.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
-from src.Base.utils.grids import minimax_time_grid
+from src.Base.utils.grids.grids import minimax_time_grid
 
 
 def t2_3_aaaa_t3_aaaaaa_laplace(g_aaaa, g_abab, g_bbbb, o, v, nv, no, eps_a, t2_1_aaaa, t2_1_abab, ntau=6):

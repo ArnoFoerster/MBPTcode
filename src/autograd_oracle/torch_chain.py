@@ -1,6 +1,6 @@
 """torch.autograd oracle for the solvated ISDF / contour-deformation BSE@GW chain.
 
-The production chain (`src/gradients/excited_state.py`) is a hand-written
+The production chain (`src/gradients/gwbse/excited_state.py`) is a hand-written
 reverse pass through
 
     factors (eps, X_mo, D_dressed, D_bare)
@@ -34,7 +34,7 @@ import time
 import numpy as np
 import torch
 
-from src.Base.constants import RESIDUE_ON_CONTOUR_TOL
+from src.Base.numerics.constants import RESIDUE_ON_CONTOUR_TOL
 from src.autograd_oracle.frozen import FrozenConventions, dump, load  # noqa: F401
 
 torch.set_default_dtype(torch.float64)

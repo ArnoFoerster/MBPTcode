@@ -28,16 +28,15 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_CM
-from src.Base.numerics import Numerics
-from src.Base.pyscf_interface import get_density_fitting_coefficients
+from src.Base.numerics.constants import HARTREE_TO_CM
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       GROUND_SPIN_FACTOR, _blocks, coupling,
-                                       ground_state_element,
+from src.properties.spin_orbit import (_blocks, coupling, ground_state_element,
                                        interstate_element, soc_operator_mo)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from test_spin_orbit import CH2O
 from tests.pins import assert_same
 

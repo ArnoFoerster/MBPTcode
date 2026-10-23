@@ -46,92 +46,17 @@ import warnings
 
 import numpy as np
 
-from src.Base.constants import QP_WINDOW_Z_MIN
-from src.Base.eri_blocks import as_blocks
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
+from src.SingleReference.LinearResponse.quasi_boson_rpa import (RPA,
+                                                                build_rpa_AB,
+                                                                couplings_V)
+# Read through this module's namespace by ADC/solve.py, gradients/__init__.py
+# and gradients/quasi_boson_adjoint.py until they import them from their homes
+# (Base.utils.linearAlgebra.matrix_functions, LinearResponse.quasi_boson_rpa).
+from src.Base.utils.linear_algebra.matrix_functions import (  # noqa: F401
+    eigh_sym, invsqrtm_sym)
 from src.Solvers.qp_equation import (bracketed_root, largest_weight_root,
                                      ranked_root)
-
-
-class RPA:
-    """Closed-form direct-RPA ground state for factor-2 singlet (A, B).
-
-    Solved in the Bogoliubov/drUCCD form -- ring-diagram coupled-cluster
-    doubles, whose amplitudes ARE the RPA ones -- which is where t comes from.
-    The energy is dRPA's, and `gradients.rpa_ground_state.RPAGroundStateChain`
-    is the same quantity on the cubic space-time factorization rather than the
-    dense one.
-
-    Holds t and every derived object needed downstream, with one eigh of G
-    shared by all matrix functions of t (t = log(G)/2 has G's eigenvectors).
-    TDA screening (B = 0) gives t = 0 exactly and Abar = A.
-
-    The reverse mode -- the boson density matrices and the Frechet/adjoint maps
-    at this t -- is `gradients.quasi_boson_adjoint.RPAAdjoint`.
-    """
-
-    def __init__(self, A, B):
-        self.A = A
-        self.B = B
-        n = A.shape[0]
-        P = A + B
-        Mm = A - B
-        wP, VP = eigh_sym(P)
-        wM = np.linalg.eigvalsh(0.5 * (Mm + Mm.T))
-        if wP.min() <= 0 or wM.min() <= 0:
-            raise ValueError(f"RPA instability: min eig(A+B)={wP.min():.3e}, "
-                             f"min eig(A-B)={wM.min():.3e}")
-        Ph = (VP * np.sqrt(wP)[None, :]) @ VP.T
-        Pmh = (VP * (1.0 / np.sqrt(wP))[None, :]) @ VP.T
-        K = Ph @ Mm @ Ph
-        Kh = sqrtm_sym(K)
-        G = Pmh @ Kh @ Pmh                     # e^{2t}
-        self.eigG = eigh_sym(G)
-        wG, VG = self.eigG
-        if wG.min() <= 0:
-            raise ValueError("e^{2t} not positive definite")
-        self.t = (VG * (0.5 * np.log(wG))[None, :]) @ VG.T
-        self.wt = 0.5 * np.log(wG)             # eigenvalues of t (vectors VG)
-        self.Vt = VG
-        self.exp_t = (VG * np.sqrt(wG)[None, :]) @ VG.T          # e^t
-        self.exp_mt = (VG * (1.0 / np.sqrt(wG))[None, :]) @ VG.T  # e^-t
-        self.cosh_t = 0.5 * (self.exp_t + self.exp_mt)
-        self.sinh_t = 0.5 * (self.exp_t - self.exp_mt)
-        self.Abar = 0.5 * (self.exp_t @ P @ self.exp_t
-                           + self.exp_mt @ Mm @ self.exp_mt)
-        self.eigAbar = eigh_sym(self.Abar)     # (Omega, U)
-
-    # -- diagnostics ------------------------------------------------------
-    def residual(self, t=None):
-        """J(t) = [e^t(A+B)e^t - e^-t(A-B)e^-t]/2 (symmetric)."""
-        if t is None:
-            et, emt = self.exp_t, self.exp_mt
-        else:
-            w, V = eigh_sym(t)
-            et = (V * np.exp(w)[None, :]) @ V.T
-            emt = (V * np.exp(-w)[None, :]) @ V.T
-        return 0.5 * (et @ (self.A + self.B) @ et
-                      - emt @ (self.A - self.B) @ emt)
-
-    @property
-    def omega(self):
-        return self.eigAbar[0]
-
-    # -- energies ---------------------------------------------------------
-    def e_corr(self):
-        s2 = self.sinh_t @ self.sinh_t
-        sc = self.sinh_t @ self.cosh_t
-        return float(np.einsum('ij,ji->', self.A, s2)
-                     + np.einsum('ij,ji->', self.B, sc))
-
-    def e_corr_plasmon(self):
-        """Furche's trace formula E_c = (sum_s Omega_s - Tr[A])/2.
-
-        The same quantity `rpa_energy.rpa_correlation_energy_casida` returns
-        from a Casida solve, but not the same arithmetic: Omega comes from one
-        eigh of Abar rather than from the symplectic Casida solver, and the two
-        differ by 1.8e-15 Ha on H4/sto-3g and 5.7e-14 Ha on water/cc-pVDZ.
-        """
-        return float(0.5 * (self.omega.sum() - np.trace(self.A)))
 
 
 class QPqb:
@@ -183,6 +108,9 @@ class QPqb:
         # each followed root the largest weight has left, kept on its branch
         # (`solve_diag`): {orbital, w, z, w0, largest, labels}
         self.branch_log = []
+        # each root of largest weight kept with Z outside (0, 1]
+        # (`quasiparticle_root`): {orbital, w, z}
+        self.z_outside = []
 
     # -- self-energy and diagonal QP solve --------------------------------
     def _pole_arrays(self, p):
@@ -196,10 +124,6 @@ class QPqb:
     def sigma(self, p, w):
         nh, ph, npp, pp = self._pole_arrays(p)
         return float((nh / (w - ph)).sum() + (npp / (w - pp)).sum())
-
-    def sigma_prime(self, p, w):
-        nh, ph, npp, pp = self._pole_arrays(p)
-        return float(-(nh / (w - ph) ** 2).sum() - (npp / (w - pp) ** 2).sum())
 
     def solve_diag(self, p, w0=None):
         """(w*, Z) of w = eps_p + delta_p + Sigma_pp(w), solved exactly over
@@ -243,8 +167,12 @@ class QPqb:
         nh, ph, npp, pp = self._pole_arrays(p)
         num = np.concatenate([nh.ravel(), npp.ravel()])
         pol = np.concatenate([ph.ravel(), pp.ravel()])
-        return largest_weight_root(num, pol, self.eps[p] + self.delta[p],
-                                   label=f'orbital {p}')
+        seen = {}
+        w, z = largest_weight_root(num, pol, self.eps[p] + self.delta[p],
+                                   label=f'orbital {p}', out=seen)
+        if seen['z_outside']:
+            self.z_outside.append({'orbital': int(p), 'w': w, 'z': z})
+        return w, z
 
     def _all_poles(self, p):
         """(num, pol, a) of orbital p's secular equation, every pole kept."""
@@ -305,69 +233,6 @@ class QPqb:
         H[1 + nocc * nb + idx, 1 + nocc * nb + idx] = dp
         return H
 
-    def solve_diag_dense(self, p):
-        """Max-weight eigenvalue of the dense diagonal supermatrix."""
-        H = self.supermatrix_diag(p)
-        w, V = np.linalg.eigh(H)
-        k = np.argmax(V[0, :] ** 2)
-        return w[k], V[0, k] ** 2
-
-
-# ---------------------------------------------------------------------------
-# symmetric matrix-function calculus
-# ---------------------------------------------------------------------------
-
-def eigh_sym(M):
-    return np.linalg.eigh(0.5 * (M + M.T))
-
-
-def funm_sym(M, f, eig=None):
-    """f(M) for symmetric M via eigh. `eig` reuses a precomputed (w, V)."""
-    w, V = eigh_sym(M) if eig is None else eig
-    return (V * f(w)[None, :]) @ V.T
-
-
-def sqrtm_sym(M, eig=None):
-    return funm_sym(M, np.sqrt, eig)
-
-
-def invsqrtm_sym(M, eig=None):
-    return funm_sym(M, lambda w: 1.0 / np.sqrt(w), eig)
-
-
-# ---------------------------------------------------------------------------
-# RPA blocks and couplings (restricted singlet, factor 2)
-# ---------------------------------------------------------------------------
-
-def build_rpa_AB(eps, eri_mo, nocc, tda_screening=False):
-    """Factor-2 singlet RPA blocks over I=(ia), row-major i*nvirt+(a-nocc).
-
-    tda_screening=True zeroes B (TDA screening variant: bosons from the
-    Hermitian TDA problem, t = 0 downstream).
-    """
-    norb = len(eps)
-    occ = np.arange(nocc)
-    virt = np.arange(nocc, norb)
-    d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
-    n_ov = d.size
-    V_iajb = as_blocks(eri_mo, nocc).ovov.reshape(n_ov, n_ov)
-    A = np.diag(d) + 2.0 * V_iajb
-    B = np.zeros_like(A) if tda_screening else 2.0 * V_iajb
-    return A, B, d
-
-
-def couplings_V(eri_mo, nocc):
-    """Bare boson couplings V^I_pq = (pq|ia), shape (norb, norb, n_ov).
-
-    eri_mo: a full (pq|rs) or an `MOEriBlocks`; both give the same numbers.
-
-    The singlet spin factor for the self-energy/supermatrix is applied at
-    the point of use (sqrt(2) per coupling => factor 2 in |W|^2), pinned
-    against `SelfEnergySolver` in the quasiparticle gate.
-    """
-    b = as_blocks(eri_mo, nocc)
-    return b.pqov.reshape(b.norb, b.norb, b.n_ov)
-
 
 def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
     """Diagonal-mode QP energy for a general (non-diagonal) Fock matrix.
@@ -380,8 +245,8 @@ def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
     The satellite blocks are diagonalized for the poles of Sigma_pp and its
     couplings to them, and the root comes from the one finder of
     `Solvers.qp_equation`: the largest weight, or with w0 the root in the
-    interval between the poles that bracket it, refused below a
-    quasiparticle weight (`bracketed_root`).
+    interval between the poles that bracket it (`bracketed_root`), kept with
+    a warning at a weight no quasiparticle has.
     """
     norb = epsF.shape[0]
     nvirt = norb - nocc
@@ -413,6 +278,7 @@ def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
                                    label=f'orbital {p}')[0]
     w, z = bracketed_root(num, pol, epsF[p, p], w0)
     if not z > QP_WINDOW_Z_MIN:
-        raise ValueError(f'the root of orbital {p} that follows {w0} has '
-                         f'weight {z:.4f}, not above {QP_WINDOW_Z_MIN}')
+        warnings.warn(f'the root of orbital {p} that follows {w0} has weight '
+                      f'{z:.4f}, not above {QP_WINDOW_Z_MIN}: kept on its branch',
+                      RuntimeWarning, stacklevel=2)
     return w

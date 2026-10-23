@@ -19,9 +19,10 @@ import pytest
 from pyscf import dft, gto
 
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.environment import PointCharges
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
+from src.environments.environment import PointCharges
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.properties.excitations import SurfaceSpec, surface_of
 
 pytestmark = pytest.mark.filterwarnings('ignore::RuntimeWarning')
@@ -40,7 +41,7 @@ COMPONENTS = ((0, 2), (1, 1))
 def isdf_b3lyp(mol):
     """A tightly converged ISDF-K B3LYP mean field on the G3 grid."""
     counts, n_start = resolve_isdf_grid('G3', BASIS, ['H', 'O'], auxbasis=AUX)
-    mf = isdf_jk(dft.RKS(mol, xc='b3lyp'), auxbasis=AUX, counts=counts,
+    mf = isdf_jk_with_force(dft.RKS(mol, xc='b3lyp'), auxbasis=AUX, counts=counts,
                  n_start=n_start)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
@@ -73,8 +74,8 @@ def test_excitation_force_in_point_charges_is_the_energy_derivative():
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
-                                 'nroots': 3})
+                       numerics=numerics_of({'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
+                                 'nroots': 3}))
     chain = surface_of(spec, Excitation('singlet', root=1), mol0, isdf_b3lyp)
     force = np.asarray(chain.excitation_gradient()[0])
     for ia, k in COMPONENTS:

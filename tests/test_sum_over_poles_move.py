@@ -50,17 +50,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.Base.constants import (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
-                                SOP_FIT_STRIDE, SOP_N_POLES)
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
+from src.Base.numerics.constants import (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                         SOP_FIT_STRIDE, SOP_N_POLES)
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import sum_over_poles as prod
 from src.SingleReference.GW.contour_deformation import residue_set, wc_explicit
 from src.SingleReference.GW.real_screening import ov_energies, screening_aux
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Solvers.qp_equation import solve_qp_equation_scan
-from src.gradients import sum_over_poles_adjoint as adjoint
-from src.gradients.contour_deformation_adjoint import (integral_term_backward,
-                                                       screening_chain)
+from src.gradients.gwbse import sum_over_poles_adjoint as adjoint
+from src.gradients.gwbse.contour_deformation_adjoint import (integral_term_backward,
+                                                             screening_chain)
 from tests.pins import assert_same_tree
 
 
@@ -220,7 +220,7 @@ def water():
     """(eps, nocc, B, C_ov, nu, wt) for RHF/cc-pVDZ water, density fitted."""
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -327,9 +327,10 @@ def test_the_closed_form_is_the_old_one(water):
 
 def test_the_quasiparticle_loop_is_the_old_loop(water):
     """Same root, same Z: the bracketed pole-sum solve lands on the loop's
-    root to one ULP and on its Z to its last bits. Not bitwise: both end on a
-    Newton step below 1e-11 from different starts (the loop from eps_p, the
-    bracketed solve from inside its interval)."""
+    root and Z by the pin rule (8 ulp on the recording BLAS, the energy class
+    bar under another; a cluster's MKL: 2 ulp, 1.1e-16 Ha). Not bitwise: both end on a Newton step below 1e-11 from
+    different starts (the loop from eps_p, the bracketed solve from inside
+    its interval)."""
     eps, nocc, b, c_ov, nu, _ = water
     for p in (nocc - 2, nocc - 1, nocc):
         _, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, p)
@@ -340,8 +341,12 @@ def test_the_quasiparticle_loop_is_the_old_loop(water):
                                               trace=trace)
             w_new, z_new = prod.qp_energy_sop(p, amp, poles, eps, nocc,
                                               xc_correction=xc)
-            assert abs(w_new - w_old) <= np.spacing(abs(w_old)), (p, xc)
-            assert abs(z_new - z_old) <= 4 * np.spacing(z_old), (p, xc)
+            # a quasiparticle energy and a pole strength not read off a
+            # continuation: the energy class, Z dimensionless
+            assert_same_tree(w_new, w_old, quantity='energy',
+                             label=('root', p, xc))
+            assert_same_tree(z_new, z_old, unit='1', quantity='energy',
+                             label=('Z', p, xc))
             # the root really is one: the residual of the equation solved
             s = prod.sigma_sop(w_new, amp, poles, eps, nocc, check=False)
             assert abs(w_new - eps[p] - xc - s) < 1e-10, (p, xc)
@@ -438,6 +443,6 @@ def test_production_does_not_import_the_gradient_package():
     assert clean.returncode == 0, clean.stderr
     leaks = subprocess.run(
         [sys.executable, '-c',
-         probe % (root, 'src.gradients.sum_over_poles_adjoint')],
+         probe % (root, 'src.gradients.gwbse.sum_over_poles_adjoint')],
         capture_output=True, text=True)
     assert leaks.returncode == 1, 'the probe cannot see a leak it should see'

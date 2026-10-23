@@ -19,8 +19,8 @@ import tempfile
 
 from pyscf.gto import basis as pyscf_basis
 
-from src.Base.basis.cp2k_basis import _write_nwchem
-from src.Base.constants import ISDF_AUX_FALLBACK, ISDF_MAX_AUX_L
+from src.Base.basis.cp2k_basis import write_nwchem
+from src.Base.numerics.constants import ISDF_AUX_FALLBACK, ISDF_MAX_AUX_L
 
 _SYMBOLS = ('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe '
             'Co Ni Cu Zn Ga Ge As Se Br Kr').split()
@@ -114,7 +114,7 @@ def fallback_auxbasis(basis):
     fd, tmp = tempfile.mkstemp(dir=out, prefix=name + '.')
     try:
         with os.fdopen(fd, 'w') as fh:
-            _write_nwchem(fh, table)
+            write_nwchem(fh, table)
     except BaseException:
         os.unlink(tmp)
         raise

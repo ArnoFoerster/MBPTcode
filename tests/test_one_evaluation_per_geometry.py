@@ -26,10 +26,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.numerics import Numerics
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics
 from src.gradients.evaluation import GeometryCache, geometry_key
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.vibronic import relax_state
 from tests.isdf_test_grid import g1_numerics
 
@@ -89,13 +89,13 @@ def test_an_energy_and_a_force_at_one_geometry_are_one_evaluation(ch2o):
     factory = CountingFactory()
     chain = ExcitedStateChain(ch2o, factory, spin='singlet', numerics=g1_numerics(ch2o))
     forwards = []
-    shared = chain._shared_forward
+    shared = chain.shared_forward
 
     def counted(mol, mf):
         forwards.append(geometry_key(mol))
         return shared(mol, mf)
 
-    chain._shared_forward = counted
+    chain.shared_forward = counted
     at = displaced(ch2o)
     energy = chain.total_energy(at)
     grad, total, _ = chain.total_gradient(displaced(ch2o))

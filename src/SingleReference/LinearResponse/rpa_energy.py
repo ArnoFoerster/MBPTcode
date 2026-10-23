@@ -23,14 +23,13 @@ import numpy as np
 from pyscf import scf as pyscf_scf
 
 from src.Base.declaration import GroundState
-from src.Base.isdf_jk import ISDFJK
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
-from src.Base.utils.mpi_grid import lockstep
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
+from src.Base.utils.parallel.mpi_grid import lockstep
+from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.space_time import \
     dielectric_log_determinant
-from src.SingleReference.GW.imaginary_axis import solve_screening_imaginary_axis
 
 
 @dataclass(frozen=True)
@@ -65,7 +64,7 @@ def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):
     Restricted spin, DF only. Recovered as Z = I - W^-1 from the already-computed
     screened interaction W(iw), rather than rebuilding chi0 from scratch.
     """
-    W_grid = solve_screening_imaginary_axis(lr_solver, nocc, freq_points)
+    W_grid = lr_solver.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
     naux = W_grid.shape[-1]
     eye = np.eye(naux)
     return np.array([eye - np.linalg.inv(W) for W in W_grid])
@@ -85,8 +84,7 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, nfreq=20, grid='minim
     occ, virt = get_occ_virt_indices(eps, nocc)
 
     if grid == 'minimax':
-        e_min = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
         freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
     elif grid == 'gauss_legendre':
         if w0 is None:

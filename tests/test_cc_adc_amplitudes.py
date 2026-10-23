@@ -24,14 +24,14 @@ import pytest
 from pyscf import cc, gto, mp, scf
 from pyscf.cc import dfccsd
 
-from src.Base.pyscf_interface import (DFIntegrals,
-                                      get_antisymmetrized_spin_block_eri,
-                                      get_orbital_energies)
+from src.Base.pyscf.pyscf_interface import (DFIntegrals,
+                                            get_antisymmetrized_spin_block_eri,
+                                            get_orbital_energies)
 from src.SingleReference.ADC.cc_adc_amplitudes import (
     InjectedAmplitudePool, cc_amplitudes_restricted,
     cc_amplitudes_spinorbital, mbpt_amplitudes_restricted,
     mbpt_amplitudes_restricted_df)
-from src.SingleReference.ADC.cc_amplitudes import _run_cc
+from src.SingleReference.ADC.cc_amplitudes import run_cc
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted)
 
@@ -124,11 +124,11 @@ def test_ccd_is_pyscfs_ccd_and_follows_the_mean_field_into_df(water, water_df):
     the conventional update_amps)."""
     from pyscf.cc import ccd as pyscf_ccd
     ref = pyscf_ccd.CCD(water).run()
-    mine = _run_cc(water, 'ccd', None)
+    mine = run_cc(water, 'ccd', None)
     assert abs(ref.e_corr - mine.e_corr) < 1e-10
     assert np.abs(np.asarray(ref.t2) - np.asarray(mine.t2)).max() < 1e-10
 
-    df_cc = _run_cc(water_df, 'ccd', None)
+    df_cc = run_cc(water_df, 'ccd', None)
     assert isinstance(df_cc, dfccsd.RCCSD)
     assert np.abs(np.asarray(df_cc.t1)).max() == 0.0
 

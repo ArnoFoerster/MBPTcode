@@ -18,12 +18,13 @@ from pyscf import dft, gto
 
 from tests.pins import assert_same
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
 from src.properties.excitations import (SurfaceSpec, ground_surface_of,
                                         surface_of)
-from src.properties.surfaces import compare_surfaces
+from src.gradients.gwbse.surface_factory import compare_surfaces
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -33,7 +34,7 @@ TOL = 1e-6
 
 def isdf_pbe0(mol):
     counts, n_start = resolve_isdf_grid('G3', BASIS, ['H', 'O'], auxbasis=AUX)
-    mf = isdf_jk(dft.RKS(mol, xc='pbe0'), auxbasis=AUX, counts=counts,
+    mf = isdf_jk_with_force(dft.RKS(mol, xc='pbe0'), auxbasis=AUX, counts=counts,
                  n_start=n_start)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
@@ -53,8 +54,8 @@ def spec(environment):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
-                                 'nroots': 4})
+                       numerics=numerics_of({'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
+                                 'nroots': 4}))
 
 
 def test_the_solvated_ground_surface_is_the_chain_reference():

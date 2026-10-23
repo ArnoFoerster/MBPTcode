@@ -39,6 +39,8 @@ machine precision (tests/test_ee_adc_en.py).
 import numpy as np
 
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
+from src.SingleReference.ADC.eeADC.ee_utils import (excitation_denominator,
+                                                   orbital_denominators)
 
 CHANNELS = ('hh', 'pp', 'hp')
 
@@ -68,10 +70,7 @@ def en_denominators_spin_orbital(eps, g, nocc, dress):
     """(d_ijab, d_ia) as full spin-orbital arrays. The spin bookkeeping is
     already inside g, so <pq||pq> is just its diagonal."""
     dress = validate_dress(dress)
-    eo, ev = eps[:nocc], eps[nocc:]
-    d = (ev[None, None, :, None] + ev[None, None, None, :]
-         - eo[:, None, None, None] - eo[None, :, None, None])
-    d_ia = 2.0 * (eo[:, None] - ev[None, :])
+    d, d_ia, _ = orbital_denominators(eps, nocc)
     if dress is None:
         return d, d_ia
     a = np.einsum('pqpq->pq', g, optimize=True)          # <pq||pq>
@@ -98,10 +97,7 @@ def en_denominators_spin_free(eps, J, K, no, nv, dress):
     <pq||pq> = J[p,q] - delta(spin_p, spin_q) K[p,q] -- the single rule the
     whole spin resolution rests on."""
     dress = validate_dress(dress)
-    eo, ev = eps[:no], eps[no:]
-    base = (ev[None, None, :, None] + ev[None, None, None, :]
-            - eo[:, None, None, None] - eo[None, :, None, None])
-    d_ia_mp = 2.0 * (eo[:, None] - ev[None, :])
+    base, d_ia_mp, _ = orbital_denominators(eps, no)
     keys4 = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
     if dress is None:
         return (SB({k: base for k in keys4}),
@@ -191,10 +187,9 @@ def en_denominators_unrestricted(eps_a, eps_b, J, K, no_a, no_b, dress):
     keys4 = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
 
     def base(si, sj, sa, sb):
-        return (ev[sa][None, None, :, None] + ev[sb][None, None, None, :]
-                - eo[si][:, None, None, None] - eo[sj][None, :, None, None])
+        return excitation_denominator((eo[si], eo[sj]), (ev[sa], ev[sb]))
 
-    d_ia = SB({s + s: 2.0 * (eo[s][:, None] - ev[s][None, :])
+    d_ia = SB({s + s: -2.0 * excitation_denominator((eo[s],), (ev[s],))
                for s in ('a', 'b')})
     if dress is None:
         return SB({k: base(*k) for k in keys4}), d_ia

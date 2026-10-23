@@ -29,13 +29,15 @@ from pyscf import dft, gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CONVERGED_SCF_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (CONVERGED_SCF_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.properties import excitations
 from src.properties.excitations import SurfaceSpec, calc_vertical_excitation
 from tests.pins import assert_same
@@ -58,7 +60,7 @@ def scf_factory(xc):
         mf.max_memory = MAX_MEMORY
         counts, n_start = resolve_isdf_grid(GRID_ACCURACY, BASIS, ['H', 'O'],
                                             auxbasis=BASIS + '-ri')
-        mf = isdf_jk(mf, auxbasis=BASIS + '-ri', counts=counts,
+        mf = isdf_jk_with_force(mf, auxbasis=BASIS + '-ri', counts=counts,
                      n_start=n_start)
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -79,8 +81,8 @@ def record(xc, forces):
     spec = SurfaceSpec(GroundState('dft', xc), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': GRID_ACCURACY, 'sliced': True,
-                                 'fit': 'rows', 'bse_adjoint': 'grid'})
+                       numerics=numerics_of({'grid_accuracy': GRID_ACCURACY, 'sliced': True,
+                                 'fit': 'rows', 'bse_adjoint': 'grid'}))
     rec = calc_vertical_excitation(spec, Excitation('singlet', root=1,
                                                     kernel='bse'),
                                    mol, scf_factory(xc))

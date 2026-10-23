@@ -25,17 +25,17 @@ from pyscf import df as pyscf_df
 from pyscf import scf as pyscf_scf
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, ISDF_TILE_GB,
-                                REACTION_FIELD_CACHE_SIZE)
-from src.Base.environment import (attached_environment, dresses_interaction,
-                                  environment_of)
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      require_closed_shell_or_unrestricted)
-from src.Base.separable_ri import (aux_metric_sqrt,
-                                   rows_transpose_product)
-from src.Base.sliced_factors import GridTileRows, SlicedFactors
-from src.Base.utils.mpi_grid import current_comm
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.constants import (BYTES_PER_GB, FIT_CHOLESKY_BLOCK, ISDF_TILE_GB,
+                                         REACTION_FIELD_CACHE_SIZE)
+from src.environments.environment import dresses_interaction
+from src.Base.environment_seam import attached_environment, environment_of
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            require_closed_shell_or_unrestricted)
+from src.Base.factorization.separable_ri import (aux_metric_sqrt,
+                                                 rows_transpose_product)
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.mpi_grid import current_comm
+from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.LinearResponse.space_time import dyson_screening
 
 
@@ -341,7 +341,7 @@ def _three_center_ov_and_diagonal(mol, auxmol, orbital_sets,
     while s0 < auxmol.nbas:
         s1 = s0 + 1
         while (s1 < auxmol.nbas and (ao_loc[s1 + 1] - ao_loc[s0]) * per_function
-               <= tile_gb * 1e9):
+               <= tile_gb * BYTES_PER_GB):
             s1 += 1
         p0, p1 = ao_loc[s0], ao_loc[s1]
         three = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',

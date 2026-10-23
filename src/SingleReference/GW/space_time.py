@@ -32,61 +32,57 @@ G0W0 in a localized basis, the pair-fitting ancestor of this route.
 """
 import os
 import time as _time
+from dataclasses import replace
 
 import numpy as np
 from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.constants import (FIT_CHOLESKY_BLOCK,
-                                ISDF_RADII_MATCH_TOL, ISDF_TILE_GB)
-from src.Base.numerics import numerics_or_default
-from src.Base.environment import environment_of
-from src.Base.geometry import elements_of
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+                                         ISDF_TILE_GB)
+from src.Base.numerics.numerics import numerics_or_default, requested
+from src.Base.environment_seam import environment_of
 from pyscf import scf as pyscf_scf
 
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      require_closed_shell_or_unrestricted,
-                                      spin_index, occupied_count)
-from src.Base.separable_ri import (aux_metric_sqrt,
-                                   build_separable_ri, fit_M_streaming,
-                                   molecular_points_covariant,
-                                   refuse_unrepresented_factors,
-                                   require_grid, resolve_isdf_grid,
-                                   runtime_atomic_radii, shipped_radii_lookup)
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.grids import (gauss_legendre_grid, minimax_time_grid,
-                                  minimax_supported_sizes)
-from src.Base.utils.mpi_grid import (agreement,
-                                     current_comm, grid_comm, lockstep,
-                                     lockstep_mean_field, partition,
-                                     reduce_sum)
-from src.Base.utils.time_frequency import (TimeFrequencyGrid, COSINE_WT,
-                                           minimax_transform_weights,
-                                           sigma_fit_ranges)
-from src.SingleReference.base import get_occ_virt_indices, transition_range
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            require_closed_shell_or_unrestricted,
+                                            spin_index, occupied_count)
+from src.Base.factorization.separable_ri import (aux_metric_sqrt,
+                                                 build_separable_ri, fit_M_streaming,
+                                                 molecular_points_covariant,
+                                                 refuse_unrepresented_factors,
+                                                 resolve_grid)
+from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
+from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
+                                        minimax_supported_sizes)
+from src.Base.utils.parallel.mpi_grid import (agreement,
+                                              current_comm, grid_comm, lockstep,
+                                              lockstep_mean_field, partition,
+                                              reduce_sum)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid, COSINE_WT,
+                                                 minimax_transform_weights,
+                                                 sigma_fit_ranges)
+from src.Base.orbital_spaces import particle_hole_window, transition_range
 from src.SingleReference.GW.imaginary_time import (
     SigmaPairs, self_energy_matrix_imaginary_time, self_energy_diagonal_rows,
     sigma_ao_to_mo_diagonal, screening_frequency_grid,
     screened_interaction_rows, screened_interaction_tau_blocked,
     minimax_points_for_gw, minimax_points_for_gw_unrestricted,
     unrestricted_fit_ranges, unrestricted_screening_frequency_grid)
-from src.SingleReference.GW.qp_solve import (add_reaction_field,
-                                             static_exchange_diagonal,
-                                             solve_qp_from_imaginary_axis,
-                                             imaginary_axis_sample_points)
+from src.SingleReference.GW.qp_solve import finish_qp
 from src.SingleReference.GW.reaction_field import (
     separable_gauge_transform, separable_quasiparticle_shift,
     shift_after_solve)
 from src.SingleReference.LinearResponse.space_time import (
     chi0_frequency_rows, chi0_imaginary_frequency, dyson_screening,
-    minimax_points_for_bse, spin_summed, static_screening_grid,
+    minimax_points_for_bse, spin_summed, split_branches, static_screening_grid,
     static_screening_matrix, static_screening_matrix_unrestricted)
 
 
 def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                       numerics=None,
-                      n_start=1, grid_accuracy=None, comm=None, timings=None,
-                      sliced=False, fit='replicated', fit_block=None,
+                      n_start=None, grid_accuracy=None, comm=None, timings=None,
+                      sliced=None, fit=None, fit_block=None,
                       fit_tiles=None):
     """(X_mo, D, X_ao, coords) of the Duchemin-Blase separable RI, Z = D D^T,
     refused (`UnrepresentedOrbitals`) when they miss the density of any
@@ -107,28 +103,11 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
     Interpolation points come from covariant atomic frames, so the answer does
     not depend on the orientation of the molecule.
 
-    The grid is one object, so a keyword naming it is never dropped. Three
-    keywords can name it and each combination has one outcome:
-
-      grid_accuracy alone   `resolve_isdf_grid` sets `counts` and `n_start`.
-      grid_accuracy+counts  equal -> proceed; different -> ValueError. One
-                            request cannot be two grids, and resolving to
-                            either side hands back a factorization nobody
-                            asked for.
-      counts alone          tabulated -> the row; not tabulated -> refused
-                            (`UntabulatedISDFGrid`) unless the numerics
-                            declare a run-time re-optimization
-                            (`IsdfNumerics.runtime_radii`) onto another local
-                            minimum of a multi-modal surface, which is a grid
-                            nothing validated.
-      radii alone           the radii are the grid; no row is consulted.
-      radii+counts          where a row exists for those counts the two must
-                            agree to `ISDF_RADII_MATCH_TOL` or the call is
-                            refused, and the row's `origin` is honoured -- it
-                            places one extra point at the nucleus, so dropping
-                            it builds a 306-point carbon grid where a
-                            Duchemin-Blase row describes 307.
-      nothing               refused (`require_grid`).
+    The grid is one object: `resolve_grid` decides which grid the keywords
+    name and refuses two, and `requested` fills each keyword left None
+    from `numerics` (isdf.level, counts, radii, n_start, auxbasis, fit;
+    layout.sliced, fit_block) and refuses one that names another value than
+    the section's, so a Numerics passed alone keeps its grid.
 
     grid_accuracy:   an accuracy level of `ISDF_GRID_ACCURACY` or four explicit
                      shell counts, resolved by `resolve_isdf_grid`, which
@@ -206,77 +185,31 @@ def unrefused_separable_factors(mf, mol, **keywords):
 
 
 def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
-                       counts=None, numerics=None, n_start=1,
+                       counts=None, numerics=None, n_start=None,
                        grid_accuracy=None, comm=None, timings=None,
-                       sliced=False, fit='replicated', fit_block=None,
+                       sliced=None, fit=None, fit_block=None,
                        fit_tiles=None):
     """The body of `separable_factors`; `refuse` False hands the factors
     over unmeasured (`unrefused_separable_factors`)."""
+    req = requested(numerics, 'separable_factors', auxbasis=auxbasis,
+                    radii=radii, counts=counts, n_start=n_start,
+                    grid_accuracy=grid_accuracy, fit=fit, sliced=sliced,
+                    fit_block=fit_block)
+    fit = req['fit'] or 'replicated'
+    sliced, fit_block = bool(req['sliced']), req['fit_block']
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
     _t0 = _time.time()
     comm = current_comm() if comm is None else comm
-    auxbasis = auxbasis or paired_auxbasis(mol.basis)
+    auxbasis = req['auxbasis'] or paired_auxbasis(mol.basis)
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis=auxbasis)
-    elements = elements_of(mol)
-    if grid_accuracy is not None:
-        level_counts, n_start = resolve_isdf_grid(grid_accuracy, mol.basis,
-                                                  elements, auxbasis=auxbasis)
-        if counts is not None and ({k: int(v) for k, v in dict(counts).items()}
-                                   != {k: int(v) for k, v in level_counts.items()}):
-            raise ValueError(
-                f'two grids asked for: counts {dict(sorted(dict(counts).items()))} '
-                f'and grid_accuracy {grid_accuracy!r}, which is '
-                f'{dict(sorted(level_counts.items()))} at {mol.basis}. Pass one '
-                f'or the other -- the level is not a hint that a count may '
-                f'override, and every energy built on the grid not asked for '
-                f'would be of a functional nobody requested.')
-        counts = level_counts
-    require_grid(counts, radii, 'separable_factors')
-    named_counts = counts is not None
-
-    if radii is None:
-        radii, origins = {}, {}
-        for el in elements:
-            # One table, one lookup, at the counts asked for. Rows carrying the
-            # published cc-pVTZ grids live in it at their own counts, so
-            # reaching them means asking for them.
-            # No row: `runtime_atomic_radii` refuses it unless the numerics
-            # declare a run-time grid (`IsdfNumerics.runtime_radii`).
-            radii[el], _, origins[el] = runtime_atomic_radii(
-                el, mol.basis, auxbasis, counts, n_start=n_start,
-                runtime_radii=numerics_or_default(numerics).isdf.runtime_radii)
-    else:
-        # Explicit radii are the grid and are honoured. Where the caller also
-        # named counts the table may describe the same grid, and then the two
-        # specifications have to agree: `origin` belongs to the row, not to the
-        # recipe, so a matching row brings its nuclear point with it.
-        origins = {el: False for el in radii}
-        against_table = sorted(set(elements) & set(radii)) if named_counts else []
-        for el in against_table:
-            hit = shipped_radii_lookup(el, mol.basis, auxbasis, counts)
-            if hit is None:
-                continue                 # no row at these counts: nothing to contradict
-            table_radii, _, origins[el] = hit
-            for shell in sorted(set(table_radii) | set(radii[el])):
-                mine = np.atleast_1d(np.asarray(radii[el].get(shell, []),
-                                                dtype=float))
-                theirs = np.atleast_1d(np.asarray(table_radii.get(shell, []),
-                                                  dtype=float))
-                if (mine.shape != theirs.shape
-                        or np.any(np.abs(mine - theirs) > ISDF_RADII_MATCH_TOL)):
-                    off = ('' if mine.shape != theirs.shape else
-                           f', worst by {np.abs(mine - theirs).max():.3g} Bohr')
-                    raise ValueError(
-                        f'{el} radii contradict the shipped grid at counts '
-                        f'{dict(sorted(dict(counts).items()))}: this call passes '
-                        f'{shell}={np.array2string(mine, precision=12)} where the '
-                        f'table row holds '
-                        f'{np.array2string(theirs, precision=12)} (they must '
-                        f'agree to {ISDF_RADII_MATCH_TOL:g} Bohr{off}). Drop '
-                        f'`radii` to build the tabulated row, or drop `counts` '
-                        f'to build the radii you passed; the two are different '
-                        f'grids and nothing here can choose between them.')
+    # the decision table is `resolve_grid`'s; no row without a declared
+    # run-time grid (`IsdfNumerics.runtime_radii`)
+    radii, origins, _, _ = resolve_grid(
+        mol, replace(numerics_or_default(numerics).isdf, auxbasis=auxbasis,
+                     counts=req['counts'], radii=req['radii'],
+                     level=req['grid_accuracy'], n_start=req['n_start']),
+        where='separable_factors')
 
     _t = _time.time()
     coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
@@ -363,11 +296,6 @@ def _row_factors(mf, mol, auxmol, coords, numerics, comm, timings, fit_block,
     return out
 
 
-def _unpack_factors(factors):
-    """(X_mo, D, X_ao, coords); the last two are None for a shorter tuple."""
-    return tuple(factors) + (None,) * (4 - len(factors))
-
-
 def _sliced_solve_factors(factors, comm):
     """(X_mo, D, X_ao, coords) as one quasiparticle solve reads `SlicedFactors`.
 
@@ -439,7 +367,7 @@ def replicate_factors(factors, comm):
         return factors
     if comm is None or comm.Get_size() == 1:
         return factors
-    lockstep(tuple(a for a in _unpack_factors(factors)
+    lockstep(tuple(a for a in unpack_factors(factors)
                    if isinstance(a, np.ndarray)), comm, check=True)
     return factors
 
@@ -488,12 +416,16 @@ def _dyson_owned(chi0, transform=None):
                                                      size))}
 
 
-def _static_screening(X_mo, D, eps, nocc, extras, comm=None):
+def _static_screening(X_mo, D, eps, nocc, extras, comm=None,
+                      tile_memory_gb=ISDF_TILE_GB, branches=None):
     """W(omega = 0), dressed, on the route's factors: `static_screening_matrix`
     on `static_screening_grid`, the one build the BSE kernel and the chain's
-    reaction field read; recorded in `extras` with its point count."""
+    reaction field read; recorded in `extras` with its point count. A route
+    that has split the collocation hands its `branches` and tile budget."""
     grid = static_screening_grid(eps, nocc)
-    w_static = static_screening_matrix(X_mo, D, eps, nocc, grid, comm=comm)
+    w_static = static_screening_matrix(X_mo, D, eps, nocc, grid, comm=comm,
+                                       tile_memory_gb=tile_memory_gb,
+                                       branches=branches)
     if extras is not None:
         extras['w_static'] = w_static
         extras['w_static_ntau'] = grid.ntau
@@ -502,7 +434,7 @@ def _static_screening(X_mo, D, eps, nocc, extras, comm=None):
 
 def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
                   tau_points, freq_points, pade_freq, p_state, want_static,
-                  extras, ntau, comm, transform, solver_mode, dm_correction,
+                  extras, ntau, comm, transform, dm_correction,
                   greedy, timings, screen_r_cut, sigma_x, eps_anchor,
                   sigma_x_matrix, tile_gb, xc_diagonal=None, with_z=False,
                   failures=None):
@@ -523,8 +455,10 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
     call shape at every rank count, each root the serial solve of its Sigma.
     """
     _t = _time.time()
+    # X_mo's two branches gathered once, for chi0 and W(0) alike
+    branches = split_branches(X_mo, eps, nocc, mu)[:2]
     chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=mu, comm=comm,
-                               tile_memory_gb=tile_gb)
+                               tile_memory_gb=tile_gb, branches=branches)
     if timings is not None:
         timings['t_chi0'] = _time.time() - _t
         timings['nranks'] = comm.Get_size()
@@ -532,8 +466,10 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
     _t = _time.time()
     W_minus_I = _dyson_owned(chi0, transform)
     del chi0
-    w_static = (_static_screening(X_mo, D, eps, nocc, extras, comm)
+    w_static = (_static_screening(X_mo, D, eps, nocc, extras, comm,
+                                  tile_memory_gb=tile_gb, branches=branches)
                 if want_static else None)
+    del branches
     rW, _ = sigma_fit_ranges(eps, nocc, mu=mu)
     Ctw, _ = minimax_transform_weights(COSINE_WT, tau_points, freq_points,
                                        *rW, warn=False)
@@ -564,10 +500,10 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    return _finish_qp(sigma[0] if np.ndim(p_state) == 0 else sigma,
+    return finish_qp(sigma[0] if np.ndim(p_state) == 0 else sigma,
                       eps if eps_anchor is None else eps_anchor,
                       nocc, p_state, mu, pade_freq, mf, mol,
-                      solver_mode, dm_correction, greedy, timings, sigma_x,
+                      dm_correction, greedy, timings, sigma_x,
                       reaction_field=reaction_field, comm=comm,
                       sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,
                       with_z=with_z, failures=failures,
@@ -611,7 +547,7 @@ def _sigma_mo_diagonal(X_mo, D, W_omega, mf, eps, nocc, tau_points, freq_points,
 def _root_quasiparticles(out, comm, extras=None):
     """Rank 0's quasiparticle energies on every rank (`lockstep`).
 
-    `_finish_qp` already all-gathers the window, so every rank holds the same
+    `qp_solve.finish_qp` already all-gathers the window, so every rank holds the same
     array before this; the lockstep makes that a guarantee of the kernel
     rather than a property of the ranks' arithmetic happening to agree, and an
     audited run counts whether it had anything to repair. These energies go on
@@ -630,128 +566,72 @@ def _root_quasiparticles(out, comm, extras=None):
     return lockstep(out, comm)
 
 
-def _finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
-               solver_mode, dm_correction, greedy, timings, sigma_x='mf',
-               reaction_field=None, comm=None, sigma_x_matrix=None, spin=None,
-               xc_diagonal=None, with_z=False, failures=None,
-               after_solve=True):
-    """Sigma_c on the imaginary axis -> quasiparticle energy, one per state.
 
-    reaction_field is the continuum's Eq. (18) shift when the route built W,
-    and replaces the COHSEX fallback inside `static_exchange_diagonal`.
-    after_solve (G0W0, `reaction_field.shift_after_solve`) adds it to every
-    root whole once the equation is solved without it; False (an evGW cycle)
-    puts it in the static term. Z is the equation's either way.
-    spin: the channel of an unrestricted reference, whose (2, ...)
-    reaction_field and sigma_x_matrix the static term indexes.
 
-    <Sigma_x - v_xc> is one exchange build for the whole window, so it
-    precedes the loop; the Pade fit of Sigma_pp(i.omega) and the root search
-    on w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w) are per state (each
-    state has its own sample line and its own scalar equation). On a
-    quasiparticle set (the whole BSE diagonal) that loop is the larger cost,
-    and it is what `comm` splits.
+def _space_time_grids(spectra, noccs, anchors, sizes, w0, timings):
+    """The time and frequency axes of one space-time solve, on the spin
+    channels `spectra`/`noccs` (one channel: restricted, two: unrestricted):
+    {'ntau', 'grid', 'freq_points', 'freq_weights', 'pade_freq',
+    'tau_points', 'ranges'}. sizes: the driver's quadrature, {'ntau',
+    'nfreq', 'npade', 'tau_target'} (read off its Numerics).
 
-    comm: rank r takes states r, r + nranks, ... and the roots are
-    all-gathered back into state order, so every rank returns the whole
-    window. The static term is replicated from rank 0 first, since a K built
-    independently per rank agrees only to its last bits; Sigma arrives
-    all-reduced and identical, so a partitioned window is bitwise the serial
-    one (`tests/test_qp_states_over_ranks.py` gates it per state). Ranks
-    beyond the number of states own an empty block and only serve the gather.
-
-    No window size divides the static term: K and v_xc are built whole and
-    then indexed. `sigma_x_matrix` hands that build in from the caller (the
-    diagonal it yields is the built one bit for bit); otherwise the ranks
-    divide it where the mean field carries the slices a distributed SCF left
-    on it, and a mean field converged one rank at a time builds it
-    replicated.
-
-    xc_diagonal: the static term of the equation on the states from the
-    caller, in place of the build: <p|Sigma_x - v_xc|p>, plus Eq. (18) only
-    where the shift belongs in the equation (after_solve False). A
-    reaction_field the route built is still added after the solve.
-    with_z: return (roots, Z) of the continuation.
-    failures: with with_z, receives {orbital: 'ExceptionClass: message'} for
-    each state whose Pade continuation or root search failed numerically
-    (ArithmeticError, LinAlgError); that state's root and Z are NaN, and any
-    other exception propagates.
+    ntau None or 'auto' is sized from `anchors` (the spectra the equation is
+    anchored on: an evGW iterate opens the gap cycle by cycle, and a grid
+    that followed it would make each cycle integrate a different functional;
+    the mean field has the smallest gap, so its count is the conservative
+    one) and filed in `timings`. The frequency axis paired with the time axis
+    is minimax of the same size, built over the range W's way back to tau is
+    fitted over, rW (`screening_frequency_grid`); it is not a quadrature --
+    chi0 goes onto it only so the Dyson inversion, which is not diagonal in
+    time, can be done -- and nfreq='auto' needs ntau tabulated. An explicit
+    nfreq is a Gauss-Legendre axis on w0, and so is the Pade axis. ranges is
+    (rW, rS) of the self-energy's fit (`sigma_fit_ranges`), the tau axis
+    half rS's minimax points.
     """
-    states = np.atleast_1d(p_state)
-    scalar = np.ndim(p_state) == 0
-    sig = np.atleast_2d(sigma)
-    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
-                    else (0, 1))
-
-    _t = _time.time()
-    after = after_solve and reaction_field is not None
-    # One exchange build for the whole window: <Sigma_x - v_xc> carries no state
-    # index until it is indexed.
-    if xc_diagonal is not None:
-        xc_diag = np.atleast_1d(np.asarray(xc_diagonal, float))
+    ntau, nfreq, npade = sizes['ntau'], sizes['nfreq'], sizes['npade']
+    tau_target = sizes['tau_target']
+    restricted = len(spectra) == 1
+    if restricted:
+        eps, nocc = spectra[0], noccs[0]
+        e_min, e_max, mu = particle_hole_window(eps, nocc)
     else:
-        xc_diag = static_exchange_diagonal(
-            mf, mol, states, dm_correction=dm_correction, exchange=sigma_x,
-            reaction_field=None if after else reaction_field,
-            sigma_x_matrix=sigma_x_matrix, comm=comm, spin=spin,
-            reaction_field_after_solve=after)
-    if nranks > 1:
-        xc_diag = lockstep(np.ascontiguousarray(xc_diag, dtype=float), comm)
-    if timings is not None:
-        timings['t_qp_static'] = _time.time() - _t
-
-    _t_states = _time.time()
-    mine = (partition(len(states), rank, nranks) if nranks > 1
-            else np.arange(len(states)))
-    out = [None] * len(states)
-    failed = {}
-    for i in mine:
-        i = int(i)
-        p = states[i]
-        z_fit, _ = imaginary_axis_sample_points(pade_freq, nocc, p, mu)
-        # Occupied states sit on the negative branch, where Sigma(-i w) = conj.
-        s_p = np.conj(sig[i]) if p < nocc else sig[i]
-        if not with_z:
-            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
-                                                  z_fit, s_p, greedy=greedy,
-                                                  solver_mode=solver_mode)
-            continue
-        # A caller that asks for Z judges each root itself, so a state whose
-        # continuation fails numerically is reported, NaN with its exception
-        # in `failures`; any other exception is a defect and raises.
-        try:
-            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
-                                                  z_fit, s_p, greedy=greedy,
-                                                  solver_mode=solver_mode,
-                                                  with_z=True)
-        except (ArithmeticError, np.linalg.LinAlgError) as exc:
-            out[i] = (np.nan, np.nan)
-            failed[i] = f'{type(exc).__name__}: {exc}'
-    if nranks > 1:
-        for chunk in comm.allgather([(i, out[i], failed.get(i))
-                                     for i in mine]):
-            for i, root, why in chunk:
-                out[int(i)] = root
-                if why is not None:
-                    failed[int(i)] = why
-    if failures is not None:
-        failures.update({int(states[i]): why for i, why in failed.items()})
-    if timings is not None:
-        timings['t_qp_states'] = _time.time() - _t_states
-        timings['t_qp'] = _time.time() - _t
-    shift = reaction_field if after else None
-    if with_z:
-        roots = add_reaction_field(np.array([r for r, _ in out], float),
-                                   shift, states, spin)
-        z = np.array([zz for _, zz in out], float)
-        return (roots[0], z[0]) if scalar else (roots, z)
-    roots = add_reaction_field(np.asarray(out, float), shift, states, spin)
-    return roots[0] if scalar else roots
+        e_min, e_max = transition_range(spectra, noccs)
+    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
+        if restricted:
+            ntau, tau_err = minimax_points_for_gw(
+                anchors[0], nocc, mu=particle_hole_window(anchors[0], nocc)[2],
+                target=tau_target)
+        else:
+            ntau, tau_err = minimax_points_for_gw_unrestricted(
+                anchors, noccs, target=tau_target)
+        if timings is not None:
+            timings['ntau_auto'] = ntau
+            timings['tau_fit_error'] = tau_err
+    if nfreq is None or (isinstance(nfreq, str) and nfreq.lower() == 'auto'):
+        if ntau not in minimax_supported_sizes():
+            raise ValueError(
+                f"nfreq='auto' needs a tabulated minimax frequency grid at "
+                f'ntau = {ntau}; GreenX has {minimax_supported_sizes()}. Pass an '
+                'explicit nfreq.')
+        freq_points, freq_weights = (
+            screening_frequency_grid(ntau, eps, nocc, mu=mu) if restricted
+            else unrestricted_screening_frequency_grid(ntau, spectra, noccs))
+    else:
+        freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
+    ranges = (sigma_fit_ranges(eps, nocc, mu=mu) if restricted
+              else unrestricted_fit_ranges(spectra, noccs))
+    return {'ntau': ntau,
+            'grid': TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
+                                                    freq_points, freq_weights),
+            'freq_points': freq_points, 'freq_weights': freq_weights,
+            'pade_freq': gauss_legendre_grid(npade, w0=w0)[0],
+            'tau_points': 0.5 * minimax_time_grid(ntau, *ranges[1])[0],
+            'ranges': ranges}
 
 
 def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                                auxbasis=None, radii=None, factors=None,
-                               greedy=True, solver_mode='pole_strength',
+                               greedy=True,
                                dm_correction=None, timings=None,
                                distribute=None, comm=None, freq_block=None,
                                scratch_dir=None, extras=None,
@@ -802,7 +682,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                  and the self-energy's branch sums are reduced and
                  re-associate; every other step is an output partition. The
                  window's per-state Pade and Newton split over the states
-                 (`_finish_qp`), with no reduction and bitwise. With
+                 (`qp_solve.finish_qp`), with no reduction and bitwise. With
                  freq_block or scratch_dir the tau partition moves inside
                  each frequency block and Wt is held rows-per-rank
                  (`_qp_blocked`); that path splits tau points alone and every
@@ -881,30 +761,20 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                              "reference")
         return _space_time_unrestricted(
             mf, mol, nocc, p_state, spin_index(spin_channel), ntau, nfreq,
-            npade, w0, auxbasis, radii, factors, greedy, solver_mode,
+            npade, w0, auxbasis, radii, factors, greedy,
             dm_correction, timings, (mpi_comm, rank, nranks), freq_block,
             scratch_dir, tau_target, extras, screen_r_cut, sigma_x,
-            eps_anchor, sigma_x_matrix, tile_gb, counts, grid_accuracy)
+            eps_anchor, sigma_x_matrix, tile_gb, counts, grid_accuracy,
+            numerics)
     eps = get_orbital_energies(mf, representation='spatial')
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    e_min = eps[virt].min() - eps[occ].max()
-    e_max = eps[virt].max() - eps[occ].min()
-    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
-
-    # R = e_max/e_min grows as the gap closes, so a fixed ntau is wrong at one
-    # end of any size series.
-    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        # Sized from the anchor spectrum when one is given: an evGW iterate
-        # opens the gap cycle by cycle, and a grid that followed it would make
-        # each cycle integrate a different functional. The mean field has the
-        # smallest gap, so its count is the conservative one.
-        eps_size = eps if eps_anchor is None else np.asarray(eps_anchor, float)
-        ntau, tau_err = minimax_points_for_gw(
-            eps_size, nocc, mu=0.5 * (eps_size[nocc - 1] + eps_size[nocc]),
-            target=tau_target)
-        if timings is not None:
-            timings['ntau_auto'] = ntau
-            timings['tau_fit_error'] = tau_err
+    mu = particle_hole_window(eps, nocc)[2]
+    axes = _space_time_grids(
+        [eps], [nocc], [eps if eps_anchor is None
+                        else np.asarray(eps_anchor, float)],
+        dict(ntau=ntau, nfreq=nfreq, npade=npade, tau_target=tau_target), w0,
+        timings)
+    ntau, grid, tau_points = axes['ntau'], axes['grid'], axes['tau_points']
+    freq_points, pade_freq = axes['freq_points'], axes['pade_freq']
 
     factors = (factors if factors is not None
                else separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
@@ -926,42 +796,18 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     if sliced:
         X_mo, D, X_ao, coords = _sliced_solve_factors(factors, mpi_comm)
     else:
-        X_mo, D, X_ao, coords = _unpack_factors(factors)
-
-    # The frequency axis paired with the time axis: same size, minimax. It is
-    # not a quadrature here -- chi0 is transformed onto it only so the Dyson
-    # inversion, which is not diagonal in time, can be done, and W comes
-    # straight back. A round trip on ntau points carries no more information.
-    # It is built over the range W's way back to tau is fitted over, rW, not
-    # over the bare window (`screening_frequency_grid`).
-    if nfreq is None or (isinstance(nfreq, str) and nfreq.lower() == 'auto'):
-        if ntau not in minimax_supported_sizes():
-            raise ValueError(
-                f"nfreq='auto' needs a tabulated minimax frequency grid at "
-                f'ntau = {ntau}; GreenX has {minimax_supported_sizes()}. Pass an '
-                'explicit nfreq.')
-        freq_points, freq_weights = screening_frequency_grid(ntau, eps, nocc,
-                                                             mu=mu)
-    else:
-        freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
-    pade_freq = gauss_legendre_grid(npade, w0=w0)[0]
+        X_mo, D, X_ao, coords = unpack_factors(factors)
 
     # W(omega = 0) for a BSE kernel or the Eq. (18) shift, from the one static
     # build: not on this axis, whose omega = 0 would be a grid of its own.
     want_static = extras is not None or transform is not None
-
-    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
-                                           freq_points, freq_weights)
-
-    _, rS = sigma_fit_ranges(eps, nocc, mu=mu)
-    tau_points = 0.5 * minimax_time_grid(ntau, *rS)[0]
 
     if freq_block or scratch_dir:
         return _root_quasiparticles(
             _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points,
                         freq_points, pade_freq, p_state, want_static, extras,
                         ntau, (mpi_comm, rank, nranks), freq_block,
-                        scratch_dir, solver_mode,
+                        scratch_dir,
                         dm_correction, greedy, timings, X_ao, coords,
                         screen_r_cut, sigma_x, eps_anchor, auxbasis,
                         transform, sigma_x_matrix, tile_gb, xc_diagonal,
@@ -972,7 +818,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
             _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
                           tau_points, freq_points, pade_freq, p_state,
                           want_static, extras, ntau, mpi_comm, transform,
-                          solver_mode, dm_correction, greedy, timings,
+                          dm_correction, greedy, timings,
                           screen_r_cut, sigma_x, eps_anchor, sigma_x_matrix,
                           tile_gb, xc_diagonal, with_z,
                           failures=failures),
@@ -1011,9 +857,9 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    return _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
+    return finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
                       nocc, p_state, mu, pade_freq, mf, mol,
-                      solver_mode, dm_correction, greedy, timings, sigma_x,
+                      dm_correction, greedy, timings, sigma_x,
                       reaction_field=reaction_field,
                       sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,
                       with_z=with_z, failures=failures,
@@ -1021,11 +867,11 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
 
 
 def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
-                             w0, auxbasis, radii, factors, greedy, solver_mode,
+                             w0, auxbasis, radii, factors, greedy,
                              dm_correction, timings, mpi, freq_block,
                              scratch_dir, tau_target, extras, screen_r_cut,
                              sigma_x, eps_anchor, sigma_x_matrix, tile_gb,
-                             counts=None, grid_accuracy=None):
+                             counts=None, grid_accuracy=None, numerics=None):
     """`solve_qp_energy_space_time` on an unrestricted reference, channel `spin`.
 
     One W from chi0_alpha + chi0_beta (`spin_summed`), each spin in its own
@@ -1067,7 +913,7 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
     noccs = tuple(int(n) for n in nocc)
     spectra = tuple(np.asarray(e, float) for e in mf.mo_energy)
     eps, n_ch = spectra[spin], noccs[spin]
-    mu = 0.5 * (eps[n_ch - 1] + eps[n_ch])
+    mu = particle_hole_window(eps, n_ch)[2]
     if eps_anchor is None:
         anchors = spectra
     else:
@@ -1076,19 +922,19 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
             raise ValueError(
                 f'an unrestricted eps_anchor is one spectrum per spin, shape '
                 f'(2, {eps.size}); got {anchors.shape}')
-    e_min, e_max = transition_range(spectra, noccs)
-    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        ntau, tau_err = minimax_points_for_gw_unrestricted(
-            anchors, noccs, target=tau_target)
-        if timings is not None:
-            timings['ntau_auto'] = ntau
-            timings['tau_fit_error'] = tau_err
+    axes = _space_time_grids(
+        spectra, noccs, anchors,
+        dict(ntau=ntau, nfreq=nfreq, npade=npade, tau_target=tau_target), w0,
+        timings)
+    ntau, grid, tau_points = axes['ntau'], axes['grid'], axes['tau_points']
+    freq_points, pade_freq = axes['freq_points'], axes['pade_freq']
+    ranges = axes['ranges']
     factors = (factors if factors is not None
                else separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
                                       counts=counts,
                                       grid_accuracy=grid_accuracy,
-                                      comm=mpi_comm))
-    _, D, X_ao, coords = _unpack_factors(factors)
+                                      comm=mpi_comm, numerics=numerics))
+    _, D, X_ao, coords = unpack_factors(factors)
     if X_ao is None:
         raise ValueError(
             'an unrestricted reference needs the AO collocation of the '
@@ -1099,24 +945,9 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
         agreement((X_ao, D, sigma_x_matrix), mpi_comm, audit_only=True,
                   label='solve_qp_energy_space_time inputs')
     transform = separable_gauge_transform(mol, environment_of(mf), auxbasis)
-    if nfreq is None or (isinstance(nfreq, str) and nfreq.lower() == 'auto'):
-        if ntau not in minimax_supported_sizes():
-            raise ValueError(
-                f"nfreq='auto' needs a tabulated minimax frequency grid at "
-                f'ntau = {ntau}; GreenX has {minimax_supported_sizes()}. Pass an '
-                'explicit nfreq.')
-        freq_points, freq_weights = unrestricted_screening_frequency_grid(
-            ntau, spectra, noccs)
-    else:
-        freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
-    pade_freq = gauss_legendre_grid(npade, w0=w0)[0]
     # W(omega = 0) for a BSE kernel or the Eq. (18) shift, from the one static
     # build: not on this axis, whose omega = 0 would be a grid of its own.
     want_static = extras is not None or transform is not None
-    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
-                                           freq_points, freq_weights)
-    ranges = unrestricted_fit_ranges(spectra, noccs)
-    tau_points = 0.5 * minimax_time_grid(ntau, *ranges[1])[0]
 
     _t = _time.time()
     if nranks > 1:
@@ -1180,8 +1011,8 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
     return _root_quasiparticles(
-        _finish_qp(sigma, anchors[spin], n_ch, p_state, mu, pade_freq, mf, mol,
-                   solver_mode, dm_correction, greedy, timings, sigma_x,
+        finish_qp(sigma, anchors[spin], n_ch, p_state, mu, pade_freq, mf, mol,
+                   dm_correction, greedy, timings, sigma_x,
                    reaction_field=reaction_field,
                    comm=mpi_comm if nranks > 1 else None,
                    sigma_x_matrix=sigma_x_matrix, spin=spin,
@@ -1191,7 +1022,7 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
 
 def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
                 pade_freq, p_state, want_static, extras, ntau, mpi,
-                freq_block, scratch_dir, solver_mode, dm_correction, greedy,
+                freq_block, scratch_dir, dm_correction, greedy,
                 timings, X_ao, coords, screen_r_cut, sigma_x='mf',
                 eps_anchor=None, auxbasis=None, transform=None,
                 sigma_x_matrix=None, tile_gb=ISDF_TILE_GB, xc_diagonal=None,
@@ -1254,9 +1085,9 @@ def _qp_blocked(X_mo, D, mf, mol, eps, nocc, mu, grid, tau_points, freq_points,
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
-    out = _finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
+    out = finish_qp(sigma, eps if eps_anchor is None else eps_anchor,
                      nocc, p_state, mu, pade_freq, mf, mol,
-                     solver_mode, dm_correction, greedy, timings, sigma_x,
+                     dm_correction, greedy, timings, sigma_x,
                      reaction_field=reaction_field,
                      comm=mpi_comm if nranks > 1 else None,
                      sigma_x_matrix=sigma_x_matrix, xc_diagonal=xc_diagonal,

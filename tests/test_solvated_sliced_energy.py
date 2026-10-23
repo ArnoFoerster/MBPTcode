@@ -20,9 +20,10 @@ ISDF BSE roots (`solve_bse_isdf`):
       RANK_SPLIT_ENERGY_TOL of the one-rank row fit's, with the densities in
       the production tile (one tile on this grid) and cut into 7 tiles;
   (c) THE MEMORY CENSUS: the continuum's solve makes the gas phase's gathers
-      on the same slices, by name and by collective, plus the one gather of
-      X_o and X_v the window's static W(0) sweep makes (the Eq. (18) shift
-      reads it; the gas-phase window builds none), X_mo never among them,
+      on the same slices, by name and by collective: the window's static
+      W(0) (the Eq. (18) shift reads it; the gas-phase window builds none)
+      is swept on the branches the window gathered already, X_mo never
+      among them,
       the densities are formed from this rank's rows, and the bare gauge is
       the gathered D's own buffer;
   (d) the gas phase never reaches the densities.
@@ -45,19 +46,20 @@ import numpy as np
 import pytest
 from pyscf import df, gto, scf
 
-from src.Base import sliced_factors
-from src.Base.constants import (FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                RANK_SPLIT_ENERGY_TOL)
-from src.Base.environment import attach_environment
-from src.Base.numerics import Numerics
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
+from src.Base.factorization import sliced_factors
+from src.Base.numerics.constants import (FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         RANK_SPLIT_ENERGY_TOL)
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import reaction_field, space_time
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 
@@ -223,14 +225,9 @@ def test_the_continuum_gathers_what_the_gas_phase_does(water, spies, size):
         return out
 
     res = run_simulated(rank, size)
-    npts, nmo = res[0]['gas'][2][0][0], mf.mo_coeff.shape[1]
-    static_sweep = Counter({(npts, nocc): 1, (npts, nmo - nocc): 1})
     for r, out in enumerate(res):
-        assert out['solvated'][0] == dict(Counter(out['gas'][0])
-                                          + Counter({'X_o': 1, 'X_v': 1})), \
-            (r, out)
-        assert (Counter(out['solvated'][2])
-                == Counter(out['gas'][2]) + static_sweep), r
+        assert out['solvated'][0] == out['gas'][0], (r, out)
+        assert Counter(out['solvated'][2]) == Counter(out['gas'][2]), r
         assert 'X_mo' not in out['solvated'][0]
         r0, r1 = out['solvated'][1]
         rows = ('SlicedFactors', (r0, r1), (r1 - r0, mf.mo_coeff.shape[1]),

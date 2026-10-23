@@ -12,13 +12,13 @@ from dataclasses import replace
 import numpy as np
 from pyscf import gto
 
-from src.Base.constants import AMU_TO_ME
+from src.Base.numerics.constants import AMU_TO_ME
 from src.Base.declaration import QPStates
 from src.photophysics.cli import declaration_of, parser
 from src.photophysics.minimum import GroundModes
 from src.photophysics.stages import Run, ground_minimum
 from src.photophysics.store import Store
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 
 #: The formaldehyde geometry of the production gate, Angstrom.
 FORMALDEHYDE = ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
@@ -67,11 +67,13 @@ def run_of(store_root, *extra, max_memory=4000, **changes):
     return run_in(store_root, declaration(*extra, **changes), max_memory)
 
 
-def production(store_root, environment, solvation):
+def production(store_root, environment, solvation, *extra):
     """(the photophysics Run, the S1 surface at R0 it would walk): the walk
-    gate's configuration, the run's own factory and declaration."""
+    gate's configuration, the run's own factory and declaration; `extra`
+    command-line options appended."""
     run = run_of(store_root, '--environment', environment,
-                 '--relaxed-solvation', solvation, qp_states='admitted')
+                 '--relaxed-solvation', solvation, *extra,
+                 qp_states='admitted')
     mol0 = run.mol_in
     mf0 = reference_mean_field(mol0, run.factory, run.relaxed_spec.environment)
     return run, run.excited_at(run.relaxed_spec, mol0, mf0)

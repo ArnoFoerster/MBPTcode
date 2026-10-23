@@ -116,10 +116,24 @@ def toy_electronics(monkeypatch, run, modes, masses, g, t0):
         ss, st = ((SIGN['singlet'], SIGN['triplet']) if flipped
                   else (np.ones(N_ROOTS),) * 2)
         out = (true[np.ix_(ps, pt)] * ss[:, None, None] * st[None, :, None])
-        return spectrum('singlet', flipped), spectrum('triplet', flipped), out
+        return (spectrum('singlet', flipped), spectrum('triplet', flipped), out,
+                (mol, None, None))
+
+    def overlap(key, here, nocc, x_ref, y_ref, x, y):
+        # the toy's orbitals do not move: the transported overlap is the
+        # normalized dot product of the two Casida vectors
+        y_ref = np.zeros_like(x_ref) if y_ref is None else y_ref
+        y = np.zeros_like(x) if y is None else y
+        ov = x_ref.T @ x + y_ref.T @ y
+        nr = np.sqrt((x_ref ** 2 + y_ref ** 2).sum(axis=0))
+        nd = np.sqrt((x ** 2 + y ** 2).sum(axis=0))
+        s = np.eye(ov.shape[0] + 1, ov.shape[1] + 1)
+        s[1:, 1:] = ov / np.outer(nr, nd)
+        return s
 
     monkeypatch.setattr(uisc, 'chain_at', chain_at)
     monkeypatch.setattr(uisc, 'solve_at', solve_at)
+    monkeypatch.setattr(uisc, 'transported_overlap', overlap)
     return calls
 
 

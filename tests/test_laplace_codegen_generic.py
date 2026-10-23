@@ -1,7 +1,7 @@
 """Validates the generic Laplace-fusion code generator
 (src/CodeGeneration/laplace_codegen.py) by using it to independently
 re-derive the SAME two quantities mpn_density_driver_restricted.py's
-hand-ported _laplace_aaaaaa_contribution computes (the t3_2_aaaaaa
+hand-ported laplace_aaaaaa_contribution computes (the t3_2_aaaaaa
 contribution to t1_3_aa's numerator, and to the ov M3 block) -- if the
 generic, rank-agnostic fuser reproduces that already-oracle-validated
 hand derivation exactly, that's strong evidence it's correct and ready to
@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 pytestmark = pytest.mark.skipif(not pdaggerq_available(),
                                 reason='needs pdaggerq (optional)')
@@ -23,12 +23,13 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.CodeGeneration.generate_mpn_density import ranks_present
-from src.CodeGeneration.generate_mpn_density_restricted import (
-    t_numerator_terms_restricted, cross_density_terms_restricted, DENSITY_OUT_IDX_R,
+from src.CodeGeneration.generate_mpn_density_spin import (
+    t_numerator_terms_restricted, cross_density_terms_restricted,
 )
+from src.CodeGeneration.codegen_common import density_out_idx
 from src.CodeGeneration.laplace_codegen import fuse_amplitude_into_consumer, assemble_laplace_fused
-from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted, _laplace_aaaaaa_contribution
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
+from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted, laplace_aaaaaa_contribution
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
 
 
 def build_generic_t1_3_laplace():
@@ -40,7 +41,7 @@ def build_generic_t1_3_laplace():
         ['g_aaaa', 'o', 'v', 'eps_a', 't2_1_aaaa'],
         {'t2_aaaa': 't2_1_aaaa'}, 't1_3_lap', '(nv, no)', fused, ['a', 'i'],
         eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]')
-    from src.Base.utils.grids import minimax_time_grid
+    from src.Base.utils.grids.grids import minimax_time_grid
     from src.SingleReference.CC.cached_einsum import einsum
     ns = {'np': np, 'minimax_time_grid': minimax_time_grid, 'einsum': einsum}
     # nv/no aren't in params; patch shape expr to use local shapes instead
@@ -53,14 +54,14 @@ def build_generic_ov_laplace():
     inner = t_numerator_terms_restricted(3, 2, 'aaaaaa')
     outer = cross_density_terms_restricted('ov', [2], ranks_present(2))
     fused = fuse_amplitude_into_consumer(inner, 3, outer, 't3_aaaaaa')
-    out_idx = DENSITY_OUT_IDX_R['ov']  # ['m', 'e']
+    out_idx = density_out_idx('ov')  # ['m', 'e']
     src = assemble_laplace_fused(
         'laplace_ov_generic',
         ['g_aaaa', 'o', 'v', 'eps_a', 't2_1_aaaa', 'l2_1_aaaa'],
         {'t2_aaaa': 't2_1_aaaa', 'l2_aaaa': 'l2_1_aaaa'}, 'ov_lap', '(no, nv)', fused, out_idx,
         eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]')
     src = src.replace('(no, nv)', '(t2_1_aaaa.shape[2], t2_1_aaaa.shape[0])')
-    from src.Base.utils.grids import minimax_time_grid
+    from src.Base.utils.grids.grids import minimax_time_grid
     from src.SingleReference.CC.cached_einsum import einsum
     ns = {'np': np, 'minimax_time_grid': minimax_time_grid, 'einsum': einsum}
     exec(compile(src, '<laplace_ov_generic>', 'exec'), ns)
@@ -83,11 +84,11 @@ def main():
 
         d = MPnDensityDriverRestricted(f_aa, g_aaaa, g_abab, g_bbbb, nocc)
         t2_1_aaaa, t2_1_abab = d.compute_t2_1()
-        from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import _to_l_restricted
-        l2_1_aaaa = _to_l_restricted(t2_1_aaaa, 2, 'aaaa')
+        from src.SingleReference.common.mp_amplitudes import to_l
+        l2_1_aaaa = to_l(t2_1_aaaa, 2, 'aaaa')
 
         ntau = 8
-        hand_t1_3, hand_ov = _laplace_aaaaaa_contribution(eps_a[:nocc], eps_a[nocc:], g_aaaa, d.o, d.v, t2_1_aaaa, ntau)
+        hand_t1_3, hand_ov = laplace_aaaaaa_contribution(eps_a[:nocc], eps_a[nocc:], g_aaaa, d.o, d.v, t2_1_aaaa, ntau)
 
         gen_t1_3 = laplace_t1_3_generic(g_aaaa=g_aaaa, o=d.o, v=d.v, eps_a=eps_a, t2_1_aaaa=t2_1_aaaa, ntau=ntau)
         gen_ov = laplace_ov_generic(g_aaaa=g_aaaa, o=d.o, v=d.v, eps_a=eps_a, t2_1_aaaa=t2_1_aaaa, l2_1_aaaa=l2_1_aaaa, ntau=ntau)

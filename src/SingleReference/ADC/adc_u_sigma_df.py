@@ -4,7 +4,7 @@ anywhere); the production open-shell path."""
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-from src.SingleReference.ADC.adc_utils import _g_block_df
+from src.SingleReference.ADC.adc_utils import g_block_df
 from src.SingleReference.ADC.adc_u_utils import (
     u2_denominators, u1_dressing_shift,
     u1_shift_terms_2h1p, u1_shift_terms_2p1h)
@@ -22,7 +22,7 @@ def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     B_ov, B_oo, B_vo = ing['B_ov'], ing['B_oo'], ing['B_vo']
     if t2_ijcd is None:
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
+        t2_ijcd = g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
 
     Zo = _cached_einsum('Qip,p->Qi', B_o_full, z_p, optimize=True)   # (naux,O)
     Zv = _cached_einsum('Qcp,p->Qc', B_v_full, z_p, optimize=True)   # (naux,V)
@@ -77,7 +77,7 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     B_ov, B_oo, B_vo = ing['B_ov'], ing['B_oo'], ing['B_vo']
     if t2_ijcd is None:
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
+        t2_ijcd = g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
     # t2m == -t2_abkl, a transposed VIEW of the shared t2_ijcd array
     # (no copy); each t2-linear term below flips sign accordingly --
     # on the term prefactor for forward terms, on the small rank-3
@@ -223,7 +223,7 @@ def build_operator(s, nocc, static_correction=None, t2_ijcd=None):
     if t2_ijcd is None:
         occ_, virt_ = slice(0, nocc), slice(nocc, s.norb)
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(s.B_spin, occ_, occ_, virt_, virt_) / denom_ij_cd
+        t2_ijcd = g_block_df(s.B_spin, occ_, occ_, virt_, virt_) / denom_ij_cd
 
     def aop(z):
         z_p = z[:norb]

@@ -45,7 +45,7 @@ def test_every_seeded_solve_hits_a_dense_eigenpair():
     _, seeds = solver.downfolded_seeds()
     found = []
     for k in range(seeds.shape[1]):
-        e, Z = solver.solve(nroots=1, ref_vec=seeds[:, k], conv_tol=1e-8)
+        e, Z = solver.solve(nroots=1, ref_vec=seeds[:, k], tol=1e-8)
         j = int(np.argmin(np.abs(e_d - float(e[0]))))
         assert abs(e_d[j] - float(e[0])) < 5e-6
         assert abs(Z_d[j] - float(Z[0])) < 1e-4
@@ -61,7 +61,7 @@ def test_en_dressed_route():
     en = ADCSolver(mf, mol=mol, level='adc3', matrix_free=True,
                    en_dress={'hh': True, 'singles': False})
     e_eff, seeds = en.downfolded_seeds()
-    e, Z = en.solve(nroots=1, ref_vec=seeds[:, -1], conv_tol=1e-7)
+    e, Z = en.solve(nroots=1, ref_vec=seeds[:, -1], tol=1e-7)
     assert e.shape == (1,) and 0.0 < float(Z[0]) <= 1.0
     assert float(e[0]) < 0.0
 

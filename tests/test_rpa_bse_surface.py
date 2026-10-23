@@ -15,14 +15,14 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import CD_NFREQ, HARTREE_TO_EV
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.isdf_derivatives import (exx_double_counting_Y,
-                                            exx_double_counting_skeleton)
+from src.Base.numerics.constants import CD_NFREQ, HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.mean_field_response import (exx_double_counting_Y,
+                                               exx_double_counting_skeleton)
 from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'

@@ -7,19 +7,16 @@ from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.DensityMatrix.generated_mpn import (
     mpn_density_pieces as mpn_gen)
 from src.SingleReference.DensityMatrix.mpn_density_driver import (
-    MPnDensityDriver, _denom, g_vvoo_df, t1_2_numerator_df)
+    MPnDensityDriver, g_vvoo_df, t1_2_numerator_df)
+from src.SingleReference.common.mp_amplitudes import orbital_denominator
 from src.SingleReference.EpsteinNesbet.shifts import epstein_nesbet_denominator
 
 
 def u2_denominators(eps, nocc):
     """(D_hhpp, D_pphh): the two bare MP1 doubles denominators the U^(2)
     blocks divide by."""
-    eps_o, eps_v = eps[:nocc], eps[nocc:]
-    d_hhpp = (eps_o[:, None, None, None] + eps_o[None, :, None, None]
-              - eps_v[None, None, :, None] - eps_v[None, None, None, :])
-    d_pphh = (eps_v[:, None, None, None] + eps_v[None, :, None, None]
-              - eps_o[None, None, :, None] - eps_o[None, None, None, :])
-    return d_hhpp, d_pphh
+    d = orbital_denominator(eps[:nocc], eps[nocc:], 2)      # [a,b,i,j]
+    return d.transpose(2, 3, 0, 1), -d
 
 
 def u1_dressing_shift(s, nocc, t2_ijcd):
@@ -36,7 +33,7 @@ def u1_dressing_shift(s, nocc, t2_ijcd):
             g=s.g, kd=np.eye(norb), o=o, v=v,
             nv=norb - nocc, no=nocc, t2_1=(t2_bare_native - t2_fed_native))
     else:
-        t2_bare_native = g_vvoo_df(s.B_spin, nocc) / _denom(s.eps[o], s.eps[v], 2)
+        t2_bare_native = g_vvoo_df(s.B_spin, nocc) / orbital_denominator(s.eps[o], s.eps[v], 2)
         num_delta = t1_2_numerator_df(s.B_spin, nocc,
                                       t2_bare_native - t2_fed_native)
     return num_delta.T                                      # w[j,a]
@@ -55,7 +52,7 @@ def dressed_t2_amplitudes(s, nocc, u2_denom_dress):
     o, v = slice(0, nocc), slice(nocc, s.norb)
     channels = {k: val for k, val in u2_denom_dress.items()
                 if k in ('hh', 'pp', 'hp')}
-    D_bare = _denom(s.eps[o], s.eps[v], 2)
+    D_bare = orbital_denominator(s.eps[o], s.eps[v], 2)
     if s.g is not None:
         D_dressed = epstein_nesbet_denominator(D_bare, s.g, nocc, layout='pphh',
                                                bare_sign=1.0, **channels)

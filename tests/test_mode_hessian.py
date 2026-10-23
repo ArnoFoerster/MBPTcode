@@ -41,15 +41,17 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (HARTREE_TO_CM, ISDF_HESSIAN_MIN_GRID,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.numerics import Numerics  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.properties.mode_hessian import (displaced_along, mode_hessian,  # noqa: E402
-                                         mode_step, step_ladder,
-                                         stretch_modes)
-from src.properties.optimize import MeanFieldSurface, relax_ground_state  # noqa: E402
+from src.Base.numerics.constants import (HARTREE_TO_CM, ISDF_HESSIAN_MIN_GRID,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
+from src.Base.geometry.geometry import displaced  # noqa: E402
+from src.properties.mode_hessian import (cartesian_mode,  # noqa: E402
+                                         frequency_ladder, mode_hessian,
+                                         mode_step, stretch_modes)
+from src.properties.optimize import relax_ground_state
+from src.gradients.mean_field_surface import MeanFieldSurface  # noqa: E402
 from src.properties.vibronic import normal_modes  # noqa: E402
 from tests.isdf_test_grid import counts_at
 
@@ -125,8 +127,9 @@ def test_the_gradient_curvature_is_the_energy_curvature(ground, s1, carbonyl):
         second = []
         for cart in (0.02, 0.01):
             h = mode_step(modes[:, k], masses, cart)
-            ep = s1.total_energy(displaced_along(mol, modes[:, k], masses, h))
-            em = s1.total_energy(displaced_along(mol, modes[:, k], masses, -h))
+            u = cartesian_mode(modes[:, k], masses)
+            ep = s1.total_energy(displaced(mol, h * u))
+            em = s1.total_energy(displaced(mol, -h * u))
             second.append((ep + em - 2.0 * e0) / h ** 2)
         reference = (4.0 * second[1] - second[0]) / 3.0
         # measured 5.5e-04 (C=O) and 7.8e-04 (scissor)
@@ -172,8 +175,8 @@ def test_noisy_gradients_are_refused(ground):
 def test_the_ladder_refuses_steps_it_cannot_read_an_order_from(ground):
     mol, mf, omega, modes, masses = ground
     with pytest.raises(ValueError, match='halved'):
-        step_ladder(MeanFieldSurface(mol, factory, mf=mf, own=True), mol,
-                    omega, modes, masses, [3], steps=(3e-3, 2e-3, 1e-3))
+        frequency_ladder(MeanFieldSurface(mol, factory, mf=mf, own=True), mol,
+                         omega, modes, masses, [3], steps=(3e-3, 2e-3, 1e-3))
 
 
 if __name__ == '__main__':

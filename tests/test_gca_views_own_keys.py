@@ -16,9 +16,9 @@ import copy
 import numpy as np
 from pyscf import gto
 
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_differentiable
 

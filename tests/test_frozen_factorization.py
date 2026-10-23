@@ -20,11 +20,11 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.numerics import Numerics
-from src.gradients import factor_chain as fc_module
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.numerics import Numerics
+from src.gradients.rpa import factor_chain as fc_module
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 from tests.reference_scf import rhf_tight_default_cycles

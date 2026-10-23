@@ -25,11 +25,11 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (QP_BLOCK_CORRECTION_TOL,
-                                QP_DEGENERACY_TOL)
+from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL,
+                                         QP_DEGENERACY_TOL)
 from src.SingleReference.GW.quasi_boson import ranked_root
-from src.gradients import dense_surfaces
-from src.gradients.dense_surfaces import DenseBSESurface
+from src.gradients.gwbse import dense_surfaces
+from src.gradients.gwbse.dense_surfaces import DenseBSESurface
 from src.properties.excitations import qp_bookkeeping
 from tests.blas_bar import assert_same, bar_with_drift
 

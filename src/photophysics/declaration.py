@@ -30,10 +30,11 @@ whose stamp is not the one the reading declaration makes.
 from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
+from src.Base.numerics.constants import RESIDUE_ROUTES_ALL
 from src.Base.declaration import KERNELS, QPStates
-from src.Base.numerics import Numerics
-from src.Base.record_io import record_hash
-from src.properties.rates import MANIFOLD_GAP_RULES
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_io import record_hash
+from src.photophysics.rates import MANIFOLD_GAP_RULES
 
 #: Where the relaxed states stand in a continuum.
 RELAXED_SOLVATION = ('equilibrium', 'nonequilibrium')
@@ -47,8 +48,13 @@ SCF_FINISH = ('diis', 'newton')
 #: E_0 under the excited state: E_KS of the reference ('dft'), or
 #: E_HF + E_c^dRPA on it ('rpa').
 GROUNDS = ('dft', 'rpa')
-#: How the self-energy's real-axis residues are taken on the chain.
+#: How the self-energy's real-axis residues are taken on the chain: the two
+#: of the one vocabulary (`RESIDUE_ROUTES_ALL`) a production run declares,
+#: the pole model first (the default).
 RESIDUES = ('sop', 'explicit')
+if not set(RESIDUES) <= set(RESIDUE_ROUTES_ALL):
+    raise ImportError(f'declaration residues {RESIDUES} leave the one '
+                      f'vocabulary {RESIDUE_ROUTES_ALL}')
 #: The mean-field routes of the production chain.
 SCF_ROUTES = ('isdf', 'df')
 #: What the gas phase is called.

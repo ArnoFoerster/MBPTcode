@@ -23,17 +23,16 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base.constants import (HARTREE_TO_EV, ISDF_DENSITY_RESIDUAL_TOL,
-                                ISDF_ORBITAL_RESIDUAL_TOL)
-from src.Base.isdf_jk import canonical_basis, solve_in_span
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (orbital_density_residual,
-                                   refuse_unrepresented_orbitals,
-                                   represented_span, shipped_radii_lookup)
+from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_DENSITY_RESIDUAL_TOL,
+                                         ISDF_ORBITAL_RESIDUAL_TOL)
+from src.Base.factorization.isdf_jk import canonical_basis, solve_in_span
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import (orbital_density_residual,
+                                                 refuse_unrepresented_orbitals,
+                                                 represented_span, shipped_radii_lookup)
 from src.SingleReference.GW.space_time import (separable_factors,
                                                 unrefused_separable_factors)
-from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 
 #: The extra diffuse shells: first exponent, ratio, count.
 EXTRA = (0.03, 1.15, 4)

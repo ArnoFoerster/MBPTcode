@@ -45,8 +45,8 @@ from src.SingleReference.ADC.cross_block_decoupling import (delta_u_rows_k1,
                                                                 decouple_cross_blocks)
 from src.SingleReference.ADC.delta_u3_dressing import delta_u3_rows
 from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_antisymmetrized_spin_block_eri)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_antisymmetrized_spin_block_eri)
 from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.generated_runtime import requires_runtime
 

@@ -27,7 +27,7 @@ and the H2 closure are exact.
 import numpy as np
 
 from src.CodeGeneration.diagrammatic.exact_oracle import (
-    _h_element, _dets)
+    h_element, determinants)
 
 
 def apply_ops(occ_set, ops):
@@ -115,7 +115,7 @@ class SectorSpaces:
                                          ('a', l), ('a', m)])
                                 self.k2.append((det, sgn))
 
-        e0_1 = _h_element(hf, hf, h1, g) - ehf
+        e0_1 = h_element(hf, hf, h1, g) - ehf
         self.n1, self.n2 = len(self.k1), len(self.k2)
 
         self.U1 = np.array([sgn * g[:, j, k, l]
@@ -130,19 +130,19 @@ class SectorSpaces:
             for b in range(a, self.n1):
                 db, sb, _ = self.k1[b]
                 if a == b:
-                    v = _h_element(da, da, h1, g) - sum(eps[p] for p in da) - e0_1
+                    v = h_element(da, da, h1, g) - sum(eps[p] for p in da) - e0_1
                 else:
-                    v = sa * sb * _h_element(da, db, h1, g)
+                    v = sa * sb * h_element(da, db, h1, g)
                 self.C11[a, b] = self.C11[b, a] = v
         self.C12 = np.zeros((self.n1, self.n2))
         for a, (da, sa, _) in enumerate(self.k1):
             for b, (db, sb) in enumerate(self.k2):
-                self.C12[a, b] = sa * sb * _h_element(da, db, h1, g)
+                self.C12[a, b] = sa * sb * h_element(da, db, h1, g)
 
         self.doubles = []
-        for D in _dets(norb, nocc):
+        for D in determinants(norb, nocc):
             if len(D - hf) == 2:
-                cD = _h_element(D, hf, h1, g) / (-(sum(eps[p] for p in D) - ehf))
+                cD = h_element(D, hf, h1, g) / (-(sum(eps[p] for p in D) - ehf))
                 self.doubles.append((D, cD))
 
     def u2_k1(self):

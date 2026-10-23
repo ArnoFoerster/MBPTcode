@@ -1,76 +1,29 @@
 """Restricted dense supermatrix from the dense eri_chemist tensor.
 
-The CSF-basis assembly (_assemble) is written once here; adc_r_dense_df
+The CSF-basis assembly (assemble) is written once here; adc_r_dense_df
 feeds it the same named integral slices gathered from B_aa instead."""
-import math
 import numpy as np
 
 from src.SingleReference.EpsteinNesbet import (EpsteinNesbetDenominators,
                                                restricted_channel_shifts)
-from src.SingleReference.ADC.adc_r_utils import _u2_spin_amplitudes
+from src.SingleReference.ADC.adc_r_utils import build_g_blocks, csf_layout, u2_spin_amplitudes
 
 
 def build_supermatrix(s, nocc, static_correction=None):
     """(nH, nH) restricted supermatrix at s.level, dense-integral route."""
-    O, V = nocc, s.norb - nocc
-    oidx = np.arange(O)
-    vidx_abs = np.arange(O, s.norb)
-    g = s.eri.transpose(0, 2, 1, 3)  # physicist <pq|rs>
-    g_oovv = g[:O, :O, O:, O:]                 # (O,O,V,V) g[i,k,c,a]
-    g_vvoo = g[O:, O:, :O, :O]                 # (V,V,O,O) g[a,b,k,l]
-    g_vv_pv = g[O:, O:, :, O:]                 # (V,V,norb,V) g[c,d,p,a]
-    g_vv_vp = g[O:, O:, O:, :]                 # (V,V,V,norb) g[c,d,a,p]
-    g_oo_po = g[:O, :O, :, :O]                 # (O,O,norb,O) g[k,l,p,i]
-    g_oo_op = g[:O, :O, :O, :]                 # (O,O,O,norb) g[k,l,i,p]
-    g_vopo = g[O:, :O, :, :O]                  # (V,O,norb,O) g[c,i,p,k]
-    g_voho = g[O:, :O, :O, :]                  # (V,O,O,norb) g[c,i,k,p]
-    g_ovpv = g[:O, O:, :, O:]                  # (O,V,norb,V) g[k,a,p,c]
-    g_ovvp = g[:O, O:, O:, :]                  # (O,V,V,norb) g[k,a,c,p]
-    g_oo_pp = g[:O, :O, :, :]                  # (O,O,norb,norb)
-    g_vv_pp = g[O:, O:, :, :]                  # (V,V,norb,norb)
-    g_ii = g[oidx, oidx]                        # (O,norb,norb) g[i,i,:,:]
-    g_aa = g[vidx_abs, vidx_abs]                # (V,norb,norb) g[a,a,:,:]
-    g_voov = g[O:, :O, :O, O:]                 # (V,O,O,V) g[c,i,k,a]
-    g_vovo = g[O:, :O, O:, :O]                 # (V,O,V,O) g[c,i,a,k]
-    g_oooo = g[:O, :O, :O, :O]                 # (O,O,O,O)
-    g_vvvv = g[O:, O:, O:, O:]                 # (V,V,V,V)
-    g_ovov = g[:O, O:, :O, O:]                 # (O,V,O,V) g[k,a,i,c]
-    g_ovvo = g[:O, O:, O:, :O]                 # (O,V,V,O) g[k,a,c,i]
-    blk = dict(g_oovv=g_oovv, g_vvoo=g_vvoo, g_vv_pv=g_vv_pv, g_vv_vp=g_vv_vp, g_oo_po=g_oo_po, g_oo_op=g_oo_op, g_vopo=g_vopo, g_voho=g_voho, g_ovpv=g_ovpv, g_ovvp=g_ovvp, g_oo_pp=g_oo_pp, g_vv_pp=g_vv_pp, g_ii=g_ii, g_aa=g_aa, g_voov=g_voov, g_vovo=g_vovo, g_oooo=g_oooo, g_vvvv=g_vvvv, g_ovov=g_ovov, g_ovvo=g_ovvo)
-    return _assemble(s, nocc, static_correction, blk)
+    return assemble(s, nocc, static_correction, build_g_blocks(s.eri, nocc))
 
 
-def _assemble(s, nocc, static_correction, blk):
+def assemble(s, nocc, static_correction, blk):
     """Shared CSF assembly consuming the 20 named integral slices."""
-    eps, eri_chemist = s.eps, s.eri
+    eps = s.eps
     norb = s.norb
-    O, V = nocc, norb - nocc
-    eps_o, eps_v = eps[:O], eps[O:]
-
-    s32 = math.sqrt(1.5)
-    s12 = math.sqrt(0.5)
-    s2 = math.sqrt(2.0)
-    s3 = math.sqrt(3.0)
-
-    d = s.dimensions(nocc)
-    nI, nII, nIII, n2h1p = d['nI'], d['nII'], d['nIII'], d['n2h1p']
-    nIp, nIIp, nIIIp = d['nIp'], d['nIIp'], d['nIIIp']
-    nH = d['nH']
-    nP_o = O * (O - 1) // 2
-    nP_v = V * (V - 1) // 2
-
-    oI = norb
-    oII = oI + nI
-    oIII = oII + nII
-    oIp = norb + n2h1p
-    oIIp = oIp + nIp
-    oIIIp = oIIp + nIIp
-
-    iu_o, ju_o = np.triu_indices(O, k=1)   # i<j occ pairs
-    iu_v, ju_v = np.triu_indices(V, k=1)   # a<b virt pairs
-    oidx = np.arange(O)
-    vidx_local = np.arange(V)
-    vidx_abs = np.arange(O, norb)
+    (O, V, eps_o, eps_v, s32, s12, s2, s3, nI, nII, nIII, nIp, nIIp, nIIIp, nH, nP_o,
+     nP_v, oI, oII, oIII, oIp, oIIp, oIIIp, iu_o, ju_o, iu_v, ju_v, oidx, vidx_local,
+     vidx_abs) = csf_layout(s, nocc).take(
+        'O V eps_o eps_v s32 s12 s2 s3 nI nII nIII nIp nIIp nIIIp nH nP_o nP_v '
+        'oI oII oIII oIp oIIp oIIIp iu_o ju_o iu_v ju_v oidx vidx_local '
+        'vidx_abs')
 
     H = np.zeros((nH, nH))
 
@@ -184,7 +137,7 @@ def _assemble(s, nocc, static_correction, blk):
 
         # t_same/t_opp = the aaaa/abab T2^(1) amplitudes on 'ikca'; every
         # W/A object below is their unique linear combination.
-        t_same, t_opp = _u2_spin_amplitudes(g_oovv, g_oovv_T, dens, 'ikca')
+        t_same, t_opp = u2_spin_amplitudes(g_oovv, g_oovv_T, dens, 'ikca')
         W1 = t_same - 2 * t_opp                     # -(g + g^T)/D
         u_I += np.einsum('ikca,cipk->ipa', W1, g_vopo, optimize=True)
         W2 = t_opp - 2 * t_same                     # (-g + 2g^T)/D
@@ -257,7 +210,7 @@ def _assemble(s, nocc, static_correction, blk):
         u_Ip += corr_kl_Ip.transpose(2, 1, 0)
 
         # 'ackl' relabeled [a,c,k,i] = eps_a+eps_c-eps_i-eps_k
-        tp_same, tp_opp = _u2_spin_amplitudes(g_vvoo, g_vvoo_T, dens, 'ackl')
+        tp_same, tp_opp = u2_spin_amplitudes(g_vvoo, g_vvoo_T, dens, 'ackl')
         W1p = 2 * tp_opp - tp_same                   # (g + g^T)/D
         W2p = 2 * tp_same - tp_opp                   # (g - 2g^T)/D
 

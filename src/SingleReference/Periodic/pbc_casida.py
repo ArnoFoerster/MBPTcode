@@ -36,7 +36,7 @@ from pyscf.pbc.lib.kpts_helper import conj_mapping
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 
 
-def _transition_layout(dfints, kconserv):
+def transition_layout(dfints, kconserv):
     """(offsets, N, nocc, nvirt) for the (ki,i,a) flattened transition space."""
     nk = dfints.nkpts
     nocc = dfints.nocc
@@ -46,14 +46,14 @@ def _transition_layout(dfints, kconserv):
     return offsets, int(offsets[-1]), nocc, nvirt
 
 
-def _stacked_Lov(dfints, kconserv):
+def stacked_Lov(dfints, kconserv):
     """M[L, (ki,i,a)]: occ-virt DF factor stacked over ki, and the flat layout.
 
     M is the bra-conjugated occ-virt block so that V_dir = M^H M reproduces the
     direct Coulomb (a_ka i_ki | j_kj b_kb) and Pi0 = (4/nk) M f M^H reproduces
     get_rho_response.
     """
-    offsets, N, nocc, nvirt = _transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
     # naux from the blocks actually used at THIS transfer, not from L[0]: naux
     # can differ between momentum transfers in GDF, so L[0] need not carry the
     # right auxiliary momentum.
@@ -67,7 +67,7 @@ def _stacked_Lov(dfints, kconserv):
 
 
 def _diag_energies(dfints, kconserv, mo_energy):
-    offsets, N, nocc, nvirt = _transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
     d = np.zeros(N)
     for ki in range(dfints.nkpts):
         ka = kconserv[ki]
@@ -122,7 +122,7 @@ def build_rpa_matrices(dfints, kconserv, mo_energy=None):
     mo_energy = np.asarray(mo_energy)
     w = 1.0 / dfints.nkpts
 
-    M, offsets, N, nocc, nvirt = _stacked_Lov(dfints, kconserv)
+    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
     d_all = _diag_energies(dfints, kconserv, mo_energy)
 
     V_dir = M.conj().T @ M                       # Hermitian PSD, (ai|jb)
@@ -143,7 +143,7 @@ def solve_rpa_spectral(dfints, kconserv, mo_energy=None):
     if mo_energy is None:
         mo_energy = dfints.mo_energy
     mo_energy = np.asarray(mo_energy)
-    M, offsets, N, nocc, nvirt = _stacked_Lov(dfints, kconserv)
+    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
     A, B = build_rpa_matrices(dfints, kconserv, mo_energy=mo_energy)
     Omega, X, Y = CasidaSolver(A, B).solve()
     rho = M @ (X + Y)
@@ -212,7 +212,7 @@ def build_static_W_all_Q(dfints, mo_energy=None):
     return W_all
 
 
-def _screened_block(dfints, W_all, k1, k2, k3, k4, s1, s2, s3, s4):
+def screened_block(dfints, W_all, k1, k2, k3, k4, s1, s2, s3, s4):
     """Screened 4-index MO block sum_{PP'} L^{k1,k2}_{P,pq} W^Q_{PP'}
     L^{k3,k4}_{P',rs} for orbital ranges s1..s4, with Q the momentum transfer
     of the (k1,k2) pair and W^Q = conj(W_all[Q]): W_all is built from
@@ -267,7 +267,7 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
     w = 1.0 / nk
 
     # e-h exchange v^q = (a_ka i_ki | j_kj b_kb) = M^H M, in (ki,i,a) layout
-    M, offsets, N, nocc, nvirt = _stacked_Lov(dfints, kconserv)
+    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
     V_dir = M.conj().T @ M
     d_all = _diag_energies(dfints, kconserv, mo_energy)
 
@@ -288,7 +288,7 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
             sl_j = slice(offsets[kj], offsets[kj + 1])
 
             # A screened direct: (a b|W|j i), aux momentum kb-ka = kj-ki, -> [i,a,j,b]
-            Wd = _screened_block(dfints, W_all, ka, kb, kj, ki,
+            Wd = screened_block(dfints, W_all, ka, kb, kj, ki,
                                  vir(ka), vir(kb), occ(kj), occ(ki))
             A_scr = Wd.transpose(3, 0, 2, 1)
             A[sl_i, sl_j] -= w * A_scr.reshape(A_scr.shape[0] * A_scr.shape[1], -1)
@@ -296,7 +296,7 @@ def build_bse_matrices(dfints, q, W_all, mo_energy=None):
             # B screened (Fig 2d): antiresonant J at time-reversed momenta,
             # (a j~|W|b~ i) with b~=conj(kb), j~=conj(kj), -> [i,a,j,b]
             kbb, kjb = cmap[kb], cmap[kj]
-            Ws = _screened_block(dfints, W_all, ka, kjb, kbb, ki,
+            Ws = screened_block(dfints, W_all, ka, kjb, kbb, ki,
                                  vir(ka), occ(kjb), vir(kbb), occ(ki))
             B_scr = Ws.transpose(3, 0, 1, 2)
             B[sl_i, sl_j] -= w * B_scr.reshape(B_scr.shape[0] * B_scr.shape[1], -1)

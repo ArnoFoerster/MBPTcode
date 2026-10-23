@@ -38,11 +38,12 @@ from pyscf import dft, gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import distributed_df
-from src.Base.distributed_df import distributed_mean_field, release_distributed
-from src.Base.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.Base.factorization import distributed_df
+from src.Base.factorization.distributed_df import distributed_mean_field, release_distributed
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests.blas_bar import PIN_FILE, assert_same
 from tests.pins import RECORDING_BLAS, blas_identity, matches, recorded_blas
 from tests.isdf_test_grid import g1
@@ -65,7 +66,7 @@ def fresh(route, xc):
     warnings.simplefilter('ignore')
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
     mf = dft.RKS(mol, xc=xc)
-    mf = (isdf_jk(mf, auxbasis=AUX, counts=g1(mf)) if route == 'isdf'
+    mf = (isdf_jk_with_force(mf, auxbasis=AUX, counts=g1(mf)) if route == 'isdf'
           else mf.density_fit(auxbasis=AUX))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf

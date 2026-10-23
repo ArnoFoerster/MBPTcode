@@ -24,13 +24,13 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import SCF_HISTORY_GRAD_MARKS  # noqa: E402
-from src.Base.distributed_df import distributed_mean_field  # noqa: E402
-from src.Base.isdf_jk import isdf_jk  # noqa: E402
-from src.Base.scf_convergence import (SCFHistory, WarmStart, newton_finished,  # noqa: E402
-                                      scf_record, warm_started)
-from src.Base.separable_ri import resolve_isdf_grid  # noqa: E402
-from src.Base.utils.mpi_grid import run_simulated  # noqa: E402
+from src.Base.numerics.constants import SCF_HISTORY_GRAD_MARKS  # noqa: E402
+from src.Base.factorization.distributed_df import distributed_mean_field  # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.pyscf.scf_convergence import (SCFHistory, WarmStart, newton_finished,  # noqa: E402
+                                            scf_record, warm_started)
+from src.Base.factorization.separable_ri import resolve_isdf_grid  # noqa: E402
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests.pins import assert_same  # noqa: E402
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4615'
@@ -165,7 +165,7 @@ def isdf_water(xc):
     counts, n_start = resolve_isdf_grid('G1', 'cc-pvdz', ['H', 'O'],
                                         auxbasis='cc-pvdz-ri')
     mf = (scf.RHF(mol) if xc == 'hf' else dft.RKS(mol, xc=xc))
-    return isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=counts, n_start=n_start)
+    return isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=counts, n_start=n_start)
 
 
 def density_fitted(xc):

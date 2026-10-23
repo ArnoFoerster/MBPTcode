@@ -32,14 +32,16 @@ import numpy as np
 import pytest
 
 from src.CodeGeneration.generate_adcn import (
-    superop_element_terms, superop_element_terms_dressed, overlap_element_terms,
+    superop_element_terms, overlap_element_terms,
     union_element_terms, union_element_terms_ops, union_overlap_terms,
-    union_overlap_terms_ops, assemble_block, _shape_expr)
+    union_overlap_terms_ops, assemble_block)
+from src.CodeGeneration.codegen_common import shape_expr
 from src.SingleReference.ADC.adc_order_rule import u_order_terms, s_order_terms
 from src.SingleReference.ADC.precursor_classes import (
     class_index_convention, class_letters, precursor_bra_string, precursor_ket_string,
     union_operator_string, pair_index_convention, OCC_LETTERS, VIR_LETTERS)
-from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import to_l
 from tests.test_isr_assembly import _build
 from tests.generated_runtime import requires_runtime
 
@@ -52,7 +54,7 @@ TOL = 1e-14           # relative to max(1, |block|): pure einsum re-association 
 
 def _evaluate(terms, out_idx, pool, extra_args=()):
     """Numerical value of a raw term list as the dense out_idx tensor."""
-    src = assemble_block('blk', _shape_expr(out_idx), terms, out_idx, '', extra_args=extra_args)
+    src = assemble_block('blk', shape_expr(out_idx), terms, out_idx, '', extra_args=extra_args)
     ns = {}
     exec('import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n' + src, ns)
     fn = ns['blk']
@@ -86,7 +88,7 @@ def _dressed_sum(order, two_sector_fn, union_fn, pool, amps, kind='u'):
         kd = [f't{k}'] if k else None
         extra = {}
         if j:
-            extra[f'l{j}'] = _to_l(amps[(j, a)], j)
+            extra[f'l{j}'] = to_l(amps[(j, a)], j)
         if k:
             extra[f't{k}'] = amps[(k, b)]
         t2s = two_sector_fn(ham, lo, kd)
@@ -128,7 +130,7 @@ def test_same_sector_class_pairs(label, atom):
             def two_fn(ham, lo, kd, bra_dag=bra_dag, ket=ket, sector=sector):
                 if ham is None:
                     return overlap_element_terms(bra_dag, ket, left_ops=lo, ket_dressing=kd)
-                return superop_element_terms_dressed(bra_dag, ket, sector, (ham,),
+                return superop_element_terms(bra_dag, ket, sector, (ham,),
                                                      left_ops=lo, ket_dressing=kd)
 
             def uni_fn(ham, lo, kd, bk=bra_k, kk=ket_k, sector=sector):
@@ -174,7 +176,7 @@ def test_orbital_k1_couplings(label, atom):
             def two_fn(ham, lo, kd, p_tok=p_tok, ket=ket, sector=sector):
                 if ham is None:
                     return overlap_element_terms(p_tok, ket, left_ops=lo, ket_dressing=kd)
-                return superop_element_terms_dressed(p_tok, ket, sector, (ham,),
+                return superop_element_terms(p_tok, ket, sector, (ham,),
                                                      left_ops=lo, ket_dressing=kd)
 
             def uni_fn(ham, lo, kd, x=[f'a*({p_letter})'], y=y):

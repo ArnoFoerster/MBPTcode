@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import REFREEZE_TOL_MEV
+from src.Base.numerics.constants import REFREEZE_TOL_MEV
 from src.properties.excitations import relaxation_fields
 from src.properties.optimize import refreeze_pass
 

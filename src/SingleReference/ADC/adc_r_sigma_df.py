@@ -9,15 +9,16 @@ import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.EpsteinNesbet import (EpsteinNesbetDenominators,
                                                restricted_channel_shifts)
+from src.SingleReference.common.eri_blocks import g_slice_df
 from src.SingleReference.ADC.adc_utils import (
-    _g_slice_df, _g_diag_df, _g_diag_mid_df, _g_diag_outer_df,
-    _b_factor, _b_q_chunk, _b_chunk_einsum)
+    g_diag_df, g_diag_mid_df, g_diag_outer_df,
+    b_factor, b_chunk_einsum)
 from src.SingleReference.ADC.adc_r_utils import (
-    _build_g_blocks_df, _dress_is_streamable, _u2_spin_amplitudes,
-    _u_2h1p_unfold, _u_2p1h_unfold, _u_2p1h_zparts_df,
-    _u_I_ring_contract_df, _u_pv_vp_contract_df, _u_Ip_pv_vp_contract_df,
-    _u2_2h1p_amplitude_chunks, _u2_2p1h_amplitude_chunks,
-    _build_u_blocks_unstreamed, _no_u_blocks)
+    build_g_blocks_df, csf_layout, dress_is_streamable, unfold_pair, upper_pair,
+    u_2h1p_unfold, u_2p1h_unfold, u_2p1h_zparts_df, u_pv_vp_contract_df,
+    build_u_blocks_unstreamed, no_u_blocks)
+from src.SingleReference.common.mp_amplitudes import (u2_2h1p_amplitude_chunks,
+                                                      u2_2p1h_amplitude_chunks)
 
 
 # ===================== S4 followup: C-block occupied-index streaming =====================
@@ -47,8 +48,8 @@ def _c2h1p_df_chunks(B, O, V, norb, chunk_size=4, B_w=None):
     for lo in range(0, O, chunk_size):
         hi = min(lo + chunk_size, O)
         occ_chunk = occ[lo:hi]
-        gv_chunk = _g_slice_df(B_w, vir, occ, vir, occ_chunk)  # (V,O,V,ci) = g[c,i,a,j_chunk]
-        go_chunk = _g_slice_df(B, vir, occ, occ_chunk, vir)   # (V,O,ci,V) = g[c,i,j_chunk,a]
+        gv_chunk = g_slice_df(B_w, vir, occ, vir, occ_chunk)  # (V,O,V,ci) = g[c,i,a,j_chunk]
+        go_chunk = g_slice_df(B, vir, occ, occ_chunk, vir)   # (V,O,ci,V) = g[c,i,j_chunk,a]
         m1a_c = gv_chunk.transpose(1, 2, 3, 0)   # (i,a,j_chunk,c)
         m1b_c = go_chunk.transpose(1, 3, 2, 0)   # (i,a,j_chunk,c)
         yield lo, hi, m1a_c, m1b_c
@@ -71,8 +72,8 @@ def _c2p1h_df_chunks(B, O, V, norb, chunk_size=4, B_w=None):
     for lo in range(0, O, chunk_size):
         hi = min(lo + chunk_size, O)
         occ_chunk = occ[lo:hi]
-        g_ovov_c = _g_slice_df(B_w, occ_chunk, vir, occ, vir)  # (kc,V,O,V) = g[k_chunk,a,i,c]
-        g_ovvo_c = _g_slice_df(B, occ_chunk, vir, vir, occ)   # (kc,V,V,O) = g[k_chunk,a,c,i]
+        g_ovov_c = g_slice_df(B_w, occ_chunk, vir, occ, vir)  # (kc,V,O,V) = g[k_chunk,a,i,c]
+        g_ovvo_c = g_slice_df(B, occ_chunk, vir, vir, occ)   # (kc,V,V,O) = g[k_chunk,a,c,i]
         yield lo, hi, g_ovov_c, g_ovvo_c
 
 
@@ -103,11 +104,11 @@ def _oooo_contract_df(Foo, Vt):
 
 def _u_I_ring_contract_streamed_bare(B, O, V, norb, eps_o, eps_v,
                                      occ_chunk=4, q_chunk=8, dh=None, dp=None):
-    """Streamed twin of _u_I_ring_contract_df: identical (term1, term2)
+    """Streamed twin of u_I_ring_contract_df: identical (term1, term2)
     output, (O,norb,V) each, but never materializes W1/W2 (or g_oovv) as
     full (O,O,V,V) arrays -- built occupied-chunk by occupied-chunk from
     B_aa. dh/dp: optional EN hh/pp shift matrices, see
-    _u2_2h1p_amplitude_chunks's docstring for scope."""
+    u2_2h1p_amplitude_chunks's docstring for scope."""
     occ = np.arange(O)
     vir = np.arange(O, norb)
     Bo_full = B[:, occ, :]
@@ -116,7 +117,7 @@ def _u_I_ring_contract_streamed_bare(B, O, V, norb, eps_o, eps_v,
     Bvo = B[:, vir][:, :, occ]
     term1 = np.zeros((O, norb, V))
     term2 = np.zeros((O, norb, V))
-    for lo, hi, t_same, t_opp, W1c, W2c, A_mix, X_ijcd in _u2_2h1p_amplitude_chunks(
+    for lo, hi, t_same, t_opp, W1c, W2c, A_mix, X_ijcd in u2_2h1p_amplitude_chunks(
             B, O, V, norb, eps_o, eps_v, occ_chunk, dh=dh, dp=dp):
         for i_local in range(hi - lo):
             i = lo + i_local
@@ -155,11 +156,11 @@ def _corr_kl_Ip_streamed_df(Bo_full, Boo, X_akl, q_chunk=32):
 
 def _u_Ip_pv_vp_contract_streamed_bare(B, O, V, norb, eps_o, eps_v,
                                        occ_chunk=4, q_chunk=32, dh=None, dp=None):
-    """Streamed twin of _u_Ip_pv_vp_contract_df: identical (term1, term2)
+    """Streamed twin of u_Ip_pv_vp_contract_df: identical (term1, term2)
     output, (V,norb,O) each, never materializing W1p/W2p (or g_vvoo) as full
     (V,V,O,O) arrays. dh/dp: optional EN hh/pp shift matrices, see
-    _u2_2h1p_amplitude_chunks's docstring for scope. Verified against
-    _u_Ip_pv_vp_contract_df fed the full-array W1p/W2p to 1.1e-13."""
+    u2_2h1p_amplitude_chunks's docstring for scope. Verified against
+    u_Ip_pv_vp_contract_df fed the full-array W1p/W2p to 1.1e-13."""
     occ = np.arange(O)
     vir = np.arange(O, norb)
     Bo_full = B[:, occ, :]
@@ -168,7 +169,7 @@ def _u_Ip_pv_vp_contract_streamed_bare(B, O, V, norb, eps_o, eps_v,
     Bov_full = B[:, occ][:, :, vir]
     term1 = np.zeros((V, norb, O))
     term2 = np.zeros((V, norb, O))
-    for lo, hi, tp_same, tp_opp, W1p_c, W2p_c, X_abkl in _u2_2p1h_amplitude_chunks(
+    for lo, hi, tp_same, tp_opp, W1p_c, W2p_c, X_abkl in u2_2p1h_amplitude_chunks(
             B, O, V, norb, eps_o, eps_v, occ_chunk, dh=dh, dp=dp):
         for start in range(0, Bo_full.shape[0], q_chunk):
             sl = slice(start, start + q_chunk)
@@ -195,7 +196,7 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     present, no screening, no adc2x, dress bare or hh/pp spin-adapted.
     Never materializes any O^2V^2 amplitude or integral -- everything is
     rebuilt occupied-chunk by occupied-chunk from B every call, via
-    _u2_2h1p_amplitude_chunks/_u2_2p1h_amplitude_chunks (dh/dp: the small
+    u2_2h1p_amplitude_chunks/u2_2p1h_amplitude_chunks (dh/dp: the small
     EN shift matrices, None for bare).
 
     ints keys read: g_ii_U, g_ii, g_aa_U, g_aa. (g_oo_po/g_oo_op are NOT
@@ -206,8 +207,6 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     """
     s32 = math.sqrt(1.5)
     s12 = math.sqrt(0.5)
-    nP_o = O * (O - 1) // 2
-    nP_v = V * (V - 1) // 2
     nI = O * V
     nIp = O * V
     g_ii_U, g_ii = ints['g_ii_U'], ints['g_ii']
@@ -222,14 +221,14 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     # shift is the <ii|ii> diagonal.
     g_iicd = g_ii[:, O:, O:]
     X_icd = g_iicd / dens.build_icd()
-    term_pv, term_vp = _u_pv_vp_contract_df(Bv_full, Bv_pp, X_icd, 'i', 'i')
+    term_pv, term_vp = u_pv_vp_contract_df(Bv_full, Bv_pp, X_icd, 'i', 'i')
     u_I -= 0.5 * (term_pv + term_vp)
     # aaaa/abab amplitudes on 'ikca'; W1/W2/A_anti/A_mix are their
-    # unique linear combinations (see _u2_spin_amplitudes).
+    # unique linear combinations (see u2_spin_amplitudes).
     # never materializes t_same/t_opp/W1/W2 (or g_oovv) as full
     # (O,O,V,V) -- built occupied-chunk by occupied-chunk from
     # B_aa. See this section's banner comment above
-    # _u2_2h1p_amplitude_chunks.
+    # u2_2h1p_amplitude_chunks.
     r1_I, r2_I = _u_I_ring_contract_streamed_bare(
         B, O, V, norb, eps_o, eps_v, dh=dh, dp=dp)
     u_I += r1_I
@@ -248,15 +247,15 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     # Never materializes t_same/W1/A_mix/X_ijcd (or g_oovv) as full
     # (O,O,V,V) arrays -- rebuilt occupied-chunk by occupied-chunk
     # from B_aa, every matvec. See the banner comment above
-    # _u2_2h1p_amplitude_chunks.
+    # u2_2h1p_amplitude_chunks.
     def apply_U_2h1p_fwd(z_II, z_III):
         y = np.zeros(norb)
-        Zs = [_u_2h1p_unfold(z, iu_o, ju_o, O, V, anti)
+        Zs = [u_2h1p_unfold(z, iu_o, ju_o, O, V, anti)
              for (_, _, _, _, anti), z in zip(_2h1p_specs, (z_II, z_III))]
         for (sc, _, _, _, _), Zfull in zip(_2h1p_specs, Zs):
             M = _cached_einsum('Qja,ija->Qi', Bov_full, Zfull, optimize=True)
-            y += sc * _b_chunk_einsum('Qip,Qi->p', (Bo_full, M), (True, True), Bo_full)
-        for lo, hi, t_same_c, t_opp_c, W1c, W2c, A_mix_c, X_ijcd_c in _u2_2h1p_amplitude_chunks(
+            y += sc * b_chunk_einsum('Qip,Qi->p', (Bo_full, M), (True, True), Bo_full)
+        for lo, hi, t_same_c, t_opp_c, W1c, W2c, A_mix_c, X_ijcd_c in u2_2h1p_amplitude_chunks(
                 B, O, V, norb, eps_o, eps_v, 4, dh=dh, dp=dp):
             _amps_c = {'A_anti': t_same_c, 'W1': W1c}
             for (sc, akey, qsign, ysign, anti), Zfull in zip(_2h1p_specs, Zs):
@@ -268,16 +267,16 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
                     y -= sc * _cached_einsum('Qcp,Qc->p', Bv_full[sl], P, optimize=True)
                 S = _cached_einsum('ikca,ija->kcj', _amps_c[akey], Z, optimize=True)
                 R = _cached_einsum('Qjk,kcj->Qc', Boo_full, S, optimize=True)
-                y += qsign * sc * _b_chunk_einsum('Qcp,Qc->p', (Bv_full, R), (True, True), Bv_full)
+                y += qsign * sc * b_chunk_einsum('Qcp,Qc->p', (Bv_full, R), (True, True), Bv_full)
                 S4 = _cached_einsum('ikca,ija->kcj', A_mix_c, Z, optimize=True)
                 R4 = _cached_einsum('Qck,kcj->Qj', Bvo_full, S4, optimize=True)
-                y += ysign * sc * _b_chunk_einsum('Qjp,Qj->p', (Bo_full, R4), (True, True), Bo_full)
+                y += ysign * sc * b_chunk_einsum('Qjp,Qj->p', (Bo_full, R4), (True, True), Bo_full)
         return y
 
     def apply_U_2h1p_adj(z_p):
-        bzo = _b_chunk_einsum('Qip,p->Qi', (Bo_full, z_p), (True, False),
+        bzo = b_chunk_einsum('Qip,p->Qi', (Bo_full, z_p), (True, False),
                               Bo_full, (Bo_full.shape[0], O))
-        bzv = _b_chunk_einsum('Qcp,p->Qc', (Bv_full, z_p), (True, False),
+        bzv = b_chunk_einsum('Qcp,p->Qc', (Bv_full, z_p), (True, False),
                               Bv_full, (Bv_full.shape[0], V))
         gz1 = _cached_einsum('Qi,Qja->ija', bzo, Bov_full, optimize=True)
         gvo = _cached_einsum('Qc,Qjk->cjk', bzv, Boo_full, optimize=True)
@@ -285,7 +284,7 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
         tp = np.zeros((O, O, V))
         y1 = np.zeros((O, O, V))
         q3_by_key = {'A_anti': np.zeros((O, O, V)), 'W1': np.zeros((O, O, V))}
-        for lo, hi, t_same_c, t_opp_c, W1c, W2c, A_mix_c, X_ijcd_c in _u2_2h1p_amplitude_chunks(
+        for lo, hi, t_same_c, t_opp_c, W1c, W2c, A_mix_c, X_ijcd_c in u2_2h1p_amplitude_chunks(
                 B, O, V, norb, eps_o, eps_v, 4, dh=dh, dp=dp):
             _amps_c = {'A_anti': t_same_c, 'W1': W1c}
             for st in range(0, Bv_pp.shape[0], q_chunk_2h1p):
@@ -317,7 +316,7 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     # never materializes tp_same/tp_opp/W1p/W2p (or g_vvoo) as
     # full (V,V,O,O) -- built occupied-chunk by occupied-chunk
     # from B_aa. See the banner comment above
-    # _u2_2h1p_amplitude_chunks.
+    # u2_2h1p_amplitude_chunks.
     t1_Ip, t2_Ip = _u_Ip_pv_vp_contract_streamed_bare(
         B, O, V, norb, eps_o, eps_v, dh=dh, dp=dp)
     u_Ip += t1_Ip.transpose(2, 1, 0)
@@ -345,12 +344,12 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
     # chunked here.
     def apply_U_2p1h_fwd(z_IIp, z_IIIp):
         y = np.zeros(norb)
-        Zs = [_u_2p1h_unfold(z, iu_v, ju_v, O, V, anti)
+        Zs = [u_2p1h_unfold(z, iu_v, ju_v, O, V, anti)
              for (_, _, _, _, anti), z in zip(_2p1h_specs, (z_IIp, z_IIIp))]
         for (sc, _, _, _, _), Zfull in zip(_2p1h_specs, Zs):
             M = _cached_einsum('Qbi,iab->Qa', Bvo_full, Zfull, optimize=True)
-            y += sc * _b_chunk_einsum('Qap,Qa->p', (Bv_full, M), (True, True), Bv_full)
-        for lo, hi, tp_same_c, tp_opp_c, W1p_c, W2p_c, X_abkl_c in _u2_2p1h_amplitude_chunks(
+            y += sc * b_chunk_einsum('Qap,Qa->p', (Bv_full, M), (True, True), Bv_full)
+        for lo, hi, tp_same_c, tp_opp_c, W1p_c, W2p_c, X_abkl_c in u2_2p1h_amplitude_chunks(
                 B, O, V, norb, eps_o, eps_v, 4, dh=dh, dp=dp):
             _amps_c = {'A_anti_p': tp_same_c, 'W1p': W1p_c}
             A_mix_p_c = W2p_c
@@ -365,9 +364,9 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
                 # each a rank-3 GEMM chain.
                 P = _cached_einsum('abkl,iab->kli', X_abkl_c, Zfull, optimize=True)
                 R1 = _cached_einsum('Qli,kli->Qk', Boo_full[:, lo:hi, :], P, optimize=True)
-                yA = _b_chunk_einsum('Qkp,Qk->p', (Bo_full, R1), (True, True), Bo_full)
+                yA = b_chunk_einsum('Qkp,Qk->p', (Bo_full, R1), (True, True), Bo_full)
                 R2 = _cached_einsum('Qki,kli->Ql', Boo_full, P, optimize=True)
-                yB = _b_chunk_einsum('Qlp,Ql->p', (Bo_full[:, lo:hi], R2), (True, True), Bo_full)
+                yB = b_chunk_einsum('Qlp,Ql->p', (Bo_full[:, lo:hi], R2), (True, True), Bo_full)
                 y += 0.5 * sc * (yA + _gk_sign[gkey] * yB)
                 # Here 'i' genuinely IS the amplitude's l-axis
                 # (shared with Z's first axis in this contraction). 'i' is
@@ -377,23 +376,23 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
                 # numpy's single-threaded scalar-kernel path.
                 Z = Zfull[lo:hi]
                 Y = _cached_einsum('acki,iab->ckb', _amps_c[akey], Z, optimize=True)
-                R = _b_chunk_einsum('Qbc,ckb->Qk', (Bv_pp, Y), (True, False),
+                R = b_chunk_einsum('Qbc,ckb->Qk', (Bv_pp, Y), (True, False),
                                     Bv_pp, (Bv_pp.shape[0], O))
-                y += sc * _b_chunk_einsum('Qk,Qkp->p', (R, Bo_full), (True, True), Bo_full)
+                y += sc * b_chunk_einsum('Qk,Qkp->p', (R, Bo_full), (True, True), Bo_full)
                 Y2 = _cached_einsum('acki,iab->ckb', A_mix_p_c, Z, optimize=True)
-                R2 = _b_chunk_einsum('Qkc,ckb->Qb', (Bov_full, Y2), (True, False),
+                R2 = b_chunk_einsum('Qkc,ckb->Qb', (Bov_full, Y2), (True, False),
                                      Bov_full, (Bov_full.shape[0], V))
-                y += hsign * sc * _b_chunk_einsum('Qb,Qbp->p', (R2, Bv_full), (True, True), Bv_full)
+                y += hsign * sc * b_chunk_einsum('Qb,Qbp->p', (R2, Bv_full), (True, True), Bv_full)
         return y
 
     def apply_U_2p1h_adj(z_p):
         vidx_abs = np.arange(O, norb)
         oidx = np.arange(O)
-        gz, gzr, gzm = _u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p)
+        gz, gzr, gzm = u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p)
         # gkz[k,l,i] = sum_p g_klpi[k,l,p,i] z_p, DF-direct: contract z_p
         # into the p-carrying factor FIRST (boz), then close with Boo_full
         # -- rank-3 throughout, no g_klpi.
-        boz = _b_chunk_einsum('Qkp,p->Qk', (Bo_full, z_p), (True, False),
+        boz = b_chunk_einsum('Qkp,p->Qk', (Bo_full, z_p), (True, False),
                               Bo_full, (Bo_full.shape[0], O))
         _gkz_direct = _cached_einsum('Qk,Qli->kli', boz, Boo_full, optimize=True)
         _gkz_exch = _cached_einsum('Qki,Ql->kli', Boo_full, boz, optimize=True)
@@ -402,7 +401,7 @@ def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
         abkl_term = {akey: np.zeros((V, V, O)) for akey in ('A_anti_p', 'W1p')}
         Gz = {akey: np.zeros((V, V, O)) for akey in ('A_anti_p', 'W1p')}
         Hz = {akey: np.zeros((V, V, O)) for akey in ('A_anti_p', 'W1p')}
-        for lo, hi, tp_same_c, tp_opp_c, W1p_c, W2p_c, X_abkl_c in _u2_2p1h_amplitude_chunks(
+        for lo, hi, tp_same_c, tp_opp_c, W1p_c, W2p_c, X_abkl_c in u2_2p1h_amplitude_chunks(
                 B, O, V, norb, eps_o, eps_v, 4, dh=dh, dp=dp):
             _amps_c = {'A_anti_p': tp_same_c, 'W1p': W1p_c}
             A_mix_p_c = W2p_c
@@ -459,35 +458,13 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         raise ValueError(
             'dense W_chemist screening is a dense-integral route; with DF '
             'integrals use W_aux (screened DF factor), or drop B_aa')
-    eps, eri_chemist = s.eps, s.eri
+    eps = s.eps
     norb = s.norb
-    O, V = nocc, norb - nocc
-    eps_o, eps_v = eps[:O], eps[O:]
-
-    s32 = math.sqrt(1.5)
-    s12 = math.sqrt(0.5)
-    s2 = math.sqrt(2.0)
-    s3 = math.sqrt(3.0)
-
     d = s.dimensions(nocc)
-    nI, nII, nIII, n2h1p = d['nI'], d['nII'], d['nIII'], d['n2h1p']
-    nIp, nIIp, nIIIp = d['nIp'], d['nIIp'], d['nIIIp']
-    nH = d['nH']
-    nP_o = O * (O - 1) // 2
-    nP_v = V * (V - 1) // 2
-
-    oI = norb
-    oII = oI + nI
-    oIII = oII + nII
-    oIp = norb + n2h1p
-    oIIp = oIp + nIp
-    oIIIp = oIIp + nIIp
-
-    iu_o, ju_o = np.triu_indices(O, k=1)
-    iu_v, ju_v = np.triu_indices(V, k=1)
-    oidx = np.arange(O)
-    vidx_local = np.arange(V)
-    vidx_abs = np.arange(O, norb)
+    (O, V, eps_o, eps_v, s32, s2, s3, nH, nP_o, nP_v, oI, oII, oIII, oIp, oIIp,
+     oIIIp, iu_o, ju_o, iu_v, ju_v, oidx, vidx_abs) = csf_layout(s, nocc).take(
+        'O V eps_o eps_v s32 s2 s3 nH nP_o nP_v oI oII oIII oIp oIIp oIIIp '
+        'iu_o ju_o iu_v ju_v oidx vidx_abs')
 
     # ===================== F block =====================
     if static_correction is None:
@@ -495,11 +472,11 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     else:
         F = np.diag(eps) + static_correction
 
-    _u_streamable = not s._is_adc2x and _dress_is_streamable(s.u2_denom_dress)
+    _u_streamable = not s._is_adc2x and dress_is_streamable(s.u2_denom_dress)
 
     # Common integral slices, DF-gathered; the streamed paths skip every
     # slice they rebuild chunkwise from B themselves.
-    blk = _build_g_blocks_df(s.B_aa, O, V, norb,
+    blk = build_g_blocks_df(s.B_aa, O, V, norb,
                              need_vvvv=False, need_vv_pv_vp=False, need_vv_pp=False,
                              need_ovpv_ovvp=False,
                              need_oo_pp=False, need_vopo_voho=False,
@@ -515,12 +492,12 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     g_ii, g_aa = blk['g_ii'], blk['g_aa']
 
     allo_full = np.arange(norb)
-    Bv_pp = _b_factor(s.B_aa, vidx_abs, vidx_abs, s.B_aa[:, O:, O:])
-    Bv_full = _b_factor(s.B_aa, vidx_abs, allo_full, s.B_aa[:, O:, :])
-    Bvo_full = _b_factor(s.B_aa, vidx_abs, oidx, s.B_aa[:, O:, :O])
-    Bo_full = _b_factor(s.B_aa, oidx, allo_full, s.B_aa[:, :O, :])
-    Bov_full = _b_factor(s.B_aa, oidx, vidx_abs, s.B_aa[:, :O, O:])
-    Boo_full = _b_factor(s.B_aa, oidx, oidx, s.B_aa[:, :O, :O])
+    Bv_pp = b_factor(s.B_aa, vidx_abs, vidx_abs, s.B_aa[:, O:, O:])
+    Bv_full = b_factor(s.B_aa, vidx_abs, allo_full, s.B_aa[:, O:, :])
+    Bvo_full = b_factor(s.B_aa, vidx_abs, oidx, s.B_aa[:, O:, :O])
+    Bo_full = b_factor(s.B_aa, oidx, allo_full, s.B_aa[:, :O, :])
+    Bov_full = b_factor(s.B_aa, oidx, vidx_abs, s.B_aa[:, :O, O:])
+    Boo_full = b_factor(s.B_aa, oidx, oidx, s.B_aa[:, :O, :O])
 
     g_oovv_T = g_oovv.transpose(0, 1, 3, 2) if g_oovv is not None else None
     g_vvoo_T = g_vvoo.transpose(0, 1, 3, 2) if g_vvoo is not None else None
@@ -554,7 +531,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     # The four small C^(1) ladder slices -- from M_aa under W_aux, else bare.
     if M_aa is not None:
         # W[i,i,k,l] = sum_R M[R,i,k] M[R,i,l]; (O,O,O) is tiny.
-        _g_ii3 = _g_diag_df(M_aa, oidx, oidx, oidx)
+        _g_ii3 = g_diag_df(M_aa, oidx, oidx, oidx)
 
         # (O,O)  = W[i,i,k,k]
         g_ii_kk = _g_ii3[:, oidx, oidx]
@@ -564,7 +541,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         Mvv_w = M_vv_screened
         g_aabb = np.einsum('Rab,Rab->ab', Mvv_w, Mvv_w, optimize=True)  # (V,V) = W[a,a,b,b]
         # W[a,a,c_r,d_r], a-chunked so the transient stays (chunk,V,V)
-        # instead of a V^3 _g_diag_df over the whole virtual space.
+        # instead of a V^3 g_diag_df over the whole virtual space.
         g_aa_cd = np.empty((V, nP_v))
         for _alo in range(0, V, 32):
             _ahi = min(_alo + 32, V)
@@ -600,7 +577,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         g_ii_U=g_ii_U, g_ii=g_ii, g_aa_U=g_aa_U, g_aa=g_aa)
     if not couplings:
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
-         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _no_u_blocks(norb, O, V, nP_o, nP_v)
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = no_u_blocks(norb, O, V, nP_o, nP_v)
     elif _u_streamable:
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
          apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_streamed(
@@ -615,7 +592,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
             g_vv_pv=None, g_vv_vp=None,
             g_oo_pp_U=None, g_vv_pp_U=None)
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
-         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_unstreamed(
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = build_u_blocks_unstreamed(
             s.B_aa, O, V, norb, eps_o, eps_v, dens,
             Bo_full, Bv_full, Bov_full, Boo_full, Bvo_full, Bv_pp,
             iu_o, ju_o, iu_v, ju_v, _u_ints,
@@ -632,8 +609,8 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     # ==================== C-block sigma-vector pieces (streamed) ====================
     _B_scr = M_aa if M_aa is not None else s.B_aa
 
-    g_ciia = _g_diag_mid_df(s.B_aa, vidx_abs, oidx, vidx_abs)
-    g_ciai = _g_diag_outer_df(_B_scr, vidx_abs, oidx, vidx_abs)
+    g_ciia = g_diag_mid_df(s.B_aa, vidx_abs, oidx, vidx_abs)
+    g_ciai = g_diag_outer_df(_B_scr, vidx_abs, oidx, vidx_abs)
     inner_I = -(g_ciia - 2 * g_ciai).transpose(1, 2, 0)
 
     def apply_C_I_I(Vmat):
@@ -642,17 +619,6 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         return term1 + term2
 
     _Foo_scr = _B_scr[:, :O, :O]
-    def unfold_pair(Vmat, iu, ju, O_, Vv):
-        Vfull = np.zeros((O_, O_, Vv))
-        Vfull[iu, ju, :] = Vmat
-        Vfull[ju, iu, :] = -Vmat
-        return Vfull
-
-    def upper_pair(Vmat, iu, ju, O_, Vv):
-        Vup = np.zeros((O_, O_, Vv))
-        Vup[iu, ju, :] = Vmat
-        return Vup
-    # Streamed replacement for the eight M1a/M1b-derived appliers above:
     def _apply_C_2h1p_coupled(z_I, z_II, z_III):
         Vfull_II = unfold_pair(z_II, iu_o, ju_o, O, V)
         Vupper_II = upper_pair(z_II, iu_o, ju_o, O, V)
@@ -724,8 +690,8 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         contrib_III = c_III_III + c_III_I + c_III_II
         return contrib_I, contrib_II, contrib_III
 
-    g_kaai = _g_diag_mid_df(s.B_aa, oidx, vidx_abs, oidx)
-    g_kaia = _g_diag_outer_df(_B_scr, oidx, vidx_abs, oidx)
+    g_kaai = g_diag_mid_df(s.B_aa, oidx, vidx_abs, oidx)
+    g_kaia = g_diag_outer_df(_B_scr, oidx, vidx_abs, oidx)
     inner_Ip = (g_kaai - 2 * g_kaia).transpose(2, 1, 0)
 
     def apply_C_Ip_Ip(Vmat):

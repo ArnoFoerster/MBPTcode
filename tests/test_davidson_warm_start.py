@@ -10,7 +10,7 @@ it ends. Gated:
   * the first batch is orthonormal together with its partners, the guess
     spanned first;
   * from its own converged roots and the tracked Ritz pairs above them
-    (`_run_davidson`'s `tracked`) a solve ends in its first cycle, serially
+    (`run_davidson`'s `tracked`) a solve ends in its first cycle, serially
     and at 2 and 3 simulated ranks (the pair-row loop), the roots within
     the Davidson's resolution (`roots_resolution`) of the cold ones and the
     same bits on every rank;
@@ -29,24 +29,28 @@ it ends. Gated:
     at 2 simulated ranks, the same on every rank.
 """
 
+import threading
 import warnings
 
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import DAVIDSON_LINDEP, DAVIDSON_WARM_START_MAX_SHIFT
+from src.Base.numerics.constants import DAVIDSON_LINDEP, DAVIDSON_WARM_START_MAX_SHIFT
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.record_io import read_record, record_hash, write_record
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.utils.record_io import read_record, record_hash, write_record
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.SingleReference.LinearResponse import davidson as davidson_module
 from src.SingleReference.LinearResponse.davidson import DavidsonWarmStart
-from src.SingleReference.LinearResponse.davidson_shared import (_guess_indices,
-                                                                _tracked_roots)
+from src.SingleReference.LinearResponse.davidson_shared import (guess_indices,
+                                                                tracked_roots)
 from src.SingleReference.LinearResponse.trial_space import warm_trial_space
-from src.gradients.state_following import coupled
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.state_following import coupled
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.pins import align_signs, class_bar
 from tests.test_distributed_fit_mpi import roots_resolution
 from tests.test_distributed_trial_space import (NOCC, NROOTS, model_problem,
@@ -78,6 +82,18 @@ STEP = 1e-3
 #: state's X - Y (workstation, 2 threads), the warm roots within 0.05
 #: of the Davidson's resolution of the cold ones.
 WARM_CONV_TOL = 1e-10
+#: What the warm start buys at the displaced geometry, gated on the residual it
+#: starts from: the warm first cycle's largest root residual at most this
+#: fraction of the cold one's (measured 4.7e-3 against 1.8e-1, 0.026, serially
+#: and at 2 simulated ranks). Not on the cycle count: formaldehyde has 240
+#: pairs, and at WARM_CONV_TOL cold and warm solves alike stall near a 1e-9
+#: residual and end only when the trial space spans every pair, one correction
+#: per cycle, so the count is how fast that space fills (warm 15 to 20 cycles
+#: against cold 18 to 20, workstation and a cluster).
+WARM_FIRST_RESIDUAL_RATIO = 0.1
+#: Each rank thread's Davidsons, the largest root residual of their first
+#: cycle in order (`recording_casida_rows`).
+FIRST_RESIDUALS = {}
 
 
 def neighbour():
@@ -106,7 +122,7 @@ def test_first_batch_is_orthonormal_with_partners():
     spanned exactly by the first rows."""
     apply_AB, diag, _, _ = model_problem()
     _, X, Y, _, _, _ = root(apply_AB, diag)
-    order = _guess_indices(diag, NROOTS)
+    order = guess_indices(diag, NROOTS)
     n = diag.size
     x0 = np.zeros((len(order), 2 * n))
     x0[np.arange(len(order)), order] = 1.0
@@ -131,7 +147,7 @@ def test_own_vectors_converge_in_one_cycle(size):
     held = {}
     om, X, Y, _, cycles, _ = root(apply_AB, diag, tracked=held)
     guess = (held['X'], held['Y'])
-    assert held['X'].shape[1] == _tracked_roots(NROOTS, diag.size)
+    assert held['X'].shape[1] == tracked_roots(NROOTS, diag.size)
     if size == 1:
         out = [root(apply_AB, diag, guess=guess)]
     else:
@@ -253,6 +269,19 @@ def formaldehyde(shift=0.0):
     return mol.set_geom_(coords, unit='Bohr', inplace=False)
 
 
+def recording_casida_rows(*args, **kwargs):
+    """`trial_space.casida_rows`, its first cycle's largest root residual
+    noted under this thread (`FIRST_RESIDUALS`)."""
+    out = REAL_CASIDA_ROWS(*args, **kwargs)
+    first = kwargs['trace'][0]['r_norms'][:kwargs['nroots']]
+    FIRST_RESIDUALS.setdefault(threading.get_ident(), []).append(
+        float(np.max(first)))
+    return out
+
+
+REAL_CASIDA_ROWS = davidson_module.casida_rows
+
+
 def chain_solves():
     """(solves, holder.used) on the production chain, each solve (roots,
     eps_qp, Davidson cycles, guess vectors kept, the state's X - Y) through
@@ -268,7 +297,7 @@ def chain_solves():
                                         auxbasis='cc-pvdz-ri')
 
     def factory(mol):
-        mf = isdf_jk(dft.RKS(mol, xc='pbe0'), auxbasis='cc-pvdz-ri',
+        mf = isdf_jk_with_force(dft.RKS(mol, xc='pbe0'), auxbasis='cc-pvdz-ri',
                      counts=counts, n_start=n_start)
         mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-9, 200
         return mf
@@ -278,23 +307,24 @@ def chain_solves():
         excitation=Excitation('singlet', root=1, kernel='bse'),
         chi0='space-time', residues='sop', solver='davidson',
         factorization='isdf', qp_states=QPStates('frontier'),
-        grid_accuracy='G1', bse_adjoint='grid', nroots=5,
-        bse_conv_tol=WARM_CONV_TOL)
+        numerics=numerics_of({'grid_accuracy': 'G1', 'bse_adjoint': 'grid',
+                              'nroots': 5, 'bse_conv_tol': WARM_CONV_TOL}))
     assert isinstance(chain.davidson_warm_start, DavidsonWarmStart)
     chain.timer = {}
     at0 = chain.mean_field()
     at1 = chain.mean_field(formaldehyde(STEP))
-    shared = [chain._shared_forward(*at) for at in (at0, at1)]
+    shared = [chain.shared_forward(*at) for at in (at0, at1)]
 
     def solve(s, at):
-        om, xn, yn, _ = chain._casida(s.x_mo, s.d, s.eps_qp, s.w_aux,
+        om, xn, yn, _ = chain.follower._casida(s.x_mo, s.d, s.eps_qp, s.w_aux,
                                       **coupled(s.qp_h), at=at)
         timings = chain.davidson_solves[-1]['timings']
         state = chain.state
         return (np.array(om), np.array(s.eps_qp),
                 timings['davidson_iterations'],
                 timings['davidson_warm_start'],
-                np.array(xn[:, state] - yn[:, state]))
+                np.array(xn[:, state] - yn[:, state]),
+                FIRST_RESIDUALS[threading.get_ident()][-1])
 
     chain.davidson_warm_start = None
     out = [solve(shared[0], at0), solve(shared[1], at1)]
@@ -303,25 +333,25 @@ def chain_solves():
     chain.commit(at0[0])
     out.append(solve(shared[0], at0))
     # committed again on its warm roots, as every step of a walk after the
-    # first is seeded by a warm solve: seeded by the cold solve's Ritz pairs
-    # the displaced geometry takes about as many cycles as cold (18 against
-    # 18-20, workstation), by the warm one's 15
+    # first is seeded by a warm solve
     chain.commit(at0[0])
     out.append(solve(shared[1], at1))
     return out, holder.used
 
 
-def test_production_chain_warm_start():
+def test_production_chain_warm_start(monkeypatch):
     """Serially and at 2 simulated ranks, through the chain's own warm start:
     with an empty holder, and before the reference is committed, the solve
     is the cold one; once it is, the reference ends in one cycle and the
-    displaced geometry takes fewer cycles than cold; every warm root is the
+    displaced geometry starts from a first residual a tenth of cold's or
+    less (`WARM_FIRST_RESIDUAL_RATIO`); every warm root is the
     cold one to the Davidson's resolution and within the vector class bar
     (`class_bar('vector')`, as the first batch's orthonormality), the state's
     X - Y within it too, and every rank's the same. No two solves are
     compared bit for bit."""
     nocc = 8
     vector_bar = class_bar('vector')
+    monkeypatch.setattr(davidson_module, 'casida_rows', recording_casida_rows)
     with distributed(None):
         serial, used = chain_solves()
     ranked = run_simulated(lambda comm: chain_solves(), 2)
@@ -330,7 +360,9 @@ def test_production_chain_warm_start():
         assert n_used == 2 and first[3] == 0 and early[3] == 0
         assert first[2] == cold0[2] and early[2] == cold1[2]
         assert again[3] > 0 and again[2] == 1 < cold0[2]
-        assert warm[3] > 0 and warm[2] < cold1[2]
+        assert warm[3] > 0
+        assert warm[5] <= WARM_FIRST_RESIDUAL_RATIO * cold1[5], (warm[5],
+                                                                 cold1[5])
         for got, ref in ((first, cold0), (early, cold1), (again, cold0),
                          (warm, cold1)):
             assert close(got[0], ref[0], ref[1], nocc)

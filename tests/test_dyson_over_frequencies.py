@@ -67,11 +67,11 @@ from pyscf import gto, scf
 
 from tests.archived_tree import require_commit
 from tests.archive_radii import install_current_radii
-from src.Base.constants import PCM_LEBEDEV_ORDER
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import attach_solvent_screening
-from src.Base.utils.mpi_grid import (contiguous_block, partition,
-                                     run_simulated)
+from src.Base.numerics.constants import PCM_LEBEDEV_ORDER
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import attach_solvent_screening
+from src.Base.utils.parallel.mpi_grid import contiguous_block, partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import space_time
 from src.SingleReference.GW.imaginary_time import screened_interaction_rows
 from src.SingleReference.LinearResponse.space_time import (
@@ -160,13 +160,22 @@ sys.path.insert(0, {archive!r})
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.solvent_screening import attach_solvent_screening
+try:
+    from src.environments.solvent_screening import attach_solvent_screening
+except ImportError:  # an older tree's module layout
+    from src.Base.solvent_screening import attach_solvent_screening
 from src.SingleReference.GW.space_time import (solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
 
 import src.SingleReference.GW.space_time as _archived_space_time
-from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
-from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
+try:
+    from src.Base.utils.grids.grids import minimax_frequency_grid as _minimax_frequency_grid
+except ImportError:  # an older tree's module layout
+    from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
+try:
+    from src.Base.utils.grids.time_frequency import SELF_ENERGY_PAD as _PAD
+except ImportError:  # an older tree's module layout
+    from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
 
 # the one change since the pinned commit: W's frequencies span rW, the range
 # its transform back to tau is fitted over, not the bare window

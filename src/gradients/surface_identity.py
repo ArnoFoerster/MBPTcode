@@ -29,9 +29,13 @@ per half of a composed surface. The walk's history -- which root was followed
 where -- is not in it: it says how the surface was walked, not which surface
 it is.
 """
-from src.Base.environment import environment_label
-from src.Base.numerics import Numerics
-from src.Base.record_io import record_hash
+from dataclasses import dataclass
+
+import numpy as np
+
+from src.environments.environment import environment_label
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_io import record_hash
 
 #: What a factorization record holds that is not a convention.
 NOT_A_CONVENTION = ('seconds',)
@@ -138,3 +142,37 @@ def grid_record(factorization):
 
 def class_name(obj):
     return f'{type(obj).__module__}:{type(obj).__qualname__}'
+
+
+@dataclass(eq=False)
+class FirstPoint:
+    """(dE/dR, E, diagnostics) of one state already evaluated at one
+    geometry, handed to the surface that walks from there: its first
+    `total_gradient` at that geometry, for that spin and root, on the same
+    frozen conventions, is this one (`replayed_first_point`), so a T1
+    relaxation started where the S1 force was taken does not evaluate the T1
+    force there again. `conventions`: the hash of the conventions the force
+    stands on (`conventions_hash`), stamped by the surface it is handed to
+    (`HandedOverPoint`) unless its maker stamped it."""
+
+    coords: np.ndarray
+    charges: np.ndarray
+    spin: str
+    state: int
+    result: tuple
+    conventions: str = None
+
+    def mismatch(self, mol, spin, state, conventions):
+        """What differs from the point asked for: 'geometry', 'spin',
+        'root', 'conventions'; empty when this is it."""
+        out = []
+        if not (np.array_equal(mol.atom_charges(), self.charges)
+                and np.array_equal(mol.atom_coords(), self.coords)):
+            out.append('geometry')
+        if spin != self.spin:
+            out.append('spin')
+        if int(state) != self.state:
+            out.append('root')
+        if conventions != self.conventions:
+            out.append('conventions')
+        return out

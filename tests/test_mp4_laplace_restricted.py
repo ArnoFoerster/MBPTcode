@@ -1,5 +1,5 @@
 """Validates MP4's T4^(2)_aaaaaaaa Laplace fusion
-(generate_mp4_laplace_restricted.py -> generated_mpn_restricted/
+(generate_mpn_laplace.py -> generated_mpn_restricted/
 mp4_laplace_restricted.py, wired into mpn_density_driver_restricted.py's
 compute_delta_gamma4(laplace_ntau=...)) against the exact (materialized-T4)
 result -- see that module's docstring for scope (only t2_3_aaaa_numerator/
@@ -15,7 +15,7 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
 
 
 if __name__ == '__main__':

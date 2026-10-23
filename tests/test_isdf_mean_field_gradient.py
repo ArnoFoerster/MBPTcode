@@ -25,11 +25,12 @@ import numpy as np
 import pytest
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import BOHR_TO_ANGSTROM, ISDF_FIT_REGULARIZATION
-from src.Base.isdf_jk import ISDFJK, isdf_jk, exchange_free_reference
-from src.Base.numerics import Numerics
-from src.gradients.isdf_derivatives import (fock_partial_skeleton_df,
-                                            xc_hybrid_coeff)
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, ISDF_FIT_REGULARIZATION
+from src.Base.factorization.isdf_jk import ISDFJK, exchange_free_reference
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics
+from src.gradients.mean_field_response import fock_partial_skeleton_df
+from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
 from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
@@ -63,7 +64,7 @@ def mean_field(xc, shift=None, route='isdf', regularization=None):
     """
     mol = water(shift)
     mf = dft.RKS(mol, xc=xc) if xc else scf.RHF(mol)
-    mf = (isdf_jk(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
+    mf = (isdf_jk_with_force(mf, auxbasis=AUXBASIS, counts=g1(mf)) if route == 'isdf'
           else mf.density_fit(auxbasis=AUXBASIS))
     if regularization is not None:
         mf.with_df.numerics = Numerics(
@@ -260,10 +261,10 @@ def test_what_is_not_covered_refuses_by_name():
     """Everything outside the restricted closed-shell hybrid on df-direct J."""
     mol = water()
     cases = {
-        'interpolated Coulomb': isdf_jk(dft.RKS(mol, xc='b3lyp'),
+        'interpolated Coulomb': isdf_jk_with_force(dft.RKS(mol, xc='b3lyp'),
                                         auxbasis=AUXBASIS, j_route='isdf', counts=g1(dft.RKS(mol, xc='b3lyp'))),
-        'unrestricted': isdf_jk(dft.UKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.UKS(mol, xc='b3lyp'))),
-        'restricted open shell': isdf_jk(dft.ROKS(mol, xc='b3lyp'),
+        'unrestricted': isdf_jk_with_force(dft.UKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.UKS(mol, xc='b3lyp'))),
+        'restricted open shell': isdf_jk_with_force(dft.ROKS(mol, xc='b3lyp'),
                                          auxbasis=AUXBASIS, counts=g1(dft.ROKS(mol, xc='b3lyp'))),
     }
     for label, mf in cases.items():
@@ -274,7 +275,7 @@ def test_what_is_not_covered_refuses_by_name():
     # which is exactly what the point chain needs and cannot recover
     built = ISDFJK(mol, auxbasis=AUXBASIS, check_tol=None, counts=g1(mol))
     built.build()
-    injected = isdf_jk(dft.RKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc='b3lyp')))
+    injected = isdf_jk_with_force(dft.RKS(mol, xc='b3lyp'), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc='b3lyp')))
     injected.with_df.coords = built.coords
     with pytest.raises(NotImplementedError):
         require_isdf_gradient_support(injected, 'injected coords')
@@ -290,4 +291,4 @@ def test_what_is_not_covered_refuses_by_name():
     # subtracting HF by name. Gated in test_range_separated_exchange.py.
     for label, xc in (('covered', 'b3lyp'), ('range-separated', 'lrc-wpbeh')):
         require_isdf_gradient_support(
-            isdf_jk(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc))), label)
+            isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis=AUXBASIS, counts=g1(dft.RKS(mol, xc=xc))), label)

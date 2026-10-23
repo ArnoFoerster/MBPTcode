@@ -46,10 +46,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from tests.archived_tree import require_commit, unpack_commit
 from tests.archive_radii import install_current_radii
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import block_actions
-from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.isdf_test_grid import counts_at
@@ -93,7 +93,16 @@ sys.path.insert(0, {archive!r})
 
 import numpy as np
 
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.LinearResponse.davidson import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 

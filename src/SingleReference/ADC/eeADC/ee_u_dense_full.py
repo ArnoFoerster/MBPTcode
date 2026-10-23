@@ -35,18 +35,7 @@ from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_en as _en
 
-LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2')
-
-# (ph/ph order, ph/2p2h order, 2p2h/2p2h order); None = block absent
-_BLOCK_ORDERS = {
-    'adc1':  (1, None, None),
-    'adc2':  (2, 1, 0),
-    'adc2x': (2, 1, 1),
-    'adc3':  (3, 2, 1),
-    # GF2 of Monino and Loos, J. Chem. Phys. 159, 034105 (2023), eq 53: A^HF
-    # singles, ADC(2)'s first-order coupling, the bare doubles diagonal
-    'gf2':   (1, 1, 0),
-}
+LEVELS = ee_utils.LEVELS
 
 
 def build_supermatrix(eps, g, nocc, level='adc3', amps=None, zint=None,
@@ -59,11 +48,11 @@ def build_supermatrix(eps, g, nocc, level='adc3', amps=None, zint=None,
     if level not in LEVELS:
         raise ValueError(f"level={level!r}; expected one of {LEVELS}")
     norb = len(eps)
-    o_ss, o_sd, o_dd = _BLOCK_ORDERS[level]
+    o_ss, o_sd, o_dd = ee_utils.BLOCK_ORDERS[level]
     d = ee_utils.dimensions(nocc, norb)
     n_s, n_d = d['n_s'], d['n_d']
 
-    amps, zint, rho = _ingredients(eps, g, nocc, norb, level, amps, zint,
+    amps, zint, rho = ingredients(eps, g, nocc, norb, level, amps, zint,
                                    rho, en_dress)
 
     if o_sd is None:                                   # ADC(1): singles only
@@ -78,9 +67,9 @@ def build_supermatrix(eps, g, nocc, level='adc3', amps=None, zint=None,
     return H
 
 
-def _ingredients(eps, g, nocc, norb, level, amps, zint, rho, en_dress=None):
+def ingredients(eps, g, nocc, norb, level, amps, zint, rho, en_dress=None):
     """MP amplitudes / Z intermediates / density, computed on demand."""
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
+    order = ee_utils.AMPLITUDE_ORDER[level]
     if order == 1:
         return None, None, None
     if amps is None:
@@ -106,7 +95,7 @@ def m_ss(eps, g, nocc, norb, order, amps=None, zint=None, rho=None):
     arrays; the spin-free route evaluates the same strings on spatial spin
     blocks."""
     gb = ee_utils.g_blocks(g, nocc, norb)
-    _, _, d_ph = ee_utils._denominators(eps, nocc)
+    _, _, d_ph = ee_utils.orbital_denominators(eps, nocc)
     return _eq.m_ss(_eq.NUMPY, gb, order, amps, zint, rho, d_ph,
                     nocc, norb - nocc)
 
@@ -173,8 +162,6 @@ def m_dd(eps, g, nocc, norb, order):
 
     d_ik, d_jl = (Ic == K), (Jc == L)
     d_ac, d_bd = (Ac == C), (Bc == D)
-    d_jk, d_il = (Jc == K), (Ic == L)
-    d_bc, d_ad = (Bc == C), (Ac == D)
 
     # 1/2 sum_cd <ab||cd> Y^cd_ij  ->  delta_ik delta_jl <ab||cd>
     H += (d_ik & d_jl) * g[Ac, Bc, C, D]

@@ -1,7 +1,7 @@
 """The distributed Fock build reproduces the serial mean field, and divides
 the fitted tensor and the quadrature grid.
 
-`mpi_grid.simulated_world` runs each rank in a thread of this process and
+`simulated_comm.simulated_world` runs each rank in a thread of this process and
 broadcasts and reduces through shared memory, so the whole sequence runs here
 without MPI: pyscf's SCF on every rank, the density and its orbitals locked at
 every J/K build and every quadrature, the reductions of (J, K) and of (nelec,
@@ -64,19 +64,19 @@ from tests.blas_bar import bar_with_drift
 from tests.pins import (RECORDING_BLAS, assert_archive_same, assert_same,
                         bar_under)
 from tests.archive_radii import install_current_radii
-from src.Base import distributed_df
-from src.Base.constants import COMPOSED_GRAD_K
-from src.Base.distributed_df import (TIMING_KEYS, DistributedDF,
-                                     DistributedNumInt, distributed_df_jk,
-                                     distributed_df_storage,
-                                     distributed_handles,
-                                     distributed_mean_field,
-                                     distributed_numint)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
-                                     distributed, lockstep_stats,
-                                     run_simulated)
-from src.Base.utils.threads import blas_single_threaded, blas_threads
+from src.Base.factorization import distributed_df
+from src.Base.numerics.constants import COMPOSED_GRAD_K
+from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF,
+                                                   DistributedNumInt, distributed_df_jk,
+                                                   distributed_df_storage,
+                                                   distributed_handles,
+                                                   distributed_mean_field,
+                                                   distributed_numint)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, current_comm, distributed, lockstep_stats)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
 from tests.isdf_test_grid import g1
 from tests.pins import THREAD_CAPS
 
@@ -140,8 +140,20 @@ sys.path.insert(0, {tree!r})
 import numpy as np
 from pyscf import dft
 
-from src.Base.distributed_df import distributed_df_jk
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    from src.Base.factorization.distributed_df import distributed_df_jk
+except ImportError:  # an older tree's module layout
+    from src.Base.distributed_df import distributed_df_jk
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 
 warnings.simplefilter('ignore')
 rows = {{}}
@@ -745,7 +757,7 @@ def test_one_rank_world_is_pyscf(serial):
 def isdf_mean_field():
     """Water/cc-pVDZ Hartree-Fock whose J/K is ISDF's (`isdf_jk`), unrun."""
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
-    mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
 

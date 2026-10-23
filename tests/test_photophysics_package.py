@@ -11,18 +11,24 @@ method-neutral minimum through the rate table.
   * the command line refuses a run without its policies and, given them, makes
     the declaration and stops before the first SCF (`--dry-run`); without
     --stages it runs every stage of the declared rate model;
+  * `python -m src.photophysics` is that command line, and `python -m
+    src.photophysics solvated` the solvated driver's;
   * ADC(2) excitation energies at three geometries fill `StateMinimum`
     records that `tadf_rate_table` reads like GW-BSE ones; the channels whose
     ingredients ADC(2) leaves out are refused by name, and R0, S1 and T1 of
     two methods are not mixed in one table.
 """
+import pathlib
+import subprocess
+import sys
 from dataclasses import replace
 
 import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.declaration import Excitation
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.photophysics import cli, stages
 from src.photophysics.declaration import DeclarationRefused, Policies
@@ -31,6 +37,7 @@ from src.photophysics.minimum import (GroundModes, StateMinimum, from_adc2,
 from src.photophysics.rate_models import RateRefused, tadf_rate_table
 from src.photophysics.stages import Run, run_tadf
 from src.photophysics.store import Store, StoreRefused
+from src.properties.excitations import surface_of
 from src.properties.vibronic import normal_modes
 from tests.photophysics_cases import (REQUIRED, argv, declaration, refusing,
                                       run_in)
@@ -59,11 +66,14 @@ def test_a_declaration_without_a_policy_is_refused():
 
 def test_a_choice_the_chain_cannot_read_is_refused():
     d = declaration()
-    numerics = d.numerics.derive('a tau target the flat names cannot carry',
+    numerics = d.numerics.derive('a tau target the chain does not read',
                                  quadrature={'tau_target': 1e-9})
-    run_decl = replace(d, numerics=numerics)
-    with pytest.raises(ValueError, match='quadrature.tau_target'):
-        stages.chain.chain_spec(run_decl, None)
+    spec = stages.chain.chain_spec(replace(d, numerics=numerics), None)
+    assert spec.numerics is numerics
+    mol = gto.M(atom=d.system.atom, basis=d.system.basis, verbose=0)
+    # refused by the entry point before any mean field is built
+    with pytest.raises(TypeError, match='quadrature.tau_target'):
+        surface_of(spec, Excitation('singlet'), mol, None)
 
 
 def test_the_identity_moves_with_every_policy():
@@ -135,6 +145,22 @@ def test_the_command_line_dry_run(tmp_path, capsys):
     said = capsys.readouterr().out
     assert 'formaldehyde: 4 atoms' in said and 'stored: nothing' in said
     assert (tmp_path / 'formaldehyde' / 'gas').is_dir()
+
+
+def test_python_m_runs_both_command_lines():
+    """`python -m src.photophysics` reaches the staged run's options and
+    `python -m src.photophysics solvated` the solvated driver's."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+
+    def help_of(*words):
+        out = subprocess.run([sys.executable, '-m', 'src.photophysics', *words,
+                              '--help'], cwd=repo, capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr[-2000:]
+        return out.stdout
+    staged, solvated = help_of(), help_of('solvated')
+    assert '--rate-model' in staged and '--solvent' not in staged
+    assert 'python -m src.photophysics solvated' in solvated
+    assert '--solvent' in solvated and '--rate-model' not in solvated
 
 
 def test_the_default_stages_are_the_rate_model_s(tmp_path):

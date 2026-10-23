@@ -22,7 +22,7 @@ from pyscf import gto, scf, df
 
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
 
 
 def _max_diff(blocks_a, blocks_b):

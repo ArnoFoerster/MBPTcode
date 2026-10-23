@@ -43,8 +43,8 @@ from pyscf import dft, gto
 
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   SurfacePhysics)
-from src.Base.numerics import Numerics
-from src.properties.surfaces import potential_energy_surface
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_tight
 
@@ -62,20 +62,19 @@ def surface_classes():
     found = {}
     for package in PACKAGES:
         pkg = importlib.import_module(package)
-        for info in pkgutil.iter_modules(pkg.__path__):
-            mod = importlib.import_module(f'{package}.{info.name}')
+        for info in pkgutil.walk_packages(pkg.__path__, prefix=f'{package}.'):
+            mod = importlib.import_module(info.name)
             for name, obj in vars(mod).items():
                 if (inspect.isclass(obj) and obj.__module__ == mod.__name__
                         and any(MARKER in vars(k) for k in obj.__mro__)):
-                    found[f'{info.name}.{name}'] = obj
+                    found[f'{info.name[len(package) + 1:]}.{name}'] = obj
     return found
 
 
 CLASSES = surface_classes()
-#: The protocol itself is discovered too; it states the requirements rather
-#: than meeting them.
-CONCRETE = sorted(n for n, c in CLASSES.items()
-                  if not getattr(c, '_is_protocol', False))
+#: The abstract base class is discovered too; it states the requirements
+#: rather than meeting them.
+CONCRETE = sorted(n for n, c in CLASSES.items() if not inspect.isabstract(c))
 
 
 def test_the_search_finds_the_surfaces_we_know_about():
@@ -196,13 +195,13 @@ def direct_surfaces(mol, hf, ks):
     be handed settings the caller never asked for and still report the
     caller's label.
     """
-    from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+    from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                               QuasiparticleSurface)
-    from src.gradients.excited_state import ExcitedStateChain
-    from src.gradients.rpa_bse_surface import (MeanFieldQPSurface,
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
+    from src.gradients.gwbse.rpa_bse_surface import (MeanFieldQPSurface,
                                                RPABSESurface, RPAQPSurface)
-    from src.gradients.rpa_ground_state import RPAGroundStateChain
-    from src.properties.optimize import MeanFieldSurface
+    from src.gradients.rpa.ground_state import RPAGroundStateChain
+    from src.gradients.mean_field_surface import MeanFieldSurface
 
     rpa_hf, ks_pbe0 = GroundState('rpa', 'hf'), GroundState('dft', 'pbe0')
     homo = mol.nelectron // 2 - 1
@@ -246,7 +245,7 @@ def direct(references):
 
 def test_every_dispatched_class_is_built_directly_here(direct):
     """A curated list that fell behind the dispatch table would test nothing."""
-    from src.properties.surfaces import dispatch_table
+    from src.gradients.gwbse.surface_factory import dispatch_table
     assert set(direct) == set(DIRECT_NAMES)
     assert {row.cls.__name__ for row in dispatch_table()} <= set(DIRECT_NAMES)
 

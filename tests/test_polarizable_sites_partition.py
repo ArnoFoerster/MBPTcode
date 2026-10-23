@@ -49,13 +49,13 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV,
-                                MIN_SITE_TO_QM_DISTANCE)
-from src.Base.environment import attached_environment
-from src.Base.polarizable_sites import (PolarizableSites,
-                                        calibrated_site_alphas,
-                                        finite_field_polarizability,
-                                        sites_for_molecule)
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV,
+                                         MIN_SITE_TO_QM_DISTANCE)
+from src.Base.environment_seam import attached_environment
+from src.environments.polarizable_sites import (PolarizableSites,
+                                                calibrated_site_alphas,
+                                                finite_field_polarizability,
+                                                sites_for_molecule)
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from tests.reference_scf import rhf_conv_1e12
@@ -93,7 +93,7 @@ def gw_levels_and_weights(mf, nocc, environment=None, extra=0):
     thread pool."""
     states = list(range(nocc - 1 - extra, nocc + 1 + extra))
     weights = {}
-    solve = qp_energy.solve_qp_equation
+    solve = qp_energy.solve_qp_equation_pole_strength
 
     def slope_recorded(func, e_start, **kwargs):
         root = solve(func, e_start, **kwargs)
@@ -104,7 +104,7 @@ def gw_levels_and_weights(mf, nocc, environment=None, extra=0):
         return root
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(qp_energy, 'solve_qp_equation', slope_recorded)
+        mp.setattr(qp_energy, 'solve_qp_equation_pole_strength', slope_recorded)
         with attached_environment(mf, environment):
             out = calc_qp_energy(mf, mode='casida', state=states)
     assert len(weights) == len(states)

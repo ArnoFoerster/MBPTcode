@@ -14,12 +14,12 @@ import pytest
 from pyscf import gto
 
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.numerics import (NumericsMismatch, numerics_identity,
-                               surface_numerics)
+from src.Base.numerics.numerics import (NumericsMismatch, numerics_identity,
+                                        numerics_of, surface_numerics)
 from src.properties import excitations
 from src.properties.excitations import (SurfaceSpec, adiabatic_energy,
                                         ground_surface_of, surface_of)
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.reference_scf import rhf_df_differentiable
 
 BASIS = 'cc-pvdz'
@@ -29,7 +29,7 @@ NTAU_W = 14
 def spec(ntau_w):
     return SurfaceSpec(GroundState('rpa', 'hf'), chi0='space-time',
                        factorization='isdf', qp_states=QPStates('all'),
-                       numerics={'grid_accuracy': 'G1', 'ntau_w': ntau_w})
+                       numerics=numerics_of({'grid_accuracy': 'G1', 'ntau_w': ntau_w}))
 
 
 @pytest.fixture(scope='module')
@@ -63,7 +63,7 @@ def test_adiabatic_energy_refuses_a_ground_surface_of_other_numerics(
 def test_a_mean_field_ground_surface_holds_no_numerics_and_is_not_refused(h2):
     dft = SurfaceSpec(GroundState('dft', 'hf'), chi0='space-time',
                       factorization='isdf', qp_states=QPStates('all'),
-                      numerics={'grid_accuracy': 'G1'})
+                      numerics=numerics_of({'grid_accuracy': 'G1'}))
     excited = surface_of(dft, Excitation('singlet'), h2, rhf_df_differentiable)
     ground = ground_surface_of(dft, excited, h2, rhf_df_differentiable)
     assert numerics_identity(ground) is None
@@ -78,4 +78,5 @@ def test_a_given_numerics_on_another_grid_than_the_keywords_is_refused(
     with pytest.raises(NumericsMismatch, match='isdf.counts'):
         potential_energy_surface(
             h2, rhf_df_differentiable, ground_state=GroundState('rpa', 'hf'),
-            settings=surface_numerics(excited), grid_accuracy='G2')
+            settings=surface_numerics(excited),
+            numerics=numerics_of({'grid_accuracy': 'G2'}))

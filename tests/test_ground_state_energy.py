@@ -29,19 +29,19 @@ import pytest
 from pyscf import dft, gto, scf
 
 from tests.pins import RECORDING_BLAS, assert_same, bar_under
-from src.Base.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import GroundState
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, exx_double_counting, ground_state_energy,
     reference_energy)
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
-                                          QuasiparticleSurface, mo_eri)
-from src.gradients.quasi_boson_adjoint import QPqbAdjoint as QPqb
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+                                                QuasiparticleSurface, mo_eri)
+from src.gradients.gwbse.quasi_boson_adjoint import QPqbAdjoint as QPqb
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'

@@ -9,8 +9,9 @@ unseen; every entry now refuses them.
 import numpy as np
 import pytest
 
-from src.Base.constants import HARTREE_TO_CM, VIBRONIC_MODE_FLOOR_CM
-from src.properties import rates
+from src.Base.numerics.constants import HARTREE_TO_CM, VIBRONIC_MODE_FLOOR_CM
+from src.photophysics import rates
+from src.properties import franck_condon
 from src.properties.spin_vibronic import mode_derivatives
 from src.properties.vibronic import (huang_rhys_from_gradient,
                                      reorganization_from_huang_rhys)
@@ -48,7 +49,7 @@ def test_the_rate_routines_refuse(bad):
 
 
 def test_vibrations_pass():
-    rates.require_vibrational_modes(GOOD, 'test')
+    franck_condon.require_vibrational_modes(GOOD, 'test')
     s, _ = huang_rhys_from_gradient(np.ones(3), GOOD, np.eye(3)[:, :2],
                                     np.ones(1))
     assert s == pytest.approx(1.0 / (2.0 * GOOD ** 3))

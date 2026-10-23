@@ -30,7 +30,7 @@ import warnings
 import numpy as np
 from pyscf import gto
 
-from src.Base.constants import ROOT_FOLLOW_MARGIN_MIN, ROOT_FOLLOW_WEIGHT_MIN
+from src.Base.numerics.constants import ROOT_FOLLOW_MARGIN_MIN, ROOT_FOLLOW_WEIGHT_MIN
 
 
 class FollowingWarning(RuntimeWarning):

@@ -51,17 +51,17 @@ from dataclasses import replace
 import numpy as np
 from pyscf import gto
 
-from src.Base.constants import (HARTREE_TO_EV, SCF_ENERGY_CONV_TOL,
-                                SCF_ENERGY_GRAD_TOL, VERTICAL_FRONTIER_LISTED,
-                                VERTICAL_WORST_LISTED)
+from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_ENERGY_CONV_TOL,
+                                         SCF_ENERGY_GRAD_TOL, VERTICAL_FRONTIER_LISTED,
+                                         VERTICAL_WORST_LISTED)
 from src.Base.declaration import Excitation, QPStates
-from src.Base.pyscf_interface import occupied_count
-from src.Base.separable_ri import UnrepresentedOrbitals
-from src.gradients.state_manifold import StateEvaluation, StateManifold
+from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.factorization.separable_ri import UnrepresentedOrbitals
+from src.gradients.gwbse.state_manifold import StateEvaluation, StateManifold
 from src.photophysics import chain
 from src.photophysics.records import log
 from src.properties.excitations import grid_record, qp_bookkeeping, surface_of
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 
 #: The quasiparticle arms.
 ARMS = ('sop-admitted', 'sop-adaptive', 'ac-all')
@@ -198,7 +198,7 @@ def sop_forward(man, mol, mf, states):
     qp_report(shared, occupied_count(mf))
     shared, solved = man.spectra(mol, mf, shared, states,
                                  StateEvaluation(mol, mf))
-    return shared, {spin: om for spin, (om, _) in solved.items()}
+    return shared, {spin: s.omega for spin, s in solved.items()}
 
 
 def ac_all(man, shared, mol, mf, nocc):

@@ -29,7 +29,7 @@ What that costs in agreement, and why none of it is a tuned tolerance:
   * the gradient at that geometry is then what the Lagrangian carries of
     the difference between two mean fields each converged to
     SCF_DIFFERENTIABLE_GRAD_TOL, so it is compared at
-    CONVERGED_SCF_FORCE_TOL (src/Base/constants.py, which derives it from
+    CONVERGED_SCF_FORCE_TOL (src/Base/numerics/constants.py, which derives it from
     that convergence). Measured: 2.4e-13 Ha/Bohr at two ranks and 3.1e-13
     at three, against a force of 2.21e-02.
   * a build-only factory with NO communicator is `mf.kernel()`, the call the
@@ -63,12 +63,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (CONVERGED_SCF_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import run_simulated
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.numerics.constants import (CONVERGED_SCF_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.test_mpi_routes import recorded
 from tests.isdf_test_grid import g1
 

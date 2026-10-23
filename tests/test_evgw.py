@@ -27,10 +27,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto
 
-from src.Base.constants import HARTREE_TO_EV, HARTREE_TO_MEV
-from src.Base.environment import attach_environment
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import HARTREE_TO_EV, HARTREE_TO_MEV
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.evGW import (EvGWNotConverged, evgw_eigenvalues,
                                          shifted_mean_field)
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
@@ -40,7 +40,7 @@ from src.SingleReference.GW.qp_energy import EVGW_MODES, calc_qp_energy
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 import src.SingleReference.GW.qp_energy as qpe
 import src.SingleReference.GW.space_time as gwst
-import src.SingleReference.LinearResponse.davidson as dv
+import src.SingleReference.BSE.solve as dv
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
 
@@ -50,15 +50,15 @@ MODES = sorted(set(EVGW_MODES.values()))
 
 def truncated(mf, max_cycle, mol=None, **kwargs):
     """(eps, info) of a loop cut short at `max_cycle` cycles with tol = 0:
-    the iterate its refusal carries, read only to test what one cycle does."""
-    try:
-        evgw_eigenvalues(mf, mf.mol if mol is None else mol,
-                         max_cycle=max_cycle, tol=0.0,
-                         **g1_route(mf, kwargs.get('mode', 'space-time')),
-                         **kwargs)
-    except EvGWNotConverged as err:
-        return err.eps, err.info
-    raise AssertionError('a loop with tol = 0 was not refused')
+    the last iterate it returns with its warning, read only to test what one
+    cycle does."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', EvGWNotConverged)
+        eps, info = evgw_eigenvalues(
+            mf, mf.mol if mol is None else mol, max_cycle=max_cycle, tol=0.0,
+            **g1_route(mf, kwargs.get('mode', 'space-time')), **kwargs)
+    assert not info['converged']
+    return eps, info
 
 
 def check(ok, label, detail=''):
@@ -116,12 +116,15 @@ def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
 
 def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
     """The default decides convergence on the frontier pair; asked to decide
-    it on every state the loop converges within ten cycles, and cut short it
-    is refused with the residual rather than returned.
+    it on every state the loop converges within max_cycle (20), and cut short
+    it is refused with the residual rather than returned.
 
     Converging on every state needs W's frequency grid to span the range its
     transform to imaginary time is fitted over; frequencies built for the bare
-    transition window leave the high virtuals wandering from cycle to cycle.
+    transition window leave the high virtuals wandering from cycle to cycle
+    (near 1e-2 eV for all 20 cycles). With the grid as built it converges in
+    10 cycles on the workstation and 13 on a cluster's MKL: the gate is
+    convergence, not the count.
     """
     nocc = mf.mol.nelectron // 2
     _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20, counts=g1(mf))
@@ -135,19 +138,21 @@ def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
     all_states = np.arange(len(np.asarray(mf.mo_energy)))
     _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
                                max_cycle=20, counts=g1(mf))
-    ok &= check(wide['converged'] and len(wide['history']) <= 10,
+    ok &= check(wide['converged'],
                 'converging on every orbital converges too',
                 f"{len(wide['history'])} cycles, "
                 f"{wide['history'][-1] * HARTREE_TO_EV:.3e} eV")
-    message, short = '', None
-    try:
-        evgw_eigenvalues(mf, mf.mol, converge_on=all_states, max_cycle=3, counts=g1(mf))
-    except EvGWNotConverged as err:
-        message, short = str(err), err.info
-    ok &= check(short is not None and not short['converged']
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
+                                    max_cycle=3, counts=g1(mf))
+    message = ' '.join(str(w.message) for w in caught
+                       if issubclass(w.category, EvGWNotConverged))
+    ok &= check(not short['converged']
                 and 'not converged after 3 of max_cycle = 3 cycles' in message
                 and short['history'][-1] > wide['history'][-1],
-                'cut short, it is refused with its residual', message[:60])
+                'cut short, it warns with its residual and flags the record',
+                message[:60])
     return ok
 
 
@@ -522,13 +527,13 @@ def check_evgw0_keeps_w_and_moves_the_poles():
         return (e[nocc] - e[nocc - 1]) * HARTREE_TO_EV
 
     builds = []
-    original = qpe._casida_spectrum
+    original = qpe.casida_spectrum
 
     def counted(*args, **kw):
         builds.append(1)
         return original(*args, **kw)
 
-    qpe._casida_spectrum = counted
+    qpe.casida_spectrum = counted
     try:
         eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida',
                                             screening='fixed')
@@ -537,7 +542,7 @@ def check_evgw0_keeps_w_and_moves_the_poles():
         eps_updated, updated = evgw_eigenvalues(mf, mol, mode='casida')
         n_updated = len(builds)
     finally:
-        qpe._casida_spectrum = original
+        qpe.casida_spectrum = original
     _, one = truncated(mf, max_cycle=1, mol=mol, mode='casida',
                        screening='fixed')
     first = one['eps_mean_field'] + one['shift']
@@ -662,23 +667,25 @@ def check_the_full_update_is_the_default_and_moves_the_core(water):
                  'electronvolts', f'1s {shift:+.2f} eV')
 
 
-def check_an_unconverged_loop_is_refused_with_its_residual_and_bar(water):
+def check_an_unconverged_loop_warns_with_its_residual_and_bar(water):
     """Water/cc-pVDZ, Casida evGW, one cycle against tol = 1e-12 Ha: the
-    last iterate is not a fixed point, so the loop refuses, naming max
-    |delta eps| against tol and the cycles against max_cycle."""
-    try:
-        evgw_eigenvalues(water, water.mol, mode='casida', max_cycle=1,
-                         tol=1e-12)
-    except EvGWNotConverged as err:
-        message = str(err)
-        return check('not converged after 1 of max_cycle = 1 cycles' in message
-                     and 'max |delta eps| = ' in message
-                     and 'tol = 1.000e-12 Ha' in message
-                     and not err.info['converged']
-                     and err.info['history'][-1] > 1e-12,
-                     'an unconverged loop is refused with its residual and bar',
-                     message[:60])
-    return check(False, 'an unconverged loop is refused')
+    last iterate is not a fixed point, so the loop returns it with
+    info['converged'] False and a warning naming max |delta eps| against tol
+    and the cycles against max_cycle (refuse inputs, warn numerics; it once
+    refused)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        _, info = evgw_eigenvalues(water, water.mol, mode='casida',
+                                   max_cycle=1, tol=1e-12)
+    message = ' '.join(str(w.message) for w in caught
+                       if issubclass(w.category, EvGWNotConverged))
+    return check('not converged after 1 of max_cycle = 1 cycles' in message
+                 and 'max |delta eps| = ' in message
+                 and 'tol = 1.000e-12 Ha' in message
+                 and not info['converged']
+                 and info['history'][-1] > 1e-12,
+                 'an unconverged loop warns with its residual and bar and '
+                 'flags its record', message[:60])
 
 
 def check_an_empty_update_window_is_refused(water):
@@ -724,7 +731,7 @@ def run():
     water = build_water()
     all_ok &= check_orbitals_outside_the_update_window_stay_at_the_mean_field(water)
     all_ok &= check_the_full_update_is_the_default_and_moves_the_core(water)
-    all_ok &= check_an_unconverged_loop_is_refused_with_its_residual_and_bar(water)
+    all_ok &= check_an_unconverged_loop_warns_with_its_residual_and_bar(water)
     all_ok &= check_an_empty_update_window_is_refused(water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return all_ok

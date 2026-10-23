@@ -65,7 +65,7 @@ a stage this setting does not reach.
 SHOWN TO FAIL, then restored and byte-compared (`cmp`): `_casida` building
 the cache in the forward pass on the grid route too, as the default route
 once did. The scan failed on water, 24 block-shaped arrays seen in the
-`b_block`, `_casida_args` and `_casida_seeds` frames, and so did the cache
+`b_block` and `_casida_seeds` frames, and so did the cache
 count, an energy having built it.
 """
 import math
@@ -79,21 +79,22 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.numerics import Numerics, numerics_of
-from src.Base.constants import BSE_ADJOINT_TILE_ROWS, KAPPA
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import BSE_ADJOINT_TILE_ROWS, KAPPA
 from src.Base.declaration import Excitation, GroundState
 from src.SingleReference.LinearResponse import isdf_bse_adjoint
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
-from src.gradients import state_following
-from src.gradients.bse_isdf import (bse_backward, bse_cache,
-                                    interstate_backward)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse import state_following
+from src.gradients.gwbse.bse_isdf import (bse_backward, bse_cache,
+                                          interstate_backward)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.test_chain_sliced_factors import (BASIS, H2O, chain_scf,
                                              reachable_arrays)
 from tests.isdf_test_grid import g1_numerics
+from tests.chain_stages import casida_args
 from tests.pins import assert_same
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
@@ -132,8 +133,8 @@ def symmetric(w):
 def casida_inputs(chain):
     """(X_mo, D, eps_qp, W_aux, nocc, cache, Xn, Yn) at the reference, the
     cache built as the explicit route builds it."""
-    om, pieces = chain._forward(chain.mol0, chain.mf0)
-    x, d, eq, w, no, cache, xn, yn = chain._casida_args(pieces)
+    x, d, eq, w, no, cache, xn, yn = casida_args(
+        chain, *chain.forward(chain.mol0, chain.mf0))
     if not cache:
         cache = bse_cache(x, d, eq, w, no, spin=chain.spin,
                           bse_tda=chain.bse_tda)
@@ -307,18 +308,18 @@ def worst_ratio(a, b, bound):
 
 
 def captured(chain):
-    """Every call of the chain's Casida-level adjoint: its forward pieces,
+    """Every call of the chain's Casida-level adjoint: its forward and solution,
     root, bra and copies of its seeds, which the fold consumes."""
     calls = []
-    seeds_of = chain._casida_seeds
+    seeds_of = chain.follower._casida_seeds
 
-    def probed(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        calls.append(dict(pieces=pieces, n=n, m=m,
+    def probed(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        calls.append(dict(shared=shared, solution=solution, n=n, m=m,
                           seeds=tuple(np.array(a, copy=True) for a in out)))
         return out
 
-    chain._casida_seeds = probed
+    chain.follower._casida_seeds = probed
     return calls
 
 
@@ -341,15 +342,15 @@ def test_the_setting_is_carried_and_refused():
     ground = GroundState('rpa', 'hf')
     surface = potential_energy_surface(mol, chain_scf, ground_state=ground,
                                        excitation=Excitation('singlet'),
-                                       bse_adjoint='grid')
+                                       numerics=numerics_of({'bse_adjoint': 'grid'}))
     assert surface.excited.bse_adjoint == 'grid'
     assert surface.numerics['bse_adjoint'] == 'grid'
     assert surface.refreeze(mol).excited.bse_adjoint == 'grid'
-    with pytest.raises(TypeError, match='bse_adjoint'):
+    with pytest.raises(TypeError, match='bse.adjoint'):
         potential_energy_surface(mol, chain_scf, ground_state=ground,
                                  excitation=Excitation('singlet'),
                                  chi0='dense-qb', factorization='four-index',
-                                 bse_adjoint='grid')
+                                 numerics=numerics_of({'bse_adjoint': 'grid'}))
 
 
 def test_the_cache_is_built_once_at_the_first_reverse_call(monkeypatch):
@@ -462,8 +463,8 @@ def test_benzene_agreement_and_timing():
         mol, chain_scf, mf=chain_scf(mol),
         numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson'})))
     chain.orbital_residuals_of = lambda *args: None
-    om, pieces = chain._forward(mol, chain.mf0)
-    x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+    x, d, eq, w, no, _, xn, yn = casida_args(chain,
+                                             *chain.forward(mol, chain.mf0))
     t0 = time.perf_counter()
     cache = bse_cache(x, d, eq, w, no)
     ref = bse_backward(0, x, d, eq, w, no, cache, xn, yn)
@@ -532,12 +533,13 @@ def test_the_grid_force_is_the_default_force(pyscf_one_thread):
             (g_d, om_d, c_d), (g_g, om_g, c_g) = out
             label = f"{solver or 'default'} solver, {element}"
             assert_same(om_g, om_d, quantity='energy', label=label)
-            fold = default._fold_to_nuclei
-            g_x = np.asarray(fold(c_d['pieces'], *[np.array(a, copy=True)
+            fold = default.reverse.fold_to_nuclei
+            g_x = np.asarray(fold(c_d['shared'], *[np.array(a, copy=True)
                                                    for a in c_g['seeds']])[0])
-            image = np.abs(fold(c_d['pieces'], *[
+            image = np.abs(fold(c_d['shared'], *[
                 a - b for a, b in zip(c_g['seeds'], c_d['seeds'])])[0]).max()
-            x, d, eq, w, no, _, xn, yn = default._casida_args(c_d['pieces'])
+            x, d, eq, w, no, _, xn, yn = casida_args(
+                default, c_d['shared'], c_d['solution'])
             ratios = bound_ratios(c_d['seeds'], c_g['seeds'],
                                   (x, d, eq, w, no, xn, yn), default.spin,
                                   default.bse_tda, c_d['n'], bra=c_d['m'],

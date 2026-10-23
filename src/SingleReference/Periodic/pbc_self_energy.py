@@ -29,7 +29,10 @@ supercell-folding check that catches it (ratio exactly 2.000000 at nk=2,
 The exciton set feeding chi_a is RPA (plain GW) or BSE-screened (vertex); this
 module builds Sigma_c generically from whatever (Omega, X, Y) per q are passed.
 """
+import warnings
+
 import numpy as np
+from src.Solvers.qp_equation import quasiparticle_weight
 from src.SingleReference.Periodic.pbc_casida import build_rpa_matrices, build_bse_matrices
 from src.SingleReference.Periodic.pbc_amplitudes import (
     project_XpY, get_chi_a, get_chi_b_vertex, kpoint_minus_q)
@@ -80,11 +83,17 @@ def solve_bse_all_q(dfints, W_all, mo_energy=None):
     return out
 
 
-def sigma_c_diag(dfints, eig_all_q, kn, n, freq, mo_energy=None, eta=1e-3):
-    """Diagonal correlation self-energy Sigma_c^{n,kn}(freq), spectral form.
+def spectral_sigma(dfints, eig_all_q, kn, freq, numerator, hole_weight,
+                   scale=2.0, mo_energy=None, eta=1e-3):
+    """The spectral sum every diagonal Sigma_c here is, for a target at kn:
 
-    eig_all_q[q] = (Omega, X, Y) at transfer q (from solve_rpa_all_q for plain
-    GW, or the BSE eigenpairs for the vertex path). freq may be a scalar or 1D
+        Sigma(w) = sum_q scale w_q/nk sum_{S,m} num_q[S, m]
+                   [ h_m D(w - e_m + Omega_S) + (1 - h_m) D(w - e_m - Omega_S) ]
+
+    with D(x) = x/(x^2 + eta^2), m running over the internal orbitals at
+    km = kn - q, num_q = numerator(q, X, Y) of shape (nstates, nmo) and
+    h = hole_weight(km) the weight of the hole (+Omega) branch: 1 or 0 by the
+    integer occupation, f_m/2 with smearing. freq may be a scalar or 1D
     array; returns matching shape (real part).
     """
     if mo_energy is None:
@@ -96,19 +105,42 @@ def sigma_c_diag(dfints, eig_all_q, kn, n, freq, mo_energy=None, eta=1e-3):
 
     for q in range(nq):
         Omega, X, Y = eig_all_q[q]
-        rho = project_XpY(dfints, dfints.kconserv_pair[q], X, Y)
-        chi_a = get_chi_a(dfints, q, rho, kn)          # (nstates, nmo, nmo) [p@kn, m@km]
+        num = numerator(q, X, Y)                       # (nstates, nmo), m@km
         km = kpoint_minus_q(dfints, q, kn)             # km = kn - q
-        amp2 = np.abs(chi_a[:, n, :]) ** 2             # (nstates, nmo), internal m@km
-        nocc_km = dfints.nocc[km]
-        s_m = np.where(np.arange(dfints.nmo) < nocc_km, 1.0, -1.0)
         eps_m = mo_energy[km].real
+        hole = hole_weight(km)
+        part = 1.0 - hole
         for iw, w in enumerate(freq_grid):
-            energy = w - eps_m[None, :] + s_m[None, :] * Omega[:, None].real
-            denom = energy / (energy**2 + eta**2)
-            sigma[iw] += 2.0 * q_weights[q] / dfints.nkpts * np.sum(amp2 * denom)
+            e_h = w - eps_m[None, :] + Omega[:, None].real
+            e_p = w - eps_m[None, :] - Omega[:, None].real
+            dh = e_h / (e_h ** 2 + eta ** 2)
+            dp = e_p / (e_p ** 2 + eta ** 2)
+            term = num * (hole[None, :] * dh + part[None, :] * dp)
+            sigma[iw] += scale * q_weights[q] / dfints.nkpts * np.sum(term)
 
     return sigma if not np.isscalar(freq) else sigma[0]
+
+
+def integer_hole_weight(dfints):
+    """h_m = 1 for m occupied at km, else 0: `spectral_sigma`'s binary split."""
+    return lambda km: (np.arange(dfints.nmo) < dfints.nocc[km]).astype(float)
+
+
+def sigma_c_diag(dfints, eig_all_q, kn, n, freq, mo_energy=None, eta=1e-3):
+    """Diagonal correlation self-energy Sigma_c^{n,kn}(freq), spectral form.
+
+    eig_all_q[q] = (Omega, X, Y) at transfer q (from solve_rpa_all_q for plain
+    GW, or the BSE eigenpairs for the vertex path). freq may be a scalar or 1D
+    array; returns matching shape (real part).
+    """
+    def amp2(q, X, Y):
+        rho = project_XpY(dfints, dfints.kconserv_pair[q], X, Y)
+        chi_a = get_chi_a(dfints, q, rho, kn)          # (nstates, nmo, nmo) [p@kn, m@km]
+        return np.abs(chi_a[:, n, :]) ** 2             # (nstates, nmo), internal m@km
+
+    return spectral_sigma(dfints, eig_all_q, kn, freq, amp2,
+                          integer_hole_weight(dfints), mo_energy=mo_energy,
+                          eta=eta)
 
 
 def sigma_vertex_diag(dfints, eig_all_q, W_all, kn, n, freq, vertex_mode='GWGammaInf',
@@ -125,38 +157,22 @@ def sigma_vertex_diag(dfints, eig_all_q, W_all, kn, n, freq, vertex_mode='GWGamm
     [internal@km, target@kn] (target last) -- extracted consistently below.
     Reduces to the molecular vertex self-energy at nkpts=1.
     """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    nq, q_weights = q_grid(dfints)
-    freq_grid = np.atleast_1d(freq).astype(float)
-    sigma = np.zeros(len(freq_grid))
+    if vertex_mode not in ('GWGammaInf', 'PSD1'):
+        raise ValueError(f"unknown vertex_mode '{vertex_mode}'")
 
-    for q in range(nq):
-        Omega, X, Y = eig_all_q[q]
+    def vertex_numerator(q, X, Y):
         rho = project_XpY(dfints, dfints.kconserv_pair[q], X, Y)
         chi_a = get_chi_a(dfints, q, rho, kn)                 # [S, target@kn, internal@km]
         chi_b = get_chi_b_vertex(dfints, q, W_all, X, Y, kn)  # [S, internal@km, target@kn]
-        km = kpoint_minus_q(dfints, q, kn)
         a = chi_a[:, n, :]                                    # (S, m) target n, internal m
         b = chi_b[:, :, n]                                    # (S, m) internal m, target n
-
         if vertex_mode == 'GWGammaInf':
-            num = np.real(np.conj(a) * (a - 0.5 * b))
-        elif vertex_mode == 'PSD1':
-            num = 0.25 * np.abs(2.0 * a - b) ** 2
-        else:
-            raise ValueError(f"unknown vertex_mode '{vertex_mode}'")
+            return np.real(np.conj(a) * (a - 0.5 * b))
+        return 0.25 * np.abs(2.0 * a - b) ** 2
 
-        nocc_km = dfints.nocc[km]
-        s_m = np.where(np.arange(dfints.nmo) < nocc_km, 1.0, -1.0)
-        eps_m = mo_energy[km].real
-        for iw, w in enumerate(freq_grid):
-            energy = w - eps_m[None, :] + s_m[None, :] * Omega[:, None].real
-            denom = energy / (energy**2 + eta**2)
-            sigma[iw] += 2.0 * q_weights[q] / dfints.nkpts * np.sum(num * denom)
-
-    return sigma if not np.isscalar(freq) else sigma[0]
+    return spectral_sigma(dfints, eig_all_q, kn, freq, vertex_numerator,
+                          integer_hole_weight(dfints), mo_energy=mo_energy,
+                          eta=eta)
 
 
 def get_exchange_minus_vxc(mf, exxdiv=None):
@@ -190,11 +206,33 @@ def get_exchange_minus_vxc(mf, exxdiv=None):
     return out
 
 
+def qp_energy_linearized(sigma_fn, ep, de=1e-3, exchange_minus_vxc=0.0):
+    """(QP, Z) of the QP equation linearized about the level ep:
+
+        QP = ep + Z * (Sigma_c(ep) + (Sigma_x - v_xc)_nn),
+        Z  = 1/(1 - dSigma_c/domega|ep),
+
+    the derivative a forward difference at `de` of sigma_fn(omega) ->
+    Sigma_c(omega). Z outside (0, 1] means the linearization has inverted (a
+    pole of Sigma_c near ep): the value is returned with a RuntimeWarning, and
+    a root solve on the full Sigma_c(omega) is the check.
+    """
+    s0 = sigma_fn(ep)
+    s1 = sigma_fn(ep + de)
+    dsigma = (s1 - s0) / de
+    Z = 1.0 / (1.0 - dsigma)
+    if not quasiparticle_weight(Z, 0.0):
+        warnings.warn(f"linearized QP equation at {ep:.6f} Ha has Z = {Z:.4g}, "
+                      f"outside (0, 1]: a pole of Sigma_c lies near the level, "
+                      f"so solve for the root instead.", RuntimeWarning,
+                      stacklevel=3)
+    return ep + Z * (s0 + exchange_minus_vxc), Z
+
+
 def qp_energy_g0w0(dfints, eig_all_q, kn, n, mo_energy=None, eta=1e-3, de=1e-3,
                    exchange_minus_vxc=0.0):
-    """Linearized G0W0 QP energy for orbital (n, kn):
-        QP = eps + Z * (Sigma_c(eps) + (Sigma_x - v_xc)_nn),
-        Z = 1/(1 - dSigma_c/domega|eps).
+    """Linearized G0W0 QP energy for orbital (n, kn) (`qp_energy_linearized`
+    on `sigma_c_diag`; the energy alone, Z is dropped).
 
     `exchange_minus_vxc` is the scalar <n,kn| Sigma_x - v_xc |n,kn> (from
     get_exchange_minus_vxc[kn, n]); pass 0.0 only for a HF start in a convention
@@ -203,9 +241,7 @@ def qp_energy_g0w0(dfints, eig_all_q, kn, n, mo_energy=None, eta=1e-3, de=1e-3,
     if mo_energy is None:
         mo_energy = dfints.mo_energy
     mo_energy = np.asarray(mo_energy)
-    ep = mo_energy[kn][n].real
-    s0 = sigma_c_diag(dfints, eig_all_q, kn, n, ep, mo_energy=mo_energy, eta=eta)
-    s1 = sigma_c_diag(dfints, eig_all_q, kn, n, ep + de, mo_energy=mo_energy, eta=eta)
-    dsigma = (s1 - s0) / de
-    Z = 1.0 / (1.0 - dsigma)
-    return ep + Z * (s0 + exchange_minus_vxc)
+    return qp_energy_linearized(
+        lambda w: sigma_c_diag(dfints, eig_all_q, kn, n, w,
+                               mo_energy=mo_energy, eta=eta),
+        mo_energy[kn][n].real, de, exchange_minus_vxc)[0]

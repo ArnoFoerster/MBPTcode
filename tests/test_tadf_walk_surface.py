@@ -19,12 +19,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (HESSIAN_FD_ASYMMETRY_TOL,
-                                ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
+from src.Base.numerics.constants import (HESSIAN_FD_ASYMMETRY_TOL,
+                                         ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
 from src.photophysics.stages import ground_minimum
 from src.photophysics.store import StoreRefused
 from src.properties.hessian import require_hessian_grid
-from src.properties.optimize import mean_field_force
+from src.gradients.mean_field_surface import mean_field_force
 from tests.photophysics_cases import run_of
 
 #: formaldehyde off its minimum, C2v: C_y breaks the symmetry

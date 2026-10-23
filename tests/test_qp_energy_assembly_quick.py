@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests import directional_difference as dd
 from tests.test_qp_energy_assembly import (FD_STEP, FD_TOL, WINDOWS, build,
                                            environment, factory_for, molecule)

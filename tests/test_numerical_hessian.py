@@ -22,18 +22,18 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
-                                HESSIAN_FD_NOISE_REL, HESSIAN_FD_STEP_RATIO,
-                                ISDF_GRID_ACCURACY,
-                                ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
-from src.Base.isdf_jk import (FrozenFrames, frozen_frames, isdf_grid,
-                              isdf_jk)
-from src.Base.separable_ri import (_SHELL_ORDER, atomic_points,
-                                   resolve_isdf_grid)
+from src.Base.numerics.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
+                                         HESSIAN_FD_NOISE_REL, HESSIAN_FD_STEP_RATIO,
+                                         ISDF_GRID_ACCURACY,
+                                         ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
+from src.Base.factorization.isdf_jk import FrozenFrames, frozen_frames, isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import (SHELL_ORDER, atomic_points,
+                                                 resolve_isdf_grid)
 from src.properties.hessian import (check_step_scaling, displacement_list,
                                     gradient_at, hessian_from_gradients,
                                     numerical_hessian, translation_residual)
-from src.properties.optimize import mean_field_force
+from src.gradients.mean_field_surface import mean_field_force
 from src.properties.vibronic import normal_modes
 from tests.pins import assert_same
 
@@ -48,11 +48,11 @@ def factory(route, xc='b3lyp', level=None):
     """Converged mean fields: `level` names an ISDF_GRID_ACCURACY row (the
     interpolated route has no default grid)."""
     counts = (None if level is None else
-              dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz'][level])))
+              dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz'][level])))
 
     def build(m):
         mf = dft.RKS(m, xc=xc) if xc else scf.RHF(m)
-        mf = (isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=counts)
+        mf = (isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=counts)
               if route == 'isdf'
               else mf.density_fit(auxbasis='cc-pvdz-jkfit'))
         if xc:

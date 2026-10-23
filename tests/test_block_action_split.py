@@ -53,13 +53,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import (contiguous_block, run_simulated,
-                                     simulated_world)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated, simulated_world
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import block_actions
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.trial_space import ActionNotSymmetric

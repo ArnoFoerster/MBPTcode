@@ -38,18 +38,18 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, lib, scf
 
-import src.gradients.adaptive_selection as adaptive_selection_module
-import src.gradients.qp_set as qp_set_module
-from src.Base.chain_settings import with_setting
-from src.Base.numerics import Numerics
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
+import src.gradients.gwbse.adaptive_selection as adaptive_selection_module
+import src.gradients.gwbse.qp_set as qp_set_module
+from src.gradients.rpa.chain_settings import with_setting
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.reaction_field import (offdiagonal_reaction_field,
                                                    pair_densities,
                                                    projected_quasiparticle_shift)
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
 
@@ -129,7 +129,7 @@ def displaced(mol, atom, axis, step):
 
 def coupling(ch):
     """The forward's QPHamiltonian at the reference geometry."""
-    return ch._shared_forward(ch.mol0, ch.mf0).qp_h
+    return ch.shared_forward(ch.mol0, ch.mf0).qp_h
 
 
 def test_subspaces_are_frozen_with_the_set():
@@ -224,7 +224,7 @@ def test_the_reaction_field_element_is_eq18_to_first_order():
     the chain puts on H is the mean of the two slopes over two."""
     ch = solvated(qp_hamiltonian=True)
     ch.excitation()
-    fwd = ch._shared_forward(ch.mol0, ch.mf0)
+    fwd = ch.shared_forward(ch.mol0, ch.mf0)
     p, q = PAIR
     pair = [(p, q)]
     dens = [pair_densities(fwd.x_mo, f, pair) for f in (fwd.d, fwd.d_bare)]

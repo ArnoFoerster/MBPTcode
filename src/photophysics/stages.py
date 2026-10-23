@@ -62,7 +62,7 @@ where it stopped; a relaunch that asks for the stage again sets that stage
 and every stage built on its minimum aside (`walk_again`: s0 takes every
 stage, s1 takes t1, vib and rate, t1 takes vib and rate) into
 unconverged/<stage>-<time>/, and the stage walks again from its start, as the
-solvated driver does (tools/solvation, `_drop_unconverged`). A far start's
+solvated driver does (solvated.py, `_drop_unconverged`). A far start's
 chain ('s1_start_chain') is the far start's and stays.
 
 Under ranks (`with distributed(comm):` around `run_tadf`) every rank runs
@@ -87,43 +87,43 @@ from typing import Callable, NamedTuple
 import numpy as np
 from pyscf import gto
 
-from src.Base.constants import (HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation
-from src.Base.environment import equilibrium_environment
-from src.Base.geometry import elements_of, molecule_at
-from src.Base.pyscf_interface import occupied_count
-from src.Base.scf_convergence import WarmStart
-from src.Base.separable_ri import (frame_turning_record, resolve_isdf_grid,
-                                   shell_tuple)
-from src.Base.utils.mpi_grid import (broadcast, current_comm, distributed,
-                                     is_root, mpi_map, n_ranks)
+from src.environments.environment import equilibrium_environment
+from src.Base.geometry.geometry import elements_of, molecule_at
+from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.pyscf.scf_convergence import WarmStart
+from src.Base.factorization.separable_ri import (frame_turning_record, resolve_isdf_grid,
+                                                 shell_tuple)
+from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,
+                                              is_root, mpi_map, n_ranks)
 from src.SingleReference.GW.qp_selection import AdaptivePartition
-from src.SingleReference.LinearResponse.davidson import oscillator_strengths
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling)
-from src.gradients.state_manifold import StateManifold
+from src.SingleReference.BSE.solve import oscillator_strengths
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling)
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.photophysics import chain, df_check, rate_models, uisc
 from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
-from src.photophysics.records import (StageRefused, WalkNotRelaxed,
-                                      following, label, log,
-                                      refreeze_summary, relaxation_flags,
-                                      walk_fields)
+from src.photophysics.records import (StageRefused, following, label, log,
+                                      refreeze_summary, walk_fields)
 from src.properties.excitations import (grid_record, qp_bookkeeping,
-                                        saddle_check, surface_of)
+                                        relaxation_flags,
+                                        saddle_check, saddle_verdict,
+                                        surface_of)
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
                                     require_hessian_counts,
                                     translation_residual)
-from src.properties.optimize import (MeanFieldSurface, relax,
-                                     saddle_test, surface_from_record,
+from src.properties.optimize import (relax, saddle_test, surface_from_record,
                                      surface_record)
+from src.gradients.mean_field_surface import MeanFieldSurface
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
                                           spin_vibronic_coupling)
-from src.properties.surface import (driven_chain, followed_root,
-                                    lockstep_geometry)
-from src.properties.surfaces import reference_mean_field
+from src.gradients.surface import lockstep_geometry
+from src.gradients.surface import driven_chain, followed_root
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from src.properties.vibronic import normal_modes
 
 #: The stages in the order they run ('vib' is the UISC model's alone).
@@ -609,15 +609,10 @@ class Run:
             f'mode, {record["step_bohr"]} Bohr; the new minimum lies '
             f'{record.get("energy_drop", float("nan")) * HARTREE_TO_MEV:.2f}'
             f' meV below it')
-        flags = relaxation_flags(f'{stage} escape', again)
-        if record['status'] != 'escaped':
-            # Refuse inputs, warn numerics
-            flags['saddle_check'] = record['status']
-            warnings.warn(f'{name}: {record["status"]} (saddle check); the '
-                          f'stage carries on where the escape walk stopped '
-                          f'and its record is flagged', WalkNotRelaxed,
-                          stacklevel=2)
-        again['numerical_flags'] = flags
+        # Refuse inputs, warn numerics
+        again['numerical_flags'] = dict(
+            relaxation_flags(f'{stage} escape', again),
+            **saddle_verdict(stage, record))
         return moved, again, walked_['root'], walked_['final'], record
 
     def analytic_df_hessian(self):
@@ -677,7 +672,7 @@ def with_partition(spec, partition):
     selecting."""
     if partition is None:
         return spec
-    return replace(spec, numerics=dict(spec.numerics, qp_partition=partition))
+    return replace(spec, options=dict(spec.options, qp_partition=partition))
 
 
 # ------------------------------------------------------------ properties

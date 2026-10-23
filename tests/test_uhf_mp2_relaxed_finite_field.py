@@ -9,14 +9,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, mp
 
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_antisymmetrized_spin_block_eri,
-                                      uhf_blockstacked_order)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_antisymmetrized_spin_block_eri,
+                                            uhf_blockstacked_order)
 from src.SingleReference.ADC.static_correction import build_mp2_static_correction
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
     MPnDensityDriverUnrestricted)
 from src.SingleReference.DensityMatrix.density_matrix import (
-    solve_cphf_relaxation_uhf, _build_dgamma_block)
+    solve_cphf_relaxation_uhf, build_dgamma_block)
 
 
 def interleaved_to_blockstacked_perm(nocc_a, nocc_b, norb):
@@ -53,8 +53,8 @@ def relaxed_mp2_dm_ao_uhf(mf, mol, relax):
         dg_a, dg_b = solve_cphf_relaxation_uhf(
             mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b)
     else:
-        dg_a = _build_dgamma_block(len(eps_a), nocc_a, oo_a, ov_a, vv_a)
-        dg_b = _build_dgamma_block(len(eps_b), nocc_b, oo_b, ov_b, vv_b)
+        dg_a = build_dgamma_block(len(eps_a), nocc_a, oo_a, ov_a, vv_a)
+        dg_b = build_dgamma_block(len(eps_b), nocc_b, oo_b, ov_b, vv_b)
     mo_a, mo_b = mf.mo_coeff
     dm_hf_a = np.diag((mf.mo_occ[0] > 0).astype(float))
     dm_hf_b = np.diag((mf.mo_occ[1] > 0).astype(float))

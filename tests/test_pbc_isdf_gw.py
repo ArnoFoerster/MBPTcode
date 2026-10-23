@@ -22,7 +22,7 @@ from pyscf.pbc import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
+from src.Base.utils.grids.grids import gauss_legendre_grid, minimax_time_grid
 from src.SingleReference.GW.qp_solve import (imaginary_axis_sample_points,
                                              solve_qp_from_imaginary_axis)
 from src.SingleReference.Periodic import pbc_isdf_gw as gw
@@ -31,7 +31,7 @@ from src.SingleReference.Periodic import pbc_self_energy as pse
 from src.SingleReference.Periodic.pbc_integrals import (PBCDFIntegrals,
                                                         get_momentum_transfer_map)
 from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts, kpoint_minus_map
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from tests.pins import assert_same
 
 KMESH = [2, 2, 1]
@@ -266,7 +266,7 @@ def test_matsubara_route_reproduces_the_t0_route(gwfix):
     constant that reads as a convention rather than a bug.
     """
     f = gwfix
-    from src.Base.utils.matsubara import ir_continuation_order
+    from src.Base.utils.grids.matsubara import ir_continuation_order
     beta = 400.0
     wmax = gw.self_energy_range_k(f['mo_energy'], f['mo_occ'], f['rW'][1], f['mu'])
     nuB = gw.bosonic_sampling(beta, wmax)

@@ -4,7 +4,7 @@ partner of a CC-ADC(3) amplitude substitution.
 The correction evaluates the SAME second-order Delta_gamma^(2) functional the
 MP2 static uses, at foreign (CC) amplitudes instead of the MBPT T2^(1)/T1^(2)
 it would otherwise generate. Because bra amplitudes are the ket adjoints (the
-driver's own _to_l_restricted, the same helper cc_amplitudes_restricted uses),
+driver's own to_l, the same helper cc_amplitudes_restricted uses),
 this is an EXPECTATION-VALUE density -- deliberately matching how the CC-ADC(3)
 supermatrix is built -- and NOT the Lambda-CCSD response 1-RDM that
 build_ccsd_static_correction_restricted computes. The two are different objects
@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals
+from src.Base.pyscf.pyscf_interface import DFIntegrals
 from src.SingleReference.ADC.cc_adc_amplitudes import (cc_amplitudes_restricted,
                                                        mbpt_amplitudes_restricted)
 from src.SingleReference.ADC.static_correction import (

@@ -11,7 +11,7 @@ check that declaring it changed no number.
 
 Water/cc-pVDZ throughout, RHF for the rpa rows and PBE0 for the dft one.
 
-What breaks each equivalence gate, in `src/properties/surfaces.py`:
+What breaks each equivalence gate, in `src/gradients/gwbse/surface_factory.py`:
 
   * test_every_dispatch_row_builds_its_class: the ('rpa', 'Excitation',
     'space-time', 'isdf') row given the charged row's class yields
@@ -40,20 +40,20 @@ import pytest
 from pyscf import dft, gto
 
 from tests.pins import assert_same
-from src.Base.numerics import Numerics
-from src.Base.constants import BSE_DENSE_MAX_GB, ISDF_GRID_ACCURACY
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import BSE_DENSE_MAX_GB, ISDF_GRID_ACCURACY
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   PhysicsMismatch, QPStates)
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
-                                          QuasiparticleSurface)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import (MeanFieldQPSurface, RPABSESurface,
-                                           RPAQPSurface)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surfaces import (compare_surfaces, potential_energy_surface,
-                                     qp_set_degeneracy_tol)
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+                                                QuasiparticleSurface)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.qp_set import QuasiparticleSet
+from src.gradients.gwbse.rpa_bse_surface import (MeanFieldQPSurface, RPABSESurface,
+                                                 RPAQPSurface)
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.gwbse.surface_factory import compare_surfaces, potential_energy_surface
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight
 
@@ -236,12 +236,13 @@ def test_a_numeric_keyword_the_realization_does_not_read_is_refused(mol):
     """
     with pytest.raises(TypeError) as exc:
         potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
-                                 excitation=Excitation('singlet'), ntau_rpa=12)
+                                 excitation=Excitation('singlet'),
+                                 numerics=numerics_of({'ntau_rpa': 12}))
     assert 'RPABSESurface' in str(exc.value)
     assert 'ntau_rpa' in str(exc.value)
     surface = potential_energy_surface(mol, rhf_tight, ground_state=RPA_HF,
                                        excitation=Excitation('singlet'),
-                                       ntau_gw=20)
+                                       numerics=numerics_of({'ntau_gw': 20}))
     assert surface.numerics['ntau_gw'] == 20
 
 
@@ -337,7 +338,7 @@ def test_the_default_quasiparticle_set_is_the_admitted_one(mol):
     mf = rhf_tight(mol)
     direct = resolve_qp_states(QPStates(), mf.mo_energy, mol.nelectron // 2,
                                mol=mol,
-                               degeneracy_tol=qp_set_degeneracy_tol({}))
+                               degeneracy_tol=Numerics().qp.degeneracy_tol)
     assert surface.realization.qp_explicit == direct.explicit
     assert tuple(np.asarray(surface.excited.resolved.qp_set)) == direct.explicit
 
@@ -349,11 +350,11 @@ def test_an_integer_window_still_gives_the_set_it_always_gave(mol):
     a sequence being accepted has to leave a half-width bitwise where it was.
     """
     eps = np.asarray(rhf_tight(mol).mo_energy, float)
-    by_width = ExcitedStateChain._qp_set(eps, 5, 2, 1e-4)
+    by_width = QuasiparticleSet._qp_set(eps, 5, 2, 1e-4)
     assert np.array_equal(by_width, np.arange(3, 7))
-    by_sequence = ExcitedStateChain._qp_set(eps, 5, (6, 3, 5, 4), 1e-4)
+    by_sequence = QuasiparticleSet._qp_set(eps, 5, (6, 3, 5, 4), 1e-4)
     assert np.array_equal(by_sequence, by_width)
-    assert np.array_equal(ExcitedStateChain._qp_set(eps, 5, 'all', 1e-4),
+    assert np.array_equal(QuasiparticleSet._qp_set(eps, 5, 'all', 1e-4),
                           np.arange(len(eps)))
 
 

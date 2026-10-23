@@ -28,15 +28,15 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.Base.pdaggerq_interface import pdaggerq_available
-from src.Base.pyscf_interface import (get_antisymmetrized_spin_integrals,
-                                      get_orbital_energies)
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_integrals,
+                                            get_orbital_energies)
 from src.CodeGeneration.diagrammatic import exact_oracle as EO
 from src.SingleReference.DensityMatrix import generated_mpn
 from src.SingleReference.DensityMatrix.generated_mpn import (
     mpn_density_pieces as gen)
-from src.SingleReference.DensityMatrix.mpn_density_driver import (
-    MPnDensityDriver, _denom)
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import orbital_denominator
 
 SYSTEMS = {'H4/sto-3g': 'H 0 0 0; H 0 0 0.80; H 0 0 1.75; H 0 0 2.60',
            'LiH/sto-3g': 'Li 0 0 0; H 0 0 1.6'}
@@ -98,7 +98,7 @@ def test_orders_up_to_three_are_the_hand_chain(name, tmp_path, monkeypatch):
     E2 = mpn.compute_E(t2_1)
     o3 = mpn.compute_order3_amplitudes(*o2, t2_1, E2=E2)
     t4_3 = gen.t4_3_numerator(**mpn._args(), t2_2=o2[1], t3_2=o2[2],
-                              t4_2=o2[3]) / _denom(mpn.eps[mpn.o], mpn.eps[mpn.v], 4)
+                              t4_2=o2[3]) / orbital_denominator(mpn.eps[mpn.o], mpn.eps[mpn.v], 4)
     legacy = {(2, 1): t2_1,
               (1, 2): o2[0], (2, 2): o2[1], (3, 2): o2[2], (4, 2): o2[3],
               (1, 3): o3[0], (2, 3): o3[1], (3, 3): o3[2], (4, 3): t4_3}

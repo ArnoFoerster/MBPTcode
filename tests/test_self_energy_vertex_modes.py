@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import METHOD_REGISTRY
-from src.Base.pyscf_interface import (get_antisymmetrized_spin_eri,
-                                      get_density_fitting_coefficients,
-                                      get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import METHOD_REGISTRY
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_eri,
+                                            get_density_fitting_coefficients,
+                                            get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.self_energy import (TRIPLET_VERTEX_MODES,
@@ -127,7 +127,7 @@ def test_psd2_is_the_spin_orbital_eh_pair(water_exact):
     lr_u = LinearResponseSolver(eps_u, eri_chemist=eri_u, spin_mode='unrestricted')
     se_u = SelfEnergySolver(eps_u, eri_chemist=eri_u, spin_mode='unrestricted', eta=1e-12)
     infos = {'PSD2': METHOD_REGISTRY['PSD2']}
-    spectrum = qp_energy._casida_spectrum(lr_u, uhf.nelec, 'TDHF', None, False, infos,
+    spectrum = qp_energy.casida_spectrum(lr_u, uhf.nelec, 'TDHF', None, False, infos,
                                           ['PSD2'], True, False)
     for p in (nocc - 1, nocc):
         om_u, chi_a_u, chi_b_u, om_t_u, chi_b_t_u = qp_energy._self_energy_amplitudes(
@@ -210,3 +210,26 @@ def test_the_batch_matches_the_scalar_on_what_it_serves(batch, mode):
     s = [se.calculate_self_energy(p, freq[p], nocc, omega, chi_a, chi_b,
                                   vertex_mode=mode) for p in range(len(eps))]
     assert np.allclose(b, s, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize('mode', ['GW', 'GWGammaInf', 'PSD1', 'PSD5', 'PSD6',
+                                  'PSD8'])
+def test_the_matrix_diagonal_is_the_scalar_on_what_it_serves(batch, mode):
+    """The self-energy matrix reads the evaluator's weights: its diagonal is
+    Sigma_pp(eps_p) for every mode it serves (it once squared the PSD
+    denominator, dropped PSD5's 0.75 and returned GW for PSD6/PSD8)."""
+    se, nocc, eps, omega, chi_a, chi_b = batch
+    m = se.calculate_self_energy_matrix(nocc, omega, chi_a, chi_b,
+                                        vertex_mode=mode)
+    s = [se.calculate_self_energy(p, eps[p], nocc, omega, chi_a, chi_b,
+                                  vertex_mode=mode) for p in range(len(eps))]
+    assert np.allclose(np.diag(m), s, rtol=0, atol=1e-12)
+    assert np.array_equal(m, m.T)
+
+
+@pytest.mark.parametrize('mode', ['PSD2', 'PSD3'])
+def test_the_matrix_refuses_what_it_cannot_build(batch, mode):
+    se, nocc, eps, omega, chi_a, chi_b = batch
+    with pytest.raises(ValueError, match=mode):
+        se.calculate_self_energy_matrix(nocc, omega, chi_a, chi_b,
+                                        vertex_mode=mode)

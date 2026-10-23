@@ -14,7 +14,7 @@ import warnings
 import numpy as np
 import pytest
 
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.Base.step_failed import StepFailed
 from src.Solvers.qp_equation import (QPRootNotConverged, solve_qp_equation,
                                      solve_qp_equation_pole_strength)

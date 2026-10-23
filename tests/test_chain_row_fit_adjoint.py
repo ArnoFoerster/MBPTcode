@@ -58,21 +58,22 @@ import numpy as np
 import pytest
 from pyscf.df.grad import rhf as pyscf_df_grad
 
-from src.Base.constants import (FIT_REALIZATION_REL_TOL,
-                                FIT_REALIZATION_FORCE_TOL, ISDF_GRADIENT_FLOOR,
-                                REASSOCIATED_SUM_REL_TOL)
-from src.Base import separable_ri
-from src.Base.numerics import Numerics, numerics_of
-from src.Base.separable_ri import fit_rows_adjoint
-from src.Base.sliced_factors import GridTileRows, SlicedFactors
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
-from src.gradients.factor_chain import FrozenFactorization
+from src.Base.numerics.constants import (FIT_REALIZATION_REL_TOL,
+                                         FIT_REALIZATION_FORCE_TOL, ISDF_GRADIENT_FLOOR,
+                                         REASSOCIATED_SUM_REL_TOL)
+from src.Base.factorization import separable_ri
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.factorization.separable_ri import fit_rows_adjoint
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
                                             orbital_rotation_rows,
                                             point_chain, product_pairs)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.surface import evaluate
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.surface import evaluate
 from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
                                       GATE_BSE_CONV_TOL, TILE, molecule,
                                       patch_whole_assembly, relative, row_kw,
@@ -202,7 +203,7 @@ def test_the_force_on_the_row_fit_adjoint(size, monkeypatch):
             branches, inputs, log = [], [], []
             surface = state_pair(bse_conv_tol=GATE_BSE_CONV_TOL, **row_kw())
             ex = surface.excited
-            ex._forward(ex.mol0, ex.mf0)       # the reference's rows
+            ex.forward(ex.mol0, ex.mf0)        # the reference's rows
             record(surface, branches, inputs)
             if tag == 'rows' and comm.Get_size() > 1:
                 watch(surface, log, comm.Get_rank(), comm.Get_size())

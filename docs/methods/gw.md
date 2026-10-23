@@ -22,21 +22,31 @@ route's blocked (`freq_block`, `scratch_dir`) and sliced paths stay
 restricted; ROHF/ROKS and fractional occupations are refused.
 
 A correlated density matrix is passed to any of them as
-`dm_correction=`; the old `dm_ccsd=` alias is not accepted and raises
-`TypeError`.
+`dm_correction=`.
 
-The imaginary-axis routes reach the real axis by one of four continuations,
+Each route reaches the real axis by a continuation,
 `calc_qp_energy(..., continuation=...)`: `'pade'` (Thiele-Pade of
-Sigma_c(i.omega), the default, no analytic gradient); `'cd'` (contour
-deformation — the omega' contour rotated onto the imaginary axis, the poles of
-G it sweeps over collected as residues, no continuation at all); `'sop'` (W
-modelled by M poles fit on the imaginary axis, so Sigma_c is closed-form and
-never evaluated off it, valence states only); and `'spectral'` (the Lehmann
-sum at omega + i.eta, `mode='casida'` only). `MODE_CONTINUATIONS` is the
-validity table pairing modes with the continuations they accept; a keyword
-another continuation reads raises `TypeError` naming both.
+Sigma_c(i.omega), the default on the imaginary-axis routes, no analytic
+gradient); `'cd'` (contour deformation — the omega' contour rotated onto the
+imaginary axis, the poles of G it sweeps over collected as residues, no
+continuation at all); `'laplace'` (the same residues by a Laplace quadrature,
+space-time route); `'sop'` (W modelled by M poles fit on the imaginary axis,
+so Sigma_c is closed-form and never evaluated off it, valence states only,
+space-time route); and `'spectral'` (the Lehmann sum at omega + i.eta, the
+Casida route's only one). `MODE_CONTINUATIONS` is the validity table pairing
+modes with the continuations they accept; a keyword another continuation
+reads raises `TypeError` naming both.
 
-A dense route (`GW.quasi_boson`, `LinearResponse.quasi_boson_bse`) builds the
+**The quasiparticle equation** is solved by one root finder on every route
+(`src/Solvers/qp_equation.py`): it scans windows that widen outward from the
+mean-field level, brackets each root, refines it by safeguarded Newton, and
+keeps the root of largest pole strength Z. Along a geometry walk it follows
+the root the last accepted geometry kept instead. A root whose Z lies outside
+(0, 1] is kept, warned about and flagged (`'z_outside'`), and a state without
+any root is a NaN flagged `'no_root'`; neither is refused ([Warnings, flags
+and refusals](../warnings.md)).
+
+A dense route (`GW.quasi_boson`, `BSE.quasi_boson_bse`) builds the
 same dRPA/BSE amplitudes as an explicit auxiliary-boson diagonalization rather
 than a Davidson iteration — bitwise the physics of `casida(eta=0)`, at O(N^6),
 and what the dense analytic gradients ([Gradients](gradients.md))
@@ -49,7 +59,9 @@ acceleration and convergence decided on the HOMO and LUMO. The equation stays
 anchored on the mean field while the screening follows the iterate — anchored
 on the iterate instead, each cycle adds its own correction a second time and
 the gap runs away without ever converging. `evgw_eigenvalues` returns the whole
-converged spectrum and a record of how it got there. See `examples/12_evgw.py`.
+converged spectrum and a record of how it got there; a loop that runs out of
+cycles returns its last iterate with `info['converged']` False and warns
+(`EvGWNotConverged`). See `examples/12_evgw.py`.
 `self_consistency='evGW0'` reinjects them into G alone: the mean field's P₀ and
 W stay and only the poles of Σ_c move, on the Casida route.
 

@@ -27,15 +27,16 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import ISDF_TILE_GB
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import partition, run_simulated
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.numerics.constants import ISDF_TILE_GB
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     polarizability_projected_rows)
-from src.gradients.qp_space_time import qp_set_gradient
+from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from src.SingleReference.GW.real_screening import ResidueRefused
 from src.Solvers.qp_equation import QPRootNotConverged
 from tests.isdf_test_grid import g1

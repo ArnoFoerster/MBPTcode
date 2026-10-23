@@ -46,11 +46,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.utils import mpi_grid
-from src.Base.utils.mpi_grid import (SimulatedComm, current_comm, distributed,
-                                     lockstep, lockstep_stats, mpi_map,
-                                     partition, reduce_sum, run_simulated,
-                                     simulated_world)
+from src.Base.utils.parallel import mpi_grid
+from src.Base.utils.parallel.mpi_grid import (
+    current_comm, distributed, lockstep, lockstep_stats, mpi_map, partition,
+    reduce_sum)
+from src.Base.utils.parallel.simulated_comm import (
+    SimulatedComm, run_simulated, simulated_world)
 from tests.pins import assert_same
 
 SIZE = 3

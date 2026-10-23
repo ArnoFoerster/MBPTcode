@@ -30,10 +30,10 @@ import os
 import pathlib
 import platform
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.record_io import git_commit, read_record, record_hash, write_record
-from src.Base.utils.mpi_grid import current_comm, is_root, n_ranks
-from src.Base.utils.threads import blas_libraries
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
+from src.Base.utils.parallel.mpi_grid import current_comm, is_root, n_ranks
+from src.Base.utils.parallel.threads import blas_libraries
 
 
 class StoreRefused(RuntimeError):

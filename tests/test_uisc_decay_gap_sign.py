@@ -18,14 +18,14 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import (ATOMIC_TIME_SECONDS, HARTREE_TO_EV,
-                                TRIPLET_SUBLEVELS)
-from src.Base.geometry import molecule_at
+from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS, HARTREE_TO_EV,
+                                         TRIPLET_SUBLEVELS)
+from src.Base.geometry.geometry import molecule_at
 from src.photophysics import uisc
 from src.photophysics.declaration import UiscModel
 from src.photophysics.minimum import GroundModes, StateMinimum
-from src.properties.rates import (Minimum, fc_weighted_dos,
-                                  internal_conversion_rate, rate_table)
+from src.photophysics.rates import Minimum, internal_conversion_rate, rate_table
+from src.properties.franck_condon import fc_weighted_dos
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.vibronic import align_to, project_coupling
 from tests.photophysics_cases import FORMALDEHYDE_TOY, internal_modes_of

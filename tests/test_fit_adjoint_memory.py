@@ -38,16 +38,16 @@ import pytest
 import scipy.linalg
 from pyscf import gto, scf
 
-from src.Base.constants import (FIT_CHOLESKY_BLOCK, ISDF_FIT_REGULARIZATION,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL, WHOLE_FIT_ADJOINT_MAX_GB)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_FIT_REGULARIZATION,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL, WHOLE_FIT_ADJOINT_MAX_GB)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics, numerics_of
 # aliased on import: pytest collects a module-level `test_*` callable
-from src.Base.separable_ri import test_set_D as build_test_set
+from src.Base.factorization.separable_ri import test_set_D as build_test_set
 from src.gradients import isdf_derivatives
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.isdf_derivatives import (dfactor_adjoint_gauges,
                                             fit_adjoint,
                                             isdf_exchange_skeleton,
@@ -337,7 +337,7 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
     def built(*args, **kwargs):
         raise AssertionError('an array of the whole form was built')
 
-    mf = isdf_jk(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)))
     mf.with_df.build()
     monkeypatch.setattr(isdf_derivatives, 'WHOLE_FIT_ADJOINT_MAX_GB', 1e-4)
     monkeypatch.setattr(isdf_derivatives, 'test_set_D', built)

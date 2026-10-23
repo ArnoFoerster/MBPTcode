@@ -11,21 +11,23 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, ao2mo
 
-from src.Base.constants import (KAPPA, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.SingleReference.GW.quasi_boson import build_rpa_AB
-from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
-                                               QPqbAdjoint as QPqb,
-                                               RPAAdjoint as RPA)
-from src.Base.eri_blocks import MOEriBlocks
-from src.gradients.targets import rpa_partials, qp_partials
+from src.Base.numerics.constants import (KAPPA, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
+from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                                     QPqbAdjoint as QPqb,
+                                                     RPAAdjoint as RPA)
+from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.gradients.gwbse.targets import rpa_partials, qp_partials
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.Solvers.qp_equation import solve_qp_equation_pole_strength
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_screened_coulomb_chemist)
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                       CasidaSolver)
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida
+from tests.dense_qp import dense_max_weight_root
 
 
 @pytest.fixture(scope='module')
@@ -66,7 +68,7 @@ def test_qp_diag_vs_dense_and_selfenergy_newton(h4):
                           spin_mode='restricted', eta=1e-9)
     for p in range(norb):
         w_mine, Z = qp.solve_diag(p)
-        w_dense, _ = qp.solve_diag_dense(p)
+        w_dense, _ = dense_max_weight_root(qp, p)
         assert abs(w_mine - w_dense) < 1e-10
         chi_a = se.get_chi_a(nocc, X, Y, p_state=p)
         func = lambda w: w - mf.mo_energy[p] - np.real(
@@ -135,7 +137,7 @@ def test_qp_on_a_kohn_sham_reference_carries_the_static_shift(h4_bhlyp):
         om, X, Y = CasidaSolver(Aw, B).solve()
         for p in range(norb):
             w_mine, _ = qp.solve_diag(p)
-            w_dense, _ = qp.solve_diag_dense(p)
+            w_dense, _ = dense_max_weight_root(qp, p)
             assert abs(w_mine - w_dense) < 1e-10, (screening, p)
             chi_a = se.get_chi_a(nocc, X, Y, p_state=p)
             func = lambda w: w - mf.mo_energy[p] - delta[p] - np.real(
@@ -262,7 +264,7 @@ def test_dense_route_takes_its_spin_from_the_kappa_table(h4):
     with pytest.raises(ValueError, match='one of'):
         BSEqb(mf, eri, nocc, screening='rpa', spin='quintet')
 
-    with pytest.raises(ValueError, match='BSE instability'):
+    with pytest.raises(CasidaInstability, match='unstable'):
         BSEqb(mf, eri, nocc, screening='rpa', spin='triplet')
 
     tda = BSEqb(mf, eri, nocc, screening='rpa', spin='triplet', bse_tda=True)

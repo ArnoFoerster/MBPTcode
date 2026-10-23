@@ -4,11 +4,11 @@ import sys
 import itertools
 import argparse
 import networkx as nx
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.Base.pdaggerq_interface import pq_helper
+from src.CodeGeneration.pdaggerq_interface import pq_helper
 
 _PQ = []
 
@@ -25,9 +25,20 @@ INDEX_MAP = {
     'a7': 'v', 'a8': 'w','a9': 'x', 'a10': 'z'
 }
 
-VIRS  = ['a', 'b', 'c', 'd', 'e', 'f' 'g', 'h']
+# The index spaces of the QDPT terms (after INDEX_MAP): core (occupied),
+# virtual and active labels; generate_qdpt_evaluators reads them from here.
+VIRS  = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 CORES = ['i', 'j', 'k', 'l', 'm', 'n', 'o']
-EXTERNAL_INDICES = ['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'z']
+ACTS  = ['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'z']
+
+
+def index_space(idx):
+    """'occ', 'vir' or 'act' (anything not core or virtual is active)."""
+    if idx in CORES:
+        return 'occ'
+    if idx in VIRS:
+        return 'vir'
+    return 'act'
 
 
 @dataclass
@@ -77,31 +88,6 @@ def get_indices(op_str):
     indices = [idx.strip() for idx in match.group(1).split(',')]
     n = len(indices)
     return indices[:n//2], indices[n//2:]
-
-def is_right_op(created, annihilated):
-    if any(x in VIRS for x in annihilated): return False
-    if any(c in CORES and c not in annihilated for c in created): return False
-    return True
-
-def is_left_op(created, annihilated):
-    if any(x in VIRS for x in created): return False
-    if any(a in CORES and a not in created for a in annihilated): return False
-    return True
-
-def get_state_slice(ops):
-    total_c, total_a = [], []
-    for op in ops:
-        c, a = get_indices(op)
-        total_c.extend(c)
-        total_a.extend(a)
-    net_c = []
-    net_a = total_a.copy()
-    for c in total_c:
-        if c in net_a:
-            net_a.remove(c)
-        else:
-            net_c.append(c)
-    return net_c, net_a
 
 def build_denom_string(net_c, net_a, target_n, is_mpn=False, external_indices=frozenset()):
     """Constructs the E_corr algebraic string for a single time slice.
@@ -367,7 +353,7 @@ def get_external_signature(term_str):
     for m in re.finditer(r'\((.*?)\)', op_part):
         for idx in m.group(1).split(','):
             idx = idx.strip()
-            if idx in EXTERNAL_INDICES:
+            if idx in ACTS:
                 indices.append(idx)
     return tuple(indices)
 

@@ -26,22 +26,23 @@ import pytest
 from pyscf import gto, scf, tdscf
 from pyscf.x2c import sfx2c1e, x2c
 
-from src.Base.constants import (HARTREE_TO_CM, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import (HARTREE_TO_CM, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization, from_pyscf)
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR, chain_manifolds,
-                                       ground_state_element, interstate_element,
-                                       isdf_manifolds, qdpt_hamiltonian,
-                                       qdpt_spectrum, soc_operator,
-                                       soc_operator_mo, socme_table,
-                                       spin_orbit_couplings, sublevel_elements)
+from src.properties.spin_orbit import (chain_manifolds, ground_state_element,
+                                       interstate_element, isdf_manifolds,
+                                       qdpt_hamiltonian, qdpt_spectrum,
+                                       soc_operator, soc_operator_mo,
+                                       socme_table, spin_orbit_couplings,
+                                       sublevel_elements)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 

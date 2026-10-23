@@ -10,9 +10,9 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import build_pieces_gw
 
 HARTREE_TO_EV = 27.211386245988
@@ -55,7 +55,7 @@ print('adc2, singlet, tiled fold, frozen 1s: ' + '   '.join(
 # in toluene: the SCF relaxes at the static dielectric constant, the singlet
 # singles block takes the optical reaction field of the transition density,
 # and the second-order terms keep the bare interaction
-from src.Base.solvent_screening import SolventScreening      # noqa: E402
+from src.environments.solvent_screening import SolventScreening      # noqa: E402
 
 env = SolventScreening(mol, solvent='toluene')
 mf_tol = env.mean_field(mol, lambda m: scf.RHF(m).density_fit().run())

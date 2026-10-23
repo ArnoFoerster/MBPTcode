@@ -5,7 +5,7 @@ materializing the O(no^3 nv^3) t3/l3 amplitudes.
 Two guarantees:
 
   1. RANK-GENERAL convention: laplace_codegen.lambda_canonical_and_sign(rank)
-     reproduces mpn_density_driver_restricted._to_l_restricted's signed
+     reproduces mp_amplitudes.to_l's signed
      transpose EXACTLY for rank 2..5 -- so the same fusion machinery applies to
      l4 (the O(N^8) MP4/ADC(5) denominators) and l5, not just l3. This is the
      generalization the whole approach rests on.
@@ -24,13 +24,13 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri)
 from src.CodeGeneration.generate_mpn_density import amp_out_indices
 from src.CodeGeneration.laplace_codegen import lambda_canonical_and_sign
-from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
-    MPnDensityDriverRestricted, _to_l_restricted)
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
+from src.SingleReference.common.mp_amplitudes import to_l
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 
 def generate():
@@ -39,16 +39,16 @@ def generate():
     repository) and loaded from there."""
     import importlib.util
     import tempfile
-    from src.CodeGeneration import generate_adcn
-    from src.CodeGeneration import generate_adc4_u3_l3_laplace_restricted as l3gen
+    from src.CodeGeneration import codegen_common, generate_adcn
+    from src.CodeGeneration import generate_adc_laplace_restricted
     out = tempfile.mkdtemp(prefix='l3_laplace_')
-    saved = generate_adcn.OUT_DIR, l3gen.OUT_DIR
-    generate_adcn.OUT_DIR = l3gen.OUT_DIR = out
+    saved = codegen_common.ADC_OUT_DIR
+    codegen_common.ADC_OUT_DIR = out
     try:
-        generate_adcn.generate_adc4_u3_restricted()
-        l3gen.generate(df=False)
+        generate_adcn.generate_adc_u(3, restricted=True)
+        generate_adc_laplace_restricted.generate('adc4_u3_l3_laplace_restricted')
     finally:
-        generate_adcn.OUT_DIR, l3gen.OUT_DIR = saved
+        codegen_common.ADC_OUT_DIR = saved
     mods = []
     for name in ('adc4_u3_blocks_restricted', 'adc4_u3_l3_laplace_restricted'):
         spec = importlib.util.spec_from_file_location(name, os.path.join(out, 'adc4', name + '.py'))
@@ -59,7 +59,7 @@ def generate():
 
 
 def check_rank_general_lambda_canonical():
-    """lambda_canonical_and_sign(rank) == _to_l_restricted for rank 2..5."""
+    """lambda_canonical_and_sign(rank) == to_l for rank 2..5."""
     ok = True
     for rank in (2, 3, 4, 5):
         ext = amp_out_indices(rank)
@@ -70,7 +70,7 @@ def check_rank_general_lambda_canonical():
             canon, sign = lcs[kind]
             axes = [ext.index(c) for c in canon]
             t = np.random.default_rng(0).standard_normal([4] * rank + [3] * rank)
-            d = np.abs(_to_l_restricted(t, rank, block) - sign * t.transpose(*axes)).max()
+            d = np.abs(to_l(t, rank, block) - sign * t.transpose(*axes)).max()
             ok &= d < 1e-14
             print(f"[{'OK' if d < 1e-14 else 'FAIL'}] rank={rank} {kind}: {d:.1e}")
     assert ok
@@ -94,10 +94,10 @@ def check_l3_blocks_vs_dense(dense, lap, ntau=16):
     pool = dict(
         f_aa=f_aa, f_bb=f_aa, g_aaaa=ga, g_abab=gab, g_bbbb=gb,
         d_aa=np.eye(norb), d_bb=np.eye(norb),
-        l3_aaaaaa=_to_l_restricted(t3aaa, 3, 'aaaaaa'),
-        l3_aabaab=_to_l_restricted(t3aab, 3, 'aabaab'),
-        l3_abbabb=_to_l_restricted(t3abb, 3, 'abbabb'),
-        l3_bbbbbb=_to_l_restricted(t3aaa, 3, 'aaaaaa'),
+        l3_aaaaaa=to_l(t3aaa, 3, 'aaaaaa'),
+        l3_aabaab=to_l(t3aab, 3, 'aabaab'),
+        l3_abbabb=to_l(t3abb, 3, 'abbabb'),
+        l3_bbbbbb=to_l(t3aaa, 3, 'aaaaaa'),
         t2_aaaa=t2a, t2_abab=t2b, t2_bbbb=t2a, o=o, v=v, no=no, nv=nv,
         eps_a=eps, t2_1_aaaa=t2a, t2_1_abab=t2b)
 

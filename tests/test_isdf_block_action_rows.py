@@ -8,7 +8,7 @@ all-gathered, and the intermediate X_o^T (Zt * P) is reduced so that each rank
 contracts only its own columns with X_v.
 
 That mix is why the ranks are run here as THREADS of one process
-(`mpi_grid.run_simulated`), with the real collectives, rather than through a
+(`simulated_comm.run_simulated`), with the real collectives, rather than through a
 communicator whose all-reduce is a no-op: a gather has no partial to inspect,
 and a rank handed nothing from the others computes with an uninitialized grid
 rather than with a contribution that could be added up afterwards. (mpi4py's
@@ -44,8 +44,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
-from src.SingleReference.LinearResponse.block_actions import (_block_action,
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.SingleReference.LinearResponse.block_actions import (block_action,
                                                               isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.pins import assert_same
@@ -132,10 +133,10 @@ def test_df_action_runs_whole_on_every_rank(size, name, lBSE, screened, spin):
                                  spin_mode='restricted')
     mode = {'bse': 'BSE', 'tdhf': 'TDHF', 'rpa': 'RPA'}[name]
     W_aux = W if screened else None
-    A0, B0 = _block_action(lr_df, NOCC, mode, W_aux, None, spin=spin)[0](z)
+    A0, B0 = block_action(lr_df, NOCC, mode, W_aux, None, spin=spin)[0](z)
 
     def one_rank(comm, explicit):
-        act, _ = _block_action(lr_df, NOCC, mode, W_aux, None, spin=spin,
+        act, _ = block_action(lr_df, NOCC, mode, W_aux, None, spin=spin,
                                comm=comm if explicit else None)
         return act(z.copy())
 

@@ -141,6 +141,27 @@ def new_structures_at(n, max_rank=4, kind='u'):
     return {nm: spec for nm, spec in up(n, max_rank).items() if nm not in prev}
 
 
+def struct_home_order(name, kind, max_order=8):
+    """The order at which tag structure `name` FIRST appears (new_structures_at),
+    or None. kind 'u' (or 'c', the class-class K+C element, which shares the
+    hamiltonian structures) or 's' (overlap)."""
+    k = 's' if kind == 's' else 'u'
+    for o in range(1, max_order + 1):
+        if name in new_structures_at(o, kind=k):
+            return o
+    return None
+
+
+def struct_ungenerated(name, kind, max_generated):
+    """True when `name` is missing because its home order is above the highest
+    GENERATED module order (a resolver returning None would silently
+    UNDER-COMPUTE), False when a module that could hold it exists and pdaggerq
+    pruned it there (legitimately null). The always-pruned f-family pair sits
+    at order 1 by order counting; within range either way, so 'pruned'."""
+    home = struct_home_order(name, kind)
+    return home is not None and home > max_generated
+
+
 # ----------------------------------------------------------------------
 # MANIFOLD axis: which excitation classes exist at ADC(n), and to what order
 # each supermatrix block is carried.

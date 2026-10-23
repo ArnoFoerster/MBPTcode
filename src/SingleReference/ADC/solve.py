@@ -1,44 +1,87 @@
 """Solver machinery shared by every ADC route: root-following Davidson,
 dense diagonalization, the downfolded/satellite seed builders, and the
 Lanczos/continued-fraction spectral solver."""
+import warnings
+
 import numpy as np
 
-from src.Base.constants import INV_SQRT_LANCZOS_MAX_STEPS, INV_SQRT_LANCZOS_TOL
-from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
-from src.SingleReference.GW.quasi_boson import eigh_sym, invsqrtm_sym
+from src.Base.numerics.constants import INV_SQRT_LANCZOS_MAX_STEPS, INV_SQRT_LANCZOS_TOL
+from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
+from src.Base.utils.linear_algebra.matrix_functions import eigh_sym, invsqrtm_sym
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 
 
-def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
-                    conv_tol=1e-6, max_cycle=200, max_subspace=40, verbose=0):
-    """Root-following Davidson on a matrix-free operator: Ritz pairs are
-    picked by |overlap| with the reference vector (Koopmans unit vector at
-    homo_index unless ref_vec is given). Returns (eGF, Z, Reigv, conv) sorted
-    ascending in eGF.
-
-    The iteration is src.Solvers.davidson.solve_symmetric -- the same call the
-    ee (neutral-excitation) route makes, differing only in the `pick` and in
-    the pole strength computed here. Everything about the quasiparticle
-    targeting is in overlap_pick; everything about Z is in this function.
-
-    conv_tol is a RESIDUAL NORM (see the solver's tolerance contract), not
-    pyscf's eigenvalue `tol`, from which pyscf derives a residual tolerance of
-    sqrt(tol): passed there, the default 1e-6 would converge roots at
-    |r| <= 1e-3.
-    """
-    if ref_vec is None:
-        x0 = np.zeros(nH)
+def koopmans_seed(n, homo_index, v0=None, space='the operator space'):
+    """The Davidson guess of an IP/EA root, one length-n vector: v0
+    normalized, or the Koopmans unit vector at homo_index (never an n x n
+    identity: the operators are matrix-free because n is large). A v0 of
+    another length is refused, naming `space`."""
+    if v0 is None:
+        x0 = np.zeros(n)
         x0[homo_index] = 1.0
-    else:
-        x0 = np.asarray(ref_vec, dtype=float)
-        x0 = x0 / np.linalg.norm(x0)
+        return x0
+    x0 = np.asarray(v0, dtype=float)
+    if x0.shape[0] != n:
+        raise ValueError(f"v0 has length {x0.shape[0]}, expected {n} ({space})")
+    return x0 / np.linalg.norm(x0)
 
-    eGF, Reigv, conv = solve_symmetric(
-        aop_vec, diag, nroots=nroots, x0=x0, pick=overlap_pick(x0),
-        tol_residual=conv_tol, max_cycle=max_cycle,
-        max_subspace=max_subspace, verbose=verbose, label='ADC Davidson')
+
+def follow_roots(op, diag, x0, nroots=1, tol=1e-8, follow=True, label='ADC Davidson',
+                 max_cycle=200, max_subspace=None, max_memory=None, verbose=0):
+    """(w, X, conv) of a matrix-free ADC operator by MBPTcode's one symmetric
+    Davidson, src.Solvers.davidson.solve_symmetric, started from x0: with
+    follow=True the nroots roots whose Ritz vectors overlap most with
+    span(x0) (overlap_pick, ties broken by energy), the targeted
+    quasiparticle or satellite; with follow=False the nroots lowest. tol is a
+    RESIDUAL NORM (the solver's tolerance contract), not pyscf's eigenvalue
+    `tol`, from which pyscf derives sqrt(tol). max_cycle, max_subspace (the
+    memory knob of the large ADC(4)/(5) operators), max_memory and verbose go
+    to solve_symmetric. An unconverged root warns (RuntimeWarning) and comes
+    back with conv False; the caller records the flag."""
+    if follow and x0 is None:
+        raise ValueError("follow_roots(follow=True) needs x0, the guess to follow")
+    pick = overlap_pick(x0) if follow else None
+    return solve_symmetric(op, diag, nroots=nroots, x0=x0, pick=pick,
+                           tol_residual=tol, label=label, max_cycle=max_cycle,
+                           max_subspace=max_subspace, max_memory=max_memory,
+                           verbose=verbose)
+
+
+def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
+                    tol=1e-6, max_cycle=200, max_subspace=40, verbose=0):
+    """Root-following Davidson (follow_roots) from ref_vec, or the Koopmans
+    unit vector at homo_index (koopmans_seed). Returns (eGF, Z, Reigv, conv)
+    sorted ascending in eGF, Z the orbital-block weight of each root."""
+    x0 = koopmans_seed(nH, homo_index, ref_vec)
+    eGF, Reigv, conv = follow_roots(aop_vec, diag, x0, nroots=nroots, tol=tol,
+                                    max_cycle=max_cycle, max_subspace=max_subspace,
+                                    verbose=verbose)
     Z = np.sum(Reigv[:norb, :] ** 2, axis=0)
     return eGF, Z, Reigv, conv
+
+
+def solve_handwritten(s, static_correction, nroots, homo_index, ref_vec, tol,
+                      threshold, verbose, max_cycle):
+    """The hand-written routes of either solver class: dense eigh
+    (benchmarking) or root-following Davidson on s._handwritten_operator
+    (production). Returns (e, Z); vectors and the convergence flag 'conv' on
+    s.last_result."""
+    nocc = s.nocc
+    if not s.matrix_free:
+        H = s.build_supermatrix(nocc, static_correction)
+        e, Z, vec = diag_dense(H, s.norb, threshold=threshold)
+        # dense: eigh either returns every root or raises, so this one
+        # really is all-True rather than a stand-in for an unread flag
+        s.last_result = {'vec': vec, 'conv': np.ones_like(e, dtype=bool)}
+        return e, Z
+    aop, diag, nH = s._handwritten_operator(nocc, static_correction)
+    homo = homo_index if homo_index is not None else nocc - 1
+    e, Z, vec, conv = davidson_follow(aop, diag, nH, s.norb, homo, ref_vec, nroots,
+                                      tol=tol, max_cycle=max_cycle, verbose=verbose)
+    # the solver's own flag, not a placeholder: a Davidson that ran out of
+    # cycles still returns an energy for every root it was asked for
+    s.last_result = {'vec': vec, 'conv': conv}
+    return e, Z
 
 
 def downfolded_seed_vectors(aop_vec, diag, nH, norb, orbital_window, omega0,
@@ -165,7 +208,7 @@ def diag_dense(H, norb, threshold=5000):
 
 
 # ---- Lanczos/continued-fraction spectral solver ----
-class _LanczosState:
+class LanczosState:
     """Incremental Lanczos state so lanczos_spectral can extend the
     tridiagonalization in blocks instead of restarting from scratch each
     time it checks convergence. keep_vectors=False stores no Krylov basis
@@ -191,11 +234,11 @@ class _LanczosState:
         return a, b
 
 
-def _lanczos_extend(matvec, state, nsteps, reorth=True):
+def lanczos_extend(matvec, state, nsteps, reorth=True):
     """Run up to `nsteps` more Lanczos iterations on `state` in place (fewer
     if an invariant subspace is hit -- state.breakdown is then set True)."""
     if reorth and state.V is None:
-        raise ValueError("_lanczos_extend: reorth needs a state that keeps "
+        raise ValueError("lanczos_extend: reorth needs a state that keeps "
                          "its vectors")
     for _ in range(nsteps):
         if state.breakdown:
@@ -223,21 +266,23 @@ def _lanczos_extend(matvec, state, nsteps, reorth=True):
 def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
                        max_steps=INV_SQRT_LANCZOS_MAX_STEPS):
     """N^{-1/2} v for a symmetric positive-definite N given only as a
-    matvec: Lanczos on N from v (_lanczos_extend, reorthogonalized),
+    matvec: Lanczos on N from v (lanczos_extend, reorthogonalized),
     N^{-1/2} v ~ |v| V_k f(T_k) e_1 with f(x) = x^{-1/2}, extended until two
     successive approximations differ by less than tol*|v|. For the Faddeev
     metric N = 1 + dN, dN small, a handful of steps suffice.
 
-    Raises when a Ritz value of N is not positive (N indefinite) or the
-    approximation has not settled in max_steps."""
+    Raises when a Ritz value of N is not positive (N indefinite: the input is
+    not a metric). An approximation that has not settled in max_steps is a
+    numerical shortfall: it warns (RuntimeWarning) and returns the last
+    approximation."""
     v = np.asarray(v, dtype=float)
     vnorm = np.linalg.norm(v)
     if vnorm == 0.0:
         return np.zeros_like(v)
-    state = _LanczosState(v)
+    state = LanczosState(v)
     prev = None
     for _ in range(max_steps):
-        _lanczos_extend(matvec, state, 1)
+        lanczos_extend(matvec, state, 1)
         a = np.asarray(state.a)
         b = np.asarray(state.b[:len(a) - 1])
         th, S = np.linalg.eigh(np.diag(a) + np.diag(b, 1) + np.diag(b, -1))
@@ -250,14 +295,15 @@ def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
                                and np.linalg.norm(cur - prev) < tol * vnorm):
             return cur
         prev = cur
-    raise RuntimeError(f"apply_inverse_sqrt: not converged in {max_steps} "
-                       "Lanczos steps")
+    warnings.warn(f"apply_inverse_sqrt: not settled to {tol:g} in {max_steps} Lanczos "
+                  "steps; the last approximation is returned", RuntimeWarning, stacklevel=2)
+    return cur
 
 
 def inverse_sqrt_psd(N, what):
     """N^{-1/2} of a dense symmetric positive-definite N
-    (GW.quasi_boson.invsqrtm_sym); raises LinAlgError for an indefinite N,
-    naming it by `what`."""
+    (Base.utils.linearAlgebra.matrix_functions.invsqrtm_sym); raises
+    LinAlgError for an indefinite N, naming it by `what`."""
     w, V = eigh_sym(N)
     if w.min() <= 0.0:
         raise np.linalg.LinAlgError(f"{what} is not positive definite (min "
@@ -268,7 +314,7 @@ def inverse_sqrt_psd(N, what):
 def _continued_fraction(omega, a, b, eta):
     """G(omega+i*eta) via the Lanczos continued fraction, evaluated
     bottom-up. a: (n,) diagonal (alpha_k). b: (n,) off-diagonal (beta_k),
-    b[0] unused/0 by convention -- matches _LanczosState.arrays()."""
+    b[0] unused/0 by convention -- matches LanczosState.arrays()."""
     z = np.asarray(omega, dtype=complex) + 1j * eta
     n = len(a)
     cf = 1.0 / (z - a[n - 1])
@@ -349,12 +395,12 @@ def lanczos_spectral(A, diag, v0, omega_range, eta=None, npts=2000,
     if eta is None:
         eta = 3.0 * (omega_hi - omega_lo) / npts
 
-    state = _LanczosState(v0)
+    state = LanczosState(v0)
     prev_spectral = None
     converged = False
     while len(state.a) < max_steps:
         block = min(step_block, max_steps - len(state.a))
-        _lanczos_extend(matvec, state, block, reorth=reorth)
+        lanczos_extend(matvec, state, block, reorth=reorth)
         a, b = state.arrays()
         spectral = -_continued_fraction(omega_grid, a, b, eta).imag / np.pi
         if state.breakdown:

@@ -5,23 +5,19 @@ import numpy as np
 from pyscf.lib import param
 from pyscf.tdscf._lr_eig import MAX_SPACE_INC
 
-from src.Base.constants import (DAVIDSON_EXTRA_ROOTS_DIVISOR,
-                                DAVIDSON_EXTRA_ROOTS_FLOOR,
-                                DAVIDSON_GUESS_FACTOR,
-                                DAVIDSON_PRECONDITIONERS,
-                                DAVIDSON_SPACE_CYCLES, DAVIDSON_SPACE_FRACTION,
-                                DAVIDSON_SPACE_GB)
+from src.Base.numerics.constants import (BYTES_PER_GB, DAVIDSON_DENOMINATOR_FLOOR,
+                                         DAVIDSON_EXTRA_ROOTS_DIVISOR, DAVIDSON_GUESS_DEG_TOL,
+                                         DAVIDSON_EXTRA_ROOTS_FLOOR,
+                                         DAVIDSON_GUESS_FACTOR,
+                                         DAVIDSON_PRECONDITIONERS,
+                                         DAVIDSON_SPACE_CYCLES, DAVIDSON_SPACE_FRACTION,
+                                         DAVIDSON_SPACE_GB)
 
 
-#: Ha. Two orbital-energy differences closer than this count as one degenerate
-#: set, which the guess then takes whole. pyscf's tdscf uses the same value and
-#: the same window (`deg_eia_thresh`); the splittings it has to absorb are the
-#: DF and SCF noise on a true degeneracy, ~1e-5 Ha on the benzene case above.
-GUESS_DEG_TOL = 1e-3
 
 
-def _guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
-                   deg_tol=GUESS_DEG_TOL, counters=None):
+def guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
+                   deg_tol=DAVIDSON_GUESS_DEG_TOL, counters=None):
     """Occupied-virtual pairs carrying the unit-vector Davidson guess: more of
     them than `nroots`, and never half a degenerate set -- see
     DAVIDSON_GUESS_FACTOR for
@@ -59,7 +55,7 @@ def _guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
     return order[:n]
 
 
-def _real_eig_space(max_memory, nroots, n_pair):
+def real_eig_space(max_memory, nroots, n_pair):
     """(space_inc, max_space): the corrections real_eig adds per cycle and the
     trial pairs it holds before collapsing, by its own rule on `max_memory` MB.
     """
@@ -71,9 +67,9 @@ def _real_eig_space(max_memory, nroots, n_pair):
     return space_inc, min(max(max_space, nroots * 4), n_pair)
 
 
-def _trial_space_memory(nroots, n_pair, rows=None, max_memory=None,
+def trial_space_memory(nroots, n_pair, rows=None, max_memory=None,
                         working_bytes=0):
-    """MB handed to real_eig, whose own rule (`_real_eig_space`) then gives the
+    """MB handed to real_eig, whose own rule (`real_eig_space`) then gives the
     trial pairs the Davidson holds before it restarts: pyscf's own MAX_MEMORY,
     raised until the space holds DAVIDSON_SPACE_CYCLES increments within this
     rank's budget.
@@ -83,7 +79,7 @@ def _trial_space_memory(nroots, n_pair, rows=None, max_memory=None,
     space serially). real_eig's rule gives them half of max_memory, less one
     increment for the cycle's Ritz vectors and residuals; here that half,
     DAVIDSON_SPACE_FRACTION of this rank's `max_memory` MB, must also hold the
-    block action's `working_bytes` (`_action_working_bytes`), which run beside
+    block action's `working_bytes` (`action_working_bytes`), which run beside
     the holders. The space is held whole wherever the allocation has room for
     it (on a large system once enough ranks share its pair rows), where
     DAVIDSON_SPACE_CYCLES binds first; a space that collapses every few
@@ -92,9 +88,9 @@ def _trial_space_memory(nroots, n_pair, rows=None, max_memory=None,
     max_memory None, no allocation to size against: the whole holders within
     DAVIDSON_SPACE_GB, the bound for a run outside SLURM.
     """
-    space_inc = _real_eig_space(param.MAX_MEMORY, nroots, n_pair)[0]
+    space_inc = real_eig_space(param.MAX_MEMORY, nroots, n_pair)[0]
     if max_memory is None:
-        fits = int(DAVIDSON_SPACE_GB * 1e9 / (32 * n_pair))
+        fits = int(DAVIDSON_SPACE_GB * BYTES_PER_GB / (32 * n_pair))
     else:
         budget = DAVIDSON_SPACE_FRACTION * max_memory * 1e6 - working_bytes
         fits = int(budget / (32 * (n_pair if rows is None else max(rows, 1)))
@@ -105,7 +101,7 @@ def _trial_space_memory(nroots, n_pair, rows=None, max_memory=None,
                (target + space_inc + 0.5) * 2 * 32 * n_pair / 1e6)
 
 
-def _action_working_bytes(apply_AB, batch, n_pair, stacked):
+def action_working_bytes(apply_AB, batch, n_pair, stacked):
     """Bytes the block action holds and allocates beside the trial space
     while it applies a `batch` of trial pairs: what it keeps (`held_bytes`),
     one vector's scratch (`scratch_bytes`) and, per pair, one application's
@@ -119,7 +115,7 @@ def _action_working_bytes(apply_AB, batch, n_pair, stacked):
             + getattr(apply_AB, 'scratch_bytes', 0) + batch * per_pair)
 
 
-def _check_preconditioner(preconditioner):
+def check_preconditioner(preconditioner):
     """A ValueError unless `preconditioner` is one of DAVIDSON_PRECONDITIONERS,
     raised at an entry point before anything is built."""
     if preconditioner not in DAVIDSON_PRECONDITIONERS:
@@ -127,7 +123,7 @@ def _check_preconditioner(preconditioner):
                          f"{', '.join(map(repr, DAVIDSON_PRECONDITIONERS))}.")
 
 
-def _preconditioner_diagonal(apply_AB, diag_d, preconditioner):
+def preconditioner_diagonal(apply_AB, diag_d, preconditioner):
     """(n_occ, n_vir): the diagonal the Davidson's corrections divide by.
 
     'bare' is the pair energies d, the operator's own d z term; 'screened'
@@ -135,9 +131,9 @@ def _preconditioner_diagonal(apply_AB, diag_d, preconditioner):
     (`screened_diagonal`). The screened direct term is the part of diag(A)
     the kernel moves most -- on average far more than the Hartree 2(ia|ia)
     -- so it moves the corrections' denominators where the bare d is
-    furthest off.
+    furthest off. `preconditioner` is checked at the entry points
+    (`check_preconditioner`).
     """
-    _check_preconditioner(preconditioner)
     if preconditioner == 'bare':
         return diag_d
     screened = getattr(apply_AB, 'screened_diagonal', None)
@@ -148,19 +144,21 @@ def _preconditioner_diagonal(apply_AB, diag_d, preconditioner):
     return screened()
 
 
-def _tracked_roots(nroots, n_pair):
+def tracked_roots(nroots, n_pair, extra=None):
     """Ritz pairs the Hermitian Davidson iterates on for `nroots` roots:
     nroots + max(DAVIDSON_EXTRA_ROOTS_FLOOR, nroots //
-    DAVIDSON_EXTRA_ROOTS_DIVISOR), at most the pair space."""
-    extra = max(DAVIDSON_EXTRA_ROOTS_FLOOR,
-                nroots // DAVIDSON_EXTRA_ROOTS_DIVISOR)
-    return min(nroots + extra, n_pair)
+    DAVIDSON_EXTRA_ROOTS_DIVISOR), or nroots + `extra` where a caller names
+    its own, at most the pair space."""
+    if extra is None:
+        extra = max(DAVIDSON_EXTRA_ROOTS_FLOOR,
+                    nroots // DAVIDSON_EXTRA_ROOTS_DIVISOR)
+    return min(nroots + int(extra), n_pair)
 
 
-def _correction(dx, hdiag, e):
+def correction(dx, hdiag, e):
     """The raw Davidson corrections r / (d - omega) of the residual rows `dx`
     (len(e), pairs) against the rows `hdiag` of the pair diagonal, a
-    vanishing denominator floored at 1e-8 Ha."""
+    vanishing denominator floored at DAVIDSON_DENOMINATOR_FLOOR."""
     d = hdiag[None, :] - e[:, None]
-    d[np.abs(d) < 1e-8] = 1e-8
+    d[np.abs(d) < DAVIDSON_DENOMINATOR_FLOOR] = DAVIDSON_DENOMINATOR_FLOOR
     return dx.reshape(len(e), -1) / d

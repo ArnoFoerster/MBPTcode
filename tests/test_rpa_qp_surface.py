@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.gradients.dense_surfaces import QuasiparticleSurface
-from src.gradients.rpa_bse_surface import RPAQPSurface
+from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
+from src.gradients.gwbse.rpa_bse_surface import RPAQPSurface
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'

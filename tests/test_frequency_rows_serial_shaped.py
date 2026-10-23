@@ -55,10 +55,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import ISDF_TILE_GB
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import partition, run_simulated
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.numerics.constants import ISDF_TILE_GB
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.contour_deformation import \
     cd_screening_contraction_multi
 from src.SingleReference.GW.imaginary_time import (screened_interaction_rows,
@@ -67,11 +68,11 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     frequency_blocks, owned_frequency_blocks, three_index_slice)
-from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
-from src.gradients.space_time_adjoint import (polarizability_tau,
-                                              rpa_energy_and_adjoint,
-                                              screened_interaction_tau_backward,
-                                              sigma_transforms)
+from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
+from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
+                                                  rpa_energy_and_adjoint,
+                                                  screened_interaction_tau_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
 

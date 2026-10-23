@@ -41,7 +41,6 @@ pytest test_flex.py
 pytest test_force_serial_shaped.py
 pytest test_frequency_rounds.py
 script test_grid_radii_optimizer.py
-script test_gw_cc_polarizability.py
 pytest test_hessian_frozen_pair_layout.py
 script test_imaginary_axis_gw.py
 pytest test_isdf_fock_partial.py
@@ -56,6 +55,7 @@ pytest test_one_fit_forces_quick.py
 pytest test_one_scf_per_record.py
 pytest test_optimize_under_ranks.py
 pytest test_outside_scissor.py
+pytest test_pbc_gdf_build.py
 pytest test_pbc_isdf_2d.py
 pytest test_pbc_isdf_gamma.py
 pytest test_pbc_isdf_gw.py
@@ -137,3 +137,4 @@ pytest test_sigma_restricted_full.py
 pytest test_sigma_u4_laplace.py
 # GW-BSE state model in the solvation loop: 11 min on the workstation (2 threads), slow by the 60 s rule
 pytest test_gwbse_solvation_loop.py
+pytest test_generated_committed.py   # regenerates the committed CC, MPn and QDPT modules (pdaggerq; ~8 min)

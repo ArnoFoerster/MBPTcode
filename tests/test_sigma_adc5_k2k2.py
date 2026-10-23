@@ -39,7 +39,7 @@ from src.SingleReference.ADC.generated_modules import lazy
 ap = lazy('adc5_k2k2_apply_blocks')
 apr = lazy('adc5_k2k2_apply_restricted_blocks')
 apr_df = lazy('adc5_k2k2_apply_restricted_df_blocks')
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri,
     get_antisymmetrized_spin_integrals, DFIntegrals)
 from tests.generated_runtime import requires_runtime

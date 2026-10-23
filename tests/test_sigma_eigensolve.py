@@ -41,9 +41,11 @@ from src.SingleReference.ADC.generated_modules import lazy
 c1ap = lazy('adc4_c1_self_apply_blocks')
 c2ap = lazy('adc4_c2_apply_blocks')
 s2ap = lazy('adc4_c2_s2c_apply_blocks')
-from src.SingleReference.ADC.sigma_driver import sector_operator, diag_K, _eigs
-from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
-from src.Base.pyscf_interface import (
+from src.SingleReference.ADC.sigma_driver import sector_operator, diag_K
+from src.SingleReference.ADC.solve import follow_roots
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import to_l
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from tests.generated_runtime import requires_runtime
@@ -88,7 +90,7 @@ def main():
         t1_2, _, _, _ = mpn.compute_order2_amplitudes(t2)
         pool = {'f': np.diag(eps), 'g': g, 'kd': np.eye(norb),
                 'o': slice(0, nocc), 'v': slice(nocc, norb), 'no': no, 'nv': nv,
-                't2': t2, 'l2': _to_l(t2, 2), 't1': t1_2, 'l1': _to_l(t1_2, 1)}
+                't2': t2, 'l2': to_l(t2, 2), 't1': t1_2, 'l1': to_l(t1_2, 1)}
 
         print(f"\n=== {label}  (norb={norb}) ===")
         for sector, Ufn in (('IP', so.u_2h1p), ('EA', so.u_2p1h)):
@@ -108,7 +110,7 @@ def main():
             k = min(6, n - 2)
             dg = np.concatenate([eps, diag_K(eps, nocc, norb, sector)])
             start = np.random.default_rng(0).standard_normal((n, 2 * k + 4))
-            w_mf, _, conv = _eigs(op, dg, v0=start, nroots=k, tol=1e-10)
+            w_mf, _, conv = follow_roots(op, dg, start, nroots=k, tol=1e-10, follow=False)
             w_mf = np.sort(w_mf)
             all_ok &= bool(conv.all())
             w_dense = np.sort(np.linalg.eigvalsh(Href))[:k]

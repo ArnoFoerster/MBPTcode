@@ -109,10 +109,10 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     """The one real advantage over the fitted route, on the real thing."""
     pyscf = pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.constants import HARTREE_TO_MEV
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
-    from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
-    from src.SingleReference.base import get_occ_virt_indices
+    from src.Base.numerics.constants import HARTREE_TO_MEV
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
+    from src.Base.orbital_spaces import get_occ_virt_indices
     from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
                                                             wc_explicit)
     from src.SingleReference.GW.real_screening import ov_energies

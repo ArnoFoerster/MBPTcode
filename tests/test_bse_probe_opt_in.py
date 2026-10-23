@@ -15,12 +15,11 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.numerics import Numerics
-from src.SingleReference.LinearResponse import davidson
-from src.SingleReference.LinearResponse.bse import solve_bse
-from src.SingleReference.LinearResponse.davidson import (_CasidaBreakdown,
-                                                         solve_bse_df,
-                                                         solve_bse_isdf)
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.BSE import solve as bse_solve
+from src.SingleReference.BSE.solve import solve_bse
+from src.SingleReference.LinearResponse.davidson import CasidaBreakdown
+from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from tests.isdf_test_grid import g1, g1_kw
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -75,18 +74,18 @@ def test_a_breakdown_names_the_reference_without_the_probe(water, monkeypatch,
     mol, mf, nocc = water
 
     def broken(*args, **kwargs):
-        raise _CasidaBreakdown('projected (A-B) not positive definite',
+        raise CasidaBreakdown('projected (A-B) not positive definite',
                                UNSTABLE_AMB)
 
     if route == 'df':
-        monkeypatch.setattr(davidson, 'solve_casida_davidson', broken)
+        monkeypatch.setattr(bse_solve, 'solve_casida_davidson', broken)
         call = lambda: solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), qp=False,
                                     progress=False)
     else:
-        monkeypatch.setattr(davidson, '_run_davidson', broken)
+        monkeypatch.setattr(bse_solve, 'run_davidson', broken)
         call = lambda: solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), qp=False,
                                       auxbasis=AUXBASIS, progress=False, counts=g1(mol))
     with pytest.raises(RuntimeError,
                        match=r'min eig\(A-B\) = -0\.050000 Ha <= 0') as exc:
         call()
-    assert not isinstance(exc.value, _CasidaBreakdown)
+    assert not isinstance(exc.value, CasidaBreakdown)

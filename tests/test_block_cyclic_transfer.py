@@ -32,8 +32,8 @@ for name, attrs in (('pyelpa', {'Elpa': object}),
         mod.__dict__.update(attrs)
         sys.modules[name] = mod
 
-from src.Base.utils.linearAlgebra import diagonalization as dg
-from src.Base.utils.linearAlgebra.elpa import ElpaEigensolver
+from src.Base.utils.linear_algebra import diagonalization as dg
+from src.Base.utils.linear_algebra.elpa import ElpaEigensolver
 
 INT_MAX = 2**31 - 1
 

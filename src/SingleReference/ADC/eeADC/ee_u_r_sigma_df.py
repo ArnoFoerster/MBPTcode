@@ -44,7 +44,8 @@ from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_en as _en
-from src.SingleReference.ADC.eeADC.ee_equations import _Backend
+from src.SingleReference.ADC.eeADC import ee_utils
+from src.SingleReference.ADC.eeADC.ee_equations import Backend
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4_uhf
 
 LEVELS = _r.LEVELS
@@ -87,8 +88,8 @@ def to_blocks(v, d, level='adc3'):
              'bb': v[sb].reshape(no_b, nv_b)})
     if not d['doubles']:
         return y1, SB()
-    Yaa = _r._expand_same(v[da], no_a, nv_a) / SCALE
-    Ybb = _r._expand_same(v[db], no_b, nv_b) / SCALE
+    Yaa = ee_utils.unfold_doubles(v[da], no_a, no_a + nv_a) / SCALE
+    Ybb = ee_utils.unfold_doubles(v[db], no_b, no_b + nv_b) / SCALE
     Yab = v[dm].reshape(no_a, no_b, nv_a, nv_b) / SCALE
     Yneg = -Yab                     # one array, three views (see ee_r_sigma)
     Y = SB({'aaaa': Yaa, 'bbbb': Ybb, 'abab': Yab,
@@ -111,7 +112,7 @@ def from_blocks(w1, W, d, level='adc3'):
     for key, no, nv in (('aaaa', no_a, nv_a), ('bbbb', no_b, nv_b)):
         T = W.get(key)
         T = T if T is not None else np.zeros((no, no, nv, nv))
-        out.append(SCALE * _r._restrict_same(T, no, nv))
+        out.append(SCALE * ee_utils.fold_doubles(T, no, no + nv))
     T = W.get('abab')
     T = T if T is not None else np.zeros((no_a, no_b, nv_a, nv_b))
     out.append(SCALE * T.ravel())
@@ -300,7 +301,7 @@ def _backend():
     passing the sizes as an (n_alpha, n_beta) pair is all it takes to make
     m_ss unrestricted -- the equations themselves need no edit."""
     base = _eq.SPIN_BLOCKED
-    return _Backend(ein=base.ein, scale=base.scale, divide=base.divide,
+    return Backend(ein=base.ein, scale=base.scale, divide=base.divide,
                     eye=lambda n: SB({'aa': np.eye(n[0]), 'bb': np.eye(n[1])}))
 
 
@@ -315,13 +316,12 @@ def _denominators(eps_a, eps_b, no_a, no_b):
     d_ijab = {}
     for key in ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab'):
         si, sj, sa, sb = key
-        d_ijab[key] = (ev[sa][None, None, :, None]
-                       + ev[sb][None, None, None, :]
-                       - eo[si][:, None, None, None]
-                       - eo[sj][None, :, None, None])
-    d_ia = SB({s + s: 2.0 * (eo[s][:, None] - ev[s][None, :]) for s in _SPINS})
+        d_ijab[key] = ee_utils.excitation_denominator((eo[si], eo[sj]),
+                                                      (ev[sa], ev[sb]))
+    d_ai = {s: ee_utils.excitation_denominator((eo[s],), (ev[s],)) for s in _SPINS}
+    d_ia = SB({s + s: -2.0 * d_ai[s] for s in _SPINS})
     d_ph = SB({s + s + s + s: np.broadcast_to(
-        (ev[s][None, :] - eo[s][:, None])[:, :, None, None],
+        d_ai[s][:, :, None, None],
         (len(eo[s]), len(ev[s]), len(eo[s]), len(ev[s]))) for s in _SPINS})
     return SB(d_ijab), d_ia, d_ph
 
@@ -365,8 +365,7 @@ def _diagonal(eps_a, eps_b, d, M, o_dd, Ba, Bb):
         return out
 
     def block(si, sj, sa, sb):
-        D = (ev[sa][None, None, :, None] + ev[sb][None, None, None, :]
-             - eo[si][:, None, None, None] - eo[sj][None, :, None, None])
+        D = ee_utils.excitation_denominator((eo[si], eo[sj]), (ev[sa], ev[sb]))
         if o_dd >= 1:
             D = D + part(sa, sb, 'v', 'v')[None, None, :, :]
             D = D + part(si, sj, 'o', 'o')[:, :, None, None]
@@ -376,10 +375,10 @@ def _diagonal(eps_a, eps_b, d, M, o_dd, Ba, Bb):
             D = D - part(si, sb, 'o', 'v')[:, None, None, :]
         return D
 
-    parts.append(_r._restrict_same(block('a', 'a', 'a', 'a'),
-                                   d['no_a'], d['nv_a']))
-    parts.append(_r._restrict_same(block('b', 'b', 'b', 'b'),
-                                   d['no_b'], d['nv_b']))
+    parts.append(ee_utils.fold_doubles(block('a', 'a', 'a', 'a'),
+                                       d['no_a'], d['no_a'] + d['nv_a']))
+    parts.append(ee_utils.fold_doubles(block('b', 'b', 'b', 'b'),
+                                       d['no_b'], d['no_b'] + d['nv_b']))
     parts.append(block('a', 'b', 'a', 'b').ravel())
     return np.concatenate(parts)
 
@@ -396,15 +395,15 @@ def build_operator(eps_a, eps_b, Ba, Bb, no_a, no_b, level='adc3',
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     norb_a, norb_b = len(eps_a), len(eps_b)
     nv_a, nv_b = norb_a - no_a, norb_b - no_b
-    o_ss, o_sd, o_dd = _r._BLOCK_ORDERS[level]
+    o_ss, o_sd, o_dd = ee_utils.BLOCK_ORDERS[level]
     d = dimensions(no_a, no_b, nv_a, nv_b, level)
 
-    gb, vk, cache = _r._ingredients(
+    gb, vk, cache = _eq.cached_ingredients(
         cache,
         lambda: g_blocks_df_uhf(Ba, Bb, no_a, no_b, norb_a, norb_b),
         lambda: UDFVvvvKernels(Ba, Bb, no_a, no_b, norb_a, norb_b))
     d_ijab, d_ia, d_ph = _denominators(eps_a, eps_b, no_a, no_b)
-    _eq._check_denominator(d_ijab)
+    _eq.check_denominator(d_ijab)
 
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
@@ -418,8 +417,8 @@ def build_operator(eps_a, eps_b, Ba, Bb, no_a, no_b, level='adc3',
         en_shift = _en.shift_from_denominators(d_amp, d_ijab)
 
     be = _backend()
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
-    amps, zint, rho = _r._amplitudes_cached(cache, be, gb, d_amp, d_ia_amp,
+    order = ee_utils.AMPLITUDE_ORDER[level]
+    amps, zint, rho = _eq.cached_amplitudes(cache, be, gb, d_amp, d_ia_amp,
                                             order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph,
                  (no_a, no_b), (nv_a, nv_b), vk=vk)

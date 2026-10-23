@@ -2,134 +2,157 @@
  "src/Base/basis/ri_fallback.py::missing_row_hint": [
   "counts"
  ],
- "src/Base/fragment_localization.py::_localize": [
+ "src/fragments/localization.py::_localize": [
   "conv_tol"
  ],
- "src/Base/fragment_localization.py::_localize_space": [
+ "src/fragments/localization.py::_localize_space": [
   "conv_tol"
  ],
- "src/Base/fragment_localization.py::from_mf": [
+ "src/fragments/localization.py::from_mf": [
   "conv_tol"
  ],
- "src/Base/isdf_jk.py::__init__": [
+ "src/Base/factorization/isdf_jk.py::__init__": [
   "counts",
   "n_start",
   "radii"
  ],
- "src/Base/isdf_jk.py::isdf_grid": [
+ "src/Base/factorization/isdf_jk.py::isdf_grid": [
   "counts",
   "grid_accuracy",
   "n_start",
   "radii"
  ],
- "src/Base/isdf_jk.py::isdf_jk": [
+ "src/Base/factorization/isdf_jk.py::isdf_jk": [
   "counts",
   "n_start",
   "radii"
  ],
- "src/Base/isdf_jk.py::points_on_frames": [
+ "src/Base/factorization/isdf_jk.py::points_on_frames": [
   "radii"
  ],
- "src/Base/polarizable_sites.py::finite_field_polarizability": [
+ "src/environments/polarizable_sites.py::finite_field_polarizability": [
   "conv_tol"
  ],
- "src/Base/polarizable_sites.py::rpa_polarizability": [
+ "src/environments/polarizable_sites.py::rpa_polarizability": [
   "conv_tol"
  ],
- "src/Base/separable_ri.py::_cholesky_tiles": [
+ "src/Base/factorization/separable_ri.py::_cholesky_tiles": [
   "regularization"
  ],
- "src/Base/separable_ri.py::_flat_from_radii": [
+ "src/Base/factorization/separable_ri.py::_flat_from_radii": [
   "radii"
  ],
- "src/Base/separable_ri.py::_gram_tiles": [
+ "src/Base/factorization/separable_ri.py::_gram_tiles": [
   "regularization"
  ],
- "src/Base/separable_ri.py::_radii_from_flat": [
+ "src/Base/factorization/separable_ri.py::_radii_from_flat": [
   "counts"
  ],
- "src/Base/separable_ri.py::_radii_settings": [
+ "src/Base/factorization/separable_ri.py::_radii_settings": [
   "counts",
   "l_max_second",
   "n_start",
   "regularization"
  ],
- "src/Base/separable_ri.py::_shipped_key": [
+ "src/Base/factorization/separable_ri.py::_shipped_key": [
   "counts"
  ],
- "src/Base/separable_ri.py::_start_radii": [
+ "src/Base/factorization/separable_ri.py::_start_radii": [
   "counts"
  ],
- "src/Base/separable_ri.py::ao_blocks": [
+ "src/Base/factorization/separable_ri.py::ao_blocks": [
   "block_memory_gb"
  ],
- "src/Base/separable_ri.py::atomic_grid": [
+ "src/Base/factorization/separable_ri.py::atomic_grid": [
   "counts"
  ],
- "src/Base/separable_ri.py::atomic_points": [
+ "src/Base/factorization/separable_ri.py::atomic_points": [
   "radii"
  ],
- "src/Base/separable_ri.py::grid_identity": [
-  "counts",
-  "radii"
- ],
- "src/Base/separable_ri.py::grid_points_per_atom": [
-  "counts"
- ],
- "src/Base/separable_ri.py::optimize_atomic_radii": [
-  "counts",
-  "n_start"
- ],
- "src/Base/separable_ri.py::require_grid": [
+ "src/Base/factorization/separable_ri.py::grid_identity": [
   "counts",
   "radii"
  ],
- "src/Base/separable_ri.py::resolve_isdf_grid": [
-  "n_start"
+ "src/Base/factorization/separable_ri.py::grid_points_per_atom": [
+  "counts"
  ],
- "src/Base/separable_ri.py::runtime_atomic_radii": [
+ "src/Base/factorization/separable_ri.py::optimize_atomic_radii": [
   "counts",
   "n_start"
  ],
- "src/Base/separable_ri.py::search_r_max": [
+ "src/Base/factorization/separable_ri.py::require_grid": [
+  "counts",
+  "radii"
+ ],
+ "src/Base/factorization/separable_ri.py::resolve_isdf_grid": [
   "n_start"
  ],
- "src/Base/separable_ri.py::shipped_radii_lookup": [
+ "src/Base/factorization/separable_ri.py::runtime_atomic_radii": [
+  "counts",
+  "n_start"
+ ],
+ "src/Base/factorization/separable_ri.py::search_r_max": [
+  "n_start"
+ ],
+ "src/Base/factorization/separable_ri.py::shipped_radii_lookup": [
   "counts"
  ],
- "src/Base/utils/analyticalContinuation.py::pade_nodes": [
-  "npade"
- ],
- "src/Base/utils/grids.py::gauss_legendre_grid": [
+ "src/Base/utils/grids/grids.py::gauss_legendre_grid": [
   "nfreq"
  ],
- "src/Base/utils/grids.py::minimax_frequency_grid": [
+ "src/Base/utils/grids/grids.py::minimax_frequency_grid": [
   "nfreq"
  ],
- "src/Base/utils/grids.py::minimax_time_grid": [
+ "src/Base/utils/grids/grids.py::minimax_time_grid": [
   "ntau"
  ],
- "src/Base/utils/mpi_grid.py::_displacements": [
+ "src/Base/utils/parallel/mpi_grid.py::_displacements": [
   "counts"
  ],
- "src/Base/utils/mpi_grid.py::_reduce_scatter_once": [
+ "src/Base/utils/parallel/mpi_grid.py::_reduce_scatter_once": [
   "counts"
  ],
- "src/Base/utils/mpi_grid.py::reduce_scatter_sum": [
+ "src/Base/utils/parallel/simulated_comm.py::reduce_scatter_sum": [
   "counts"
  ],
- "src/Base/utils/time_frequency.py::gauss_legendre": [
+ "src/Base/utils/grids/time_frequency.py::gauss_legendre": [
   "nfreq"
  ],
- "src/Base/utils/time_frequency.py::minimax": [
+ "src/Base/utils/grids/time_frequency.py::minimax": [
   "regularization"
  ],
- "src/Base/utils/time_frequency.py::minimax_split": [
+ "src/Base/utils/grids/time_frequency.py::minimax_split": [
   "ntau",
   "regularization"
  ],
- "src/Base/utils/time_frequency.py::minimax_transform_weights": [
+ "src/Base/utils/grids/time_frequency.py::minimax_transform_weights": [
   "regularization"
+ ],
+ "src/SingleReference/BSE/bse_upfolded.py::davidson_nonsymmetric": [
+  "max_cycle",
+  "nroots"
+ ],
+ "src/SingleReference/BSE/bse_upfolded.py::solve_bse_upfolded": [
+  "conv_tol",
+  "nroots"
+ ],
+ "src/SingleReference/BSE/bse_upfolded.py::solve_dense": [
+  "nroots"
+ ],
+ "src/SingleReference/BSE/solve.py::_solve_bse_dense": [
+  "nroots"
+ ],
+ "src/SingleReference/BSE/solve.py::isdf_bse_factors": [
+  "counts",
+  "grid_accuracy",
+  "n_start",
+  "radii"
+ ],
+ "src/SingleReference/BSE/solve.py::solve_bse_isdf": [
+  "counts",
+  "grid_accuracy",
+  "n_start",
+  "radii"
  ],
  "src/SingleReference/GW/cc_polarizability.py::__init__": [
   "nroots"
@@ -266,12 +289,6 @@
  "src/SingleReference/GW/sum_over_poles.py::sop_from_wc": [
   "n_poles"
  ],
- "src/SingleReference/LinearResponse/bse.py::_solve_bse_dense": [
-  "nroots"
- ],
- "src/SingleReference/LinearResponse/davidson.py::_casida_action": [
-  "conv_tol"
- ],
  "src/SingleReference/LinearResponse/davidson.py::_casida_breakdown": [
   "conv_tol"
  ],
@@ -286,53 +303,44 @@
   "conv_tol",
   "nroots"
  ],
- "src/SingleReference/LinearResponse/davidson.py::_run_davidson": [
+ "src/SingleReference/LinearResponse/davidson.py::_tda_davidson_root": [
   "conv_tol",
   "guess_factor",
   "max_cycle",
   "nroots",
   "preconditioner"
+ ],
+ "src/SingleReference/LinearResponse/davidson.py::casida_action": [
+  "conv_tol"
  ],
  "src/SingleReference/LinearResponse/davidson.py::check_residual_floor": [
   "conv_tol"
  ],
- "src/SingleReference/LinearResponse/davidson.py::isdf_bse_factors": [
-  "counts",
-  "grid_accuracy",
-  "n_start",
-  "radii"
- ],
- "src/SingleReference/LinearResponse/davidson.py::solve_bse_isdf": [
-  "counts",
-  "grid_accuracy",
-  "n_start",
-  "radii"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_check_preconditioner": [
-  "preconditioner"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_guess_indices": [
-  "guess_factor",
-  "nroots"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_preconditioner_diagonal": [
-  "preconditioner"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_real_eig_space": [
-  "nroots"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_tracked_roots": [
-  "nroots"
- ],
- "src/SingleReference/LinearResponse/davidson_shared.py::_trial_space_memory": [
-  "nroots"
- ],
- "src/SingleReference/LinearResponse/davidson_tda.py::_tda_davidson_root": [
+ "src/SingleReference/LinearResponse/davidson.py::run_davidson": [
   "conv_tol",
   "guess_factor",
   "max_cycle",
   "nroots",
   "preconditioner"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::check_preconditioner": [
+  "preconditioner"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::guess_indices": [
+  "guess_factor",
+  "nroots"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::preconditioner_diagonal": [
+  "preconditioner"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::real_eig_space": [
+  "nroots"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::tracked_roots": [
+  "nroots"
+ ],
+ "src/SingleReference/LinearResponse/davidson_shared.py::trial_space_memory": [
+  "nroots"
  ],
  "src/SingleReference/LinearResponse/probe.py::lowest": [
   "nroots"
@@ -382,101 +390,98 @@
   "max_cycle",
   "nroots"
  ],
- "src/gradients/bse_isdf.py::_factorized_block_backward": [
+ "src/gradients/gwbse/bse_isdf.py::_factorized_block_backward": [
   "tile_gb"
  ],
- "src/gradients/bse_isdf.py::bse_backward": [
+ "src/gradients/gwbse/bse_isdf.py::bse_backward": [
   "tile_gb"
  ],
- "src/gradients/bse_isdf.py::bse_solve": [
+ "src/gradients/gwbse/bse_isdf.py::bse_solve": [
   "nroots"
  ],
- "src/gradients/bse_isdf.py::interstate_backward": [
+ "src/gradients/gwbse/bse_isdf.py::interstate_backward": [
   "tile_gb"
  ],
- "src/gradients/factor_chain.py::radii_tag": [
+ "src/gradients/rpa/factor_chain.py::radii_tag": [
   "radii"
  ],
- "src/gradients/qp_set.py::_build_cd_grid": [
+ "src/gradients/gwbse/qp_set.py::_build_cd_grid": [
   "nfreq_cd"
  ],
- "src/gradients/qp_space_time.py::_stride_kw": [
+ "src/gradients/gwbse/qp_space_time.py::_stride_kw": [
   "sop_stride"
  ],
- "src/gradients/qp_space_time.py::fit_poles_over_ranks": [
+ "src/gradients/gwbse/qp_space_time.py::fit_poles_over_ranks": [
   "n_poles",
   "sop_stride"
  ],
- "src/gradients/qp_space_time.py::pair_contractions": [
+ "src/gradients/gwbse/qp_space_time.py::pair_contractions": [
   "tile_gb"
  ],
- "src/gradients/qp_space_time.py::qp_gradient_space_time": [
+ "src/gradients/gwbse/qp_space_time.py::qp_gradient_space_time": [
   "n_poles",
   "sop_stride",
   "tile_gb"
  ],
- "src/gradients/qp_space_time.py::qp_set_gradient": [
+ "src/gradients/gwbse/qp_space_time.py::qp_set_gradient": [
   "n_poles",
   "sop_stride",
   "tile_gb"
  ],
- "src/gradients/qp_space_time.py::reads": [
+ "src/gradients/gwbse/qp_space_time.py::reads": [
   "tile_gb"
  ],
- "src/gradients/qp_space_time.py::slices_over_ranks": [
+ "src/gradients/gwbse/qp_space_time.py::slices_over_ranks": [
   "tile_gb"
  ],
- "src/gradients/qp_space_time.py::sop_model": [
+ "src/gradients/gwbse/qp_space_time.py::sop_model": [
   "n_poles",
   "sop_stride"
  ],
- "src/gradients/reaction_field_adjoint.py::static_grid": [
+ "src/gradients/gwbse/reaction_field_adjoint.py::static_grid": [
   "ntau",
   "tau_target"
  ],
- "src/gradients/space_time_adjoint.py::_sweep_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::_sweep_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::chi0_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::chi0_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::chi0_frequency": [
+ "src/gradients/rpa/space_time_adjoint.py::chi0_frequency": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::polarizability_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::polarizability_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::polarizability_tau": [
+ "src/gradients/rpa/space_time_adjoint.py::polarizability_tau": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::qp_energy_space_time": [
+ "src/gradients/rpa/space_time_adjoint.py::rpa_energy_and_adjoint": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::rpa_energy_and_adjoint": [
+ "src/gradients/rpa/space_time_adjoint.py::rpa_frequency_traces": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::rpa_frequency_traces": [
+ "src/gradients/rpa/space_time_adjoint.py::screened_interaction_tau_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::screened_interaction_tau_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::selfenergy_block_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::selfenergy_block_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::selfenergy_diag_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::selfenergy_diag_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::three_index_ov_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::three_index_ov_backward": [
+ "src/gradients/rpa/space_time_adjoint.py::three_index_slice_backward": [
   "tile_gb"
  ],
- "src/gradients/space_time_adjoint.py::three_index_slice_backward": [
-  "tile_gb"
- ],
- "src/properties/fragment_bse.py::_casida_davidson": [
+ "src/gradients/gwbse/fragment_bse.py::_casida_davidson": [
   "max_cycle"
  ],
- "src/properties/fragment_bse.py::_guard_lowest": [
+ "src/gradients/gwbse/fragment_bse.py::_guard_lowest": [
   "max_cycle"
  ],
  "src/properties/hessian.py::require_hessian_counts": [
@@ -497,12 +502,67 @@
  "src/properties/spin_orbit.py::spin_orbit_couplings": [
   "nroots"
  ],
- "src/properties/surfaces.py::_grid_label": [
+ "src/gradients/gwbse/surface_factory.py::_grid_label": [
   "counts",
   "n_start",
   "radii"
  ],
- "src/properties/surfaces.py::_shell_counts": [
+ "src/gradients/gwbse/surface_factory.py::_shell_counts": [
   "counts"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::estimate": [
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::mp2_pieces": [
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::ground_operator": [
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::prepare": [
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::force": [
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force_tiled.py::mp2_force_tiled": [
+  "tile_gb"
+ ],
+ "src/gradients/state_models.py::_refined_cphf": [
+  "max_cycle"
+ ],
+ "src/gradients/state_models.py::mp2_relaxed": [
+  "max_cycle"
+ ],
+ "src/gradients/state_models.py::__init__": [
+  "tile_gb"
+ ],
+ "src/gradients/adc/ee_gradient.py::solve_root": [
+  "conv_tol",
+  "nroots",
+  "tile_gb"
+ ],
+ "src/gradients/adc/ee_gradient.py::tiled_force": [
+  "tile_gb"
+ ],
+ "src/gradients/adc/ee_gradient.py::adc2_force": [
+  "conv_tol",
+  "nroots"
+ ],
+ "src/gradients/adc/ee_gradient.py::adc2_force_tiled": [
+  "conv_tol",
+  "nroots",
+  "tile_gb"
+ ],
+ "src/gradients/adc/ee_state_model.py::__init__": [
+  "conv_tol",
+  "nroots",
+  "tile_gb"
+ ],
+ "src/gradients/df_correlation_force.py::relax": [
+  "max_cycle"
+ ],
+ "src/gradients/df_correlation_force.py::relax_gradient": [
+  "max_cycle"
  ]
 }

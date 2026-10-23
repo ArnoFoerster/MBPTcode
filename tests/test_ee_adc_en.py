@@ -17,7 +17,7 @@ import pytest
 
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from src.SingleReference.ADC.eeADC import (ee_utils, ee_en, ee_spin_blocks as psb,

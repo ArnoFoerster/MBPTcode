@@ -46,17 +46,18 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.gradients.qp_space_time as qp_space_time
-import src.gradients.space_time_adjoint as space_time_adjoint
-from src.Base.numerics import Numerics
-from src.Base.constants import (EXPLICIT_RESIDUE_MAX_GB,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
+import src.gradients.gwbse.qp_space_time as qp_space_time
+import src.gradients.rpa.space_time_adjoint as space_time_adjoint
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, polarizability_projected_sweep)
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'

@@ -33,19 +33,22 @@ from pyscf import gto, lib, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import separable_ri
-from src.Base.constants import ISDF_GRID_ACCURACY, NUCLEAR_FD_STEP
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import isdf_grid, isdf_jk
-from src.Base.separable_ri import _SHELL_ORDER
-from src.Base.utils.mpi_grid import mpi_map, run_simulated
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import ISDF_GRID_ACCURACY, NUCLEAR_FD_STEP
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import mpi_map
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.factorization.separable_ri import SHELL_ORDER
+from src.Base.geometry.geometry import displaced
 from src.properties import hessian as H
 from tests.pins import assert_same
 
 ATOM = ('C 0.0 0.0 -0.6035; O 0.0 0.0 0.7349; '
         'H 0.0 0.9753 -1.1057; H 0.0 -0.9753 -1.1057')
 AUXBASIS = 'cc-pvdz-ri'
-COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz']['GH']))
+COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz']['GH']))
 #: Bohr, hydrogen 2 along y from ATOM: one pair of the GH screen drops here.
 CROSSING = 0.008182855963706971
 SHIFT = CROSSING - 3.7e-5
@@ -78,7 +81,7 @@ def _reference():
 
 
 def _factory(mol):
-    mf = isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=COUNTS)
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=AUXBASIS, counts=COUNTS)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     assert mf.converged
@@ -155,8 +158,8 @@ def serial(mol0):
 def test_every_stencil_straddles_a_pair_crossing(mol0):
     s0 = _screen(mol0)
     for h in STEPS:
-        assert _screen(H.displaced(mol0, *MOVED, +1, h)) != s0
-        assert _screen(H.displaced(mol0, *MOVED, -1, h)) == s0
+        assert _screen(displaced(mol0, H.component_step(mol0, *MOVED, h))) != s0
+        assert _screen(displaced(mol0, H.component_step(mol0, *MOVED, -h))) == s0
 
 
 def test_every_displaced_mean_field_fits_on_the_reference_layout(

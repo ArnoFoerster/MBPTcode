@@ -41,15 +41,13 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.geometry import molecule_at
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV, KAPPA, SURFACE_GRID_ACCURACY
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.GW.real_screening import residue_set
-from src.SingleReference.GW.qp_states import frozen_scissor
-from src.gradients.excited_state import ExcitedStateChain
-from src.autograd_oracle.frozen import FrozenConventions, dump
+from src.Base.geometry.geometry import molecule_at
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.autograd_oracle.frozen import dump, frozen_conventions_of
 
 
 def say(*args, **kwargs):
@@ -112,7 +110,7 @@ def main(argv=None):
                           isdf={'basis': BASIS, 'auxbasis': AUX,
                                 'counts': resolve_isdf_grid(args.grid_accuracy, BASIS)[0]}))
     mol, mf = chain.mean_field()
-    nocc, norb = chain.nocc, len(mf.mo_energy)
+    nocc = chain.nocc
     say(f'{"gas phase" if args.gas else "PCM(" + args.solvent + ")"}: '
           f'{chain.label()}   nao {mol.nao}  M {chain.M}  naux {chain.naux}  '
           f'nocc {nocc}   {time.perf_counter() - t0:.1f} s')
@@ -149,26 +147,9 @@ def main(argv=None):
 
     say('reading the frozen conventions')
     # every frozen convention, read off the chain AFTER its first solve
-    om_all, pieces = chain._forward(mol, mf)
-    (_, _, auxmol, crd, x_mo, d, eps, eps_qp_prod, w_aux, cache, xn, yn, mu,
-     d_bare, shift_prod, screening, _) = pieces
-    d_sigma = d if d_bare is None else d_bare
-    states = [int(p) for p in chain.resolved.qp_set]
-    if args.target == 'qp' and qp_orb not in states:
-        states = sorted(set(states) | {qp_orb})
-    xc_set = chain._xc_correction(mf, states, shift_prod)
-    (ws, _, _, _), ro = chain._qp_set_solve(x_mo, d_sigma, eps, mu, xc_set,
-                                            np.zeros(len(states)), states=states)
-    roots = {int(p): float(w) for p, w in zip(states, ws)}
-    z_prod = {int(p): float(z) for p, z in zip(states, ro['z'])}
-    routes = ro['routes']
-    shift_vec = np.zeros(norb) if shift_prod is None else np.asarray(shift_prod, float)
-    xc_all = np.asarray(chain._xc_correction(mf, np.arange(norb), shift_vec), float)
-    residues = {p: residue_set(eps, nocc, roots[p]) for p in roots}
-    for p in roots:
-        if routes.get(p) not in ('explicit', 'none') and residues[p]:
-            sys.exit(f'orbital {p} took the {routes.get(p)!r} residue route; the '
-                     f'oracle ports the explicit backend only')
+    fz, sh, solution = frozen_conventions_of(chain, mol, mf, args.target, qp_orb)
+    x_mo, d, d_bare, eps = sh.x_mo, sh.d, sh.d_bare, sh.eps
+    states, roots, residues = fz.states, fz.roots, fz.residues
     # the distance of each root from the nearest other orbital energy (Ha): the
     # one QP root finder has no guard band to compare it with
     gaps = {p: np.delete(np.abs(eps - roots[p]), p).min() for p in roots}
@@ -176,24 +157,14 @@ def main(argv=None):
         f'{p}:{len(residues[p])}' for p in roots) + '   nearest level ' + ', '.join(
         f'{p}:{gaps[p]:.1e}' for p in roots))
 
-    fz = FrozenConventions(
-        nocc=nocc, mu=mu, states=states, xc_const=xc_all, roots=roots,
-        residues=residues, gw_tau=chain.conventions.gw_grid.tau_points,
-        gw_cosft=chain.conventions.gw_grid.cosft_wt, nu=chain.conventions.nu, wt=chain.conventions.wt,
-        w_tau=chain.w_grid.tau_points, w_cosft=chain.w_grid.cosft_wt,
-        spin_kappa=KAPPA[args.spin], bse_tda=args.tda, state=args.state,
-        outside_window=chain._outside_window(norb),
-        scissor=[frozen_scissor(chain.resolved.outside_shift, p) or 0.0
-                 for p in range(norb)], z_prod=z_prod)
-
     # ------------------------------------------------- the torch process
     os.makedirs(args.workdir, exist_ok=True)
     tag = f'{args.target}_{"gas" if args.gas else args.solvent}_{BASIS}'
     f_in = os.path.join(args.workdir, f'oracle_{tag}_frozen.npz')
     f_out = os.path.join(args.workdir, f'oracle_{tag}_torch.npz')
     dump(f_in, x_mo, d, d_bare, eps, fz, target=args.target, qp_orb=qp_orb,
-         value_prod=value_prod, shift_prod=shift_prod, eps_qp_prod=eps_qp_prod,
-         omega_prod=om_all, eps_bar=captured['eps_bar'], x_bar=captured['x_bar'],
+         value_prod=value_prod, shift_prod=sh.shift, eps_qp_prod=sh.eps_qp,
+         omega_prod=solution.omega, eps_bar=captured['eps_bar'], x_bar=captured['x_bar'],
          d_bar=captured['d_bar'], d_bar_bare=captured['d_bar_bare'])
     say(f'torch process on {f_in}')
     cmd = [sys.executable, os.path.join(HERE, 'torch_oracle.py'), f_in, f_out,

@@ -34,14 +34,14 @@ import numpy as np
 import pytest
 from pyscf import df, gto, scf
 
-from src.Base.composite_environment import (ContinuumWithSites,
-                                            dipole_surface_potential)
-from src.Base.environment import attach_environment
-from src.Base.polarizable_sites import PolarizableSites, site_field
-from src.Base.solvent_screening import EnclosingPCM, SolventScreening
+from src.environments.composite_environment import (ContinuumWithSites,
+                                                    dipole_surface_potential)
+from src.Base.environment_seam import attach_environment
+from src.environments.polarizable_sites import PolarizableSites, site_field
+from src.environments.solvent_screening import EnclosingPCM, SolventScreening
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.gradients.excited_state import ExcitedStateChain
-from src.Base.numerics import numerics_of
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import assert_same
 

@@ -56,14 +56,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from pyscf.tdscf._lr_eig import real_eig
 
-from src.Base.constants import DAVIDSON_LINDEP, DAVIDSON_PAIR_TILE
-from src.Base.utils.mpi_grid import (current_comm, distributed,
-                                     lockstep_stats, run_simulated,
-                                     simulated_world)
+from src.Base.numerics.constants import DAVIDSON_LINDEP, DAVIDSON_PAIR_TILE
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, lockstep_stats
+from src.Base.utils.parallel.simulated_comm import run_simulated, simulated_world
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import (davidson, davidson_shared,
                                                 trial_space)
-from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.block_actions import (bse_pair_diagonal,
                                                               isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -108,7 +107,7 @@ PLANT_AT = 3
 TIMER_SLACK = 1e-3
 
 
-#: What makes `_run_davidson` read a SLURM allocation for its budget
+#: What makes `run_davidson` read a SLURM allocation for its budget
 #: (`allocation_max_memory_mb`) in place of the DAVIDSON_SPACE_GB fallback the
 #: forced caps below patch; inside a SLURM allocation the budget is the
 #: allocation's share and the bound never binds on these small problems, so
@@ -316,7 +315,7 @@ def rank_products(comm, g, tile):
         X, Y, R_x, R_y, r2 = ritz_rows(Vh[i], Wh[i], U1h[i], U2h[i], M_GATE,
                                        g['x'], g['y'], g['w'])
         dx = np.vstack([R_x, R_y]).T
-        t = davidson_shared._correction(dx, np.hstack([g['d'][p0:p1],
+        t = davidson_shared.correction(dx, np.hstack([g['d'][p0:p1],
                                                 -g['d'][p0:p1]]), g['w'])
         x_new, y_new = g['X_new'][p0:p1].copy(), g['Y_new'][p0:p1].copy()
         project_rows(Vh[i], Wh[i], x_new, y_new, g['ox'], g['oy'])
@@ -490,14 +489,14 @@ def test_holders_take_their_rows_alone(model, size):
     rank's worth over all of them."""
     tile = 64
     n_pair = model[1].size
-    bound = davidson_shared._real_eig_space(
-        davidson_shared._trial_space_memory(NROOTS, n_pair), NROOTS, n_pair)[1]
+    bound = davidson_shared.real_eig_space(
+        davidson_shared.trial_space_memory(NROOTS, n_pair), NROOTS, n_pair)[1]
 
     def one_rank(comm):
         t = {}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            davidson._run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
+            davidson.run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
                                    comm=comm, timings=t, pair_tile=tile,
                                    pair_rows=True)
         rows = PairRows(n_pair, comm, tile)
@@ -512,7 +511,7 @@ def test_holders_take_their_rows_alone(model, size):
         total += held
     assert total == 32 * n_pair * bound
     t_serial = {}
-    davidson._run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
+    davidson.run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
                            timings=t_serial)
     assert t_serial['davidson_trial_space_mb'] * 1e6 == 32 * n_pair * bound
 
@@ -549,11 +548,11 @@ def test_one_tile_is_pyscfs_real_eig():
     n = diag.size
     d = diag.ravel()
     hdiag = np.hstack([d, -d])
-    order = davidson_shared._guess_indices(diag, NROOTS)
+    order = davidson_shared.guess_indices(diag, NROOTS)
     x0 = np.zeros((len(order), 2 * n))
     x0[np.arange(len(order)), order] = 1.0
     max_memory = 4000
-    space_inc, max_space = davidson_shared._real_eig_space(max_memory, NROOTS, n)
+    space_inc, max_space = davidson_shared.real_eig_space(max_memory, NROOTS, n)
 
     def products(xys):
         xys = np.asarray(xys).reshape(-1, 2, *diag.shape)
@@ -568,7 +567,7 @@ def test_one_tile_is_pyscfs_real_eig():
 
     def precond(dx, e):
         e = np.atleast_1d(e)
-        return davidson_shared._correction(dx, hdiag, e).reshape(dx.shape)
+        return davidson_shared.correction(dx, hdiag, e).reshape(dx.shape)
 
     log = io.StringIO()
     conv, e, xy = real_eig(vind, x0, precond, tol_residual=CONV_TOL,
@@ -577,7 +576,7 @@ def test_one_tile_is_pyscfs_real_eig():
                            verbose=logger.Logger(log, logger.DEBUG1))
     kept = [int(k) for k in re.findall(r'Generate (\d+) trial', log.getvalue())]
     out = {}
-    for ntrack in (NROOTS, davidson_shared._tracked_roots(NROOTS, n)):
+    for ntrack in (NROOTS, davidson_shared.tracked_roots(NROOTS, n)):
         trace = []
         out[ntrack] = casida_rows(
             products, x0, lambda dx, e: [precond(b, e) for b in dx],
@@ -592,7 +591,7 @@ def test_one_tile_is_pyscfs_real_eig():
     assert np.abs(e - e1).max() <= ONE_TILE_ROOT_TOL
     assert np.abs(xy - xy1).max() <= ONE_RANK_VECTOR_TOL
     assert len(trace2) == len(trace1) and all(trace2[-1]['settled'])
-    assert len(e2) == davidson_shared._tracked_roots(NROOTS, n)
+    assert len(e2) == davidson_shared.tracked_roots(NROOTS, n)
     # two solves: to a few ulp
     assert_same(e2[:NROOTS], e1, quantity='root', label='tracked roots')
     assert_same(xy2[:NROOTS], xy1, unit='1', quantity='vector',
@@ -602,8 +601,9 @@ def test_one_tile_is_pyscfs_real_eig():
 @pytest.mark.parametrize('size', [1, 3])
 def test_restarts_apply_no_action(model, monkeypatch, size):
     """A bound forced small: every restart takes the lowest max(2 nroots,
-    tracked) Ritz vectors' products from the stored ones, so no action is
-    applied on a restart cycle, and the roots are the dense ones."""
+    tracked) Ritz vectors, at most the tracked pairs a cycle corrects, and
+    their products from the stored ones, so no action is applied on a
+    restart cycle, and the roots are the dense ones."""
     n_pair = model[1].size
     monkeypatch.setattr(davidson.param, 'MAX_MEMORY', 1)
     monkeypatch.setattr(davidson_shared, 'DAVIDSON_SPACE_GB',
@@ -624,8 +624,7 @@ def test_restarts_apply_no_action(model, monkeypatch, size):
     restarts = [s for s in trace[1:] if s['fresh']]
     assert conv.all() and restarts
     assert counters['collapses'] == len(restarts)
-    keep = min(max(2 * NROOTS, davidson_shared._tracked_roots(NROOTS, n_pair)),
-               davidson_shared._real_eig_space(1, NROOTS, n_pair)[0])
+    keep = davidson_shared.tracked_roots(NROOTS, n_pair)
     assert all(s['applied'] == 0 and s['new'] == keep for s in restarts)
     assert counters['vectors'] == 2 * sum(s['applied'] + s['intervals']
                                           for s in trace)
@@ -675,7 +674,7 @@ def test_the_subspace_time_is_split_into_its_pieces(model):
         t = {}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            davidson._run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
+            davidson.run_davidson(*model[:2], NROOTS, CONV_TOL, 100, None,
                                    comm=comm, timings=t, pair_tile=MODEL_TILE)
         return t
 

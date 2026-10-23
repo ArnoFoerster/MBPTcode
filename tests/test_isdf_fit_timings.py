@@ -46,10 +46,10 @@ from pyscf import gto, scf
 
 from tests.archived_tree import require_commit, unpack_commit
 from tests.pins import THREAD_CAPS, assert_archive_same, assert_same
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from tests.archive_radii import install_current_radii
-from src.Base.separable_ri import atomic_grid
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.factorization.separable_ri import atomic_grid
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
 from tests.isdf_test_grid import g1
 

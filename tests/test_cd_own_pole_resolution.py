@@ -28,10 +28,11 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CD_NFREQ, ISDF_GRID_ACCURACY_TARGET_EV,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (CD_NFREQ, ISDF_GRID_ACCURACY_TARGET_EV,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
+from src.Base.numerics.numerics import numerics_of
 from src.SingleReference.GW.qp_states import is_quasiparticle_root
 from src.properties.excitations import (SurfaceSpec, driven_chain,
                                         qp_bookkeeping, surface_of)
@@ -41,7 +42,7 @@ FORMALDEHYDE = ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
 GROUND = GroundState('rpa', 'hf')
 EXPLICIT = SurfaceSpec(GROUND, chi0='space-time', residues='explicit',
                        factorization='isdf', qp_states=QPStates('frontier'),
-                       numerics={'grid_accuracy': 'G3'})
+                       numerics=numerics_of({'grid_accuracy': 'G3'}))
 QB = SurfaceSpec(GROUND, chi0='dense-qb', factorization='four-index',
                  qp_states=QPStates('frontier'))
 #: The orbital whose root sits inside its own pole's band.

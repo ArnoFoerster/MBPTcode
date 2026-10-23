@@ -26,10 +26,11 @@ be compared with a measured one.
 """
 import numpy as np
 
-from src.Base.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
-                                NUCLEAR_FD_STEP)
-from src.Base.geometry import molecule_at
-from src.properties.surface import evaluate
+from src.Base.numerics.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
+                                         NUCLEAR_FD_STEP)
+from src.Base.geometry.geometry import displaced
+from src.properties.hessian import ladder_ratios
+from src.gradients.surface import evaluate
 
 
 def cartesian_mode(mode, masses):
@@ -71,12 +72,6 @@ def mode_step(mode, masses, step=NUCLEAR_FD_STEP):
     return step / float(np.linalg.norm(u, axis=1).max())
 
 
-def displaced_along(mol, mode, masses, dq):
-    """`mol` moved by `dq` along one mass-weighted mode."""
-    return molecule_at(mol, np.asarray(mol.atom_coords())
-                       + dq * cartesian_mode(mode, masses))
-
-
 def mode_gradient(grad, modes, masses):
     """A Cartesian gradient projected on the mass-weighted modes, d/dq = M^-1/2 d/dx."""
     w = np.repeat(np.asarray(masses), 3) ** -0.5
@@ -107,7 +102,8 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
     def one(job):
         i, sign = job
         k = selected[i]
-        moved = displaced_along(mol, modes[:, k], masses, sign * hs[i])
+        moved = displaced(mol, sign * hs[i] * cartesian_mode(modes[:, k],
+                                                            masses))
         grad, energy, _ = evaluate(surface, moved)
         if verbose:
             print(f'  [mode {k:3d} {"+" if sign > 0 else "-"}] '
@@ -127,7 +123,7 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
             f'{asymmetry:.2e} ({asymmetry / scale:.2e} of the largest), above '
             f'{asymmetry_tol:.1e}: the displaced gradients carry more noise '
             f'than curvature at this step. Check the gradient reproducibility '
-            f'at this geometry, or take a larger step through `step_ladder`.')
+            f'at this geometry, or take a larger step through `frequency_ladder`.')
     block = 0.5 * (block_raw + block_raw.T)
     lam, vec = np.linalg.eigh(block)
     freq = np.sign(lam) * np.sqrt(np.abs(lam))
@@ -153,7 +149,7 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
             'gradients': len(jobs)}
 
 
-def step_ladder(surface, mol, omega, modes, masses, selected,
+def frequency_ladder(surface, mol, omega, modes, masses, selected,
                 steps=(4.0 * NUCLEAR_FD_STEP, 2.0 * NUCLEAR_FD_STEP,
                        NUCLEAR_FD_STEP),
                 **kw):
@@ -172,7 +168,6 @@ def step_ladder(surface, mol, omega, modes, masses, selected,
     results = [mode_hessian(surface, mol, omega, modes, masses, selected,
                             step=h, **kw) for h in steps]
     w = [r['omega_cm'] for r in results]
-    ratios = [(w[j] - w[j + 1]) / np.where(np.abs(w[j + 1] - w[j + 2]) > 1e-12,
-                                           w[j + 1] - w[j + 2], 1e-12)
-              for j in range(len(w) - 2)]
+    ratios = list(ladder_ratios([w[j] - w[j + 1]
+                                 for j in range(len(w) - 1)]))
     return results, ratios

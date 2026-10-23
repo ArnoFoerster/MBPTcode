@@ -14,20 +14,26 @@ Vidberg and Serene, J. Low Temp. Phys. 29, 179 (1977) -- Pade continuation of
 a function sampled on the imaginary axis via Thiele's continued fraction, the
 algorithm behind `Base/utils/analyticalContinuation.thiele_coefficients`.
 """
+import hashlib
+import threading
+import time as _time
+import weakref
+
 import numpy as np
-from pyscf import df as _pyscf_df, scf as _pyscf_scf
+from pyscf import df as _pyscf_df, gto as _pyscf_gto, scf as _pyscf_scf
 from pyscf.df import incore as _df_incore
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.distributed_df import distributed_fock
-from src.Base.environment import environment_of
-from src.Base.utils.analyticalContinuation import (greedy_pade_order,
-                                                   thiele_coefficients,
-                                                   pade_eval)
-from src.Base.utils.mpi_grid import (current_comm, lockstep,
-                                     lockstep_mean_field)
-from src.Base.utils.threads import blas_single_threaded
-from src.Solvers.qp_equation import pole_strength, solve_qp_equation
+from src.Base.numerics.constants import BYTES_PER_GB
+from src.Base.factorization.distributed_df import distributed_fock
+from src.Base.environment_seam import environment_of
+from src.Base.utils.grids.analytic_continuation import PadeFit
+from src.Base.utils.parallel.mpi_grid import (current_comm, lockstep,
+                                              lockstep_mean_field, partition,
+                                              reduce_max)
+from src.Base.utils.parallel.threads import blas_single_threaded
+from src.Solvers.qp_equation import (pole_strength,
+                                     solve_qp_equation_pole_strength)
 
 
 def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
@@ -127,24 +133,71 @@ def _local_static_exchange(mf, mol, dm_correction, exchange):
         raise ValueError(
             f'an unrestricted mean field needs dm_correction as (alpha, beta) '
             f'of shape {np.shape(dm)}, got {np.shape(dm_for_hx)}')
+    mo = mf.mo_coeff
+    if not unrestricted and dm_correction is None and exchange == 'mf':
+        return mo.T @ mean_field_static_operator(mf, mol) @ mo
     # K and the exchange-correlation potential are pyscf's own OpenMP -- the
     # fit's contraction and `nr_rks` on the DFT grid -- so BLAS is held at one
     # thread across them and the two pools stop spinning against each other.
     with blas_single_threaded():
         K = _exchange_k(mf, mol, dm_for_hx, exchange)
         sig_x = -K if unrestricted else -0.5 * K
-        dm_total = dm[0] + dm[1] if unrestricted else dm
-        v_eff = mf.get_veff(mol, dm)
-        j_mf = mf.get_j(mol, dm_total)
-        op = sig_x - (v_eff - j_mf)
+        v_xc, j_mf = _xc_potential(mf, mol, dm)
+        op = sig_x - v_xc
         if dm_correction is not None:
             dm_x_total = (dm_for_hx[0] + dm_for_hx[1] if unrestricted
                           else dm_for_hx)
             op = op + hartree_shift(mf, mol, dm_x_total, j_mf)
-    mo = mf.mo_coeff
     if unrestricted:
         return np.stack([mo[s].T @ op[s] @ mo[s] for s in (0, 1)])
     return mo.T @ op @ mo                                # a GEMM: BLAS wide
+
+
+#: each restricted mean field's Sigma_x - v_xc at its own density, with the
+#: content it was built for (`mean_field_static_operator`)
+_STATIC_OPERATORS = weakref.WeakKeyDictionary()
+_STATIC_OPERATORS_LOCK = threading.Lock()
+
+
+def mean_field_static_operator(mf, mol=None):
+    """Sigma_x - v_xc = -K/2 - (v_eff - J) in the AO basis at a restricted
+    mean field's own density, from its own K, v_eff and J; read-only.
+
+    THE ONE OPERATOR the quasiparticle static term (`_local_static_exchange`
+    at exchange='mf'), the Kohn-Sham static correction's orbital response and
+    the EXX double counting's (`gradients.isdf_derivatives`) all read: built
+    once per mean field and kept beside it (a weak reference, so it goes with
+    the mean field) for as long as its density, molecule, functional and
+    fit are the ones it was built from; any change rebuilds it.
+
+    Over ranks the build may be a collective (`distributed_fock`), so a
+    held operator is used only where every rank holds one.
+    """
+    mol = mf.mol if mol is None else mol
+    dm = mf.make_rdm1()        # tagged with its orbitals, as pyscf builds K
+    key = (hashlib.blake2b(np.ascontiguousarray(dm).data,
+                           digest_size=32).digest(),
+           mol._atm.tobytes(), mol._bas.tobytes(),
+           mol._env[_pyscf_gto.mole.PTR_ENV_START:].tobytes(),
+           getattr(mf, 'xc', None), id(getattr(mf, 'with_df', None)))
+    with _STATIC_OPERATORS_LOCK:
+        held = _STATIC_OPERATORS.get(mf)
+    hit = held is not None and held[0] == key
+    comm = current_comm()
+    if comm is not None and comm.Get_size() > 1:
+        hit = reduce_max(np.array([0.0 if hit else 1.0]), comm)[0] == 0.0
+    if hit:
+        return held[1]
+    # K and the exchange-correlation potential are pyscf's own OpenMP -- the
+    # fit's contraction and `nr_rks` on the DFT grid -- so BLAS is held at one
+    # thread across them and the two pools stop spinning against each other.
+    with distributed_fock(mf, build=False), blas_single_threaded():
+        K = mf.get_k(mol, dm)
+        op = -0.5 * K - _xc_potential(mf, mol, dm)[0]
+    op.setflags(write=False)
+    with _STATIC_OPERATORS_LOCK:
+        _STATIC_OPERATORS[mf] = (key, op)
+    return op
 
 
 def refuse_unshifted_environment(mf, mol, where):
@@ -192,12 +245,24 @@ def _exchange_k(mf, mol, dm, exchange):
     raise ValueError(f"exchange must be 'mf', 'exact' or 'df', got {exchange!r}")
 
 
-def _unrestricted_xc_potential(mf, mol, dm):
-    """(2, nao, nao) v_xc_s = veff_s - J[D_alpha + D_beta], exact exchange
-    included: the operator the unrestricted eigenvalues came from, less the
-    Hartree term every spin sees alike."""
-    vj = mf.get_j(mol, dm)
-    return np.asarray(mf.get_veff(mol, dm)) - (vj[0] + vj[1])[None]
+def _xc_potential(mf, mol, dm):
+    """(v_xc, J): v_xc = v_eff - J[D], exact exchange included, J of the
+    total density -- the operator the eigenvalues came from, less the Hartree
+    term every spin sees alike; restricted (nao, nao), unrestricted
+    (2, nao, nao) for dm (2, nao, nao)."""
+    total = dm[0] + dm[1] if np.ndim(dm) == 3 else dm
+    v_eff = mf.get_veff(mol, dm)
+    j = mf.get_j(mol, total)
+    return v_eff - j, j
+
+
+def _df_direct_block_gb(mf, given):
+    """The working set of the 'df-direct' exchange diagonal's streamed pass:
+    the one `given`, or a quarter of the mean field's max_memory, at least
+    1 GB."""
+    if given is not None:
+        return given
+    return max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
 
 
 def _refuse_both_placements(reaction_field, after_solve):
@@ -325,7 +390,7 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
     T = np.zeros((naux, mo_states.shape[1], nao))
     # Big blocks: each aux_e2 call rebuilds a shell-pair list over
     # nbas x auxnbas, so the CALL COUNT costs at large nbas.
-    max_ao = max(1, int(block_memory_gb * 1e9 / (nao * naux * 8)))
+    max_ao = max(1, int(block_memory_gb * BYTES_PER_GB / (nao * naux * 8)))
     sh0 = 0
     while sh0 < mol.nbas:
         sh1 = sh0 + 1
@@ -425,12 +490,9 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     dm_for_hx = dm if dm_correction is None else dm_correction
     mo = mf.mo_coeff[:, states]
     aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
-    if block_memory_gb is None:
-        block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
-    k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx, block_memory_gb)
-    v_eff = mf.get_veff(mol, dm)
-    j_mf = mf.get_j(mol, dm)
-    v_xc = v_eff - j_mf
+    k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx,
+                                        _df_direct_block_gb(mf, block_memory_gb))
+    v_xc, j_mf = _xc_potential(mf, mol, dm)
     if dm_correction is not None:
         v_xc = v_xc - hartree_shift(mf, mol, dm_correction, j_mf)
     out = -0.5 * k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
@@ -451,14 +513,12 @@ def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
             f'{dm.shape}; got {dm_for_hx.shape}')
     mo = mf.mo_coeff[spin][:, states]
     aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
-    if block_memory_gb is None:
-        block_memory_gb = max(1.0, 0.25 * getattr(mf, 'max_memory', 4000) / 1e3)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx[spin],
-                                        block_memory_gb)
-    v_xc = _unrestricted_xc_potential(mf, mol, dm)[spin]
+                                        _df_direct_block_gb(mf, block_memory_gb))
+    v_xc, j_mf = _xc_potential(mf, mol, dm)
+    v_xc = v_xc[spin]
     if dm_correction is not None:
-        vj = mf.get_j(mol, dm[0] + dm[1])
-        v_xc = v_xc - hartree_shift(mf, mol, dm_for_hx[0] + dm_for_hx[1], vj)
+        v_xc = v_xc - hartree_shift(mf, mol, dm_for_hx[0] + dm_for_hx[1], j_mf)
     out = -k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
     if reaction_field is None:
         return out
@@ -466,11 +526,12 @@ def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
 
 
 def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
-                                 greedy=True, solver_mode='pole_strength',
-                                 max_order=None, with_z=False):
+                                 greedy=True, max_order=None, with_z=False):
     """Pade-continue Sigma_c off the imaginary axis and solve the QP equation.
 
         w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w)
+
+    for the root of largest Z (`solve_qp_equation_pole_strength`).
 
     eps           : KS orbitale energies
     p_state       : state of interest 
@@ -478,38 +539,145 @@ def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
     z_fit         : the sample points
     sigma_iw      : Sigma_c values on them
     greedy        : Default algorithm for analytical continuation
-    solver_mode   : By default, look for solution with largest Z-factor.
     max_order     : cap on the number of Pade nodes, applied after the greedy
                     ordering. None keeps all of them, which is the T = 0 behaviour; pass
                     `matsubara.ir_continuation_order(beta, wmax)` for a metal.
     with_z        : return (root, Z), Z = 1/(1 - dRe Sigma_c/dw) of the
                     continued fraction at the root, NaN where it is flat.
     """
-    z_ord, f_ord = z_fit, sigma_iw
-    if greedy:
-        order = greedy_pade_order(z_fit, sigma_iw)
-        z_ord, f_ord = z_fit[order], sigma_iw[order]
-    if max_order is not None and max_order < len(z_ord):
-        # At finite temperature the imaginary-axis data can only resolve so
-        # many independent structures and asking Pade for more nodes than
-        # that is asking it to fit noise. Truncating AFTER the greedy ordering
-        # keeps the most informative points, since that ordering puts them
-        # first by construction.
-        if max_order < 2:
-            raise ValueError(
-                f"max_order = {max_order} leaves too few points for a Pade "
-                f"fit; at least two are needed.")
-        z_ord, f_ord = z_ord[:max_order], f_ord[:max_order]
-    pade_coeffs = thiele_coefficients(z_ord, f_ord)
+    fit = PadeFit(z_fit, sigma_iw, greedy=greedy, max_order=max_order)
 
     def residual(w):
-        sigma_c_w = pade_eval(np.array([w], dtype=complex), z_ord, pade_coeffs)[0]
+        sigma_c_w = fit(np.array([w], dtype=complex))[0]
         return w - eps[p_state] - xc_correction - sigma_c_w.real
 
-    root = solve_qp_equation(residual, eps[p_state], method=solver_mode)
+    root = solve_qp_equation_pole_strength(residual, eps[p_state])
     if not with_z:
         return root
     return root, float(pole_strength(residual, root))
+
+
+def finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,
+              dm_correction, greedy, timings, sigma_x='mf',
+              reaction_field=None, comm=None, sigma_x_matrix=None, spin=None,
+              xc_diagonal=None, with_z=False, failures=None,
+              after_solve=True, max_order=None, branch_sampled=False):
+    """Sigma_c on the imaginary axis -> quasiparticle energy, one per state.
+
+    reaction_field is the continuum's Eq. (18) shift when the route built W,
+    and replaces the COHSEX fallback inside `static_exchange_diagonal`.
+    after_solve (G0W0, `reaction_field.shift_after_solve`) adds it to every
+    root whole once the equation is solved without it; False (an evGW cycle)
+    puts it in the static term. Z is the equation's either way.
+    spin: the channel of an unrestricted reference, whose (2, ...)
+    reaction_field and sigma_x_matrix the static term indexes.
+
+    <Sigma_x - v_xc> is one exchange build for the whole window, so it
+    precedes the loop; the Pade fit of Sigma_pp(i.omega) and the root search
+    on w = eps_p + <Sigma_x - v_xc>_pp + Re Sigma_c(w) are per state (each
+    state has its own sample line and its own scalar equation). On a
+    quasiparticle set (the whole BSE diagonal) that loop is the larger cost,
+    and it is what `comm` splits.
+
+    comm: rank r takes states r, r + nranks, ... and the roots are
+    all-gathered back into state order, so every rank returns the whole
+    window. The static term is replicated from rank 0 first, since a K built
+    independently per rank agrees only to its last bits; Sigma arrives
+    all-reduced and identical, so a partitioned window is bitwise the serial
+    one (`tests/test_qp_states_over_ranks.py` gates it per state). Ranks
+    beyond the number of states own an empty block and only serve the gather.
+
+    No window size divides the static term: K and v_xc are built whole and
+    then indexed. `sigma_x_matrix` hands that build in from the caller (the
+    diagonal it yields is the built one bit for bit); otherwise the ranks
+    divide it where the mean field carries the slices a distributed SCF left
+    on it, and a mean field converged one rank at a time builds it
+    replicated.
+
+    xc_diagonal: the static term of the equation on the states from the
+    caller, in place of the build: <p|Sigma_x - v_xc|p>, plus Eq. (18) only
+    where the shift belongs in the equation (after_solve False). A
+    reaction_field the route built is still added after the solve.
+    with_z: return (roots, Z) of the continuation.
+    max_order: the Pade continuation's cap (`solve_qp_from_imaginary_axis`).
+    branch_sampled: sigma[i] was sampled on its state's own branch of the
+    imaginary axis (`imaginary_axis_sample_points`); False, on the positive
+    one, an occupied state's being the conjugate, Sigma(-i w) = Sigma(i w)^*.
+    failures: with with_z, receives {orbital: 'ExceptionClass: message'} for
+    each state whose Pade continuation or root search failed numerically
+    (ArithmeticError, LinAlgError); that state's root and Z are NaN, and any
+    other exception propagates.
+    """
+    states = np.atleast_1d(p_state)
+    scalar = np.ndim(p_state) == 0
+    sig = np.atleast_2d(sigma)
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+
+    _t = _time.time()
+    after = after_solve and reaction_field is not None
+    # One exchange build for the whole window: <Sigma_x - v_xc> carries no state
+    # index until it is indexed.
+    if xc_diagonal is not None:
+        xc_diag = np.atleast_1d(np.asarray(xc_diagonal, float))
+    else:
+        xc_diag = static_exchange_diagonal(
+            mf, mol, states, dm_correction=dm_correction, exchange=sigma_x,
+            reaction_field=None if after else reaction_field,
+            sigma_x_matrix=sigma_x_matrix, comm=comm, spin=spin,
+            reaction_field_after_solve=after)
+    if nranks > 1:
+        xc_diag = lockstep(np.ascontiguousarray(xc_diag, dtype=float), comm)
+    if timings is not None:
+        timings['t_qp_static'] = _time.time() - _t
+
+    _t_states = _time.time()
+    mine = (partition(len(states), rank, nranks) if nranks > 1
+            else np.arange(len(states)))
+    out = [None] * len(states)
+    failed = {}
+    for i in mine:
+        i = int(i)
+        p = states[i]
+        z_fit, _ = imaginary_axis_sample_points(pade_freq, nocc, p, mu)
+        # Occupied states sit on the negative branch, where Sigma(-i w) = conj.
+        s_p = np.conj(sig[i]) if p < nocc and not branch_sampled else sig[i]
+        if not with_z:
+            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
+                                                  z_fit, s_p, greedy=greedy,
+                                                  max_order=max_order)
+            continue
+        # A caller that asks for Z judges each root itself, so a state whose
+        # continuation fails numerically is reported, NaN with its exception
+        # in `failures`; any other exception is a defect and raises.
+        try:
+            out[i] = solve_qp_from_imaginary_axis(eps, int(p), xc_diag[i],
+                                                  z_fit, s_p, greedy=greedy,
+                                                  max_order=max_order,
+                                                  with_z=True)
+        except (ArithmeticError, np.linalg.LinAlgError) as exc:
+            out[i] = (np.nan, np.nan)
+            failed[i] = f'{type(exc).__name__}: {exc}'
+    if nranks > 1:
+        for chunk in comm.allgather([(i, out[i], failed.get(i))
+                                     for i in mine]):
+            for i, root, why in chunk:
+                out[int(i)] = root
+                if why is not None:
+                    failed[int(i)] = why
+    if failures is not None:
+        failures.update({int(states[i]): why for i, why in failed.items()})
+    if timings is not None:
+        timings['t_qp_states'] = _time.time() - _t_states
+        timings['t_qp'] = _time.time() - _t
+    shift = reaction_field if after else None
+    if with_z:
+        roots = add_reaction_field(np.array([r for r, _ in out], float),
+                                   shift, states, spin)
+        z = np.array([zz for _, zz in out], float)
+        return (roots[0], z[0]) if scalar else (roots, z)
+    roots = add_reaction_field(np.asarray(out, float), shift, states, spin)
+    return roots[0] if scalar else roots
 
 
 def imaginary_axis_sample_points(freq_points, nocc, p_state, mu):

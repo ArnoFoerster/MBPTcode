@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.SingleReference.state_models import HFState, MP2State
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.gradients.state_models import HFState, MP2State
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import ATOMS, AUX, NF, ROOT_CONV_TOL, check, make_scf_loop, molecule
 from tests.pins import RECORDING_BLAS, matches
 

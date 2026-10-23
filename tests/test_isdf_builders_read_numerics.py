@@ -21,19 +21,20 @@ import pathlib
 import pytest
 from pyscf import df, gto
 
-from src.Base import constants, isdf_jk, separable_ri
-from src.Base.numerics import IsdfNumerics, Numerics
-from src.Base.separable_ri import atomic_grid, build_D_F, fit_settings
-from src.Base.separable_ri import molecular_points_covariant
-from src.gradients.factor_chain import FrozenFactorization
+from src.Base.numerics import constants
+from src.Base.factorization import isdf_jk, separable_ri
+from src.Base.numerics.numerics import IsdfNumerics, Numerics
+from src.Base.factorization.separable_ri import atomic_grid, build_D_F, fit_settings
+from src.Base.factorization.separable_ri import molecular_points_covariant
+from src.gradients.rpa.factor_chain import FrozenFactorization
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 QUARTET = ('l_max_second', 'pair_tol', 'regularization', 'block_memory_gb')
 #: The modules of the ISDF fit and its adjoints.
-FIT_MODULES = ('src/Base/separable_ri.py', 'src/Base/isdf_jk.py',
-               'src/Base/skeleton_tiles.py', 'src/Base/distributed_isdf_jk.py',
+FIT_MODULES = ('src/Base/factorization/separable_ri.py', 'src/Base/factorization/isdf_jk.py',
+               'src/gradients/skeleton_tiles.py', 'src/Base/factorization/distributed_isdf_jk.py',
                'src/gradients/isdf_derivatives.py',
-               'src/gradients/factor_chain.py')
+               'src/gradients/rpa/factor_chain.py')
 H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
@@ -141,6 +142,6 @@ def test_no_isdf_duplicate_of_a_constant():
     """The metric's root floor and pseudo-inverse cut and the K kernel's
     memory share are the constants, not literals beside them."""
     assert not hasattr(isdf_jk, '_METRIC_EIG_TOL')
-    text = (REPO / 'src/Base/isdf_jk.py').read_text()
+    text = (REPO / 'src/Base/factorization/isdf_jk.py').read_text()
     assert 'metric_rcond' not in text and '0.33' not in text
     assert 'numerics' in isdf_jk.ISDFJK.__init__.__code__.co_varnames

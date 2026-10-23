@@ -50,19 +50,18 @@ import numpy as np
 import pytest
 from pyscf import gto, lib, scf
 
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import QPStates
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 

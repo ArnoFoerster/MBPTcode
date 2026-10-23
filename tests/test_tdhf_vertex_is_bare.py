@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.Solvers.qp_equation import solve_qp_equation_pole_strength

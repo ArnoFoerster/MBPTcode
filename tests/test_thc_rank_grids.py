@@ -25,7 +25,6 @@ import numpy as np
 import pytest
 from pyscf.pbc import gto, scf
 
-from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
 from src.SingleReference.Periodic.pbc_isdf import resolve_npoints
 from src.SingleReference.Periodic.pbc_isdf_gw import minimax_points_for_gw_k
 
@@ -73,9 +72,8 @@ def diamond_scf():
 def test_auto_ntau_resolves_and_reports_its_accuracy(diamond_scf):
     """It must return a grid AND the error it actually achieved."""
     cell, mf, kpts, _ = diamond_scf
-    kplus = get_momentum_transfer_map(cell, kpts)
     n, err = minimax_points_for_gw_k(np.asarray(mf.mo_energy),
-                                     np.asarray(mf.mo_occ), kplus)
+                                     np.asarray(mf.mo_occ))
     print(f"  auto ntau = {n}, worst fit error = {err:.2e}")
     assert 6 <= n <= 34
     assert err < 1e-9, err
@@ -90,19 +88,18 @@ def test_auto_ntau_binds_on_the_self_energy_range(diamond_scf):
     either of the others is a silent accuracy loss.
     """
     from src.SingleReference.Periodic.pbc_isdf_gw import self_energy_fit_ranges_k
-    from src.Base.utils.time_frequency import minimax_points_for_accuracy
-    from src.SingleReference.Periodic.pbc_isdf_rpa import transition_window_occ
+    from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
+    from src.SingleReference.Periodic.pbc_occupations import transition_window
 
     cell, mf, kpts, _ = diamond_scf
     e, f = np.asarray(mf.mo_energy), np.asarray(mf.mo_occ)
-    kplus = get_momentum_transfer_map(cell, kpts)
     rW, rS = self_energy_fit_ranges_k(e, f)
-    e_min, e_max = transition_window_occ(e, f, kplus)
+    e_min, e_max = transition_window(e, f)
 
     ratios = {'window': e_max / e_min, 'rW': rW[1] / rW[0], 'rS': rS[1] / rS[0]}
     assert ratios['rS'] == max(ratios.values()), ratios
 
-    n_all, _ = minimax_points_for_gw_k(e, f, kplus)
+    n_all, _ = minimax_points_for_gw_k(e, f)
     n_rS, _ = minimax_points_for_accuracy(1.0, ratios['rS'], target=1e-10)
     assert n_all == n_rS, (n_all, n_rS, ratios)
 

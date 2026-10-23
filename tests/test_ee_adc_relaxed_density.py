@@ -51,8 +51,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as rd
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc

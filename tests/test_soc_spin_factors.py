@@ -31,11 +31,10 @@ import pytest
 from pyscf import gto, scf
 from pyscf.x2c import sfx2c1e, x2c
 
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       GROUND_SPIN_FACTOR, coupling,
-                                       ground_state_element,
+from src.properties.spin_orbit import (coupling, ground_state_element,
                                        interstate_element, soc_operator,
                                        soc_operator_mo)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from tests.pins import assert_same
 
 

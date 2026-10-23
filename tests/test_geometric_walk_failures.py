@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from src.Base.step_failed import StepFailed
 import src.properties.optimize as optimize_module
 from src.properties.optimize import optimize_geometric

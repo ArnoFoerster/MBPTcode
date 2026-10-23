@@ -16,10 +16,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment
-from src.Base.solvent_screening import (SolventScreening,
-                                        detach_solvent_screening)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import (SolventScreening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from tests.pins import assert_same
 

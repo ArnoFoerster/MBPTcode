@@ -51,13 +51,16 @@ carries the spin factor, so no separate factor of two appears below. Both
 builders reduce EXACTLY to their integer-occupation counterparts in
 pbc_casida when the occupations are 0 or 2 -- that equality is the main test.
 """
+import warnings
+
 import numpy as np
 
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.Periodic.pbc_amplitudes import get_chi_a, kpoint_minus_q
-from src.Base.constants import PBC_QP_Z_MIN
+from src.SingleReference.Periodic.pbc_amplitudes import get_chi_a
+from src.Base.numerics.constants import PBC_QP_Z_MIN
 from src.Solvers.qp_equation import SampledEquation, find_qp_root
-from src.SingleReference.Periodic.pbc_self_energy import q_grid
+from src.SingleReference.Periodic.pbc_self_energy import (qp_energy_linearized,
+                                                          spectral_sigma)
 
 #: Pairs whose occupation difference falls below this carry no useful weight
 #: and would contribute a zero row to A - B (0/0 for a degenerate pair), so
@@ -201,7 +204,7 @@ def transition_layout(dfints, kconserv, mo_energy=None, mo_occ=None,
                       threshold=DEFAULT_OCCUPATION_THRESHOLD):
     """Per-k transition lists and flat offsets for one momentum transfer.
 
-    The occupation-weighted analogue of pbc_casida._transition_layout. The
+    The occupation-weighted analogue of pbc_casida.transition_layout. The
     space is ragged -- a different number of transitions survives at each k --
     which is the point: with a metal the integer nocc is not even the same at
     every k-point.
@@ -367,18 +370,6 @@ def solve_rpa_all_q_occ(dfints, mo_energy=None, mo_occ=None,
     return out
 
 
-def rho_all_q_occ(dfints, eig_all_q, mo_energy=None, mo_occ=None,
-                  threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Aux-basis projections rho[q] = Mtilde (X + Y), one per transfer."""
-    out = []
-    for q in range(dfints.nkpts):
-        M = stacked_Lw(dfints, dfints.kconserv_pair[q], mo_energy, mo_occ,
-                       threshold, sqrt_weight=True)[0]
-        _, X, Y = eig_all_q[q]
-        out.append(M @ (X + Y))
-    return out
-
-
 def sigma_c_diag_occ(dfints, eig_all_q, kn, n, freq, mo_energy=None,
                      mo_occ=None, eta=1e-3,
                      threshold=DEFAULT_OCCUPATION_THRESHOLD):
@@ -410,30 +401,32 @@ def sigma_c_diag_occ(dfints, eig_all_q, kn, n, freq, mo_energy=None,
     mo_energy = np.asarray(mo_energy)
     mo_occ = np.asarray(mo_occ, dtype=float)
 
-    nq, q_weights = q_grid(dfints)
-    freq_grid = np.atleast_1d(freq).astype(float)
-    sigma = np.zeros(len(freq_grid))
-
-    for q in range(nq):
-        Omega, X, Y = eig_all_q[q]
+    def amp2(q, X, Y):
         M = stacked_Lw(dfints, dfints.kconserv_pair[q], mo_energy, mo_occ,
                        threshold, sqrt_weight=True)[0]
-        rho = M @ (X + Y)
-        chi_a = get_chi_a(dfints, q, rho, kn)          # (nstates, nmo, nmo)
-        km = kpoint_minus_q(dfints, q, kn)
-        amp2 = np.abs(chi_a[:, n, :]) ** 2             # (nstates, nmo)
-        eps_m = mo_energy[km].real
-        hole = mo_occ[km] / 2.0                        # weight on the +Omega branch
-        part = 1.0 - hole
-        for iw, w in enumerate(freq_grid):
-            e_h = w - eps_m[None, :] + Omega[:, None].real
-            e_p = w - eps_m[None, :] - Omega[:, None].real
-            dh = e_h / (e_h ** 2 + eta ** 2)
-            dp = e_p / (e_p ** 2 + eta ** 2)
-            term = amp2 * (hole[None, :] * dh + part[None, :] * dp)
-            sigma[iw] += q_weights[q] / dfints.nkpts * np.sum(term)
+        chi_a = get_chi_a(dfints, q, M @ (X + Y), kn)  # (nstates, nmo, nmo)
+        return np.abs(chi_a[:, n, :]) ** 2             # (nstates, nmo)
 
-    return sigma if not np.isscalar(freq) else sigma[0]
+    # weight f_m/2 on the +Omega (hole) branch
+    return spectral_sigma(dfints, eig_all_q, kn, freq, amp2,
+                          lambda km: mo_occ[km] / 2.0, scale=1.0,
+                          mo_energy=mo_energy, eta=eta)
+
+
+def split_transition_window(mo_energy, occupied):
+    """(e_min, e_max) of the transitions across a FIXED occupied/virtual split,
+    over all k-points: smallest virtual minus largest occupied (the
+    fundamental, possibly indirect, gap) and largest virtual minus smallest
+    occupied. `occupied` is a boolean mask shaped like mo_energy, or an
+    integer count applied at every k-point. Defined for a gap; for a metal
+    use `transition_window`.
+    """
+    e = np.asarray(mo_energy)
+    if np.ndim(occupied) == 0:
+        occupied = np.arange(e.shape[-1]) < occupied
+    occ = np.broadcast_to(occupied, e.shape)
+    e_occ, e_vir = e[occ], e[~occ]
+    return e_vir.min() - e_occ.max(), e_vir.max() - e_occ.min()
 
 
 def transition_window(mo_energy, mo_occ, threshold=DEFAULT_OCCUPATION_THRESHOLD):
@@ -441,7 +434,7 @@ def transition_window(mo_energy, mo_occ, threshold=DEFAULT_OCCUPATION_THRESHOLD)
 
     The window an imaginary-frequency grid should be scaled by. Every grid in
     `Base/utils/grids.py` is keyed on e_min, and without `mo_occ` that comes
-    from `pbc_rpa._transition_window`, which applies ONE integer occupied count
+    from `split_transition_window`, which applies ONE integer occupied count
     at every k-point. For a metal that boundary is an artifact, and it fails in
     two different ways depending on how ragged the collapse happens to be.
     Measured on a Li monolayer at 3x3 with sigma = 0.02 Ha:
@@ -487,12 +480,11 @@ def qp_energy_g0w0_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
         QP = eps + Z (Sigma_c(eps) + (Sigma_x - v_xc)_nn),
         Z  = 1 / (1 - dSigma_c/domega|eps),
 
-    the same linearization `pbc_self_energy.qp_energy_g0w0` performs, differing
-    only in calling `sigma_c_diag_occ`. That is the whole of it, and it is why
-    this exists as a separate three-line wrapper rather than a flag: the
-    integer entry point reaches `sigma_c_diag`, which splits the internal
-    orbital by a BINARY occupied/virtual label, so pointing a metal at it
-    yields a number rather than an error.
+    `pbc_self_energy.qp_energy_linearized`, the linearization
+    `qp_energy_g0w0` also uses, on `sigma_c_diag_occ`. It is a separate entry
+    point rather than a flag because the integer one reaches `sigma_c_diag`,
+    which splits the internal orbital by a BINARY occupied/virtual label, so
+    pointing a metal at it yields a number rather than an error.
 
     `exchange_minus_vxc` must be supplied for a DFT starting point exactly as
     in the integer routine. The derivative is a forward difference at `de`,
@@ -501,7 +493,8 @@ def qp_energy_g0w0_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     converge together, not independently.
 
     Returns (QP, Z), a PAIR -- unlike the integer routine, which returns the
-    energy alone. Z is not a diagnostic afterthought here: see below.
+    energy alone. Z is not a diagnostic afterthought here: see below. Z
+    outside (0, 1] is returned with a RuntimeWarning.
 
     For a metal, note what the linearization assumes rather than what it
     computes: a single well-separated pole near eps. That is a statement about
@@ -513,12 +506,10 @@ def qp_energy_g0w0_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     if mo_energy is None:
         mo_energy = dfints.mo_energy
     mo_energy = np.asarray(mo_energy)
-    ep = mo_energy[kn][n].real
     kw = dict(mo_energy=mo_energy, mo_occ=mo_occ, eta=eta, threshold=threshold)
-    s0 = sigma_c_diag_occ(dfints, eig_all_q, kn, n, ep, **kw)
-    s1 = sigma_c_diag_occ(dfints, eig_all_q, kn, n, ep + de, **kw)
-    Z = 1.0 / (1.0 - (s1 - s0) / de)
-    return ep + Z * (s0 + exchange_minus_vxc), Z
+    return qp_energy_linearized(
+        lambda w: sigma_c_diag_occ(dfints, eig_all_q, kn, n, w, **kw),
+        mo_energy[kn][n].real, de, exchange_minus_vxc)
 
 
 def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
@@ -537,21 +528,34 @@ def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     function; the fix is to stop linearizing.
 
     Returns a dict rather than a scalar, because on a metal the useful output
-    is not only where the root is but HOW MANY there are:
+    is not only where the root is but HOW MANY there are. The keys are the
+    same on every path:
 
-        qp       root of largest weight (the rule of every quasiparticle
-                 equation in the code base)
-        Z        1/(1 - dSigma_c/domega) evaluated AT that root, not at eps
-        nroots   roots surviving the pole-strength floor |Z| >= z_min
-        n_rejected  roots discarded as pole artifacts (Z ~ 0)
-        roots    all of them, ascending
-        bracketed  False if the window caught no sign change at all
+        qp            `find_qp_root`'s root: the largest weight Z in (0, 1]
+                      (the rule of every quasiparticle equation in the code
+                      base), the root nearest eps if no Z is in (0, 1], NaN if
+                      the window holds no root
+        Z             1/(1 - dSigma_c/domega) evaluated AT that root, not at eps
+        quasiparticle False when Z <= z_min (or Z outside (0, 1]): the root is
+                      kept and flagged, with a RuntimeWarning
+        bracketed     False if the window caught no sign change at all
+        nroots        roots with |Z| >= z_min
+        n_small_z     roots with |Z| < z_min (pole artifacts, Z ~ 0)
+        roots         the roots with |Z| >= z_min, ascending
+        all_roots     every (root, Z) found, ascending
 
     `nroots > 1` means the spectral weight is split and there is no single
     quasiparticle to converge -- report it rather than silently taking one
     root and calling it converged. `bracketed=False` means the root is
     outside eps +/- half_width, which is itself information: widen the window
     deliberately rather than trusting an extrapolation.
+
+    A root sitting ON a pole of Sigma_c has dSigma/domega -> -inf and so
+    Z -> 0: it solves the equation and carries no spectral weight -- measured
+    Z = -3.2e-06 for bulk Al at 6x6x6, on a case that reported a single
+    bracketed root and looked clean in every other column. PBC_QP_Z_MIN is
+    this scan's own artifact floor, not the molecular QP_WINDOW_Z_MIN, and it
+    is what `quasiparticle` is judged by.
 
     The scan costs `npts` self-energy evaluations, but `sigma_c_diag_occ`
     accepts a frequency ARRAY, so it is one call, not npts of them.
@@ -567,37 +571,24 @@ def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
                                                   **kw)))
         return w - ep - sig - exchange_minus_vxc
 
-    # the one root finder (`Solvers.qp_equation.find_qp_root`) on this
-    # window: every sign change bisected, a pole of Sigma_c told from a root,
-    # every root weighed, the largest weight kept
+    # the one root finder on this window: every sign change bisected, a pole
+    # of Sigma_c told from a root, every root weighed, the largest weight kept
+    # and judged against z_min
     source = SampledEquation(residual, vectorized=True, n_omega=npts,
                              tol=1e-10,
                              windows=[(ep - half_width, ep + half_width)])
-    got = find_qp_root(source, ep)
-    if not got.found:
-        return dict(qp=float('nan'), Z=float('nan'), nroots=0, roots=[],
-                    bracketed=False)
-    # A root sitting ON a pole of Sigma_c has dSigma/domega -> -inf and so
-    # Z -> 0: it solves the equation and carries no spectral weight, i.e. it
-    # is not a quasiparticle -- measured z_min = -3.2e-06 for bulk Al at
-    # 6x6x6, on a case that reported a single bracketed root and looked clean
-    # in every other column. PBC_QP_Z_MIN is this scan's own artifact floor,
-    # not the molecular QP_WINDOW_Z_MIN; the choice among the roots kept is
-    # the one rule of every quasiparticle equation, the largest weight.
-    weighted = sorted(got.found)
-    keep = [(r, z) for r, z in weighted if abs(z) >= z_min]
-    rejected = [(r, z) for r, z in weighted if abs(z) < z_min]
-    if not keep or abs(got.z) < z_min:
-        # Every root is a pole artifact. Report it rather than returning the
-        # least-bad one: "no quasiparticle here" is the honest answer and the
-        # caller can widen eta or refine the grid deliberately.
-        return dict(qp=float('nan'), Z=float('nan'),
-                    nroots=len(weighted),
-                    roots=[float(r) for r, _ in weighted], bracketed=False,
-                    n_rejected=len(rejected),
-                    reject_reason=f'all {len(weighted)} roots have |Z| < '
-                                  f'{z_min}')
-    return dict(qp=float(got.w), Z=float(got.z), nroots=len(keep),
-                roots=[float(r) for r, _ in keep], bracketed=True,
-                n_rejected=len(rejected),
-                all_roots=[(float(r), float(z)) for r, z in weighted])
+    got = find_qp_root(source, ep, z_min=z_min,
+                       label=f'the QP equation of state {n} at k-point {kn}')
+    found = sorted((float(r), float(z)) for r, z in got.found)
+    keep = [r for r, z in found if abs(z) >= z_min]
+    if found and not got.quasiparticle:
+        warnings.warn(
+            f"state {n} at k-point {kn}: the QP root kept, {got.w:.6f} Ha, has "
+            f"Z = {got.z:.4g}, not in ({z_min}, 1]: no quasiparticle in the "
+            f"window ({len(found)} root(s)). The root is returned and flagged "
+            f"(quasiparticle=False); widen eta or refine the grid.",
+            RuntimeWarning, stacklevel=2)
+    return dict(qp=float(got.w), Z=float(got.z),
+                quasiparticle=bool(got.quasiparticle), bracketed=bool(found),
+                nroots=len(keep), n_small_z=len(found) - len(keep),
+                roots=keep, all_roots=found)

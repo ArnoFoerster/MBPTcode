@@ -1,5 +1,5 @@
 """Checkpoint restart of the solvation loop for the HF, MP2 and ADC(2) state models
-(src.Base.solvation_loop.equilibrate(checkpoint=...)): water 6-31G in
+(src.environments.solvation_loop.equilibrate(checkpoint=...)): water 6-31G in
 toluene IEF-PCM, frozen 1, aux cc-pvdz-ri, JK cc-pvdz-jkfit, the loop at
 tol_q 1e-10 e and tol_energy 1e-12 Ha. The GW-BSE twin is in
 test_gwbse_solvation_loop.py.
@@ -25,12 +25,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base import solvation_loop as sl
-from src.Base.numerics import Numerics
-from src.Base.reaction_field import ContinuumField
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.state_models import HFState, MP2State, StateResult
-from src.SingleReference.ADC.eeADC.ee_state_model import ADC2State
+from src.environments import solvation_loop as sl
+from src.Base.numerics.numerics import Numerics
+from src.environments.reaction_field import ContinuumField
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.state_models import HFState, MP2State, StateResult
+from src.gradients.adc.ee_state_model import ADC2State
 from tests.adc_common import (AUX, SCF_TOL_TIGHT, SOLVATION_TIGHT, SOLVATION_TIGHT_LOOP,
                               WATER_C2V, Stop, df_rhf, stop_after)
 from tests.pins import assert_same, assert_same_tree

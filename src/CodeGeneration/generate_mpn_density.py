@@ -38,7 +38,7 @@ cancellation by hand for n=2). No manual "drop the disconnected piece"
 filtering is done anywhere in this module -- the recursion handles it.
 
 Scope/limitation: pdaggerq operator strings only accept index letters a-f
-(virtual) / i-n (occupied) safely (src/Base/pdaggerq_interface.py's
+(virtual) / i-n (occupied) safely (src/CodeGeneration/pdaggerq_interface.py's
 check_safe_indices gotcha), capping any single bra/ket rank at 6.
 ranks_present() is capped at MAX_RANK=4: MP4 (n=4) needs T4^(2) (quadruples)
 for N^(4)'s <Psi2|Psi2> term and M^(4)'s <Psi2|op|Psi2> term, but does NOT
@@ -79,29 +79,14 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from src.Base.pdaggerq_interface import pq_helper, raw_terms_to_einsum, raw_terms_to_einsum_freeing
+from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum, raw_terms_to_einsum_freeing
 from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
+from src.CodeGeneration.codegen_common import (
+    DM_OUT_DIR, OCC_LETTERS, VIR_LETTERS, density_insert, density_out_idx, density_shape, pq_terms,
+    generated_header, write_module)
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'SingleReference', 'DensityMatrix', 'generated_mpn')
+OUT_DIR = os.path.join(DM_OUT_DIR, 'generated_mpn')
 
-# Unbounded index-label pools -- the FIFTH such pool in the repo (after
-# precursor_classes, pdaggerq_interface's two, and laplace_codegen's). Classic
-# single letters first so every existing generated module is byte-identical;
-# numbered labels (i7, i8, ... / a7, a8, ...) beyond, which pdaggerq accepts and
-# preserves. Without this, amp_out_indices(rank>=7) raises IndexError outright.
-# (precursor_classes._label_pool is the same construction; duplicated rather
-# than imported to keep CodeGeneration free of a SingleReference dependency.)
-def _label_pool(base, n=64):
-    pool = list(base)
-    k = len(base) + 1
-    while len(pool) < n:
-        pool.append(f'{base[0]}{k}')
-        k += 1
-    return pool
-
-
-OCC_LETTERS = _label_pool('ijklmn')
-VIR_LETTERS = _label_pool('abcdef')
 MAX_RANK = 4  # see module docstring; needed for T4^(2) (MP4's N^(4)/M^(4))
 
 
@@ -153,7 +138,7 @@ def _factor_indices(fac):
     return set(x.strip() for x in m.group(1).split(',')) if m else set()
 
 
-def _filter_connected(raw_terms, free_indices):
+def filter_connected(raw_terms, free_indices):
     """Drop raw pdaggerq terms that factorize into a vacuum-bubble sub-piece
     touching NONE of the target amplitude's own free (external) indices --
     e.g. t_numerator_terms(2, 2) raw output includes
@@ -241,30 +226,12 @@ def t_numerator_terms(rank, order, extra_connect=()):
         raise ValueError("order must be >= 1")
 
     if order == 1:
-        terms = []
-        if rank == 2:
-            pq = pq_helper('fermi')
-            pq.set_left_operators([bra_ops(rank)])
-            pq.set_right_operators([['1']])
-            pq.add_operator_product(1.0, ['v'])
-            pq.simplify()
-            terms = _filter_connected(pq.strings(), amp_out_indices(rank))
-            pq.clear()
-        _numerator_cache[key] = terms
-        return terms
-
-    connect_ranks = [r for r in sorted(set(ranks_present(order - 1)) | set(extra_connect))
-                     if abs(r - rank) <= 2]
-    terms = []
-    if connect_ranks:
-        pq = pq_helper('fermi')
-        pq.set_left_operators([bra_ops(rank)])
-        pq.set_right_operators([['1']])
-        for r in connect_ranks:
-            pq.add_operator_product(1.0, ['v', f't{r}'])
-        pq.simplify()
-        terms = _filter_connected(pq.strings(), amp_out_indices(rank))
-        pq.clear()
+        products = [(1.0, ['v'])] if rank == 2 else []
+    else:
+        products = [(1.0, ['v', f't{r}'])
+                    for r in sorted(set(ranks_present(order - 1)) | set(extra_connect))
+                    if abs(r - rank) <= 2]
+    terms = filter_connected(pq_terms([bra_ops(rank)], products), amp_out_indices(rank)) if products else []
     _numerator_cache[key] = terms
     return terms
 
@@ -295,17 +262,9 @@ def overlap_terms(rank):
     """Raw pdaggerq terms for <l{rank}|t{rank}> (one N^(n) piece; order-agnostic
     -- which order's amplitude array is fed into l{rank}/t{rank} is a
     numeric-evaluation choice made by the driver, not a symbolic one here)."""
-    if rank in _overlap_cache:
-        return _overlap_cache[rank]
-    pq = pq_helper('fermi')
-    pq.set_left_operators([[f'l{rank}']])
-    pq.set_right_operators([['1']])
-    pq.add_operator_product(1.0, [f't{rank}'])
-    pq.simplify()
-    terms = pq.strings()
-    pq.clear()
-    _overlap_cache[rank] = terms
-    return terms
+    if rank not in _overlap_cache:
+        _overlap_cache[rank] = pq_terms([[f'l{rank}']], [(1.0, [f't{rank}'])])
+    return _overlap_cache[rank]
 
 
 _cross_cache = {}
@@ -324,17 +283,8 @@ def cross_density_terms(insert_op, bra_ranks, ket_ranks):
     if not bra_ranks and not ket_ranks:
         raise ValueError("bra_ranks and ket_ranks cannot both be empty")
 
-    pq = pq_helper('fermi')
-    pq.set_left_operators([[f'l{r}'] for r in bra_ranks] if bra_ranks else [['1']])
-    pq.set_right_operators([['1']])
-    if ket_ranks:
-        for r in ket_ranks:
-            pq.add_operator_product(1.0, [insert_op, f't{r}'])
-    else:
-        pq.add_operator_product(1.0, [insert_op])
-    pq.simplify()
-    terms = pq.strings()
-    pq.clear()
+    products = [(1.0, [insert_op, f't{r}']) for r in ket_ranks] if ket_ranks else [(1.0, [insert_op])]
+    terms = pq_terms([[f'l{r}'] for r in bra_ranks] if bra_ranks else [['1']], products)
     _cross_cache[key] = terms
     return terms
 
@@ -372,11 +322,6 @@ def _shape(rank):
 
 COMMON_ARGS = ['g', 'kd', 'o', 'v', 'nv', 'no']
 
-DENSITY_INSERT = {
-    'oo': 'e1(m,n)', 'vv': 'e1(e,f)', 'ov': 'e1(m,e)', 'vo': 'e1(e,m)',
-}
-DENSITY_SHAPE = {'oo': '(no, no)', 'vv': '(nv, nv)', 'ov': '(no, nv)', 'vo': '(nv, no)'}
-DENSITY_OUT_IDX = {'oo': ['m', 'n'], 'vv': ['e', 'f'], 'ov': ['m', 'e'], 'vo': ['e', 'm']}
 
 
 def _amplitude_numerator_func(rank, order, extra_connect=()):
@@ -432,21 +377,10 @@ def generate_amplitude_numerator_module(orders, basename, extra_connect_by_order
         extra = extra_by_order.get(order, ())
         for rank in manifest[order]:
             funcs.append(_amplitude_numerator_func(rank, order, extra_connect=extra))
-    path = os.path.join(OUT_DIR, f'{basename}.py')
-    header = (f'"""AUTO-GENERATED by generate_mpn_density.'
-              f'generate_amplitude_numerator_module({orders!r}) -- MPn'
-              f' amplitude V-connected numerators. Do not hand-edit."""\n')
-    manifest_src = f"RANKS_PRESENT = {manifest!r}\n\n\n"
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(path, 'w') as fh:
-        fh.write(header)
-        fh.write("import numpy as np\n"
-                 "from src.SingleReference.CC.cached_einsum import einsum\n\n\n")
-        fh.write(manifest_src)
-        fh.write("\n\n".join(funcs))
-        fh.write("\n")
-    print(f"wrote {path}")
-    return path
+    return write_module(os.path.join(OUT_DIR, f'{basename}.py'),
+                        [f"RANKS_PRESENT = {manifest!r}"] + funcs, generated_header(
+                            f'generate_mpn_density.py (generate_amplitude_numerator_module({orders!r}))',
+                            'MPn amplitude V-connected numerators.'))
 
 
 def generate_overlaps(ranks):
@@ -467,8 +401,7 @@ def generate_density_pieces(pieces):
     """
     funcs = []
     for name, block, bra_ranks, bra_args, ket_ranks, ket_args in pieces:
-        insert_op = DENSITY_INSERT[block]
-        terms = cross_density_terms(insert_op, bra_ranks, ket_ranks)
+        terms = cross_density_terms(density_insert(block), bra_ranks, ket_ranks)
         aliases = {}
         params = list(COMMON_ARGS)
         for r in bra_ranks:
@@ -478,7 +411,8 @@ def generate_density_pieces(pieces):
             aliases[f't{r}'] = ket_args[r]
             params.append(ket_args[r])
         print(f"{name}: {len(terms)} terms")
-        funcs.append(assemble(name, params, aliases, 'result', DENSITY_SHAPE[block], terms, DENSITY_OUT_IDX[block]))
+        funcs.append(assemble(name, params, aliases, 'result', density_shape(block), terms,
+                              density_out_idx(block)))
     return funcs
 
 
@@ -549,19 +483,8 @@ def density_pieces_for_order(order, extra_ranks_by_order=None):
     return pieces
 
 
-def _write(path, funcs, header):
-    os.makedirs(OUT_DIR, exist_ok=True)
-    with open(path, 'w') as fh:
-        fh.write(header)
-        fh.write("import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n\n\n")
-        fh.write("\n\n".join(funcs))
-        fh.write("\n")
-    print(f"wrote {path}")
-
-
-if __name__ == '__main__':
-    os.makedirs(OUT_DIR, exist_ok=True)
-    open(os.path.join(OUT_DIR, '__init__.py'), 'a').close()
+def generate():
+    """Write OUT_DIR/mpn_density_pieces.py."""
 
     # --- amplitude numerators: T2^(1); T1^(2),T2^(2),T3^(2),T4^(2) (T4^(2) new
     # for MP4's N^(4)/M^(4)); T1^(3),T2^(3),T3^(3) (T2^(3) now gets its
@@ -587,8 +510,12 @@ if __name__ == '__main__':
                        + density_pieces_for_order(4))
     density_funcs = generate_density_pieces(density_pieces)
 
-    _write(os.path.join(OUT_DIR, 'mpn_density_pieces.py'), amp_funcs + overlap_funcs + density_funcs,
-           "# GENERATED CODE -- MPn amplitude-numerator, overlap, and density cross-term\n"
-           "# pieces (spin-orbital), order-generic pdaggerq recursion. Produced by\n"
-           "# src/CodeGeneration/generate_mpn_density.py; see that module's docstring\n"
-           "# for the recursion these pieces are combined through. Do not edit by hand.\n")
+    write_module(os.path.join(OUT_DIR, 'mpn_density_pieces.py'), amp_funcs + overlap_funcs + density_funcs,
+                 generated_header('generate_mpn_density.py',
+                                  'MPn amplitude-numerator, overlap and density cross-term pieces',
+                                  '(spin-orbital) of the order-generic pdaggerq recursion.'),
+                 package_init=True)
+
+
+if __name__ == '__main__':
+    generate()

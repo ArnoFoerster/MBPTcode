@@ -23,13 +23,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_MEV
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import HARTREE_TO_MEV
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.Base.numerics import numerics_of
+from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
 

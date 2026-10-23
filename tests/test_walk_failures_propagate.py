@@ -21,13 +21,13 @@ from pyscf import gto, scf
 
 from src.Base.step_failed import StepFailed
 from src.SingleReference.LinearResponse.casida import CasidaInstability
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.qp_set import QuasiparticleRootLost
-from src.gradients.state_following import RootFollowingLost
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.qp_set import QuasiparticleRootLost
+from src.gradients.gwbse.state_following import RootFollowingLost
 from src.properties.optimize import (HAVE_GEOMETRIC, optimize,
                                      optimize_geometric)
 from src.SingleReference.LinearResponse.davidson import (DavidsonRefusal,
-                                                         _CasidaBreakdown)
+                                                         CasidaBreakdown)
 from src.Solvers.qp_equation import QPRootNotConverged
 from tests.isdf_test_grid import g1_numerics
 
@@ -92,7 +92,7 @@ def _walk(engine, surface, mol):
 def test_the_step_failures_are_step_failed():
     """The four places that mean "shorter step" raise a `StepFailed`."""
     for kind in (RootFollowingLost, QuasiparticleRootLost, DavidsonRefusal,
-                 _CasidaBreakdown, QPRootNotConverged, CasidaInstability):
+                 CasidaBreakdown, QPRootNotConverged, CasidaInstability):
         assert issubclass(kind, StepFailed), kind
     # the dense instability is still the ValueError its callers caught
     assert issubclass(CasidaInstability, ValueError)
@@ -140,7 +140,7 @@ def test_a_defect_in_the_quasiparticle_solve_leaves_a_real_walk():
                      'H 0 -0.9376 -1.1188', basis='cc-pvdz', verbose=0)
     chain = ExcitedStateChain(mol, scf_factory, spin='singlet',
                               mf=scf_factory(mol), numerics=g1_numerics(mol))
-    solve = chain._qp_set_solve
+    solve = chain.quasiparticles.qp_set_solve
     first = []
 
     def at_the_start_only(x_mo, d_sigma, eps, *args, **kw):
@@ -150,6 +150,6 @@ def test_a_defect_in_the_quasiparticle_solve_leaves_a_real_walk():
             raise NotImplementedError('a member with no pole model here')
         return solve(x_mo, d_sigma, eps, *args, **kw)
 
-    chain._qp_set_solve = at_the_start_only
+    chain.quasiparticles.qp_set_solve = at_the_start_only
     with pytest.raises(NotImplementedError, match='no pole model'):
         optimize(chain, max_cycle=5, verbose=False)

@@ -30,11 +30,12 @@ from pyscf import dft, gto
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference import calc_qp_energy
-from src.SingleReference.LinearResponse.davidson import solve_bse_df
+from src.SingleReference.BSE.solve import solve_bse_df
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 NROOTS = 3
@@ -72,7 +73,8 @@ print(f'{"  shift from gas / eV":28s}'
 # ---- the lowest excitations: neutral -------------------------------------
 rows = []
 for m in (gas, frozen, solvated):
-    omega = solve_bse_df(m, mol, nocc, nroots=NROOTS, probe=False)[0]
+    omega = solve_bse_df(m, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+                         probe=False)[0]
     rows.append(sorted(omega * HARTREE_TO_EV))
 for k in range(NROOTS):
     print(f'{f"BSE@G0W0 root {k + 1} / eV":28s}'

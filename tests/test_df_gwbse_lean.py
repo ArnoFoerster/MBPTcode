@@ -12,11 +12,11 @@ import pytest
 from pyscf import df as pyscf_df
 from pyscf import dft, gto
 
-from src.Base.environment import attach_environment
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import SolventScreening
+from src.Base.environment_seam import attach_environment
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW import reaction_field as rf
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.LinearResponse.block_actions import df_block_action

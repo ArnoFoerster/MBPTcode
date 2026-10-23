@@ -26,15 +26,15 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import HARTREE_TO_EV, HARTREE_TO_MEV
+from src.Base.numerics.constants import HARTREE_TO_EV, HARTREE_TO_MEV
 from src.Base.declaration import Excitation, GroundState
-from src.Base.environment import (NoEnvironment, PointCharges,
-                                  equilibrium_environment)
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.excited_state import ExcitedStateChain
+from src.environments.environment import PointCharges, equilibrium_environment
+from src.Base.environment_seam import NoEnvironment
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.characters import ct_character, roots
 from src.properties.excitations import SurfaceSpec, surface_of
-from src.Base.numerics import numerics_of
+from src.Base.numerics.numerics import numerics_of
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight
@@ -174,7 +174,7 @@ def test_the_switch_reaches_a_declared_surface(water):
     energies = {}
     for e in (env, equilibrium_environment(env)):
         spec = SurfaceSpec(GroundState('dft', 'hf'), environment=e,
-                           numerics={'nroots': 3})
+                           numerics=numerics_of({'nroots': 3}))
         surface = surface_of(spec, Excitation('triplet', root=1), water, rhf_tight)
         named = 'equilibrium' in surface.physics.environment
         assert named == bool(e.equilibrium)

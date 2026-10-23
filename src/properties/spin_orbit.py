@@ -68,17 +68,18 @@ from pyscf.data import nist
 from pyscf.scf import _vhf
 from pyscf.x2c import sfx2c1e, x2c
 
-from src.Base.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
-                                SOC_MANIFOLD_CONV_TOL)
-from src.Base.numerics import (Numerics, Stamped, numerics_identity,
-                               require_one_stamp)
-from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
-from src.SingleReference.base import get_occ_virt_indices
-from src.SingleReference.LinearResponse.davidson import (davidson_flags,
-                                                         solve_bse_isdf,
-                                                         solve_casida_davidson)
+from src.Base.numerics.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
+                                         SOC_MANIFOLD_CONV_TOL)
+from src.Base.numerics.numerics import (Numerics, Stamped, numerics_identity,
+                                        require_one_stamp)
+from src.Base.utils.linear_algebra.diagonalization import diagonalize_matrix
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.SingleReference.LinearResponse.davidson import (
+    davidson_flags, solve_casida_davidson)
+from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 
 # alpha^2/4, the Breit-Pauli prefactor of the PAULI MATRIX: H_SO =
 # (alpha^2/2) (r x p).s with s = sigma/2 is (alpha^2/4) (r x p).sigma. So the
@@ -87,14 +88,6 @@ from src.SingleReference.LinearResponse.linear_response import (
 # operator, where reading it as the coefficient of s halves every element.
 SOC_PREFACTOR = nist.ALPHA ** 2 / 4
 
-# The spin-coupling factors: with |S_ia>, |T^M_ia> the orthonormal spin-adapted
-# singles and h the coefficient of sigma, <S_I|H_SO,z|T_J,0> = VV - OO and
-# <0|H_SO,z|T_J,0> = sqrt(2) sum h_ia X_ia. They play the role sqrt(2) plays in
-# `oscillator_strengths`: the spin adaptation's own factor, in the same
-# spatial-orbital normalization. Halving them is the sigma/s confusion, and it
-# is invisible to every ratio, invariance and route-agreement test.
-EXCITED_SPIN_FACTOR = 1.0
-GROUND_SPIN_FACTOR = np.sqrt(2.0)
 
 def koseki_charge(z):
     """Koseki effective nuclear charge for a one-electron-only SOC operator.
@@ -534,15 +527,14 @@ def chain_manifolds(chain, mol=None, mf=None, evaluation=None):
     returned as they are and nothing is evaluated.
 
     The adapter for `ExcitedStateChain`, whose spin channel is fixed at
-    construction. `_forward` computes the quasiparticle set and the screening
+    construction. `shared_forward` computes the quasiparticle set and the screening
     BEFORE the Casida step, and only the Casida step reads `chain.spin` -- so
     both manifolds come off a single pass, and neither the GW code nor the
     chain needs a line changed. The spin-flipped copy is shallow on purpose: it
     shares the mean field, the grids and every setting, and differs in exactly
     the one attribute that selects the kernel.
 
-    Reaching for `_forward` and `_casida` is the deliberate cost of not
-    modifying the GW or BSE code; the gate asserts these roots equal an
+    The gate asserts these roots equal an
     independently constructed chain's. This varies SPIN, where `StateManifold`
     varies the root off one forward pass; the two fold together the day an
     interstate quantity needs both axes at once.
@@ -555,15 +547,12 @@ def chain_manifolds(chain, mol=None, mf=None, evaluation=None):
                              f'spectrum; give it a target of each spin')
         return evaluation.spectrum['singlet'], evaluation.spectrum['triplet']
     mol, mf = chain.mean_field(mol, mf)
-    om_a, pieces = chain._forward(mol, mf)
-    x_mo, d, eps_qp, w_aux = pieces[4], pieces[5], pieces[7], pieces[8]
+    shared, sol_a = chain.forward(mol, mf)
     other = copy.copy(chain)
     other.spin = 'triplet' if chain.spin == 'singlet' else 'singlet'
     # the other spin on the same quasiparticle Hamiltonian, where there is one
-    qp_h = getattr(pieces, 'qp_h', None)
-    om_b, xb, yb, _ = other._casida(x_mo, d, eps_qp, w_aux,
-                                    **({} if qp_h is None else {'qp_h': qp_h}))
+    sol_b = other.solve_casida(shared, warm=False)
     stamp = numerics_identity(chain)
-    a = Stamped((om_a, pieces[10], pieces[11]), stamp)
-    b = Stamped((om_b, xb, yb), stamp)
+    a = Stamped((sol_a.omega, sol_a.x, sol_a.y), stamp)
+    b = Stamped((sol_b.omega, sol_b.x, sol_b.y), stamp)
     return (a, b) if chain.spin == 'singlet' else (b, a)

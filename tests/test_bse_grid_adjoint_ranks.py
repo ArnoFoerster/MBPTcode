@@ -26,17 +26,18 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics import Numerics
-from src.Base.constants import BSE_ADJOINT_TILE_ROWS
-from src.Base.sliced_factors import GridTileRows, SlicedFactors, whole_factor
-from src.Base.utils.mpi_grid import (contiguous_block, distributed,
-                                     run_simulated)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BSE_ADJOINT_TILE_ROWS
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
+from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse import isdf_bse_adjoint
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
-from src.gradients import state_following
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse import state_following
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.test_bse_grid_adjoint import ETHYLENE, grid_bound_ratios
+from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
 from tests.test_chain_sliced_factors import (BASIS, H2O, H2O_DISPLACED,
                                              chain_scf)
@@ -148,8 +149,8 @@ def inputs():
             chain = ExcitedStateChain(
                 mol, chain_scf, mf=chain_scf(mol), spin=spin, bse_tda=tda,
                 numerics=g1_numerics(mol, Numerics(bse={'solver': solver})))
-            _, pieces = chain._forward(chain.mol0, chain.mf0)
-            x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+            x, d, eq, w, no, _, xn, yn = casida_args(
+                chain, *chain.forward(chain.mol0, chain.mf0))
             out[(name, spin, tda)] = (x, d, eq, w, no, xn, yn, spin, tda)
     return out
 
@@ -301,7 +302,7 @@ def test_the_composed_force_is_the_replicated_adjoints(size, monkeypatch,
 def traced_grid_forces(comm, factory_of):
     """`grid_forces`, recording at every reverse call this chain's seeds
     beside the default-tile kernel's run serially on the gathered factors and
-    folded on the same pieces: (the forces, the records)."""
+    folded on the same forward: (the forces, the records)."""
     factory = factory_of(comm.Get_rank())
     mol = own_molecule('water')
     chain = ExcitedStateChain(
@@ -309,11 +310,11 @@ def traced_grid_forces(comm, factory_of):
         numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid'},
                                            layout={'sliced': True})))
     calls = []
-    seeds_of, fold = chain._casida_seeds, chain._fold_to_nuclei
+    seeds_of, fold = chain.follower._casida_seeds, chain.reverse.fold_to_nuclei
 
-    def seeds(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+    def seeds(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        x, d, eq, w, no, _, xn, yn = casida_args(chain, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=chain.spin, bse_tda=chain.bse_tda)
         with distributed(None):
@@ -328,16 +329,16 @@ def traced_grid_forces(comm, factory_of):
                                       for a in out)))
         return out
 
-    def folded(pieces, *own, **fold_kw):
+    def folded(shared, *own, **fold_kw):
         # the refold first, keeping the tape the probed fold may release
-        refold = np.asarray(fold(pieces, *[
+        refold = np.asarray(fold(shared, *[
             np.array(a, copy=True) for a in calls[-1]['ref']],
             release_tape=False)[0])
-        result = fold(pieces, *own, **fold_kw)
+        result = fold(shared, *own, **fold_kw)
         calls[-1]['refold'] = refold
         return result
 
-    chain._casida_seeds, chain._fold_to_nuclei = seeds, folded
+    chain.follower._casida_seeds, chain.reverse.fold_to_nuclei = seeds, folded
     here = gto.M(atom=H2O_DISPLACED, basis=BASIS, verbose=0)
     g_ex, d_ex = chain.excitation_gradient(here)
     g_st, _ = chain.interstate_gradient(0, 1)

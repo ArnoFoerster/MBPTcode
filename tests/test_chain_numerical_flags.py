@@ -35,14 +35,14 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-import src.Base.constants as constants
-import src.gradients.factor_chain as factor_chain
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
+import src.Base.numerics.constants as constants
+import src.gradients.rpa.factor_chain as factor_chain
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import one_fit_adjoint, sqrtm_adjoint
-import src.gradients.qp_set as qp_set
-from src.gradients.qp_set import QPSetMixin, QuasiparticleRootLost
-from src.gradients.state_following import StateFollowingMixin
+import src.gradients.gwbse.qp_set as qp_set
+from src.gradients.gwbse.qp_set import QuasiparticleRootLost, QuasiparticleSet
+from src.gradients.gwbse.state_following import CasidaSolution, StateFollower
 from src.Base.step_failed import DavidsonNotConverged
 from src.properties.excitations import (casida_warnings, held_grid,
                                         qp_hamiltonian_warnings, scf_flags)
@@ -54,11 +54,16 @@ WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 def test_a_member_leaving_its_frozen_group_warns_and_is_recorded():
     class Stub:
+        """The chain and its quasiparticle set in one."""
         qp_subspace_drops = {'dropped': []}
+
+        @property
+        def chain(self):
+            return self
 
     stub = Stub()
     with pytest.warns(RuntimeWarning, match='leave their frozen'):
-        QPSetMixin._dropped_here(stub, frozen=[(3, 4)], kept=[], off={4},
+        QuasiparticleSet._dropped_here(stub, frozen=[(3, 4)], kept=[], off={4},
                                  routes={3: 'sop', 4: 'cd'},
                                  route_out={'z': [0.9, 0.9]},
                                  pos={3: 0, 4: 1})
@@ -82,9 +87,18 @@ def test_a_failed_isdf_fit_warns_and_is_flagged(monkeypatch):
     assert held_grid(chain)['fit_failed'] == ['H', 'O']
 
 
-class Follower(StateFollowingMixin):
+class Follower(StateFollower):
     """A chain following one state, its match planted: the best root above
-    the weight floor and the runner-up within the margin."""
+    the weight floor and the runner-up within the margin. The chain and its follower in one."""
+
+    @property
+    def chain(self):
+        return self
+
+    @property
+    def follower(self):
+        return self
+
     track, state, nocc = 'overlap', 0, 1
 
     def __init__(self):
@@ -92,7 +106,7 @@ class Follower(StateFollowingMixin):
         x = np.eye(4)[:, :2]
         self._followed = self._anchor = (None, np.eye(2), x, 0 * x)
 
-    def _match_followed(self, here, pieces):
+    def _match_followed(self, here, solution):
         return 0, 0.6, 0.5 * constants.ROOT_FOLLOW_MARGIN_MIN
 
     def _matched_at(self, mol, mf, followed):
@@ -100,9 +114,8 @@ class Follower(StateFollowingMixin):
 
 
 def test_two_mixed_roots_warn_and_are_flagged(monkeypatch):
-    import src.gradients.state_following as sf
-    monkeypatch.setattr(sf, 'body_overlap', lambda *a: np.eye(2))
-    monkeypatch.setattr(sf, 'state_overlap', lambda *a: np.eye(2))
+    import src.gradients.gwbse.state_following as sf
+    monkeypatch.setattr(sf, 'transported_overlap', lambda *a: np.eye(2))
 
     class MeanField:
         mo_coeff = np.eye(2)
@@ -112,11 +125,12 @@ def test_two_mixed_roots_warn_and_are_flagged(monkeypatch):
         def atom_coords():
             return np.zeros((1, 3))
 
-    pieces = {10: np.eye(4)[:, :2], 11: np.zeros((4, 2))}
+    solution = CasidaSolution(np.zeros(2), np.eye(4)[:, :2], np.zeros((4, 2)),
+                              {})
     chain = Follower()
     with pytest.warns(RuntimeWarning, match='mixed'):
-        root, _, _ = chain.tracked_root(Mol(), MeanField(), np.zeros(2),
-                                        pieces, widen=False)
+        root, _ = chain.tracked_root(Mol(), MeanField(), None, solution,
+                                     widen=False)
     assert root == 0
     assert chain.follow_log[-1]['mixed'] is True
 
@@ -134,11 +148,16 @@ def test_an_unasked_mean_field_skeleton_warns():
 
 def test_a_dropped_member_of_z_outside_keeps_its_root_and_is_flagged():
     class Stub:
+        """The chain and its quasiparticle set in one."""
         qp_subspace_drops = {'dropped': []}
+
+        @property
+        def chain(self):
+            return self
 
     stub = Stub()
     with pytest.warns(RuntimeWarning, match=r'outside \(0, 1\]: \[\(4, 1.3\)\]'):
-        QPSetMixin._dropped_here(stub, frozen=[(3, 4)], kept=[], off={4},
+        QuasiparticleSet._dropped_here(stub, frozen=[(3, 4)], kept=[], off={4},
                                  routes={3: 'sop', 4: 'cd'},
                                  route_out={'z': [0.9, 1.3]},
                                  pos={3: 0, 4: 1})
@@ -163,9 +182,18 @@ class Conventions:
         self.groups = groups
 
 
-class GroupChain(QPSetMixin):
-    """A chain whose quasiparticle Hamiltonian has one group (3, 4)."""
+class GroupChain(QuasiparticleSet):
+    """A chain whose quasiparticle Hamiltonian has one group (3, 4): the chain
+    and its quasiparticle set in one."""
     is_ks, tile_gb, nocc = False, None, 3
+
+    @property
+    def chain(self):
+        return self
+
+    @property
+    def quasiparticles(self):
+        return self
 
     def __init__(self):
         self.resolved, self.conventions = View(), Conventions()
@@ -203,7 +231,7 @@ def test_a_group_of_z_outside_keeps_its_h_and_is_logged(monkeypatch):
 
     chain = GroupChain()
     with pytest.warns(RuntimeWarning, match=r'outside \(0, 1\], kept'):
-        qp_h = chain._qp_hamiltonian(
+        qp_h = chain.quasiparticles._qp_hamiltonian(
             MeanField(), np.linspace(-1, 1, 6), [-0.5, 0.2],
             {'tape': Tape(), 'xc_correction': None})
     assert qp_h.groups[0].z.tolist() == [0.8, 1.2]
@@ -220,7 +248,7 @@ def test_a_group_short_of_self_consistency_carries_on_and_is_logged(
                         (h_end, max_iter, False))
     chain = GroupChain()
     with pytest.warns(RuntimeWarning, match='no self-consistency'):
-        h, it = QPSetMixin._group_newton(chain, (3, 4), np.eye(2), None,
+        h, it = QuasiparticleSet._group_newton(chain, (3, 4), np.eye(2), None,
                                          None, None)
     assert h is h_end and it == 200
     entry, = chain.qp_hamiltonian_log
@@ -228,7 +256,7 @@ def test_a_group_short_of_self_consistency_carries_on_and_is_logged(
     assert entry['newton_steps'] == 200 and entry['last_step'] == 0.0
     # what is left of a group starts from its block of the frozen seed
     with pytest.warns(RuntimeWarning, match=r'left of \[3, 4\]'):
-        QPSetMixin._group_newton(chain, (4,), np.eye(1), None, None, None,
+        QuasiparticleSet._group_newton(chain, (4,), np.eye(1), None, None, None,
                                  of=(3, 4))
     assert [e['orbitals'] for e in chain.qp_hamiltonian_log] == [[3, 4], [4]]
     surface = type('Surface', (), {'qp_hamiltonian_log':
@@ -241,7 +269,7 @@ def test_a_non_finite_group_h_still_refuses_the_step(monkeypatch):
                         lambda e0, amp, d, seed, max_iter=200:
                         (np.full((2, 2), np.nan), max_iter, False))
     with pytest.raises(QuasiparticleRootLost, match='non-finite'):
-        QPSetMixin._group_newton(GroupChain(), (3, 4), np.eye(2), None, None,
+        QuasiparticleSet._group_newton(GroupChain(), (3, 4), np.eye(2), None, None,
                                  None)
 
 
@@ -254,8 +282,17 @@ def test_scf_flags_reach_the_record_once_each():
     assert got == [dict(flag, coords=[[0.0, 0.0, 0.0]])]
 
 
-class Solver(StateFollowingMixin):
-    """A chain on the matrix-free Casida route at state 1, unfollowed."""
+class Solver(StateFollower):
+    """A chain on the matrix-free Casida route at state 1, unfollowed. The chain and its follower in one."""
+
+    @property
+    def chain(self):
+        return self
+
+    @property
+    def follower(self):
+        return self
+
     nocc, nroots, state, track, timer = 1, 3, 1, None, None
     spin, bse_tda, probe, settings, bse_conv_tol = 'singlet', False, False, None, 1e-8
 
@@ -287,7 +324,7 @@ def stuck_davidson(converged, residuals):
 
 def test_a_read_root_left_unconverged_is_kept_warned_and_recorded(
         monkeypatch):
-    import src.gradients.state_following as sf
+    import src.gradients.gwbse.state_following as sf
     monkeypatch.setattr(sf, 'solve_casida_davidson', stuck_davidson(
         [True, False, False], [1e-9, 1e-3, 1e-2]))
     chain = Solver()
@@ -305,7 +342,7 @@ def test_a_read_root_left_unconverged_is_kept_warned_and_recorded(
 
 
 def test_an_unconfirmed_read_root_is_logged(monkeypatch):
-    import src.gradients.state_following as sf
+    import src.gradients.gwbse.state_following as sf
     monkeypatch.setattr(sf, 'solve_casida_davidson', stuck_davidson(
         [False, True, True], [1e-9, 1e-9, 1e-9]))
     chain = Solver()
@@ -320,7 +357,7 @@ def test_a_read_root_both_unconverged_and_unconfirmed_is_logged(monkeypatch):
     (`davidson_unconfirmed`): a read root left unconverged within read_tol
     that an unsettled Ritz pair may lie below is logged as unconfirmed,
     which the merged flag alone could not tell."""
-    import src.gradients.state_following as sf
+    import src.gradients.gwbse.state_following as sf
     stuck = stuck_davidson([True, False, True], [1e-9, 1e-7, 1e-9])
 
     def solve(*args, timings=None, **kw):

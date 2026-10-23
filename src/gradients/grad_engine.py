@@ -31,12 +31,13 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf import grad as _pyscf_grad  # registers mf.Gradients()
 
-from src.Base.constants import DERIV_BLOCK_BYTES, ORBITAL_MULTIPLIER_TOL
-from src.Base.eri_blocks import MOEriBlocks
+from src.Base.numerics.constants import DERIV_BLOCK_BYTES, ORBITAL_MULTIPLIER_TOL
+from src.SingleReference.common.eri_blocks import MOEriBlocks
 from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
 from src.gradients.df_assembly import df_densities, two_electron_skeleton_df
-from src.gradients.isdf_derivatives import (fock_partial_Y,
-                                            fock_partial_skeleton, solve_lambda)
+from src.gradients.mean_field_response import (fock_partial_Y,
+                                               fock_partial_skeleton,
+                                               solve_lambda)
 from src.gradients.multipliers import solve_orbital_multipliers
 from src.gradients.one_electron import one_electron_skeleton
 

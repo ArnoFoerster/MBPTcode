@@ -89,13 +89,13 @@ the W_bar pass (D, S D). Flops per rank 3.2e14 / 1.6e14 against 2.6e15.
 """
 import numpy as np
 
-from src.Base.constants import (BSE_ADJOINT_AUX_ROWS, BSE_ADJOINT_TILE_ROWS,
-                                KAPPA)
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (allgather_ranges, allgather_rows,
-                                     broadcast_rows, contiguous_block,
-                                     current_comm, exchange_blocks, lockstep)
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.constants import (BSE_ADJOINT_AUX_ROWS, BSE_ADJOINT_TILE_ROWS,
+                                         KAPPA)
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, allgather_rows,
+                                              broadcast_rows, contiguous_block,
+                                              current_comm, exchange_blocks, lockstep)
+from src.Base.orbital_spaces import get_occ_virt_indices
 
 #: S = -(H + H^T) as products of blocks of P_T ('P') and of P_T^T ('Q'),
 #: Casida blocks 0 x_m, 1 x_n, 2 y_m, 3 y_n; Tamm-Dancoff keeps x alone.
@@ -342,6 +342,10 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
     nT = len(Ts)
     Tcat = np.concatenate(Ts)                         # (nT n_occ, n_vir)
     s_terms, pbar, pbar_t = S_TERMS[bse_tda], PBAR[bse_tda], PBAR_T[bse_tda]
+    # dOmega_n (m = n) has T_1 = T_0 and T_3 = T_2: a twin's P_T, P_T^T and
+    # Pbar_T blocks are its partner's products of the same operands, so they
+    # are formed once and read twice, the same bits
+    twin = {1: 0, 3: 2} if m == n else {}
     DW = {t: np.matmul(D_t[t], W) for t in grid.mine}   # rows of D W
     AT = {t: np.matmul(Xv_t[t], Tcat.T) for t in grid.mine}
     SD = {t: np.zeros((r, naux)) for t, r in tiles.items()}   # rows of S D
@@ -356,8 +360,9 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
     # Zt, S, one product and one Pbar
     flat = np.empty((2 * nT + 4, edge * edge))
     prod = np.empty(edge * max(naux, no, nv))
+    kept = np.empty(edge * no if twin else 0)     # a partner's Pbar_T X_v T^T
     hold('blocks', flat)
-    hold('block_products', prod)
+    hold('block_products', prod, kept)
 
     def block(i, r, q):
         return flat[i, :r * q].reshape(r, q)
@@ -385,6 +390,9 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
             zt, s, tmp, pair = (block(2 * nT + i, r, q) for i in range(4))
             np.matmul(DW[t], Dc.T, out=zt)                  # Zt block
             for i in range(nT):
+                if i in twin:
+                    P[i], Q[i] = P[twin[i]], Q[twin[i]]
+                    continue
                 cols = slice(i * no, (i + 1) * no)
                 np.matmul(Xo_t[t], ATc[:, cols].T, out=P[i])    # P_T block
                 np.matmul(AT[t][:, cols], Xoc.T, out=Q[i])      # P_T^T block
@@ -402,6 +410,10 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
             np.matmul(s, Dc, out=sd)
             SD[t] += sd
             for i in range(nT):
+                if i in twin:
+                    # its Pbar_T^T X_o is the partner's accumulator itself
+                    Go[t] += kept[:r * no].reshape(r, no)
+                    continue
                 for sources, operand, acc in (
                         (pbar[i], ATc[:, i * no:(i + 1) * no], Go[t]),
                         (pbar_t[i], Xoc, Gv[t][i])):
@@ -412,6 +424,8 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
                     g = product(r, no)
                     np.matmul(pair, operand, out=g)
                     acc += g
+                    if acc is Go[t] and i + 1 in twin:
+                        np.copyto(kept[:r * no].reshape(r, no), g)
     del DW
 
     # this rank's rows of the adjoints; a tile inside the block writes them
@@ -433,8 +447,9 @@ def isdf_bse_backward_rows(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
         np.multiply(Go[t], -w, out=xo_bar)
         for i, T in enumerate(Ts):
             g = product(r, nv)
-            np.matmul(Gv[t][i], T, out=g)
-            g *= w
+            if i not in twin:                   # a twin's is its partner's
+                np.matmul(Gv[t][i], T, out=g)
+                g *= w
             xv_bar -= g
         if c:
             # the bare kernel's adjoint on the same rows

@@ -23,15 +23,16 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
-from src.Base.pyscf_interface import (
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import to_l
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 
 SPLITS = ['vt2', 'l2ft2', 'ft1']   # the surviving C^(2) splits
 
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 
 def _generate():
@@ -39,15 +40,15 @@ def _generate():
     (generated output is not part of the repository) and loaded from there."""
     import importlib.util
     import tempfile
-    from src.CodeGeneration import generate_adcn, sigma_codegen
+    from src.CodeGeneration import codegen_common, generate_adcn, sigma_codegen
     out = tempfile.mkdtemp(prefix='sigma_codegen_')
-    saved = generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR
-    generate_adcn.OUT_DIR = sigma_codegen.OUT_DIR = out
+    saved = codegen_common.ADC_OUT_DIR
+    codegen_common.ADC_OUT_DIR = out
     try:
-        generate_adcn.generate_adc4_base_c2()
-        sigma_codegen.generate_adc4_base_c2_apply()
+        generate_adcn.generate_adc_class_pair(2)
+        sigma_codegen.generate_adc_class_pair_apply(2)
     finally:
-        generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR = saved
+        codegen_common.ADC_OUT_DIR = saved
     mods = []
     for name in ('adc4_c2_blocks', 'adc4_c2_apply_blocks'):
         spec = importlib.util.spec_from_file_location(name, os.path.join(out, 'adc4', name + '.py'))
@@ -78,9 +79,9 @@ def main():
         t1_2, t2_2, t3_2, _ = mpn.compute_order2_amplitudes(t2_1)
         pool = {'f': np.diag(eps), 'g': g, 'kd': np.eye(norb),
                 'o': slice(0, nocc), 'v': slice(nocc, norb), 'no': no, 'nv': nv,
-                't2': t2_1, 'l2': _to_l(t2_1, 2),
-                't1': t1_2, 'l1': _to_l(t1_2, 1),
-                't3': t3_2, 'l3': _to_l(t3_2, 3)}
+                't2': t2_1, 'l2': to_l(t2_1, 2),
+                't1': t1_2, 'l1': to_l(t1_2, 1),
+                't3': t3_2, 'l3': to_l(t3_2, 3)}
         rng = np.random.default_rng(0)
 
         print(f"\n=== {label}  (no={no}, nv={nv}) ===")

@@ -46,26 +46,27 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import (FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                ISDF_HESSIAN_MIN_GRID,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         ISDF_HESSIAN_MIN_GRID,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import (current_comm, distributed, mpi_map,
-                                     run_simulated)
-from src.Base.constants import NUCLEAR_FD_STEP, PIN_CROSS_BLAS_GRADIENT_BAR
-from src.gradients import qp_space_time
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling)
-from src.gradients.state_manifold import StateManifold
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, mpi_map
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.numerics.constants import NUCLEAR_FD_STEP, PIN_CROSS_BLAS_GRADIENT_BAR
+from src.gradients.gwbse import qp_space_time
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling)
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.properties.hessian import numerical_hessian
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.spin_vibronic import spin_vibronic_coupling
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.blas_bar import assert_same_within
 from tests.pins import assert_same
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
@@ -85,9 +86,9 @@ PRODUCTION = SurfaceSpec(GroundState('dft', 'lrc-wpbeh'), environment=None,
                          chi0='space-time', residues='sop', solver='davidson',
                          factorization='isdf',
                          qp_states=QPStates(kind='frontier'),
-                         numerics={'grid_accuracy': 'G1', 'sliced': True,
+                         numerics=numerics_of({'grid_accuracy': 'G1', 'sliced': True,
                                    'fit': 'rows', 'bse_adjoint': 'grid',
-                                   'nroots': 4, 'track': 'overlap'})
+                                   'nroots': 4, 'track': 'overlap'}))
 
 
 def molecule():
@@ -103,7 +104,7 @@ def isdf_lrc(mol):
     base = dft.RKS(mol, xc='lrc-wpbeh')
     base.max_memory = MAX_MEMORY
     counts, n_start = grid('G1')
-    mf = isdf_jk(base, auxbasis=AUX, counts=counts, n_start=n_start)
+    mf = isdf_jk_with_force(base, auxbasis=AUX, counts=counts, n_start=n_start)
     mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
     mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
@@ -116,7 +117,7 @@ def isdf_lrc(mol):
 def isdf_hf_hessian(mol):
     """A cold Hartree-Fock ISDF-K SCF on the Hessian's grid, always run."""
     counts, n_start = grid(ISDF_HESSIAN_MIN_GRID)
-    mf = isdf_jk(scf.RHF(mol), auxbasis=AUX, counts=counts, n_start=n_start)
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=AUX, counts=counts, n_start=n_start)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     return mf
@@ -131,7 +132,7 @@ def declaration(environment):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics=dict(PRODUCTION.numerics))
+                       numerics=PRODUCTION.numerics)
 
 
 def property_block(solvent=None):

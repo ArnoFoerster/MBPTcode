@@ -1,7 +1,7 @@
 """Solvent-screened Coulomb kernel v -> v + vtilde (Duchemin, Jacquemin and
 Blase, J. Chem. Phys. 144, 164106 (2016), doi:10.1063/1.4946778).
 
-src.Base.solvent_screening folds the solvent's reducible polarizability into
+src.environments.solvent_screening folds the solvent's reducible polarizability into
 the Coulomb kernel (the paper's Eqs. (11)-(16)) and hands the result to the two
 places this code gets two-electron integrals from, so every self-energy picks
 it up at once.
@@ -54,20 +54,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (get_two_electron_integrals_chemist,
-                                      get_density_fitting_coefficients,
-                                      get_uhf_spin_orbital_arrays_blockstacked,
-                                      get_uhf_spin_orbital_df_factor_blockstacked)
-from src.Base.solvent_screening import (SolventScreening, attach_solvent_screening,
-                                        detach_solvent_screening,
-                                        solvent_static_selfenergy,
-                                        solvent_dielectrics)
+from src.Base.pyscf.pyscf_interface import (get_two_electron_integrals_chemist,
+                                            get_density_fitting_coefficients,
+                                            get_uhf_spin_orbital_arrays_blockstacked,
+                                            get_uhf_spin_orbital_df_factor_blockstacked)
+from src.environments.solvent_screening import (SolventScreening, attach_solvent_screening,
+                                                detach_solvent_screening,
+                                                solvent_static_selfenergy,
+                                                solvent_dielectrics)
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_matrix
-from src.Base.separable_ri import optimize_atomic_radii
+from src.Base.factorization.separable_ri import optimize_atomic_radii
 
-from src.Base.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
+from src.Base.numerics.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'

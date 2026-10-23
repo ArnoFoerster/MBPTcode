@@ -37,8 +37,8 @@ import numpy as np
 from pyscf import adc, gto, scf
 from pyscf.lib import logger
 
-from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
@@ -68,7 +68,7 @@ def build(basis='cc-pvdz'):
 
 
 def operator(mol, mf, level, frozen=0, df=False, en_dress=None):
-    """The spin-free route's operator, as _solve_spin_free builds it."""
+    """The spin-free route's operator, as solve_spin_free builds it."""
     eps = get_orbital_energies(mf, representation='spatial')[frozen:]
     no = mol.nelectron // 2 - frozen
     act = slice(frozen, None)
@@ -247,7 +247,7 @@ def check_channel_basis():
     """Both channel bases, molecule-free: each orthonormal and inside its flip
     eigenspace, restrict the adjoint of embed, together a basis of the space."""
     try:
-        from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+        from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
     except ImportError as exc:
         return check(False, 'the channel bases exist', str(exc))
     ok = True
@@ -258,7 +258,7 @@ def check_channel_basis():
             n = ee_r_sigma.dimensions(no, nv, level)['nH']
             cols = []
             for sgn in (+1.0, -1.0):
-                embed, restrict, reps = _channel_basis(n, no, nv, level, sgn)
+                embed, restrict, reps = channel_basis(n, no, nv, level, sgn)
                 U = np.column_stack([embed(c) for c in np.eye(len(reps))])
                 FU = np.column_stack([ee_r_sigma.spin_flip_vector(u, no, nv, level)
                                       for u in U.T])

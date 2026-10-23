@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
+from src.Base.numerics.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
 import src.Solvers.qp_equation as qpe
 from src.Solvers.qp_equation import (largest_weight_root, qp_start,
                                      quasiparticle_weight, select_qp_root,
@@ -299,7 +299,7 @@ def test_a_pole_hidden_beside_the_root_is_found():
 
 def test_qp_energy_general_follows_through_the_one_finder():
     """qp_energy_general takes its root from the solver's pole-sum finders
-    and refuses a followed root below the one threshold, no literal cut."""
+    and warns at a followed root below the one threshold, no literal cut."""
     src = inspect.getsource(qb.qp_energy_general)
     assert 'bracketed_root' in src and 'largest_weight_root' in src
     assert 'QP_WINDOW_Z_MIN' in src and '0.2' not in src

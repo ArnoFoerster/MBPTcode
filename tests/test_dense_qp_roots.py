@@ -34,13 +34,14 @@ from pyscf import gto
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.eri_blocks import mo_eri
+from src.SingleReference.common.eri_blocks import mo_eri
 from src.SingleReference.GW.quasi_boson import QPqb, largest_weight_root
-from src.SingleReference.LinearResponse.quasi_boson_bse import BSEqb
-from src.gradients.dense_surfaces import tight_rhf
+from src.SingleReference.BSE.quasi_boson_bse import BSEqb
+from src.gradients.gwbse.dense_surfaces import tight_rhf
 from src.properties.optimize import optimize
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.pins import class_bar
+from tests.dense_qp import dense_max_weight_root
 from tests.test_dense_surfaces import FD_TOL
 
 #: Roots and pole strengths of the two routes: the roots bar of tests/pins.py.
@@ -113,7 +114,7 @@ def test_every_water_orbital_carries_the_supermatrix_quasiparticle():
     qp = bare_quasiparticles(surface.mol0)
     assert surface.qp_set == list(range(surface.mol0.nao))
     for p in surface.qp_set:
-        w, z = qp.solve_diag_dense(p)
+        w, z = dense_max_weight_root(qp, p)
         assert abs(surface.seeds[p] - w) < ROOT_TOL, (p, surface.seeds[p], w)
         assert surface.qp_z[p] == pytest.approx(z, abs=ROOT_TOL), p
 

@@ -22,8 +22,9 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.isdf_jk import ISDFJK, isdf_jk, refuse_isdf_jk_gradient
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.factorization.isdf_jk import ISDFJK, refuse_isdf_jk_gradient
+from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests.isdf_test_grid import g1
 
@@ -36,7 +37,7 @@ STEP_ANGSTROM = 2.5e-4
 
 def mean_field(route, atom=ATOM):
     mf = dft.RKS(gto.M(atom=atom, basis='cc-pvdz', verbose=0), xc='b3lyp')
-    mf = isdf_jk(mf, counts=g1(mf)) if route == 'isdf' else mf.density_fit(auxbasis='cc-pvdz-ri')
+    mf = isdf_jk_with_force(mf, counts=g1(mf)) if route == 'isdf' else mf.density_fit(auxbasis='cc-pvdz-ri')
     mf.grids.prune = None
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
     mf.kernel()
@@ -83,7 +84,8 @@ def test_the_surfaces_that_move_nuclei_now_dispatch_instead():
     """
     import inspect
 
-    from src.gradients import excited_state, factor_chain
+    from src.gradients.gwbse import excited_state
+    from src.gradients.rpa import factor_chain
     for module in (excited_state, factor_chain):
         assert 'refuse_isdf_jk_gradient(' not in inspect.getsource(module), \
             module.__name__

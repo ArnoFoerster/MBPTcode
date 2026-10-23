@@ -19,11 +19,11 @@ import inspect
 import pytest
 from pyscf import gto, scf
 
-from src.Base import constants
-from src.Base.numerics import Numerics
-from src.Base.utils import time_frequency
+from src.Base.numerics import constants
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.grids import time_frequency
 from src.SingleReference.GW import qp_selection, space_time
-from src.SingleReference.LinearResponse import davidson
+from src.SingleReference.BSE import solve as bse_solve
 from tests.isdf_test_grid import g1_kw
 
 H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -32,7 +32,7 @@ RETIRED = {'ntau', 'nfreq', 'npade', 'w0', 'tau_target', 'tile_gb'}
 
 def test_the_entry_points_take_the_object():
     for fn in (space_time.solve_qp_energy_space_time,
-               davidson.isdf_bse_factors):
+               bse_solve.isdf_bse_factors):
         params = inspect.signature(fn).parameters
         assert 'numerics' in params, fn.__name__
         assert not RETIRED & set(params), (fn.__name__,
@@ -64,16 +64,16 @@ def test_the_rebuilt_w_reads_the_solves_quadrature(water, monkeypatch):
     object names, not on `isdf_bse_factors`' own default."""
     mol, mf = water
     asked = []
-    real = davidson.static_screening_grid
+    real = bse_solve.static_screening_grid
 
     def spy(eps, nocc, ntau=None, tau_target=None):
         asked.append((ntau, tau_target))
         return real(eps, nocc, ntau=ntau, tau_target=tau_target)
 
-    monkeypatch.setattr(davidson, 'static_screening_grid', spy)
+    monkeypatch.setattr(bse_solve, 'static_screening_grid', spy)
     numerics = Numerics(bse={'nroots': 2},
                         quadrature={'ntau_w': 10, 'tau_target': 1e-8})
-    davidson.solve_bse_isdf(mf, mol, mol.nelectron // 2, numerics=numerics,
+    bse_solve.solve_bse_isdf(mf, mol, mol.nelectron // 2, numerics=numerics,
                             qp=False, progress=False, **g1_kw(mol, {}))
     assert asked == [(10, 1e-8)]
 
@@ -81,7 +81,7 @@ def test_the_rebuilt_w_reads_the_solves_quadrature(water, monkeypatch):
 def test_a_second_object_in_gw_kwargs_is_refused(water):
     mol, mf = water
     with pytest.raises(TypeError, match='numerics'):
-        davidson.solve_bse_isdf(mf, mol, mol.nelectron // 2, qp=False,
+        bse_solve.solve_bse_isdf(mf, mol, mol.nelectron // 2, qp=False,
                                 progress=False,
                                 gw_kwargs={'numerics': Numerics()},
                                 **g1_kw(mol, {}))

@@ -24,10 +24,10 @@ import warnings
 import pytest
 from pyscf import dft, gto
 
-from src.Base.constants import QP_WINDOW_Z_MIN
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
+from src.environments.solvent_screening import SolventScreening
 from src.gradients.evaluation import geometry_hash
-from src.gradients.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'

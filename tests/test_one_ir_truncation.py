@@ -13,9 +13,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base.constants import IR_EPS
-import src.Base.utils.matsubara as matsubara
-import src.Base.utils.time_frequency as time_frequency
+from src.Base.numerics.constants import IR_EPS
+import src.Base.utils.grids.matsubara as matsubara
+import src.Base.utils.grids.time_frequency as time_frequency
 from tests.pins import assert_same
 
 

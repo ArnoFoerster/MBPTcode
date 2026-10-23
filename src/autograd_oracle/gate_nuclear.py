@@ -28,16 +28,14 @@ from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.data import radii as pyscf_radii
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.geometry import molecule_at
-from src.Base.numerics import Numerics
-from src.Base.constants import (HARTREE_TO_EV, ISDF_FIT_REGULARIZATION, KAPPA,
-                                SURFACE_GRID_ACCURACY)
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.GW.real_screening import residue_set
-from src.SingleReference.GW.qp_states import frozen_scissor
-from src.gradients.excited_state import ExcitedStateChain
-from src.autograd_oracle.frozen import (FrozenConventions, dump,
+from src.Base.geometry.geometry import molecule_at
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_FIT_REGULARIZATION,
+                                         SURFACE_GRID_ACCURACY)
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.autograd_oracle.frozen import (dump, frozen_conventions_of,
                                         shell_table_arrays)
 
 
@@ -104,7 +102,7 @@ def main(argv=None):
             isdf={'basis': BASIS, 'auxbasis': AUX,
                   'counts': resolve_isdf_grid(SURFACE_GRID_ACCURACY, BASIS)[0]}))
     mol, mf = chain.mean_field()
-    nocc, norb = chain.nocc, len(mf.mo_energy)
+    nocc = chain.nocc
     say(f'{"gas phase" if args.gas else "PCM(" + args.solvent + ")"}: {chain.label()}   '
           f'nao {mol.nao}  M {chain.M}  naux {chain.naux}   {time.perf_counter() - t0:.1f} s')
 
@@ -122,32 +120,10 @@ def main(argv=None):
           f'   gradients {time.perf_counter() - t0:.1f} s   nfreq_cd {chain.conventions.nfreq_cd}')
 
     # ------------------------------------------------ frozen many-body conventions
-    om_all, pieces = chain._forward(mol, mf)
-    (_, _, auxmol, crd, x_mo, d, eps, eps_qp_prod, w_aux, cache, xn, yn, mu,
-     d_bare, shift_prod, screening, _) = pieces
-    d_sigma = d if d_bare is None else d_bare
-    states = [int(p) for p in chain.resolved.qp_set]
-    if args.target == 'qp' and qp_orb not in states:
-        states = sorted(set(states) | {qp_orb})
-    xc_set = chain._xc_correction(mf, states, shift_prod)
-    (ws, _, _, _), ro = chain._qp_set_solve(x_mo, d_sigma, eps, mu, xc_set,
-                                            np.zeros(len(states)), states=states)
-    roots = {int(p): float(w) for p, w in zip(states, ws)}
-    z_prod = {int(p): float(z) for p, z in zip(states, ro['z'])}
-    for p, r in ro['routes'].items():
-        if r not in ('explicit', 'none') and residue_set(eps, nocc, roots[p]):
-            sys.exit(f'orbital {p} took the {r!r} residue route; only explicit is ported')
-    shift_vec = np.zeros(norb) if shift_prod is None else np.asarray(shift_prod, float)
-    xc_all = np.asarray(chain._xc_correction(mf, np.arange(norb), shift_vec), float)
-    residues = {p: residue_set(eps, nocc, roots[p]) for p in roots}
-    fz = FrozenConventions(
-        nocc=nocc, mu=mu, states=states, xc_const=xc_all, roots=roots, residues=residues,
-        gw_tau=chain.conventions.gw_grid.tau_points, gw_cosft=chain.conventions.gw_grid.cosft_wt, nu=chain.conventions.nu,
-        wt=chain.conventions.wt, w_tau=chain.w_grid.tau_points, w_cosft=chain.w_grid.cosft_wt,
-        spin_kappa=KAPPA[args.spin], bse_tda=args.tda, state=args.state,
-        outside_window=chain._outside_window(norb),
-        scissor=[frozen_scissor(chain.resolved.outside_shift, p) or 0.0
-                 for p in range(norb)], z_prod=z_prod)
+    fz, sh, _ = frozen_conventions_of(chain, mol, mf, args.target, qp_orb)
+    x_mo, d, d_bare, eps = sh.x_mo, sh.d, sh.d_bare, sh.eps
+    auxmol, crd, states, roots, residues = (sh.auxmol, sh.crd, fz.states,
+                                            fz.roots, fz.residues)
     say(f'window {states}   residues ' + ', '.join(f'{p}:{len(residues[p])}' for p in roots))
 
     # ------------------------------------------------ constants for the torch side
@@ -179,7 +155,7 @@ def main(argv=None):
         pcm = env._pcm
         surf = pcm.surface
         owner = np.concatenate([np.full(p1 - p0, ia) for ia, (p0, p1) in enumerate(surf['gslice_by_atom'])])
-        rad = env._cavity['vdw_scale'] * pyscf_pcm.modified_Bondi + env._cavity['r_probe'] / pyscf_radii.BOHR
+        rad = env.cavity_settings['vdw_scale'] * pyscf_pcm.modified_Bondi + env.cavity_settings['r_probe'] / pyscf_radii.BOHR
         extra.update(cav_owner=owner, cav_normals=surf['norm_vec'], cav_weights=surf['weights'],
                      cav_r_vdw=surf['R_vdw'], cav_xi=surf['charge_exp'],
                      cav_R_J=rad[mol.atom_charges()], cav_R_in_J=surf['R_in_J'],

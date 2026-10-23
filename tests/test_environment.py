@@ -30,19 +30,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df as pyscf_df, gto, qmmm, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import (Environment, NoEnvironment, PointCharges,
-                                  attach_environment, attached_environment,
-                                  dresses_interaction, environment_of)
-from src.Base.numerics import Numerics
-from src.Base.polarizable_sites import PolarizableSites
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        solvent_static_selfenergy)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.environment import PointCharges, dresses_interaction
+from src.Base.environment_seam import Environment, NoEnvironment, attach_environment, attached_environment, environment_of
+from src.Base.numerics.numerics import Numerics
+from src.environments.polarizable_sites import PolarizableSites
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening,
+                                                solvent_static_selfenergy)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
 

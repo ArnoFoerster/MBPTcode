@@ -24,11 +24,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.gradients.conventions import FrozenConventions
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.evaluation import GeometryCache
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_following import ForwardPieces
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_following import CasidaSolution
 from src.properties.optimize import (HAVE_GEOMETRIC, optimize,
                                      optimize_geometric)
 
@@ -73,17 +73,14 @@ def follower():
     return chain
 
 
-def pieces(mol, mf, x):
-    body = [None] * 17
-    body[0], body[1] = mol, mf
-    body[10], body[11] = x, np.zeros_like(x)
-    return ForwardPieces(tuple(body))
+def solution(x):
+    return CasidaSolution(np.arange(x.shape[1], dtype=float), x,
+                          np.zeros_like(x), {})
 
 
 def match(chain, mol, mf, x):
     """(root, weight) of the followed state among the planted roots `x`."""
-    root, _, _ = chain.tracked_root(mol, mf, np.arange(x.shape[1], dtype=float),
-                                    pieces(mol, mf, x))
+    root, _ = chain.tracked_root(mol, mf, None, solution(x))
     return root, chain.follow_log[-1]['weight']
 
 

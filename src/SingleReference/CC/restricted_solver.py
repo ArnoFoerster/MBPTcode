@@ -22,7 +22,8 @@ from .integrals import build_restricted_integrals_from_mf, energy_denominators
 from .generated_restricted import amplitudes_restricted as TR
 from .generated_restricted import lambda_residual_restricted as LR
 from .generated_restricted import d1_blocks_restricted as D1R
-from .diis import DIIS
+from .fixed_point import (TO_L_LAYOUT, iterate, jacobi_step, lambda_denominators,
+                          solve_lambda)
 
 
 def _t_residual_args(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
@@ -36,178 +37,93 @@ def _t_residual_args(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
 
 def kernel_t_restricted(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
                         f_aa, g_aaaa, g_abab, o, v, hf_energy, max_iter=100,
-                        stopping_eps=1e-9, diis_size=8, diis_start_cycle=2, verbose=True):
-    """Iterate the restricted CCSDT T-amplitude equations to convergence."""
+                        stopping_eps=1e-9, diis_size=8, diis_start_cycle=2, verbose=True,
+                        out=None):
+    """Iterate the restricted CCSDT T-amplitude equations to convergence.
+
+    out: optional dict; receives 'converged' and 'n_iter'. Non-convergence
+    warns (fixed_point.CCNotConverged) and returns the last iterate."""
     nv, no = t1_aa.shape
     e_ai, e_abij, e_abcijk = energy_denominators(f_aa, no, nv)
-    fock_e_ai = np.reciprocal(e_ai)
-    fock_e_abij = np.reciprocal(e_abij)
-    fock_e_abcijk = np.reciprocal(e_abcijk)
+    denominators = [(e, np.reciprocal(e)) for e in
+                    (e_ai, e_abij, e_abij, e_abcijk, e_abcijk, e_abcijk)]
 
-    shapes = [t1_aa.shape, t2_aaaa.shape, t2_abab.shape,
-             t3_aaaaaa.shape, t3_aabaab.shape, t3_abbabb.shape]
-    sizes = [int(np.prod(s)) for s in shapes]
+    def energy(ts):
+        return hf_energy + TR.cc_energy_restricted(ts[0], ts[0], ts[1], ts[2], ts[1],
+                                                   f_aa, f_aa, g_aaaa, g_abab, g_aaaa, o, v)
 
-    diis_update = DIIS(diis_size, start_iter=diis_start_cycle)
-    old_vec = np.hstack([t1_aa.ravel(), t2_aaaa.ravel(), t2_abab.ravel(),
-                        t3_aaaaaa.ravel(), t3_aabaab.ravel(), t3_abbabb.ravel()])
+    def step(ts):
+        args = _t_residual_args(*ts, f_aa, g_aaaa, g_abab, o, v)
+        rs = [TR.t1_aa_residual(*args), TR.t2_aaaa_residual(*args), TR.t2_abab_residual(*args),
+              TR.t3_aaaaaa_residual(*args), TR.t3_aabaab_residual(*args),
+              TR.t3_abbabb_residual(*args)]
+        res_norm = (np.linalg.norm(rs[0]) + np.linalg.norm(rs[1]) + np.linalg.norm(rs[2])
+                    + np.linalg.norm(rs[3]) + np.linalg.norm(rs[4]) + np.linalg.norm(rs[5]))
+        return [jacobi_step(r, t, d, fd) for r, t, (d, fd) in zip(rs, ts, denominators)], res_norm
 
-    old_energy = hf_energy + TR.cc_energy_restricted(t1_aa, t1_aa, t2_aaaa, t2_abab, t2_aaaa,
-                                                     f_aa, f_aa, g_aaaa, g_abab, g_aaaa, o, v)
+    old_energy = energy([t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb])
 
-    if verbose:
-        print("    ==> Restricted CCSDT T amplitude equations (DIIS) <==")
-        print("     Iter               Energy                 |dE|                 |dT|")
-
-    for it in range(max_iter):
-        args = _t_residual_args(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
-                                f_aa, g_aaaa, g_abab, o, v)
-        r1 = TR.t1_aa_residual(*args)
-        r2aa = TR.t2_aaaa_residual(*args)
-        r2ab = TR.t2_abab_residual(*args)
-        r3aaa = TR.t3_aaaaaa_residual(*args)
-        r3aab = TR.t3_aabaab_residual(*args)
-        r3abb = TR.t3_abbabb_residual(*args)
-
-        res_norm = (np.linalg.norm(r1) + np.linalg.norm(r2aa) + np.linalg.norm(r2ab)
-                   + np.linalg.norm(r3aaa) + np.linalg.norm(r3aab) + np.linalg.norm(r3abb))
-
-        new_t1 = (r1 + fock_e_ai * t1_aa) * e_ai
-        new_t2aa = (r2aa + fock_e_abij * t2_aaaa) * e_abij
-        new_t2ab = (r2ab + fock_e_abij * t2_abab) * e_abij
-        new_t3aaa = (r3aaa + fock_e_abcijk * t3_aaaaaa) * e_abcijk
-        new_t3aab = (r3aab + fock_e_abcijk * t3_aabaab) * e_abcijk
-        new_t3abb = (r3abb + fock_e_abcijk * t3_abbabb) * e_abcijk
-
-        vec = np.hstack([new_t1.ravel(), new_t2aa.ravel(), new_t2ab.ravel(),
-                        new_t3aaa.ravel(), new_t3aab.ravel(), new_t3abb.ravel()])
-        error_vec = old_vec - vec
-        vec = diis_update.compute_new_vec(vec, error_vec)
-        old_vec = vec
-
-        idx = 0
-        t1_aa = vec[idx:idx + sizes[0]].reshape(shapes[0]); idx += sizes[0]
-        t2_aaaa = vec[idx:idx + sizes[1]].reshape(shapes[1]); idx += sizes[1]
-        t2_abab = vec[idx:idx + sizes[2]].reshape(shapes[2]); idx += sizes[2]
-        t3_aaaaaa = vec[idx:idx + sizes[3]].reshape(shapes[3]); idx += sizes[3]
-        t3_aabaab = vec[idx:idx + sizes[4]].reshape(shapes[4]); idx += sizes[4]
-        t3_abbabb = vec[idx:idx + sizes[5]].reshape(shapes[5]); idx += sizes[5]
-
-        current_energy = hf_energy + TR.cc_energy_restricted(
-            t1_aa, t1_aa, t2_aaaa, t2_abab, t2_aaaa, f_aa, f_aa, g_aaaa, g_abab, g_aaaa, o, v)
+    def is_converged(it, ts, res_norm):
+        nonlocal old_energy
+        current_energy = energy(ts)
         delta_e = np.abs(old_energy - current_energy)
-
         if verbose:
             print("    {: 5d} {: 20.12f} {: 20.12f} {: 20.12f}".format(
-                it, current_energy - hf_energy, delta_e, res_norm))
-
+                it, current_energy - hf_energy, delta_e, res_norm), flush=True)
         if delta_e < stopping_eps and res_norm < stopping_eps:
-            break
+            return True
         old_energy = current_energy
-    else:
-        raise ValueError("Restricted CCSDT T amplitude iterations did not converge")
+        return False
 
-    return t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb
+    if verbose:
+        print("    ==> Restricted CCSDT T amplitude equations (DIIS) <==", flush=True)
+        print("     Iter               Energy                 |dE|                 |dT|", flush=True)
+
+    ts, converged, n_iter = iterate(
+        step, [t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb], is_converged,
+        max_iter, diis_size=diis_size, diis_start_cycle=diis_start_cycle,
+        what='Restricted CCSDT T amplitude iterations')
+    if out is not None:
+        out['converged'], out['n_iter'] = converged, n_iter
+    return tuple(ts)
 
 
 def solve_lambda_ccsdt_restricted(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
                                   f_aa, g_aaaa, g_abab, o, v, max_iter=300,
                                   stopping_eps=1e-8, diis_size=15, diis_start_cycle=2,
-                                  verbose=True):
+                                  verbose=True, out=None):
     """Iterate the restricted full Lambda-CCSDT (Lambda1/Lambda2/Lambda3)
-    equations to convergence."""
+    equations to convergence: the same algorithm as solver.solve_lambda_ccsdt
+    (fixed_point.solve_lambda) over the six spin blocks.
+
+    out: optional dict; receives 'converged' and 'n_iter'. Non-convergence
+    warns (fixed_point.CCNotConverged) and returns the last iterate."""
     nv, no = t1_aa.shape
     e_ai, e_abij, e_abcijk = energy_denominators(f_aa, no, nv)
-    fock_e_ai = np.reciprocal(e_ai)
-    fock_e_abij = np.reciprocal(e_abij)
-    fock_e_abcijk = np.reciprocal(e_abcijk)
-    le_ai = e_ai.transpose(1, 0)
-    lfock_e_ai = fock_e_ai.transpose(1, 0)
-    le_abij = e_abij.transpose(2, 3, 0, 1)
-    lfock_e_abij = fock_e_abij.transpose(2, 3, 0, 1)
-    le_abcijk = e_abcijk.transpose(3, 4, 5, 0, 1, 2)
-    lfock_e_abcijk = fock_e_abcijk.transpose(3, 4, 5, 0, 1, 2)
+    to_l = TO_L_LAYOUT
+    ranks = (1, 2, 2, 3, 3, 3)
+    denominators = lambda_denominators(ranks, e_ai, e_abij, e_abcijk)
 
     # standard CC-Lambda starting point
-    l1_aa = t1_aa.transpose(1, 0).copy()
-    l2_aaaa = t2_aaaa.transpose(2, 3, 0, 1).copy()
-    l2_abab = t2_abab.transpose(2, 3, 0, 1).copy()
-    l3_aaaaaa = t3_aaaaaa.transpose(3, 4, 5, 0, 1, 2).copy()
-    l3_aabaab = t3_aabaab.transpose(3, 4, 5, 0, 1, 2).copy()
-    l3_abbabb = t3_abbabb.transpose(3, 4, 5, 0, 1, 2).copy()
+    t_blocks = (t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb)
+    l_blocks = [t.transpose(to_l[r]).copy() for t, r in zip(t_blocks, ranks)]
 
-    shapes = [l1_aa.shape, l2_aaaa.shape, l2_abab.shape,
-             l3_aaaaaa.shape, l3_aabaab.shape, l3_abbabb.shape]
-    sizes = [int(np.prod(s)) for s in shapes]
-    diis_update = DIIS(diis_size, start_iter=diis_start_cycle)
-    old_vec = np.hstack([l1_aa.ravel(), l2_aaaa.ravel(), l2_abab.ravel(),
-                        l3_aaaaaa.ravel(), l3_aabaab.ravel(), l3_abbabb.ravel()])
+    t_args = _t_residual_args(*t_blocks, f_aa, g_aaaa, g_abab, o, v)
+    residual_fns = (LR.l1_aa_residual, LR.l2_aaaa_residual, LR.l2_abab_residual,
+                    LR.l3_aaaaaa_residual, LR.l3_aabaab_residual, LR.l3_abbabb_residual)
 
-    if verbose:
-        print("    ==> Restricted Lambda-CCSDT amplitude equations (DIIS) <==")
-        print("     Iter          |dL1|          |dL2aa|        |dL2ab|        "
-              "|dL3aaa|       |dL3aab|       |dL3abb|")
-
-    t_args = (t1_aa, t1_aa, t2_aaaa, t2_abab, t2_aaaa,
-             t3_aaaaaa, t3_aabaab, t3_abbabb, t3_aaaaaa,
-             f_aa, f_aa, g_aaaa, g_abab, g_aaaa, o, v)
-
-    for it in range(max_iter):
+    def residuals(ls):
+        l1_aa, l2_aaaa, l2_abab, l3_aaaaaa, l3_aabaab, l3_abbabb = ls
         l_args = t_args + (l1_aa, l1_aa, l2_aaaa, l2_abab, l2_aaaa,
                           l3_aaaaaa, l3_aabaab, l3_abbabb, l3_aaaaaa)
-        r1 = LR.l1_aa_residual(*l_args).transpose(1, 0)
-        r2aa = LR.l2_aaaa_residual(*l_args).transpose(2, 3, 0, 1)
-        r2ab = LR.l2_abab_residual(*l_args).transpose(2, 3, 0, 1)
-        r3aaa = LR.l3_aaaaaa_residual(*l_args).transpose(3, 4, 5, 0, 1, 2)
-        r3aab = LR.l3_aabaab_residual(*l_args).transpose(3, 4, 5, 0, 1, 2)
-        r3abb = LR.l3_abbabb_residual(*l_args).transpose(3, 4, 5, 0, 1, 2)
+        return [fn(*l_args).transpose(to_l[r]) for fn, r in zip(residual_fns, ranks)]
 
-        l1_new = (r1 + lfock_e_ai * l1_aa) * le_ai
-        l2aa_new = (r2aa + lfock_e_abij * l2_aaaa) * le_abij
-        l2ab_new = (r2ab + lfock_e_abij * l2_abab) * le_abij
-        l3aaa_new = (r3aaa + lfock_e_abcijk * l3_aaaaaa) * le_abcijk
-        l3aab_new = (r3aab + lfock_e_abcijk * l3_aabaab) * le_abcijk
-        l3abb_new = (r3abb + lfock_e_abcijk * l3_abbabb) * le_abcijk
-
-        d1 = np.linalg.norm(l1_new - l1_aa)
-        d2aa = np.linalg.norm(l2aa_new - l2_aaaa)
-        d2ab = np.linalg.norm(l2ab_new - l2_abab)
-        d3aaa = np.linalg.norm(l3aaa_new - l3_aaaaaa)
-        d3aab = np.linalg.norm(l3aab_new - l3_aabaab)
-        d3abb = np.linalg.norm(l3abb_new - l3_abbabb)
-
-        vec = np.hstack([l1_new.ravel(), l2aa_new.ravel(), l2ab_new.ravel(),
-                        l3aaa_new.ravel(), l3aab_new.ravel(), l3abb_new.ravel()])
-        error_vec = old_vec - vec
-        try:
-            vec = diis_update.compute_new_vec(vec, error_vec)
-        except np.linalg.LinAlgError:
-            # tiny systems can converge so fast the DIIS error vectors become
-            # exactly degenerate (singular B-matrix) -- fall back to the
-            # undamped update for this step rather than crashing (same
-            # fallback as solver.py's generalized solve_lambda_ccsdt).
-            pass
-        old_vec = vec
-
-        idx = 0
-        l1_aa = vec[idx:idx + sizes[0]].reshape(shapes[0]); idx += sizes[0]
-        l2_aaaa = vec[idx:idx + sizes[1]].reshape(shapes[1]); idx += sizes[1]
-        l2_abab = vec[idx:idx + sizes[2]].reshape(shapes[2]); idx += sizes[2]
-        l3_aaaaaa = vec[idx:idx + sizes[3]].reshape(shapes[3]); idx += sizes[3]
-        l3_aabaab = vec[idx:idx + sizes[4]].reshape(shapes[4]); idx += sizes[4]
-        l3_abbabb = vec[idx:idx + sizes[5]].reshape(shapes[5]); idx += sizes[5]
-
-        if verbose:
-            print(f"     {it:4d}   {d1:.3e}      {d2aa:.3e}      {d2ab:.3e}      "
-                 f"{d3aaa:.3e}      {d3aab:.3e}      {d3abb:.3e}")
-
-        if (d1 < stopping_eps and d2aa < stopping_eps and d2ab < stopping_eps
-               and d3aaa < stopping_eps and d3aab < stopping_eps and d3abb < stopping_eps):
-            break
-    else:
-        raise ValueError("Restricted Lambda-CCSDT iterations did not converge")
-
-    return l1_aa, l2_aaaa, l2_abab, l3_aaaaaa, l3_aabaab, l3_abbabb
+    ls, converged, n_iter = solve_lambda(
+        residuals, l_blocks, denominators, ['L1', 'L2aa', 'L2ab', 'L3aaa', 'L3aab', 'L3abb'],
+        max_iter, stopping_eps, diis_size, diis_start_cycle, verbose, 'Restricted Lambda-CCSDT')
+    if out is not None:
+        out['converged'], out['n_iter'] = converged, n_iter
+    return tuple(ls)
 
 
 def ccsdt_one_rdm_restricted(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
@@ -237,10 +153,12 @@ def ccsdt_one_rdm_restricted(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_a
 
 
 def solve_ccsdt_1rdm_restricted_from_ints(ints, t_stopping_eps=1e-9, l_stopping_eps=1e-8,
-                                          max_iter=300, verbose=True):
+                                          max_iter=300, verbose=True, out=None):
     """Core restricted solve: given the integral dict from
     build_restricted_integrals_from_mf, converge T-CCSDT, full Lambda-CCSDT,
-    and assemble the spatial 1-RDM."""
+    and assemble the spatial 1-RDM.
+
+    out: optional dict; receives 't_converged' and 'lambda_converged'."""
     f_aa, g_aaaa, g_abab = ints['f_aa'], ints['g_aaaa'], ints['g_abab']
     nocc, nvir = ints['nocc'], ints['nvir']
     o, v = ints['o'], ints['v']
@@ -252,15 +170,19 @@ def solve_ccsdt_1rdm_restricted_from_ints(ints, t_stopping_eps=1e-9, l_stopping_
     t3_aabaab = np.zeros((nvir, nvir, nvir, nocc, nocc, nocc))
     t3_abbabb = np.zeros((nvir, nvir, nvir, nocc, nocc, nocc))
 
+    t_out, l_out = {}, {}
     t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb = kernel_t_restricted(
         t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
         f_aa, g_aaaa, g_abab, o, v, ints['hf_energy'],
-        max_iter=max_iter, stopping_eps=t_stopping_eps, verbose=verbose)
+        max_iter=max_iter, stopping_eps=t_stopping_eps, verbose=verbose, out=t_out)
 
     l1_aa, l2_aaaa, l2_abab, l3_aaaaaa, l3_aabaab, l3_abbabb = solve_lambda_ccsdt_restricted(
         t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
         f_aa, g_aaaa, g_abab, o, v,
-        max_iter=max_iter, stopping_eps=l_stopping_eps, verbose=verbose)
+        max_iter=max_iter, stopping_eps=l_stopping_eps, verbose=verbose, out=l_out)
+    if out is not None:
+        out['t_converged'] = t_out['converged']
+        out['lambda_converged'] = l_out['converged']
 
     opdm = ccsdt_one_rdm_restricted(t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab, t3_abbabb,
                                     l1_aa, l2_aaaa, l2_abab, l3_aaaaaa, l3_aabaab, l3_abbabb, o, v)
@@ -271,8 +193,9 @@ def compute_ccsdt_density_matrix_restricted(mf, symmetrize=True, **kwargs):
     """Restricted CCSDT AO-basis 1-RDM from an already-converged, closed-shell
     spin-restricted pyscf mean-field object. Mirrors pipeline.py's
     compute_ccsdt_density_matrix, but via the restricted (spin-blocked)
-    T-CCSDT + Lambda-CCSD(T3-informed) pipeline instead of full generalized
-    spin-orbital CCSDT."""
+    T-CCSDT + full Lambda-CCSDT pipeline instead of full generalized
+    spin-orbital CCSDT. kwargs go to solve_ccsdt_1rdm_restricted_from_ints
+    (including out= for the convergence flags)."""
     ints = build_restricted_integrals_from_mf(mf)
     opdm, _ = solve_ccsdt_1rdm_restricted_from_ints(ints, **kwargs)
     dm_ao = ints['mo_coeff'] @ opdm @ ints['mo_coeff'].T

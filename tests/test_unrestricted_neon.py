@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 
 def run_tests():
     # Setup Neon atom

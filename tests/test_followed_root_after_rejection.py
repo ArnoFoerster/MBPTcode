@@ -14,7 +14,7 @@ import numpy as np
 from pyscf import gto
 
 from src.properties.optimize import optimize
-from src.properties.surface import followed_root
+from src.gradients.surface import followed_root
 
 class Crossing:
     """A walked state whose root changes off the start and whose energy rises

@@ -81,19 +81,20 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base import constants
-from src.Base.environment import PointCharges
-from src.Base.fragment_localization import FragmentOrbitals
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.fragment_diabatic import (DiabaticGradient, DiabaticSurface,
-                                             linear_vibronic_coupling)
-from src.properties import fragment_bse
-from src.properties.diabatic import displaced_along, diabatic_derivative, step_ladder
+from src.Base.numerics import constants
+from src.environments.environment import PointCharges
+from src.fragments.localization import FragmentOrbitals
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.fragment_diabatic import DiabaticGradient, DiabaticSurface
+from src.gradients.gwbse import fragment_bse
+from src.Base.geometry.geometry import displaced
+from src.properties.diabatic import (derivative_ladder, diabatic_derivative,
+                                     linear_vibronic_coupling)
 from tests.isdf_test_grid import g1
-from src.gradients.bse_isdf import bse_solve
-from src.properties.fragment_bse import (BSEOperator, FeshbachOracle,
+from src.gradients.gwbse.bse_isdf import bse_solve
+from src.gradients.gwbse.fragment_bse import (BSEOperator, FeshbachOracle,
                                          FragmentPartition, to_local)
-from src.Base.numerics import numerics_of
+from src.Base.numerics.numerics import numerics_of
 
 ETHYLENE = [('C', (0, 0, 0.667)), ('C', (0, 0, -0.667)),
             ('H', (0, 0.923, 1.238)), ('H', (0, -0.923, 1.238)),
@@ -275,9 +276,9 @@ def test_root_gradient_is_the_supermolecular_root_gradient(chain, operator):
 
 def test_element_gradients_match_finite_differences(chain, gradient):
     direction = random_direction(chain.mol0.natm, 7)
-    ladder = step_ladder(chain, FRAGMENTS, SITES, direction,
-                         omega0=gradient.partition.omega0,
-                         steps=(1e-3, 5e-4))
+    ladder = derivative_ladder(chain, FRAGMENTS, SITES, direction,
+                               omega0=gradient.partition.omega0,
+                               steps=(1e-3, 5e-4))
     fd = ladder['richardson'][-1]
     scale = np.abs(fd).max()
     for a, b in ((0, 0), (1, 1), (0, 1)):
@@ -314,8 +315,8 @@ def test_charge_transfer_diabat_surface_gradient(charged_chain):
     mol0 = charged_chain.mol0
 
     def central(h):
-        return (surf.total_energy(displaced_along(mol0, direction, h))
-                - surf.total_energy(displaced_along(mol0, direction, -h))) / (2 * h)
+        return (surf.total_energy(displaced(mol0, h * direction))
+                - surf.total_energy(displaced(mol0, -h * direction))) / (2 * h)
     # Richardson over (1e-3, 5e-4): a single central difference leaves an h^2
     # error of a few 1e-5 relative on a direction where the slope is small
     fd = (4.0 * central(5e-4) - central(1e-3)) / 3.0

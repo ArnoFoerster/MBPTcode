@@ -21,19 +21,19 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base.constants import ISDF_ORBITAL_RESIDUAL_TOL
-from src.Base.isdf_jk import canonical_basis, solve_in_span
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (UnrepresentedOrbitals,
-                                   aux_metric_sqrt, orbital_density_residual,
-                                   refuse_unrepresented_factors,
-                                   shipped_radii_lookup)
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import ISDF_ORBITAL_RESIDUAL_TOL
+from src.Base.factorization.isdf_jk import canonical_basis, solve_in_span
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import (UnrepresentedOrbitals,
+                                                 aux_metric_sqrt, orbital_density_residual,
+                                                 refuse_unrepresented_factors,
+                                                 shipped_radii_lookup)
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (separable_factors,
                                                 unrefused_separable_factors)
-from src.SingleReference.LinearResponse.bse import solve_bse
-from src.gradients.excited_state import ExcitedStateChain
+from src.SingleReference.BSE.solve import solve_bse
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
 

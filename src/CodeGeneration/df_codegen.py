@@ -1,7 +1,7 @@
 """Density-fitting (DF/RI) term-rewrite pass: replaces every bare bracket
 integral factor <p,q||r,s>(_ssss) in a pdaggerq raw-term list with its RI
 expansion in terms of a 3-index auxiliary factor B_Q,pq, so the resulting
-terms feed unmodified into src/Base/pdaggerq_interface.py::raw_terms_to_einsum
+terms feed unmodified into src/CodeGeneration/pdaggerq_interface.py::raw_terms_to_einsum
 -- exactly the "no new codegen logic downstream" pattern
 laplace_codegen.py::fuse_amplitude_into_consumer uses for the amplitude side
 (Phase 0 of the DF rewrite).
@@ -35,7 +35,7 @@ and are NOT handled specially here.
 import re
 from itertools import product
 
-from src.Base.pdaggerq_interface import exact_coefficient
+from src.CodeGeneration.pdaggerq_interface import exact_coefficient
 
 _AUX_POOL = 'QRSTUVWXYZ'
 
@@ -102,7 +102,7 @@ def dress_integral_factor(raw_terms):
             if spins is None:
                 p_spin = q_spin = s_spin = None
             else:
-                p_spin, q_spin, r_spin, s_spin = spins[0], spins[1], spins[2], spins[3]
+                p_spin, q_spin, s_spin = spins[0], spins[1], spins[3]
             b_p, b_q = _b_name(p_spin), _b_name(q_spin)
 
             choices = [(1.0, [f"{b_p}({Q},{p},{r})", f"{b_q}({Q},{q},{s})"])]

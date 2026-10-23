@@ -1,7 +1,7 @@
 """Self-consistent state-specific solvation of GW-BSE states:
-`src.gradients.gwbse_state_model.GWBSEState` in the medium-independent loop
-(`src.Base.solvation_loop`) against the continuum adapter
-(`src.Base.reaction_field.ContinuumField`), with the gates and bars of the
+`src.gradients.gwbse.state_model.GWBSEState` in the medium-independent loop
+(`src.environments.solvation_loop`) against the continuum adapter
+(`src.environments.reaction_field.ContinuumField`), with the gates and bars of the
 ADC(2) twin (test_solvation_loop, test_solvation_force,
 test_solvation_gas_limit, test_solvation_loop_checkpoint).
 
@@ -90,21 +90,21 @@ from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
                                                 '..')))
-from src.Base import solvation_loop as sl
-from src.Base.environment import solvent_scheme
-from src.Base.geometry import molecule_at
-from src.Base.chain_settings import with_setting
-from src.Base.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_MEV,
-                                REFREEZE_TOL_MEV)
-from src.Base.numerics import Numerics
-from src.Base.reaction_field import ContinuumField, NoMedium
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.gwbse_state_model import GWBSEState
+from src.environments import solvation_loop as sl
+from src.environments.environment import solvent_scheme
+from src.Base.geometry.geometry import molecule_at
+from src.gradients.rpa.chain_settings import with_setting
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_MEV,
+                                         REFREEZE_TOL_MEV)
+from src.Base.numerics.numerics import Numerics
+from src.environments.reaction_field import ContinuumField, NoMedium
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_model import GWBSEState
 from src.properties.optimize import relax
-from src.properties.solvated_surface import SolvatedSurface
-from src.properties.surface import commit
+from src.gradients.solvated_surface import SolvatedSurface
+from src.gradients.surface import commit
 from tests.adc_common import (FD_STEP_SOLVATION, Stop, central, five_point,
                               stop_after)
 from tests.isdf_test_grid import g1

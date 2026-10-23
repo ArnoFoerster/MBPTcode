@@ -52,21 +52,22 @@ import scipy.linalg
 from pyscf import scf
 from pyscf.scf import diis as scf_diis
 
-from src.Base.constants import (DEFAULT_BROADENING_ETA, EVGW_MAX_CYCLE, EVGW_TOL,
-                                HARTREE_TO_EV, QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE,
-                                QSGW_DM_TOL, QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
-                                get_method_info)
-from src.Base.environment import environment_of
-from src.Base.pyscf_interface import get_density_fitting_coefficients
+from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, EVGW_MAX_CYCLE, EVGW_TOL,
+                                         HARTREE_TO_EV, QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE,
+                                         QSGW_DM_TOL, QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
+                                         get_method_info)
+from src.Base.environment_seam import environment_of
+from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
+from src.SingleReference.GW.evGW import SCREENINGS
 from src.SingleReference.GW.reaction_field import (continuum_operator,
                                                    dressed_factors)
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
-#: What the iterate screens: the Casida problem rebuilt from it (qsGW), or the
-#: mean field's kept and only the amplitudes and poles moved (qsGW0).
-SCREENINGS = ('updated', 'fixed')
+# SCREENINGS (evGW's): what the iterate screens, the Casida problem rebuilt
+# from it (qsGW, 'updated'), or the mean field's kept and only the
+# amplitudes and poles moved (qsGW0, 'fixed').
 #: How the AO Hamiltonian is mixed between cycles: PySCF's CDIIS, or linear
 #: mixing, Kaplan et al.'s H <- lambda H_new + (1 - lambda) S C diag(eps) C^T S.
 MIXINGS = ('diis', 'linear')
@@ -80,7 +81,7 @@ def _rpa_spectrum(eps, coeff, nocc, eta, tda, unrestricted=False):
                               coeff_df=tuple(coeff) if unrestricted else coeff,
                               spin_mode='unrestricted' if unrestricted
                               else 'restricted', eta=eta)
-    spectrum = qp_energy._casida_spectrum(lr, nocc, 'RPA', None, tda,
+    spectrum = qp_energy.casida_spectrum(lr, nocc, 'RPA', None, tda,
                                           {'GW': get_method_info('GW')}, ['GW'],
                                           unrestricted, True)
     return spectrum, lr
@@ -232,7 +233,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         raise ValueError(f'converge_on={tested.tolist()}: name one orbital or more, '
                          f'each an index 0 to {nmo - 1} of the spectrum')
 
-    workers = qp_energy._resolve_workers(n_workers, nocc * (nmo - nocc))
+    workers = qp_energy.resolve_workers(n_workers, nocc * (nmo - nocc))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
     mf_hf = scf.RHF(mol)
@@ -254,7 +255,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         spectrum, lr0 = _rpa_spectrum(eps0, coeff0, nocc, eta, tda)
         omega, X, Y = spectrum['singlet']
         rho = SelfEnergySolver(eps0, df_coeff=coeff0, spin_mode='restricted',
-                               eta=eta)._rho_a_df(nocc, X, Y)
+                               eta=eta).rho_a_df(nocc, X, Y)
         w_aux = lr0.static_screening_aux(nocc)
         # the loop needs omega and rho only; X and Y are nexciton x nocc nvirt
         del lr0, X, Y
@@ -277,7 +278,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             spectrum = None
             spectrum, _ = _rpa_spectrum(eps, coeff, nocc, eta, tda)
             omega, X, Y = spectrum['singlet']
-            rho = se._rho_a_df(nocc, X, Y)
+            rho = se.rho_a_df(nocc, X, Y)
             del X, Y
             spectrum = spectrum if keep_spectrum else None
         # Sigma~ in the current MO basis, then to the AO basis: C^-1 = C^T S
@@ -384,7 +385,7 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
         raise ValueError(f'converge_on={converge_on!r}: name one flattened '
                          f'(channel, orbital) index 0 to {2 * nmo - 1} or more')
 
-    workers = qp_energy._resolve_workers(
+    workers = qp_energy.resolve_workers(
         n_workers, sum(n * (nmo - n) for n in noccs))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
@@ -407,7 +408,7 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
         omega, X, Y = spectrum['singlet']
         rho = SelfEnergySolver(tuple(eps), df_coeff=tuple(coeffs),
                                spin_mode='unrestricted',
-                               eta=eta)._rho_a_df(noccs, X, Y)
+                               eta=eta).rho_a_df(noccs, X, Y)
         return spectrum, lr, omega, rho
 
     def static_screening(eps, coeffs):

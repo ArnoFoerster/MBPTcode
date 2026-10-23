@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import ao2mo, gto, scf
 
-from src.Base.constants import METHOD_REGISTRY
+from src.Base.numerics.constants import METHOD_REGISTRY
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -135,7 +135,7 @@ def check_psd2_is_the_eh_pair(r):
     nelec = r['mf'].nelec
     om, X, Y = CasidaSolver(r['A'], r['B']).solve(tda=True)
     infos = {'PSD2': METHOD_REGISTRY['PSD2']}
-    spectrum = qp_energy._casida_spectrum(r['lr'], nelec, 'TDHF', None, True, infos,
+    spectrum = qp_energy.casida_spectrum(r['lr'], nelec, 'TDHF', None, True, infos,
                                           ['PSD2'], True, False)
     es, no = r['es'], r['no']
     for spin_channel, s in (('alpha', 0), ('beta', 1)):

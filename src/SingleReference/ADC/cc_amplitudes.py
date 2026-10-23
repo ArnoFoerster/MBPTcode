@@ -46,7 +46,7 @@ def _ccd_class(base):
 CC_METHODS = ('ccsd', 'ccd')
 
 
-def _run_cc(mf, method, frozen, **cc_opts):
+def run_cc(mf, method, frozen, **cc_opts):
     """Converged pyscf RHF-based CCSD or CCD object; cc_opts are set on it.
     The CC class is the one pyscf.cc.CCSD dispatches to for this mean field,
     so a density-fitted mf gives DF-CCSD/DF-CCD. t1 is exactly zero for CCD."""
@@ -72,7 +72,7 @@ def ccd_t2_restricted(mf, return_energy=False, **cc_opts):
     """t2[i,j,a,b], the alpha-beta amplitude of a converged all-electron CCD
     on an RHF mean field (DF-CCD for a density-fitted mf); cc_opts are set on
     the pyscf CC object."""
-    mycc = _run_cc(mf, 'ccd', None, **cc_opts)
+    mycc = run_cc(mf, 'ccd', None, **cc_opts)
     t2 = np.asarray(mycc.t2)
     return (t2, mycc.e_corr) if return_energy else t2
 

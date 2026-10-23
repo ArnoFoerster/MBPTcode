@@ -28,7 +28,7 @@ WHAT EACH GATE IS FOR:
   weight, against the same contraction of displaced solves: the ground-state
   coupling is one weight of it, the fragment localization response another
   that is no amplitude at all.
-- `kernel_pieces` is the forward before the Casida step, and the fold to the
+- `shared_forward` is the forward before the Casida step, and the fold to the
   nuclei reads nothing the roots carry: a force folded off it equals the one
   folded off the full forward.
 """
@@ -41,20 +41,22 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import AMU_TO_ME, NUCLEAR_FD_STEP
-from src.gradients.bse_isdf import bse_blocks, bse_solve, interstate_backward
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling,
-                                               canonical_overlap_derivative,
-                                               configuration_coupling,
-                                               ov_coupling,
-                                               state_to_state_density)
-from src.gradients.excited_state import ExcitedStateChain
-from src.properties import rates, vibronic
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import AMU_TO_ME, NUCLEAR_FD_STEP
+from src.gradients.gwbse.bse_isdf import bse_blocks, bse_solve, interstate_backward
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling,
+                                                     canonical_overlap_derivative,
+                                                     configuration_coupling,
+                                                     ov_coupling,
+                                                     state_to_state_density)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.photophysics import rates
+from src.properties import vibronic
+from src.properties import franck_condon
 from src.properties.nonadiabatic import (derivative_couplings,
                                          translational_sum)
-from src.properties.spin_orbit import EXCITED_SPIN_FACTOR
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
 
@@ -196,8 +198,8 @@ def test_configuration_term_z_vector_matches_displaced_solves(chain):
     virtuals and is exactly what the symmetric-gauge form throws away.
     """
     mol, mf = chain.mean_field()
-    _, pieces = chain._forward(mol, mf)
-    xn, yn, nocc = pieces[10], pieces[11], chain.nocc
+    solution = chain.forward(mol, mf)[1]
+    xn, yn, nocc = solution.x, solution.y, chain.nocc
     goo, gvv = state_to_state_density(nocc, xn[:, 0], yn[:, 0],
                                       xn[:, 1], yn[:, 1])
     ana = configuration_coupling(mol, mf, nocc, goo, gvv)
@@ -240,29 +242,29 @@ def test_ov_coupling_matches_displaced_solves(chain):
     assert np.abs(ana - num).max() < 1e-7 * np.abs(num).max()
 
 
-def test_kernel_pieces_are_the_forward_before_the_casida_step(chain):
-    """`kernel_pieces` holds `_forward`'s pieces with no roots, and the fold
-    to the nuclei reads nothing the roots carry: the excitation force folded
-    off it equals the one folded off the full forward.
+def test_the_shared_forward_is_the_forward_before_the_casida_step(chain):
+    """`shared_forward` is `forward`'s `SharedForward` built again with no
+    roots, and the fold to the nuclei reads nothing the roots carry: the
+    excitation force folded off it equals the one folded off the full
+    forward.
 
-    The fragment-diabatic gradients fold their own seeds off these pieces,
+    The fragment-diabatic gradients fold their own seeds off this forward,
     one fold per element, so the tape is kept (`release_tape=False`).
     """
     mol, mf = chain.mean_field()
-    _, full = chain._forward(mol, mf)
-    kern = chain.kernel_pieces(mol, mf)
-    assert len(kern) == len(full) == 17
-    assert kern[9] == {} and kern[10] is None and kern[11] is None
+    full, solution = chain.forward(mol, mf)
+    kern = chain.shared_forward(mol, mf)
     # built again, not read back: the factors, eps, eps^QP, W and mu to a
     # few ulp (the quasiparticle roots are solved a second time)
-    for k in (4, 5, 6, 7, 8, 12):
-        assert_same(np.asarray(kern[k], float), np.asarray(full[k], float),
-                    quantity='root', label=k)
+    for name in ('x_mo', 'd', 'eps', 'eps_qp', 'w_aux', 'mu'):
+        assert_same(np.asarray(getattr(kern, name), float),
+                    np.asarray(getattr(full, name), float),
+                    quantity='root', label=name)
     # the fold consumes x_bar and d_bar, so each fold gets its own seeds
-    ref = chain._fold_to_nuclei(full, *chain._casida_seeds(full, 0),
-                                release_tape=False)[0]
-    got = chain._fold_to_nuclei(kern, *chain._casida_seeds(full, 0),
-                                release_tape=False)[0]
+    ref = chain.reverse.fold_to_nuclei(full, *chain.follower._casida_seeds(full, solution, 0),
+                               release_tape=False)[0]
+    got = chain.reverse.fold_to_nuclei(kern, *chain.follower._casida_seeds(full, solution, 0),
+                               release_tape=False)[0]
     assert np.abs(got - ref).max() <= 1e-12 * np.abs(ref).max()
 
 
@@ -341,9 +343,9 @@ def test_translational_sum_rule(chain):
     coupling, a different object.
     """
     mol, mf = chain.mean_field()
-    _, pieces = chain._forward(mol, mf)
-    ref = translational_sum(mol, mf.mo_coeff, chain.nocc, pieces[10],
-                            pieces[11], states=(0, 1, 2))
+    solution = chain.forward(mol, mf)[1]
+    ref = translational_sum(mol, mf.mo_coeff, chain.nocc, solution.x,
+                            solution.y, states=(0, 1, 2))
     for n in (0, 1, 2):
         d, _ = analytic_ground_coupling(chain, n)
         assert np.abs(d.sum(axis=0) - ref[0, 1 + n]).max() < 1e-10
@@ -366,7 +368,7 @@ def test_internal_conversion_rate_plumbing():
     s_vib, w_vib = s_k[1:], omega[1:]
 
     def rho(de):
-        return rates.fc_weighted_dos(de, s_vib, w_vib, 300.0,
+        return franck_condon.fc_weighted_dos(de, s_vib, w_vib, 300.0,
                                      lambda_classical=0.002)
 
     with pytest.raises(ValueError, match='imaginary'):

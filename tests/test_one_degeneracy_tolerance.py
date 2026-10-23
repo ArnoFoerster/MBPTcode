@@ -14,11 +14,11 @@ from dataclasses import fields
 
 import numpy as np
 
-import src.Base.constants as constants
-from src.Base.numerics import Numerics
-from src.Base.numerics import QPNumerics
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+import src.Base.numerics.constants as constants
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import QPNumerics
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 
 #: Ha: three orbital energies, 1 and 2 two-thirds of the separation apart
 EPS = np.array([-0.5, 0.1, 0.1, 0.3])
@@ -46,7 +46,7 @@ def test_the_set_blocks_read_the_one_separation():
         ch.conventions = FrozenConventions(qp_set=np.arange(len(eps)))
         ch.qp_hamiltonian = False
         ch.degeneracy_tol = tol
-        ch._block_shared(eps, eps + OWN)
+        ch.quasiparticles._block_shared(eps, eps + OWN)
         assert ch.resolved.qp_blocks[1] == blocks, tol
         rec = ch.conventions.qp_block_record
         assert rec['energy_tol_Ha'] == tol

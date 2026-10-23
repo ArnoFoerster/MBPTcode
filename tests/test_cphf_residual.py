@@ -1,4 +1,4 @@
-"""The orbital-response solve (src.Base.utils.cphf) reaches its true residual,
+"""The orbital-response solve (src.Base.pyscf.cphf) reaches its true residual,
 and the relaxed densities built on it reach the finite field.
 
   1. RHF, water 6-31G: the CPHF equation of a random right-hand side solved
@@ -30,8 +30,8 @@ import numpy as np
 from pyscf import gto, mp, scf
 from pyscf.scf import cphf as pyscf_cphf
 
-from src.Base.numerics import Numerics
-from src.Base.utils import cphf
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf import cphf
 from src.SingleReference.DensityMatrix import density_matrix as dmm
 from tests.adc_common import WATER_C2V, check, converge_newton
 

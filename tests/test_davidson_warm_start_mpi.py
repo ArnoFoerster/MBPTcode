@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 
 import numpy as np
 
-from src.Base.utils.mpi_grid import distributed, grid_comm
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from tests.test_davidson_warm_start import close, neighbour
 from tests.test_distributed_fit_mpi import Gate, bitwise, serial
 from tests.test_distributed_trial_space import NOCC, model_problem, root

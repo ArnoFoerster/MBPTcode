@@ -2,9 +2,9 @@
 with pyscf's non-Hermitian Davidson (pyscf.lib.davidson_nosym1) -- the same
 architecture pyscf's own eom_rccsd/eom_gccsd modules use (matvec + diagonal
 preconditioner + davidson_nosym1), just built from CCSDT-level generated
-equations instead of hand-derived CCSD ones.py were produced, and
-its module docstring for the r/l amplitude storage conventions and bra/ket
-projector operator strings.
+equations instead of hand-derived CCSD ones. The generator,
+src/CodeGeneration/generate_eom_ccsdt.py, documents the r/l amplitude storage
+conventions and the bra/ket projector operator strings.
 
 Hbar = e^{-T} H e^{T} still carries the Hamiltonian's absolute energy scale
 (e.g. sigma1's leading `f(j,j)*r1(i)` term) regardless of whether the rank-0
@@ -35,17 +35,16 @@ import warnings
 from itertools import permutations
 
 import numpy as np
-from pyscf import lib
+from pyscf import lib, scf
 
 from . import amplitudes
 from . import solver as _lambda_solver
 from .integrals import build_spinorbital_integrals_from_mf, energy_denominators
-from .diis import DIIS
 from .generated_eom import ip_sigma, ea_sigma, ee_sigma
 from .generated_eom import ee_density
 
 _SIGMA_MODULE = {'ip': ip_sigma, 'ea': ea_sigma, 'ee': ee_sigma}
-_LEVEL_RANKS = {'ccsd': (1, 2), 'ccsdt': (1, 2, 3)}
+_RANKS = (1, 2, 3)
 
 
 def _antisym_pair(x, axes):
@@ -191,12 +190,11 @@ def _diagonal(sector, side, no, nv, eps):
 
 
 class EOMCC:
-    """Ground-state CCSDT (or CCSD) amplitudes + per-sector Davidson EOM.
+    """Ground-state CCSDT amplitudes + per-sector Davidson EOM-CCSDT.
 
     mf : converged closed-shell spin-restricted pyscf mean-field.
-    level : 'ccsdt' (default, singles+doubles+triples manifold) or 'ccsd'
-        (t3 pinned to zero, manifold truncated to singles+doubles -- the
-        same generated CCSDT equations reduce exactly to EOM-CCSD there).
+    level : 'ccsdt' only (singles+doubles+triples manifold). EOM-CCSD is
+        retired here: use pyscf (pyscf.cc.eom_rccsd / eom_gccsd).
     t_amps : optional (t1, t2, t3) to skip the amplitude solve.
     t_diis_size : DIIS subspace for the ground-state T solve (0 disables it and
         restores plain fixed-point iteration). DIIS holds 2*t_diis_size flat
@@ -207,33 +205,39 @@ class EOMCC:
 
     def __init__(self, mf, level='ccsdt', t_amps=None, t_stopping_eps=1e-10,
                  max_iter=200, verbose=False, t_diis_size=6):
-        if level not in _LEVEL_RANKS:
-            raise ValueError(f"unknown level '{level}'")
+        if level != 'ccsdt':
+            raise ValueError(f"EOMCC supports level='ccsdt' only, not {level!r}; "
+                             f"EOM-CCSD is pyscf's (pyscf.cc.eom_rccsd / eom_gccsd)")
+        if isinstance(mf, scf.uhf.UHF):
+            raise ValueError("EOMCC needs a closed-shell RHF mean field: its transition "
+                             "densities and polarizability assume interleaved spin orbitals")
         self.level = level
-        self.ranks = _LEVEL_RANKS[level]
+        self.ranks = _RANKS
         self.ints = build_spinorbital_integrals_from_mf(mf)
         ints = self.ints
         self.nocc, self.nvir = ints['nocc'], ints['nvir']
         self.norb = self.nocc + self.nvir
         o, v = slice(None, self.nocc), slice(self.nocc, None)
 
+        # convergence flags (warn numerics and flag them);
+        # True when the amplitudes were handed in
+        self.t_converged = True
+        self.lambda_converged = None
         if t_amps is not None:
             self.t1, self.t2, self.t3 = t_amps
         else:
+            t_out = {}
             e_ai, e_abij, e_abcijk = energy_denominators(ints['fock'], self.nocc, self.nvir)
             t1 = np.zeros((self.nvir, self.nocc))
             t2 = np.zeros((self.nvir, self.nvir, self.nocc, self.nocc))
             t3 = np.zeros((self.nvir,) * 3 + (self.nocc,) * 3)
-            if level == 'ccsd':
-                t1, t2 = _ccsd_kernel(t1, t2, ints['fock'], ints['g'], o, v,
-                                      e_ai, e_abij, max_iter, t_stopping_eps, verbose)
-            else:
-                t1, t2, t3 = amplitudes.kernel(
-                    t1, t2, t3, ints['fock'], ints['g'], o, v,
-                    e_ai, e_abij, e_abcijk, ints['hf_energy'],
-                    max_iter=max_iter, stopping_eps=t_stopping_eps,
-                    diis_size=t_diis_size)
+            t1, t2, t3 = amplitudes.kernel(
+                t1, t2, t3, ints['fock'], ints['g'], o, v,
+                e_ai, e_abij, e_abcijk, ints['hf_energy'],
+                max_iter=max_iter, stopping_eps=t_stopping_eps,
+                diis_size=t_diis_size, out=t_out)
             self.t1, self.t2, self.t3 = t1, t2, t3
+            self.t_converged = t_out['converged']
 
         self.e_cc = amplitudes.cc_energy(self.t1, self.t2, ints['fock'], ints['g'], o, v)
         self.e_tot = self.e_cc + ints['nuclear_repulsion']
@@ -242,15 +246,20 @@ class EOMCC:
     def lambda_amplitudes(self, l_stopping_eps=1e-9, max_iter=200, verbose=False):
         """Ground-state Lambda multipliers (lam1, lam2, lam3), solved once
         and cached -- needed for transition_densities()'s rho_n (which
-        sandwiches the ground-state bra <(1+Lambda)|, not an EOM eigenvector)."""
+        sandwiches the ground-state bra <(1+Lambda)|, not an EOM eigenvector).
+
+        `lambda_converged` records whether the Lambda-CCSDT solve converged
+        (it warns when it did not)."""
         if self._lambda is None:
             ints = self.ints
             o, v = slice(None, self.nocc), slice(self.nocc, None)
             e_ai, e_abij, e_abcijk = energy_denominators(ints['fock'], self.nocc, self.nvir)
+            l_out = {}
             self._lambda = _lambda_solver.solve_lambda_ccsdt(
                 self.t1, self.t2, self.t3, ints['fock'], ints['g'], o, v,
                 e_ai, e_abij, e_abcijk, max_iter=max_iter,
-                stopping_eps=l_stopping_eps, verbose=verbose)
+                stopping_eps=l_stopping_eps, verbose=verbose, out=l_out)
+            self.lambda_converged = l_out['converged']
         return self._lambda
 
     def _pack(self, d, side, no, nv):
@@ -362,6 +371,12 @@ class EOMCC:
         omega = es.real[order] - self.e_cc
         vectors = [np.asarray(vs[i]).real for i in order]
         conv = np.asarray(conv)[order]
+        if not np.all(conv):
+            # davidson_nosym1's tol is an eigenvalue change, not a residual norm
+            warnings.warn(f'EOM-{sector} Davidson left {int(np.sum(~conv.astype(bool)))} of '
+                          f'{len(conv)} roots unconverged (tol {tol:.1e}, max_cycle '
+                          f'{max_cycle}); EOMResult.conv says which',
+                          UnconvergedEOMRoots, stacklevel=2)
         return EOMResult(self, sector, left, omega, vectors, conv,
                          max_imag=max_imag)
 
@@ -372,6 +387,11 @@ class ComplexEOMEigenvalues(RuntimeWarning):
     is flagged (`EOMResult.complex_eigenvalues`)."""
 
 
+class UnconvergedEOMRoots(RuntimeWarning):
+    """The EOM Davidson stopped with some roots unconverged: they are
+    returned and flagged (`EOMResult.conv` per root, `EOMResult.converged`)."""
+
+
 #: |Im omega| above which an EOM eigenvalue is reported as complex.
 EOM_IMAG_TOL = 1e-6
 
@@ -379,7 +399,9 @@ EOM_IMAG_TOL = 1e-6
 class EOMResult:
     """The roots of one EOM solve. `max_imag` is the largest |Im| of the
     eigenvalues the solver returned and `complex_eigenvalues` whether it
-    exceeds EOM_IMAG_TOL: the omega kept are the real parts."""
+    exceeds EOM_IMAG_TOL: the omega kept are the real parts. `conv` is the
+    Davidson's per-root convergence flag and `converged` whether all roots
+    converged."""
 
     def __init__(self, eomcc, sector, left, omega, vectors, conv,
                  max_imag=0.0):
@@ -389,6 +411,7 @@ class EOMResult:
         self.omega = omega
         self.vectors = vectors
         self.conv = conv
+        self.converged = bool(np.all(conv))
         self.max_imag = float(max_imag)
         self.complex_eigenvalues = self.max_imag > EOM_IMAG_TOL
 
@@ -404,8 +427,8 @@ class EOMResult:
         """EOM-EE transition densities for every state in this (right)
         result: rho[n](pq) = <(1+Lambda_gs)|e^-T p^dag q e^T|R_n> and
         rho_star[n](pq) = <L_n|e^-T p^dag q e^T|1>, validated to machine
-        precision against the determinant_space oracle (both the CCSD and
-        full CCSDT level -- see tests/test_eom_ccsdt.py).
+        precision against the determinant_space oracle (full CCSDT, see
+        tests/test_eom_ccsdt.py).
 
         Requires the matching LEFT eigenvectors for the SAME states; if
         `left_result` isn't supplied, solves for it (same nroots). Right/left
@@ -491,36 +514,3 @@ class EOMResult:
                         + np.einsum('ny,nx,n->xy', mu_0n, mu_n0, d2))
         return alpha
 
-
-def _ccsd_kernel(t1, t2, fock, g, o, v, e_ai, e_abij, max_iter, stopping_eps, verbose):
-    """CCSD via the CCSDT singles/doubles residuals with t3 pinned to zero
-    (they reduce exactly to the CCSD equations), same DIIS scheme as
-    amplitudes.kernel."""
-    nvir, nocc = t1.shape
-    t3 = np.zeros((nvir,) * 3 + (nocc,) * 3)
-    fock_e_ai = np.reciprocal(e_ai)
-    fock_e_abij = np.reciprocal(e_abij)
-    diis_update = DIIS(8, start_iter=2)
-    old_vec = np.hstack((t1.ravel(), t2.ravel()))
-    for it in range(max_iter):
-        r1 = amplitudes.singles_residual(t1, t2, t3, fock, g, o, v)
-        r2 = amplitudes.doubles_residual(t1, t2, t3, fock, g, o, v)
-        t1_new = (r1 + fock_e_ai * t1) * e_ai
-        t2_new = (r2 + fock_e_abij * t2) * e_abij
-        d = max(np.linalg.norm(t1_new - t1), np.linalg.norm(t2_new - t2))
-        vec = np.hstack((t1_new.ravel(), t2_new.ravel()))
-        try:
-            vec = diis_update.compute_new_vec(vec, old_vec - vec)
-        except np.linalg.LinAlgError:
-            # tiny systems can converge so fast the DIIS error vectors become
-            # exactly degenerate (singular B-matrix) -- fall back to the
-            # undamped update for this step rather than crashing.
-            pass
-        old_vec = vec
-        t1 = vec[:t1.size].reshape(t1.shape)
-        t2 = vec[t1.size:].reshape(t2.shape)
-        if verbose:
-            print(f"  CCSD iter {it}: |dT| = {d:.3e}")
-        if d < stopping_eps:
-            return t1, t2
-    raise ValueError("CCSD iterations did not converge")

@@ -42,16 +42,17 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import src.SingleReference.LinearResponse.solvated_rpa_energy as production
-import src.gradients.solvated_rpa_energy as reverse
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.environment import NoEnvironment, dresses_interaction
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import (SolventScreening,
-                                        dynamic_screening_factor)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.space_time_adjoint import (rpa_energy_and_adjoint,
-                                              rpa_frequency_traces)
+import src.gradients.rpa.solvated_energy as reverse
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.environments.environment import dresses_interaction
+from src.Base.environment_seam import NoEnvironment
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import (SolventScreening,
+                                                dynamic_screening_factor)
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.rpa.space_time_adjoint import (rpa_energy_and_adjoint,
+                                                  rpa_frequency_traces)
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
 
@@ -135,7 +136,7 @@ def water():
 def test_the_callers_take_their_fold_terms_from_production():
     """The chain that folds reads the one production pair, so no route can
     assemble a counter-term of its own."""
-    from src.gradients import rpa_ground_state
+    from src.gradients.rpa import ground_state as rpa_ground_state
     ok = check(rpa_ground_state.fold_terms is production.fold_terms,
                'RPAGroundStateChain._fold_terms is the production pair')
     assert ok
@@ -263,7 +264,7 @@ def test_production_does_not_import_the_gradient_package():
     forward = loaded('src.SingleReference.LinearResponse.solvated_rpa_energy')
     ok = check(not forward, 'production pulls in no src.gradients module',
                f'{forward}' if forward else 'none')
-    backward = loaded('src.gradients.solvated_rpa_energy')
+    backward = loaded('src.gradients.rpa.solvated_energy')
     ok &= check(bool(backward), 'while the reverse module does, so the probe '
                 'can see one', f'{len(backward)} modules')
     assert not forward

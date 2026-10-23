@@ -3,7 +3,6 @@ first-order C-block batch builders (g-free capable via GProxy)."""
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-from src.SingleReference.ADC.adc_u_utils import u2_denominators
 
 
 def build_supermatrix(s, nocc, static_correction=None, g=None):
@@ -18,7 +17,6 @@ def build_supermatrix(s, nocc, static_correction=None, g=None):
     virt = np.arange(nocc, norb)
     nvirt = len(virt)
     p_ = np.arange(norb)
-    eps_o, eps_v = eps[occ], eps[virt]
 
     d = s.dimensions(nocc)
     nH = d['nH']

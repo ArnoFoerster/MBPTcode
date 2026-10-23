@@ -41,19 +41,20 @@ import pytest
 import scipy.sparse.linalg
 from pyscf import ao2mo, gto, scf
 
-from src.Base.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
-                                ORBITAL_MULTIPLIER_MAX_ITER,
-                                ORBITAL_MULTIPLIER_RESIDUAL_TOL,
-                                ORBITAL_MULTIPLIER_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.SingleReference.GW.quasi_boson import build_rpa_AB
+from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
+                                         ORBITAL_MULTIPLIER_MAX_ITER,
+                                         ORBITAL_MULTIPLIER_RESIDUAL_TOL,
+                                         ORBITAL_MULTIPLIER_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.pyscf.cphf import CphfNotConverged
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
                                        solve_multipliers)
-from src.gradients.isdf_derivatives import fock_partial_Y, solve_lambda
+from src.gradients.mean_field_response import fock_partial_Y, solve_lambda
 from src.gradients.multipliers import solve_orbital_multipliers
-from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
-from src.gradients.targets import rpa_partials
+from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
+from src.gradients.gwbse.targets import rpa_partials
 from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
@@ -117,7 +118,7 @@ def _reference_solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps,
 
 def _reference_solve_lambda(mf, Y_E, nocc, tol=ORBITAL_MULTIPLIER_TOL,
                             max_iter=ORBITAL_MULTIPLIER_MAX_ITER, verbose=False):
-    """`isdf_derivatives.solve_lambda` as it stood before consolidation."""
+    """`mean_field_response.solve_lambda` as it stood before consolidation."""
     eps = np.asarray(mf.mo_energy, float)
     norb = len(eps)
     iu = np.triu_indices(norb, k=1)
@@ -299,15 +300,19 @@ def test_a_degenerate_pair_carrying_gradient_refuses():
 def test_an_operator_blind_to_one_pair_is_caught_by_the_residual():
     """lgmres reports info=0 on stagnation as well as on convergence, so the
     residual is recomputed and checked. Without that the force comes back
-    smooth, plausible and wrong."""
+    smooth, plausible and wrong. A numerical event: warned, flagged, and the
+    last iterate kept."""
     eps = np.array([-0.7, -0.2, 0.3, 1.1])
     Y_E = np.array([[0.0, 0.25, 0.4, -0.2],
                     [0.55, 0.0, 0.1, 0.7],
                     [-0.3, 0.6, 0.0, 0.15],
                     [0.5, -0.1, 0.9, 0.0]])
-    with pytest.raises(RuntimeError, match=r'multiplier solve failed.*res='):
-        solve_orbital_multipliers(_pair_blind_matvec(eps, (0, 1)), Y_E, eps,
-                                  max_iter=5)
+    flags = []
+    with pytest.warns(CphfNotConverged, match=r'not converged.*residual'):
+        Lam, res = solve_orbital_multipliers(_pair_blind_matvec(eps, (0, 1)),
+                                             Y_E, eps, max_iter=5, flags=flags)
+    assert res > ORBITAL_MULTIPLIER_RESIDUAL_TOL
+    assert [f['flag'] for f in flags] == ['orbital_response_not_converged']
 
 
 def test_the_same_right_hand_side_solves_with_the_whole_operator():

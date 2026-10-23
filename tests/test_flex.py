@@ -31,7 +31,7 @@ import scipy.linalg as la
 from pyscf import gto, scf
 from scipy.sparse.linalg import LinearOperator, minres
 
-from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC import ADCSolverRestricted
 from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC import adc_r_flex as FX
@@ -165,7 +165,7 @@ def check_closed_form(basis='6-31g'):
     for spin in ('singlet', 'triplet'):
         A, Bm = LinearResponseSolver(eps, coeff_df=B).build_casida_matrices(
             nocc, lBSE=True, triplet=(spin == 'triplet'))
-        T = FR._eh_channel(eps, nocc, spin, B, None, 'riccati', 'rpa')['T']
+        T = FR.eh_channel(eps, nocc, spin, B, None, 'riccati', 'rpa')['T']
         dH, dN = channel_corrections_from_amplitudes(Bm, A, T)
         w, X = la.eigh(A + dH, np.eye(len(A)) + dN)
         d = np.abs(np.sort(w) - np.sort(CasidaSolver(A, Bm).solve()[0])).max()

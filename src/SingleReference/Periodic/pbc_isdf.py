@@ -47,6 +47,10 @@ import scipy.linalg
 from pyscf.pbc import tools
 from pyscf.pbc.dft import numint
 
+from src.SingleReference.Periodic.pbc_integrals import (get_momentum_transfer_map,
+                                                        kpoint_matches)
+from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
+
 #: Ridge on the ISDF normal equations. The Gram matrix Z is Hermitian PSD by
 #: construction but is deliberately driven towards rank deficiency -- more
 #: interpolation points means a better fit AND a worse-conditioned Z -- so the
@@ -140,8 +144,6 @@ def check_isdf_low_dim(cell, kpts, coulG_fn=None):
        `check_low_dim_support`, which the four DF builders call and this route
        -- a fifth consumer of the same `coulG_fn` seam -- did not.
     """
-    from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
-
     if getattr(cell, 'low_dim_ft_type', None) == 'inf_vacuum':
         raise ValueError(
             "cell.low_dim_ft_type='inf_vacuum' is not usable with the ISDF "
@@ -362,7 +364,6 @@ def kpoint_minus_map(cell, kpts, tol=1e-8):
 
     The inverse permutation of `get_momentum_transfer_map`'s rows.
     """
-    from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
     kplus = get_momentum_transfer_map(cell, kpts, tol=tol)
     kminus = np.empty_like(kplus)
     for q in range(len(kpts)):
@@ -585,24 +586,24 @@ def build_isdf_kpts_per_q(cell, mo_coeff, kpts, npoints, mesh=None,
     the pair densities at different transfers have different numerical ranks,
     which is itself worth seeing.
     """
-    cell, mesh = resolve_grid(cell, mesh, ke_cutoff)
-    check_isdf_low_dim(cell, kpts, coulG_fn)
-    coords, weight = uniform_grid(cell, mesh)
-    Phi = collocation_kpts(cell, coords, mo_coeff, kpts)
-    kminus = kpoint_minus_map(cell, kpts)
+    ctx = isdf_prepare(cell, mo_coeff, kpts, npoints=npoints, mesh=mesh,
+                       ke_cutoff=ke_cutoff, coulG_fn=coulG_fn)
+    Phi, kminus = ctx['Phi'], ctx['kminus']
 
     X_by_q, V, counts = [], [], []
     for q in range(len(kpts)):
-        pts = (select_points_cholesky_kpts(Phi, npoints)[0] if q == 0
+        pts = (ctx['points'] if q == 0
                else _select_points_q(Phi, kminus, q, npoints))
         zeta = interpolating_vectors_q(Phi, kminus, q, pts, regularization)
         X_by_q.append([P[pts] for P in Phi])
-        V.append(coulomb_matrix_q(cell, zeta, coords, weight, kpts[q],
-                                  coulG_fn=coulG_fn, mesh=mesh))
+        V.append(coulomb_matrix_q(ctx['cell'], zeta, ctx['coords'],
+                                  ctx['weight'], ctx['kpts'][q],
+                                  coulG_fn=coulG_fn, mesh=ctx['mesh'],
+                                  check_kernel=check_kernel))
         counts.append(len(pts))
-    return X_by_q, V, {'kminus': kminus, 'counts': counts, 'coords': coords,
-                       'weight': weight,
-                       'mesh': cell.mesh if mesh is None else mesh}
+    return X_by_q, V, {'kminus': kminus, 'counts': counts,
+                       'coords': ctx['coords'], 'weight': ctx['weight'],
+                       'mesh': ctx['mesh']}
 
 
 def _select_points_q(Phi_list, kminus, q, npoints, tol=1e-10):
@@ -750,8 +751,7 @@ def mesh_invariant_operations(cell, kpts, R_cart, tol=1e-8):
         rot = (kpts @ R.T) @ binv
         hit = np.zeros(len(kpts), dtype=bool)
         for i, r in enumerate(rot):
-            d = scaled - r
-            m = np.where(np.linalg.norm(np.round(d) - d, axis=1) < tol)[0]
+            m = kpoint_matches(scaled, r, tol)
             if len(m) == 1:
                 hit[m[0]] = True
         if hit.all():
@@ -783,8 +783,7 @@ def q_star_map(cell, kpts, R_cart, tol=1e-8):
         rep[q], op[q] = here, 0
         for s, R in enumerate(R_cart):
             rot = (R @ kpts[q]) @ binv                  # scaled coordinates
-            d = scaled - rot
-            hit = np.where(np.linalg.norm(np.round(d) - d, axis=1) < tol)[0]
+            hit = kpoint_matches(scaled, rot, tol)
             if len(hit) == 1 and rep[hit[0]] < 0:
                 rep[hit[0]], op[hit[0]] = here, s
     if (rep < 0).any():
@@ -822,12 +821,9 @@ def build_isdf_kpts_symm(cell, mo_coeff, kpts, npoints, mesh=None,
     X_by_op[s][k] is (npoints, nmo) with entries phi^k_i(R_s r_mu).
     V_ibz[j] is the Coulomb matrix at the j-th irreducible transfer.
     """
-    cell, mesh = resolve_grid(cell, mesh, ke_cutoff)
-    check_isdf_low_dim(cell, kpts, coulG_fn)
-    coords, weight = uniform_grid(cell, mesh)
-    Phi = collocation_kpts(cell, coords, mo_coeff, kpts)
-    kminus = kpoint_minus_map(cell, kpts)
-    points, residuals = select_points_cholesky_kpts(Phi, npoints)
+    ctx = isdf_prepare(cell, mo_coeff, kpts, npoints=npoints, mesh=mesh,
+                       ke_cutoff=ke_cutoff, coulG_fn=coulG_fn)
+    cell, coords, points = ctx['cell'], ctx['coords'], ctx['points']
     r_mu = coords[points]
 
     R_all = cartesian_rotations(cell)
@@ -835,23 +831,20 @@ def build_isdf_kpts_symm(cell, mo_coeff, kpts, npoints, mesh=None,
     R_cart = R_all[keep]
     ibz, rep, op = q_star_map(cell, kpts, R_cart)
 
-    V_ibz = []
-    for q in ibz:
-        zeta = interpolating_vectors_q(Phi, kminus, q, points, regularization)
-        V_ibz.append(coulomb_matrix_q(cell, zeta, coords, weight, kpts[q],
-                                      coulG_fn=coulG_fn, mesh=mesh))
+    V_ibz = [isdf_vq(ctx, q, coulG_fn=coulG_fn, regularization=regularization,
+                     check_kernel=check_kernel) for q in ibz]
 
     X_by_op = []
     for R in R_cart:
         rot = r_mu @ R.T
         X_by_op.append(collocation_kpts(cell, rot, mo_coeff, kpts))
 
-    info = {'points': points, 'residuals': residuals, 'kminus': kminus,
-            'ibz': ibz, 'rep': rep, 'op': op, 'R_cart': R_cart,
-            'ngrid': len(coords), 'weight': weight, 'coords': coords,
-            'nq_solved': len(ibz), 'nq_total': len(kpts),
+    info = {'points': points, 'residuals': ctx['info']['residuals'],
+            'kminus': ctx['kminus'], 'ibz': ibz, 'rep': rep, 'op': op,
+            'R_cart': R_cart, 'ngrid': len(coords), 'weight': ctx['weight'],
+            'coords': coords, 'nq_solved': len(ibz), 'nq_total': len(kpts),
             'nop_group': len(R_all), 'nop_mesh_invariant': len(keep),
-            'mesh': cell.mesh if mesh is None else mesh}
+            'mesh': ctx['mesh']}
     return X_by_op, V_ibz, info
 
 

@@ -16,17 +16,17 @@ difference of the energy.
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.isdf_jk import isdf_jk
-from src.Base.numerics import Numerics
-from src.Base.geometry import molecule_at
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics
+from src.Base.geometry.geometry import molecule_at
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1 as g1_counts
 
 H = 1e-3
 
 
 def isdf_rhf(mol):
-    mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1_counts(mol))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1_counts(mol))
     mf.conv_tol, mf.conv_tol_grad = 1e-13, 1e-11
     mf.kernel()
     return mf

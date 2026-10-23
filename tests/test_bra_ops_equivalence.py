@@ -24,14 +24,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 pytestmark = pytest.mark.skipif(not pdaggerq_available(),
                                 reason='needs pdaggerq (optional)')
 
-from src.Base.pdaggerq_interface import pq_helper
+from src.CodeGeneration.pdaggerq_interface import pq_helper
 from src.CodeGeneration.generate_mpn_density import (
-    bra_string, bra_ops, amp_out_indices, _filter_connected, t_numerator_terms)
+    bra_string, bra_ops, amp_out_indices, filter_connected, t_numerator_terms)
 
 
 def _terms(left, rank, dress):
@@ -41,7 +41,7 @@ def _terms(left, rank, dress):
     for r in dress:
         pq.add_operator_product(1.0, ['v', f't{r}'])
     pq.simplify()
-    out = [tuple(t) for t in _filter_connected(pq.strings(), amp_out_indices(rank))]
+    out = [tuple(t) for t in filter_connected(pq.strings(), amp_out_indices(rank))]
     pq.clear()
     return out
 

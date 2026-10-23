@@ -2,7 +2,7 @@
 
 The skeleton derivatives CARRY a range-separated hybrid, channel by channel --
 see `test_range_separated_exchange.py`, which gates that, and
-`isdf_derivatives.exchange_channels`, which is what they are built from. What
+`rpa_energy.exchange_channels`, which is what they are built from. What
 is gated here is the reading of the coefficients themselves, and the fact that
 `xc_hybrid_coeff` returns ALPHA and so is not a weight.
 """
@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.gradients.isdf_derivatives import (require_no_range_separation,
-                                            rsh_split, xc_hybrid_coeff)
+from src.gradients.mean_field_response import require_no_range_separation
+from src.SingleReference.LinearResponse.rpa_energy import (rsh_split,
+                                                           xc_hybrid_coeff)
 
 
 @pytest.fixture(scope='module')

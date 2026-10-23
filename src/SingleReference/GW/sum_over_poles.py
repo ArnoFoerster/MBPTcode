@@ -18,7 +18,7 @@ which, put into the frequency convolution, integrates in closed form to
                       + sum_{a,m} A^pa_m / (omega - eps_a - Om_m) .
 
 The omega dependence is then analytic: no argument of W depends on omega, so
-the screening is never evaluated off the imaginary axis, the Newton iteration
+the screening is never evaluated off the imaginary axis, the bracketed root search
 costs nothing after the fit, and there is no residue SET whose membership can
 change along a nuclear coordinate.
 
@@ -46,11 +46,11 @@ import warnings
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (QP_CD_NEWTON_TOL,
-                                QP_SUBSPACE_MAX_ITER, QP_SUBSPACE_TOL,
-                                SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
-                                SOP_FIT_STRIDE, SOP_N_POLES,
-                                SOP_POLE_MERGE_TOL)
+from src.Base.numerics.constants import (QP_CD_NEWTON_TOL,
+                                         QP_SUBSPACE_MAX_ITER, QP_SUBSPACE_TOL,
+                                         SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                         SOP_FIT_STRIDE, SOP_N_POLES,
+                                         SOP_POLE_MERGE_TOL)
 from src.SingleReference.GW.real_screening import ov_energies, residue_set
 from src.Solvers.qp_equation import (solve_qp_equation_poles,
                                      solve_qp_hamiltonian)

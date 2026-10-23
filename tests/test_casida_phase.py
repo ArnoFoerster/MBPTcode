@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.gradients.state_following import casida_phase
+from src.gradients.gwbse.state_following import casida_phase
 from tests.pins import assert_same
 from tests.test_shared_evaluation_consumers import (fresh, molecule,
                                                     prototype)
@@ -33,7 +33,7 @@ FLIPPED = ((0, -1), (1, -1), (3, 1), (4, 1))
 def _setup():
     chain = fresh(prototype('hf-davidson-grid', molecule()), ('singlet', 0))
     mol, mf = chain.mean_field()
-    return chain, chain._shared_forward(mol, mf)
+    return chain, chain.shared_forward(mol, mf)
 
 
 def _leads_positive(xn):
@@ -46,11 +46,11 @@ def _leads_positive(xn):
 def test_an_ulp_of_eps_qp_moves_no_sign():
     chain, shared = _setup()
     args = (shared.x_mo, shared.d)
-    _, x0, _, _ = chain._casida(*args, shared.eps_qp, shared.w_aux)
+    _, x0, _, _ = chain.follower._casida(*args, shared.eps_qp, shared.w_aux)
     for p, direction in FLIPPED:
         eps = np.array(shared.eps_qp, float)
         eps[p] = np.nextafter(eps[p], direction * np.inf)
-        _, x, _, _ = chain._casida(*args, eps, shared.w_aux)
+        _, x, _, _ = chain.follower._casida(*args, eps, shared.w_aux)
         dots = np.einsum('ik,ik->k', x0, x)
         assert (dots > 0).all(), (p, direction, dots)
 
@@ -58,10 +58,10 @@ def test_an_ulp_of_eps_qp_moves_no_sign():
 def test_both_solvers_hand_back_the_convention():
     chain, shared = _setup()
     args = (shared.x_mo, shared.d, shared.eps_qp, shared.w_aux)
-    _, x_dav, _, _ = chain._casida(*args)
+    _, x_dav, _, _ = chain.follower._casida(*args)
     _leads_positive(x_dav)
     chain.solver = 'dense'
-    _, x_dense, _, _ = chain._casida(*args)
+    _, x_dense, _, _ = chain.follower._casida(*args)
     _leads_positive(x_dense)
     nroots = x_dav.shape[1]
     assert (np.einsum('ik,ik->k', x_dav, x_dense[:, :nroots]) > 0).all()

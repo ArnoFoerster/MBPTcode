@@ -29,10 +29,10 @@ import itertools
 
 import numpy as np
 
-from src.Base.constants import (CURVILINEAR_LINEAR_ANGLE_DEG,
-                                CURVILINEAR_PINV_RCOND)
+from src.Base.numerics.constants import (CURVILINEAR_LINEAR_ANGLE_DEG,
+                                         CURVILINEAR_PINV_RCOND)
 from src.properties.conformers import molecular_graph
-from src.properties.rates import require_vibrational_modes
+from src.properties.vibronic import huang_rhys_of
 
 
 def primitives(mol):
@@ -155,6 +155,5 @@ def huang_rhys_curvilinear(mol_ref, mol_a, mol_b, omega, modes, masses):
     coordinates; the same return as `vibronic.huang_rhys_from_displacement`.
     """
     dq, _ = curvilinear_displacement(mol_ref, mol_a, mol_b, masses)
-    dqk = np.asarray(modes).T @ dq
-    require_vibrational_modes(omega, 'huang_rhys_curvilinear')
-    return omega * dqk ** 2 / 2.0, dqk
+    return huang_rhys_of(np.asarray(modes).T @ dq, omega,
+                         'huang_rhys_curvilinear')

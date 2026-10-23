@@ -43,13 +43,13 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, dft, gto, scf
 
-from src.Base.constants import (CD_NTAU, HARTREE_TO_EV, ISDF_TILE_GB, KAPPA,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.Base.environment import attach_environment
-from src.Base.numerics import Numerics
-from src.Base.solvent_screening import SolventScreening, detach_solvent_screening
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import (CD_NTAU, HARTREE_TO_EV, ISDF_TILE_GB, KAPPA,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening, detach_solvent_screening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range,
                                                         solve_qp_energy_contour)
@@ -58,20 +58,20 @@ from src.SingleReference.GW.reaction_field import (
     bare_gauge_transform, projected_quasiparticle_shift,
     separable_quasiparticle_shift)
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.bse import ISDF_KWARGS, solve_bse
-from src.SingleReference.LinearResponse.block_actions import (_block_action,
+from src.SingleReference.BSE.solve import ISDF_KWARGS, solve_bse
+from src.SingleReference.LinearResponse.block_actions import (block_action,
                                                               bse_pair_diagonal)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.space_time import (
     RPAEnergyTape, polarizability_projected_sweep,
     rpa_correlation_energy_space_time)
-from src.gradients.bse_isdf import bse_blocks
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.qp_space_time import qp_gradient_space_time
-from src.gradients.reaction_field_adjoint import (reaction_field_shift,
-                                                  static_grid, static_screening)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.space_time_adjoint import rpa_energy_and_adjoint
+from src.gradients.gwbse.bse_isdf import bse_blocks
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.qp_space_time import qp_gradient_space_time
+from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_shift,
+                                                        static_grid, static_screening)
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.rpa.space_time_adjoint import rpa_energy_and_adjoint
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
@@ -222,7 +222,7 @@ def test_both_bse_routes_place_the_quasiparticle_diagonal_by_one_rule(water):
     lr = LinearResponseSolver(eps_qp, spin_mode='restricted')
     naux = w['d'].shape[1]
     w_aux = np.eye(naux)
-    _, diag_d = _block_action(lr, w['nocc'], 'BSE', w_aux, (w['x_mo'], w['d']))
+    _, diag_d = block_action(lr, w['nocc'], 'BSE', w_aux, (w['x_mo'], w['d']))
     assert_same(diag_d, bse_pair_diagonal(eps_qp, w['nocc']), quantity='root',
                 label='action diagonal')
 

@@ -24,8 +24,10 @@ import pytest
 from pyscf import gto
 
 from src.photophysics import chain, stages
-from src.photophysics.records import WalkNotRelaxed, walk_fields
-from src.properties import rates
+from src.photophysics.records import walk_fields
+from src.properties.excitations import WalkNotRelaxed
+from src.photophysics import rates
+from src.properties import franck_condon
 from tests.photophysics_cases import run_of
 
 UNCONVERGED = {'converged': False, 'status': 'max cycles', 'cycles': 3,
@@ -129,18 +131,18 @@ def test_the_rate_table_gathers_every_stage_flag(tmp_path, monkeypatch):
 
 def test_an_undecayed_fc_integrand_warns_with_its_class():
     # one mode and no bath recurs forever
-    with pytest.warns(rates.FCIntegrandNotDecayed, match='had not decayed'):
-        rates.fc_weighted_dos(-0.02, [1.0], [0.01], 300.0, t_decay=0.5)
+    with pytest.warns(franck_condon.FCIntegrandNotDecayed, match='had not decayed'):
+        franck_condon.fc_weighted_dos(-0.02, [1.0], [0.01], 300.0, t_decay=0.5)
 
 
 def test_the_rate_table_names_an_undecayed_density(monkeypatch):
-    real = rates.fc_weighted_dos
+    real = franck_condon.fc_weighted_dos
     omega = np.array([0.004, 0.008, 0.015])
 
     def truncated(e, s, w, temperature, **kw):
         if s[0] < 0.2:      # only the S0 <-> S1 density
             warnings.warn('planted: had not decayed',
-                          rates.FCIntegrandNotDecayed)
+                          franck_condon.FCIntegrandNotDecayed)
         return real(e, s, w, temperature, **kw)
 
     def minimum(where):
@@ -157,7 +159,7 @@ def test_the_rate_table_names_an_undecayed_density(monkeypatch):
                              s_ic=10 * s_k / 12, d_ic=np.ones(3) * 1e-3)
     assert clean['numerical_flags'] == {}
     monkeypatch.setattr(rates, 'fc_weighted_dos', truncated)
-    with pytest.warns(rates.FCIntegrandNotDecayed, match='planted'):
+    with pytest.warns(franck_condon.FCIntegrandNotDecayed, match='planted'):
         flagged = rates.rate_table(s1, t1, -1.0, omega, s_k, 300.0, 0.002,
                                    s_ic=10 * s_k / 12,
                                    d_ic=np.ones(3) * 1e-3)

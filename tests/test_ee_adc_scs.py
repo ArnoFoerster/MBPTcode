@@ -36,9 +36,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import mp
 
-from src.Base.constants import ADC2_SPIN_SCALING
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import ADC2_SPIN_SCALING
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold, ee_u_dense_full, ee_utils
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from tests.adc_common import WATER_ORIGIN, check, rhf_df

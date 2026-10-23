@@ -16,13 +16,14 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base import numerics as nm
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.derivative_coupling import analytic_coupling
-from src.gradients.excited_state import ExcitedStateChain, FirstPoint
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.numerics import numerics as nm
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.derivative_coupling import analytic_coupling
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.surface_identity import FirstPoint
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties import hessian
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.vibronic import adiabatic_gap

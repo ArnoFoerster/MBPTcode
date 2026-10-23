@@ -38,13 +38,13 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import Excitation, GroundState
 from src.SingleReference.GW.qp_states import calibrate_scissor, frozen_scissor
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.pins import assert_pin, assert_same, recorded_blas
 from tests.isdf_test_grid import g1_numerics, g1_numerics_kw
 
@@ -157,11 +157,11 @@ def test_with_every_orbital_explicit_the_scissor_is_the_mean_field(water):
     mol, mf = water
     sciss = ExcitedStateChain(
         mol, scf_factory, mf=mf, numerics=g1_numerics(mol, Numerics(qp={'window': 'all'})))
-    _, pieces = sciss._forward(mol, mf)
+    shared = sciss.forward(mol, mf)[0]
     assert sciss.resolved.outside_shift == {}
     # a second forward solves the roots again: to a few ulp, not bitwise
-    assert_same(sciss._forward(mol, mf)[1][7], pieces[7], quantity='energy',
-                label='eps_qp')
+    assert_same(sciss.forward(mol, mf)[0].eps_qp, shared.eps_qp,
+                quantity='energy', label='eps_qp')
 
 
 # ------------------------------------------------- (c) the shift, and what it moves
@@ -175,8 +175,8 @@ def test_the_outside_orbitals_carry_the_calibrated_shift(water, spin):
     """
     mol, mf = water
     sciss = ExcitedStateChain(mol, scf_factory, mf=mf, spin=spin, numerics=g1_numerics(mol))
-    _, pieces = sciss._forward(mol, mf)
-    eps, eps_qp = pieces[6], pieces[7]
+    shared = sciss.forward(mol, mf)[0]
+    eps, eps_qp = shared.eps, shared.eps_qp
     qp_set = [int(p) for p in sciss.resolved.qp_set]
     roots = {p: float(eps_qp[p]) for p in qp_set}
     outside = outside_of(sciss, len(eps))

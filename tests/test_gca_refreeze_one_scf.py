@@ -17,9 +17,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
 from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'

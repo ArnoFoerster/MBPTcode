@@ -21,7 +21,7 @@ from pyscf import gto, scf
 
 from src.SingleReference.ADC import ADCSolverUnrestricted
 from src.SingleReference.ADC.sigma_driver import build_sigma_operator
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from tests.generated_runtime import requires_runtime
@@ -67,9 +67,10 @@ def main(nroots=1):
         solver.eps, solver.g, nocc=nocc, pdaggerq=True).solve(
             homo_index=nocc - 1, nroots=1)
     e4, _ = ADCSolverUnrestricted.from_arrays(
-        solver.eps, solver.g, nocc=nocc, pdaggerq=True, level='adc4').solve(
+        solver.eps, solver.g, nocc=nocc, pdaggerq=True, level='adc4',
+        construction='twosector').solve(
             homo_index=nocc - 1, nroots=1)
-    op, _, _ = build_sigma_operator(solver, nocc, 'adc4')
+    op, _, _ = build_sigma_operator(solver, nocc, 'adc4', construction='twosector')
     n = op.shape[0]
     D = np.column_stack([op.matvec(e) for e in np.eye(n)])
     w = np.linalg.eigvalsh(0.5 * (D + D.T))

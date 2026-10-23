@@ -7,7 +7,7 @@ import numpy as np
 from pyscf import gto, scf, df
 from pyscf.gw.rpa import RPA as PyscfRPA
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients, \
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients, \
     get_two_electron_integrals_chemist
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida, \

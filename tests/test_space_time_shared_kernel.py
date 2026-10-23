@@ -28,13 +28,13 @@ boundaries and not only inside one.
 """
 import numpy as np
 
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.LinearResponse.space_time import (
     chi0_imaginary_frequency, polarizability_projected_sweep,
     polarizability_projected_tau, polarizability_work, split_branches,
     tile_rows)
-from src.gradients.space_time_adjoint import chi0_frequency, polarizability_tau
+from src.gradients.rpa.space_time_adjoint import chi0_frequency, polarizability_tau
 from tests.pins import assert_same
 
 M, NORB, NOCC, NAUX, NTAU, NFREQ = 23, 8, 3, 6, 8, 5

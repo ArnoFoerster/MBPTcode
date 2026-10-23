@@ -37,12 +37,12 @@ otherwise a second route to a different number.
 """
 import numpy as np
 
-from src.Base.constants import LAPLACE_SCREENING_TOL, RESIDUE_ON_CONTOUR_TOL
+from src.Base.numerics.constants import LAPLACE_SCREENING_TOL, RESIDUE_ON_CONTOUR_TOL
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
-from src.SingleReference.LinearResponse.space_time import \
-    laplace_representation_error
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_aux, dyson_screening, laplace_representation_error)
+from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
 
 
 class ResidueRefused(ValueError):
@@ -132,8 +132,7 @@ class LaplaceRealScreening:
         err = self.representation_error(freq)
         if not err < self.tol:
             if self.pair_energies is None:
-                occ, virt = get_occ_virt_indices(self.eps, self.nocc)
-                gap = self.eps[virt].min() - self.eps[occ].max()
+                gap = particle_hole_window(self.eps, self.nocc)[0]
             else:
                 gap = float(self.pair_energies.min())
             raise ResidueRefused(
@@ -182,9 +181,8 @@ def screening_aux(C_ov, d, omega, imaginary, eta=0.0):
     lives here and nowhere else. Serves both axes, since only the frequency
     factor knows which one it is on.
     """
-    f = frequency_factor(d, omega, imaginary, eta)
-    chi0 = 2.0 * (C_ov * f) @ C_ov.T
-    W = np.linalg.inv(np.eye(C_ov.shape[0]) - chi0)
+    W = dyson_screening(chi0_aux(
+        [(C_ov, frequency_factor(d, omega, imaginary, eta))], 2.0))
     return W - np.eye(C_ov.shape[0]), W
 
 

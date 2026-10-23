@@ -1,7 +1,8 @@
-# GENERATED CODE -- restricted (spin-blocked) 1-RDM oo/vv/ov/vo blocks,
-# _aa only (off-diagonal spin blocks vanish; final spatial density is
-# 2x this block). Includes full Lambda1/Lambda2/Lambda3 feedback.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
+# Restricted 1-RDM oo/vv/ov/vo blocks, _aa only (off-diagonal spin blocks vanish; the spatial density is
+# 2x this block), with the full Lambda1/Lambda2/Lambda3 feedback.
+# See that module's docstring for the equations/conventions.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

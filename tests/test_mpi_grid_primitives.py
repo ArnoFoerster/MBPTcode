@@ -29,9 +29,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.utils.mpi_grid import (allgather_blocks, broadcast,
-                                     contiguous_block, exchange_blocks,
-                                     reduce_sum, replicate, run_simulated)
+from src.Base.utils.parallel.mpi_grid import (
+    allgather_blocks, broadcast, contiguous_block, exchange_blocks,
+    reduce_sum, replicate)
+from src.Base.utils.parallel.simulated_comm import run_simulated
 
 SIZES = [2, 3, 8]
 

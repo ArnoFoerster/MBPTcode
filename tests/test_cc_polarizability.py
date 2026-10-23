@@ -18,7 +18,7 @@ import numpy as np
 from pyscf import gto, scf, fci
 
 from src.SingleReference.CC.eom import EOMCC
-from src.Base.pyscf_interface import get_dipole_integrals
+from src.Base.pyscf.pyscf_interface import get_dipole_integrals
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 
 
@@ -99,22 +99,17 @@ def check_gwcc_vs_paper():
     return all_ok
 
 
-def check_ccsd_equals_ccsdt_screening_for_2e():
-    """For a 2-electron system T3 == 0 and the SD manifold spans the full
-    sector, so EOM-CCSD and EOM-CCSDT screening must give the same QP.
-    H2/sto-3g (not He/def2-svp): minimal basis, no p-orbital degeneracy, so
-    this doesn't hit the degenerate-root limitation documented above -- keeps
-    this specific check a clean pass/fail."""
+def check_ccsd_screening_is_refused():
+    """EOM-CCSD is retired from MBPTcode (pyscf has it); CC
+    screening at the CCSD level is refused at the EOM build, by name."""
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
-    qp_sd = calc_qp_energy(mf, selfenergy='GW', polarizability='CCSD',
-                           state='homo', nroots=4)
-    qp_sdt = calc_qp_energy(mf, selfenergy='GW', polarizability='CCSDT',
-                            state='homo', nroots=4)
-    d = abs(qp_sd - qp_sdt)
-    ok = d < 1e-5
-    print(f"H2/sto-3g: G0WCC with EOM-CCSD == EOM-CCSDT screening for 2e "
-          f"(diff {d:.2e} eV): {'OK' if ok else 'FAIL'}")
+    try:
+        calc_qp_energy(mf, selfenergy='GW', polarizability='CCSD', state='homo', nroots=4)
+        ok = False
+    except ValueError as exc:
+        ok = 'pyscf' in str(exc)
+    print(f"H2/sto-3g: G0WCC with EOM-CCSD screening is refused: {'OK' if ok else 'FAIL'}")
     return ok
 
 
@@ -122,6 +117,6 @@ if __name__ == '__main__':
     all_ok = True
     all_ok &= check_alpha_vs_finite_field_fci()
     all_ok &= check_gwcc_vs_paper()
-    all_ok &= check_ccsd_equals_ccsdt_screening_for_2e()
+    all_ok &= check_ccsd_screening_is_refused()
     print("\nALL PASSED" if all_ok else "\nFAILURES DETECTED")
     sys.exit(0 if all_ok else 1)

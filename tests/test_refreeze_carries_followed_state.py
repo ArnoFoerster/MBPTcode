@@ -17,9 +17,9 @@ state at root 0 with an overlap of one.
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 #: Hartree: two evaluations of one state at one geometry on two SCFs.

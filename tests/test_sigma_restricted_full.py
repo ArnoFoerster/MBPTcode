@@ -32,7 +32,7 @@ c2r = lazy('adc4_c2_apply_restricted_blocks')
 s2r = lazy('adc4_c2_s2c_apply_restricted_blocks')
 k2r = lazy('adc4_k2_apply_restricted_blocks')
 from src.SingleReference.ADC.sigma_driver import restricted_full_operator
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri)
 from tests.generated_runtime import requires_runtime
 

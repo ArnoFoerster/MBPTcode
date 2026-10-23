@@ -22,13 +22,13 @@ import copy
 import numpy as np
 import pytest
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.SingleReference.GW.qp_states import (CurveOvershoots, OutsideCurve,
                                               curve_sides, fit_outside_curve)
-from src.gradients import qp_set
+from src.gradients.gwbse import qp_set
 from src.gradients.evaluation import GeometryCache
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import qp_bookkeeping
 
 from test_outside_scissor import (FD_STEP, FD_TOL, RECORD, at_coords,
@@ -55,8 +55,8 @@ def curved(water):
     chain = ExcitedStateChain(
         mol, scf_factory, mf=mf,
         numerics=g1_numerics(mol, Numerics(qp={'outside_scissor': 'curve'})))
-    om, pieces = chain._forward(mol, mf)
-    return chain, om, pieces
+    shared, solution = chain.forward(mol, mf)
+    return chain, solution, shared
 
 
 # ------------------------------------------------------------- the curve alone
@@ -155,10 +155,10 @@ def test_the_curve_carries_the_members_and_meets_the_edge(water, curved):
     tiers have them, and Delta(eps_edge) equal to the edge's own correction:
     the window boundary has no jump."""
     mol, mf = water
-    chain, _, pieces = curved
+    chain, _, shared = curved
     tiers = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
-    _, pieces_t = tiers._forward(mol, mf)
-    eps, eps_qp, eps_qp_t = pieces[6], pieces[7], pieces_t[7]
+    shared_t = tiers.forward(mol, mf)[0]
+    eps, eps_qp, eps_qp_t = shared.eps, shared.eps_qp, shared_t.eps_qp
     explicit = [int(p) for p in chain.resolved.qp_set]
     # two chains solve the explicit roots apart: to a few ulp, not bitwise
     assert_same(eps_qp[explicit], eps_qp_t[explicit], quantity='energy',
@@ -233,8 +233,8 @@ def test_the_slope_term_is_what_the_force_needs(water, curved):
     flat = copy.copy(chain)
     # another surface: its own evaluations, not the chain's cached force
     flat._evaluations = GeometryCache()
-    full = flat._curve_at
-    flat._curve_at = lambda eps: [(i, d, 0.0 * s) for i, d, s in full(eps)]
+    full = flat.quasiparticles._curve_at
+    flat.quasiparticles._curve_at = lambda eps: [(i, d, 0.0 * s) for i, d, s in full(eps)]
     missing = np.abs(grad - flat.total_gradient(moved)[0]).max()
     assert missing / np.abs(grad).max() > 10 * FD_TOL
 

@@ -15,16 +15,19 @@ downfolded active-space root.
 """
 import numpy as np
 
-from src.Base.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
+from src.Base.geometry.body_frame import centred, kabsch_rotation
+from src.Base.numerics.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
 from src.Base.declaration import PhysicsMismatch
-from src.Base.geometry import molecule_at
-from src.Base.isdf_jk import refuse_isdf_jk_gradient
-from src.Base.numerics import (numerics_identity, require_same_identity,
-                               stamp_of)
-from src.properties.optimize import relax, translation_rotation_basis
-from src.properties.rates import require_vibrational_modes
+from src.Base.geometry.geometry import molecule_at
+from src.Base.factorization.isdf_jk import refuse_isdf_jk_gradient
+from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
+                                        stamp_of)
+from src.properties.optimize import (cartesian_hessian, relax,
+                                     translation_rotation_basis)
+from src.properties.franck_condon import require_vibrational_modes
 from src.properties.spin_orbit import slope_from_squares
-from src.properties.surface import evaluate, surface_mean_field
+from src.gradients.surface import evaluate, surface_mean_field
+from src.gradients.surface import provides
 
 
 def normal_modes(mf, mol=None, hess=None, project=True, isotope_avg=True):
@@ -58,7 +61,7 @@ def normal_modes(mf, mol=None, hess=None, project=True, isotope_avg=True):
         refuse_isdf_jk_gradient(mf, 'the analytic Hessian')
         hess = mf.Hessian().kernel()
     n = mol.natm
-    h = np.asarray(hess).transpose(0, 2, 1, 3).reshape(3 * n, 3 * n)
+    h = cartesian_hessian(hess, n)
     h = 0.5 * (h + h.T)
     masses = np.asarray(mol.atom_mass_list(isotope_avg=isotope_avg)) * AMU_TO_ME
     w = np.repeat(masses, 3) ** -0.5
@@ -92,9 +95,7 @@ def huang_rhys_from_gradient(grad, omega, modes, masses):
     systems too large to relax, and it is the version the effective-mode
     treatments in the TADF literature use.
     """
-    w = np.repeat(np.asarray(masses), 3) ** -0.5
-    g_mw = np.asarray(grad).ravel() * w              # d/dq = M^-1/2 d/dx
-    gk = modes.T @ g_mw
+    gk = project_coupling(grad, modes, masses)        # d/dq = M^-1/2 d/dx
     require_vibrational_modes(omega, 'huang_rhys_from_gradient')
     return gk ** 2 / (2.0 * omega ** 3), gk
 
@@ -142,8 +143,15 @@ def huang_rhys_from_displacement(mol_gs, mol_ex, omega, modes, masses):
     """
     dx = (np.asarray(mol_ex.atom_coords()) - np.asarray(mol_gs.atom_coords())).ravel()
     dq = dx * np.repeat(np.asarray(masses), 3) ** 0.5   # q = M^1/2 x
-    dqk = modes.T @ dq
-    require_vibrational_modes(omega, 'huang_rhys_from_displacement')
+    return huang_rhys_of(modes.T @ dq, omega, 'huang_rhys_from_displacement')
+
+
+def huang_rhys_of(dqk, omega, where):
+    """(S_k, dq_k): S_k = omega_k dq_k^2 / 2 of a displacement dq_k on the
+    mass-weighted modes, whatever coordinates measured it (Cartesian here,
+    curvilinear in `curvilinear`); an imaginary mode is refused at `where`
+    (`franck_condon.require_vibrational_modes`)."""
+    require_vibrational_modes(omega, where)
     return omega * dqk ** 2 / 2.0, dqk
 
 
@@ -165,12 +173,8 @@ def align_to(mol_ref, mol_move, return_rotation=False):
     a = np.asarray(mol_ref.atom_coords())
     b = np.asarray(mol_move.atom_coords())
     ca = (m[:, None] * a).sum(0) / m.sum()
-    cb = (m[:, None] * b).sum(0) / m.sum()
-    a0, b0 = a - ca, b - cb
-    u, _, vt = np.linalg.svd((m[:, None] * b0).T @ a0)
-    d = np.sign(np.linalg.det(u @ vt))
-    rot = u @ np.diag([1.0, 1.0, d]) @ vt
-    out = molecule_at(mol_move, b0 @ rot + ca)
+    rot = kabsch_rotation(b, a, weights=m)
+    out = molecule_at(mol_move, centred(b, m) @ rot + ca)
     return (out, rot) if return_rotation else out
 
 
@@ -206,7 +210,7 @@ def relax_state(surface, mol=None, engine='auto', **kw):
     # both off ONE forward pass: its `energy` is (E_0 + Omega, ..., Omega). A
     # ground-state one has none, and reporting a zero there would read as a
     # degeneracy.
-    excited = hasattr(final, 'excitation')
+    excited = provides(final, 'energy')
     energies = final.energy(mol_opt, mf) if excited else None
     record = {'mol': mol_opt, 'mf': mf,
               'e_total': (energies[0] if excited
@@ -325,7 +329,7 @@ def reorganization_four_point(surface_a=None, surface_b=None, mol_a=None,
     Returns {'lambda_a', 'lambda_b', 'lambda_inner', 'lambda_outer',
     'lambda', 'energies', 'sources'}; 'lambda' = inner + outer is the
     `lambda_total` of `rates.marcus_rate`, and 'lambda_outer' the
-    `lambda_classical` of `rates.fc_weighted_dos` when the inner modes are
+    `lambda_classical` of `franck_condon.fc_weighted_dos` when the inner modes are
     treated quantum mechanically.
     """
     mols = {'a': mol_a if mol_a is not None else (state_a or {}).get('mol'),

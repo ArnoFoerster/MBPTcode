@@ -17,7 +17,8 @@ import pytest
 from pyscf import gto
 
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.gradients.state_manifold import StateManifold
+from src.Base.numerics.numerics import numerics_of
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.photophysics import stages
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.reference_scf import rhf_df_differentiable
@@ -33,7 +34,7 @@ def h2():
 def evaluation(h2, ground):
     spec = SurfaceSpec(GroundState(ground, 'hf'), chi0='space-time',
                        factorization='isdf', qp_states=QPStates('all'),
-                       numerics={'grid_accuracy': 'G1'})
+                       numerics=numerics_of({'grid_accuracy': 'G1'}))
     excited = surface_of(spec, Excitation('singlet'), h2,
                          rhf_df_differentiable)
     return StateManifold(excited, states=(S0, T0)).evaluate(h2)

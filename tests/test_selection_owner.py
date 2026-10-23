@@ -8,9 +8,9 @@ its limit: a copy must still refuse to refine or verify what it did not start.
 """
 import copy
 
-from src.gradients import adaptive_selection
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse import adaptive_selection
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 
 
 def selecting_chain():
@@ -28,6 +28,6 @@ def test_a_copy_does_not_take_over_the_selection(monkeypatch):
     chain = selecting_chain()
     view = copy.copy(chain)
     assert view._selecting is chain._selecting
-    assert view._refine_selection(None, None, None) is False
-    assert view.verify_selection(None, None) is False
-    assert chain._owns_selection(chain._selecting)
+    assert view.selection._refine_selection(None, None, None) is False
+    assert view.selection.verify_selection(None, None) is False
+    assert chain.selection._owns_selection(chain._selecting)

@@ -22,10 +22,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import GEOM_OPT_CONV
-from src.Base.solvent_screening import SolventScreening
-from src.properties.optimize import MeanFieldSurface, relax_ground_state
-from src.properties.surface import surface_mean_field
+from src.Base.numerics.constants import GEOM_OPT_CONV
+from src.environments.solvent_screening import SolventScreening
+from src.properties.optimize import relax_ground_state
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.surface import surface_mean_field
 from src.properties.vibronic import (huang_rhys_from_gradient, normal_modes,
                                      vibronic_analysis)
 

@@ -12,7 +12,7 @@ from pyscf import gto, scf
 from src.SingleReference.ADC import (
     ADCSolver, ADCSolverUnrestricted, build_mp2_static_correction,
     ADCSolverRestricted, build_mp2_static_correction_restricted)
-from src.Base.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, get_antisymmetrized_spin_eri
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, get_antisymmetrized_spin_eri
 
 HARTREE_TO_EV = 27.211386245988
 

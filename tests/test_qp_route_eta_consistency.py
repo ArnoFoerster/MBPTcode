@@ -11,7 +11,7 @@ route
 has a broadening to honour. chi0(i.omega) has the real denominator
 -2d/(d^2 + w^2), chi0(i.tau) is a separable factorization with no denominator at
 all, and Sigma_c reaches the real axis by Pade rather than at w + i.eta.
-Only the real-axis branch of `_f_rpa` reads an `eta`, so forwarding one from
+Only the real-axis branch of `f_rpa` reads an `eta`, so forwarding one from
 `solve_qp_energy_imaginary_axis` to the solver would look like a fix while
 changing nothing. The signature takes no `eta`: it does not advertise a
 broadening the route does not have, which leaves the refusal below as the only
@@ -46,9 +46,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, df
 
-from src.Base.constants import DEFAULT_BROADENING_ETA
-from src.Base.pyscf_interface import get_orbital_energies, get_df_coefficients_ov
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_df_coefficients_ov
+from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -93,7 +93,7 @@ def test_eta_is_inert_on_the_imaginary_frequency_route(hf_mf):
     Measured on W itself rather than on the quasiparticle energy, because that
     is where the inertness comes from: the whole eta dependence of the route
     was `LinearResponseSolver.eta`, read only by the real-axis branch of
-    `_f_rpa`.
+    `f_rpa`.
     """
     mol = hf_mf.mol
     nocc = mol.nelectron // 2
@@ -166,14 +166,22 @@ def test_non_default_eta_is_refused(hf_mf, mode):
 
 
 def test_the_default_still_runs_and_is_unchanged(hf_mf):
-    """A guard that refuses the default would break every existing caller."""
-    for mode in ('imagfrequency', 'casida'):
-        implicit = calc_qp_energy(hf_mf, mode=mode, **g1_route(hf_mf, mode))
-        explicit = calc_qp_energy(hf_mf, mode=mode, eta=DEFAULT_BROADENING_ETA, **g1_route(hf_mf, mode))
-        # two solves of one root: to a few ulp (tests/pins.py), not bitwise
-        check(matches(implicit, explicit, RECORDING_BLAS, unit='eV'),
-              f"mode={mode!r} takes the default eta either way",
-              f'{implicit!r} vs {explicit!r}')
+    """A guard that refuses the default would break every existing caller.
+    On the Casida route an eta given equal to the default is the default;
+    on the imaginary axis an eta given at all is refused, since nothing
+    reads it there (it was told from the default by its value until
+    eta=None became "not set")."""
+    implicit = calc_qp_energy(hf_mf, mode='casida', **g1_route(hf_mf, 'casida'))
+    explicit = calc_qp_energy(hf_mf, mode='casida', eta=DEFAULT_BROADENING_ETA,
+                              **g1_route(hf_mf, 'casida'))
+    # two solves of one root: to a few ulp (tests/pins.py), not bitwise
+    check(matches(implicit, explicit, RECORDING_BLAS, unit='eV'),
+          "mode='casida' takes the default eta either way",
+          f'{implicit!r} vs {explicit!r}')
+    calc_qp_energy(hf_mf, mode='imagfrequency', **g1_route(hf_mf, 'imagfrequency'))
+    with pytest.raises(ValueError, match='has no broadening'):
+        calc_qp_energy(hf_mf, mode='imagfrequency', eta=DEFAULT_BROADENING_ETA,
+                       **g1_route(hf_mf, 'imagfrequency'))
 
 
 def test_evgw_forwards_eta(monkeypatch):

@@ -86,22 +86,22 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState
-from src.Base.utils.mpi_grid import (current_comm, distributed, lockstep_stats,
-                                     run_simulated)
-from src.gradients import factor_chain
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surface import evaluate
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed, lockstep_stats
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.rpa import factor_chain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.surface import evaluate
 from tests.pins import assert_pin, assert_same, recorded_blas
-from src.properties.surfaces import (potential_energy_surface,
-                                     reference_mean_field)
+from src.gradients.gwbse.surface_factory import (potential_energy_surface,
+                                                 reference_mean_field)
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 

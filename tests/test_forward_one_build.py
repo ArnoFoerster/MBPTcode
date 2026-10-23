@@ -10,14 +10,14 @@ import inspect
 import numpy as np
 from pyscf import ao2mo, gto, scf
 
-import src.Base.utils.time_frequency as time_frequency
+import src.Base.utils.grids.time_frequency as time_frequency
 import src.SingleReference.GW.imaginary_time as imaginary_time
 import src.SingleReference.GW.reaction_field as reaction_field
 import src.SingleReference.GW.space_time as gw_space_time
 import src.SingleReference.LinearResponse.space_time as lr_space_time
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
-from src.SingleReference.LinearResponse.quasi_boson_bse import BSEqb
+from src.SingleReference.BSE.quasi_boson_bse import BSEqb
 from tests.pins import assert_same
 
 NORB, NOCC = 9, 4
@@ -83,8 +83,7 @@ def test_chi0_has_one_sweep():
 # ------------------------------------------------------ the Dyson step for W
 DYSON_ROUTES = (gw_space_time._dyson_in_place, gw_space_time._dyson_owned,
                 imaginary_time.screened_interaction_tau_blocked,
-                imaginary_time.screened_interaction_tau,
-                lr_space_time.screening_space_time)
+                imaginary_time.screened_interaction_tau)
 
 
 def test_every_dyson_route_calls_the_one_kernel():

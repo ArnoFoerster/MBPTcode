@@ -30,17 +30,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import TRANSFORM_FIT_RCOND
-from src.Base.utils import time_frequency
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT,
-                                           DEFAULT_TAU_TARGET,
-                                           TimeFrequencyGrid,
-                                           minimax_convergence_floor,
-                                           minimax_points_for_accuracy,
-                                           minimax_points_for_ranges,
-                                           minimax_transform_weights,
-                                           resolve_grid_size)
+from src.Base.numerics.constants import TRANSFORM_FIT_RCOND
+from src.Base.utils.grids import time_frequency
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT,
+                                                 DEFAULT_TAU_TARGET,
+                                                 TimeFrequencyGrid,
+                                                 minimax_convergence_floor,
+                                                 minimax_points_for_accuracy,
+                                                 minimax_points_for_ranges,
+                                                 minimax_transform_weights,
+                                                 resolve_grid_size)
 from tests.pins import RECORDING_BLAS, matches
 
 E_MIN, E_MAX = 0.4, 40.0

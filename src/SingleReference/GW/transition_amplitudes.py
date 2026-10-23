@@ -1,5 +1,7 @@
 import numpy as np
 
+from src.Base.pyscf.pyscf_interface import spin_index
+
 class AmplitudeGenerator:
     """
     Generates transition amplitudes (GW chi_a and vertex chiXYb, PSD amplitudes)
@@ -50,7 +52,7 @@ class AmplitudeGenerator:
         rho^T B' with the rotated factors this solver holds, provided B' shares
         B's auxiliary basis: a with_df's, or B rotated, never factors
         re-decomposed from the rotated ERI. Restricted only;
-        keyed exactly as _rho_a_df keys its own build, so X and Y must stay
+        keyed exactly as rho_a_df keys its own build, so X and Y must stay
         alive while the solver is used.
         """
         if self.spin_mode != 'restricted':
@@ -74,14 +76,7 @@ class AmplitudeGenerator:
         else:
             return self.get_chi_b_vertex_full(nocc, X, Y, spin_channel, eri_w, p_state)
 
-    def get_chi_b_psd(self, nocc, eigenvalues_casida, chiXYa, spin_channel='alpha', eri_w=None, p_state=None):
-        """Computes the PSD transition amplitude chiXYb (dispatches to DF or full ERI version)."""
-        if (self.spin_mode == 'unrestricted' and self.df_a is not None) or (self.spin_mode != 'unrestricted' and self.df_coeff is not None):
-            return self.get_chi_b_psd_df(nocc, eigenvalues_casida, chiXYa, spin_channel, eri_w, p_state)
-        else:
-            return self.get_chi_b_psd_full(nocc, eigenvalues_casida, chiXYa, spin_channel, eri_w, p_state)
-
-    def _rho_a_df(self, nocc, X, Y):
+    def rho_a_df(self, nocc, X, Y):
         """(naux, nexciton) DF transition density C_ov^T.(X+Y) -- independent of
         spin_channel and p_state, so cached and shared across every get_chi_a_df
         call for this X/Y (see _amp_cache)."""
@@ -113,10 +108,10 @@ class AmplitudeGenerator:
 
     def get_chi_a_df(self, nocc, X, Y, spin_channel='alpha', p_state=None):
         """Computes the GW transition amplitude using density fitting."""
-        rho = self._rho_a_df(nocc, X, Y)
+        rho = self.rho_a_df(nocc, X, Y)
         nexciton = rho.shape[1]
         if self.spin_mode == 'unrestricted':
-            coeff_target = self.df_a if spin_channel == 'alpha' else self.df_b
+            coeff_target = (self.df_a, self.df_b)[spin_index(spin_channel)]
         else:
             coeff_target = self.df_coeff
 
@@ -147,7 +142,7 @@ class AmplitudeGenerator:
             XpY_a = XpY[:n_pair_a, :]
             XpY_b = XpY[n_pair_a:, :]
             
-            if spin_channel == 'alpha':
+            if spin_index(spin_channel) == 0:
                 norb_target = self.norb_a
                 if p_state is not None:
                     eri_a_slice = self.eri_a[:, :, p_state, :][np.ix_(occ_a, virt_a)].reshape(n_pair_a, -1)
@@ -192,16 +187,16 @@ class AmplitudeGenerator:
     def get_chi_b_vertex_df(self, nocc, X, Y, spin_channel='alpha', eri_w=None, p_state=None):
         """Computes the vertex correction transition amplitude chiXYb using density fitting."""
         if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            coeff = self.df_a if spin_channel == 'alpha' else self.df_b
+            eps = (self.eps_a, self.eps_b)[spin_index(spin_channel)]
+            coeff = (self.df_a, self.df_b)[spin_index(spin_channel)]
             nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
+            nocc_spin = (nocc_a, nocc_b)[spin_index(spin_channel)]
             occ, virt = self._get_occ_virt_indices(eps, nocc_spin)
             
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             n_pair_a = len(occ_a) * len(virt_a)
             
-            if spin_channel == 'alpha':
+            if spin_index(spin_channel) == 0:
                 X_spin = X[:n_pair_a, :]
                 Y_spin = Y[:n_pair_a, :]
             else:
@@ -323,18 +318,18 @@ class AmplitudeGenerator:
     def get_chi_b_vertex_full(self, nocc, X, Y, spin_channel='alpha', eri_w=None, p_state=None):
         """Computes the vertex correction transition amplitude chiXYb using full ERIs."""
         if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            eri = self.eri_a if spin_channel == 'alpha' else self.eri_b
+            eps = (self.eps_a, self.eps_b)[spin_index(spin_channel)]
+            eri = (self.eri_a, self.eri_b)[spin_index(spin_channel)]
             if eri_w is None:
                 eri_w = eri
             nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
+            nocc_spin = (nocc_a, nocc_b)[spin_index(spin_channel)]
             occ, virt = self._get_occ_virt_indices(eps, nocc_spin)
             
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             n_pair_a = len(occ_a) * len(virt_a)
             
-            if spin_channel == 'alpha':
+            if spin_index(spin_channel) == 0:
                 X_spin = X[:n_pair_a, :]
                 Y_spin = Y[:n_pair_a, :]
             else:
@@ -404,100 +399,6 @@ class AmplitudeGenerator:
                 return 2.0 * chiXYb
             return chiXYb
 
-    def get_chi_b_psd_df(self, nocc, eigenvalues_casida, chiXYa, spin_channel='alpha', eri_w=None, p_state=None):
-        """Computes the PSD transition amplitude chiXYb using density fitting."""
-        if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            coeff = self.df_a if spin_channel == 'alpha' else self.df_b
-            nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
-        else:
-            eps = self.eps
-            coeff = self.df_coeff
-            nocc_spin = nocc
-            
-        occ, virt = self._get_occ_virt_indices(eps, nocc_spin)
-        norb = len(eps)
-        nexciton = len(eigenvalues_casida)
-        
-        chiXYa_ov = chiXYa[:, occ, :][:, :, virt]
-        
-        # Vectorized denominators
-        d_ia = eps[virt] - eps[occ][:, None]
-        denom_minus = 1.0 / (d_ia[None, :, :] - eigenvalues_casida[:, None, None])
-        denom_plus = 1.0 / (d_ia[None, :, :] + eigenvalues_casida[:, None, None])
-        
-        chiXY_minus = chiXYa_ov * denom_minus
-        chiXY_plus = chiXYa_ov * denom_plus
-        
-        eri_pajk = np.einsum('Ppa, Pjk -> pajk', coeff[:, :, virt], coeff[:, occ[:, None], occ])
-        wt_pk = np.einsum('pajk, Sja -> pkS', eri_pajk, chiXY_plus)
-        
-        eri_pjak = np.einsum('Ppj, Pak -> pjak', coeff[:, :, occ], coeff[:, virt[:, None], occ])
-        wt_pk += np.einsum('pjak, Sja -> pkS', eri_pjak, chiXY_minus)
-        
-        eri_pajc = np.einsum('Ppa, Pjc -> pajc', coeff[:, :, virt], coeff[:, occ[:, None], virt])
-        wt_pc = np.einsum('pajc, Sja -> pcS', eri_pajc, chiXY_minus)
-        
-        eri_pjac = np.einsum('Ppj, Pac -> pjac', coeff[:, :, occ], coeff[:, virt[:, None], virt])
-        wt_pc += np.einsum('pjac, Sja -> pcS', eri_pjac, chiXY_plus)
-        
-        chiXYb = np.zeros((nexciton, norb, norb))
-        for S in range(nexciton):
-            chiXYb[S, :len(occ), :] = wt_pk[:, :, S].T
-            chiXYb[S, len(occ):, :] = wt_pc[:, :, S].T
-            
-        return chiXYb
-
-    def get_chi_b_psd_full(self, nocc, eigenvalues_casida, chiXYa, spin_channel='alpha', eri_w=None, p_state=None):
-        """Computes the PSD transition amplitude chiXYb using full ERIs."""
-        if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            eri = self.eri_a if spin_channel == 'alpha' else self.eri_b
-            if eri_w is None:
-                eri_w = eri
-            nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
-        else:
-            eps = self.eps
-            eri = self.eri_chemist
-            if eri_w is None:
-                eri_w = eri
-            nocc_spin = nocc
-            
-        occ, virt = self._get_occ_virt_indices(eps, nocc_spin)
-        norb = len(eps)
-        nexciton = len(eigenvalues_casida)
-        
-        chiXYa_ov = chiXYa[:, occ, :][:, :, virt]
-        
-        # Vectorized denominators
-        d_ia = eps[virt] - eps[occ][:, None]
-        denom_minus = 1.0 / (d_ia[None, :, :] - eigenvalues_casida[:, None, None])
-        denom_plus = 1.0 / (d_ia[None, :, :] + eigenvalues_casida[:, None, None])
-        
-        chiXY_minus = chiXYa_ov * denom_minus
-        chiXY_plus = chiXYa_ov * denom_plus
-        
-        eri_pajk = eri_w[np.ix_(np.arange(norb), virt, occ, occ)]
-        wt_pk = np.einsum('pajk, Sja -> pkS', eri_pajk, chiXY_plus)
-        
-        eri_pjak = eri_w[np.ix_(np.arange(norb), occ, virt, occ)]
-        wt_pk += np.einsum('pjak, Sja -> pkS', eri_pjak, chiXY_minus)
-        
-        eri_pajc = eri_w[np.ix_(np.arange(norb), virt, occ, virt)]
-        wt_pc = np.einsum('pajc, Sja -> pcS', eri_pajc, chiXY_minus)
-        
-        eri_pjac = eri_w[np.ix_(np.arange(norb), occ, virt, virt)]
-        wt_pc += np.einsum('pjac, Sja -> pcS', eri_pjac, chiXY_plus)
-        
-        chiXYb = np.zeros((nexciton, norb, norb))
-        for S in range(nexciton):
-            chiXYb[S, :len(occ), :] = wt_pk[:, :, S].T
-            chiXYb[S, len(occ):, :] = wt_pc[:, :, S].T
-            
-        return chiXYb
-
     def _spin_flip_vertex(self, nocc, X, Y, spin_channel, p_state, integral):
         """Spin-flip vertex amplitude M[n, r] of the spin-orbital eh pair, r of the spin opposite to p.
 
@@ -520,7 +421,7 @@ class AmplitudeGenerator:
         blocks = {'ab': (nocc_a, self.norb_b - nocc_b), 'ba': (nocc_b, self.norb_a - nocc_a)}
         X_ab, X_ba = X[:n_ab].reshape(*blocks['ab'], nexciton), X[n_ab:].reshape(*blocks['ba'], nexciton)
         Y_ab, Y_ba = Y[:n_ab].reshape(*blocks['ab'], nexciton), Y[n_ab:].reshape(*blocks['ba'], nexciton)
-        if spin_channel == 'alpha':
+        if spin_index(spin_channel) == 0:
             nocc_s, norb_s, nocc_t, norb_t = nocc_a, self.norb_a, nocc_b, self.norb_b
             X_st, Y_st, X_ts, Y_ts = X_ab, Y_ab, X_ba, Y_ba
         else:
@@ -538,7 +439,7 @@ class AmplitudeGenerator:
 
     def get_chi_b_vertex_sf_df(self, nocc, X, Y, spin_channel='alpha', eri_w=None, p_state=None):
         """Spin-flip vertex amplitude (see _spin_flip_vertex) with density fitting; eri_w is W_aux."""
-        coeff_s, coeff_t = ((self.df_a, self.df_b) if spin_channel == 'alpha'
+        coeff_s, coeff_t = ((self.df_a, self.df_b) if spin_index(spin_channel) == 0
                             else (self.df_b, self.df_a))
         W = np.eye(self.naux) if eri_w is None else np.asarray(eri_w)
 
@@ -554,7 +455,7 @@ class AmplitudeGenerator:
         eri = self.eri_ab if eri_w is None else eri_w
 
         def integral(i1, i2, i3, i4):
-            if spin_channel == 'alpha':
+            if spin_index(spin_channel) == 0:
                 return eri[np.ix_(i1, i2, i3, i4)]
             return eri[np.ix_(i3, i4, i1, i2)].transpose(2, 3, 0, 1)
 

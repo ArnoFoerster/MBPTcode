@@ -45,7 +45,7 @@ What breaks each gate:
     anything of `src.gradients` there is circular through
     `gradients/__init__.py` -> `qp_space_time` and dies at import time. Its
     sensitivity is a positive control in the same test instead -- the same
-    subprocess probe run on `src.gradients.qp_space_time`, which must show
+    subprocess probe run on `src.gradients.gwbse.qp_space_time`, which must show
     `src.gradients` in sys.modules.
 """
 import subprocess
@@ -56,12 +56,14 @@ import pytest
 from pyscf import gto, scf
 from pyscf.data.elements import chemcore
 
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.Base.declaration import QPStates
 from src.SingleReference.GW import qp_states as prod
+from src.Base.orbital_spaces import particle_hole_window
 from src.SingleReference.GW.sum_over_poles import compressible
-from src.gradients import dense_surfaces, qp_space_time
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse import dense_surfaces, qp_space_time
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.qp_set import QuasiparticleSet
 from tests.pins import assert_same, assert_same_tree
 
 #: The chain's own degeneracy tolerance; `resolve_qp_states` has no default.
@@ -126,7 +128,7 @@ def test_frontier_is_the_chains_window(spectra, name, half_width):
     """The production function and the chain's staticmethod, index for index."""
     _, eps, nocc = spectra[name]
     got = prod.frontier_qp_states(eps, nocc, half_width, DEGENERACY_TOL)
-    assert np.array_equal(got, ExcitedStateChain._qp_set(eps, nocc, half_width,
+    assert np.array_equal(got, QuasiparticleSet._qp_set(eps, nocc, half_width,
                                                         DEGENERACY_TOL))
     assert np.array_equal(got, _old_qp_set(eps, nocc, half_width,
                                            DEGENERACY_TOL))
@@ -149,7 +151,7 @@ def test_frontier_takes_all_when_asked(spectra):
     assert np.array_equal(prod.frontier_qp_states(eps, nocc, 'all',
                                                   DEGENERACY_TOL),
                           np.arange(len(eps)))
-    assert np.array_equal(ExcitedStateChain._qp_set(eps, nocc, 'all',
+    assert np.array_equal(QuasiparticleSet._qp_set(eps, nocc, 'all',
                                                     DEGENERACY_TOL),
                           np.arange(len(eps)))
 
@@ -159,7 +161,7 @@ def test_resolve_frontier_matches_the_chain(spectra):
     spec = QPStates(kind='frontier', half_width=2)
     got = prod.resolve_qp_states(spec, eps, nocc, degeneracy_tol=DEGENERACY_TOL)
     assert np.array_equal(got.explicit,
-                          ExcitedStateChain._qp_set(eps, nocc, 2, DEGENERACY_TOL))
+                          QuasiparticleSet._qp_set(eps, nocc, 2, DEGENERACY_TOL))
     assert got.reach == {}, 'reach is the admitted criterion and nothing else'
 
 
@@ -231,7 +233,7 @@ def test_admitted_holds_the_frontier_and_excludes_the_oxygen_core(spectra):
     _, eps, nocc = spectra['water']
     resolved = prod.resolve_qp_states(QPStates(kind='admitted'), eps, nocc,
                                       degeneracy_tol=DEGENERACY_TOL)
-    frontier = ExcitedStateChain._qp_set(eps, nocc, 2, DEGENERACY_TOL)
+    frontier = QuasiparticleSet._qp_set(eps, nocc, 2, DEGENERACY_TOL)
     assert set(frontier) <= set(resolved.explicit)
     assert 0 in resolved.outside
     assert resolved.reach[0] > 1.0
@@ -246,7 +248,7 @@ def test_the_pole_condition_reproduces_compressible_on_the_gap(spectra):
     ulp."""
     for name in MOLS:
         _, eps, nocc = spectra[name]
-        limit = prod.particle_hole_gap(eps, nocc)
+        limit = particle_hole_window(eps, nocc)[0]
         for p in range(len(eps)):
             got = prod.admitted_by_pole_condition(eps, nocc, p, limit)
             want = compressible(float(eps[p]), eps, nocc)
@@ -262,7 +264,7 @@ def test_omega1_refuses_without_the_lowest_drpa_root(spectra):
     spec = QPStates(kind='admitted', threshold='omega1')
     with pytest.raises(ValueError, match='omega1'):
         prod.resolve_qp_states(spec, eps, nocc, degeneracy_tol=DEGENERACY_TOL)
-    at_gap = prod.resolve_qp_states(spec, eps, nocc, omega1=prod.particle_hole_gap(eps, nocc),
+    at_gap = prod.resolve_qp_states(spec, eps, nocc, omega1=particle_hole_window(eps, nocc)[0],
                                     degeneracy_tol=DEGENERACY_TOL)
     on_gap = prod.resolve_qp_states(QPStates(kind='admitted'), eps, nocc,
                                     degeneracy_tol=DEGENERACY_TOL)
@@ -276,7 +278,7 @@ def test_the_gap_is_the_conservative_threshold(spectra):
     does: testing against the gap can only leave a state out, never let one in
     that the true Om_1 would exclude."""
     _, eps, nocc = spectra['water']
-    gap = prod.particle_hole_gap(eps, nocc)
+    gap = particle_hole_window(eps, nocc)[0]
     loose = prod.resolve_qp_states(QPStates(kind='admitted', threshold='omega1'),
                                    eps, nocc, omega1=2.0 * gap,
                                    degeneracy_tol=DEGENERACY_TOL)
@@ -361,4 +363,4 @@ def test_production_does_not_reach_into_the_gradient_package():
     see what this one denies -- otherwise the probe proves nothing.
     """
     assert not _imports('src.SingleReference.GW.qp_states')
-    assert _imports('src.gradients.qp_space_time'), 'the probe can see it'
+    assert _imports('src.gradients.gwbse.qp_space_time'), 'the probe can see it'

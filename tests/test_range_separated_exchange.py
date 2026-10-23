@@ -30,10 +30,11 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.isdf_jk import isdf_jk
-from src.gradients.isdf_derivatives import (exchange_channel_skeleton,
-                                            exchange_channels, rsh_split,
-                                            xc_hybrid_coeff)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.mean_field_response import exchange_channel_skeleton
+from src.SingleReference.LinearResponse.rpa_energy import (exchange_channels,
+                                                           rsh_split,
+                                                           xc_hybrid_coeff)
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
 from tests.isdf_test_grid import g1
@@ -149,7 +150,7 @@ def test_isdf_mean_field_force_on_a_range_separated_hybrid(mol, xc):
     where a correct force gives 1e-15.
     """
     def scf(m):
-        mf = isdf_jk(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
+        mf = isdf_jk_with_force(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
         mf.grids.prune = None
         mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
         mf.kernel()

@@ -19,7 +19,7 @@ from src.SingleReference.Periodic import pbc_casida as pc
 from src.SingleReference.Periodic import pbc_amplitudes as pa
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
 
 
 class _MolAmp(AmplitudeGenerator):

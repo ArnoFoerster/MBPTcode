@@ -1,4 +1,4 @@
-"""Gates for src/gradients/rpa_ground_state.py -- the cubic dRPA ground-state gradient.
+"""Gates for src/gradients/rpa/ground_state.py -- the cubic dRPA ground-state gradient.
 
 The analytic gradient is differenced against E_HF + E_c of the chain's own
 function (SCF, factors and energy redone at each displacement), on a distorted
@@ -12,17 +12,17 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import shipped_radii_lookup
-from src.SingleReference.GW.quasi_boson import build_rpa_AB
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import shipped_radii_lookup
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.SingleReference.LinearResponse.space_time import (
     rpa_correlation_energy_space_time)
-from src.Base.eri_blocks import df_eri_mo
+from src.SingleReference.common.eri_blocks import df_eri_mo
 from src.gradients.grad_engine import correlation_gradient
-from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.targets import rpa_partials
+from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.gwbse.targets import rpa_partials
 from tests.isdf_test_grid import g1
 
 BASIS = 'cc-pvdz'

@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.separable_ri import optimize_atomic_radii
-from src.Base.solvent_screening import (attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.factorization.separable_ri import optimize_atomic_radii
+from src.environments.solvent_screening import (attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from tests.isdf_test_grid import g1
 

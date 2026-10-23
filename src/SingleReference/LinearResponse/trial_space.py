@@ -40,8 +40,8 @@ linear-dependence tests, when the space restarts -- is read off reduced or
 lockstepped small matrices, so it is the same on every rank and the
 collectives pair.
 
-RESTARTS take the lowest max(2 nroots, tracked) Ritz vectors (real_eig takes
-the nroots requested ones), and their products as the same combinations of the
+RESTARTS take the lowest max(2 nroots, tracked) Ritz vectors, at most the
+space_inc a cycle corrects (real_eig takes the nroots requested ones), and their products as the same combinations of the
 stored products, A (V x + W y) + B (W x + V y) = U1 x + U2 y, instead of
 applying the action to them again.
 
@@ -49,8 +49,10 @@ ONE TILE. On one rank with one tile every expression is the one real_eig
 evaluates: a tile's addend is real_eig's own sum, a sum over one tile is that
 addend, and the square root of a squared norm is the norm again
 (sqrt(fl(x^2)) = |x| in binary floating point), so a solve without restarts
-whose tracked pairs are no more than real_eig corrects, and settled where its
-requested roots converge, takes real_eig's decisions on real_eig's sums.
+handed real_eig's space_inc, whose tracked pairs are no more than real_eig
+corrects, and settled where its requested roots converge, takes real_eig's
+decisions on real_eig's sums. `davidson._davidson_root` hands it the tracked
+pairs as space_inc instead, so it corrects fewer pairs a cycle than real_eig.
 """
 import time
 
@@ -60,10 +62,10 @@ from pyscf.lib.linalg_helper import _sort_elast
 from pyscf.tdscf._lr_eig import (TDDFT_subspace_eigen_solver, _asym_dot,
                                  _sym_dot)
 
-from src.Base.constants import (DAVIDSON_ACTION_SYMMETRY_TOL, DAVIDSON_LINDEP,
-                                DAVIDSON_PAIR_TILE)
-from src.Base.utils.mpi_grid import (allgather_ranges, contiguous_block,
-                                     lockstep, ordered_sum)
+from src.Base.numerics.constants import (DAVIDSON_ACTION_SYMMETRY_TOL, DAVIDSON_LINDEP,
+                                         DAVIDSON_PAIR_TILE)
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, contiguous_block,
+                                              lockstep, ordered_sum)
 
 
 #: The owned loop's own time outside the block action, each piece timed

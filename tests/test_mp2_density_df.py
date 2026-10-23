@@ -26,7 +26,7 @@ from pyscf import gto, scf, df
 
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
 
 
 def _max_diff(blocks_a, blocks_b):
@@ -135,7 +135,7 @@ if __name__ == '__main__':
     import src.SingleReference.ADC.adc_r_utils as _ar
     from src.SingleReference.ADC import build_mp2_static_correction_restricted
     from src.SingleReference.EpsteinNesbet import (
-        _build_dressed_e_abij, _build_dressed_e_ai, restricted_channel_shifts)
+        build_dressed_e_abij, build_dressed_e_ai, restricted_channel_shifts)
 
     mol6 = gto.M(atom='C 0 0 0; O 0 0 1.13', basis='sto-3g', verbose=0)
     mf6 = scf.RHF(mol6).run()
@@ -149,8 +149,8 @@ if __name__ == '__main__':
     for dname, dress in (("bare", None), ("hh+pp", {'hh': True, 'pp': True})):
         e_abij6 = e_ai6 = dh6 = dp6 = None
         if dress is not None:
-            e_abij6 = _build_dressed_e_abij(dress, eps6, O6, V6, B_aa=B6)
-            e_ai6 = _build_dressed_e_ai(dress, eps6, O6, V6, B_aa=B6)
+            e_abij6 = build_dressed_e_abij(dress, eps6, O6, V6, B_aa=B6)
+            e_ai6 = build_dressed_e_ai(dress, eps6, O6, V6, B_aa=B6)
             d_h6, d_p6, _ = restricted_channel_shifts(dress, B6, None, None, O6, vidx6)
             dh6, dp6 = d_h6[0], d_p6[0]
         ref6 = MPnDensityDriverRestricted(np.diag(eps6), None, None, None, nocc6,
@@ -168,10 +168,10 @@ if __name__ == '__main__':
 
     def _boom(*a, **k):
         raise AssertionError("rank-4 producer called on streamed MP2 path")
-    _saved = (_gdf.t2_1_aaaa_numerator_df, _drv_mod._to_l_restricted, _sc._build_dressed_e_abij)
+    _saved = (_gdf.t2_1_aaaa_numerator_df, _drv_mod.to_l, _sc.build_dressed_e_abij)
     _gdf.t2_1_aaaa_numerator_df = _boom
-    _drv_mod._to_l_restricted = _boom
-    _sc._build_dressed_e_abij = _boom
+    _drv_mod.to_l = _boom
+    _sc.build_dressed_e_abij = _boom
     try:
         build_mp2_static_correction_restricted(mf6, mol6, nocc6, relax=True, B_aa=B6,
                                                u2_denom_dress={'hh': True, 'pp': True})
@@ -180,24 +180,24 @@ if __name__ == '__main__':
     except AssertionError:
         guard_ok = False
     finally:
-        _gdf.t2_1_aaaa_numerator_df, _drv_mod._to_l_restricted, _sc._build_dressed_e_abij = _saved
+        _gdf.t2_1_aaaa_numerator_df, _drv_mod.to_l, _sc.build_dressed_e_abij = _saved
     all_ok &= guard_ok
     print(f"streamed MP2 static correction touches NO rank-4 producer "
-          f"(t2 numerator/_to_l/_build_dressed_e_abij all guarded): "
+          f"(t2 numerator/to_l/build_dressed_e_abij all guarded): "
           f"{'OK' if guard_ok else 'FAIL'}")
 
     # hp-dress must FALL BACK (still exact) rather than stream
     stat_hp = build_mp2_static_correction_restricted(
         mf6, mol6, nocc6, relax=True, B_aa=B6,
         u2_denom_dress={'hh': True, 'pp': True, 'hp': True})
-    _ar_orig = _ar._dress_is_streamable
-    _ar._dress_is_streamable = lambda d: False
+    _ar_orig = _ar.dress_is_streamable
+    _ar.dress_is_streamable = lambda d: False
     try:
         stat_hp_ref = build_mp2_static_correction_restricted(
             mf6, mol6, nocc6, relax=True, B_aa=B6,
             u2_denom_dress={'hh': True, 'pp': True, 'hp': True})
     finally:
-        _ar._dress_is_streamable = _ar_orig
+        _ar.dress_is_streamable = _ar_orig
     d_hp = np.abs(stat_hp - stat_hp_ref).max()
     ok = d_hp < 1e-12
     all_ok &= ok

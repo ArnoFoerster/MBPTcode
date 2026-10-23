@@ -6,8 +6,8 @@ named; the BSE and static-screening resolvers that read the count raise too.
 import numpy as np
 import pytest
 
-from src.Base.utils.time_frequency import (minimax_points_for_accuracy,
-                                           minimax_points_for_ranges)
+from src.Base.utils.grids.time_frequency import (minimax_points_for_accuracy,
+                                                 minimax_points_for_ranges)
 from src.SingleReference.LinearResponse.space_time import (
     minimax_points_for_bse, static_screening_grid)
 

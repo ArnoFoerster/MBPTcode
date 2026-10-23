@@ -1,5 +1,5 @@
 """Gates for src/properties/band_shape.py and the line-shape branch of
-`rates.fc_weighted_dos`.
+`franck_condon.fc_weighted_dos`.
 
 Every reference is independent of the generating function: the Poisson
 progression convolved with scipy's Voigt profile, the displaced-oscillator
@@ -17,12 +17,12 @@ from scipy.stats import norm, poisson
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
-                                GAUSSIAN_FWHM_PER_SIGMA, HARTREE_TO_CM,
-                                HARTREE_TO_EV, HARTREE_WAVELENGTH_NM)
+from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+                                         GAUSSIAN_FWHM_PER_SIGMA, HARTREE_TO_CM,
+                                         HARTREE_TO_EV, HARTREE_WAVELENGTH_NM)
 from src.properties.band_shape import (band_grid, band_shape, fwhm,
                                        gaussian_limit_fwhm, peak)
-from src.properties.rates import TRAPEZOID, fc_weighted_dos
+from src.properties.franck_condon import TRAPEZOID, fc_weighted_dos
 from tests.pins import assert_same
 
 EV = 1.0 / HARTREE_TO_EV

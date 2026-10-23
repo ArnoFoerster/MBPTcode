@@ -21,13 +21,13 @@ from pyscf import df, dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
-from src.Base.numerics import numerics_of
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
+from src.Base.numerics.numerics import numerics_of
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import solve_bse_df
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 

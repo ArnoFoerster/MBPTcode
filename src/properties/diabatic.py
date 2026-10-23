@@ -1,7 +1,7 @@
 """Finite-difference nuclear derivatives of the fragment-diabatic BSE matrix,
 Tamm-Dancoff or full (the chain's kernel).
 
-The reference the analytic diabatic gradient (`src.gradients.fragment_diabatic`)
+The reference the analytic diabatic gradient (`src.gradients.gwbse.fragment_diabatic`)
 has to reproduce, in the role `nonadiabatic.derivative_couplings` plays for the
 derivative coupling and `FiniteDifferenceGradient` for forces. It is also the
 cheap route when only a few nuclear directions matter: one displaced pair of
@@ -23,17 +23,19 @@ from the reference geometry is IDENTITY, not values:
   `DIABAT_OVERLAP_FLOOR` is refused rather than differenced;
 * Omega_0 is the reference's, held fixed.
 
-`step_ladder` repeats the central difference over a ladder of steps and
+`derivative_ladder` repeats the central difference over a ladder of steps and
 Richardson-extrapolates; a localization that jumps between local maxima, or a
 diabat that swaps, shows up there as a ladder that does not converge as h^2.
 """
 import numpy as np
 
-from src.Base.constants import DIABAT_OVERLAP_FLOOR, NUCLEAR_FD_STEP
-from src.Base.geometry import molecule_at
-from src.Base.fragment_localization import FragmentOrbitals
-from src.properties.fragment_bse import BSEOperator, FragmentPartition
-from src.properties.nonadiabatic import mo_overlap, state_overlap
+from src.Base.numerics.constants import DIABAT_OVERLAP_FLOOR, NUCLEAR_FD_STEP
+from src.Base.geometry.geometry import displaced
+from src.fragments.localization import FragmentOrbitals
+from src.gradients.gwbse.fragment_bse import BSEOperator, FragmentPartition
+from src.gradients.state_identity import mo_overlap, state_overlap
+from src.properties.hessian import ladder_ratios
+from src.properties.vibronic import project_coupling
 
 
 def diabatic_matrix(chain, fragments, sites, ct=None, omega0=None, mol=None,
@@ -60,7 +62,7 @@ def _align(part, reference):
     """Flip the signs of `part`'s diabats to overlap the reference's positively.
 
     The overlap is the transported state overlap of the CANONICAL amplitudes
-    (`nonadiabatic.state_overlap`), not a dot product in the local basis:
+    (`state_identity.state_overlap`), not a dot product in the local basis:
     the fragment functional is nearly flat under rotations inside one
     fragment, so local orbitals of one fragment can rotate among themselves
     between geometries while the diabat, which depends only on the fragment
@@ -84,11 +86,6 @@ def _align(part, reference):
         setattr(part, name, getattr(part, name) * np.outer(s, s))
 
 
-def displaced_along(mol, direction, h):
-    """`mol` moved by `h` along the Cartesian `direction` (Bohr)."""
-    return molecule_at(mol, np.asarray(mol.atom_coords()) + h * direction)
-
-
 def diabatic_derivative(chain, fragments, sites, direction, ct=None,
                         omega0=None, step=NUCLEAR_FD_STEP, scheme='lowdin',
                         reference=None, route='auto'):
@@ -105,7 +102,7 @@ def diabatic_derivative(chain, fragments, sites, direction, ct=None,
         reference = diabatic_matrix(chain, fragments, sites, ct, omega0,
                                     scheme=scheme, route=route)
     plus, minus = (diabatic_matrix(chain, fragments, sites, ct,
-                                   mol=displaced_along(mol0, direction, s * step),
+                                   mol=displaced(mol0, s * step * direction),
                                    scheme=scheme, reference=reference,
                                    route=route)
                    for s in (1.0, -1.0))
@@ -117,7 +114,7 @@ def diabatic_derivative(chain, fragments, sites, direction, ct=None,
     return out, reference
 
 
-def step_ladder(chain, fragments, sites, direction, ct=None, omega0=None,
+def derivative_ladder(chain, fragments, sites, direction, ct=None, omega0=None,
                 steps=None, scheme='lowdin', route='auto'):
     """Derivatives over a ladder of steps, and their Richardson extrapolation.
 
@@ -138,6 +135,27 @@ def step_ladder(chain, fragments, sites, direction, ct=None, omega0=None,
     ladder = np.array(ladder)
     rich = (4.0 * ladder[1:] - ladder[:-1]) / 3.0
     diffs = np.abs(np.diff(ladder, axis=0)).max(axis=(1, 2))
-    ratio = diffs[:-1] / np.maximum(diffs[1:], 1e-300)
+    ratio = ladder_ratios(diffs)
     return dict(steps=steps, a_eff=ladder, richardson=rich, ratio=ratio,
                 labels=reference.labels, reference=reference)
+
+
+def linear_vibronic_coupling(gradient, modes, masses):
+    """The linear vibronic coupling model of the diabatic matrix.
+
+    Returns E (n, n), the diabatic matrix at the reference geometry, and
+    kappa (n, n, nmode), each element's gradient on the MASS-WEIGHTED normal
+    modes (`vibronic.normal_modes`, `vibronic.project_coupling`): diagonal
+    entries are the site and charge-transfer slopes, off-diagonal ones the
+    coupling slopes (Koeppel, Domcke and Cederbaum, Adv. Chem. Phys. 57, 59
+    (1984)). One reverse pass per element, n(n+1)/2 of them.
+    """
+    m = gradient.matrix()
+    n = m.shape[0]
+    kappa = np.zeros((n, n, modes.shape[1]))
+    for a in range(n):
+        for b in range(a, n):
+            g, _ = gradient.element(a, b)
+            kappa[a, b] = kappa[b, a] = project_coupling(g, modes, masses)
+    return dict(energies=m.copy(), kappa=kappa,
+                labels=list(gradient.partition.labels))

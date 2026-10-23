@@ -7,10 +7,11 @@ factorization, not a coarse one, so no grid is a default.
 import pytest
 from pyscf import gto, scf
 
-from src.Base.isdf_jk import ISDFJK, isdf_grid, isdf_jk
-from src.Base.separable_ri import optimize_atomic_radii
+from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import optimize_atomic_radii
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.factor_chain import FrozenFactorization
+from src.gradients.rpa.factor_chain import FrozenFactorization
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
@@ -23,7 +24,7 @@ def mol():
 @pytest.mark.parametrize('call', [
     lambda mol: isdf_grid(mol),
     lambda mol: ISDFJK(mol),
-    lambda mol: isdf_jk(scf.RHF(mol)),
+    lambda mol: isdf_jk_with_force(scf.RHF(mol)),
     lambda mol: separable_factors(scf.RHF(mol), mol),
     lambda mol: FrozenFactorization(mol),
     lambda mol: optimize_atomic_radii('O', 'cc-pvdz', 'cc-pvdz-ri'),

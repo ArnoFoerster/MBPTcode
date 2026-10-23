@@ -17,18 +17,19 @@ import os
 
 import numpy as np
 
-from src.Base.constants import (DEFAULT_TAU_TARGET, ISDF_TILE_GB,
-                                SCREENED_CHUNK_BYTES)
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (agreement, contiguous_block,
-                                     current_comm, partition, reduce_sum)
-from src.Base.utils.grids import minimax_frequency_grid
-from src.Base.utils.time_frequency import (minimax_transform_weights,
+from src.Base.numerics.constants import (BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB,
+                                         SCREENED_CHUNK_BYTES)
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (agreement, contiguous_block,
+                                              current_comm, partition, reduce_sum)
+from src.Base.utils.grids.grids import minimax_frequency_grid
+from src.Base.utils.grids.time_frequency import (minimax_transform_weights,
                                           minimax_points_for_ranges,
                                           self_energy_fit_ranges_from_window,
                                           sigma_fit_ranges,
                                           COSINE_TW, COSINE_WT, SINE_TW)
-from src.SingleReference.base import get_occ_virt_indices, transition_range
+from src.Base.orbital_spaces import (get_occ_virt_indices,
+                                     particle_hole_window, transition_range)
 from src.SingleReference.LinearResponse.space_time import (
     FrequencyBlock, ProjRows, dyson_screening, owned_frequency_blocks,
     polarizability_projected_sweep, polarizability_projected_tau,
@@ -97,45 +98,6 @@ class SigmaPairs:
             del Zt, G
 
 
-def greens_function_imaginary_time(X, eps, nocc, tau, mu=None):
-    """
-    (Ghat_lesser, Ghat_greater) projected onto the THC grid, each (M, M).
-    """
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    X_o, X_v = X[:, occ], X[:, virt]
-    e_o, e_v = eps[occ] - mu, eps[virt] - mu
-    G_lesser = (X_o * np.exp(e_o * tau)) @ X_o.T          # occupied branch
-    G_greater = -(X_v * np.exp(-e_v * tau)) @ X_v.T       # virtual branch
-    return G_lesser, G_greater
-
-
-def self_energy_imaginary_time(X, D, W_tilde_aux_tau, eps, nocc, tau_points,
-                               mu=None):
-    """Sigma^c(i.tau) in the AO/MO basis X was built in, shape (ntau, n, n) x 2.
-
-    W_tilde_aux_tau : (ntau, naux, naux) the correlation part of the screened
-        interaction, W - V, already on the imaginary-time axis.
-
-    Returns (Sigma_lesser, Sigma_greater). The frequency-axis self-energy
-    follows by transforming their sum with the cosine kernel and their
-    difference with the sine kernel (the even and odd parts of Sigma(i.tau)).
-    Both transforms are carried by TimeFrequencyGrid, which carries the
-    reference for them.
-    """
-    n = X.shape[1]
-    ntau = len(tau_points)
-    sig_l = np.empty((ntau, n, n))
-    sig_g = np.empty((ntau, n, n))
-    for k, tau in enumerate(tau_points):
-        G_l, G_g = greens_function_imaginary_time(X, eps, nocc, tau, mu=mu)
-        Zt = D @ W_tilde_aux_tau[k] @ D.T                 # (M, M)
-        sig_l[k] = X.T @ (Zt * G_l) @ X
-        sig_g[k] = X.T @ (Zt * G_g) @ X
-    return sig_l, sig_g
-
-
 def screening_frequency_grid(ntau, eps, nocc, mu=None):
     """(points, weights): the minimax frequencies W(i.omega) is sampled on.
 
@@ -171,12 +133,11 @@ def minimax_points_for_gw(eps, nocc, mu=None, target=DEFAULT_TAU_TARGET,
     best available is returned instead, and the second value is the accuracy
     obtained; callers should not assume `target` was met.
     """
-    occ, virt = get_occ_virt_indices(eps, nocc)
+    gap, span, mid = particle_hole_window(eps, nocc)
     if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
+        mu = mid
     rW, rS = sigma_fit_ranges(eps, nocc, mu=mu)
-    ratios = ((eps[virt].max() - eps[occ].min())
-              / (eps[virt].min() - eps[occ].max()),
+    ratios = (span / gap,
               rW[1] / rW[0],
               rS[1] / rS[0])
     return minimax_points_for_ranges(ratios, target=target,
@@ -417,7 +378,7 @@ def sigma_blocks(M, naux, block_memory_gb=ISDF_TILE_GB):
     """[(p0, p1)] interpolation-point blocks of the self-energy sweep, b rows
     each so that one (b, naux) and two (b, b) blocks fit the budget: set by
     M, naux and the budget alone."""
-    b = int((-naux + np.sqrt(naux**2 + 8 * block_memory_gb * 1e9 / 8)) / 4)
+    b = int((-naux + np.sqrt(naux**2 + 8 * block_memory_gb * BYTES_PER_GB / 8)) / 4)
     b = max(1, min(M, b))
     edges = list(range(0, M, b)) + [M]
     return list(zip(edges[:-1], edges[1:]))
@@ -489,7 +450,7 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     """
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
+        mu = particle_hole_window(eps, nocc)[2]
     rW, rS = ranges or sigma_fit_ranges(eps, nocc, mu=mu)
 
     if Wt_tau is None:
@@ -592,7 +553,7 @@ def self_energy_diagonal_rows(pairs, Wt, eps, nocc, tau_points, omega_out,
     """
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
+        mu = particle_hole_window(eps, nocc)[2]
     _, rS = ranges or sigma_fit_ranges(eps, nocc, mu=mu)
     C, _ = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS,
                                      warn=False)

@@ -22,28 +22,29 @@ import pytest
 from pyscf import dft, gto, scf
 
 from tests.pins import assert_same
-from src.Base.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import GroundState
-from src.Base.environment import PointCharges, attach_environment
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening)
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+from src.environments.environment import PointCharges
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
                                SCF_DIFFERENTIABLE_GRAD_TOL,
                                SCF_ENERGY_CONV_TOL,
                                SCF_ENERGY_GRAD_TOL,
                                XC_SHIFT_GRADIENT_TOL)
-from src.gradients import dense_surfaces
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+from src.gradients.gwbse import dense_surfaces
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                                 QuasiparticleSurface,
                                                 kohn_sham_gradient_correction,
                                                 mo_eri)
-from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
-                                               QPqbAdjoint as QPqb)
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    PotentialEnergySurface)
+from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                                     QPqbAdjoint as QPqb)
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.surface import (FiniteDifferenceGradient,
+                                   PotentialEnergySurface)
 
 #: A two-point central difference has an O(h^2) truncation error, so comparing
 #: at ONE step size cannot tell a correct gradient from one that is wrong by
@@ -584,7 +585,7 @@ def test_the_refusal_spares_everything_that_carries_no_correlation_energy():
     pcm, _ = solvated_pair(mol)
     tda = QuasiparticleSurface(mol, rhf, screening='tda')
     assert np.isfinite(tda.total_energy(mol, pcm))
-    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation_energy(mol,
+    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation(mol,
                                                                        pcm))
 
 
@@ -617,12 +618,12 @@ def test_a_solvated_mean_field_is_refused_wherever_a_force_is_reported():
 
 
 def test_the_excitation_energy_is_the_one_the_gradient_reports():
-    """`excitation_energy` reads Omega without a force, and it is the same
+    """`excitation` reads Omega without a force, and it is the same
     Omega `excitation_gradient` returns, bit for bit on the BLAS the pin files
     record (two evaluations, each its own SCF; energy class bar elsewhere)."""
     mol = h2()
     surface = DenseBSESurface(mol, scf=rhf)
-    assert_same(surface.excitation_energy(mol),
+    assert_same(surface.excitation(mol),
                 surface.excitation_gradient(mol)[1])
 
 

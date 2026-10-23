@@ -60,12 +60,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, mp, tdscf
 
-from src.Base.constants import (EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
-                                HARTREE_TO_EV)
-from src.Base.environment import NoEnvironment, attach_environment
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import (EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
+                                         HARTREE_TO_EV)
+from src.Base.environment_seam import NoEnvironment, attach_environment
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from tests.adc_common import H2CO, WATER_ORIGIN, check, df_rhf_converged, rhf_df

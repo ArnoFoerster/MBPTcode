@@ -122,7 +122,7 @@ def test_emitted_q4_matches_closed_form(h4):
     ranges = {'o': np.arange(nocc), 'v': np.arange(nocc, norb)}
     for w in OMEGAS[:2]:
         ref = np.zeros((norb, norb), complex)
-        for block in GS._BLOCKS:
+        for block in GS.BLOCKS:
             grps = QP.quartet_groups(block)
             rb, rk = ranges[block[0]], ranges[block[1]]
             ref[np.ix_(rb, rk)] += ev.eval_groups(grps, w)
@@ -138,7 +138,7 @@ def test_emitted_q4_zero_h2(h2):
 
 
 def test_quartet_census_and_group_structure(h4):
-    for block in GS._BLOCKS:
+    for block in GS.BLOCKS:
         grps = QP.quartet_groups(block)
         assert len(grps) >= 16
         for grp in grps:
@@ -150,7 +150,7 @@ def test_closed_form_equals_ordering_sum_h4(h4):
     eps, h1, g, nocc, _ = h4
     ev = QP.QuartetEvaluator(eps, g, nocc)
     worst = 0.0
-    for block in GS._BLOCKS:
+    for block in GS.BLOCKS:
         grps = QP.quartet_groups(block)
         for w in OMEGAS[:2]:
             a = ev.eval_groups(grps, w)

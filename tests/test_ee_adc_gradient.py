@@ -28,10 +28,10 @@ import numpy as np
 from pyscf.mp import dfmp2_native
 
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
-from src.SingleReference.ADC.eeADC import ee_gradient as eg
+from src.gradients.adc import ee_gradient as eg
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
-from src.SingleReference import df_correlation_force as dcf
-from src.SingleReference.state_models import mp2_relaxed
+from src.gradients import df_correlation_force as dcf
+from src.gradients.state_models import mp2_relaxed
 from tests.adc_common import (ATOMS, AUX, FD_STEP_FORCE, NF, check,
                               make_scf_tight, molecule)
 

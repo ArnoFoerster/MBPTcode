@@ -37,20 +37,21 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import numerics_of
-from src.Base.constants import (ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import distributed, run_simulated
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import product_pairs
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.isdf_test_grid import g1, g1_kw, g1_numerics
 from tests.pins import assert_same
@@ -156,7 +157,7 @@ def sop(mol, **kw):
     spec = SurfaceSpec(GroundState('dft', 'hf'), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics=dict(kw, bse_adjoint='grid'))
+                       numerics=numerics_of(dict(kw, bse_adjoint='grid')))
     chain = surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                        sop_scf)
     return Route(chain, chain.excitation,
@@ -224,7 +225,7 @@ def isdf_scf(name, xc, coords=None):
     if coords is not None:
         mol.set_geom_(coords, unit='Bohr')
     base = dft.RKS(mol, xc=xc) if xc != 'hf' else scf.RHF(mol)
-    mf = isdf_jk(base, auxbasis=AUX, counts=g1(base))
+    mf = isdf_jk_with_force(base, auxbasis=AUX, counts=g1(base))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = (MF_CONV_TOL,
                                                    MF_CONV_TOL_GRAD, 200)
     return mf

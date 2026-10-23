@@ -5,7 +5,7 @@
 A + B by its lowest eigenvalue plus eta before the Cholesky factorization and
 clipping omega^2 < 0 to eta^2 would return roots near sqrt(eta) for an
 unstable reference with nothing said. The Davidson route
-(`davidson._CasidaBreakdown`) and the quasi-boson BSE refuse the same case;
+(`davidson.CasidaBreakdown`) and the quasi-boson BSE refuse the same case;
 the dense one raises
 `CasidaInstability`, a ValueError and a `StepFailed`.
 

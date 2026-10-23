@@ -10,9 +10,9 @@ the oxygen at 0.37.
 import numpy as np
 from pyscf import gto
 
-from src.Base.constants import FRAME_TURNING_RATE_BAR
-from src.Base.separable_ri import (atomic_frames, frame_turning,
-                                   frame_turning_record)
+from src.Base.numerics.constants import FRAME_TURNING_RATE_BAR
+from src.Base.factorization.separable_ri import (atomic_frames, frame_turning,
+                                                 frame_turning_record)
 
 LADDER = ('C 0 0 -0.5296; O 0 0 0.6742; '
           'H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123')

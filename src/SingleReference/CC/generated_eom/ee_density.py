@@ -1,4 +1,6 @@
 # GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_eom_ccsdt.py.
+# See that module's docstring for the equations/conventions.
 import numpy as np
 
 from ..cached_einsum import einsum
@@ -7,7 +9,7 @@ from ..parallel_accum import pacc
 
 def rho_oo(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((no,no))
+    rho = np.zeros((no, no))
     _tmp0 = einsum('mn,ai,ia->mn', kd[o, o], r1, lam1, optimize=True)
     pacc(rho, ((1, _tmp0),))
     _tmp1 = einsum('am,na->mn', r1, lam1, optimize=True)
@@ -31,7 +33,7 @@ def rho_oo(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
 
 def rho_vv(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((nv,nv))
+    rho = np.zeros((nv, nv))
     _tmp0 = einsum('fi,ie->ef', r1, lam1, optimize=True)
     pacc(rho, ((1, _tmp0),))
     _tmp1 = einsum('faji,jiea->ef', r2, lam2, optimize=True)
@@ -49,7 +51,7 @@ def rho_vv(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
 
 def rho_ov(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((no,nv))
+    rho = np.zeros((no, nv))
     _tmp0 = einsum('em->me', r1)
     pacc(rho, ((1, _tmp0),))
     _tmp1 = einsum('eaim,ia->me', r2, lam1, optimize=True)
@@ -105,7 +107,7 @@ def rho_ov(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
 
 def rho_vo(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((nv,no))
+    rho = np.zeros((nv, no))
     _tmp0 = einsum('ai,imea->em', r1, lam2, optimize=True)
     pacc(rho, ((-1, _tmp0),))
     _tmp1 = einsum('abji,jimeab->em', r2, lam3, optimize=True)
@@ -115,7 +117,7 @@ def rho_vo(lam1, lam2, lam3, r1, r2, r3, t1, t2, t3, kd, o, v):
 
 def rho_star_oo(l1, l2, l3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((no,no))
+    rho = np.zeros((no, no))
     _tmp0 = einsum('am,na->mn', t1, l1, optimize=True)
     pacc(rho, ((-1, _tmp0),))
     _tmp1 = einsum('baim,inba->mn', t2, l2, optimize=True)
@@ -127,7 +129,7 @@ def rho_star_oo(l1, l2, l3, t1, t2, t3, kd, o, v):
 
 def rho_star_vv(l1, l2, l3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((nv,nv))
+    rho = np.zeros((nv, nv))
     _tmp0 = einsum('fi,ie->ef', t1, l1, optimize=True)
     pacc(rho, ((1, _tmp0),))
     _tmp1 = einsum('faij,ijea->ef', t2, l2, optimize=True)
@@ -139,7 +141,7 @@ def rho_star_vv(l1, l2, l3, t1, t2, t3, kd, o, v):
 
 def rho_star_ov(l1, l2, l3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((no,nv))
+    rho = np.zeros((no, nv))
     _tmp0 = einsum('eaim,ia->me', t2, l1, optimize=True)
     pacc(rho, ((-1, _tmp0),))
     _tmp1 = einsum('ebaijm,ijba->me', t3, l2, optimize=True)
@@ -161,7 +163,7 @@ def rho_star_ov(l1, l2, l3, t1, t2, t3, kd, o, v):
 
 def rho_star_vo(l1, l2, l3, t1, t2, t3, kd, o, v):
     nv, no = t1.shape
-    rho = np.zeros((nv,no))
+    rho = np.zeros((nv, no))
     _tmp0 = einsum('me->em', l1)
     pacc(rho, ((1, _tmp0),))
     return rho

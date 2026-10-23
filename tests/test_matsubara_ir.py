@@ -2,7 +2,7 @@
 
 Every imaginary-axis grid in Base/utils/grids.py is a T = 0 construction scaled
 by the smallest transition energy -- the gap. For a metal there isn't one, and
-the failures are silent. src/Base/utils/matsubara.py supplies the two things
+the failures are silent. src/Base/utils/grids/matsubara.py supplies the two things
 that fixes: the thermal e_min that makes the existing quadratures well defined
 again, and the intermediate representation, which has no gap in its
 construction at all.
@@ -41,10 +41,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base.utils.grids import (minimax_frequency_grid, minimax_time_grid,
-                                  gauss_legendre_grid, gap_scaled_w0)
-from src.Base.utils.matsubara import (IRBasis, thermal_e_min, matsubara_frequencies,
-                                      ir_continuation_order, _log_kernel)
+from src.Base.utils.grids.grids import (minimax_frequency_grid, minimax_time_grid,
+                                        gauss_legendre_grid, gap_scaled_w0)
+from src.Base.utils.grids.matsubara import (IRBasis, thermal_e_min, matsubara_frequencies,
+                                            ir_continuation_order, _log_kernel)
 
 WMAX = 10.0
 

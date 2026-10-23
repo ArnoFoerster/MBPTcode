@@ -8,7 +8,8 @@ BSE@GW excitation, a dRPA ground state and a downfolded active-space root are
 the same object here, and a surface that has no analytic gradient is driven
 through `FiniteDifferenceGradient` instead of being excluded.
 
-    surface     the protocol, and the finite-difference gradient wrapper
+    surface     the protocol, and the finite-difference gradient wrapper (the
+                root-selection vocabulary is `src.gradients.surface`)
     optimize    Cartesian RFO/BFGS with the rigid-body directions projected
                 out, geomeTRIC when it is installed, and the refreeze outer
                 loop that measures the frozen conventions' own drift
@@ -18,10 +19,13 @@ through `FiniteDifferenceGradient` instead of being excluded.
                 populations, and a property averaged over them
     characters  the whole BSE spectrum at one geometry and its charge-transfer
                 weights, for labelling roots; the fragment character of a
-                quasiparticle orbital (Pipek-Mezey), following it across
-                geometries, and whether it is the lowest-energy process
-    rates       Marcus-Levich-Jortner and Marcus golden-rule rates, with the
-                electronic coupling as an argument
+                quasiparticle orbital (Pipek-Mezey) and whether it is the
+                lowest-energy process (following an orbital or a state across
+                geometries is `src.gradients.state_identity`)
+    franck_condon
+                the Franck-Condon weighted density of states of displaced
+                oscillators, which the golden-rule rates of the physics layer
+                (`src.photophysics.rates`) multiply by the squared coupling
     spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors -- the coupling
                 `rates` was written to receive
     spin_vibronic
@@ -43,28 +47,25 @@ through `FiniteDifferenceGradient` instead of being excluded.
                 under the ground state cannot be two functionals
     hessian     the nuclear Hessian by central differences of the analytic
                 gradient, for a route pyscf's own analytic Hessian cannot serve
-    fragment_bse
-                the fragment-partitioned BSE, Tamm-Dancoff or full: site and
-                charge-transfer diabats, A_eff(Omega_0) = K_PP + Sigma(Omega_0)
-                with the rest eliminated exactly, and its resolvent vectors
-    diabatic    finite differences of that diabatic matrix, relocalized at
-                every displaced geometry: the reference the analytic gradient
-                (`src.gradients.fragment_diabatic`) is gated against
+    diabatic    finite differences of the fragment-diabatic BSE matrix
+                (`src.gradients.gwbse.fragment_bse`), relocalized at every displaced
+                geometry: the reference the analytic gradient
+                (`src.gradients.gwbse.fragment_diabatic`) is gated against, and the
+                linear vibronic coupling model built on that gradient
 
 `src.Embedding` and its cRPA-embedded surfaces are out of scope for this
 repository, so no row here dispatches to one; a spec that names such a surface
 is simply not among the combinations `potential_energy_surface` realizes.
 
-The names below are imported on first use, so a module of the gradient layer
-that reads one module of this package (`nonadiabatic`, `surface`,
-`characters`) does not import the drivers, which import the gradient layer.
+The names below are imported on first use, so importing one module of this
+package does not import the drivers.
 """
 import importlib
 
 _EXPORTS = {
     'src.Base.declaration': ('ChargedExcitation', 'Excitation', 'GroundState',
                              'PhysicsMismatch', 'QPStates', 'SurfacePhysics'),
-    'src.properties.surface': ('FiniteDifferenceGradient',
+    'src.gradients.surface': ('FiniteDifferenceGradient',
                                'PotentialEnergySurface', 'surface_mean_field'),
     'src.properties.optimize': ('ground_state_residual_force',
                                 'optimize_geometric', 'relax',
@@ -82,24 +83,21 @@ _EXPORTS = {
                                   'deduplicate', 'rotatable_bonds',
                                   'search_conformers', 'torsion_starts',
                                   'torsion_values'),
-    'src.properties.characters': ('ct_character', 'orbital_fingerprint',
-                                  'quasiparticle_character',
+    'src.properties.characters': ('ct_character', 'quasiparticle_character',
                                   'quasiparticle_order', 'roots',
-                                  'surface_order', 'track_orbital'),
-    'src.properties.rates': ('marcus_levich_jortner_rate', 'marcus_rate'),
+                                  'surface_order'),
     'src.properties.spin_orbit': ('chain_manifolds', 'isdf_manifolds',
                                   'qdpt_hamiltonian', 'qdpt_spectrum',
                                   'soc_operator', 'soc_operator_mo',
                                   'socme_table', 'spin_orbit_couplings'),
     'src.properties.nonadiabatic': ('DerivativeCouplings',
-                                    'derivative_couplings', 'mo_overlap',
-                                    'state_overlap', 'translational_sum'),
-    'src.properties.surfaces': ('Realization', 'compare_surfaces',
+                                    'derivative_couplings',
+                                    'translational_sum'),
+    'src.gradients.gwbse.surface_factory': ('Realization', 'compare_surfaces',
                                 'potential_energy_surface'),
     'src.properties.excitations': ('SurfaceSpec', 'adiabatic_energy',
                                    'calc_adiabatic_excitation',
                                    'calc_adiabatic_gap',
-                                   'calc_emission_energy',
                                    'calc_vertical_excitation', 'surface_of'),
     'src.properties.hessian': ('numerical_hessian',),
 }

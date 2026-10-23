@@ -67,26 +67,27 @@ import pathlib
 
 import numpy as np
 
-from src.Base.constants import (BOHR_TO_ANGSTROM,
-                                HESSIAN_ASYMMETRY_WORST,
-                                HESSIAN_FD_ASYMMETRY_TOL,
-                                HESSIAN_FD_NOISE_REL,
-                                HESSIAN_FD_STEP_RATIO,
-                                ISDF_GRID_ACCURACY,
-                                ISDF_HESSIAN_MIN_GRID,
-                                NUCLEAR_FD_STEP)
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import (ISDFJK, FrozenFrames, frozen_frames,
-                              frozen_pair_layout)
-from src.Base.record_io import record_hash
-from src.Base.geometry import molecule_at
-from src.Base.separable_ri import (_SHELL_ORDER, frame_turning_record,
-                                   shell_tuple)
-from src.Base.utils.mpi_grid import current_comm, lockstep
-from src.Base.numerics import numerics_identity
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, FD_LADDER_RATIO_FLOOR,
+                                         HESSIAN_ASYMMETRY_WORST,
+                                         HESSIAN_FD_ASYMMETRY_TOL,
+                                         HESSIAN_FD_NOISE_REL,
+                                         HESSIAN_FD_STEP_RATIO,
+                                         ISDF_GRID_ACCURACY,
+                                         ISDF_HESSIAN_MIN_GRID,
+                                         NUCLEAR_FD_STEP)
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.Base.factorization.isdf_jk import (ISDFJK, FrozenFrames, frozen_frames,
+                                            frozen_pair_layout)
+from src.Base.utils.record_io import record_hash
+from src.Base.geometry.geometry import displaced
+from src.Base.factorization.separable_ri import (SHELL_ORDER, frame_turning_record,
+                                                 shell_tuple)
+from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.Base.numerics.numerics import numerics_identity
 from src.gradients.surface_identity import force_identity
-from src.properties.optimize import mean_field_force
-from src.properties.surface import evaluate
+from src.properties.optimize import cartesian_hessian
+from src.gradients.mean_field_surface import mean_field_force
+from src.gradients.surface import evaluate
 
 #: `numerical_hessian`'s default `pair_layout`: the layout of the factory's
 #: mean field at the reference geometry (`reference_pair_layout`).
@@ -192,6 +193,25 @@ def cached_conventions(surface):
     return force_identity(surface)
 
 
+def component_step(mol, ia, x, step):
+    """(natm, 3) Bohr: `step` on atom `ia`'s axis `x`, zero elsewhere -- the
+    one-component displacement `geometry.displaced` moves a molecule by."""
+    delta = np.zeros((mol.natm, 3))
+    delta[ia, x] = step
+    return delta
+
+
+def ladder_ratios(differences):
+    """d_j / d_(j+1) over the successive differences of a ladder of halved
+    finite-difference steps, the one convergence read of every ladder here
+    (4 for a clean h^2 central difference, 2 for an error first order in h): a
+    denominator within FD_LADDER_RATIO_FLOOR of zero is read as the floor."""
+    d = np.asarray(differences, float)
+    den = d[1:]
+    return d[:-1] / np.where(np.abs(den) > FD_LADDER_RATIO_FLOOR, den,
+                             FD_LADDER_RATIO_FLOOR)
+
+
 def displacement_list(natm, step=NUCLEAR_FD_STEP):
     """Every (atom, component, sign) central-difference displacement.
 
@@ -202,19 +222,12 @@ def displacement_list(natm, step=NUCLEAR_FD_STEP):
             for ia in range(natm) for x in range(3) for sign in (+1, -1)]
 
 
-def displaced(mol, ia, x, sign, step=NUCLEAR_FD_STEP):
-    """`mol` with atom `ia` moved by `sign * step` Bohr along axis `x`."""
-    coords = np.asarray(mol.atom_coords()).copy()
-    coords[ia, x] += sign * step
-    return molecule_at(mol, coords)
-
-
 def isdf_grid_counts(with_df):
     """{element: (A1, A2, A3, B1) shell counts} of the grid an ISDFJK placed,
     or None when its points were injected from outside."""
     radii = with_df.grid_radii if with_df.grid_radii is not None else with_df.radii
     if radii is not None:
-        return {el: tuple(len(np.atleast_1d(r.get(sh, []))) for sh in _SHELL_ORDER)
+        return {el: tuple(len(np.atleast_1d(r.get(sh, []))) for sh in SHELL_ORDER)
                 for el, r in radii.items()}
     if with_df.coords is not None:
         return None
@@ -269,7 +282,7 @@ def gradient_at(mol, scf_factory, ia, x, sign, step=NUCLEAR_FD_STEP):
     point of differencing rather than calling pyscf's Hessian. An ISDF mean
     field below `ISDF_HESSIAN_MIN_GRID` is refused here.
     """
-    mf = scf_factory(displaced(mol, ia, x, sign, step))
+    mf = scf_factory(displaced(mol, component_step(mol, ia, x, sign * step)))
     require_hessian_grid(mf)
     return np.asarray(mean_field_force(mf))
 
@@ -314,7 +327,7 @@ def hessian_from_gradients(gradients, natm, step=NUCLEAR_FD_STEP, info=None):
             gm = np.asarray(gradients[(ja, y, -1)])
             # the displaced atom is the SECOND index: one pair fills a column
             h[:, ja, :, y] = (gp - gm) / (2.0 * step)
-    flat = h.transpose(0, 2, 1, 3).reshape(3 * natm, 3 * natm)
+    flat = cartesian_hessian(h, natm)
     if info is not None:
         info['asymmetry'] = float(np.abs(flat - flat.T).max())
         info['asymmetry_worst'] = worst_asymmetry(flat)
@@ -474,7 +487,8 @@ def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
         g = None if cache is None else cache.get(ia, x, sign)
         if g is None:
             with frozen_frames(frames):
-                g, _, _ = evaluate(surface, displaced(mol, ia, x, sign, step))
+                g, _, _ = evaluate(surface, displaced(
+                    mol, component_step(mol, ia, x, sign * step)))
             g = np.asarray(g)
             if cache is not None:
                 cache.put(ia, x, sign, g)

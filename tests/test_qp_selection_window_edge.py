@@ -22,18 +22,18 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV, QP_HAMILTONIAN_WINDOW
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV, QP_HAMILTONIAN_WINDOW
 from src.Base.declaration import QPStates
-from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.qp_selection import (calibrated_selection,
                                                  mandatory_members,
                                                  select_explicit)
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               calibrate_scissor_tiers)
-from src.gradients.conventions import ConventionsLost, FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.gradients.gwbse.conventions import ConventionsLost, FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.optimize import nudge_vector
 from tests.isdf_test_grid import g1_numerics
 

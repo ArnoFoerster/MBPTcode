@@ -23,9 +23,9 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.SingleReference.Periodic.pbc_occupations import transition_window
-from src.SingleReference.Periodic.pbc_rpa import (_transition_window,
-                                                  build_freq_grid)
+from src.SingleReference.Periodic.pbc_occupations import (split_transition_window,
+                                                          transition_window)
+from src.SingleReference.Periodic.pbc_rpa import build_freq_grid
 from tests.test_metallic_grid_wiring import (check_beta_from_mf,
                                              check_gapped_is_untouched,
                                              check_pade_cap_is_sized_from_sigma_not_from_w,
@@ -48,7 +48,7 @@ def test_the_silent_half_of_the_integer_window(szv):
     e = np.asarray(mf.mo_energy)
     f = np.asarray(mf.mo_occ, dtype=float)
     n0 = int((f > 1e-8).sum(axis=1)[0])
-    e_int, _ = _transition_window(list(e), n0)
+    e_int, _ = split_transition_window(list(e), n0)
     honest, _ = transition_window(e, f)
     build_freq_grid(list(e), n0, 16)            # no guard fires
     assert 0 < honest < e_int, (honest, e_int)

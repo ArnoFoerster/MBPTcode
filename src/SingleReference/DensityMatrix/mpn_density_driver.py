@@ -30,32 +30,13 @@ import warnings
 
 import numpy as np
 
+from src.SingleReference.common.mp_amplitudes import orbital_denominator, to_l
+
 from src.SingleReference.DensityMatrix import generated_mpn as _gen_pkg
 from src.SingleReference.DensityMatrix.generated_mpn import mpn_density_pieces as gen
 
 
-def _to_l(t_arr, rank):
-    """Convert a t{rank}-convention array (my storage: axes
-    [vir_asc(rank), occ_asc(rank)], antisymmetric under any same-type pair
-    swap) into the l{rank}-convention array the generator's own 'l{rank}' tag
-    expects (axes [occ_asc(rank), vir_DESC(rank)]).
 
-    Empirically confirmed (not just derived): the raw generated overlap<rank>
-    terms print e.g. 'l2(i,j,b,a)' (occ ascending i,j; vir DESCENDING b,a) vs
-    't2(b,a,i,j)' (vir first, occ last -- but any relative vir/occ order
-    within the generic 't2' tag needs no correction, since that
-    tag's numeric convention already matches this module's own t{rank}
-    storage bit-for-bit -- only the 'l' tag's axis layout genuinely differs).
-    Reversing the vir block (rank elements) is an odd permutation whenever
-    rank//2 is odd (transposition count for reversing n elements = n//2), so
-    a sign flip of (-1)**(rank//2) is needed on top of the transpose --
-    verified numerically for rank=1 (no flip) and rank=2 (flip) against an
-    independent 0.25*sum(t2**2)-style overlap oracle; rank=3's flip follows
-    the same n//2 parity argument (1 transposition to reverse 3 elements).
-    """
-    axes = list(range(rank, 2 * rank)) + list(range(rank - 1, -1, -1))
-    sign = (-1) ** (rank // 2)
-    return sign * t_arr.transpose(*axes)
 
 
 def g_vvoo_df(B, nocc):
@@ -105,23 +86,6 @@ def t1_2_numerator_df(B, nocc, t2_1):
     return -0.5 * term1 - 0.5 * term2
 
 
-def _denom(eps_o, eps_v, rank):
-    """D[a,b,...,i,j,...] = sum(eps_occ) - sum(eps_vir), rank virtual axes
-    (leading) then rank occupied axes (trailing) -- matches t{rank}'s own
-    [vir..., occ...] storage convention."""
-    no, nv = eps_o.shape[0], eps_v.shape[0]
-    d = np.zeros((nv,) * rank + (no,) * rank)
-    for r in range(rank):
-        shape = [1] * (2 * rank)
-        shape[rank + r] = no
-        d = d + eps_o.reshape(shape)
-    for r in range(rank):
-        shape = [1] * (2 * rank)
-        shape[r] = nv
-        d = d - eps_v.reshape(shape)
-    return d
-
-
 class MPnDensityDriver:
     """Spin-orbital MPn density-matrix correction, built from the generic
     generated pieces. eps_spin/g_anti_spin/nocc_spin match
@@ -145,11 +109,11 @@ class MPnDensityDriver:
 
     def compute_t2_1(self):
         num = gen.t2_1_numerator(**self._args())
-        return num / _denom(self.eps[self.o], self.eps[self.v], 2)
+        return num / orbital_denominator(self.eps[self.o], self.eps[self.v], 2)
 
     def compute_t2_1_custom_denom(self, D):
         """compute_t2_1 but with an externally supplied denominator `D`
-        (same shape/axis convention as _denom(eps_o, eps_v, 2): [vir,vir,occ,
+        (same shape/axis convention as orbital_denominator(eps_o, eps_v, 2): [vir,vir,occ,
         occ]) instead of the bare MP1 one -- e.g. an Epstein-Nesbet-dressed D
         from EpsteinNesbet.epstein_nesbet_denominator. Reuses the SAME
         numerator as compute_t2_1, so this is a strict denominator swap, not an
@@ -167,17 +131,17 @@ class MPnDensityDriver:
         if t2_1 is None:
             t2_1 = self.compute_t2_1()
         args = self._args()
-        d1 = _denom(self.eps[self.o], self.eps[self.v], 1)
+        d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
         t1_2 = gen.t1_2_numerator(**args, t2_1=t2_1) / d1
         t2_2 = t3_2 = t4_2 = None
         if max_rank >= 2:
-            d2 = _denom(self.eps[self.o], self.eps[self.v], 2)
+            d2 = orbital_denominator(self.eps[self.o], self.eps[self.v], 2)
             t2_2 = gen.t2_2_numerator(**args, t2_1=t2_1) / d2
         if max_rank >= 3:
-            d3 = _denom(self.eps[self.o], self.eps[self.v], 3)
+            d3 = orbital_denominator(self.eps[self.o], self.eps[self.v], 3)
             t3_2 = gen.t3_2_numerator(**args, t2_1=t2_1) / d3
         if max_rank >= 4:
-            d4 = _denom(self.eps[self.o], self.eps[self.v], 4)
+            d4 = orbital_denominator(self.eps[self.o], self.eps[self.v], 4)
             t4_2 = gen.t4_2_numerator(**args, t2_1=t2_1) / d4
         return t1_2, t2_2, t3_2, t4_2
 
@@ -193,9 +157,9 @@ class MPnDensityDriver:
         args = self._args()
         if E2 is None:
             E2 = self.compute_E(t2_1)
-        d1 = _denom(self.eps[self.o], self.eps[self.v], 1)
-        d2 = _denom(self.eps[self.o], self.eps[self.v], 2)
-        d3 = _denom(self.eps[self.o], self.eps[self.v], 3)
+        d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
+        d2 = orbital_denominator(self.eps[self.o], self.eps[self.v], 2)
+        d3 = orbital_denominator(self.eps[self.o], self.eps[self.v], 3)
         t1_3 = gen.t1_3_numerator(**args, t1_2=t1_2, t2_2=t2_2, t3_2=t3_2) / d1
         t2_3 = (gen.t2_3_numerator(**args, t1_2=t1_2, t2_2=t2_2, t3_2=t3_2, t4_2=t4_2) - E2 * t2_1) / d2
         t3_3 = gen.t3_3_numerator(**args, t1_2=t1_2, t2_2=t2_2, t3_2=t3_2, t4_2=t4_2) / d3
@@ -203,7 +167,7 @@ class MPnDensityDriver:
 
     def compute_t1_3(self, t1_2, t2_2, t3_2):
         args = self._args()
-        d1 = _denom(self.eps[self.o], self.eps[self.v], 1)
+        d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
         num = gen.t1_3_numerator(**args, t1_2=t1_2, t2_2=t2_2, t3_2=t3_2)
         return num / d1
 
@@ -212,7 +176,7 @@ class MPnDensityDriver:
         args = self._args()
         if E2 is None:
             E2 = self.compute_E(self.compute_t2_1())
-        d1 = _denom(self.eps[self.o], self.eps[self.v], 1)
+        d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
         num = gen.t1_4_numerator(**args, t1_3=t1_3, t2_3=t2_3, t3_3=t3_3) - E2 * t1_2
         return num / d1
 
@@ -340,7 +304,7 @@ class MPnDensityDriver:
                     lower = amps.get((r, o - k))
                     if lower is not None:
                         num = num - Es[k] * lower
-                amps[(r, o)] = num / _denom(self.eps[self.o],
+                amps[(r, o)] = num / orbital_denominator(self.eps[self.o],
                                             self.eps[self.v], r)
         return amps
 
@@ -349,7 +313,7 @@ class MPnDensityDriver:
         t2_1 = self.compute_t2_1()
         t1_2, _, _, _ = self.compute_order2_amplitudes(t2_1, max_rank=1)
 
-        N2 = gen.overlap2(l_amp=_to_l(t2_1, 2), t_amp=t2_1)
+        N2 = gen.overlap2(l_amp=to_l(t2_1, 2), t_amp=t2_1)
         c2 = -N2
 
         gamma_hf = {'oo': self.kd[self.o, self.o],
@@ -358,8 +322,8 @@ class MPnDensityDriver:
 
         blocks = {}
         for block in ('oo', 'vv', 'ov'):
-            m11 = getattr(gen, f'm2_{block}_11')(**args, l2=_to_l(t2_1, 2), t2=t2_1)
-            m20 = getattr(gen, f'm2_{block}_20')(**args, l1=_to_l(t1_2, 1))
+            m11 = getattr(gen, f'm2_{block}_11')(**args, l2=to_l(t2_1, 2), t2=t2_1)
+            m20 = getattr(gen, f'm2_{block}_20')(**args, l1=to_l(t1_2, 1))
             m02 = getattr(gen, f'm2_{block}_02')(**args, t1=t1_2)
             M2 = m11 + m20 + m02
             blocks[block] = M2 + c2 * gamma_hf[block]
@@ -373,7 +337,7 @@ class MPnDensityDriver:
             t1_2, t2_2, t3_2, t4_2 = self.compute_order2_amplitudes(t2_1)
         t1_3 = self.compute_t1_3(t1_2, t2_2, t3_2)
 
-        N3 = 2.0 * gen.overlap2(l_amp=_to_l(t2_1, 2), t_amp=t2_2)
+        N3 = 2.0 * gen.overlap2(l_amp=to_l(t2_1, 2), t_amp=t2_2)
         c3 = -N3
 
         gamma_hf = {'oo': self.kd[self.o, self.o],
@@ -390,9 +354,9 @@ class MPnDensityDriver:
             # (an earlier version of this driver wrongly used c^(2)*M^(2) here,
             # which is off by O(1e-5) relative to density_matrix.py's oracle --
             # c^(2) only ever multiplies M^(1), never M^(2), in the n=3 recursion).
-            m3_12 = getattr(gen, f'm3_{block}_12')(**args, l2=_to_l(t2_1, 2), t1=t1_2, t2=t2_2, t3=t3_2)
-            m3_21 = getattr(gen, f'm3_{block}_21')(**args, l1=_to_l(t1_2, 1), l2=_to_l(t2_2, 2), l3=_to_l(t3_2, 3), t2=t2_1)
-            m3_30 = getattr(gen, f'm3_{block}_30')(**args, l1=_to_l(t1_3, 1))
+            m3_12 = getattr(gen, f'm3_{block}_12')(**args, l2=to_l(t2_1, 2), t1=t1_2, t2=t2_2, t3=t3_2)
+            m3_21 = getattr(gen, f'm3_{block}_21')(**args, l1=to_l(t1_2, 1), l2=to_l(t2_2, 2), l3=to_l(t3_2, 3), t2=t2_1)
+            m3_30 = getattr(gen, f'm3_{block}_30')(**args, l1=to_l(t1_3, 1))
             m3_03 = getattr(gen, f'm3_{block}_03')(**args, t1=t1_3)
             M3 = m3_12 + m3_21 + m3_30 + m3_03
 
@@ -413,9 +377,9 @@ class MPnDensityDriver:
         t1_3, t2_3, t3_3 = self.compute_order3_amplitudes(t1_2, t2_2, t3_2, t4_2, t2_1, E2=E2)
         t1_4 = self.compute_t1_4(t1_3, t2_3, t3_3, t1_2, E2=E2)
 
-        l2_1, l1_2, l2_2, l3_2, l4_2 = _to_l(t2_1, 2), _to_l(t1_2, 1), _to_l(t2_2, 2), _to_l(t3_2, 3), _to_l(t4_2, 4)
-        l1_3, l2_3, l3_3 = _to_l(t1_3, 1), _to_l(t2_3, 2), _to_l(t3_3, 3)
-        l1_4 = _to_l(t1_4, 1)
+        l2_1, l1_2, l2_2, l3_2, l4_2 = to_l(t2_1, 2), to_l(t1_2, 1), to_l(t2_2, 2), to_l(t3_2, 3), to_l(t4_2, 4)
+        l1_3, l2_3, l3_3 = to_l(t1_3, 1), to_l(t2_3, 2), to_l(t3_3, 3)
+        l1_4 = to_l(t1_4, 1)
 
         # N^(4) = 2*<Psi1|Psi3> (rank-2-matched only, Psi1 pure rank2) +
         # <Psi2|Psi2> (rank-matched sum over Psi^(2)'s own ranks 1-4).

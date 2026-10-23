@@ -32,13 +32,12 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.declaration import ChargedExcitation
-from src.gradients.conventions import ConventionsWriteRefused
-from src.gradients.rpa_bse_surface import MeanFieldQPSurface
-from src.properties.characters import (orbital_fingerprint,
-                                       quasiparticle_character,
-                                       quasiparticle_order, surface_order,
-                                       track_orbital)
-from src.Base.numerics import numerics_of
+from src.gradients.gwbse.conventions import ConventionsWriteRefused
+from src.gradients.gwbse.rpa_bse_surface import MeanFieldQPSurface
+from src.properties.characters import (quasiparticle_character,
+                                       quasiparticle_order, surface_order)
+from src.gradients.state_identity import orbital_fingerprint, track_orbital
+from src.Base.numerics.numerics import numerics_of
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1
 

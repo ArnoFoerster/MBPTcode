@@ -6,8 +6,9 @@ is augmented by the doubles that the dynamical kernel resums, so the
 eigenvalue problem is linear and the frequency dependence is recovered
 exactly on downfolding.
 
-The static BSE lives in LinearResponse/ -- Casida (casida.py, dense) and the
-matrix-free Davidson routes (davidson.py), including the ISDF one.
+solve.py is the static BSE@GW: the front end `solve_bse` and its drivers,
+on the Casida eigensolvers of LinearResponse/ (casida.py, dense; davidson.py,
+matrix-free). quasi_boson_bse.py is the dense quasi-boson route.
 """
 from src.SingleReference.BSE.bse_upfolded import (build_hamiltonian, downfold,
                                                   dynamical_bse_matrix,

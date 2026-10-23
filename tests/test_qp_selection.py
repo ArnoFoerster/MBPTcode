@@ -8,8 +8,8 @@ known exactly and the file runs in under a second.
 import numpy as np
 import pytest
 
-from src.Base.constants import (ADAPTIVE_HOLE_MAX_EV, HARTREE_TO_EV,
-                                HARTREE_TO_MEV)
+from src.Base.numerics.constants import (ADAPTIVE_HOLE_MAX_EV, HARTREE_TO_EV,
+                                         HARTREE_TO_MEV)
 from src.Base.declaration import QPStates
 from src.SingleReference.GW.qp_selection import (AdaptivePartition,
                                                  ac_unjudgeable,
@@ -26,7 +26,7 @@ from src.SingleReference.GW.qp_selection import (AdaptivePartition,
                                                  select_explicit)
 from src.SingleReference.GW.qp_states import (calibrate_scissor_tiers,
                                               resolve_qp_states)
-from src.gradients.bse_isdf import bse_solve
+from src.gradients.gwbse.bse_isdf import bse_solve
 from tests.pins import assert_same
 
 #: Hellmann-Feynman against a central difference in each eps (Ha per Ha).

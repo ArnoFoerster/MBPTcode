@@ -15,8 +15,8 @@ relaxation.
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.numerics import FLAT_FIELDS, Numerics
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import FLAT_FIELDS, Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 

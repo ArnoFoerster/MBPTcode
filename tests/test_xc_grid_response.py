@@ -1,5 +1,5 @@
 """The xc skeleton on the Becke grid that moves with the atoms
-(`skeleton_tiles.xc_grid_skeleton`, reached as `isdf_derivatives.xc_skeleton`).
+(`skeleton_tiles.xc_grid_skeleton`, reached as `mean_field_response.xc_skeleton`).
 
 T(R) = Tr[g v_xc^DFT[D](R)] with the AO matrices g and D held is what every
 Kohn-Sham force's xc skeleton differentiates (the relaxed-density Fock term
@@ -37,11 +37,12 @@ from pyscf.hessian import rks as hessian_rks
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from src.Base import skeleton_tiles                                  # noqa: E402
-from src.Base.constants import ISDF_GRADIENT_FLOOR                   # noqa: E402
-from src.Base.isdf_jk import isdf_jk                                 # noqa: E402
-from src.Base.utils.mpi_grid import current_comm, run_simulated      # noqa: E402
-from src.gradients.isdf_derivatives import xc_skeleton               # noqa: E402
+from src.gradients import skeleton_tiles                                  # noqa: E402
+from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR                   # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force                                 # noqa: E402
+from src.Base.utils.parallel.mpi_grid import current_comm
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.mean_field_response import xc_skeleton          # noqa: E402
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same  # noqa: E402
 
@@ -85,7 +86,7 @@ def mean_field(name, xc, reference='df'):
     key = (name, xc, reference)
     if key not in MEAN_FIELDS:
         mol = molecule(name)
-        mf = (isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
+        mf = (isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
               if reference == 'isdf-k' else dft.RKS(mol, xc=xc).density_fit())
         mf.conv_tol, mf.conv_tol_grad = 1e-11, 1e-8
         mf.kernel()

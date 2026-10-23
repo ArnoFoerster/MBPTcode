@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 pytestmark = pytest.mark.skipif(not pdaggerq_available(),
                                 reason='needs pdaggerq (optional)')
@@ -34,18 +34,18 @@ pytestmark = pytest.mark.skipif(not pdaggerq_available(),
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_antisymmetrized_spin_block_eri)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_antisymmetrized_spin_block_eri)
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted)
 from src.SingleReference.DensityMatrix.generated_mpn_restricted import (
     mpn_density_pieces_restricted as gen)
-from src.CodeGeneration.generate_mpn_density_restricted import (
+from src.CodeGeneration.generate_mpn_density_spin import (
     t_numerator_terms_restricted)
 from src.CodeGeneration.generate_mpn_density import amp_out_indices
 from src.CodeGeneration.laplace_codegen import (
     fuse_amplitude_rank3_tags, assemble_laplace_fused)
-from src.Base.utils.grids import minimax_time_grid
+from src.Base.utils.grids.grids import minimax_time_grid
 from src.SingleReference.CC.cached_einsum import einsum
 
 NTAU = 6

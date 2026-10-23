@@ -23,7 +23,7 @@ import tempfile
 import numpy as np
 from pyscf import fci
 
-from src.Base.constants import FCI_CONV_TOL
+from src.Base.numerics.constants import FCI_CONV_TOL
 from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
                                                spatial_to_spin_orbitals)
 

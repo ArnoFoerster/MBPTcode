@@ -14,11 +14,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import aux_metric_sqrt, fit_M_streaming
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.factor_chain import FrozenFactorization
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_streaming
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.rpa.factor_chain import FrozenFactorization
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 

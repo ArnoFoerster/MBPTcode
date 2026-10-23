@@ -32,16 +32,14 @@ chained 1/(E_f E_f') weights in place of the amplitude-factorized ones.
 This module is validation-scale dense numerics, like goldstone.py; the
 symbolic emission consumes the same group data.
 """
-import numpy as np
-
 from src.CodeGeneration.diagrammatic.goldstone import (
-    _BLOCKS, build_skeletons, ordering_sector, ordering_sign, _ordering_cuts,
+    build_skeletons, ordering_sector, ordering_sign, ordering_cuts,
     sevenline_filter, BlockEvaluator)
 
 
 def _signature(skel, ordering):
     return tuple((('w' if d != 0 else 'f'), len(h) + len(p))
-                 for d, h, p in _ordering_cuts(skel, ordering))
+                 for d, h, p in ordering_cuts(skel, ordering))
 
 
 _ROLE = {(('w', 3), ('w', 7), ('w', 3)): 'O1',
@@ -69,7 +67,7 @@ class QuartetGroup:
             raise ValueError(
                 f"incomplete quartet for {skel.raw}: {set(self.orderings)}")
         # cut data from O1: [a-cut, m-cut, b-cut]; sector from any member
-        self.cuts = _ordering_cuts(skel, self.orderings['O1'])
+        self.cuts = ordering_cuts(skel, self.orderings['O1'])
         self.sector = ordering_sector(skel, self.orderings['O1'])
 
     def consistency(self):
@@ -79,14 +77,14 @@ class QuartetGroup:
         raises."""
         mid = frozenset(self.cuts[1][1] + self.cuts[1][2])
         for role in ('O2', 'O3', 'O4'):
-            cuts = _ordering_cuts(self.skel, self.orderings[role])
+            cuts = ordering_cuts(self.skel, self.orderings[role])
             m = frozenset(cuts[1][1] + cuts[1][2])
             if m != mid:
                 raise ValueError(f"middle cut differs in {role}: {self.skel.raw}")
         a = frozenset(self.cuts[0][1] + self.cuts[0][2])
         b = frozenset(self.cuts[2][1] + self.cuts[2][2])
-        a2 = _ordering_cuts(self.skel, self.orderings['O2'])[0]
-        b3 = _ordering_cuts(self.skel, self.orderings['O3'])[2]
+        a2 = ordering_cuts(self.skel, self.orderings['O2'])[0]
+        b3 = ordering_cuts(self.skel, self.orderings['O3'])[2]
         if frozenset(a2[1] + a2[2]) != a or frozenset(b3[1] + b3[2]) != b:
             raise ValueError(f"outer cuts differ across roles: {self.skel.raw}")
         return True

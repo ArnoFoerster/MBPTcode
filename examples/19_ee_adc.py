@@ -7,7 +7,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 HARTREE_TO_EV = 27.211386245988
 basis = 'aug-cc-pvdz'

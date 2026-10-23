@@ -100,14 +100,15 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.utils.mpi_grid import current_comm, run_simulated
+from src.Base.utils.parallel.mpi_grid import current_comm
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.properties.excitations import (SurfaceSpec,
                                         calc_adiabatic_excitation)
 from src.properties.optimize import optimize
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS = 'cc-pvdz'

@@ -25,11 +25,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.utils.grids import minimax_frequency_grid, minimax_time_grid
-from src.Base.utils.time_frequency import (COSINE_WT,
-                                           minimax_transform_weights,
-                                           sigma_fit_ranges)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.grids.grids import minimax_frequency_grid, minimax_time_grid
+from src.Base.utils.grids.time_frequency import (COSINE_WT,
+                                                 minimax_transform_weights,
+                                                 sigma_fit_ranges)
 from src.SingleReference.GW import imaginary_time, space_time
 from src.SingleReference.GW.imaginary_time import (screening_frequency_grid,
                                                    unrestricted_fit_ranges,

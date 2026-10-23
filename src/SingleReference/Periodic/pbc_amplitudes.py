@@ -15,8 +15,8 @@ via the same aux-index contraction as PBCDFIntegrals.eri_block.
 """
 import numpy as np
 from pyscf.pbc.lib.kpts_helper import conj_mapping
-from src.SingleReference.Periodic.pbc_casida import (_screened_block, _stacked_Lov,
-                                                      _transition_layout)
+from src.SingleReference.Periodic.pbc_casida import (screened_block, stacked_Lov,
+                                                     transition_layout)
 
 
 def kpoint_minus_q(dfints, q, kp):
@@ -36,7 +36,7 @@ def project_XpY(dfints, kconserv, X, Y):
     Same object as pbc_casida.solve_rpa_spectral's rho, but for an arbitrary set
     of eigenvectors (e.g. the BSE X, Y at transfer q). kconserv = kconserv_pair[q].
     """
-    M, offsets, N, nocc, nvirt = _stacked_Lov(dfints, kconserv)
+    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
     return M @ (X + Y)
 
 
@@ -78,7 +78,7 @@ def get_chi_b_vertex(dfints, q, W_all, X, Y, kp):
     kconserv = dfints.kconserv_pair[q]
     kr = kpoint_minus_q(dfints, q, kp)            # internal k
     cmap = conj_mapping(dfints.cell, dfints.kpts)
-    offsets, N, nocc, nvirt = _transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
     nstates = X.shape[1]
     allp = slice(0, nmo)
     o_r, v_r = slice(0, nocc[kr]), slice(nocc[kr], nmo)
@@ -94,9 +94,9 @@ def get_chi_b_vertex(dfints, q, W_all, X, Y, kp):
         Xt = X[st].reshape(nocc[kq], nvirt[k], nstates)
         Yt = Y[st].reshape(nocc[kq], nvirt[k], nstates)
         # (a p|r i)^* and (j p|r b)^*, W at transfer kr - k
-        Ia = _screened_block(dfints, W_all, kq, kp, kr, k, slice(nocc[kq], nmo),
+        Ia = screened_block(dfints, W_all, kq, kp, kr, k, slice(nocc[kq], nmo),
                              allp, allp, slice(0, nocc[k])).conj()
-        Ij = _screened_block(dfints, W_all, kq, kp, kr, k, slice(0, nocc[kq]),
+        Ij = screened_block(dfints, W_all, kq, kp, kr, k, slice(0, nocc[kq]),
                              allp, allp, slice(nocc[k], nmo)).conj()
         chi[:, v_r] += (np.einsum('apri,iaS->Srp', Ia[:, :, v_r], Xd)
                         + np.einsum('jprb,jbS->Srp', Ij[:, :, v_r], Yt))

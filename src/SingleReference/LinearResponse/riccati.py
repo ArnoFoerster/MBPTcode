@@ -19,15 +19,15 @@ ladder-CCD ones (Scuseria, Henderson, Bulik, J. Chem. Phys. 139, 104113
     (X X^+)^{-1}        = 1 - T^+ T.
 
 solve_riccati is the dense Newton solve of any channel. The particle-hole
-channel (A, B, A) has the closed form of GW.quasi_boson.RPA instead
+channel (A, B, A) has the closed form of LinearResponse.quasi_boson_rpa.RPA instead
 (ring_channel). The closed-shell ladder channel at scale is
 adc_r_faddeev.solve_ladder_amplitudes_restricted, DF-streamed.
 """
 import numpy as np
 import scipy.linalg as la
 
-from src.Base.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER
-from src.SingleReference.GW.quasi_boson import RPA
+from src.Base.numerics.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER
+from src.SingleReference.LinearResponse.quasi_boson_rpa import RPA
 
 
 def riccati_residual(A, B, D, T):
@@ -127,7 +127,7 @@ def channel_corrections_from_phonons(A, omega, X, Y):
 
 def ring_channel(A, B):
     """(T, dH, dN) of the particle-hole channel (A, B, A), real symmetric A
-    and B, in closed form: GW.quasi_boson.RPA gives T = tanh(t) and
+    and B, in closed form: LinearResponse.quasi_boson_rpa.RPA gives T = tanh(t) and
     cosh(t) from one eigendecomposition of t, so dN = -T^2 and
     dH = cosh(t)^{-1} Abar cosh(t)^{-1} - A. Raises for an unstable channel."""
     r = RPA(A, B)

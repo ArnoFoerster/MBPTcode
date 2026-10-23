@@ -1,7 +1,7 @@
-# GENERATED CODE -- restricted (spin-blocked) Lambda-CCSDT residuals
-# (Lambda1/Lambda2/Lambda3, full Lambda-CCSDT) -- see this module's
-# generator script's docstring for equations/conventions.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
+# Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).
+# See that module's docstring for the equations/conventions.
 # allow numpy built with MKL to consume more threads for tensordot -- but only
 # if the caller hasn't already pinned the thread count (same convention as
 # amplitudes.py's generalized-pipeline counterpart)

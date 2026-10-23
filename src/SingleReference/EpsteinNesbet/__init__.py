@@ -13,9 +13,9 @@ from src.SingleReference.EpsteinNesbet.shifts import (
 from src.SingleReference.EpsteinNesbet.denominators import (
     EpsteinNesbetDenominators,
     restricted_channel_shifts,
-    _build_dressed_e_ai,
-    _build_dressed_e_abij,
-    _build_dressed_denoms_uhf,
+    build_dressed_e_ai,
+    build_dressed_e_abij,
+    build_dressed_denoms_uhf,
 )
 
 __all__ = [
@@ -26,9 +26,9 @@ __all__ = [
     'epstein_nesbet_shift_restricted_spinresolved',
     'EpsteinNesbetDenominators',
     'restricted_channel_shifts',
-    '_build_dressed_e_ai',
-    '_build_dressed_e_abij',
-    '_build_dressed_denoms_uhf',
+    'build_dressed_e_ai',
+    'build_dressed_e_abij',
+    'build_dressed_denoms_uhf',
 ]
 
 
@@ -58,5 +58,5 @@ def validate_en_dress(en_dress):
     if singles not in (True, False, 'screened'):
         raise ValueError(f"en_dress['singles']={singles!r}; expected True, False "
                          f"or 'screened' (static-RPA-screened e-h direct term, "
-                         f"see _build_dressed_e_ai)")
+                         f"see build_dressed_e_ai)")
     return dict(en_dress)

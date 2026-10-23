@@ -14,11 +14,11 @@ import pathlib
 import numpy as np
 import pytest
 
-from src.Base.record_io import record_hash
+from src.Base.utils.record_io import record_hash
 from src.photophysics import stages
-from src.Base.geometry import molecule_at
+from src.Base.geometry.geometry import molecule_at
 from src.properties.optimize import nudge_vector, surface_record
-from src.properties.surfaces import reference_mean_field
+from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.photophysics_cases import Stop, declaration, refusing, run_at_r0
 
 #: Bohr: how far from R0 the stand-in minimum lies.

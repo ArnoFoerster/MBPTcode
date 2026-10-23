@@ -30,7 +30,7 @@ def _no_action(Z):
 
 
 def test_a_defect_in_the_probe_raises_as_itself(monkeypatch):
-    monkeypatch.setattr(davidson, '_lowest_amb_from_action',
+    monkeypatch.setattr(davidson, 'lowest_amb_from_action',
                         _probe_raising(TypeError('planted defect')))
     with pytest.raises(TypeError, match='planted defect'):
         davidson._casida_breakdown(_no_action, DIAG, 1e-6)
@@ -44,9 +44,9 @@ def test_a_defect_in_the_probe_raises_as_itself(monkeypatch):
 def test_a_probe_that_did_not_converge_is_a_breakdown(monkeypatch, exc):
     if exc == 'AmbProbeNotConverged':
         exc = AmbProbeNotConverged('planted')
-    monkeypatch.setattr(davidson, '_lowest_amb_from_action',
+    monkeypatch.setattr(davidson, 'lowest_amb_from_action',
                         _probe_raising(exc))
     err = davidson._casida_breakdown(_no_action, DIAG, 1e-6)
-    assert isinstance(err, davidson._CasidaBreakdown)
+    assert isinstance(err, davidson.CasidaBreakdown)
     assert err.min_eig_amb is None
     assert 'did not converge' in str(err)

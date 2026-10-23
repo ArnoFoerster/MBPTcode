@@ -35,10 +35,11 @@ Convention notes (locked in by the invariance test, not by trust):
 """
 import numpy as np
 
-from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
 from scipy import sparse
 
 from src.SingleReference.ADC import base  # module import: base.py imports this file
+from src.SingleReference.ADC.adc_utils import NoccCache
 
 
 # =====================================================================
@@ -86,7 +87,7 @@ def det_sz(det):
     return sz
 
 
-def _apply_S2(det, norb_spatial):
+def apply_S2(det, norb_spatial):
     """S^2 |det> = S-S+|det> + Sz(Sz+1)|det>, exactly, as a dict
     {det': coefficient}. S+ = sum_p a+_{2p} a_{2p+1} (alpha=even)."""
     out = {}
@@ -267,7 +268,7 @@ def build_class_T(solver, nocc, cls, memoize=True):
             n = len(sub)
             S2 = np.zeros((n, n))
             for s_col in range(n):
-                for d2, coef in _apply_S2(dets_sub[s_col], norb_spatial).items():
+                for d2, coef in apply_S2(dets_sub[s_col], norb_spatial).items():
                     r = index.get(d2)
                     if r is not None:
                         # states are sign_c * |det_c>
@@ -375,7 +376,7 @@ class _LazyT:
 # CSF-basis solver adapter
 # =====================================================================
 
-class ADCSolverCSF:
+class ADCSolverCSF(NoccCache):
     """Spin-adapted (doublet-CSF-basis) front-end for a spin-orbital solver:
     exposes norb (SPATIAL), dimensions/dimensions_adc4 (CSF sizes, ~4x
     smaller per class), and build_supermatrix/solve/build_matrix_free_operator
@@ -395,23 +396,11 @@ class ADCSolverCSF:
         self.norb = spin_solver.norb // 2
         self._cache = {}
 
-    def _cached(self, name, nocc, compute_fn):
-        key = (name, nocc)
-        if key not in self._cache:
-            self._cache[key] = compute_fn()
-        return self._cache[key]
-
     def _T(self, nocc):
         """Lazy per-class isometry view (see _LazyT) -- classes are built on
         first access, so e.g. a plain-ADC(3) solve never constructs the
         3h2p/3p2h pieces."""
         return self._cached('T', nocc, lambda: _LazyT(self.spin, nocc))
-
-    @staticmethod
-    def _embed_sc(static_correction):
-        if static_correction is None:
-            return None
-        return base.ADCSolverRestricted._embed_static_correction_spin(static_correction)
 
     # ---------------- dimensions ----------------
 
@@ -513,7 +502,8 @@ class ADCSolverCSF:
         T = self._T(nocc)
         T_SD = T['SD']
         aop_spin, _, _ = self.spin.build_matrix_free_operator(
-            nocc, static_correction=self._embed_sc(static_correction))
+            nocc, static_correction=base.ADCSolverRestricted._embed_static_correction_spin(
+                static_correction))
 
         def aop(z):
             return T_SD.T @ aop_spin(T_SD @ z)

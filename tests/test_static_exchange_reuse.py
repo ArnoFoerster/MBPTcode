@@ -32,7 +32,11 @@ What is gated:
     the few-ulp bar is floored at one Ha, so the HF diagonal
     cases below, whose whole term is 1e-16 Ha, no longer see a 1e-6
     relative perturbation);
-  * `exchange='df-direct'` forms no such matrix and refuses a handed-in one.
+  * `exchange='df-direct'` forms no such matrix and refuses a handed-in one;
+  * the AO operator under the matrix is built once per mean field and
+    density and read by the static term and by the orbital responses of the
+    Kohn-Sham correction and the EXX double counting
+    (`mean_field_static_operator`).
 
 What breaks each gate:
 
@@ -75,8 +79,8 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import qp_solve
 from src.SingleReference.GW.evGW import shifted_mean_field
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
@@ -84,7 +88,7 @@ from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              static_exchange_mean_field_matrix)
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 
@@ -236,7 +240,7 @@ def count_builds(monkeypatch):
 
     monkeypatch.setattr(qp_solve, 'static_exchange_mean_field_matrix', counted)
     monkeypatch.setattr(
-        'src.SingleReference.LinearResponse.davidson.'
+        'src.SingleReference.BSE.solve.'
         'static_exchange_mean_field_matrix', counted)
     return calls, built
 
@@ -284,6 +288,49 @@ def test_bse_roots_are_bitwise_with_a_handed_matrix(water):
                                      factors=w['factors'], probe=False,
                                      progress=False, sigma_x_matrix=matrix)
     assert_same(handed, ref, quantity='root', label='BSE roots')
+
+
+@pytest.mark.parametrize('xc', REFERENCES)
+def test_one_operator_serves_the_term_and_its_orbital_responses(xc):
+    """The static term, the Kohn-Sham correction's orbital response and the
+    EXX double counting's read ONE Sigma_x - v_xc
+    (`mean_field_static_operator`), built once per mean field and density:
+    one K among the three, each the operator built per consumer to a few ulp
+    (the static term bitwise: the same calls under the same thread policy). A new
+    density on the same mean field is a new operator, not the held one.
+
+    Breaks if a consumer builds its own again (two or three K) or if the key
+    misses the density (the held operator after the orbitals moved)."""
+    from src.gradients.mean_field_response import (exx_double_counting_Y,
+                                                   qp_xc_correction_Y)
+    from src.Base.utils.parallel.threads import blas_single_threaded
+    mf, mol, nocc = mean_field(xc)
+    mo, dm = mf.mo_coeff, mf.make_rdm1()
+    with blas_single_threaded():
+        own = -0.5 * mf.get_k(mol, dm) - (mf.get_veff(mol, dm)
+                                          - mf.get_j(mol, dm))
+    weights = np.linspace(0.1, 1.0, mo.shape[1])
+    qp_solve._STATIC_OPERATORS.clear()
+    calls, get_k = [], mf.get_k
+    mf.get_k = lambda *a, **k: calls.append(1) or get_k(*a, **k)
+    matrix = static_exchange_mean_field_matrix(mf, mol)
+    y_qp = qp_xc_correction_Y(mf, weights, nocc)
+    y_exx = exx_double_counting_Y(mf, nocc)
+    assert len(calls) == 1, f'{len(calls)} K builds for one mean field'
+    o_mo = mo.T @ own @ mo
+    assert np.array_equal(matrix, o_mo)
+    assert_same(y_qp[:, nocc:], 2.0 * (o_mo @ np.diag(weights))[:, nocc:],
+                quantity='root', label='qp_xc_correction_Y, virtual columns')
+    if xc != 'hf':
+        want = np.zeros_like(y_exx)
+        want[:, :nocc] = 4.0 * o_mo[:, :nocc]
+        assert_same(y_exx, want, quantity='root', label='exx_double_counting_Y')
+    mf.mo_coeff = mo @ np.linalg.qr(np.eye(mo.shape[1]) + 1e-3 * np.tri(
+        mo.shape[1], k=-1))[0]                 # another density, same object
+    moved = static_exchange_mean_field_matrix(mf, mol)
+    assert len(calls) == 2, 'the held operator was read at a new density'
+    if xc != 'hf':                             # zero on HF at any density
+        assert not np.allclose(moved, matrix)
 
 
 if __name__ == '__main__':

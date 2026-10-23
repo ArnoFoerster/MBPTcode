@@ -19,13 +19,13 @@ import warnings
 import numpy as np
 warnings.simplefilter('ignore')
 from pyscf import gto, scf
-import src.Base.utils.mpi_grid as mpi_grid
-from src.Base.utils.mpi_grid import (contiguous_block, grid_comm, partition,
-                                     reduce_scatter_rows, reduce_sum,
-                                     run_simulated)
+import src.Base.utils.parallel.mpi_grid as mpi_grid
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, grid_comm, partition, reduce_scatter_rows, reduce_sum)
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (solve_qp_energy_space_time,
                                                separable_factors)
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from tests.test_proj_rows import LIMIT, collectives
 from tests.test_sliced_factors import (rank_partials, reassociation_bar,
                                        scatter_shapes)

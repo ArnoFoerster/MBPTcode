@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_two_electron_integrals_chemist,
-                                      DFIntegrals)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_two_electron_integrals_chemist,
+                                            DFIntegrals)
 from src.SingleReference.BSE import bse_upfolded as B
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 SPINS = ('singlet', 'triplet')
 

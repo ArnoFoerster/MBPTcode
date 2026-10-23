@@ -56,9 +56,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.Base.environment import dresses_interaction
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import dynamic_screening_factor
+from src.environments.environment import dresses_interaction
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import dynamic_screening_factor
 
 
 @dataclass(frozen=True)

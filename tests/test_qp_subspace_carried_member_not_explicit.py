@@ -16,8 +16,8 @@ explicit.
 import numpy as np
 import pytest
 
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 
 EPS = np.array([-20.0, -10.0, -5.0, -1.0, 1.0, 2.0, 3.0, 9.0])
 NOCC = 4
@@ -38,7 +38,7 @@ def test_a_carried_member_outside_the_set_is_recorded():
     chain = planted()
     routes = {int(p): 'sop' for p in SET}
     with pytest.warns(RuntimeWarning, match=r'\b6\b'):
-        groups = chain._frozen_qp_subspaces(EPS, routes)
+        groups = chain.quasiparticles._frozen_qp_subspaces(EPS, routes)
     assert groups == ((4, 5),)
     dropped = chain.conventions.qp_subspace_record['dropped']
     lost = [d for d in dropped if d['orbital'] == 6]
@@ -51,5 +51,5 @@ def test_nothing_is_recorded_when_every_carried_member_is_explicit():
     chain = planted()
     chain.conventions.carried_subspaces = ((4, 5),)
     routes = {int(p): 'sop' for p in SET}
-    assert chain._frozen_qp_subspaces(EPS, routes) == ((4, 5),)
+    assert chain.quasiparticles._frozen_qp_subspaces(EPS, routes) == ((4, 5),)
     assert chain.conventions.qp_subspace_record['dropped'] == []

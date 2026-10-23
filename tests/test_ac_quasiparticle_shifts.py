@@ -23,16 +23,16 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import QPStates
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.qp_selection import ac_quasiparticle_shifts
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
@@ -87,7 +87,7 @@ def test_ac_frontier_shifts_sit_within_the_gate(formaldehyde, medium):
         numerics=g1_numerics(mol, Numerics(isdf={'counts': counts, 'n_start': n_start},
                                            qp={'window': window, 'residue_route': 'sop', 'scissor': 'calibrate'},
                                            bse={'solver': 'dense'})))
-    shared = chain._shared_forward(mol, mf)
+    shared = chain.shared_forward(mol, mf)
     states = np.asarray(chain.resolved.qp_set)
     explicit = {int(p): float(shared.eps_qp[p] - shared.eps[p])
                 for p in states}

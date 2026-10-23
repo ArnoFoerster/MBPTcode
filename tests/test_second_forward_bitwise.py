@@ -29,14 +29,14 @@ from tests.pins import assert_same, assert_same_tree
 def test_a_second_forward_at_the_reference_is_the_first(case):
     chain = fresh(prototype(case, molecule()), ('singlet', 0))
     mol, mf = chain.mean_field()
-    om1, first = chain._forward(mol, mf)
-    om2, second = chain._forward(mol, mf)
+    first, sol1 = chain.forward(mol, mf)
+    second, sol2 = chain.forward(mol, mf)
     # two passes: a few ulp. The vectors are held
     # without sign alignment ('root'), so a flipped eigenvector still fails.
-    assert_same(second[7], first[7], label='eps_QP')
-    assert_same(om2, om1, quantity='root', label='Omega')
-    assert_same(second[10], first[10], unit='1', quantity='root', label='X')
-    assert_same(second[11], first[11], unit='1', quantity='root', label='Y')
+    assert_same(second.eps_qp, first.eps_qp, label='eps_QP')
+    assert_same(sol2.omega, sol1.omega, quantity='root', label='Omega')
+    assert_same(sol2.x, sol1.x, unit='1', quantity='root', label='X')
+    assert_same(sol2.y, sol1.y, unit='1', quantity='root', label='Y')
 
 
 def test_the_first_quasiparticle_call_is_the_second():

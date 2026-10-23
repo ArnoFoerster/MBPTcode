@@ -32,18 +32,20 @@ from pyscf import dft, gto
 from pyscf import solvent as pyscf_solvent
 
 from tests.pins import assert_same
-from src.Base.constants import (RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.isdf_jk import isdf_jk
-from src.Base.scf_convergence import WarmStart, newton_finished, warm_started
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import numerics_of
+from src.Base.pyscf.scf_convergence import WarmStart, newton_finished, warm_started
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.reference_mean_field import converged_factory
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
 COUNTS, N_START = resolve_isdf_grid('G1', 'cc-pvdz', ['H', 'O'],
@@ -66,7 +68,7 @@ def built(mol, route):
     the differentiable tolerances; serially the factory converges it."""
     mf = dft.RKS(mol, xc='pbe0')
     mf = (mf.density_fit(auxbasis='cc-pvdz-ri') if route == 'df'
-          else isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=COUNTS,
+          else isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=COUNTS,
                        n_start=N_START))
     mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
     mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -234,7 +236,8 @@ def test_solvated_production_force_over_ranks(size):
             environment=SolventScreening(mol, solvent='toluene'),
             chi0='space-time', residues='sop', solver='davidson',
             factorization='isdf', qp_states=QPStates('frontier'),
-            grid_accuracy='G1', bse_adjoint='grid', nroots=5, mf=mf)
+            mf=mf, numerics=numerics_of({'grid_accuracy': 'G1',
+                                         'bse_adjoint': 'grid', 'nroots': 5}))
         assert hasattr(chain.mf0, 'with_solvent')
         return np.array(chain.total_gradient()[0]), chain.mf0
 

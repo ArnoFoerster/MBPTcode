@@ -18,9 +18,9 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics import Numerics
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_differentiable
 
@@ -42,13 +42,13 @@ def handed_over(monkeypatch):
                               numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
     man = StateManifold(chain, states=(S0, T0))
     ev = man.evaluate(gradients=(S0, T0))
-    forwards, shared = [], ExcitedStateChain._shared_forward
+    forwards, shared = [], ExcitedStateChain.shared_forward
 
     def counted(self, *args):
         forwards.append(1)
         return shared(self, *args)
 
-    monkeypatch.setattr(ExcitedStateChain, '_shared_forward', counted)
+    monkeypatch.setattr(ExcitedStateChain, 'shared_forward', counted)
     return man, ev, forwards
 
 

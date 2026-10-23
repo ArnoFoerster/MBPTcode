@@ -6,7 +6,7 @@ own keyword is a second way in, and the two disagree the moment a caller passes 
 holds another. Read off the source by AST over the GW-BSE, gradient and property packages: no
 parameter of a function, method or lambda carries one of `SIGNATURE_NAMES`, except
 
-  * `derive`, the one sanctioned way to change a field, and `src/Base/numerics.py`;
+  * `derive`, the one sanctioned way to change a field, and `src/Base/numerics/numerics.py`;
   * the rows of `numerics_signature_debt.json`, the signatures not yet converted. The list can only
     shrink: a signature that gains a name fails, and an entry whose name has left its signature
     fails until the row is deleted.
@@ -22,7 +22,9 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 #: The packages the object covers: GW-BSE, gradients and properties, and what they build on.
 PACKAGES = ('src/gradients', 'src/properties', 'src/Base',
             'src/SingleReference/GW', 'src/SingleReference/LinearResponse',
-            'src/photophysics')
+            'src/SingleReference/BSE',
+            'src/photophysics', 'src/environments', 'src/fragments',
+            'src/SingleReference/common')
 
 #: Parameter names that are a numerical choice of a run: grids, quadratures, the ISDF fit,
 #: the Davidson, the memory and layout knobs.
@@ -34,7 +36,7 @@ SIGNATURE_NAMES = frozenset(
 
 #: Functions and modules exempt by construction.
 EXEMPT_FUNCTIONS = frozenset({'derive'})
-EXEMPT_MODULES = frozenset({'src/Base/numerics.py'})
+EXEMPT_MODULES = frozenset({'src/Base/numerics/numerics.py'})
 
 DEBT = json.loads((REPO / 'tests' / 'numerics_signature_debt.json').read_text())
 

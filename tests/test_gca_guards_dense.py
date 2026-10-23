@@ -3,13 +3,13 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.record_io import read_record, write_record
-from src.Base.geometry import molecule_at
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
-                                          QuasiparticleSurface, tight_rhf)
+from src.Base.utils.record_io import read_record, write_record
+from src.Base.geometry.geometry import molecule_at
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+                                                QuasiparticleSurface, tight_rhf)
 from src.properties.hessian import surface_hessian
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surfaces import compare_surfaces
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.gwbse.surface_factory import compare_surfaces
 
 
 def test_write_record_keeps_arrays_of_a_dotted_sibling_stem(tmp_path):
@@ -50,7 +50,7 @@ def test_dense_surfaces_refuse_a_mean_field_of_another_geometry(h2):
     bse = DenseBSESurface(h2)
     for call in (rpa.total_energy, rpa.total_gradient, qp.total_energy,
                  qp.total_gradient, bse.total_energy, bse.total_gradient,
-                 bse.excitation_energy):
+                 bse.excitation):
         with pytest.raises(ValueError, match='another geometry'):
             call(moved, mf)
 

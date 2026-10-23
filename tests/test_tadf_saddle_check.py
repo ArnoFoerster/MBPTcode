@@ -9,8 +9,9 @@ surface.
 """
 import pytest
 
-from src.Base.constants import START_NUDGE_BOHR
-from src.photophysics.records import WalkNotRelaxed, walk_fields
+from src.Base.numerics.constants import START_NUDGE_BOHR
+from src.photophysics.records import walk_fields
+from src.properties.excitations import WalkNotRelaxed
 from src.properties import excitations
 from src.properties.optimize import optimize
 from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,

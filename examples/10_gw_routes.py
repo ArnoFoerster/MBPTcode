@@ -13,9 +13,10 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
-from src.Base.isdf_jk import isdf_jk, separable_factors_from_jk
-from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.numerics.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
+from src.Base.factorization.isdf_jk import separable_factors_from_jk
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
@@ -65,7 +66,7 @@ print('window HOMO-1..LUMO    '+ ', '.join(f'{e * HARTREE_TO_EV:.3f}' for e in w
 # With an ISDF mean field the static exchange <Sigma_x - v_xc> would inherit the SCF's ISDF-K
 # which puts the interpolation error into the quasiparticle energy at first order.
 # 'df-direct' rebuilds that one term from the three-index integrals instead.
-mf_isdf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=counts)
+mf_isdf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=counts)
 mf_isdf.kernel()
 factors = separable_factors_from_jk(mf_isdf)
 qp_mf = solve_qp_energy_space_time(mf_isdf, mol, nocc, nocc - 1, factors=factors)

@@ -24,7 +24,7 @@ Licensed under the Apache License, Version 2.0.
     explicit contraction ordering) and are described in the file's module
     docstring; the amplitude equations themselves are unchanged.
 
-  * src/Base/pdaggerq_interface.py and src/CodeGeneration/
+  * src/CodeGeneration/pdaggerq_interface.py and src/CodeGeneration/
     Code generators that derive equations with pdaggerq (an optional
     dependency, not distributed here) and emit NumPy modules. The restricted
     CC generator (generate_restricted_ccsdt.py) sets up its operators as
@@ -36,12 +36,12 @@ GreenX
 https://github.com/nomad-coe/greenX
 Licensed under the Apache License, Version 2.0.
 
-  * src/Base/utils/minimax_omega_data.json
-  * src/Base/utils/minimax_tau_data.json
+  * src/Base/utils/grids/minimax_omega_data.json
+  * src/Base/utils/grids/minimax_tau_data.json
     Minimax quadrature grid tables derived from the GreenX library, loaded
-    by src/Base/utils/grids.py.
+    by src/Base/utils/grids/grids.py.
 
-  * src/Base/utils/grids.py
+  * src/Base/utils/grids/grids.py
     The table lookup follows GreenX's GX-TimeFrequency/src/minimax_utils.F90:
     the energy-range column selection of find_erange and the narrow-range
     stretch of coeffs_and_weights, applied with the sign each axis carries
@@ -49,7 +49,7 @@ Licensed under the Apache License, Version 2.0.
     written as one shared helper serving both axes, and the grids are returned
     in atomic units rather than accumulated into a quadrature in place.
 
-  * src/Base/utils/time_frequency.py
+  * src/Base/utils/grids/time_frequency.py
     Python port of the imaginary time <-> imaginary frequency transformation
     weights from GreenX's GX-TimeFrequency/src/minimax_grids.F90, namely the
     routines get_transformation_weights and calculate_psi_and_mat_A, together

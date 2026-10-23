@@ -29,17 +29,17 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-import src.gradients.qp_set as qp_set_module
-from src.Base.numerics import Numerics
-from src.Base.constants import (ADAPTIVE_HOLE_MAX_EV, ADAPTIVE_QP_TOL_MEV,
-                                HARTREE_TO_EV)
+import src.gradients.gwbse.qp_set as qp_set_module
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (ADAPTIVE_HOLE_MAX_EV, ADAPTIVE_QP_TOL_MEV,
+                                         HARTREE_TO_EV)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.separable_ri import resolve_isdf_grid
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.qp_selection import AdaptivePartition
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
 from tests.reference_scf import rhf_df_jkfit
@@ -456,10 +456,10 @@ def import_closure(path, seen=None):
 
 
 @pytest.mark.parametrize('module', [
-    'src/gradients/qp_space_time.py',
+    'src/gradients/gwbse/qp_space_time.py',
     'src/SingleReference/LinearResponse/isdf_bse_adjoint.py',
-    'src/gradients/space_time_adjoint.py',
-    'src/gradients/bse_isdf.py'])
+    'src/gradients/rpa/space_time_adjoint.py',
+    'src/gradients/gwbse/bse_isdf.py'])
 def test_reverse_chain_does_not_import_the_selection(module):
     closure = import_closure(REPO / module)
     assert closure, module
@@ -474,7 +474,8 @@ def test_the_entry_point_selects_and_refuses_the_reference(system):
     surface = potential_energy_surface(
         mol, rhf_df_jkfit, ground_state=GroundState('dft', 'hf'),
         excitation=Excitation('singlet'), residues='sop',
-        qp_states=adaptive(), mf=mf, grid_accuracy='G1')
+        qp_states=adaptive(), mf=mf,
+        numerics=numerics_of({'grid_accuracy': 'G1'}))
     assert surface.qp_select == adaptive()
     assert surface.realization.qp_explicit == tuple(system['window'])
     with pytest.raises(ValueError, match='reference'):

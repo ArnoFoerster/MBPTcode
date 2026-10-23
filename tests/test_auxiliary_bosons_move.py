@@ -33,7 +33,7 @@ import sys
 import numpy as np
 import pytest
 
-from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
+from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.SingleReference.GW import auxiliary_bosons as prod
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -166,8 +166,8 @@ def test_a_real_molecule_agrees_on_the_physical_output():
     """
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
-    from src.SingleReference.base import get_occ_virt_indices
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.orbital_spaces import get_occ_virt_indices
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -213,4 +213,4 @@ def test_production_does_not_reach_into_the_gradients_package():
 def test_the_sys_modules_gate_can_fail():
     """A module of src.gradients -- the one the closed form above comes from --
     must report True under the same probe."""
-    assert imports_gradients('src.gradients.quasi_boson_adjoint')
+    assert imports_gradients('src.gradients.gwbse.quasi_boson_adjoint')

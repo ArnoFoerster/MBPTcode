@@ -25,8 +25,8 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP
-from src.Base.isdf_jk import frozen_pair_layout
+from src.Base.numerics.constants import ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP
+from src.Base.factorization.isdf_jk import frozen_pair_layout
 from src.properties.hessian import gradient_at, reference_pair_layout
 from tests.test_numerical_hessian import FORMALDEHYDE, factory
 

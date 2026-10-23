@@ -16,9 +16,9 @@ from dataclasses import replace
 
 import pytest
 
-from src.Base.constants import (SCF_ENERGY_CONV_TOL, SCF_ENERGY_GRAD_TOL,
-                                SCF_OPTIMIZATION_CONV_TOL,
-                                SCF_OPTIMIZATION_GRAD_TOL)
+from src.Base.numerics.constants import (SCF_ENERGY_CONV_TOL, SCF_ENERGY_GRAD_TOL,
+                                         SCF_OPTIMIZATION_CONV_TOL,
+                                         SCF_OPTIMIZATION_GRAD_TOL)
 from src.photophysics import chain, vertical_arms
 from src.photophysics.cli import declaration_of, parser
 from tests.photophysics_cases import (calls, halves_electrons,
@@ -59,10 +59,10 @@ def test_walk_and_arms_declare_the_same_chain(one):
         assert arm == chain.chain_spec(d, env)
     assert run.spec == chain.chain_spec(
         vertical_arms.arm_declaration(d, 'ac-all'), run.env)
-    numerics = dict(run.spec.numerics)
-    assert numerics['track'] == 'overlap'
-    assert numerics['qp_hamiltonian'] is True
-    assert numerics['bse_conv_tol'] == 1e-6
+    numerics = run.spec.numerics
+    assert numerics.bse.track == 'overlap'
+    assert numerics.qp.hamiltonian is True
+    assert numerics.bse.conv_tol == 1e-6
 
 
 def test_the_arms_name_only_the_quasiparticle_declaration(one):

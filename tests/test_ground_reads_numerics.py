@@ -17,12 +17,12 @@ import inspect
 import pytest
 from pyscf import gto
 
-from src.Base.constants import RPA_ENERGY_NFREQ
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.factor_chain import FactorChain
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.numerics.constants import RPA_ENERGY_NFREQ
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.rpa.factor_chain import FactorChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.reference_scf import rhf_df_differentiable_checked
 
 BASIS = 'cc-pvdz'

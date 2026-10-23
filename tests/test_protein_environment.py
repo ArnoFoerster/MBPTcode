@@ -28,12 +28,12 @@ import numpy as np
 import pytest
 from pyscf import scf
 
-from src.Base.composite_environment import CompositeEnvironment
-from src.Base.protein_environment import (LINK_BOND_LENGTH, embed, read_pqr)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.fragment_diabatic import DiabaticGradient
+from src.environments.composite_environment import CompositeEnvironment
+from src.environments.protein_environment import (LINK_BOND_LENGTH, embed, read_pqr)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.fragment_diabatic import DiabaticGradient
 from src.properties.diabatic import diabatic_derivative
-from src.Base.numerics import numerics_of
+from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1
 
 ETHYLENE = [('C1', 0, 0, 0.667), ('C2', 0, 0, -0.667),

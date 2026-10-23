@@ -56,14 +56,14 @@ import numpy as np
 from pyscf import scf
 from scipy import linalg
 
-from src.Base.constants import (HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
-                                UPFOLDED_BSE_DAVIDSON_TOL, UPFOLDED_BSE_DENSE_LIMIT,
-                                UPFOLDED_BSE_IMAG_TOL, UPFOLDED_BSE_LINDEP_TOL,
-                                UPFOLDED_BSE_PRECOND_FLOOR)
-from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import (HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
+                                         UPFOLDED_BSE_DAVIDSON_TOL, UPFOLDED_BSE_DENSE_LIMIT,
+                                         UPFOLDED_BSE_IMAG_TOL, UPFOLDED_BSE_LINDEP_TOL,
+                                         UPFOLDED_BSE_PRECOND_FLOOR)
+from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
 from src.Base.step_failed import StepFailed
-from src.Base.utils.linearAlgebra.orthogonalization import extend_orthonormal
+from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 
 SQRT2 = np.sqrt(2.0)

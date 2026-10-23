@@ -33,7 +33,7 @@ Open and close the script with
 ```python
 import sys
 
-from src.Base.utils.linearAlgebra.diagonalization import (serve_distributed_solves,
+from src.Base.utils.linear_algebra.diagonalization import (serve_distributed_solves,
                                                           release_workers)
 
 if serve_distributed_solves():
@@ -117,8 +117,8 @@ the region the script opens once:
 ```python
 from pyscf import dft, gto
 
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.utils.mpi_grid import distributed, grid_comm
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
 
 comm = grid_comm()[0]                  # COMM_WORLD, or None without mpi4py

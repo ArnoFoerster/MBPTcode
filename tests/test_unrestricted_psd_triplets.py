@@ -19,9 +19,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import METHOD_REGISTRY
-from src.Base.pyscf_interface import (get_antisymmetrized_spin_eri,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import METHOD_REGISTRY
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_eri,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.self_energy import SelfEnergySolver, TRIPLET_VERTEX_MODES
@@ -96,7 +96,7 @@ def check_psd2_is_the_eh_pair(mol, rhf, uhf):
     lr_u = LinearResponseSolver(eps_u, eri_chemist=eri_u, spin_mode='unrestricted')
     se_u = SelfEnergySolver(eps_u, eri_chemist=eri_u, spin_mode='unrestricted', eta=1e-12)
     infos = {'PSD2': METHOD_REGISTRY['PSD2']}
-    spectrum = qp_energy._casida_spectrum(lr_u, uhf.nelec, 'TDHF', None, False, infos,
+    spectrum = qp_energy.casida_spectrum(lr_u, uhf.nelec, 'TDHF', None, False, infos,
                                           ['PSD2'], True, False)
     ok = True
     for p in (nocc - 1, nocc):

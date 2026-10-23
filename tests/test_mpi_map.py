@@ -24,8 +24,9 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.utils.mpi_grid import mpi_map, run_simulated
-from src.properties.surface import FiniteDifferenceGradient
+from src.Base.utils.parallel.mpi_grid import mpi_map
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.surface import FiniteDifferenceGradient
 from tests.pins import assert_same, assert_same_tree
 
 SIZES = [2, 3, 7]

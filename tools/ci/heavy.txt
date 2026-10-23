@@ -2,7 +2,7 @@ pytest test_davidson_timings.py  # timing gates, run on the cluster (5 passed, 1
 script test_davidson_warm_start_mpi.py  # real MPI: mpirun script
 script test_distributed_fit_mpi.py  # real MPI: mpirun script
 script test_distributed_isdf_scf_mpi.py  # real MPI: mpirun script
-script test_elpa_casida.py  # real MPI: mpirun script (needs pyelpa)
+script test_elpa_casida.py  # real MPI: mpirun script (needs pyelpa; prints SKIPPED without it)
 pytest test_fragment_diabatic.py  # 61 minutes on a cluster (20 passed)
 script test_fragment_diabatic_ranks.py  # real MPI: mpirun script
 script test_mpi_grid_distribution.py  # real MPI: mpirun -n 3 script; passes at 3 ranks (cluster); conftest.py ignores it

@@ -27,7 +27,7 @@ reference papers themselves flag as hard to assign.
 """
 import numpy as np
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from pyscf import symm
 
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r

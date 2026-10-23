@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import AMU_TO_ME
+from src.Base.numerics.constants import AMU_TO_ME
 from src.properties.curvilinear import (difference, huang_rhys_curvilinear,
                                         primitives, values, wilson_b)
 from src.properties.vibronic import huang_rhys_from_displacement

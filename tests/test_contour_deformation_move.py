@@ -30,7 +30,7 @@ What breaks each gate:
     broken split passes.
   * the split transforming only the rows it owns instead of its serial
     blocks: the same gate, on the row-count-sensitive tensordot.
-  * `_f_rpa` delegating its real-axis eta = 0 branch as well. That
+  * `f_rpa` delegating its real-axis eta = 0 branch as well. That
     branch is a/(a^2+0) - b/(b^2+0) against `frequency_factor`'s 1/a - 1/b,
     the same function up to 5.7e-14 apart, and the RPA numbers are pinned to
     its own spelling.
@@ -48,20 +48,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.Base.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
+from src.Base.numerics.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import contour_deformation as prod
 from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
                                                    ov_energies)
 from src.SingleReference.LinearResponse.imaginary_frequency import (
-    _f_rpa, frequency_factor)
+    f_rpa, frequency_factor)
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     frequency_blocks, owned_frequency_blocks)
-from src.SingleReference.base import get_occ_virt_indices
-from src.gradients import contour_deformation_adjoint as adjoint
-from src.gradients import qp_space_time as qst
-from src.gradients import space_time_adjoint as sta
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.gradients.gwbse import contour_deformation_adjoint as adjoint
+from src.gradients.gwbse import qp_space_time as qst
+from src.gradients.rpa import space_time_adjoint as sta
 from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
 from tests.pins import assert_same
 
@@ -222,7 +222,7 @@ def water():
     """(eps, nocc, B, C_ov, nu, wt) for RHF/cc-pVDZ water, density fitted."""
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -276,7 +276,7 @@ def test_frequency_factor_reproduces_the_old_formulas():
 
 
 def test_the_rpa_frequency_factor_is_untouched():
-    """`_f_rpa` delegates on the imaginary axis and for eta != 0 on the
+    """`f_rpa` delegates on the imaginary axis and for eta != 0 on the
     real one. Its two other branches keep their own spelling: w = 0 is the
     static limit, and eta = 0 is a/(a^2+0) - b/(b^2+0), which differs from
     1/a - 1/b in the last bits (5.7e-14 on these pair energies).
@@ -287,11 +287,11 @@ def test_the_rpa_frequency_factor_is_untouched():
         lr = type('LR', (), {'eta': eta})()
         for w in (0.0, 1e-13, 0.017, 0.31, 2.5, -0.44):
             for axis in (True, False):
-                assert_same(_f_rpa(lr, d, w, axis), _old_f_rpa(lr, d, w, axis),
+                assert_same(f_rpa(lr, d, w, axis), _old_f_rpa(lr, d, w, axis),
                             unit='1', quantity='root', label=(eta, w, axis))
     lr = type('LR', (), {'eta': 0.0})()
     shared = frequency_factor(d, 0.31, False, 0.0)
-    own = _f_rpa(lr, d, 0.31, False)
+    own = f_rpa(lr, d, 0.31, False)
     assert not np.array_equal(shared, own), \
         'the two real-axis eta = 0 spellings coincide; then they should be one'
     assert np.abs(shared - own).max() < 1e-12

@@ -1,8 +1,8 @@
 import numpy as np
-from src.SingleReference.base import get_occ_virt_indices
-from src.Base.constants import (CASIDA_NORM_TOL,
-                                DEFAULT_BROADENING_ETA)
-from src.Base.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Base.numerics.constants import (CASIDA_NORM_TOL,
+                                         DEFAULT_BROADENING_ETA)
+from src.Base.pyscf.pyscf_interface import occupied_count, spin_index
 from src.SingleReference.LinearResponse import imaginary_frequency
 
 
@@ -109,7 +109,7 @@ class LinearResponseSolver:
             screened_b = 2.0 * V_b.T @ R @ V_b
             W_rpa_b = eri[1] - screened_b.reshape(eri[1].shape)
 
-            eri_w_singlet = W_rpa_a if spin_channel == 'alpha' else W_rpa_b
+            eri_w_singlet = (W_rpa_a, W_rpa_b)[spin_index(spin_channel)]
             # The spin-flip vertex reads the (aa|bb) block of W.
             eri_w_triplet = eri[2] - (2.0 * V_a.T @ R @ V_b).reshape(eri[2].shape)
         else:
@@ -134,7 +134,7 @@ class LinearResponseSolver:
         return self.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
 
     def _get_f_rpa(self, d, w, is_imaginary):
-        return imaginary_frequency._f_rpa(self, d, w, is_imaginary)
+        return imaginary_frequency.f_rpa(self, d, w, is_imaginary)
 
     def build_casida_matrices(self, nocc, lBSE=False, W_aux=None, triplet=False,
                               eps_screen=None):
@@ -544,42 +544,38 @@ class LinearResponseSolver:
         else:
             return self.solve_rpa_spectral_full(omega_grid, nocc, eigenvalues_casida, X_plus_Y, is_imaginary)
 
+    def _spectral_grid(self, omega_grid, eigenvalues_casida, prefactor,
+                       is_imaginary, build):
+        """[build(denom(w)) for w in omega_grid]: the spectral W's frequency
+        loop, denom(w) = prefactor sum over the Casida poles +-Omega of
+        1/(w -+ Omega), broadened by eta on the real axis."""
+        W_grid = []
+        for w in omega_grid:
+            if is_imaginary:
+                denom = -2.0 * prefactor * eigenvalues_casida / (eigenvalues_casida**2 + w**2)
+            else:
+                denom = prefactor * np.real(1.0 / (w - eigenvalues_casida + 1j * self.eta) - 1.0 / (w + eigenvalues_casida + 1j * self.eta))
+            W_grid.append(build(denom))
+        return np.array(W_grid)
+
     def solve_rpa_spectral_df(self, omega_grid, nocc, eigenvalues_casida, X_plus_Y, is_imaginary=False):
         """Spectral representation of screened potential W using density fitting."""
         if self.spin_mode == 'unrestricted':
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             occ_b, virt_b = self._get_occ_virt_indices(self.eps_b, nocc_b)
-            
             C_ov_a = self.coeff_a[:, occ_a[:, None], virt_a].reshape(self.naux, -1)
             C_ov_b = self.coeff_b[:, occ_b[:, None], virt_b].reshape(self.naux, -1)
             XplusY_proj = np.block([[C_ov_a, C_ov_b]]) @ X_plus_Y
-            
             prefactor = 1.0
-            W_grid = []
-            for w in omega_grid:
-                if is_imaginary:
-                    denom = -2.0 * prefactor * eigenvalues_casida / (eigenvalues_casida**2 + w**2)
-                else:
-                    denom = prefactor * np.real(1.0 / (w - eigenvalues_casida + 1j * self.eta) - 1.0 / (w + eigenvalues_casida + 1j * self.eta))
-                W_w = np.eye(self.naux) + (XplusY_proj * denom) @ XplusY_proj.T
-                W_grid.append(W_w)
-            return np.array(W_grid)
         else:
             occ, virt = self._get_occ_virt_indices(self.eps, nocc)
             C_ov = self.df_coeff[:, occ[:, None], virt].reshape(self.naux, -1)
             XplusY_proj = C_ov @ X_plus_Y
-            
             prefactor = 2.0
-            W_grid = []
-            for w in omega_grid:
-                if is_imaginary:
-                    denom = -2.0 * prefactor * eigenvalues_casida / (eigenvalues_casida**2 + w**2)
-                else:
-                    denom = prefactor * np.real(1.0 / (w - eigenvalues_casida + 1j * self.eta) - 1.0 / (w + eigenvalues_casida + 1j * self.eta))
-                W_w = np.eye(self.naux) + (XplusY_proj * denom) @ XplusY_proj.T
-                W_grid.append(W_w)
-            return np.array(W_grid)
+        return self._spectral_grid(
+            omega_grid, eigenvalues_casida, prefactor, is_imaginary,
+            lambda denom: np.eye(self.naux) + (XplusY_proj * denom) @ XplusY_proj.T)
 
     def solve_rpa_spectral_full(self, omega_grid, nocc, eigenvalues_casida, X_plus_Y, is_imaginary=False):
         """Spectral representation of screened potential W using full ERIs."""
@@ -587,45 +583,21 @@ class LinearResponseSolver:
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             occ_b, virt_b = self._get_occ_virt_indices(self.eps_b, nocc_b)
-            
-            nocc_a_val, nvirt_a_val = len(occ_a), len(virt_a)
-            nocc_b_val, nvirt_b_val = len(occ_b), len(virt_b)
-            n_pair_a = nocc_a_val * nvirt_a_val
-            n_pair_b = nocc_b_val * nvirt_b_val
-            
-            # Optimized indexing with np.ix_
+            n_pair_a = len(occ_a) * len(virt_a)
+            n_pair_b = len(occ_b) * len(virt_b)
             V_aa = self.eri_a[np.ix_(occ_a, virt_a, occ_a, virt_a)].reshape(n_pair_a, n_pair_a)
             V_bb = self.eri_b[np.ix_(occ_b, virt_b, occ_b, virt_b)].reshape(n_pair_b, n_pair_b)
             V_ab = self.eri_ab[np.ix_(occ_a, virt_a, occ_b, virt_b)].reshape(n_pair_a, n_pair_b)
             V_trans = np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
-            
             prefactor = 1.0
-            W_grid = []
-            for w in omega_grid:
-                if is_imaginary:
-                    denom = -2.0 * prefactor * eigenvalues_casida / (eigenvalues_casida**2 + w**2)
-                else:
-                    denom = prefactor * np.real(1.0 / (w - eigenvalues_casida + 1j * self.eta) - 1.0 / (w + eigenvalues_casida + 1j * self.eta))
-                W_w = V_trans + V_trans @ (X_plus_Y * denom) @ X_plus_Y.T @ V_trans
-                W_grid.append(W_w)
-            return np.array(W_grid)
         else:
             occ, virt = self._get_occ_virt_indices(self.eps, nocc)
             n_pair = len(occ) * len(virt)
-
-            # Optimized indexing with np.ix_
             V_trans = self.eri_chemist[np.ix_(occ, virt, occ, virt)].reshape(n_pair, n_pair)
-
             prefactor = 2.0
-            W_grid = []
-            for w in omega_grid:
-                if is_imaginary:
-                    denom = -2.0 * prefactor * eigenvalues_casida / (eigenvalues_casida**2 + w**2)
-                else:
-                    denom = prefactor * np.real(1.0 / (w - eigenvalues_casida + 1j * self.eta) - 1.0 / (w + eigenvalues_casida + 1j * self.eta))
-                W_w = V_trans + V_trans @ (X_plus_Y * denom) @ X_plus_Y.T @ V_trans
-                W_grid.append(W_w)
-            return np.array(W_grid)
+        return self._spectral_grid(
+            omega_grid, eigenvalues_casida, prefactor, is_imaginary,
+            lambda denom: V_trans + V_trans @ (X_plus_Y * denom) @ X_plus_Y.T @ V_trans)
 
 
 def static_screened_coulomb_chemist(eps, eri_chemist, nocc, coeff_df=None):

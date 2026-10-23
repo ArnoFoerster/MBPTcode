@@ -25,13 +25,13 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.isdf_jk import (canonical_span_size, frozen_span, solve_in_span,
-                              span_confined)
-from src.Base.separable_ri import UnrepresentedOrbitals, shipped_radii_lookup
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.isdf_jk import (canonical_span_size, frozen_span, solve_in_span,
+                                            span_confined)
+from src.Base.factorization.separable_ri import UnrepresentedOrbitals, shipped_radii_lookup
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 
 H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'

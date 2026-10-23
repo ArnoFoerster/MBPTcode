@@ -17,9 +17,9 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.gradients.evaluation import geometry_hash
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.optimize import optimize
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import RECORDING_BLAS, matches

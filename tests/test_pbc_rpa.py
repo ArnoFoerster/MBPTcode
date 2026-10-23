@@ -50,7 +50,7 @@ def _gdf_krpa_ecorr(kmf, nw=NW):
     from pyscf.pbc.gw import krgw_ac
     from pyscf.pbc.gw.krgw_ac import get_rho_response, _conc_mos
     from pyscf.ao2mo import _ao2mo
-    from src.Base.utils.grids import gauss_legendre_grid
+    from src.Base.utils.grids.grids import gauss_legendre_grid
     einsum = lib.einsum
 
     gw = krgw_ac.KRGWAC(kmf); gw.fc = False

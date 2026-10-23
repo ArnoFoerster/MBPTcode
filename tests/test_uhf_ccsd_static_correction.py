@@ -10,7 +10,7 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.SingleReference.ADC.static_correction import build_static_correction, build_ccsd_static_correction
-from src.Base.pyscf_interface import uhf_blockstacked_order
+from src.Base.pyscf.pyscf_interface import uhf_blockstacked_order
 
 
 def interleaved_to_blockstacked_perm(nocc_a, nocc_b, norb):

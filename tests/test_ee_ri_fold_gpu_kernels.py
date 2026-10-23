@@ -26,8 +26,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import ADC2_SPIN_SCALING, EE_RI_TILE_GB
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.numerics.constants import ADC2_SPIN_SCALING, EE_RI_TILE_GB
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_ri_fold
 from tests.adc_common import WATER_ORIGIN, rhf_df
 

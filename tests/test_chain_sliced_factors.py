@@ -57,7 +57,7 @@ What breaks each gate:
     moves bytes, not bits.
 
 HEXAMER ESTIMATE (the whole per-stage table is in
-`src/gradients/factor_chain.py`'s module docstring), per rank over 8 ranks,
+`src/gradients/rpa/factor_chain.py`'s module docstring), per rank over 8 ranks,
 factor arrays only, from M 117762, nmo = nao 10980, nocc 972, naux 28236
 (14721 rows per rank), GB whole -> sliced:
 
@@ -77,20 +77,20 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
-from src.Base.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.declaration import Excitation, GroundState
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import (contiguous_block, distributed,
-                                     run_simulated)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
-from src.properties.surface import evaluate
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.surface import evaluate
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
@@ -256,8 +256,8 @@ def same_layout(a, b, label):
 def spectrum_and_vectors(surface):
     """(Omega, X, Y) of the excited half at its reference geometry."""
     ex = surface.excited
-    om, pieces = ex._forward(ex.mol0, ex.mf0)
-    return om, pieces[10], pieces[11]
+    solution = ex.forward(ex.mol0, ex.mf0)[1]
+    return solution.omega, solution.x, solution.y
 
 
 def test_serially_the_flag_is_inert(pyscf_one_thread):
@@ -429,7 +429,7 @@ def test_the_dispatcher_carries_the_layout():
         mol = own_water()
         surface = potential_energy_surface(mol, chain_scf, ground_state=ground,
                                            excitation=Excitation('singlet'),
-                                           sliced=True)
+                                           numerics=numerics_of({'sliced': True}))
         assert surface.ground.factorization is surface.excited.factorization
         assert surface.ground.factorization.sliced
         g, e, diags = evaluate(surface, own_water(H2O_DISPLACED))
@@ -441,7 +441,7 @@ def test_the_dispatcher_carries_the_layout():
         potential_energy_surface(own_water(), chain_scf, ground_state=ground,
                                  excitation=Excitation('singlet'),
                                  chi0='dense-qb', factorization='four-index',
-                                 sliced=True)
+                                 numerics=numerics_of({'sliced': True}))
 
 
 def test_what_slices_cannot_serve_is_refused():

@@ -21,10 +21,11 @@ from dataclasses import replace
 
 import numpy as np
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.geometry import molecule_at
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.geometry.geometry import molecule_at
 from src.photophysics.records import key_of, log
-from src.properties import rates
+from src.photophysics import rates
+from src.properties import franck_condon
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.spin_vibronic import mode_derivatives
 from src.properties.vibronic import align_to, project_coupling
@@ -61,7 +62,7 @@ def rate_minimum(minimum, modes, rotation, emits=False):
     if minimum.socme is None:
         raise RateRefused(f'{minimum.method} at {minimum.where} carries no '
                           f'spin-orbit table: no crossing is defined')
-    rates.require_vibrational_modes(modes.omega, 'rate_minimum')
+    franck_condon.require_vibrational_modes(modes.omega, 'rate_minimum')
 
     def per_mode(dv):
         return mode_derivatives(np.asarray(dv), modes.modes, modes.masses,

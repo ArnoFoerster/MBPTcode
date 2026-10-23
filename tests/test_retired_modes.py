@@ -14,10 +14,10 @@ Water/cc-pVDZ, the record's RHF (tests/test_outside_scissor.py).
 """
 import pytest
 
-from src.Base.numerics import Numerics
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import Excitation, GroundState
-from src.gradients.excited_state import ExcitedStateChain
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 
 from test_outside_scissor import molecule, scf_factory
 from tests.isdf_test_grid import g1_numerics

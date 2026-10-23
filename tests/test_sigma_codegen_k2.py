@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 
@@ -32,7 +32,7 @@ COUPLINGS = [('IP', 'c1_2h1p_3h2p', 'apply_c1_2h1p_3h2p'),
              ('EA', 'c1_2p1h_3p2h', 'apply_c1_2p1h_3p2h')]
 
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 
 def _generate():
@@ -40,15 +40,15 @@ def _generate():
     (generated output is not part of the repository) and loaded from there."""
     import importlib.util
     import tempfile
-    from src.CodeGeneration import generate_adcn, sigma_codegen
+    from src.CodeGeneration import codegen_common, generate_adcn, sigma_codegen
     out = tempfile.mkdtemp(prefix='sigma_codegen_')
-    saved = generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR
-    generate_adcn.OUT_DIR = sigma_codegen.OUT_DIR = out
+    saved = codegen_common.ADC_OUT_DIR
+    codegen_common.ADC_OUT_DIR = out
     try:
         generate_adcn.generate_adc4_base_k2()
         sigma_codegen.generate_adc4_base_k2_apply()
     finally:
-        generate_adcn.OUT_DIR, sigma_codegen.OUT_DIR = saved
+        codegen_common.ADC_OUT_DIR = saved
     mods = []
     for name in ('adc4_k2_blocks', 'adc4_k2_apply_blocks'):
         spec = importlib.util.spec_from_file_location(name, os.path.join(out, 'adc4', name + '.py'))

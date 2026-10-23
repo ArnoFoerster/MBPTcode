@@ -16,31 +16,26 @@ one of them evaluates the self-energy once, on the mean field's eigenvalues;
 evgw_eigenvalues reinjects the quasiparticle energies into G and P0 to a fixed
 point, and is reached from the same front door as self_consistency='evGW'.
 """
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.casida import CasidaSolver, CasidaResult
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.evGW import evgw_eigenvalues
-from src.SingleReference.LinearResponse.bse import solve_bse
-from src.SingleReference.LinearResponse.davidson import (solve_casida_davidson,
-                                                         solve_bse_isdf,
-                                                         solve_bse_df,
-                                                         isdf_bse_factors,
-                                                         isdf_df_coefficients,
-                                                         oscillator_strengths)
+from src.SingleReference.BSE.solve import solve_bse
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import (
+    solve_bse_isdf, solve_bse_df, isdf_bse_factors, isdf_df_coefficients,
+    oscillator_strengths)
 from src.SingleReference.LinearResponse.probe import lowest_amb_eigenvalue
 from src.SingleReference.DensityMatrix.density_matrix import (GWDensityMatrixSolver,
                                                  compute_gw_density_matrix,
-                                                 MP2DensityMatrixSolver,
-                                                 compute_mp2_density_matrix,
                                                  compute_mp2_density_matrix_ao,
-                                                 MP3DensityMatrixSolver,
-                                                 compute_mp3_density_matrix)
+                                                 compute_mp3_density_matrix_ao,
+                                                 compute_mpn_density_matrix_ao)
 from src.SingleReference.GW.imaginary_axis import (
-    solve_screening_imaginary_axis, self_energy_imaginary_axis,
-    solve_qp_energy_imaginary_axis)
+    self_energy_imaginary_axis, solve_qp_energy_imaginary_axis)
 from src.SingleReference.GW.space_time import (solve_qp_energy_space_time,
                                                separable_factors)
 from src.SingleReference.LinearResponse.rpa_energy import (

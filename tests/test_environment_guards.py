@@ -30,8 +30,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.solvent_screening import (SolventScreening, attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.environments.solvent_screening import (SolventScreening, attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.CC.integrals import (build_restricted_integrals_from_mf,
                                               build_spinorbital_integrals_from_mf)
 from src.SingleReference.GW.qp_energy import calc_qp_energy

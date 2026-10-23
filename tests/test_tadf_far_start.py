@@ -17,15 +17,15 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.record_io import record_hash
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.utils.record_io import record_hash
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.photophysics import stages
 from src.photophysics.declaration import FarStart
 from src.photophysics.records import label
 from src.properties.optimize import nudge_vector
-from src.properties.surface import driven_chain
+from src.gradients.surface import driven_chain
 from tests.photophysics_cases import (FORMALDEHYDE, Stop, declaration, refusing,
                                       run_at_r0)
 

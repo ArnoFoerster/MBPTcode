@@ -11,15 +11,26 @@ MO tensor in `grad_engine`, or from Coulomb/exchange builds through the ISDF
 route's Fock-partial map), so that map is the argument; the antisymmetric
 packing, degenerate-pair projection, energy-denominator preconditioner, lgmres
 call and residual check live here.
+
+A solve that ends above its residual tolerance is a numerical event, under the
+policy every orbital-response solve of this code follows (`src.Base.pyscf.cphf`,
+refuse inputs, warn numerics): its last iterate is
+returned, `CphfNotConverged` is warned, and the flag
+'orbital_response_not_converged' is appended to `flags` where the caller hands
+a list. A degenerate pair that carries gradient is an input the equation does
+not cover (a symmetry the caller has to adapt to) and is refused.
 """
+import warnings
+
 import numpy as np
 
-from src.Base.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
-                                ORBITAL_MULTIPLIER_MAX_ITER,
-                                ORBITAL_MULTIPLIER_RESIDUAL_TOL,
-                                ORBITAL_MULTIPLIER_TOL)
-from src.Base.utils.krylov import lgmres_root_driven
-from src.Base.utils.mpi_grid import lockstep
+from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
+                                         ORBITAL_MULTIPLIER_MAX_ITER,
+                                         ORBITAL_MULTIPLIER_RESIDUAL_TOL,
+                                         ORBITAL_MULTIPLIER_TOL)
+from src.Base.pyscf.cphf import CphfNotConverged
+from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
+from src.Base.utils.parallel.mpi_grid import lockstep
 
 
 def antisym_to_vec(Mmat, iu):
@@ -40,7 +51,7 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *,
                               max_iter=ORBITAL_MULTIPLIER_MAX_ITER,
                               degeneracy_tol=ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                               residual_tol=ORBITAL_MULTIPLIER_RESIDUAL_TOL,
-                              verbose=False):
+                              verbose=False, flags=None):
     """Solve antisym(Y_E + Y[fold(Lambda)]) = 0 for symmetric zero-diag Lambda.
 
     matvec: Lambda -> Y[fold(Lambda)], the route's orbital-rotation gradient
@@ -58,9 +69,11 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *,
     Exactly degenerate pairs are projected out (identity operator, zero
     solution): a rotation inside a degenerate set does not change the energy.
     Their right-hand side vanishes by symmetry, so a non-vanishing one above
-    `residual_tol` raises. The residual is recomputed from the solution and
-    checked against `residual_tol` because lgmres reports info=0 on
-    stagnation too, and a short solve gives a plausible but wrong force.
+    `residual_tol` is refused. The residual is recomputed from the solution
+    and checked against `residual_tol` because lgmres reports info=0 on
+    stagnation too, and a short solve gives a plausible but wrong force: it
+    is warned about and flagged (module docstring), the force carrying the
+    residual's error.
 
     Returns (Lambda, residual norm).
     """
@@ -94,6 +107,18 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *,
     if verbose:
         print(f"    [multipliers] n={rhs.size} info={info} |res|={res:.3e}")
     if info != 0 or res > residual_tol * max(1.0, np.linalg.norm(rhs)):
-        raise RuntimeError(f"multiplier solve failed: info={info}, "
-                           f"res={res:.3e}")
+        not_converged(f'orbital-response multiplier solve not converged: '
+                      f'info={info}, true residual {res:.3e} (tol '
+                      f'{residual_tol:.0e} relative); its last iterate is '
+                      f'returned', flags)
     return vec_to_sym(np.where(deg, 0.0, x), norb, iu), res
+
+
+def not_converged(text, flags=None):
+    """Warn `CphfNotConverged` with `text` and append the flag
+    'orbital_response_not_converged' to `flags` where it is a list: the one
+    failure policy of the gradient layer's orbital-response solves."""
+    warnings.warn(text, CphfNotConverged, stacklevel=3)
+    if flags is not None:
+        flags.append({'flag': 'orbital_response_not_converged',
+                      'message': text})

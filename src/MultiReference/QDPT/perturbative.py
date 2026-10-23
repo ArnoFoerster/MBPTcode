@@ -8,7 +8,7 @@ import importlib
 
 import numpy as np
 
-from src.Base.pyscf_interface import get_system_data, get_system_data_spatial
+from src.Base.pyscf.pyscf_interface import get_system_data, get_system_data_spatial
 from src.Solvers.active_space import solve
 
 
@@ -27,7 +27,7 @@ def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
     evaluator: 'auto' or 'generated', the generated evaluators (equivalent);
     'handwritten', the amplitude-form route with Epstein-Nesbet dressing, is
     not available in this code base and raises.
-    active_space: an src.Base.active_space.ActiveSpace in place of the two
+    active_space: an src.SingleReference.common.active_space.ActiveSpace in place of the two
     contiguous window counts; its MOs are permuted to match, which is the only
     way to downfold onto a window the energy ordering does not produce.
     """

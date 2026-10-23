@@ -24,10 +24,10 @@ this class solves; it is gated here.
 What breaks each equivalence gate:
 
   * test_the_chain_defaults_are_the_production_ones:
-    src/gradients/excited_state.py with the constructor at solver='dense'
+    src/gradients/gwbse/excited_state.py with the constructor at solver='dense'
     gives 'dense' where 'auto' is asserted.
   * test_auto_is_the_dense_route_at_this_pair_count and
-    test_the_solver_default_moved_no_number: src/gradients/excited_state.py
+    test_the_solver_default_moved_no_number: src/gradients/gwbse/excited_state.py
     with `solver_used` returning 'davidson' for 'auto' whatever the rule
     says. The first sees 'davidson' where 'dense' is asserted; the second
     sees Omega, 0.3111593161151571 by the matrix-free route against
@@ -51,12 +51,12 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics import Numerics
-from src.Base.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
-from src.SingleReference.LinearResponse.bse import solver_choice
-from src.SingleReference.base import get_occ_virt_indices
-from src.gradients.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.SingleReference.LinearResponse.casida import solver_choice
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.optimize import optimize, resolved_conv
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same

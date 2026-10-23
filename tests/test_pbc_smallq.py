@@ -54,7 +54,8 @@ trapezoid = getattr(np, 'trapezoid', None) or np.trapz
 from pyscf.pbc import gto as pgto, scf as pscf
 from pyscf.pbc.df import ft_ao
 
-from src.SingleReference.Periodic.pbc_rpa import make_auxcell, _bz_index
+from src.SingleReference.Periodic.pbc_rpa import make_auxcell
+from src.SingleReference.Periodic.pbc_integrals import bz_index
 from src.SingleReference.Periodic.pbc_rpa_damping import (
     nyquist_params, make_coulG_damped, assert_damping_fits)
 from src.SingleReference.Periodic.pbc_solvent_screening import (
@@ -69,8 +70,8 @@ from src.SingleReference.Periodic.pbc_smallq import (
     make_coulG_constant_head, smallest_transfer, minibz_polygon,
     polygon_area, head_average_polygon)
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from tests.pins import RECORDING_BLAS, matches
 
 
@@ -481,7 +482,7 @@ class _GammaHead:
         d0 = np.zeros((naux, naux), dtype=np.complex128)
         d1 = np.zeros((naux, naux), dtype=np.complex128)
         for ki in range(len(kpts)):
-            kj, G0 = _bz_index(kscaled, kscaled[ki])
+            kj, G0 = bz_index(kscaled, kscaled[ki])
             qtrue = (kscaled[kj] + G0 - kscaled[ki]).dot(b)
             auxG = ft_ao.ft_ao(aux, Gv, kpt=qtrue)
             vG = coulG(cell, qtrue, Gv) * kws

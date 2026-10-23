@@ -24,12 +24,13 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
-from src.Base.geometry import molecule_at
+from src.Base.numerics.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
+from src.Base.geometry.geometry import molecule_at
 from src.photophysics import uisc
 from src.photophysics.declaration import UiscModel
 from src.photophysics.minimum import GroundModes, StateMinimum
-from src.properties import rates
+from src.photophysics import rates
+from src.properties import franck_condon
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.vibronic import align_to
 
@@ -118,7 +119,7 @@ def test_the_vib_derivative_replaces_the_analytic_one():
         got['channels']['RISC T1->S1']['dv_dq_rms_cm']
     assert 'soc_dv_cart' not in got['channels_refused']['S1']
     # the rate on those numbers, from the library directly
-    rho = rates.fc_weighted_dos
+    rho = franck_condon.fc_weighted_dos
     isc = got['channels']['ISC S1->T1']
     k_ht, _, _ = rates.spin_vibronic_rate(
         -(E_S1 - E_T1), isc['v_condon_cm'] / HARTREE_TO_CM,

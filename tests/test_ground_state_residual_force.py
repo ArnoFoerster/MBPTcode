@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.properties.optimize import (ground_state_residual_force,
-                                     mean_field_force)
+from src.properties.optimize import ground_state_residual_force
+from src.gradients.mean_field_surface import mean_field_force
 
 
 def test_the_residual_is_the_grid_response_force():

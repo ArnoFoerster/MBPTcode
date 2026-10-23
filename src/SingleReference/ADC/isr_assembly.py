@@ -143,7 +143,7 @@ def collect_spinorbital_raw(solver, sector):
     (static-self-energy-like, order >= 2) is DROPPED -- the production
     convention at every level; it cannot touch any block gated at ADC(5)
     orders (it first reaches (0,1) at order 4 through an eff-component that
-    the arbiter-validated u_dot_orb_isr also omits).
+    the arbiter-validated dense oracle u_dot_orb_isr (tests/u_isr_oracle.py) also omits).
 
     NOT collected: the spin-orbital (0,1)@4 (that family is restricted-native)
     and the H(0,0) static content (production convention); the ADC(6) layers

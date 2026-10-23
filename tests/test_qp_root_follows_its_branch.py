@@ -25,10 +25,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 import src.Solvers.qp_equation as qpe
 from src.Solvers.qp_equation import PoleSum, SampledEquation, find_qp_root
-import src.gradients.qp_space_time as qst
+import src.gradients.gwbse.qp_space_time as qst
 
 A = 0.0
 STEPS = 0.1 - 2e-3 * np.arange(101)         # the satellite pole, 0.1 .. -0.1

@@ -53,22 +53,21 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.Base.utils.mpi_grid as mpi_grid
-from src.Base.constants import ISDF_TILE_GB
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.mpi_grid import (SimulatedComm, allgather_blocks,
-                                     allgather_ranges, allgather_rows,
-                                     broadcast_rows, contiguous_block,
-                                     exchange_blocks, exchange_rows, lockstep,
-                                     partition, reduce_max, reduce_sum,
-                                     replicate, run_simulated)
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+import src.Base.utils.parallel.mpi_grid as mpi_grid
+from src.Base.numerics.constants import ISDF_TILE_GB
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import (
+    allgather_blocks, allgather_ranges, allgather_rows, broadcast_rows,
+    contiguous_block, exchange_blocks, exchange_rows, lockstep, partition,
+    reduce_max, reduce_sum, replicate)
+from src.Base.utils.parallel.simulated_comm import SimulatedComm, run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, polarizability_projected_rows)
-from src.gradients.qp_space_time import qp_gradient_space_time, qp_set_gradient
-from src.gradients.space_time_adjoint import polarizability_tau
+from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
+from src.gradients.rpa.space_time_adjoint import polarizability_tau
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
 

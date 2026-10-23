@@ -5,9 +5,9 @@ asks for one. G1 is the lowest validated accuracy level (< 8 meV on the
 three lowest BSE roots at its basis); a basis with no validated level has no
 G1 and is refused by `resolve_isdf_grid`.
 """
-from src.Base.chain_settings import with_setting
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
+from src.gradients.rpa.chain_settings import with_setting
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
 
 #: The validated level tests run on.
 TEST_GRID_LEVEL = 'G1'

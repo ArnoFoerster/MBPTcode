@@ -32,8 +32,9 @@ c1ap = lazy('adc4_c1_self_apply_blocks')
 c2ap = lazy('adc4_c2_apply_blocks')
 s2ap = lazy('adc4_c2_s2c_apply_blocks')
 from src.SingleReference.ADC.sigma_driver import sector_operator, diag_K
-from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
-from src.Base.pyscf_interface import (
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import to_l
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from tests.generated_runtime import requires_runtime
@@ -67,7 +68,7 @@ def main():
         t1_2, _, _, _ = mpn.compute_order2_amplitudes(t2)
         pool = {'f': np.diag(eps), 'g': g, 'kd': np.eye(norb),
                 'o': slice(0, nocc), 'v': slice(nocc, norb), 'no': no, 'nv': nv,
-                't2': t2, 'l2': _to_l(t2, 2), 't1': t1_2, 'l1': _to_l(t1_2, 1)}
+                't2': t2, 'l2': to_l(t2, 2), 't1': t1_2, 'l1': to_l(t1_2, 1)}
 
         # dense reference from the SAME blocks
         ncfg = U.shape[0]

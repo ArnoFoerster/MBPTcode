@@ -14,10 +14,11 @@ import warnings
 
 from pyscf import gto
 
-import src.gradients.qp_set as qp_set_module
+import src.gradients.gwbse.qp_set as qp_set_module
 from src.Base.declaration import Excitation, GroundState, QPStates
+from src.Base.numerics.numerics import numerics_of
 from src.SingleReference.GW.qp_selection import AdaptivePartition
-from src.gradients.state_manifold import StateManifold
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.pins import assert_same
 from tests.reference_scf import rhf_df_jkfit
@@ -27,14 +28,14 @@ KEYS = (('singlet', 0), ('triplet', 0))
 
 
 def spec(partition=None):
-    numerics = {'grid_accuracy': 'G1', 'bse_adjoint': 'grid', 'nroots': 4}
-    if partition is not None:
-        numerics['qp_partition'] = partition
+    numerics = numerics_of({'grid_accuracy': 'G1', 'bse_adjoint': 'grid',
+                            'nroots': 4})
+    options = {} if partition is None else {'qp_partition': partition}
     return SurfaceSpec(GroundState('dft', 'hf'), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates('adaptive', targets=KEYS),
-                       numerics=numerics)
+                       numerics=numerics, options=options)
 
 
 def evaluated(mol, mf, partition=None):

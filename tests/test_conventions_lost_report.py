@@ -19,7 +19,7 @@ import warnings
 import numpy as np
 import pytest
 
-from src.gradients.conventions import ConventionsLost
+from src.gradients.gwbse.conventions import ConventionsLost
 from tests.test_adaptive_qp_set import adaptive, chain, system, with_extra  # noqa: F401
 from tests.test_frozen_conventions import displaced, frozen
 

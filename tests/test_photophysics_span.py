@@ -21,8 +21,8 @@ from dataclasses import fields, replace
 import numpy as np
 import pytest
 
-from src.Base.isdf_jk import canonical_span_size
-from src.Base.separable_ri import UnrepresentedOrbitals
+from src.Base.factorization.isdf_jk import canonical_span_size
+from src.Base.factorization.separable_ri import UnrepresentedOrbitals
 from src.photophysics import chain, vertical_arms
 from src.photophysics.cli import parser
 from src.photophysics.declaration import DeclarationRefused, Policies

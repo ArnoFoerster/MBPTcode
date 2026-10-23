@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.constants import METHOD_REGISTRY
-from src.Base.utils.grids import gap_scaled_w0
+from src.Base.numerics.constants import METHOD_REGISTRY
+from src.Base.utils.grids.grids import gap_scaled_w0
 import src.SingleReference.GW.evGW as evgw
 import src.SingleReference.GW.imaginary_axis as ia
 import src.SingleReference.GW.qp_selection as qsel

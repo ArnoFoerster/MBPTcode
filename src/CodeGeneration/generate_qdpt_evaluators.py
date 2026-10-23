@@ -1,15 +1,27 @@
+"""QDPT effective-Hamiltonian evaluator generator: turns the Wick-contracted
+MP2/MP3 downfolding terms of qdpt_wick into the committed
+src/MultiReference/QDPT/generated_evaluators[_spinfree].py
+(eval_pt{2,3}_v{2,3}[_spinfree], called by perturbative.build_effective_hamiltonian).
+
+Every multi-vertex term is contracted pairwise in the operator order that
+minimizes the largest intermediate (find_optimal_operator_ordering), each
+energy denominator applied at the first step that carries all its indices;
+indices beyond the rank-6 budget (and all but one virtual, for the cached
+emitter) are looped over instead of held. Terms that are pure external-index
+permutations of one skeleton share one intermediate (generate_term_code_cached,
+cached per canonical key and freed after its last use).
+"""
 import os
 import sys
 import re
 import itertools
-import numpy as np
-import sys
+import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-from src.CodeGeneration.qdpt_wick import run_wick_contractions, Term
+from src.CodeGeneration.codegen_common import QDPT_OUT_DIR, generated_header, write_source
+from src.CodeGeneration.qdpt_wick import (
+    run_wick_contractions, get_skeleton_hash, get_external_signature, Term, CORES, VIRS, ACTS,
+    index_space)
 
-VIRS  = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
-CORES = ['i', 'j', 'k', 'l', 'm', 'n', 'o']
-ACTS  = ['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'z']
 TARGET_EXT_INDICES = {
     0: [],
     1: ['p', 'q'],
@@ -19,16 +31,170 @@ TARGET_EXT_INDICES = {
     5: ['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'z'],
 }
 
+_SLICE_NAME = {'occ': 'occ_idx', 'vir': 'virt_idx', 'act': 'act_idx'}
+
+
 def get_slice_str_normal(idx):
-    if idx in CORES: return 'occ_idx'
-    if idx in ACTS:  return 'act_idx'
-    if idx in VIRS:  return 'virt_idx'
-    raise ValueError(f"Unknown index {idx}")
+    """The index-array name of a label's space (occ_idx / act_idx / virt_idx)."""
+    if idx not in CORES and idx not in VIRS and idx not in ACTS:
+        raise ValueError(f"Unknown index {idx}")
+    return _SLICE_NAME[index_space(idx)]
+
 
 def parse_operator_str(op_str):
     op_name, indices_str = op_str.split('(')
     indices = [idx.strip() for idx in indices_str.replace(')', '').split(',')]
     return op_name, indices
+
+
+def _denom_indices(denom_str):
+    return [m.group(1) for m in re.finditer(r'e_([a-z0-9_]+)', denom_str)]
+
+
+def term_indices(term):
+    """Every label of a term's operators and denominators, sorted."""
+    all_indices = set()
+    for op in term.operators:
+        all_indices.update(parse_operator_str(op)[1])
+    for denom in term.denom_slices:
+        all_indices.update(_denom_indices(denom))
+    return sorted(all_indices)
+
+
+def _char_map(all_indices):
+    return {idx: chr(65 + i) for i, idx in enumerate(all_indices)}
+
+
+def sliced_indices_for(all_indices, target_ext, max_rank, single_virtual):
+    """The labels looped over instead of held: max_rank - 6 of them (the
+    rank-6 intermediate budget), with single_virtual at least all virtuals
+    but one; virtuals first, then core, then active, external targets last."""
+    nvir = sum(1 for idx in all_indices if idx in VIRS)
+    if single_virtual:
+        if not (max_rank > 6 or nvir > 1):
+            return []
+        num = max(max_rank - 6, nvir - 1)
+    else:
+        if not max_rank > 6:
+            return []
+        num = max_rank - 6
+
+    def sort_key(idx):
+        if idx in target_ext:
+            return (3, idx)
+        if idx in VIRS:
+            return (0, idx)
+        if idx in CORES:
+            return (1, idx)
+        return (2, idx)
+    return sorted(all_indices, key=sort_key)[:num]
+
+
+def _array_name(op_name, spin_free):
+    if spin_free:
+        return op_name
+    return "g_anti_spin" if op_name == 'g' else "h1_spin"
+
+
+def _block_setup_lines(ordered_ops, get_slice_str_fn, spin_free, full):
+    """b{i} (or b{i}_full when indices are sliced) = the operator's block."""
+    lines, ops_info = [], []
+    for i, op in enumerate(ordered_ops):
+        op_name, idxs = parse_operator_str(op)
+        slice_str = ", ".join(get_slice_str_fn(idx) for idx in idxs)
+        lines.append(f"    b{i}{'_full' if full else ''} = {_array_name(op_name, spin_free)}[np.ix_({slice_str})]")
+        ops_info.append({'name': f"b{i}", 'indices': idxs})
+    return lines, ops_info
+
+
+def _slice_parts(idxs, sliced):
+    return [f"i_{idx}" if idx in sliced else ":" for idx in idxs]
+
+
+def _denoms_at(term, denom_steps, keep):
+    """[{'str', 'indices'}] of the denominators whose step satisfies keep(step)."""
+    return [{'str': term.denom_slices[d], 'indices': _denom_indices(term.denom_slices[d])}
+            for d, step in denom_steps.items() if keep(step)]
+
+
+def _denom_lines(denoms, axes, get_slice_str_fn, sliced, next_denom_var, target, indent="    "):
+    """d{k} = <denominator broadcast over axes>, guarded, and target /= d{k}."""
+    lines = []
+    for denom in denoms:
+        expr = generate_denom_expr(denom['str'], axes, get_slice_str_fn, sliced)
+        dvar = next_denom_var()
+        lines.append(f"{indent}{dvar} = {expr}")
+        lines.append(f"{indent}{dvar}[np.abs({dvar}) < 1e-12] = 1e-12")
+        lines.append(f"{indent}{target} = {target} / {dvar}")
+    return lines
+
+
+def _contraction_step(term, ops_info, i, current, target_ext, denom_steps, char_map, sliced,
+                      get_slice_str_fn, next_denom_var, pref_str):
+    """Lines of pairwise step i (current x ops_info[i] -> I{i}), with the
+    step's denominators applied and the indices nothing later needs summed;
+    returns (lines, the indices of I{i})."""
+    nxt = ops_info[i]
+    a_set = set(current['indices']) | set(nxt['indices'])
+    future = set(target_ext)
+    for j in range(i + 1, len(ops_info)):
+        future.update(ops_info[j]['indices'])
+    for d in _denoms_at(term, denom_steps, lambda step: step > i):
+        future.update(d['indices'])
+    cur_rem = [idx for idx in current['indices'] if idx not in sliced]
+    nxt_rem = [idx for idx in nxt['indices'] if idx not in sliced]
+    a_rem = sorted(idx for idx in a_set if idx not in sliced)
+    lhs = "".join(char_map[idx] for idx in cur_rem) + "," + "".join(char_map[idx] for idx in nxt_rem)
+    lines = [f"    num = {pref_str}np.einsum('{lhs}->{''.join(char_map[idx] for idx in a_rem)}', "
+             f"{current['name']}, {nxt['name']}, optimize=True)"]
+    denoms = _denoms_at(term, denom_steps, lambda step: step == i)
+    a_denom = set(a_set)
+    for denom in denoms:
+        a_denom.update(denom['indices'])
+    a_denom_rem = [idx for idx in sorted(a_denom) if idx not in sliced]
+    if denoms:
+        a_idx_rem = [idx for idx in a_set if idx not in sliced]
+        view = [":" if idx in a_idx_rem else "None" for idx in a_denom_rem]
+        if "None" in view:
+            lines.append(f"    num = num[{', '.join(view)}]")
+        lines += _denom_lines(denoms, a_denom_rem, get_slice_str_fn, sliced, next_denom_var, 'num')
+    out_list = sorted(a_denom - (a_denom - future))
+    out_rem = [idx for idx in out_list if idx not in sliced]
+    if not set(a_denom_rem) - set(out_rem):
+        lines.append(f"    I{i} = num")
+    else:
+        lines.append(f"    I{i} = np.einsum('{''.join(char_map[idx] for idx in a_denom_rem)}->"
+                     f"{''.join(char_map[idx] for idx in out_rem)}', num, optimize=True)")
+    return lines, out_list
+
+
+def _loop_nest(sliced, body, get_slice_str_fn, pass_if_empty=False):
+    """for i_x in range(len(<space>)): ... headers for every sliced index, and
+    the body re-indented under them."""
+    headers, indent = [], ""
+    for idx in sliced:
+        headers.append(f"    {indent}for i_{idx} in range(len({get_slice_str_fn(idx)})):")
+        indent += "    "
+    out = []
+    for line in body:
+        if line.strip():
+            out.append(f"    {indent}{line[4:] if line.startswith('    ') else line}")
+        else:
+            out.append(line)
+    if pass_if_empty and (not out or all(not line.strip() for line in out)):
+        out.append(f"    {indent}pass")
+    return headers + out
+
+
+def _counter():
+    n = [0]
+
+    def nxt():
+        name = f"d{n[0]}"
+        n[0] += 1
+        return name
+    return nxt
+
 
 def generate_denom_expr(denom_str, remaining_indices, get_slice_str_fn, sliced_indices=None):
     if sliced_indices is None:
@@ -39,7 +205,7 @@ def generate_denom_expr(denom_str, remaining_indices, get_slice_str_fn, sliced_i
     for match in matches:
         sign = match.group(1)
         idx = match.group(2)
-        
+
         # If it's sliced, it's a scalar in this scope
         if idx in sliced_indices:
             slice_name = get_slice_str_fn(idx)
@@ -51,75 +217,259 @@ def generate_denom_expr(denom_str, remaining_indices, get_slice_str_fn, sliced_i
             colons = ["None"] * len(remaining_indices)
             colons[axis] = ":"
             broadcast = f"[{', '.join(colons)}]"
-            
+
         if sign == '+':
             parts.append(f"+ (eps_spin[{slice_str}] + (shift / {num_holes} if shift is not None else 0.0)){broadcast}")
         else:
             parts.append(f"- eps_spin[{slice_str}]{broadcast}")
-        
+
     expr = " ".join(parts)
     if expr.startswith("+ "): expr = expr[2:]
     return expr
 
+
 def generate_term_code(term, target_dict_name, get_slice_str_fn, spin_free=False):
-    # Collect all unique indices
-    all_indices = set()
-    for op in term.operators:
-        _, idxs = parse_operator_str(op)
-        all_indices.update(idxs)
-    for denom in term.denom_slices:
-        matches = re.finditer(r'e_([a-z0-9_]+)', denom)
-        for m in matches:
-            all_indices.add(m.group(1))
-    all_indices = sorted(list(all_indices))
-    char_map = {idx: chr(65 + i) for i, idx in enumerate(all_indices)}
-    
-    lines = []
-    
-    # generate blocks
-    block_names = []
-    block_einsums = []
-    for i, op in enumerate(term.operators):
-        op_name, idxs = parse_operator_str(op)
-        slices = [get_slice_str_fn(idx) for idx in idxs]
-        slice_str = ", ".join(slices)
-        if spin_free:
-            array_name = op_name
-        else:
-            array_name = "g_anti_spin" if op_name == 'g' else "h1_spin"
-        lines.append(f"    b{i} = {array_name}[np.ix_({slice_str})]")
-        block_names.append(f"b{i}")
-        block_einsums.append("".join(char_map[idx] for idx in idxs))
-        
+    """One term as a single dense einsum over all its indices (no factorization)."""
+    all_indices = term_indices(term)
+    char_map = _char_map(all_indices)
+    lines, ops_info = _block_setup_lines(term.operators, get_slice_str_fn, spin_free, full=False)
+    block_names = [op['name'] for op in ops_info]
+    block_einsums = ["".join(char_map[idx] for idx in op['indices']) for op in ops_info]
     num_einsum_str = "".join(char_map[idx] for idx in all_indices)
-    
+    out_str = "".join(char_map[idx] for idx in TARGET_EXT_INDICES[term.sector])
+    ops_str = ", ".join(block_names)
+
     if len(term.denom_slices) == 0:
-        target_ext = TARGET_EXT_INDICES[term.sector]
-        out_str = "".join(char_map[idx] for idx in target_ext)
         rhs_einsum = ",".join(block_einsums) + "->" + out_str
-        ops_str = ", ".join(block_names)
-        
         if len(block_names) == 0:
             lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor}")
         else:
             lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor} * np.einsum('{rhs_einsum}', {ops_str}, optimize=True)")
     else:
         rhs_einsum = ",".join(block_einsums) + "->" + num_einsum_str
-        ops_str = ", ".join(block_names)
         lines.append(f"    num = {term.prefactor} * np.einsum('{rhs_einsum}', {ops_str}, optimize=True)")
-        
         for denom_idx, denom in enumerate(term.denom_slices):
             expr = generate_denom_expr(denom, all_indices, get_slice_str_fn)
             if expr:
                 lines.append(f"    d{denom_idx} = {expr}")
                 lines.append(f"    d{denom_idx}[np.abs(d{denom_idx}) < 1e-12] = 1e-12")
                 lines.append(f"    num = num / d{denom_idx}")
-            
-        target_ext = TARGET_EXT_INDICES[term.sector]
-        out_str = "".join(char_map[idx] for idx in target_ext)
         lines.append(f"    {target_dict_name}[{term.sector}] += np.einsum('{num_einsum_str}->{out_str}', num, optimize=True)")
-        
+
     return "\n".join(lines)
+
+
+def _split_loop_lines(candidate_lines, loop_dependent_vars, setup_lines, sliced_indices, lhs_indexed):
+    """Partition lines into loop-invariant (appended to setup_lines) and
+    loop-dependent ones (returned): a line depends on the loop when its
+    right-hand side (or, without '=', any word) names a loop-dependent
+    variable; its left-hand side then becomes loop-dependent, and a later
+    loop-invariant assignment to it makes it invariant again. lhs_indexed: an
+    indexed assignment to a loop-dependent variable is loop-dependent."""
+    loop_body = []
+    loop_idx = set(f"i_{idx}" for idx in sliced_indices)
+    for line in candidate_lines:
+        words = re.findall(r'[a-zA-Z0-9_]+', line)
+        if lhs_indexed and '=' in line:
+            is_dep = any(w in loop_dependent_vars for w in re.findall(r'[a-zA-Z0-9_]+', line.split('=', 1)[1]))
+        else:
+            is_dep = any(w in loop_dependent_vars for w in words)
+        if lhs_indexed and ('[' in line.split('=', 1)[0] if '=' in line else False):
+            if re.match(r'^\s*([a-zA-Z0-9_]+)', line).group(1) in loop_dependent_vars:
+                is_dep = True
+        match = re.match(r'^\s*([a-zA-Z0-9_]+)\s*=', line)
+        if match:
+            lhs = match.group(1)
+            if is_dep:
+                loop_dependent_vars.add(lhs)
+            elif lhs in loop_dependent_vars and lhs not in loop_idx:
+                loop_dependent_vars.remove(lhs)
+        (loop_body if is_dep else setup_lines).append(line)
+    return loop_body
+
+
+def _accumulate_line(target_dict_name, sector, target_slice_str, pref_str, rhs):
+    sl = f"[{target_slice_str}]" if target_slice_str else ""
+    return f"    {target_dict_name}[{sector}]{sl} += {pref_str}{rhs}"
+
+
+def generate_term_code_factorized(term, target_dict_name, get_slice_str_fn, spin_free=False):
+    """One term as a chain of pairwise contractions in the optimal operator
+    order, denominators applied at their earliest step, indices beyond the
+    rank-6 budget looped over."""
+    all_indices = term_indices(term)
+    char_map = _char_map(all_indices)
+    target_ext = TARGET_EXT_INDICES[term.sector]
+    next_denom_var = _counter()
+    if len(term.operators) == 0:
+        return f"    {target_dict_name}[{term.sector}] += {term.prefactor}"
+
+    opt_perm, denom_steps, max_rank = find_optimal_operator_ordering(term, target_ext)
+    ordered_ops = [term.operators[p] for p in opt_perm]
+    sliced_indices = sliced_indices_for(all_indices, target_ext, max_rank, single_virtual=False)
+    setup_lines, ops_info = _block_setup_lines(ordered_ops, get_slice_str_fn, spin_free,
+                                               full=bool(sliced_indices))
+    candidate_lines = []
+    if sliced_indices:
+        for i, op in enumerate(ordered_ops):
+            parts = _slice_parts(parse_operator_str(op)[1], sliced_indices)
+            candidate_lines.append(f"    b{i} = b{i}_full[{', '.join(parts)}]"
+                                   if any(p.startswith("i_") for p in parts) else f"    b{i} = b{i}_full")
+    target_slice_str = ", ".join(_slice_parts(target_ext, sliced_indices))
+    final_einsum_str = "".join(char_map[idx] for idx in target_ext if idx not in sliced_indices)
+
+    if len(term.denom_slices) == 0:
+        rhs_einsum = ",".join("".join(char_map[idx] for idx in op['indices'] if idx not in sliced_indices)
+                              for op in ops_info)
+        ops_str = ", ".join(op['name'] for op in ops_info)
+        if len(ops_info) == 0:
+            candidate_lines.append(_accumulate_line(target_dict_name, term.sector, target_slice_str,
+                                                    '', term.prefactor))
+        else:
+            candidate_lines.append(_accumulate_line(
+                target_dict_name, term.sector, target_slice_str, f"{term.prefactor} * ",
+                f"np.einsum('{rhs_einsum}->{final_einsum_str}', {ops_str}, optimize=True)"))
+    else:
+        denoms0 = _denoms_at(term, denom_steps, lambda step: step == 0)
+        if denoms0:
+            b0_rem = [idx for idx in ops_info[0]['indices'] if idx not in sliced_indices]
+            candidate_lines += _denom_lines(denoms0, b0_rem, get_slice_str_fn, sliced_indices,
+                                            next_denom_var, 'b0')
+        current = ops_info[0]
+        for i in range(1, len(ops_info)):
+            lines, out_list = _contraction_step(
+                term, ops_info, i, current, target_ext, denom_steps, char_map, sliced_indices,
+                get_slice_str_fn, next_denom_var, f"{term.prefactor} * " if i == 1 else "")
+            candidate_lines += lines
+            current = {'name': f"I{i}", 'indices': out_list}
+        cur_rem = "".join(char_map[idx] for idx in current['indices'] if idx not in sliced_indices)
+        candidate_lines.append(_accumulate_line(
+            target_dict_name, term.sector, target_slice_str, '',
+            f"np.einsum('{cur_rem}->{final_einsum_str}', {current['name']}, optimize=True)"))
+
+    loop_body = _split_loop_lines(candidate_lines, set(f"i_{idx}" for idx in sliced_indices),
+                                  setup_lines, sliced_indices, lhs_indexed=True)
+    if sliced_indices:
+        return "\n".join(setup_lines + _loop_nest(sliced_indices, loop_body, get_slice_str_fn))
+    return "\n".join(setup_lines + loop_body)
+
+
+def generate_term_code_cached(term, target_dict_name, get_slice_str_fn, intermediate_id, is_first_in_group, use_counts, spin_free=False):
+    """generate_term_code_factorized for a term whose first pairwise
+    intermediate I1 is shared with other terms: I1 (without the prefactor,
+    applied at the final accumulation) is built once into
+    _cache['int_<id>'] by the first term of its group and freed after its last
+    use (_use_count). Sliced indices of the first step are looped inside the
+    cache build; those surviving into I1 are looped over the rest of the
+    chain."""
+    all_indices = term_indices(term)
+    char_map = _char_map(all_indices)
+    target_ext = TARGET_EXT_INDICES[term.sector]
+    is_i1_sliced = False
+    next_denom_var = _counter()
+    if len(term.operators) == 0:
+        return f"    {target_dict_name}[{term.sector}] += {term.prefactor}"
+
+    opt_perm, denom_steps, max_rank = find_optimal_operator_ordering(term, target_ext)
+    ordered_ops = [term.operators[p] for p in opt_perm]
+    sliced_indices = sliced_indices_for(all_indices, target_ext, max_rank, single_virtual=True)
+    # the full blocks are always defined; b0/b1 are cut from them in the cache build
+    setup_lines, ops_info = _block_setup_lines(ordered_ops, get_slice_str_fn, spin_free,
+                                               full=bool(sliced_indices))
+    denoms0 = _denoms_at(term, denom_steps, lambda step: step == 0)
+
+    cache_sliced_indices, loop_sliced_indices = [], []
+    candidate_lines = []
+    current = ops_info[0]
+    for i in range(1, len(ops_info)):
+        if i == 1:
+            # I1's indices before its denominators: the sliced ones among the two
+            # first operators are looped in the cache build, those surviving into
+            # I1 over the rest of the chain
+            a_set = set(current['indices']) | set(ops_info[1]['indices'])
+            future = set(target_ext)
+            for j in range(2, len(ops_info)):
+                future.update(ops_info[j]['indices'])
+            for d in _denoms_at(term, denom_steps, lambda step: step > 1):
+                future.update(d['indices'])
+            i1_out_list = sorted(a_set & future)
+            if sliced_indices:
+                cache_sliced_indices = [idx for idx in sliced_indices if idx in a_set]
+                loop_sliced_indices = [idx for idx in sliced_indices if idx in i1_out_list]
+        step_sliced = cache_sliced_indices if i < 2 else loop_sliced_indices
+        if sliced_indices and i >= 2:
+            parts = _slice_parts(parse_operator_str(ordered_ops[i])[1], loop_sliced_indices)
+            candidate_lines.append(f"    b{i} = b{i}_full[{', '.join(parts)}]"
+                                   if any(p.startswith("i_") for p in parts) else f"    b{i} = b{i}_full")
+        lines, out_list = _contraction_step(term, ops_info, i, current, target_ext, denom_steps,
+                                            char_map, step_sliced, get_slice_str_fn, next_denom_var, "")
+        candidate_lines += lines
+        out_rem = [idx for idx in out_list if idx not in step_sliced]
+        current = {'name': f"I{i}", 'indices': out_list}
+        if i == 1 and loop_sliced_indices:
+            parts = _slice_parts(out_list, loop_sliced_indices)
+            if any(p.startswith("i_") for p in parts):
+                candidate_lines.append(f"    I1 = _cache['int_{intermediate_id}'][{', '.join(parts)}]")
+                is_i1_sliced = True
+                current = {'name': "I1", 'indices': out_rem}
+
+    i1_line_idx = next((k for k, line in enumerate(candidate_lines) if re.search(r'\bI1\s*=', line)), -1)
+    if i1_line_idx == -1:
+        raise ValueError(f"Could not find I1 definition in term {term.raw_str}")
+    i1_comp_lines = candidate_lines[:i1_line_idx + 1]
+    rest_comp_lines = candidate_lines[i1_line_idx + 1:]
+
+    target_slice_str = ", ".join(_slice_parts(target_ext, loop_sliced_indices))
+    final_einsum_str = "".join(char_map[idx] for idx in target_ext if idx not in loop_sliced_indices)
+    cur_rem = "".join(char_map[idx] for idx in current['indices'] if idx not in loop_sliced_indices)
+    rest_comp_lines.append(_accumulate_line(
+        target_dict_name, term.sector, target_slice_str, f"{term.prefactor} * ",
+        f"np.einsum('{cur_rem}->{final_einsum_str}', {current['name']}, optimize=True)"))
+
+    setup_body = []
+    if is_first_in_group:
+        setup_body.append(f"    if 'int_{intermediate_id}' not in _cache:")
+        indent = "        "
+        if cache_sliced_indices:
+            shape_str = ", ".join(f"len({get_slice_str_fn(idx)})" for idx in i1_out_list)
+            setup_body.append(f"        I1 = np.zeros(({shape_str}))")
+            for idx in cache_sliced_indices:
+                setup_body.append(f"{indent}for i_{idx} in range(len({get_slice_str_fn(idx)})):")
+                indent += "    "
+        for i in range(2):
+            if sliced_indices:
+                parts = _slice_parts(parse_operator_str(ordered_ops[i])[1], cache_sliced_indices)
+                setup_body.append(f"{indent}b{i} = b{i}_full[{', '.join(parts)}]")
+            else:
+                setup_body.append(f"{indent}b{i} = b{i}")
+        if denoms0:
+            b0_rem = [idx for idx in ops_info[0]['indices'] if idx not in cache_sliced_indices]
+            setup_body += _denom_lines(denoms0, b0_rem, get_slice_str_fn, cache_sliced_indices,
+                                       next_denom_var, 'b0', indent=indent)
+        for line in i1_comp_lines:
+            if denoms0 and (re.search(r'\bb0 / d\d+\b', line) or re.search(r'\bd\d+\[np\.abs', line)
+                            or "d = generate" in line):
+                continue
+            if cache_sliced_indices and re.match(r'^\s*I1\s*=', line):
+                parts = _slice_parts(i1_out_list, cache_sliced_indices)
+                if any(p != ":" for p in parts):
+                    line = line.replace("I1 =", f"I1[{', '.join(parts)}] +=")
+                else:
+                    line = line.replace("I1 =", "I1 +=")
+            setup_body.append(f"{indent}{line.strip()}")
+        setup_body.append(f"        _cache['int_{intermediate_id}'] = I1")
+    if not is_i1_sliced:
+        setup_body.append(f"    I1 = _cache['int_{intermediate_id}']")
+
+    post_setup_lines = []
+    loop_body = _split_loop_lines(rest_comp_lines, set(f"i_{idx}" for idx in loop_sliced_indices),
+                                  post_setup_lines, loop_sliced_indices, lhs_indexed=False)
+    cleanup_lines = [f"    _use_count['int_{intermediate_id}'] -= 1",
+                     f"    if _use_count['int_{intermediate_id}'] == 0:",
+                     f"        del _cache['int_{intermediate_id}']"]
+    if loop_sliced_indices:
+        loop_body = _loop_nest(loop_sliced_indices, loop_body, get_slice_str_fn, pass_if_empty=True)
+    return "\n".join(setup_lines + setup_body + post_setup_lines + loop_body + cleanup_lines)
 
 
 def find_optimal_operator_ordering(term, target_ext):
@@ -202,268 +552,6 @@ def find_optimal_operator_ordering(term, target_ext):
             
     return list(best_perm), best_denom_steps, best_max_rank
 
-def generate_term_code_factorized(term, target_dict_name, get_slice_str_fn, spin_free=False):
-    all_indices = set()
-    for op in term.operators:
-        _, idxs = parse_operator_str(op)
-        all_indices.update(idxs)
-    for denom in term.denom_slices:
-        matches = re.finditer(r'e_([a-z0-9_]+)', denom)
-        for m in matches:
-            all_indices.add(m.group(1))
-    all_indices = sorted(list(all_indices))
-    char_map = {idx: chr(65 + i) for i, idx in enumerate(all_indices)}
-    
-    target_ext = TARGET_EXT_INDICES[term.sector]
-    denom_var_counter = [0]
-
-    def next_denom_var():
-        name = f"d{denom_var_counter[0]}"
-        denom_var_counter[0] += 1
-        return name
-
-    if len(term.operators) == 0:
-        lines = []
-        lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor}")
-        return "\n".join(lines)
-
-    # Get optimal ordering and denominator assignments
-    opt_perm, denom_steps, max_rank = find_optimal_operator_ordering(term, target_ext)
-    ordered_ops = [term.operators[p] for p in opt_perm]
-
-    sliced_indices = []
-    if max_rank > 6:
-        num_sliced = max_rank - 6
-        candidates = set(all_indices) # Include target_ext!
-        
-        def sort_key(idx):
-            if idx in target_ext:
-                return (3, idx)
-            if idx in VIRS:
-                return (0, idx)
-            if idx in CORES:
-                return (1, idx)
-            return (2, idx)
-            
-        sorted_candidates = sorted(list(candidates), key=sort_key)
-        sliced_indices = sorted_candidates[:num_sliced]
-        
-    setup_lines = []
-    
-    ops_info = []
-    for i, op in enumerate(ordered_ops):
-        op_name, idxs = parse_operator_str(op)
-        slices = [get_slice_str_fn(idx) for idx in idxs]
-        slice_str = ", ".join(slices)
-        if spin_free:
-            array_name = op_name
-        else:
-            array_name = "g_anti_spin" if op_name == 'g' else "h1_spin"
-        if len(sliced_indices) > 0:
-            setup_lines.append(f"    b{i}_full = {array_name}[np.ix_({slice_str})]")
-        else:
-            setup_lines.append(f"    b{i} = {array_name}[np.ix_({slice_str})]")
-        ops_info.append({'name': f"b{i}", 'indices': idxs})
-        
-    candidate_lines = []
-    if len(sliced_indices) > 0:
-        for i, op in enumerate(ordered_ops):
-            op_name, idxs = parse_operator_str(op)
-            slice_parts = []
-            for idx in idxs:
-                if idx in sliced_indices:
-                    slice_parts.append(f"i_{idx}")
-                else:
-                    slice_parts.append(":")
-            if any(part.startswith("i_") for part in slice_parts):
-                slice_str = ", ".join(slice_parts)
-                candidate_lines.append(f"    b{i} = b{i}_full[{slice_str}]")
-            else:
-                candidate_lines.append(f"    b{i} = b{i}_full")
-                
-    # Build target slice strings
-    target_slice_parts = []
-    for idx in target_ext:
-        if idx in sliced_indices:
-            target_slice_parts.append(f"i_{idx}")
-        else:
-            target_slice_parts.append(":")
-    target_slice_str = ", ".join(target_slice_parts)
-    
-    target_ext_remaining = [idx for idx in target_ext if idx not in sliced_indices]
-    final_einsum_str = "".join(char_map[idx] for idx in target_ext_remaining)
-                
-    if len(term.denom_slices) == 0:
-        rhs_parts = []
-        for op in ops_info:
-            op_rem = [idx for idx in op['indices'] if idx not in sliced_indices]
-            rhs_parts.append("".join(char_map[idx] for idx in op_rem))
-        rhs_einsum = ",".join(rhs_parts)
-        ops_str = ", ".join(op['name'] for op in ops_info)
-        if len(ops_info) == 0:
-            if target_slice_str:
-                candidate_lines.append(f"    {target_dict_name}[{term.sector}][{target_slice_str}] += {term.prefactor}")
-            else:
-                candidate_lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor}")
-        else:
-            if target_slice_str:
-                candidate_lines.append(f"    {target_dict_name}[{term.sector}][{target_slice_str}] += {term.prefactor} * np.einsum('{rhs_einsum}->{final_einsum_str}', {ops_str}, optimize=True)")
-            else:
-                candidate_lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor} * np.einsum('{rhs_einsum}->{final_einsum_str}', {ops_str}, optimize=True)")
-    else:
-        # Check if there are any denoms associated with step 0
-        denoms_at_step_0 = []
-        for d_idx, step_associated in denom_steps.items():
-            if step_associated == 0:
-                denom_str = term.denom_slices[d_idx]
-                matches = re.finditer(r'e_([a-z0-9_]+)', denom_str)
-                d_idxs = [m.group(1) for m in matches]
-                denoms_at_step_0.append({'str': denom_str, 'indices': d_idxs})
-                
-        if denoms_at_step_0:
-            b0_indices_remaining = [idx for idx in ops_info[0]['indices'] if idx not in sliced_indices]
-            for denom in denoms_at_step_0:
-                expr = generate_denom_expr(denom['str'], b0_indices_remaining, get_slice_str_fn, sliced_indices)
-                dvar = next_denom_var()
-                candidate_lines.append(f"    {dvar} = {expr}")
-                candidate_lines.append(f"    {dvar}[np.abs({dvar}) < 1e-12] = 1e-12")
-                candidate_lines.append(f"    b0 = b0 / {dvar}")
-                
-        current_tensor = ops_info[0]
-        
-        for i in range(1, len(ops_info)):
-            next_op = ops_info[i]
-            
-            A_indices_set = set(current_tensor['indices']) | set(next_op['indices'])
-            
-            future_indices = set(target_ext)
-            for j in range(i+1, len(ops_info)):
-                future_indices.update(ops_info[j]['indices'])
-            for d_idx, step_associated in denom_steps.items():
-                if step_associated > i:
-                    matches = re.finditer(r'e_([a-z0-9_]+)', term.denom_slices[d_idx])
-                    future_indices.update(m.group(1) for m in matches)
-                    
-            sum_indices = A_indices_set - future_indices
-            out_indices = A_indices_set - sum_indices
-            out_list = sorted(list(out_indices))
-            
-            current_remaining = [idx for idx in current_tensor['indices'] if idx not in sliced_indices]
-            next_remaining = [idx for idx in next_op['indices'] if idx not in sliced_indices]
-            A_ops_remaining = [idx for idx in A_indices_set if idx not in sliced_indices]
-            A_ops_list_remaining = sorted(A_ops_remaining)
-            
-            lhs_einsum = "".join(char_map[idx] for idx in current_remaining) + "," + "".join(char_map[idx] for idx in next_remaining)
-            num_einsum_str = "".join(char_map[idx] for idx in A_ops_list_remaining)
-            
-            pref_str = f"{term.prefactor} * " if i == 1 else ""
-            candidate_lines.append(f"    num = {pref_str}np.einsum('{lhs_einsum}->{num_einsum_str}', {current_tensor['name']}, {next_op['name']}, optimize=True)")
-            
-            denoms_at_step = []
-            for d_idx, step_associated in denom_steps.items():
-                if step_associated == i:
-                    denom_str = term.denom_slices[d_idx]
-                    matches = re.finditer(r'e_([a-z0-9_]+)', denom_str)
-                    d_idxs = [m.group(1) for m in matches]
-                    denoms_at_step.append({'str': denom_str, 'indices': d_idxs})
-                    
-            A_denom_set = A_indices_set.copy()
-            for denom in denoms_at_step:
-                A_denom_set.update(denom['indices'])
-                
-            A_denom_list = sorted(list(A_denom_set))
-            A_denom_list_remaining = [idx for idx in A_denom_list if idx not in sliced_indices]
-            
-            if denoms_at_step:
-                view_slices = []
-                A_indices_remaining = [idx for idx in A_indices_set if idx not in sliced_indices]
-                for idx in A_denom_list_remaining:
-                    if idx in A_indices_remaining:
-                        view_slices.append(":")
-                    else:
-                        view_slices.append("None")
-                if "None" in view_slices:
-                    candidate_lines.append(f"    num = num[{', '.join(view_slices)}]")
-                    
-                for denom in denoms_at_step:
-                    expr = generate_denom_expr(denom['str'], A_denom_list_remaining, get_slice_str_fn, sliced_indices)
-                    dvar = next_denom_var()
-                    candidate_lines.append(f"    {dvar} = {expr}")
-                    candidate_lines.append(f"    {dvar}[np.abs({dvar}) < 1e-12] = 1e-12")
-                    candidate_lines.append(f"    num = num / {dvar}")
-
-            sum_indices = A_denom_set - future_indices
-            out_indices = A_denom_set - sum_indices
-            out_list = sorted(list(out_indices))
-            
-            out_list_remaining = [idx for idx in out_list if idx not in sliced_indices]
-            sum_indices_remaining = set(A_denom_list_remaining) - set(out_list_remaining)
-            
-            if len(sum_indices_remaining) == 0:
-                candidate_lines.append(f"    I{i} = num")
-            else:
-                in_einsum_str = "".join(char_map[idx] for idx in A_denom_list_remaining)
-                out_einsum_str = "".join(char_map[idx] for idx in out_list_remaining)
-                candidate_lines.append(f"    I{i} = np.einsum('{in_einsum_str}->{out_einsum_str}', num, optimize=True)")
-                
-            current_tensor = {'name': f"I{i}", 'indices': out_list}
-            
-        current_remaining = [idx for idx in current_tensor['indices'] if idx not in sliced_indices]
-        if target_slice_str:
-            candidate_lines.append(f"    {target_dict_name}[{term.sector}][{target_slice_str}] += np.einsum('{''.join(char_map[idx] for idx in current_remaining)}->{final_einsum_str}', {current_tensor['name']}, optimize=True)")
-        else:
-            candidate_lines.append(f"    {target_dict_name}[{term.sector}] += np.einsum('{''.join(char_map[idx] for idx in current_remaining)}->{final_einsum_str}', {current_tensor['name']}, optimize=True)")
-        
-    loop_dependent_vars = set(f"i_{idx}" for idx in sliced_indices)
-    loop_body_lines = []
-    
-    for line in candidate_lines:
-        words = re.findall(r'[a-zA-Z0-9_]+', line)
-        if '=' in line:
-            rhs = line.split('=', 1)[1]
-            rhs_words = re.findall(r'[a-zA-Z0-9_]+', rhs)
-            is_dep = any(w in loop_dependent_vars for w in rhs_words)
-        else:
-            is_dep = any(w in loop_dependent_vars for w in words)
-            
-        if '[' in line.split('=', 1)[0] if '=' in line else False:
-            lhs_var = re.match(r'^\s*([a-zA-Z0-9_]+)', line).group(1)
-            if lhs_var in loop_dependent_vars:
-                is_dep = True
-                
-        match = re.match(r'^\s*([a-zA-Z0-9_]+)\s*=', line)
-        if match:
-            lhs = match.group(1)
-            if is_dep:
-                loop_dependent_vars.add(lhs)
-            else:
-                if lhs in loop_dependent_vars and lhs not in (f"i_{idx}" for idx in sliced_indices):
-                    loop_dependent_vars.remove(lhs)
-                    
-        if is_dep:
-            loop_body_lines.append(line)
-        else:
-            setup_lines.append(line)
-        
-    if len(sliced_indices) > 0:
-        loop_headers = []
-        indent = ""
-        for idx in sliced_indices:
-            slice_name = get_slice_str_fn(idx)
-            loop_headers.append(f"    {indent}for i_{idx} in range(len({slice_name})):")
-            indent += "    "
-            
-        indented_body = []
-        for line in loop_body_lines:
-            if line.strip():
-                stripped = line[4:] if line.startswith("    ") else line
-                indented_body.append(f"    {indent}{stripped}")
-            else:
-                indented_body.append(line)
-                
-        return "\n".join(setup_lines + loop_headers + indented_body)
-        
-    return "\n".join(setup_lines + loop_body_lines)
 
 def canonical_intermediate_key(term, opt_perm, denom_steps, sliced_indices):
     ordered_ops = [term.operators[p] for p in opt_perm]
@@ -491,7 +579,7 @@ def canonical_intermediate_key(term, opt_perm, denom_steps, sliced_indices):
     rename_map = {}
     counters = {'occ': 0, 'vir': 0, 'act': 0}
     for idx in step1_indices:
-        t = get_index_type(idx)
+        t = index_space(idx)
         if idx not in rename_map:
             rename_map[idx] = f"{t[0]}{counters[t]}"
             counters[t] += 1
@@ -523,377 +611,6 @@ def canonical_intermediate_key(term, opt_perm, denom_steps, sliced_indices):
     
     return f"{' * '.join(canon_ops)} / ({' * '.join(canon_denoms)}) | sliced: {','.join(canon_sliced)}"
 
-def get_index_type(idx):
-    if idx in CORES: return 'occ'
-    if idx in VIRS:  return 'vir'
-    return 'act'
-
-def generate_term_code_cached(term, target_dict_name, get_slice_str_fn, intermediate_id, is_first_in_group, use_counts, spin_free=False):
-    all_indices = set()
-    for op in term.operators:
-        _, idxs = parse_operator_str(op)
-        all_indices.update(idxs)
-    for denom in term.denom_slices:
-        matches = re.finditer(r'e_([a-z0-9_]+)', denom)
-        for m in matches:
-            all_indices.add(m.group(1))
-    all_indices = sorted(list(all_indices))
-    char_map = {idx: chr(65 + i) for i, idx in enumerate(all_indices)}
-    
-    target_ext = TARGET_EXT_INDICES[term.sector]
-    is_i1_sliced = False
-    denom_var_counter = [0]
-
-    def next_denom_var():
-        name = f"d{denom_var_counter[0]}"
-        denom_var_counter[0] += 1
-        return name
-
-    if len(term.operators) == 0:
-        lines = []
-        lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor}")
-        return "\n".join(lines)
-
-    opt_perm, denom_steps, max_rank = find_optimal_operator_ordering(term, target_ext)
-    ordered_ops = [term.operators[p] for p in opt_perm]
-    
-    # Calculate number of virtual indices in the term
-    vir_indices = [idx for idx in all_indices if idx in VIRS]
-    
-    sliced_indices = []
-    if max_rank > 6 or len(vir_indices) > 1:
-        num_sliced = max(max_rank - 6, len(vir_indices) - 1)
-        candidates = set(all_indices)
-        def sort_key(idx):
-            if idx in target_ext:
-                return (3, idx)
-            if idx in VIRS:
-                return (0, idx)
-            if idx in CORES:
-                return (1, idx)
-            return (2, idx)
-        sorted_candidates = sorted(list(candidates), key=sort_key)
-        sliced_indices = sorted_candidates[:num_sliced]
-        
-    setup_lines = []
-    
-    ops_info = []
-    for i, op in enumerate(ordered_ops):
-        op_name, idxs = parse_operator_str(op)
-        slices = [get_slice_str_fn(idx) for idx in idxs]
-        slice_str = ", ".join(slices)
-        if spin_free:
-            array_name = op_name
-        else:
-            array_name = "g_anti_spin" if op_name == 'g' else "h1_spin"
-        
-        # We always want the full versions defined for external operators (e.g. b2)
-        if len(sliced_indices) > 0:
-            setup_lines.append(f"    b{i}_full = {array_name}[np.ix_({slice_str})]")
-        else:
-            setup_lines.append(f"    b{i} = {array_name}[np.ix_({slice_str})]")
-        ops_info.append({'name': f"b{i}", 'indices': idxs})
-        
-    def make_slice_line(idx_in_ordered, op_str, sliced_indices_list):
-        op_name, idxs = parse_operator_str(op_str)
-        slice_parts = []
-        for idx in idxs:
-            if idx in sliced_indices_list:
-                slice_parts.append(f"i_{idx}")
-            else:
-                slice_parts.append(":")
-        if any(part.startswith("i_") for part in slice_parts):
-            slice_str = ", ".join(slice_parts)
-            return f"    b{idx_in_ordered} = b{idx_in_ordered}_full[{slice_str}]"
-        else:
-            return f"    b{idx_in_ordered} = b{idx_in_ordered}_full"
-
-    # Define variables to hold split sliced indices
-    cache_sliced_indices = []
-    loop_sliced_indices = []
-    
-    candidate_lines = []
-    # If we have sliced indices, we will define b0 and b1 from full inside cache check (or loop)
-    # We will compute loop_sliced_indices and cache_sliced_indices below
-            
-    # Generate the computation logic lines
-    # For cached term, we assume term.operators >= 2
-    denoms_at_step_0 = []
-    for d_idx, step_associated in denom_steps.items():
-        if step_associated == 0:
-            denom_str = term.denom_slices[d_idx]
-            matches = re.finditer(r'e_([a-z0-9_]+)', denom_str)
-            d_idxs = [m.group(1) for m in matches]
-            denoms_at_step_0.append({'str': denom_str, 'indices': d_idxs})
-            
-    if denoms_at_step_0:
-        b0_indices_remaining = ops_info[0]['indices'] # handled later dynamically
-        
-    current_tensor = ops_info[0]
-    
-    for i in range(1, len(ops_info)):
-        next_op = ops_info[i]
-        
-        # We will split sliced_indices on the first step (i=1)
-        A_indices_set = set(current_tensor['indices']) | set(next_op['indices'])
-        future_indices = set(target_ext)
-        for j in range(i+1, len(ops_info)):
-            future_indices.update(ops_info[j]['indices'])
-        for d_idx, step_associated in denom_steps.items():
-            if step_associated > i:
-                matches = re.finditer(r'e_([a-z0-9_]+)', term.denom_slices[d_idx])
-                future_indices.update(m.group(1) for m in matches)
-                
-        sum_indices = A_indices_set - future_indices
-        out_indices = A_indices_set - sum_indices
-        out_list = sorted(list(out_indices))
-        
-        if i == 1:
-            i1_out_list = out_list.copy() if isinstance(out_list, list) else list(out_indices)
-            if len(sliced_indices) > 0:
-                # Any sliced index in the first step is looped inside the cache block to populate I1 slice-by-slice
-                step1_all_indices = set(current_tensor['indices']) | set(next_op['indices'])
-                cache_sliced_indices = [idx for idx in sliced_indices if idx in step1_all_indices]
-                loop_sliced_indices = [idx for idx in sliced_indices if idx in out_list]
-            else:
-                cache_sliced_indices = []
-                loop_sliced_indices = []
-                
-        # step_sliced_indices represents indices sliced at this step
-        step_sliced_indices = cache_sliced_indices if i < 2 else loop_sliced_indices
-        
-        if len(sliced_indices) > 0:
-            if i < 2:
-                # We define b0 and b1 inside the cache check (potentially using cache_sliced_indices)
-                pass
-            else:
-                candidate_lines.append(make_slice_line(i, ordered_ops[i], loop_sliced_indices))
-            
-        current_remaining = [idx for idx in current_tensor['indices'] if idx not in step_sliced_indices]
-        next_remaining = [idx for idx in next_op['indices'] if idx not in step_sliced_indices]
-        A_ops_remaining = [idx for idx in A_indices_set if idx not in step_sliced_indices]
-        A_ops_list_remaining = sorted(A_ops_remaining)
-        
-        lhs_einsum = "".join(char_map[idx] for idx in current_remaining) + "," + "".join(char_map[idx] for idx in next_remaining)
-        num_einsum_str = "".join(char_map[idx] for idx in A_ops_list_remaining)
-        
-        # Omit prefactor from intermediate! We multiply it at the very end when updating target
-        candidate_lines.append(f"    num = np.einsum('{lhs_einsum}->{num_einsum_str}', {current_tensor['name']}, {next_op['name']}, optimize=True)")
-        
-        denoms_at_step = []
-        for d_idx, step_associated in denom_steps.items():
-            if step_associated == i:
-                denom_str = term.denom_slices[d_idx]
-                matches = re.finditer(r'e_([a-z0-9_]+)', denom_str)
-                d_idxs = [m.group(1) for m in matches]
-                denoms_at_step.append({'str': denom_str, 'indices': d_idxs})
-                
-        A_denom_set = A_indices_set.copy()
-        for denom in denoms_at_step:
-            A_denom_set.update(denom['indices'])
-            
-        A_denom_list = sorted(list(A_denom_set))
-        A_denom_list_remaining = [idx for idx in A_denom_list if idx not in step_sliced_indices]
-        
-        if denoms_at_step:
-            view_slices = []
-            A_indices_remaining = [idx for idx in A_indices_set if idx not in step_sliced_indices]
-            for idx in A_denom_list_remaining:
-                if idx in A_indices_remaining:
-                    view_slices.append(":")
-                else:
-                    view_slices.append("None")
-            if "None" in view_slices:
-                candidate_lines.append(f"    num = num[{', '.join(view_slices)}]")
-                
-            for denom in denoms_at_step:
-                expr = generate_denom_expr(denom['str'], A_denom_list_remaining, get_slice_str_fn, step_sliced_indices)
-                dvar = next_denom_var()
-                candidate_lines.append(f"    {dvar} = {expr}")
-                candidate_lines.append(f"    {dvar}[np.abs({dvar}) < 1e-12] = 1e-12")
-                candidate_lines.append(f"    num = num / {dvar}")
-                
-        sum_indices = A_denom_set - future_indices
-        out_indices = A_denom_set - sum_indices
-        out_list = sorted(list(out_indices))
-        
-        out_list_remaining = [idx for idx in out_list if idx not in step_sliced_indices]
-        sum_indices_remaining = set(A_denom_list_remaining) - set(out_list_remaining)
-        
-        if len(sum_indices_remaining) == 0:
-            candidate_lines.append(f"    I{i} = num")
-        else:
-            in_einsum_str = "".join(char_map[idx] for idx in A_denom_list_remaining)
-            out_einsum_str = "".join(char_map[idx] for idx in out_list_remaining)
-            candidate_lines.append(f"    I{i} = np.einsum('{in_einsum_str}->{out_einsum_str}', num, optimize=True)")
-            
-        # Update current tensor. If we just computed I1 and have sliced indices, we append the slice line
-        # and then current_tensor's indices become the remaining ones.
-        if i == 1 and len(loop_sliced_indices) > 0:
-            slice_parts = []
-            for idx in out_list:
-                if idx in loop_sliced_indices:
-                    slice_parts.append(f"i_{idx}")
-                else:
-                    slice_parts.append(":")
-            if any(part.startswith("i_") for part in slice_parts):
-                slice_str = ", ".join(slice_parts)
-                candidate_lines.append(f"    I1 = _cache['int_{intermediate_id}'][{slice_str}]")
-                is_i1_sliced = True
-                current_tensor = {'name': f"I{i}", 'indices': out_list_remaining}
-            else:
-                current_tensor = {'name': f"I{i}", 'indices': out_list}
-        else:
-            current_tensor = {'name': f"I{i}", 'indices': out_list}
-        
-    # Split candidate_lines at I1's definition
-    i1_line_idx = -1
-    for idx, line in enumerate(candidate_lines):
-        if re.search(r'\bI1\s*=', line):
-            i1_line_idx = idx
-            break
-            
-    if i1_line_idx == -1:
-        raise ValueError(f"Could not find I1 definition in term {term.raw_str}")
-        
-    i1_comp_lines = candidate_lines[:i1_line_idx+1]
-    rest_comp_lines = candidate_lines[i1_line_idx+1:]
-    
-    # Define setup_lines for b0_full, b1_full if loop sliced (already added above)
-    # Define target slice string using loop_sliced_indices only
-    target_slice_parts = []
-    for idx in target_ext:
-        if idx in loop_sliced_indices:
-            target_slice_parts.append(f"i_{idx}")
-        else:
-            target_slice_parts.append(":")
-    target_slice_str = ", ".join(target_slice_parts)
-    
-    target_ext_remaining = [idx for idx in target_ext if idx not in loop_sliced_indices]
-    final_einsum_str = "".join(char_map[idx] for idx in target_ext_remaining)
-    
-    # Add final target accumulation to rest_comp_lines (with prefactor!)
-    current_remaining = [idx for idx in current_tensor['indices'] if idx not in loop_sliced_indices]
-    if target_slice_str:
-        rest_comp_lines.append(f"    {target_dict_name}[{term.sector}][{target_slice_str}] += {term.prefactor} * np.einsum('{''.join(char_map[idx] for idx in current_remaining)}->{final_einsum_str}', {current_tensor['name']}, optimize=True)")
-    else:
-        rest_comp_lines.append(f"    {target_dict_name}[{term.sector}] += {term.prefactor} * np.einsum('{''.join(char_map[idx] for idx in current_remaining)}->{final_einsum_str}', {current_tensor['name']}, optimize=True)")
-        
-    # Process i1_comp_lines (which are loop-invariant) into setup_lines if first in group
-    setup_body = []
-    if is_first_in_group:
-        setup_body.append(f"    if 'int_{intermediate_id}' not in _cache:")
-        
-        # If cache_sliced_indices is not empty, we initialize I1 to zeros and loop
-        indent = "        "
-        if cache_sliced_indices:
-            shape_str = ", ".join(f"len({get_slice_str_fn(idx)})" for idx in i1_out_list)
-            setup_body.append(f"        I1 = np.zeros(({shape_str}))")
-            for idx in cache_sliced_indices:
-                slice_name = get_slice_str_fn(idx)
-                setup_body.append(f"{indent}for i_{idx} in range(len({slice_name})):")
-                indent += "    "
-                
-        # Inside the cache check block (potentially indented)
-        # Define b0 and b1
-        if len(sliced_indices) > 0:
-            for i in range(2):
-                op_name, idxs = parse_operator_str(ordered_ops[i])
-                slice_parts = []
-                for idx in idxs:
-                    if idx in cache_sliced_indices:
-                        slice_parts.append(f"i_{idx}")
-                    else:
-                        slice_parts.append(":")
-                slice_str = ", ".join(slice_parts)
-                setup_body.append(f"{indent}b{i} = b{i}_full[{slice_str}]")
-        else:
-            for i in range(2):
-                setup_body.append(f"{indent}b{i} = b{i}")
-                
-        # Add denoms_at_step_0 evaluation if any
-        if denoms_at_step_0:
-            b0_indices_remaining = [idx for idx in ops_info[0]['indices'] if idx not in cache_sliced_indices]
-            for denom in denoms_at_step_0:
-                expr = generate_denom_expr(denom['str'], b0_indices_remaining, get_slice_str_fn, cache_sliced_indices)
-                dvar = next_denom_var()
-                setup_body.append(f"{indent}{dvar} = {expr}")
-                setup_body.append(f"{indent}{dvar}[np.abs({dvar}) < 1e-12] = 1e-12")
-                setup_body.append(f"{indent}b0 = b0 / {dvar}")
-
-        for line in i1_comp_lines:
-            # Skip denoms_at_step_0 if we evaluated it above
-            if denoms_at_step_0 and (re.search(r'\bb0 / d\d+\b', line) or re.search(r'\bd\d+\[np\.abs', line) or "d = generate" in line):
-                continue
-            if cache_sliced_indices and re.match(r'^\s*I1\s*=', line):
-                slice_parts = []
-                for idx in i1_out_list:
-                    if idx in cache_sliced_indices:
-                        slice_parts.append(f"i_{idx}")
-                    else:
-                        slice_parts.append(":")
-                if any(part != ":" for part in slice_parts):
-                    slice_str = ", ".join(slice_parts)
-                    line = line.replace("I1 =", f"I1[{slice_str}] +=")
-                else:
-                    line = line.replace("I1 =", "I1 +=")
-            setup_body.append(f"{indent}{line.strip()}")
-            
-        setup_body.append(f"        _cache['int_{intermediate_id}'] = I1")
-        
-    if not is_i1_sliced:
-        setup_body.append(f"    I1 = _cache['int_{intermediate_id}']")
-    
-    # Process rest_comp_lines (which are loop-dependent)
-    loop_dependent_vars = set(f"i_{idx}" for idx in loop_sliced_indices)
-    loop_body_lines = []
-    post_setup_lines = []
-    
-    for line in rest_comp_lines:
-        words = re.findall(r'[a-zA-Z0-9_]+', line)
-        is_dep = any(w in loop_dependent_vars for w in words)
-                
-        match = re.match(r'^\s*([a-zA-Z0-9_]+)\s*=', line)
-        if match:
-            lhs = match.group(1)
-            if is_dep:
-                loop_dependent_vars.add(lhs)
-            else:
-                if lhs in loop_dependent_vars and lhs not in (f"i_{idx}" for idx in loop_sliced_indices):
-                    loop_dependent_vars.remove(lhs)
-                    
-        if is_dep:
-            loop_body_lines.append(line)
-        else:
-            post_setup_lines.append(line)
-            
-    # Add cleanup to end of term block
-    cleanup_lines = []
-    cleanup_lines.append(f"    _use_count['int_{intermediate_id}'] -= 1")
-    cleanup_lines.append(f"    if _use_count['int_{intermediate_id}'] == 0:")
-    cleanup_lines.append(f"        del _cache['int_{intermediate_id}']")
-    
-    if len(loop_sliced_indices) > 0:
-        loop_headers = []
-        indent = ""
-        for idx in loop_sliced_indices:
-            slice_name = get_slice_str_fn(idx)
-            loop_headers.append(f"    {indent}for i_{idx} in range(len({slice_name})):")
-            indent += "    "
-            
-        indented_body = []
-        for line in loop_body_lines:
-            if line.strip():
-                stripped = line[4:] if line.startswith("    ") else line
-                indented_body.append(f"    {indent}{stripped}")
-            else:
-                indented_body.append(line)
-        if not indented_body or all(not line.strip() for line in indented_body):
-            indented_body.append(f"    {indent}pass")
-                 
-        return "\n".join(setup_lines + setup_body + post_setup_lines + loop_headers + indented_body + cleanup_lines)
-        
-    return "\n".join(setup_lines + setup_body + post_setup_lines + loop_body_lines + cleanup_lines)
 
 class SpatialTerm:
     def __init__(self, prefactor, operators, denom_slices, sector):
@@ -930,8 +647,7 @@ def expand_wick_term(term):
         if not expansion:
             return []
         op_expansions.append(expansion)
-        
-    import itertools
+
     expanded_terms = []
     for prod in itertools.product(*op_expansions):
         coef = term.prefactor
@@ -977,9 +693,7 @@ def optimize_spatial_terms(terms):
         if key not in groups:
             groups[key] = []
         groups[key].append(t)
-        
-    from src.CodeGeneration.qdpt_wick import get_skeleton_hash, Term
-    
+
     optimized = []
     for key, group in groups.items():
         pref = sum(t.prefactor for t in group)
@@ -1009,21 +723,10 @@ def generate_missing_mpn_code(terms, max_vertex, max_pt_order, optimize_factoriz
     lines.append("    missing_shift = 0.0")
     
     for term in terms:
-        all_indices = set()
-        for op in term.operators:
-            _, idxs = parse_operator_str(op)
-            all_indices.update(idxs)
-        for denom in term.denom_slices:
-            matches = re.finditer(r'e_([a-z0-9_]+)', denom)
-            for m in matches:
-                all_indices.add(m.group(1))
-                
-        from itertools import product
-        unique_indices = sorted(list(all_indices))
-        
+        unique_indices = term_indices(term)
         index_choices = {}
         for idx in unique_indices:
-            t = get_index_type(idx)
+            t = index_space(idx)
             if t == 'occ':
                 index_choices[idx] = ['occ_idx', 'act_occ_idx']
             elif t == 'vir':
@@ -1034,7 +737,7 @@ def generate_missing_mpn_code(terms, max_vertex, max_pt_order, optimize_factoriz
         keys = list(index_choices.keys())
         values = list(index_choices.values())
         
-        for p in product(*values):
+        for p in itertools.product(*values):
             mapping = dict(zip(keys, p))
             has_active = any(val in ['act_occ_idx', 'act_vir_idx', 'act_idx'] for val in mapping.values())
             if not has_active:
@@ -1045,7 +748,7 @@ def generate_missing_mpn_code(terms, max_vertex, max_pt_order, optimize_factoriz
                 
             lines.append(f"    # Term: {term.raw_str}")
             lines.append(f"    # Assignment: {mapping}")
-            if len(all_indices) > 6 and optimize_factorization:
+            if len(unique_indices) > 6 and optimize_factorization:
                 term_code = generate_term_code_factorized(term, "dummy", get_slice_assign, spin_free=spin_free)
             else:
                 term_code = generate_term_code(term, "dummy", get_slice_assign, spin_free=spin_free)
@@ -1075,7 +778,6 @@ def generate_function(pt_order, max_vertex, wick_terms, optimize_factorization=F
         return [re.sub(r'\be_([a-z0-9_]+)\b', repl, d) for d in denom_slices]
 
     def is_pure_external_permutation(base_term, term):
-        from src.CodeGeneration.qdpt_wick import get_external_signature
         base_sig = get_external_signature(base_term.raw_str)
         term_sig = get_external_signature(term.raw_str)
         if len(base_sig) != len(term_sig):
@@ -1139,33 +841,8 @@ def generate_function(pt_order, max_vertex, wick_terms, optimize_factorization=F
         target_ext = TARGET_EXT_INDICES[base_term.sector]
         opt_perm, denom_steps, max_rank = find_optimal_operator_ordering(base_term, target_ext)
         
-        all_indices = set()
-        for op in base_term.operators:
-            _, idxs = parse_operator_str(op)
-            all_indices.update(idxs)
-        for denom in base_term.denom_slices:
-            matches = re.finditer(r'e_([a-z0-9_]+)', denom)
-            for m in matches:
-                all_indices.add(m.group(1))
-        all_indices = sorted(list(all_indices))
-        
-        vir_indices = [idx for idx in all_indices if idx in VIRS]
-        
-        sliced_indices = []
-        if max_rank > 6 or len(vir_indices) > 1:
-            num_sliced = max(max_rank - 6, len(vir_indices) - 1)
-            candidates = set(all_indices)
-            def sort_key(idx):
-                if idx in target_ext:
-                    return (3, idx)
-                if idx in VIRS:
-                    return (0, idx)
-                if idx in CORES:
-                    return (1, idx)
-                return (2, idx)
-            sorted_candidates = sorted(list(candidates), key=sort_key)
-            sliced_indices = sorted_candidates[:num_sliced]
-            
+        sliced_indices = sliced_indices_for(term_indices(base_term), target_ext, max_rank,
+                                            single_virtual=True)
         canon_key = canonical_intermediate_key(base_term, opt_perm, denom_steps, sliced_indices)
         term_intermediates[id(base_term)] = canon_key
         intermediate_counts[canon_key] = intermediate_counts.get(canon_key, 0) + 1
@@ -1198,8 +875,7 @@ def generate_function(pt_order, max_vertex, wick_terms, optimize_factorization=F
         lines.append(generate_term_code(term, "g_eff", get_slice_str_normal, spin_free=spin_free))
 
     generated_intermediates = set()
-    from src.CodeGeneration.qdpt_wick import get_external_signature
-    
+
     for group_idx, group in enumerate(all_groups):
         base_term = group_bases[group_idx]
         skel = base_term.skeleton_hash or "default_skel"
@@ -1257,56 +933,42 @@ def generate_function(pt_order, max_vertex, wick_terms, optimize_factorization=F
     lines.append("    return g_eff")
     return "\n".join(lines)
 
-if __name__ == '__main__':
-    combinations = [
-        (2, 2),
-        (2, 3),
-        (3, 2),
-        (3, 3),
-    ]
+COMBINATIONS = ((2, 2), (2, 3), (3, 2), (3, 3))   # (PT order, max vertex rank)
 
-    # 2026-07-17: generate_term_code_cached's per-step denominators all shared
-    # the variable name `d`, which the loop-splitting dependency classifier
-    # could hoist one occurrence of out of a sliced-index loop while leaving a
-    # later same-named occurrence inside it -- the loop-invariant `d` got
-    # clobbered by the loop-dependent one after the first iteration. Fixed by
-    # giving every denominator its own d0, d1, ... variable. Verified: fresh
-    # regeneration now matches the committed generated_evaluators.py to 1e-16
-    # across (pt,max_vertex) in {2,3}x{2,3}, shift in {None, 0.1}.
-    output_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../MultiReference/QDPT/generated_evaluators.py'))
-    output_path_spinfree = os.path.abspath(os.path.join(os.path.dirname(__file__), '../MultiReference/QDPT/generated_evaluators_spinfree.py'))
-    
+
+def generate(out_dir=None):
+    """Write generated_evaluators.py and generated_evaluators_spinfree.py
+    (eval_pt{pt}_v{v}[_spinfree] for every COMBINATIONS entry) into out_dir
+    (default: src/MultiReference/QDPT)."""
+    # every denominator gets its own variable d0, d1, ...: a shared name could be
+    # hoisted out of a sliced-index loop by the dependency classifier while a
+    # later same-named occurrence stayed inside it
+    root = out_dir or QDPT_OUT_DIR
     header = ('"""QDPT active-space effective Hamiltonian g_eff (sectors 0 to max_vertex), {what}.\n\n'
               'Machine-generated from the Wick-contracted MP2/MP3 downfolding diagrams, for\n'
               'max vertex rank 2 or 3{extra}. Do not edit by hand. Called from the QDPT driver,\n'
               'perturbative.build_effective_hamiltonian.\n"""\nimport numpy as np\n\n')
-    with open(output_path, 'w') as f:
-        f.write(header.format(what='spin-orbital', extra=''))
-    with open(output_path_spinfree, 'w') as f:
-        f.write(header.format(what='spin-free (spatial)',
-                              extra=',\nwith the antisymmetrized-diagram terms collapsed to spatial-orbital\n'
-                                    'tensors and summed over spin'))
+    text = generated_header('generate_qdpt_evaluators.py') + header.format(what='spin-orbital', extra='')
+    text_sf = generated_header('generate_qdpt_evaluators.py') + header.format(
+        what='spin-free (spatial)',
+        extra=',\nwith the antisymmetrized-diagram terms collapsed to spatial-orbital\n'
+              'tensors and summed over spin')
+    for pt, v in COMBINATIONS:
+        for spin_free in (False, True):
+            t_start = time.time()
+            what = 'spin-free' if spin_free else 'spin-orbital'
+            print(f"Evaluating Wick's diagrams for PT={pt}, max_vertex={v} ({what})...", flush=True)
+            terms = run_wick_contractions(max_pt_order=pt, max_vertex=v, include_f=False,
+                                          print_unique=False, spin_free=spin_free)
+            print(f"Diagram evaluation took {time.time() - t_start:.2f}s", flush=True)
+            code = generate_function(pt, v, terms, optimize_factorization=True, spin_free=spin_free) + "\n\n"
+            if spin_free:
+                text_sf += code
+            else:
+                text += code
+    write_source(os.path.join(root, 'generated_evaluators.py'), text)
+    write_source(os.path.join(root, 'generated_evaluators_spinfree.py'), text_sf)
 
-    for pt, v in combinations:
-        import time
-        t_start = time.time()
-        print(f"Evaluating Wick's diagrams for PT={pt}, max_vertex={v} (spin-orbital)...", flush=True)
-        terms = run_wick_contractions(max_pt_order=pt, max_vertex=v, include_f=False, print_unique=False, spin_free=False)
-        print(f"Diagram evaluation took {time.time() - t_start:.2f}s", flush=True)
-        
-        print(f"Generating spin-orbital code for PT={pt}, max_vertex={v}...", flush=True)
-        code_str = generate_function(pt, v, terms, optimize_factorization=True, spin_free=False)
-        with open(output_path, 'a') as f:
-            f.write(code_str + "\n\n")
-            
-        t_start = time.time()
-        print(f"Evaluating Wick's diagrams for PT={pt}, max_vertex={v} (spin-free)...", flush=True)
-        terms_sf = run_wick_contractions(max_pt_order=pt, max_vertex=v, include_f=False, print_unique=False, spin_free=True)
-        print(f"Diagram evaluation took {time.time() - t_start:.2f}s", flush=True)
-        
-        print(f"Generating spin-free code for PT={pt}, max_vertex={v}...", flush=True)
-        code_str_sf = generate_function(pt, v, terms_sf, optimize_factorization=True, spin_free=True)
-        with open(output_path_spinfree, 'a') as f:
-            f.write(code_str_sf + "\n\n")
 
-    print(f"Generated evaluators saved to {output_path} and {output_path_spinfree}")
+if __name__ == '__main__':
+    generate()

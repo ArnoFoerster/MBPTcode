@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.utils import memory
+from src.Base.utils.parallel import memory
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
 from src.Solvers import davidson as dav
 

@@ -38,17 +38,17 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CD_NFREQ, HARTREE_TO_EV,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (CD_NFREQ, HARTREE_TO_EV,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.utils.mpi_grid import run_simulated
-from src.SingleReference.GW import sum_over_poles
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.numerics.numerics import numerics_of
+from src.SingleReference.GW import contour_deformation, sum_over_poles
 from src.SingleReference.GW.qp_states import (is_quasiparticle_root,
                                               resolve_qp_states)
-from src.gradients import qp_space_time
-from src.gradients.conventions import FrozenConventions
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import (SurfaceSpec, driven_chain,
                                         qp_bookkeeping, surface_of)
 
@@ -88,8 +88,8 @@ def ethylene_case():
     spec = SurfaceSpec(GroundState('rpa', 'hf'), chi0='space-time',
                        residues='sop', factorization='isdf',
                        qp_states=QPStates(),
-                       numerics={'grid_accuracy': 'G3', 'n_poles': N_POLES,
-                                 'nfreq_cd': NFREQ_CD})
+                       numerics=numerics_of({'grid_accuracy': 'G3', 'n_poles': N_POLES,
+                                 'nfreq_cd': NFREQ_CD}))
     surface = surface_of(spec, Excitation('singlet', root=1), mol, factory)
     return mol, surface, driven_chain(surface)
 
@@ -115,7 +115,7 @@ def ethylene():
     with pytest.MonkeyPatch.context() as patch:
         planted = plant_spurious_root(sum_over_poles.qp_energy_sop)
         patch.setattr(sum_over_poles, 'qp_energy_sop', planted)
-        patch.setattr(qp_space_time, 'qp_energy_sop', planted)
+        patch.setattr(contour_deformation, 'qp_energy_sop', planted)
         mol, surface, chain = ethylene_case()
         with pytest.warns(RuntimeWarning, match='outside \\(0, 1\\]'):
             chain.excitation(mol, chain.mf0)
@@ -182,7 +182,7 @@ def test_a_root_outside_the_bounds_after_settling_is_not_refused(ethylene):
                  'routes': {int(p): 'sop' for p in states}}
     flags = dict(chain.resolved.qp_z_outside)
     with pytest.warns(RuntimeWarning, match='displaced geometry'):
-        chain._flag_z_outside(route_out, states)
+        chain.quasiparticles._flag_z_outside(route_out, states)
     # the frozen conventions are not written at a displaced geometry
     assert chain.resolved.qp_z_outside == flags
 
@@ -199,7 +199,7 @@ def flag_on_rank(comm, states, z_by_rank):
     z = np.asarray(z_by_rank[comm.Get_rank()], float)
     route_out = {'z': z, 'roots': {int(p): 0.0 for p in states},
                  'routes': {int(p): 'sop' for p in states}}
-    chain._flag_z_outside(route_out, states)
+    chain.quasiparticles._flag_z_outside(route_out, states)
     return list(chain.resolved.qp_set), sorted(chain.resolved.qp_z_outside)
 
 

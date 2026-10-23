@@ -54,12 +54,12 @@ from pyscf.adc import radc, uadc
 from pyscf.solvent import pcm
 from pyscf.solvent._attach_solvent import _for_tdscf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import NoEnvironment
-from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.environment_seam import NoEnvironment
+from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_density, ee_fold, ee_ri_density,
                                            ee_ri_fold, ee_state_specific)
 from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc

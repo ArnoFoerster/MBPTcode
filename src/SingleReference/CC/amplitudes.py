@@ -38,7 +38,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "{}".format(max(1, (os.cpu_count() or 2
 import numpy as np
 
 from .cached_einsum import einsum
-from .diis import DIIS
+from .fixed_point import iterate, jacobi_step
 from .parallel_accum import pacc
 
 
@@ -914,16 +914,19 @@ def triples_residual(t1, t2, t3, f, g, o, v):
     return triples_res
 
 def kernel(t1, t2, t3, fock, g, o, v, e_ai, e_abij, e_abcijk, hf_energy, max_iter=100,
-           stopping_eps=1.0E-8, diis_size=6, diis_start_cycle=2):
+           stopping_eps=1.0E-8, diis_size=6, diis_start_cycle=2, out=None):
     """Iterate CCSDT amplitude equations to convergence. e_ai/e_abij/e_abcijk are 1/orbital-energy-denominators.
 
     diis_size: DIIS subspace dimension; 0 (or None) restores the plain
         fixed-point iteration this used to do unconditionally.
+    out: optional dict; receives 'converged' and 'n_iter'. Running out of
+        iterations warns (fixed_point.CCNotConverged) and returns the last
+        iterate; the loop itself is fixed_point.iterate.
 
     Undamped Jacobi iteration converges acceptably for well-behaved closed-shell
     cases but crawls or stalls on the open-shell radicals this code is aimed at
-    (CN/NO/O2/BN/SiC), where it can burn the whole max_iter budget and then
-    raise -- the same reason solver.py says "DIIS is not optional here" for
+    (CN/NO/O2/BN/SiC), where it can burn the whole max_iter budget and stop
+    unconverged -- the same reason solver.py says "DIIS is not optional here" for
     Lambda. Same scheme as solver.py: extrapolate the concatenated
     (t1, t2, t3) vector, error vector = change in that vector between cycles.
 
@@ -954,12 +957,8 @@ def kernel(t1, t2, t3, fock, g, o, v, e_ai, e_abij, e_abcijk, hf_energy, max_ite
     fock_e_abcijk = np.reciprocal(e_abcijk)
     old_energy = cc_energy(t1, t2, fock, g, o, v)
 
-    use_diis = bool(diis_size)
-    if use_diis:
-        diis_update = DIIS(diis_size, start_iter=diis_start_cycle)
-        t1_dim, t2_dim = t1.size, t2.size
-        old_vec = np.hstack((t1.ravel(), t2.ravel(), t3.ravel()))
-        vec_gb = old_vec.nbytes / 1e9
+    if diis_size:
+        vec_gb = (t1.nbytes + t2.nbytes + t3.nbytes) / 1e9
         print(f"    ==> CCSDT amplitude equations (DIIS, subspace {diis_size}) <==", flush=True)
         print("", flush=True)
         print(f"    DIIS will hold {2 * diis_size} x {vec_gb:.2f} GB = "
@@ -973,53 +972,32 @@ def kernel(t1, t2, t3, fock, g, o, v, e_ai, e_abij, e_abcijk, hf_energy, max_ite
     # a whole run looks hung until it exits. (pyscf's own logger flushes, which
     # is why SCF output appears and then nothing does.)
     print("     Iter               Energy                 |dE|                 |dT|", flush=True)
-    for idx in range(max_iter):
 
+    def step(ts):
+        t1, t2, t3 = ts
         residual_singles = singles_residual(t1, t2, t3, fock, g, o, v)
         residual_doubles = doubles_residual(t1, t2, t3, fock, g, o, v)
         residual_triples = triples_residual(t1, t2, t3, fock, g, o, v)
+        res_norm = (np.linalg.norm(residual_singles) + np.linalg.norm(residual_doubles)
+                    + np.linalg.norm(residual_triples))
+        return [jacobi_step(residual_singles, t1, e_ai, fock_e_ai),
+                jacobi_step(residual_doubles, t2, e_abij, fock_e_abij),
+                jacobi_step(residual_triples, t3, e_abcijk, fock_e_abcijk)], res_norm
 
-        res_norm = np.linalg.norm(residual_singles) + np.linalg.norm(residual_doubles) + np.linalg.norm(residual_triples)
-        singles_res = residual_singles + fock_e_ai * t1
-        doubles_res = residual_doubles + fock_e_abij * t2
-        triples_res = residual_triples + fock_e_abcijk * t3
-
-
-        new_singles = singles_res * e_ai
-        new_doubles = doubles_res * e_abij
-        new_triples = triples_res * e_abcijk
-
-        if use_diis:
-            vec = np.hstack((new_singles.ravel(), new_doubles.ravel(), new_triples.ravel()))
-            # drop the separate blocks now that they live inside `vec`: they are
-            # replaced by views into it a few lines down, and releasing the
-            # rank-6 one before the error vector is allocated keeps one fewer
-            # full-size array resident at the peak.
-            new_singles = new_doubles = new_triples = None
-            error_vec = old_vec - vec
-            try:
-                vec = diis_update.compute_new_vec(vec, error_vec)
-            except np.linalg.LinAlgError:
-                # error vectors gone exactly degenerate (singular B-matrix) --
-                # keep the undamped update for this step rather than crashing,
-                # same fallback solver.py uses.
-                pass
-            old_vec = vec
-            new_singles = vec[:t1_dim].reshape(t1.shape)
-            new_doubles = vec[t1_dim:t1_dim + t2_dim].reshape(t2.shape)
-            new_triples = vec[t1_dim + t2_dim:].reshape(t3.shape)
-
-        current_energy = cc_energy(new_singles, new_doubles, fock, g, o, v)
+    def is_converged(idx, ts, res_norm):
+        nonlocal old_energy
+        current_energy = cc_energy(ts[0], ts[1], fock, g, o, v)
         delta_e = np.abs(old_energy - current_energy)
-
-        print("    {: 5d} {: 20.12f} {: 20.12f} {: 20.12f}".format(idx, current_energy - hf_energy, delta_e, res_norm), flush=True)
-        t1 = new_singles
-        t2 = new_doubles
-        t3 = new_triples
+        print("    {: 5d} {: 20.12f} {: 20.12f} {: 20.12f}".format(
+            idx, current_energy - hf_energy, delta_e, res_norm), flush=True)
         if delta_e < stopping_eps and res_norm < stopping_eps:
-            break
+            return True
         old_energy = current_energy
-    else:
-        raise ValueError("CCSDT iterations did not converge")
+        return False
 
+    (t1, t2, t3), converged, n_iter = iterate(
+        step, [t1, t2, t3], is_converged, max_iter, diis_size=diis_size,
+        diis_start_cycle=diis_start_cycle, what='CCSDT iterations')
+    if out is not None:
+        out['converged'], out['n_iter'] = converged, n_iter
     return t1, t2, t3

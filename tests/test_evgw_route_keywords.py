@@ -1,7 +1,7 @@
 """`calc_qp_energy(self_consistency='evGW')` hands its route keywords to the loop.
 
 The evGW dispatcher must forward eta and the route's own keywords to
-`evgw_eigenvalues`; dropping df, dm_correction, tda, qp_solver and solver would
+`evgw_eigenvalues`; dropping df, dm_correction, tda and solver would
 run a density-fitted evGW under the name of the four-index one, with the
 default root selector in every cycle. Each cycle is a `calc_qp_energy` call, so
 the keywords reach it and the route applies or refuses them exactly as a
@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.SingleReference.GW import evGW
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from tests.isdf_test_grid import g1
@@ -44,12 +44,10 @@ def test_every_keyword_reaches_the_loop(mf, monkeypatch):
     monkeypatch.setattr(evGW, 'evgw_eigenvalues', loop)
     dm = mf.make_rdm1()
     calc_qp_energy(mf, mode='casida', self_consistency='evGW', df=False,
-                   dm_correction=dm, tda=True, qp_solver='pole_strength',
-                   solver='dense')
+                   dm_correction=dm, tda=True, solver='dense')
     assert seen['df'] is False
     assert seen['dm_correction'] is dm
     assert seen['tda'] is True
-    assert seen['qp_solver'] == 'pole_strength'
     assert seen['solver'] == 'dense'
 
 

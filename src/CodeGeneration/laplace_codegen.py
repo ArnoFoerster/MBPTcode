@@ -26,7 +26,7 @@ letter (avoiding collision with anything already used in the consumer term),
 and append one Oe(...)/Ve(...) dressing factor per amplitude external index.
 The result is a new raw-term list in the exact string format
 pdaggerq.pq_helper.strings() produces, so it feeds unmodified into
-src/Base/pdaggerq_interface.py's existing raw_terms_to_einsum -- no new codegen
+src/CodeGeneration/pdaggerq_interface.py's existing raw_terms_to_einsum -- no new codegen
 logic needed there, just new *terms* to feed it, one set per tau iteration.
 
 Validated when written (reproduces mpn_density_driver_restricted.py's
@@ -37,10 +37,12 @@ m3_ov_12_restricted's raw terms) -- see tests/test_laplace_codegen_generic.py.
 import re
 from itertools import product
 
-from src.Base.pdaggerq_interface import (exact_coefficient, raw_terms_to_einsum, _parse_factor, _array_expr,
-                                        OCC_LETTERS, VIR_LETTERS,
-                                        _OCC_SUBSCRIPTS, _VIR_SUBSCRIPTS)
+from src.CodeGeneration.pdaggerq_interface import exact_coefficient
 from src.CodeGeneration.generate_mpn_density import amp_out_indices
+from src.CodeGeneration.codegen_common import (
+    OCC_FAMILY as OCC_LETTERS, OCC_SUBSCRIPTS, VIR_SUBSCRIPTS, parse_factor, array_expr,
+    term_has_factor)
+from src.CodeGeneration.generate_mpn_density_spin import spinify_slices
 
 # Fresh-letter pools for renaming an amplitude numerator's own dummy indices
 # during fusion -- disjoint from PDAGGERQ_SAFE_OCC/VIR ('i'-'n'/'a'-'f') on
@@ -65,8 +67,8 @@ def _fresh_pool(preferred, full):
     return list(preferred) + [c for c in full if c not in set(preferred)]
 
 
-_FRESH_OCC_POOL = _fresh_pool('opqrstOPQRST', _OCC_SUBSCRIPTS)
-_FRESH_VIR_POOL = _fresh_pool('ghuvwxyzGHUVWXYZ', _VIR_SUBSCRIPTS)
+_FRESH_OCC_POOL = _fresh_pool('opqrstOPQRST', OCC_SUBSCRIPTS)
+_FRESH_VIR_POOL = _fresh_pool('ghuvwxyzGHUVWXYZ', VIR_SUBSCRIPTS)
 
 
 def lambda_canonical_and_sign(rank):
@@ -109,7 +111,7 @@ def _split_term(term):
 def _factor_name_and_idxs(fac):
     """Return (kind, idxs) where kind is enough to rebuild the exact same
     factor string later with renamed indices -- mirrors
-    pdaggerq_interface._parse_factor's three cases (bracket integral,
+    pdaggerq_interface.parse_factor's three cases (bracket integral,
     kronecker delta, generic paren leaf)."""
     fac = fac.strip()
     if fac.startswith('<'):
@@ -285,7 +287,7 @@ def _collect_dressed_term_specs(raw_terms):
     term_specs = []
     for term in raw_terms:
         coef = exact_coefficient(term[0])
-        factors = [_parse_factor(f) for f in term[1:]]
+        factors = [parse_factor(f) for f in term[1:]]
         real, dressings = [], []
         for name, idxs in factors:
             if _is_dressing_name(name):
@@ -309,7 +311,7 @@ def _collect_dressed_term_specs(raw_terms):
 
         real_exprs, real_subs = [], []
         for pos, (name, idxs) in enumerate(real):
-            expr = _array_expr(name, idxs)          # UNDRESSED (dressing -> E ops)
+            expr = array_expr(name, idxs)          # UNDRESSED (dressing -> E ops)
             real_exprs.append(expr)
             real_subs.append(''.join(idxs))
             if expr not in real_seen:
@@ -337,7 +339,7 @@ def _collect_dressed_term_specs(raw_terms):
 
 
 # Einsum label for the flattened tau-quadrature batch axis p. It must never be
-# an orbital index: pdaggerq_interface._OCC_SUBSCRIPTS/_VIR_SUBSCRIPTS (and the
+# an orbital index: pdaggerq_interface.OCC_SUBSCRIPTS/VIR_SUBSCRIPTS (and the
 # _FRESH_*_POOLs built from them) draw orbital labels from a-z + A-T, so the
 # uppercase letters U-Z are the only einsum characters guaranteed never to be an
 # occ/vir index. (An early version used lowercase 'p' and collided with the
@@ -410,7 +412,7 @@ def raw_terms_to_einsum_dressed(raw_terms, out_var, out_indices, weight_var=None
     active spaces these blocks run on, NOT the rank+#kinds blow-up a per-operand
     pre-multiply of both tau axes would cause).
 
-    Real operands are left UNDRESSED (bare _array_expr) so base tensors stay
+    Real operands are left UNDRESSED (bare array_expr) so base tensors stay
     rank<=4; only the E-factors carry p. No P(...) handling (_expand_perms
     already resolved them). `weight_var=None` (a group with no dressed amplitude,
     e.g. the empty-kindset multikind group) emits plain undressed einsums, no p.
@@ -435,94 +437,16 @@ def raw_terms_to_einsum_dressed(raw_terms, out_var, out_indices, weight_var=None
     return lines
 
 
-def raw_terms_to_sigma_einsum_dressed(raw_terms, out_var, bra_indices,
-                                      ket_indices, vec_var='x', weight_var=None):
-    """The SIGMA (matrix-free apply) twin of raw_terms_to_einsum_dressed:
-    combines the Oe/Ve dressing pre-multiply (Laplace fusion) with the
-    trial-vector fold (apply form), so a Laplace-fused APPLY block
-
-        y[bra] = sum_ket ( fused-contraction[bra,ket] ) * x[ket]
-
-    is emitted with NO amplitude of rank>=3 ever materialized AND no
-    (bra x ket) block formed. This is what lets the C^(3)/k3 matvecs (which
-    consume l3/t3/l4/t4) run matrix-free AND Laplace-fused -- the two walls
-    (self-block (n_k)^2 and amplitude O(no^r nv^r)) removed together.
-
-    Composition: the tau axis `p` and the E-factor operands are IDENTICAL to
-    raw_terms_to_einsum_dressed (flatten-p); the only change is the final einsum
-    appends the trial `vec_var` (subscripts = ket_indices) and outputs
-    bra_indices instead of the dense (bra+ket) tensor. No P(...) handling --
-    fuse_amplitude_into_consumer's _expand_perms already resolved them. CSE +
-    combined-E hoisting kept. `weight_var`/p semantics per raw_terms_to_einsum_
-    dressed."""
-    ket_sub = ''.join(ket_indices)
-    bra_sub = ''.join(bra_indices)
-    term_specs, real_expr_order, combo_order = _collect_dressed_term_specs(raw_terms)
-    lines, cse_var = _emit_dressed_hoists(real_expr_order, combo_order, term_specs)
-    pL = _batch_label(term_specs, *bra_indices, *ket_indices)
-    for coef, real_exprs, real_subs, e_ops in term_specs:
-        ops = [cse_var.get(e, e) for e in real_exprs]
-        subs = list(real_subs)
-        for evar, letter in e_ops:
-            ops.append(evar)
-            subs.append(pL + letter)
-        ops.append(vec_var)
-        subs.append(ket_sub)
-        if weight_var is not None and e_ops:
-            ops.append(weight_var)
-            subs.append(pL)
-        lines.append(f"    _tmp = einsum('{','.join(subs)}->{bra_sub}', "
-                     f"{', '.join(ops)}, optimize=True)")
-        s = '+' if coef >= 0 else '-'
-        lines.append(f"    {out_var} {s}= {abs(coef):.15g} * _tmp")
-    return lines
-
-
-def assemble_laplace_fused_apply(func_name, params, aliases, out_var,
-                                 out_shape_expr, fused_terms, bra_indices,
-                                 ket_indices, eps_o_expr, eps_v_expr,
-                                 vec_var='x', ntau_default=6):
-    """assemble_laplace_fused's APPLY twin (flatten-p): the single-amplitude tau
-    quadrature is summed as one contracted batch axis p (length ntau) inside each
-    term's einsum -- one Laplace-fused, matrix-free apply function
-    y[bra] = (block @ x)[bra], the rank>=3 amplitude tau-consumed, NO python tau
-    loop."""
-    src = [f"def {func_name}({', '.join(params)}, {vec_var}, "
-           f"ntau={ntau_default}):"]
-    for generic, real in aliases.items():
-        if generic != real:
-            src.append(f"    {generic} = {real}")
-    src.append(f"    ei = {eps_o_expr}")
-    src.append(f"    ea = {eps_v_expr}")
-    src.append("    gap_min = max(ea.min() - ei.max(), 1e-3)")
-    src.append("    gap_max = ea.max() - ei.min()")
-    src.append("    tau, sigma = minimax_time_grid(ntau, 3.0 * gap_min, "
-               "3.0 * gap_max)")
-    src.append(f"    {out_var} = np.zeros({out_shape_expr})")
-    # single tau slot -> p axis of length ntau; Oe/Ve are (ntau, no)/(ntau, nv)
-    src.append("    _tk = np.indices((ntau,)).reshape(1, -1)")
-    src.append("    Oe = np.exp(ei[None, :] * tau[_tk[0]][:, None])")
-    src.append("    Ve = np.exp(-ea[None, :] * tau[_tk[0]][:, None])")
-    src.append("    _wP = -sigma[_tk[0]]")
-    for line in raw_terms_to_sigma_einsum_dressed(fused_terms, out_var,
-                                                  bra_indices, ket_indices,
-                                                  vec_var, weight_var='_wP'):
-        src.append(line)
-    src.append(f"    return {out_var}")
-    src.append("")
-    return "\n".join(src)
-
-
 def assemble_laplace_fused(func_name, params, aliases, out_var, out_shape_expr,
-                           fused_terms, out_indices, eps_o_expr, eps_v_expr,
-                           ntau_default=6, nslots=1):
+                           fused_terms, out_indices, eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]',
+                           ntau_default=6, nslots=1, unrestricted=False):
     """Wrap fuse_amplitude_into_consumer's output into a complete function that
-    loops over `ntau` minimax quadrature points, dressing the exp factors fresh
-    each iteration and accumulating -sigma_tau * (fused contraction) into
-    `out_var` -- the amplitude's own denominator division never happens as a
-    separate step; it's folded into this sum (see module docstring).
-    `eps_o_expr`/`eps_v_expr` are Python expressions (in terms of `params`)
-    for the occupied/virtual orbital-energy 1-D arrays.
+    sums `ntau` minimax quadrature points, dressing the exp factors fresh each
+    point and accumulating -sigma_tau * (fused contraction) into `out_var` --
+    the amplitude's own denominator division never happens as a separate step;
+    it's folded into this sum (see module docstring). `eps_o_expr`/`eps_v_expr`
+    are Python expressions (in terms of `params`) for the occupied/virtual
+    orbital-energy 1-D arrays.
 
     `nslots` > 1 handles a nested structure like l4ft3 = l4^(2)*f*t3^(2), a
     PRODUCT of two amplitudes with SEPARATE denominators D_l4, D_t3, so
@@ -533,33 +457,49 @@ def assemble_laplace_fused(func_name, params, aliases, out_var, out_shape_expr,
     np.indices), slot 0's dressing MATRICES named Oe/Ve, slot s>=1's Oe{s+1}/
     Ve{s+1} (shape (P,no)/(P,nv)), and the flattened weight _wP (P,) = product of
     each slot's -sigma. raw_terms_to_einsum_dressed then emits ONE einsum per term
-    (p summed) -- no python tau loop. _fuse_highrank tags each amplitude's exp
-    factors with its slot's names via fuse_amplitude_into_consumer's dress_names.
-    A one-time (stored-coupling build) cost; base tensors stay <=4-index (only the
-    p-carrying E-factors/intermediates add the single batch axis).
-    """
+    (p summed) -- no python tau loop. A one-time (stored-coupling build) cost;
+    base tensors stay <=4-index (only the p-carrying E-factors/intermediates add
+    the single batch axis).
+
+    unrestricted=True (UHF, one slot): per-spin dressings Oe_a/Oe_b/Ve_a/Ve_b
+    from eps_a[o_a]/eps_b[o_b]/..., one shared grid wide enough for either spin
+    (gap over the union of alpha and beta orbital energies: the quadrature
+    identity holds for any D inside the grid's range, mixed-spin D3 included),
+    and every emitted line passed through generate_mpn_density_spin.spinify_slices
+    (the bracket-integral slices are spin-blind as emitted)."""
     src = [f"def {func_name}({', '.join(params)}, ntau={ntau_default}):"]
     for generic, real in aliases.items():
         if generic != real:
             src.append(f"    {generic} = {real}")
-    src.append(f"    ei = {eps_o_expr}")
-    src.append(f"    ea = {eps_v_expr}")
-    src.append("    gap_min = max(ea.min() - ei.max(), 1e-3)")
-    src.append("    gap_max = ea.max() - ei.min()")
+    if unrestricted:
+        src.append("    ei_a, ea_a = eps_a[o_a], eps_a[v_a]")
+        src.append("    ei_b, ea_b = eps_b[o_b], eps_b[v_b]")
+        src.append("    gap_min = max(min(ea_a.min(), ea_b.min()) - max(ei_a.max(), ei_b.max()), 1e-3)")
+        src.append("    gap_max = max(ea_a.max(), ea_b.max()) - min(ei_a.min(), ei_b.min())")
+    else:
+        src.append(f"    ei = {eps_o_expr}")
+        src.append(f"    ea = {eps_v_expr}")
+        src.append("    gap_min = max(ea.min() - ei.max(), 1e-3)")
+        src.append("    gap_max = ea.max() - ei.min()")
     src.append("    tau, sigma = minimax_time_grid(ntau, 3.0 * gap_min, 3.0 * gap_max)")
     src.append(f"    {out_var} = np.zeros({out_shape_expr})")
     # flatten the nslots tau sub-grids into one axis p of length ntau**nslots
     grid_shape = ", ".join(["ntau"] * nslots)
     src.append(f"    _tk = np.indices(({grid_shape},)).reshape({nslots}, -1)")
-    for s in range(nslots):
-        oe = 'Oe' if s == 0 else f'Oe{s + 1}'
-        ve = 'Ve' if s == 0 else f'Ve{s + 1}'
-        src.append(f"    {oe} = np.exp(ei[None, :] * tau[_tk[{s}]][:, None])")
-        src.append(f"    {ve} = np.exp(-ea[None, :] * tau[_tk[{s}]][:, None])")
+    if unrestricted:
+        for e, sgn, sub in (('Oe', '', 'ei'), ('Ve', '-', 'ea')):
+            for spin in 'ab':
+                src.append(f"    {e}_{spin} = np.exp({sgn}{sub}_{spin}[None, :] * tau[_tk[0]][:, None])")
+    else:
+        for s in range(nslots):
+            oe = 'Oe' if s == 0 else f'Oe{s + 1}'
+            ve = 'Ve' if s == 0 else f'Ve{s + 1}'
+            src.append(f"    {oe} = np.exp(ei[None, :] * tau[_tk[{s}]][:, None])")
+            src.append(f"    {ve} = np.exp(-ea[None, :] * tau[_tk[{s}]][:, None])")
     src.append("    _wP = " + " * ".join(f"(-sigma[_tk[{s}]])" for s in range(nslots)))
     for line in raw_terms_to_einsum_dressed(fused_terms, out_var, out_indices,
                                             weight_var='_wP'):
-        src.append(line)
+        src.append(spinify_slices(line) if unrestricted else line)
     src.append(f"    return {out_var}")
     src.append("")
     return "\n".join(src)
@@ -587,10 +527,6 @@ def highrank_tags(terms):
             if m:
                 tags[f'{m.group(1)}{m.group(2)}_{m.group(3)}'] = int(m.group(2))
     return tags
-
-
-def _term_has_factor(term, tag):
-    return any(f.strip().startswith(tag + '(') for f in term[1:])
 
 
 def tag_lowrank_leaves_by_order(terms, order):
@@ -623,7 +559,7 @@ def fuse_nested_numerator(numerator_fn, rank, order, block, _depth=0):
     """Fully-fused (T-frame) numerator of amplitude (rank, order, block).
 
     `numerator_fn(rank, order, block)` returns the raw numerator terms (e.g.
-    generate_mpn_density_restricted.t_numerator_terms_restricted). Every rank>=3
+    generate_mpn_density_spin.t_numerator_terms_restricted). Every rank>=3
     leaf is RECURSIVELY Laplace-fused -- each distinct leaf rank gets its own
     kind-named dressing (Oe_t{r}/Ve_t{r}) so assemble_laplace_fused_multikind
     integrates one independent tau per kind (1/(D_outer * D_inner ...)). Every
@@ -660,8 +596,8 @@ def fuse_nested_numerator(numerator_fn, rank, order, block, _depth=0):
             break
         tag, rk = sorted(tags.items())[0]
         blk = tag.split('_', 1)[1]
-        matching = [t for t in num if _term_has_factor(t, tag)]
-        rest = [t for t in num if not _term_has_factor(t, tag)]
+        matching = [t for t in num if term_has_factor(t, tag)]
+        rest = [t for t in num if not term_has_factor(t, tag)]
         inner = fuse_nested_numerator(numerator_fn, rk, order - 1, blk, _depth + 1)
         kind = f't{rk}' if _depth == 0 else f't{rk}_d{_depth}'
         num = rest + fuse_amplitude_into_consumer(
@@ -707,7 +643,7 @@ def fuse_amplitude_rank3_tags(numerator_fn, rank, order, block):
                 f"ITSELF rank>=3-dependent -- the nested-amplitude frontier "
                 f"(t1_4 via t3_3). Its own direct part must be fused into the "
                 f"outer amplitude too; single-level split does not cover it.")
-        matching = [t for t in outer if _term_has_factor(t, tag)]
+        matching = [t for t in outer if term_has_factor(t, tag)]
         out[tag] = (rk, fuse_amplitude_into_consumer(inner, rk, matching, tag))
     return out
 

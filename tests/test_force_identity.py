@@ -22,13 +22,13 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.chain_settings import with_setting
-from src.Base.numerics import Numerics
-from src.Base.record_io import record_hash
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.excited_state import ExcitedStateChain, conventions_hash
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.rpa.chain_settings import with_setting
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_io import record_hash
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.excited_state import ExcitedStateChain, conventions_hash
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.hessian import cached_conventions
 from src.gradients.surface_identity import force_identity
 from src.properties.optimize import restored_surface, surface_record

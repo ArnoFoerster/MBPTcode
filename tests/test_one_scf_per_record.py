@@ -28,7 +28,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from tests.pins import assert_same as pins_same
 from tests.pins import assert_same_tree
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.numerics.numerics import numerics_of
 from src.properties.excitations import (SurfaceSpec, calc_vertical_excitation,
                                         surface_of, vertical_block)
 from tests.test_state_pair_force_distributed_ks import (BASIS, GRID_ACCURACY,
@@ -60,8 +62,8 @@ def spec_and_state():
     spec = SurfaceSpec(GroundState('dft', XC), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'grid_accuracy': GRID_ACCURACY, 'sliced': True,
-                                 'fit': 'rows', 'bse_adjoint': 'grid'})
+                       numerics=numerics_of({'grid_accuracy': GRID_ACCURACY, 'sliced': True,
+                                 'fit': 'rows', 'bse_adjoint': 'grid'}))
     return spec, Excitation('singlet', root=1, kernel='bse')
 
 

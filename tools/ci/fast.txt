@@ -83,12 +83,14 @@ pytest test_inside_scissor_static_term.py
 pytest test_isdf_block_action_rows.py
 pytest test_isdf_fit_timings.py
 pytest test_isdf_fit_two_realizations.py
+pytest test_isdf_force_hook.py
 pytest test_isdf_grid_keywords.py
 pytest test_isdf_jk_gradient_guard.py
 pytest test_isdf_pcm_force.py
 pytest test_legacy_defaults_and_aliases.py
 pytest test_matsubara_ir.py
 pytest test_metallic_grid_wiring_quick.py
+pytest test_metric_root_cache.py
 pytest test_minimax_tau_grid.py
 script test_mp2_density_df.py
 script test_mp2_density_matrix.py
@@ -119,6 +121,7 @@ pytest test_pbc_kpath.py
 script test_pbc_rpa_damping.py
 script test_pbc_sigma_folding.py
 pytest test_pbc_smallq.py
+pytest test_pbc_symmetry.py
 script test_pbc_w.py
 pytest test_pcm_cavity_blocks.py
 pytest test_photoluminescence.py
@@ -136,6 +139,7 @@ pytest test_qb_casida_gate.py
 pytest test_qdpt_perturbative.py
 pytest test_qp_energy_continuation.py
 pytest test_qp_energy_diagnostics.py
+pytest test_qp_numerics_warn_and_flag.py
 script test_qp_refine_root.py
 pytest test_qp_root_demotion.py
 pytest test_qp_route_eta_consistency.py
@@ -149,12 +153,14 @@ pytest test_quasi_boson_move.py
 pytest test_range_separated_refusal.py
 pytest test_reaction_field.py
 pytest test_reaction_field_adjoint.py
+pytest test_record_names_map.py
 pytest test_refactor_baseline.py
 pytest test_refreeze_carries_settings.py
 pytest test_refreeze_last_walk_flags.py
 pytest test_relax_hessian.py
 script test_restricted_ccsdt.py
 pytest test_ri_fallback.py
+pytest test_root_driven_solve.py
 pytest test_row_fit_frozen_layout.py
 script test_rpa_correlation_energy.py
 pytest test_rpa_qp_surface.py
@@ -192,6 +198,7 @@ pytest test_static_exchange_reuse.py
 pytest test_static_screening_one_routine.py
 pytest test_sum_over_poles.py
 pytest test_sum_over_poles_move.py
+pytest test_surface_abc.py
 pytest test_surface_mean_field.py
 pytest test_surface_protocol.py
 pytest test_tadf_far_start.py
@@ -225,6 +232,7 @@ pytest test_forward_small_duplicates.py
 pytest test_frame_turning.py
 pytest test_grid_identity.py
 pytest test_isdf_forward_moves.py
+pytest test_isdf_forward_reads_numerics.py
 pytest test_isdf_grid_required.py
 pytest test_isdf_injected_grid_lagrangian.py
 pytest test_isdf_near_null_orbitals.py
@@ -252,6 +260,7 @@ pytest test_unrestricted_spin_flip_open_shell.py
 pytest test_vertex_solvent.py
 pytest test_vibronic_surface_mean_field.py
 pytest test_layering.py
+pytest test_surface_ingredients.py
 pytest test_drpa_equilibrium_solvation.py
 pytest test_walk_probe_default.py
 # Placed 2026-10-20 by the 60 s rule on the full-suite wall times of one cluster run (merged tree, 2 threads per lane): under 60 s
@@ -413,7 +422,7 @@ pytest test_provisional_results.py
 pytest test_qp_branch_frozen.py
 pytest test_qp_root_follows_its_branch.py
 pytest test_refuse_inputs_warn_numerics.py
-pytest test_run_ee_adc2_flags.py
+pytest test_ee_adc_vertical_flags.py
 pytest test_vibrational_modes.py
 pytest test_davidson_flags_reach_records.py
 pytest test_photophysics_walk_again.py

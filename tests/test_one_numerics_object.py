@@ -12,11 +12,11 @@ import inspect
 import pytest
 from pyscf import gto
 
-import src.Base.chain_settings as chain_settings
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
+import src.gradients.rpa.chain_settings as chain_settings
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
 from tests.reference_scf import rhf_df_differentiable_checked
 
 BASIS = 'cc-pvdz'

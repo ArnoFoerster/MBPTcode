@@ -1,15 +1,18 @@
 # Examples
 
 Each file is self-contained and runnable: `python examples/01_adc3.py`.
-All use H2O/cc-pVDZ unless noted, so the numbers are directly comparable
-(`11_bse_davidson_vs_dense.py` is cc-pVTZ; `18_periodic_slab_gw.py` is a
-periodic H2 slab).
+Most use H2O/cc-pVDZ, so the numbers are directly comparable. The others:
+`05` is cc-pVQZ, `06` the OH radical in STO-3G, `11` cc-pVTZ, `17` and `19`
+aug-cc-pVDZ; `14`, `15`, `17` and `20` are formaldehyde, and `18` is a
+periodic H2 slab.
 
 | file | what it shows |
 |---|---|
 | `01_adc3.py` | standard ADC(3), spin-free, matrix-free — the default route |
 | `02_adc3_df.py` | the same with density fitting, for large bases |
 | `03_en_adc3.py` | EN-ADC(3), spin-adapted — the production EN variant |
+| `04_gw.py` | G0W0 and evGW quasiparticle energies on the default route |
+| `05_vertex_gw.py` | vertex-corrected quasiparticle energies on a BSE-screened polarizability, against pyscf's EOM-IP-CCSD (cc-pVQZ) |
 | `06_open_shell.py` | UHF / spin-orbital ADC(3) |
 | `07_several_states.py` | several ionization states with pole strengths |
 | `08_en_adc3_screened_singles.py` | EN-ADC(3) singles shift, bare vs RPA-screened (BSE-kernel channel split) |
@@ -19,7 +22,7 @@ periodic H2 slab).
 | `12_evgw.py` | the eigenvalue-self-consistent loop: cycle 1 is G0W0, the fixed point sits above it |
 | `13_solvated_gw_bse.py` | GW and BSE in a continuum, with the ground-state and response halves separated |
 | `14_cp2k_aug_molopt.py` | CP2K's aug-SZV-MOLOPT-ae basis with its RI tier, read from CP2K at run time; G0W0 and dense BSE |
-| `15_excited_state_geometry_optimization.py` | two high-level entry points: S1 relaxed against S0 (`calc_adiabatic_excitation`) and the adiabatic S1-T1 gap (`calc_adiabatic_gap`), dense vs cubic-scaling ISDF/SOP |
+| `15_excited_state_geometry_optimization.py` | the adiabatic S1-T1 gap (`calc_adiabatic_gap`): S1 and T1 each relaxed to its own minimum, with each state's vertical and emission energy, dense vs cubic-scaling ISDF/SOP |
 | `16_numerical_hessian_from_gradient.py` | a vibrational analysis built by central-differencing the analytic gradient, cross-checked against pyscf's own analytic Hessian |
 | `17_spin_orbit_coupling.py` | <S1\|H_SO\|T1/T2> at both relaxed minima from `15`'s adiabatic gap (El-Sayed's rule), plus the Herzberg-Teller dV/dq scan over the ground-state modes that finds the promoting mode |
 | `18_periodic_slab_gw.py` | the continuum of `13` for a periodic **slab** — electrolyte above, metal electrode below |
@@ -39,8 +42,9 @@ either route's own error.
 `09` and `10` still use `-ri`. They print no DF-against-exact comparison, so the
 choice is invisible there, but it is the same trade. The library default stays
 `<basis>-ri` because the shipped ISDF radii are keyed on the auxiliary basis and
-`-jkfit` rows exist only for H and O at cc-pVDZ; changing the default would
-silently drop every other configuration back to an unoptimized grid.
+`-jkfit` rows exist only for H and O at cc-pVDZ; with `-jkfit` as the default,
+every other configuration would be a grid the table has no row for, which is
+refused unless its run-time optimization is declared (`11` declares it).
 
 ## Choosing a route
 
@@ -50,11 +54,12 @@ swaps in the low-scaling routes (`'imagfrequency'`, `'space-time'`), both of
 which require `df=True`; `df=False` gives the 4-center Casida reference. See
 `10_gw_routes.py`.
 
-**Excitation energies** → `solve_bse_isdf(mf, mol, nocc)`: a matrix-free
-Davidson BSE on a separable (ISDF) factorization, `qp='G0W0'`, so it runs its
-own GW and returns BSE@G0W0. It is ISDF whatever the mean field is; the dense
-A/B route is the reference, not the production path. See
-`11_bse_davidson_vs_dense.py`.
+**Excitation energies** → `solve_bse_isdf(mf, mol, nocc, numerics=...)`: a
+matrix-free Davidson BSE on a separable (ISDF) factorization, `qp='G0W0'`, so
+it runs its own GW and returns BSE@G0W0. The `Numerics` object names the
+interpolation grid (or pass `factors=`) and the number of roots. It is ISDF
+whatever the mean field is; the dense A/B route is the reference, not the
+production path. See `11_bse_davidson_vs_dense.py`.
 
 **Closed shell** → `ADCSolverRestricted` (spin-free). Add `B_aa=` for DF once the
 dense ERI stops fitting. **Open shell** → `ADCSolver` (spin-orbital).
@@ -77,26 +82,34 @@ only valid for the bare amplitude.
 01  IP = 12.225 eV   Z = 0.936
 02  IP = 12.226 eV   Z = 0.936   (DF)
 03  IP = 11.875 eV   Z = 0.929   (EN, spin-adapted)
+04  G0W0 IP = 12.159 eV
+05  IP = 12.493 (GW@BSE), 12.770 (GWGammaInf), 12.922 (PSD1), 12.636 (PSD2)
+    eV against EOM-IP-CCSD 12.637 eV
 06  IP =  8.965 eV   Z = 0.953   (UHF / spin-orbital)
-09  E(ISDF-SCF) = -76.02774739 Ha   G0W0 HOMO = -12.155 eV   (space-time)
-10  G0W0 HOMO = -12.159 eV on all three DF routes, -12.158 eV on space-time
-11  BSE@G0W0 = 8.492, 10.540, 10.966, 13.024 eV  (cc-pVTZ, cc-pVTZ-JKFIT)
-    all five routes within 2 meV: Davidson == dense exactly, ISDF-DF 1 meV,
-    DF-full 2 meV
-14  G0W0 HOMO = -9.754 eV   LUMO = 1.659 eV   BSE@G0W0 = 2.733, 6.158, 7.199 eV
-    (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4;
-    that tier is 27 meV from the exact tensor on the singlets, the tightest 1.6 meV)
-15  S1 vertical/emission/adiabatic = 4.518/3.546/4.125 eV (dense); Delta-E_ST
-    (adiabatic, S1-T1) = 0.805 eV; ISDF/SOP agrees to ~10 meV on S1 and ~1 meV
-    on Delta-E_ST (formaldehyde/cc-pVDZ, n->pi* S1 and T1)
+09  E(ISDF-SCF) = -76.02788684 Ha   G0W0 HOMO = -12.158 eV   (space-time)
+    BSE@G0W0 = 8.444, 10.511, 11.100 eV
+10  G0W0 HOMO = -12.159 eV on every route on the HF reference (Casida with
+    full ERIs and three-index, imaginary frequency, space-time), -12.158 eV
+    on space-time over the ISDF SCF
+11  BSE@G0W0 = 8.492, 10.543, 10.965, 13.026 eV  (DF; cc-pVTZ, cc-pVTZ-JKFIT)
+    all five routes within 3 meV: Davidson == dense to the printed digits,
+    ISDF-DF 2 meV, DF-full 2 meV
+14  G0W0 HOMO = -9.737 eV   LUMO = 1.688 eV   BSE@G0W0 = 2.748, 6.126, 7.194 eV
+    (formaldehyde, aug-SZV-MOLOPT-ae, 116 auxiliary functions at Delta-I 1e-4)
+15  vertical/emission S1 = 4.518/3.545 eV, T1 = 3.721/2.303 eV, Delta-E_ST
+    (adiabatic, S1-T1) = 0.862 eV (dense); ISDF/SOP agrees to 6-17 meV on
+    the vertical and emission energies and 2 meV on Delta-E_ST
+    (formaldehyde/cc-pVDZ, n->pi* S1 and T1)
 16  frequencies 1802.87, 3959.80, 4056.93 cm-1, exact against pyscf's own
     analytic Hessian (water/cc-pVDZ RHF)
-17  <S1|H_SO|T1> = 0.000 cm-1 at both R*_S1 and R*_T1 (n->pi*/n->pi*, same
-    configuration, vanishes by El-Sayed's rule); <S1|H_SO|T2> = 42.6 cm-1
+17  Delta-E_ST (adiabatic) = 0.852 eV; <S1|H_SO|T1> = 0.002 cm-1 at R*_S1
+    and 0.21 cm-1 at R*_T1 (n->pi*/n->pi*, same configuration, nearly
+    forbidden by El-Sayed's rule); <S1|H_SO|T2> = 42.7 and 40.6 cm-1
     (n->pi*/pi->pi*, different configuration); the Herzberg-Teller scan over
-    the 6 ground-state modes puts the largest |dV/dq| = 0.20 cm-1 at 1325
+    the 6 ground-state modes puts the largest |dV/dq| = 0.17 cm-1 at 1326
     cm-1, the out-of-plane wag -- the textbook promoting mode for this
-    channel -- against 0.00-0.06 cm-1 for the rest (formaldehyde/cc-pVDZ)
+    channel -- against 0.00-0.04 cm-1 for the rest (formaldehyde/aug-cc-pVDZ,
+    the dense BSE@GW route on Hartree-Fock)
 18  HOMO +0.309 eV / LUMO -0.427 eV  (H2 slab, water | metal electrode)
 19  adc2: S1 = 6.979 eV   T1 = 6.646 eV   E_ST = 0.333 eV
     adc3: S1 = 7.861 eV   T1 = 7.417 eV   E_ST = 0.444 eV

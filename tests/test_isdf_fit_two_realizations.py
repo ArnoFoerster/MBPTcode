@@ -29,12 +29,12 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base import separable_ri
-from src.Base.constants import FIT_REASSOCIATION_K, ISDF_FIT_REGULARIZATION
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import (atomic_grid, aux_metric_sqrt, fit_M_stable,
-                                   fit_M_streaming, molecular_points_covariant)
-from src.gradients.factor_chain import FrozenFactorization
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import FIT_REASSOCIATION_K, ISDF_FIT_REGULARIZATION
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import (atomic_grid, aux_metric_sqrt, fit_M_stable,
+                                                 fit_M_streaming, molecular_points_covariant)
+from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import pair_positions, product_pairs
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches

@@ -20,8 +20,8 @@ import warnings
 import numpy as np
 import pytest
 
-import src.gradients.conventions as conventions
-from src.Base.constants import CONVENTION_SPAN_MIN
+import src.gradients.gwbse.conventions as conventions
+from src.Base.numerics.constants import CONVENTION_SPAN_MIN
 from src.SingleReference.GW.qp_selection import AdaptivePartition
 from src.SingleReference.GW.sum_over_poles import (initial_poles,
                                                    pole_amplitudes,
@@ -29,9 +29,9 @@ from src.SingleReference.GW.sum_over_poles import (initial_poles,
                                                    qp_energy_sop,
                                                    subspace_hamiltonian,
                                                    subspace_residues)
-from src.gradients.conventions import ConventionsLost, FrozenConventions
-from src.gradients.sum_over_poles_adjoint import (subspace_hamiltonian_backward,
-                                                  subspace_residues_backward)
+from src.gradients.gwbse.conventions import ConventionsLost, FrozenConventions
+from src.gradients.gwbse.sum_over_poles_adjoint import (subspace_hamiltonian_backward,
+                                                        subspace_residues_backward)
 from tests.test_qp_hamiltonian import chain
 
 NORB, NOCC, NFREQ, NAUX = 12, 5, 20, 4

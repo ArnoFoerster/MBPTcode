@@ -43,7 +43,7 @@ from src.SingleReference.ADC.static_correction import (
     build_mp2_static_correction_restricted, build_mp3_static_correction_restricted,
 )
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri, get_two_electron_integrals_chemist, DFIntegrals,
 )
 from tests.generated_runtime import requires_runtime
@@ -148,7 +148,7 @@ def main():
     print(f"df=True on a non-DF mf raises ValueError: {'OK' if ok else 'FAIL'}")
 
     try:
-        ADCSolverRestricted(mf_dense, level='adc4')
+        ADCSolverRestricted(mf_dense, level='adc4', construction='twosector')
         ok = False
     except ValueError:
         ok = True

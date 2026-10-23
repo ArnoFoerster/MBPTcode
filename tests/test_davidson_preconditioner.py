@@ -42,18 +42,17 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (DAVIDSON_PRECONDITIONER,
-                                DAVIDSON_PRECONDITIONERS)
-from src.Base.numerics import Numerics
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
-                                     run_simulated)
+from src.Base.numerics.constants import (DAVIDSON_PRECONDITIONER,
+                                         DAVIDSON_PRECONDITIONERS)
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import contiguous_block, current_comm
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import unrefused_separable_factors
 from src.SingleReference.LinearResponse import block_actions, davidson
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_df_coefficients,
-                                                         solve_bse_isdf,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import (
+    isdf_bse_factors, isdf_df_coefficients, solve_bse_isdf)
 from src.SingleReference.LinearResponse.block_actions import (df_block_action,
                                                               isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -158,7 +157,7 @@ def test_the_default_is_screened():
     assert DAVIDSON_PRECONDITIONER == 'screened'
     assert set(DAVIDSON_PRECONDITIONERS) == {'bare', 'screened'}
     assert Numerics().bse.preconditioner == DAVIDSON_PRECONDITIONER
-    for fn in (davidson._run_davidson, davidson._davidson_root):
+    for fn in (davidson.run_davidson, davidson._davidson_root):
         default = inspect.signature(fn).parameters['preconditioner'].default
         assert default == DAVIDSON_PRECONDITIONER, fn.__name__
 
@@ -170,7 +169,7 @@ def test_the_bare_path_never_forms_the_screened_diagonal(systems):
     s = systems['water']
     act, diag = isdf_block_action(lr_of(s), s['nocc'], True, s['W_aux'],
                                   s['factors'])
-    ref = davidson._run_davidson(act, diag, 3, CONV_TOL, 100, None,
+    ref = davidson.run_davidson(act, diag, 3, CONV_TOL, 100, None,
                                  preconditioner='bare')
 
     def refused():
@@ -178,7 +177,7 @@ def test_the_bare_path_never_forms_the_screened_diagonal(systems):
 
     act.screened_diagonal = refused
     t = {}
-    got = davidson._run_davidson(act, diag, 3, CONV_TOL, 100, None, timings=t,
+    got = davidson.run_davidson(act, diag, 3, CONV_TOL, 100, None, timings=t,
                                  preconditioner='bare')
     # two solves of one problem: the same roots and vectors to a few ulp
     assert_same(got[0], ref[0], quantity='root', label='omega')
@@ -397,7 +396,7 @@ def test_an_action_without_the_diagonal_is_refused(systems):
         return act(z)
 
     with pytest.raises(ValueError, match='screened diagonal'):
-        davidson._run_davidson(plain, diag, 3, CONV_TOL, 100, None,
+        davidson.run_davidson(plain, diag, 3, CONV_TOL, 100, None,
                                preconditioner='screened')
 
 

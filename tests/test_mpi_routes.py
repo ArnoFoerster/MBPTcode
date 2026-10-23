@@ -45,7 +45,7 @@ Six standards:
             (tests/reduction_bounds.py)
   stated    a composed force or energy, whose inputs pass through the
             re-associated reductions, the Davidson and the fit's Gram solve:
-            a tolerance named in src/Base/constants.py and justified there by
+            a tolerance named in src/Base/numerics/constants.py and justified there by
             its mechanism (RANK_SPLIT_FORCE_TOL / RANK_SPLIT_ENERGY_TOL for
             the same calculation over ranks, FIT_REALIZATION_FORCE_TOL across
             two realizations of the fit), each check printing the fraction of
@@ -211,28 +211,28 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto, lib, scf
 
-from src.Base.numerics import Numerics, numerics_of
-from src.Base.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
-                                HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
-                                QP_GRAPHICAL_TOL, RANK_SPLIT_ENERGY_TOL,
-                                RANK_SPLIT_FORCE_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL,
-                                SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
+                                         HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
+                                         QP_GRAPHICAL_TOL, RANK_SPLIT_ENERGY_TOL,
+                                         RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import QPStates
-from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
-from src.Base.utils.mpi_grid import (SimulatedComm, broadcast,
-                                     contiguous_block, distributed,
-                                     grid_comm, lockstep_stats, mpi_map,
-                                     partition)
-from src.Base import separable_ri
-from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
-                                     whole_factor)
-from src.Base.utils.time_frequency import (COSINE_WT, TimeFrequencyGrid,
-                                           minimax_transform_weights,
-                                           sigma_fit_ranges)
+from src.Base.factorization.distributed_df import distributed_df_storage, distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.grids.grids import gauss_legendre_grid, minimax_time_grid
+from src.Base.utils.parallel.mpi_grid import (
+    broadcast, contiguous_block, distributed, grid_comm, lockstep_stats,
+    mpi_map, partition)
+from src.Base.utils.parallel.simulated_comm import SimulatedComm
+from src.Base.factorization import separable_ri
+from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
+                                                   whole_factor)
+from src.Base.utils.grids.time_frequency import (COSINE_WT, TimeFrequencyGrid,
+                                                 minimax_transform_weights,
+                                                 sigma_fit_ranges)
 from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screened_interaction_rows,
                                                    screening_frequency_grid,
@@ -240,14 +240,13 @@ from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screened_interaction_tau,
                                                    selfenergy_block)
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.Base.constants import DEFAULT_NPADE, QP_DEGENERACY_TOL
+from src.Base.numerics.constants import DEFAULT_NPADE, QP_DEGENERACY_TOL
 from src.SingleReference.GW.space_time import (_dyson_owned,
                                                separable_factors,
                                                solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse import space_time as ls_space_time
@@ -255,26 +254,27 @@ from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_frequency_rows, polarizability_projected_tau,
     polarizability_tiles, split_branches, static_screening_grid,
     static_screening_matrix, wave_items)
-from src.gradients import factor_chain
-from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain
+from src.gradients.rpa import factor_chain
+from src.gradients.gwbse.bse_isdf import bse_backward, bse_cache, interstate_backward
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
                                             product_pairs)
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.qp_space_time import (qp_gradient_space_time,
-                                         qp_set_gradient)
-from src.gradients.reaction_field_adjoint import static_grid, static_screening
-from src.gradients.space_time_adjoint import (polarizability_tau,
-                                              rpa_energy_and_adjoint,
-                                              selfenergy_block_backward,
-                                              selfenergy_diag,
-                                              selfenergy_diag_backward,
-                                              sigma_transforms)
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.qp_space_time import (qp_gradient_space_time,
+                                               qp_set_gradient)
+from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
+                                                  rpa_energy_and_adjoint,
+                                                  selfenergy_block_backward,
+                                                  selfenergy_diag_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
+from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, matches
 
 warnings.simplefilter('ignore')
@@ -1546,7 +1546,7 @@ def sliced_chain_routes(gate, mol):
         g, e, diags = surface.total_gradient(here, mf_here)           # context
         # the reference's rows, which live as long as its mean field
         ex = surface.excited
-        ex._forward(ex.mol0, ex.mf0)
+        ex.forward(ex.mol0, ex.mf0)
         out[tag] = (np.asarray(g), e, diags, ex)
     pyscf_threads_back(gate, threads)
     g_w, e_w, d_w, _ = out['whole']
@@ -1638,7 +1638,7 @@ def scan_assembly(chain, found, ledgers):
     npts = chain.M
     ngram = len(product_pairs(mol)[0])
     widths = {chain.mf0.mo_coeff.shape[1], mol.nao, chain.naux, npts,
-              int((separable_ri._ao_l_labels(mol) <= 2).sum()),
+              int((separable_ri.ao_l_labels(mol) <= 2).sum()),
               len(chain.layout[0]), ngram, ngram + chain.naux}
     assemble, branches = chain.nuclear_gradient, chain.row_fit_branches
 
@@ -1868,12 +1868,12 @@ def grid_adjoint_routes(gate, mol):
                  tuple(sorted((ex.naux, nocc, nocc)))}
         found = set()
         seeds = []
-        fold = ex._fold_to_nuclei
+        fold = ex.reverse.fold_to_nuclei
 
-        def probed(pieces, *seeds_in, fold=fold, ex=ex, three=three,
+        def probed(shared, *seeds_in, fold=fold, ex=ex, three=three,
                    found=found, seeds=seeds, **fold_kw):
             # what the reverse pass holds beside the seeds: chain and forward
-            found.update(a.shape for a in reachable((ex, pieces))[0]
+            found.update(a.shape for a in reachable((ex, shared))[0]
                          if tuple(sorted(a.shape)) in three
                          or (a.ndim == 2 and tuple(sorted(a.shape)) ==
                              tuple(sorted((ex.naux, nocc * (nmo - nocc))))))
@@ -1881,16 +1881,16 @@ def grid_adjoint_routes(gate, mol):
             if seeds and 'ref' in seeds[-1]:
                 # the same fold of the serial kernel's seeds, handed in whole;
                 # first, so that it reads the tape the probed fold may release
-                again = fold(pieces, *[np.array(a, copy=True)
+                again = fold(shared, *[np.array(a, copy=True)
                                        for a in seeds[-1]['ref']],
                              release_tape=False)
-            result = fold(pieces, *seeds_in, **fold_kw)
+            result = fold(shared, *seeds_in, **fold_kw)
             if again is not None:
                 seeds[-1]['refold'] = (np.asarray(result[0]),
                                        np.asarray(again[0]))
             return result
 
-        ex._fold_to_nuclei = probed
+        ex.reverse.fold_to_nuclei = probed
         if adjoint == 'grid':
             probe_grid_seeds(ex, seeds)
         else:
@@ -1995,19 +1995,19 @@ def probe_explicit_seeds(ex, log):
     """Wrap the default chain's Casida-level adjoint: compare its seeds with
     `bse_cache` and `bse_backward` run serially on the gathered factors; one
     record per call into `log`."""
-    seeds_of = ex._casida_seeds
+    seeds_of = ex.follower._casida_seeds
 
-    def probed(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        x, d, eq, w, no, _, xn, yn = ex._casida_args(pieces)
+    def probed(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        x, d, eq, w, no, _, xn, yn = casida_args(ex, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
         with distributed(None):
             cache = bse_cache(X, D, eq, w, no, **kw)
             ref = (bse_backward(n, X, D, eq, w, no, cache, xn, yn,
-                                **ex._tile_kw()) if m is None else
+                                **ex.quasiparticles._tile_kw()) if m is None else
                    interstate_backward(m, n, X, D, eq, w, no, cache, xn, yn,
-                                       **ex._tile_kw()))
+                                       **ex.quasiparticles._tile_kw()))
         # copies: the fold adds into X_bar and D_bar in place
         seeds = tuple(np.array(a, copy=True) for a in out)
         log.append(dict(seeds=seeds,
@@ -2016,7 +2016,7 @@ def probe_explicit_seeds(ex, log):
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex._casida_seeds = probed
+    ex.follower._casida_seeds = probed
 
 
 def probe_grid_seeds(ex, log):
@@ -2026,13 +2026,13 @@ def probe_grid_seeds(ex, log):
     makes, and compare its seeds with the same kernel run serially on the
     gathered factors, which the record keeps for the fold; one record per
     call into `log`."""
-    seeds_of = ex._casida_seeds
+    seeds_of = ex.follower._casida_seeds
     kernel = os.path.join(SRC, 'SingleReference', 'LinearResponse',
                           'isdf_bse_adjoint.py')
     boundary = 'adjoints_at_the_boundary'
 
-    def probed(pieces, n, m=None):
-        rows = ex._casida_args(pieces)[0]
+    def probed(shared, solution, n, m=None):
+        rows = shared.x_mo
         before = dict(rows.gathers)
         whole, entered = set(), []
 
@@ -2061,12 +2061,12 @@ def probe_grid_seeds(ex, log):
 
         sys.settrace(tracer)
         try:
-            out = seeds_of(pieces, n, m)
+            out = seeds_of(shared, solution, n, m)
         finally:
             sys.settrace(None)
         grew = {k: c - before.get(k, 0) for k, c in rows.gathers.items()
                 if c != before.get(k, 0)}
-        x, d, eq, w, no, _, xn, yn = ex._casida_args(pieces)
+        x, d, eq, w, no, _, xn, yn = casida_args(ex, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
         with distributed(None):
@@ -2084,7 +2084,7 @@ def probe_grid_seeds(ex, log):
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex._casida_seeds = probed
+    ex.follower._casida_seeds = probed
 
 
 def lockstep_counters(gate, stats):
@@ -2163,7 +2163,7 @@ def hessian_layout_routes(gate):
     layouts = []
 
     def factory(m):
-        mf = isdf_jk(scf.RHF(m), auxbasis='cc-pvdz-ri', counts=counts,
+        mf = isdf_jk_with_force(scf.RHF(m), auxbasis='cc-pvdz-ri', counts=counts,
                      n_start=n_start)
         mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
         mf.kernel()

@@ -26,10 +26,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.polarizable_sites import (THOLE_FACTOR,
-                                        dipole_interaction_matrix,
-                                        induced_dipoles, polarization_energy,
-                                        response_matrix)
+from src.environments.polarizable_sites import (THOLE_FACTOR,
+                                                dipole_interaction_matrix,
+                                                induced_dipoles, polarization_energy,
+                                                response_matrix)
 
 ALPHA = 5.0          # Bohr^3, near a heavy-atom polarizability
 FAR = 400.0          # Bohr; T falls as r^-3, so this is ~1e-8 of alpha^-1

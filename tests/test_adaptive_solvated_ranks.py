@@ -23,13 +23,14 @@ import numpy as np
 import pytest
 from pyscf import gto, lib
 
-from src.Base.numerics import Numerics
-from src.Base.constants import RANK_SPLIT_ENERGY_TOL
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import RANK_SPLIT_ENERGY_TOL
 from src.Base.declaration import QPStates
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.excitations import adaptive_check
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit

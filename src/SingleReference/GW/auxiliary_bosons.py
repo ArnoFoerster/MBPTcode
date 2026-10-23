@@ -32,7 +32,7 @@ Poles and amplitudes come out in the sum-over-poles layout -- (Om_nu, |W^nu_pq|^
 """
 import numpy as np
 
-from src.Base.constants import AB_RCOND
+from src.Base.numerics.constants import AB_RCOND
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 
 

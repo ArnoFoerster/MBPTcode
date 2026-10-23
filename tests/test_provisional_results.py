@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.properties.rates import fc_weighted_dos
+from src.properties.franck_condon import fc_weighted_dos
 from src.properties.spin_orbit import soc_operator_mo
 
 

@@ -11,40 +11,28 @@ scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
 the sliced factors and the row-distributed fit in the gas phase and in a
 continuum alike. The factors sit on `numerics.isdf.level`.
 
-The chain reads its numerics through `SurfaceSpec.numerics` (the flat names
-of `src.Base.numerics.FLAT_FIELDS`), from which `excited_kwargs` rebuilds the
-chain's `Numerics`. A declared choice the flat names cannot carry would be
-dropped there without a word, so `chain_spec` refuses it
-(`refuse_unreachable`).
+The chain stands on the declaration's one `Numerics`, which `chain_spec`
+hands to `SurfaceSpec.numerics` whole; `potential_energy_surface` refuses a
+declared choice the chain does not read.
 """
 import warnings
-from dataclasses import fields
 
 from pyscf import dft
 from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.constants import SCF_NEWTON_FINISH_FROM, SOLVENT_RI_RESIDUAL_MAX
+from src.Base.numerics.constants import SCF_NEWTON_FINISH_FROM, SOLVENT_RI_RESIDUAL_MAX
 from src.Base.declaration import GroundState
-from src.Base.geometry import elements_of
-from src.Base.isdf_jk import canonical_span_size, isdf_jk, span_confined
-from src.Base.numerics import FLAT_FIELDS, SECTIONS, Numerics, field_of
-from src.Base.pyscf_interface import occupied_count
-from src.Base.scf_convergence import SCFHistory, newton_finished, warm_started
-from src.Base.separable_ri import grid_identity, resolve_isdf_grid
-from src.Base.solvent_screening import SolventScreening
-from src.Base.utils.mpi_grid import n_ranks
-from src.Base.utils.threads import blas_single_threaded
+from src.Base.geometry.geometry import elements_of
+from src.Base.factorization.isdf_jk import canonical_span_size, span_confined
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.pyscf.scf_convergence import SCFHistory, newton_finished, warm_started
+from src.Base.factorization.separable_ri import grid_identity, resolve_isdf_grid
+from src.environments.solvent_screening import SolventScreening
+from src.Base.utils.parallel.mpi_grid import n_ranks
+from src.Base.utils.parallel.threads import blas_single_threaded
 from src.properties.excitations import SurfaceSpec
-
-#: The flat settings the production chain always names, whatever their value.
-ALWAYS_NAMED = ('grid_accuracy', 'bse_adjoint', 'nroots', 'sliced', 'fit')
-#: Flat names the spec carries as axes (residues, solver, quasiparticle set),
-#: not as numerics.
-SPEC_AXES = ('qp_window', 'qp_select', 'residue_route', 'solver', 'scissor')
-#: The sections this package reads itself rather than through the chain.
-OWN_SECTIONS = ('scf', 'span')
-
 
 # -------------------------------------------------------------- molecules
 def factor_auxbasis(mol):
@@ -113,57 +101,19 @@ def span_choice(declaration, mol):
 
 
 # ----------------------------------------------------------------- chain
-def flat_numerics(numerics):
-    """{flat name: value} of `numerics` the chain reads (FLAT_FIELDS): the
-    ALWAYS_NAMED ones and every other whose value is not the default's, so a
-    record of the default chain names what it always did."""
-    default = Numerics()
-    out = {}
-    for name, where in FLAT_FIELDS.items():
-        if name in SPEC_AXES:
-            continue
-        value = field_of(numerics, where)
-        if name in ALWAYS_NAMED or value != field_of(default, where):
-            out[name] = value
-    return out
-
-
-def refuse_unreachable(numerics):
-    """Refuse a declared choice the chain cannot read: a field of a section
-    the chain reads (all but OWN_SECTIONS) that has no flat name and is not
-    its default. It would be dropped where the chain rebuilds its numerics,
-    and the run would compute another chain than the one declared."""
-    flat = {where for where in FLAT_FIELDS.values()}
-    default = Numerics()
-    dropped = []
-    for section in SECTIONS:
-        if section in OWN_SECTIONS:
-            continue
-        for f in fields(getattr(numerics, section)):
-            where = f'{section}.{f.name}'
-            if where in flat:
-                continue
-            if field_of(numerics, where) != field_of(default, where):
-                dropped.append(where)
-    if dropped:
-        raise ValueError(f'numerics {dropped} cannot reach the chain (no flat '
-                         f'setting carries them): declare them where the chain '
-                         f'reads them, or leave them at their defaults')
-
-
 def chain_spec(declaration, environment):
     """The production chain of `declaration` in `environment` as one
     `SurfaceSpec`: E_0 the declared ground state on the reference functional,
     space-time GW with the declared residues (`numerics.qp.residue_route`) on
     the declared quasiparticle set, the ISDF Davidson and its adjoint, the
-    factors on the declared level."""
+    factors on the declared level, all on the declaration's one
+    `Numerics`."""
     numerics = declaration.numerics
-    refuse_unreachable(numerics)
     return SurfaceSpec(GroundState(declaration.ground, declaration.reference),
                        environment=environment, chi0='space-time',
                        residues=numerics.qp.residue_route, solver='davidson',
                        factorization='isdf', qp_states=declaration.qp_states,
-                       numerics=flat_numerics(numerics))
+                       numerics=numerics)
 
 
 # ------------------------------------------------------------ mean field
@@ -180,7 +130,8 @@ class SCFNotConverged(RuntimeWarning):
 
 def mean_field_factory(reference, numerics, max_memory, histories, finish,
                        warm_start, span, surface_route):
-    """An SCF factory mol -> mf: `reference` Kohn-Sham, its exchange ISDF-K
+    """An SCF factory mol -> mf: `reference` Kohn-Sham on the XC grid
+    `numerics.scf.xc_grid`, its exchange ISDF-K
     on `numerics.scf.grid_level` (route 'isdf') or J and K density-fitted
     (route 'df'), converged to `numerics.scf` (conv_tol, conv_tol_grad,
     max_cycle); built and NOT run under ranks, where the surface converges it
@@ -206,6 +157,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
 
     def build(mol):
         mf = dft.RKS(mol, xc=reference)
+        mf.grids.level = scf.xc_grid
         mf.max_memory = max_memory
         if route == 'df':
             mf = mf.density_fit(
@@ -214,7 +166,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
             counts, n_start = resolve_isdf_grid(scf.grid_level, str(mol.basis),
                                                 elements_of(mol),
                                                 auxbasis=factor_auxbasis(mol))
-            mf = isdf_jk(mf, auxbasis=factor_auxbasis(mol), counts=counts,
+            mf = isdf_jk_with_force(mf, auxbasis=factor_auxbasis(mol), counts=counts,
                          n_start=n_start)
         mf.conv_tol, mf.conv_tol_grad = scf.conv_tol, scf.conv_tol_grad
         mf.max_cycle = scf.max_cycle

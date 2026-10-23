@@ -73,11 +73,10 @@ import numpy as np
 from pyscf.data.elements import chemcore
 from scipy.interpolate import CubicSpline
 
-from src.Base.constants import (HARTREE_TO_EV, OUTSIDE_CURVE_BIN_EV,
-                                OUTSIDE_CURVE_OVERSHOOT_EV,
-                                QP_WINDOW_Z_MIN)
+from src.Base.numerics.constants import (HARTREE_TO_EV, OUTSIDE_CURVE_BIN_EV,
+                                         OUTSIDE_CURVE_OVERSHOOT_EV,
+                                         QP_WINDOW_Z_MIN)
 from src.Base.declaration import QPStates
-from src.SingleReference.GW.real_screening import ov_energies
 from src.SingleReference.GW.sum_over_poles import compressible, pole_condition
 from src.Solvers.qp_equation import quasiparticle_weight
 
@@ -211,11 +210,6 @@ def is_quasiparticle_root(z):
     No tolerance: the bounds are those of the definition.
     """
     return quasiparticle_weight(z, 0.0)
-
-
-def particle_hole_gap(eps, nocc):
-    """E_g = min(eps_a - eps_i), the threshold `compressible` tests against."""
-    return float(ov_energies(eps, nocc).min())
 
 
 def frontier_qp_states(eps, nocc, half_width, degeneracy_tol):

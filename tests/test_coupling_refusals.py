@@ -16,11 +16,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import COUPLING_GAP_MIN
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling,
-                                               configuration_coupling,
-                                               evaluated_coupling)
+from src.Base.numerics.constants import COUPLING_GAP_MIN
+from src.gradients.gwbse.state_following import CasidaSolution
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling,
+                                                     configuration_coupling,
+                                                     evaluated_coupling)
 from tests.reference_scf import rhf_df_jkfit
 
 S0, S1 = ('singlet', 0), ('singlet', 1)
@@ -52,10 +53,16 @@ class StubChain:
     def require_scf_quality(self, mf, where):
         return []
 
-    def _forward(self, mol, mf):
-        return np.zeros(2), {10: np.zeros((4, 2)), 11: np.zeros((4, 2))}
+    def forward(self, mol, mf):
+        return None, CasidaSolution(np.zeros(2), np.zeros((4, 2)),
+                                    np.zeros((4, 2)), {})
 
-    def _interstate_gradient(self, pieces, om, m, n):
+    @property
+    def reverse(self):
+        """The stub is its own reverse pass (`ExcitedStateChain.reverse`)."""
+        return self
+
+    def interstate_gradient_of(self, shared, solution, m, n):
         return np.zeros((3, 3)), {'gap': self.gap}
 
 

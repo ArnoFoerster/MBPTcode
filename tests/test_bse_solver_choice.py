@@ -16,10 +16,10 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import BSE_DENSE_MAX_GB, BSE_DENSE_MAX_NOV
-from src.Base.numerics import Numerics
-from src.SingleReference.LinearResponse import bse as bse_module
-from src.SingleReference.LinearResponse.bse import (_check_route_kwargs,
+from src.Base.numerics.constants import BSE_DENSE_MAX_GB, BSE_DENSE_MAX_NOV
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.BSE import solve as bse_module
+from src.SingleReference.BSE.solve import (_check_route_kwargs,
                                                     solve_bse, solver_choice)
 from tests.pins import assert_same
 

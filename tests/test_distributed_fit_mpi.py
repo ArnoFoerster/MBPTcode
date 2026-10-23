@@ -51,20 +51,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import numpy as np
 from pyscf import df, gto, scf
 
-from src.Base import separable_ri
-from src.Base.constants import (FIT_CHOLESKY_BLOCK,
-                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
-from src.Base.numerics import Numerics
-from src.Base.separable_ri import aux_metric_sqrt, fit_M_streaming
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import distributed, grid_comm, partition
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+                                         FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_streaming
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, partition
 from src.SingleReference.GW.space_time import (_row_factors,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (_residual_floor,
-                                                         isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.LinearResponse.davidson import _residual_floor
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
@@ -227,7 +226,7 @@ def rows_only(gate, part, mol, nao, naux):
                f"{fit['FD_rows']} of {npts * naux * 8} B")
     # water is one shell block, every pair kept, evaluated by rank 0 in one
     # call over every nu shell
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     want = 2 * nao * n2 * naux * 8 if gate.rank == 0 else 0
     gate.check(fit['shell_block'] == want, 'the shell block [context]: its '
                'kept pairs\' integrals and one call no larger, on the rank '

@@ -1,0 +1,26 @@
+import numpy as np
+
+
+def get_occ_virt_indices(eps, nocc):
+    """Split an orbital-energy array into occ = [0, nocc), virt = [nocc, norb) index arrays."""
+    norb = len(eps)
+    return np.arange(nocc), np.arange(nocc, norb)
+
+
+def particle_hole_window(eps, nocc):
+    """(gap, span, mu) of one spectrum: the smallest and the largest
+    particle-hole energy eps_a - eps_i, and the mid-gap chemical potential
+    (eps_HOMO + eps_LUMO) / 2, HOMO and LUMO the highest occupied and the
+    lowest virtual level whatever their order in `eps`."""
+    eps = np.asarray(eps, float)
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    homo, lumo = eps[occ].max(), eps[virt].min()
+    return lumo - homo, eps[virt].max() - eps[occ].min(), 0.5 * (homo + lumo)
+
+
+def transition_range(spectra, noccs):
+    """(smallest, largest) particle-hole energy eps_a - eps_i over every spin
+    channel: the range a screening built from all of them spans."""
+    windows = [particle_hole_window(eps, nocc)
+               for eps, nocc in zip(spectra, noccs)]
+    return min(w[0] for w in windows), max(w[1] for w in windows)

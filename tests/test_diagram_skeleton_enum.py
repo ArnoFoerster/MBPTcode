@@ -25,14 +25,14 @@ from functools import lru_cache
 import numpy as np
 import pytest
 
-from src.Base.pdaggerq_interface import pdaggerq_available
+from src.CodeGeneration.pdaggerq_interface import pdaggerq_available
 
 needs_pdaggerq = pytest.mark.skipif(not pdaggerq_available(),
                                     reason='the pdaggerq stream is optional')
 
 from src.CodeGeneration.diagrammatic import exact_oracle as EO
 from src.CodeGeneration.diagrammatic.goldstone import (
-    _BLOCKS, BlockEvaluator, build_skeletons)
+    BLOCKS, BlockEvaluator, build_skeletons)
 from src.CodeGeneration.diagrammatic.skeleton_enum import (
     _canonical, arrangement_parity, enumerate_skeletons)
 
@@ -68,7 +68,7 @@ def _n_equiv_pairs(skel):
 @needs_pdaggerq
 @pytest.mark.parametrize('order', ORDERS)
 def test_coefficient_law_on_stream(order):
-    for block in _BLOCKS:
+    for block in BLOCKS:
         skels, _ = build_skeletons(order, block)
         sigma = 1.0 if block[1] == 'v' else -1.0
         classes = defaultdict(list)
@@ -145,7 +145,7 @@ def test_class_sets_and_fields(order):
     eps, g, nocc = _h4()
     ev = BlockEvaluator(eps, g, nocc)
     oms = (0.41 + 0.77j, -1.13 + 0.6j)
-    for block in _BLOCKS:
+    for block in BLOCKS:
         stream, _ = build_skeletons(order, block)
         enum = enumerate_skeletons(order, block)
         assert ({_canon_of_skel(s) for s in enum}

@@ -30,13 +30,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment, dresses_interaction
-from src.Base.solvent_screening import (SolventScreening,
-                                        detach_solvent_screening)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.environment import dresses_interaction
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import (SolventScreening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.reaction_field import (
     bare_gauge_transform, environment_quasiparticle_shift)
-from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+from src.SingleReference.BSE.solve import isdf_bse_factors
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
 

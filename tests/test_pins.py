@@ -7,12 +7,12 @@ import pathlib
 import numpy as np
 import pytest
 
-from src.Base.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
-                                PIN_CROSS_BLAS_CONTINUED_BAR,
-                                PIN_CROSS_BLAS_GRADIENT_BAR,
-                                PIN_CROSS_BLAS_ROOT_BAR,
-                                PIN_CROSS_BLAS_VECTOR_BAR,
-                                PIN_DAVIDSON_ROOT_FACTOR, PIN_SAME_ULPS)
+from src.Base.numerics.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
+                                         PIN_CROSS_BLAS_CONTINUED_BAR,
+                                         PIN_CROSS_BLAS_GRADIENT_BAR,
+                                         PIN_CROSS_BLAS_ROOT_BAR,
+                                         PIN_CROSS_BLAS_VECTOR_BAR,
+                                         PIN_DAVIDSON_ROOT_FACTOR, PIN_SAME_ULPS)
 from tests.pins import (PIN_CROSS_BLAS_BARS, align_signs, assert_pin,
                         assert_within_class, blas_identity, class_bar,
                         davidson_root_bar, matches, recorded_blas, same_bar)

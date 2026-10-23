@@ -69,12 +69,12 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, dft, gto
 
-import src.Base.separable_ri as separable_ri
-from src.Base.constants import BLAS_WRAP_MIN_THREADS
-from src.Base.separable_ri import (atomic_grid, build_separable_ri,
-                                   molecular_points_covariant)
-from src.Base.utils import threads
-from src.Base.utils.threads import blas_single_threaded, blas_threads
+import src.Base.factorization.separable_ri as separable_ri
+from src.Base.numerics.constants import BLAS_WRAP_MIN_THREADS
+from src.Base.factorization.separable_ri import (atomic_grid, build_separable_ri,
+                                                 molecular_points_covariant)
+from src.Base.utils.parallel import threads
+from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
 import src.SingleReference.GW.qp_solve as qp_solve
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from tests.isdf_test_grid import g1
@@ -102,6 +102,14 @@ FACTOR_TOL = 1e-12
 _HAS_THREADPOOLCTL = threads.threadpool_limits is not None
 _needs_threadpoolctl = pytest.mark.skipif(
     not _HAS_THREADPOOLCTL, reason='threadpoolctl is a soft dependency')
+
+
+def built(mf, mol):
+    """The static term from a fresh build: the operator the mean field
+    holds (`qp_solve.mean_field_static_operator`) dropped first, so the
+    thread policy under test is the one the build runs under."""
+    qp_solve._STATIC_OPERATORS.clear()
+    return static_exchange_mean_field_matrix(mf, mol)
 
 
 @pytest.fixture(scope='module')
@@ -257,11 +265,10 @@ def test_the_static_term_is_bitwise_the_outside_limited_build(water, monkeypatch
     the reference is the same build under the same limit, set from OUTSIDE.
     """
     monkeypatch.setattr(threads, 'blas_threads', lambda: 16)
-    inside = static_exchange_mean_field_matrix(water['mf'], water['mol'])
+    inside = built(water['mf'], water['mol'])
     monkeypatch.undo()
     with threads.threadpool_limits(limits=1, user_api='blas'):
-        reference = static_exchange_mean_field_matrix(water['mf'],
-                                                      water['mol'])
+        reference = built(water['mf'], water['mol'])
     assert_same(inside, reference, quantity='root',
                 label='the wrap moved the static term')
 
@@ -289,12 +296,12 @@ def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
         return seen[-1]
 
     monkeypatch.setattr(qp_solve, 'blas_single_threaded', probe)
-    wrapped = static_exchange_mean_field_matrix(water['mf'], water['mol'])
+    wrapped = built(water['mf'], water['mol'])
     assert seen and all(isinstance(c, contextlib.nullcontext) for c in seen), (
         'the build armed the wrap below the threshold')
     monkeypatch.setattr(qp_solve, 'blas_single_threaded',
                         contextlib.nullcontext)
-    plain = static_exchange_mean_field_matrix(water['mf'], water['mol'])
+    plain = built(water['mf'], water['mol'])
     assert_same(wrapped, plain, quantity='root', label='below the threshold')
 
 

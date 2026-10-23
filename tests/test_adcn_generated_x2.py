@@ -41,8 +41,9 @@ x2r_df = lazy('adc4_x2_k1k1_blocks_restricted_df')
 x2ap = lazy('adc4_x2_k1k1_apply_restricted_blocks')
 x2ap_df = lazy('adc4_x2_k1k1_apply_restricted_df_blocks')
 from src.SingleReference.ADC.precursor_classes import class_configs
-from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver, _to_l
-from src.Base.pyscf_interface import (
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import to_l
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_integrals,
     get_antisymmetrized_spin_block_eri, DFIntegrals)
 from tests.test_isr_assembly import _build
@@ -146,7 +147,7 @@ def test_x2_matches_oracle(name):
     # the f[o,v]-carrying structure contributes nothing for canonical HF
     mpn = MPnDensityDriver(eps, g, nocc)
     amps = mpn.compute_order_amplitudes_general(2)
-    l2f = x2so.x2_2h1p_2p1h_l2f(**gen._args(), l2=_to_l(amps[(2, 2)], 2))
+    l2f = x2so.x2_2h1p_2p1h_l2f(**gen._args(), l2=to_l(amps[(2, 2)], 2))
     assert float(np.max(np.abs(l2f))) <= 1e-13, float(np.max(np.abs(l2f)))
 
 

@@ -19,10 +19,10 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.constants import HARTREE_TO_EV, ISDF_GRADIENT_FLOOR
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.state_manifold import (StateManifold, driven_chain,
-                                          own_root_attribute, root_attribute)
+from src.Base.numerics.constants import HARTREE_TO_EV, ISDF_GRADIENT_FLOOR
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.state_manifold import (StateManifold, driven_chain,
+                                                own_root_attribute, root_attribute)
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight_default_cycles
@@ -44,9 +44,9 @@ def test_a_chain_with_no_root_attribute_is_refused():
         root_attribute(Nothing())
 
 
-def test_an_ambiguous_chain_is_refused_rather_than_ordered():
-    """A chain carrying both names has two meanings and the manifold would drive
-    whichever came first in the candidate list."""
+def test_an_undeclared_chain_is_refused_whatever_it_carries():
+    """A chain carrying both names, or one, is not asked which it means: an
+    undeclared root attribute is refused."""
     class Both:
         state, root = 0, 0
     with pytest.raises(AttributeError, match='ROOT_ATTR'):
@@ -70,14 +70,13 @@ def test_a_declaration_that_does_not_exist_is_refused():
 def bse(mol):
     """One mean field shared, so the manifold's saving is the forward pass and
     not an SCF it avoided."""
-    from src.gradients.excited_state import ExcitedStateChain
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
     return ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=0, mf=rhf_tight_default_cycles(mol), numerics=g1_numerics(mol))
 
 
-def test_the_bse_chains_root_attribute_is_inferred(bse):
-    """`ExcitedStateChain` declares no ROOT_ATTR and carries only `state`, so
-    inference resolves it. If it ever grows a second name this fails loudly
-    rather than driving the wrong one."""
+def test_the_bse_chains_root_attribute_is_declared(bse):
+    """`ExcitedStateChain` declares ROOT_ATTR = 'state'; nothing is inferred
+    from which attributes an instance happens to carry."""
     assert root_attribute(bse) == 'state'
 
 
@@ -87,20 +86,20 @@ def test_bse_roots_off_one_pass_equal_independent_surfaces(bse, mol):
     Bitwise, not to a tolerance -- the roots come from the SAME Casida
     solution, so any difference at all would mean the pin leaked.
     """
-    from src.gradients.excited_state import ExcitedStateChain
-    calls, orig = {'n': 0}, type(bse)._shared_forward
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
+    calls, orig = {'n': 0}, type(bse).shared_forward
 
     def counted(self, m, f):
         calls['n'] += 1
         return orig(self, m, f)
 
-    type(bse)._shared_forward = counted
+    type(bse).shared_forward = counted
     try:
         man = StateManifold(bse, states=(0, 1, 2))
         got = man.energies()
         assert calls['n'] == 1, 'three roots must cost ONE forward pass'
     finally:
-        type(bse)._shared_forward = orig
+        type(bse).shared_forward = orig
 
     for n in (0, 1, 2):
         ref = ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=n,
@@ -112,7 +111,7 @@ def test_bse_roots_off_one_pass_equal_independent_surfaces(bse, mol):
 
 
 def test_bse_gradients_off_one_pass_equal_independent_surfaces(bse, mol):
-    from src.gradients.excited_state import ExcitedStateChain
+    from src.gradients.gwbse.excited_state import ExcitedStateChain
     man = StateManifold(bse, states=(0, 1))
     got = man.gradients()
     for n in (0, 1):
@@ -172,18 +171,18 @@ def test_composed_energies_come_off_one_forward_pass(composed, root1_reference):
     """Counted on the EXCITED half, which is where the pass is shared;
     sharing it on the outer object would leave one pass per root."""
     e_ref, _ = root1_reference
-    calls, orig = {'n': 0}, type(composed.excited)._shared_forward
+    calls, orig = {'n': 0}, type(composed.excited).shared_forward
 
     def counted(self, m, f):
         calls['n'] += 1
         return orig(self, m, f)
 
-    type(composed.excited)._shared_forward = counted
+    type(composed.excited).shared_forward = counted
     try:
         got = StateManifold(composed, states=(0, 1)).energies()
         assert calls['n'] == 1, 'two roots must cost ONE forward pass'
     finally:
-        type(composed.excited)._shared_forward = orig
+        type(composed.excited).shared_forward = orig
     assert got[1] == pytest.approx(e_ref, abs=1e-12)
     assert got[0] < got[1]
 

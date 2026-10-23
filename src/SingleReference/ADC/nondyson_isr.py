@@ -148,7 +148,7 @@ class NonDysonISR:
         return H, S
 
     @staticmethod
-    def _top_order(n, k_i, k_j, extra):
+    def top_order(n, k_i, k_j, extra):
         """Order through which block (k_i, k_j) is carried at ADC(n): the
         manifold rule n - k_i - k_j, raised by `extra` = {(k_i,k_j): order}
         (ADC(2)-x carries the (1,1) block through first order)."""
@@ -173,7 +173,7 @@ class NonDysonISR:
         for i, k_i in enumerate(cls):
             for k_j in cls[i:]:
                 Hs, Ss = {}, {}
-                for m in range(0, self._top_order(n, k_i, k_j, extra) + 1):
+                for m in range(0, self.top_order(n, k_i, k_j, extra) + 1):
                     Hs[m], Ss[m] = self.raw_block(k_i, k_j, m, strict)
                 for m in Hs:                      # <E^dag (H - E0) E>: subtract the E0 series
                     for c in range(0, m + 1):
@@ -206,7 +206,7 @@ class NonDysonISR:
         M = [np.zeros((off, off)) for _ in range(n + 1)]
         for k_i in cls:
             for k_j in cls:
-                top = self._top_order(n, k_i, k_j, extra)
+                top = self.top_order(n, k_i, k_j, extra)
                 for m, A in blocks[(k_i, k_j)].items():
                     if m <= top and m <= n:
                         M[m][offs[k_i]:offs[k_i] + dims[k_i], offs[k_j]:offs[k_j] + dims[k_j]] = A

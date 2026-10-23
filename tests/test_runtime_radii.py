@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-import src.Base.separable_ri as sri
+import src.Base.factorization.separable_ri as sri
 from tests.isdf_test_grid import g1
 
 #: The validated G1 counts at cc-pVDZ, the rows the lookups read.
