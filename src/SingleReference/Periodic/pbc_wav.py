@@ -1,5 +1,7 @@
 """W-av: mini-Brillouin-zone averaging of the interaction.
 
+No driver calls this module yet; its tests are its only users.
+
 `pbc_self_energy.q_grid` returns a uniform momentum grid with equal weights and
 `sigma_c_diag` sums over it directly. For a three-dimensional semiconductor
 that is defensible. For a metallic slab, where the integrand carries a sqrt(q)

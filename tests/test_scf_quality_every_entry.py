@@ -24,7 +24,7 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.reference_mean_field import check_scf_quality, scf_force_tol
 from src.gradients.gwbse.state_manifold import StateEvaluation, StateManifold
-from src.properties.spin_vibronic import evaluated_coupling
+from src.gradients.gwbse.derivative_coupling import evaluated_coupling
 from tests.isdf_test_grid import g1_numerics
 
 pytestmark = pytest.mark.filterwarnings('ignore::RuntimeWarning')

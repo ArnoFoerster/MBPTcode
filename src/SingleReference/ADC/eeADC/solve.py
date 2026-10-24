@@ -42,7 +42,8 @@ state's slow polarization frozen (vertical), or at eps_static (equilibrium);
 the LR term stays at eps_inf either way. Triplets, which have no LR term,
 take their whole response to the excitation from it.
 """
-from src.Base.numerics.constants import EE_ADC_CONV_TOL, EE_RI_TILE_GB
+from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_ADC_DENSE_LIMIT,
+                                         EE_FOLD_DENSE_LIMIT, EE_RI_TILE_GB)
 from src.SingleReference.ADC.eeADC import ee_driver as _drv
 from src.SingleReference.ADC.eeADC import ee_state_specific
 from src.SingleReference.ADC.eeADC.ee_driver import EEResult  # noqa: F401  (exported)
@@ -72,8 +73,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     an Ms = 0 triplet. It labels the roots of a spin=None solve.
 
     dense_limit: configurations below which the supermatrix is built and
-    diagonalized instead of iterated on (see ee_driver.DENSE_LIMIT, the default; with
-    fold=True the singles channel's size, default ee_driver.FOLD_DENSE_LIMIT, since a
+    diagonalized instead of iterated on (default EE_ADC_DENSE_LIMIT; with
+    fold=True the singles channel's size, default EE_FOLD_DENSE_LIMIT, since a
     dense A_eff costs one product per configuration at every Newton step).
     Exposed so a test can force the iterative route onto a system small
     enough to also solve densely -- which is the only way to compare the two.
@@ -135,7 +136,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if return_fold and not fold:
         raise ValueError('return_fold needs fold=True')
     if dense_limit is None:
-        dense_limit = _drv.FOLD_DENSE_LIMIT if fold else _drv.DENSE_LIMIT
+        dense_limit = EE_FOLD_DENSE_LIMIT if fold else EE_ADC_DENSE_LIMIT
     env = _drv.reaction_field_environment(mf, mol, environment, route)
     if ss_density not in _drv.SS_DENSITIES:
         raise ValueError(f'ss_density={ss_density!r}; expected one of '

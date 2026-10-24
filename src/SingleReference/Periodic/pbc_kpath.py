@@ -1,5 +1,7 @@
 """Band paths and Fourier interpolation of k-dependent quantities.
 
+No driver calls this module yet; its tests are its only users.
+
 A GW band structure is not computed on a path directly: the self-energy needs
 a regular mesh (the q-sum runs over it), while a plot needs a dense line
 through high-symmetry points. The standard resolution is to compute the

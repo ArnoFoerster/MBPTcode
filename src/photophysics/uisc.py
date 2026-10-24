@@ -65,10 +65,9 @@ from src.photophysics.rate_models import RateRefused, aligned_minima
 from src.photophysics.records import StageRefused, log
 from src.photophysics import rates
 from src.properties import franck_condon
-from src.properties.spin_orbit import (interstate_vectors, slope_from_squares,
+from src.properties.spin_orbit import (slope_from_squares, soc_vectors,
                                        soc_operator_mo)
 from src.gradients.state_identity import align_roots, transported_overlap
-from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from src.gradients.surface import lockstep_geometry
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.vibronic import displace_along_mode
@@ -115,16 +114,6 @@ VIB_KEYS = ('modes', 'omega', 'dv_dq_isc', 'dv_dq_risc', 'v0_isc', 'v0_risc',
 
 
 # ---------------------------------------------------------- the electronics
-def t_vectors(h_mo, nocc, singlet, triplet):
-    """(n_s, n_t, 3): T_eta of every singlet-triplet root pair, the vector
-    whose norm is the spin-orbit coupling. `singlet` and `triplet` are the
-    solver's (omega, X, Y) triples; Y may be None (Tamm-Dancoff)."""
-    _, x_s, y_s = singlet
-    _, x_t, y_t = triplet
-    return interstate_vectors(h_mo, nocc, x_s, y_s, x_t, y_t) \
-        * EXCITED_SPIN_FACTOR
-
-
 def follow(reference_at, reference, displaced_at, displaced):
     """(order, phase, cosine) matching the roots of `displaced` to those of
     `reference`, both (omega, X, Y) triples solved on the orbitals of
@@ -163,7 +152,8 @@ def chain_at(run, centre, record):
 def solve_at(run, chain_, mol):
     """(singlet, triplet, T, at) at the geometry `mol` on `chain_`: both
     manifolds as (omega, X, Y) triples from ONE quasiparticle set and one W,
-    `t_vectors` of them, and the (mol, mo_coeff, nocc) they were solved on,
+    the spin-orbit vectors of every pair (`spin_orbit.soc_vectors`,
+    (n_s, n_t, 3)), and the (mol, mo_coeff, nocc) they were solved on,
     which `follow` matches them by. The spin-orbit operator is the mean-field one
     of the spin-orbit stage ('somf')."""
     manifold = run.manifold(run.s_key, run.t_key, chain=chain_)
@@ -171,7 +161,7 @@ def solve_at(run, chain_, mol):
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     h_mo = soc_operator_mo(ev.mf, ev.mol, two_electron='somf')
     nocc = occupied_count(ev.mf)
-    return (singlet, triplet, t_vectors(h_mo, nocc, singlet, triplet),
+    return (singlet, triplet, soc_vectors(h_mo, nocc, singlet[1:], triplet[1:]),
             (ev.mol, np.asarray(ev.mf.mo_coeff, float), nocc))
 
 
@@ -379,5 +369,5 @@ def print_uisc_table(system, environment, table):
 
 
 __all__ = ['SamantaRow', 'Crossing', 'SAMANTA_REFERENCE', 'CROSSINGS',
-           'VIB_KEYS', 't_vectors', 'follow', 'vib', 'uisc_rate_table',
+           'VIB_KEYS', 'follow', 'vib', 'uisc_rate_table',
            'print_uisc_table']

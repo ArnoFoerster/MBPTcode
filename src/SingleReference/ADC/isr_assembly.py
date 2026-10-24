@@ -121,19 +121,19 @@ def isr_effective_blocks(H, S, dims, nmax, norm=None):
 def collect_spinorbital_raw(solver, sector):
     """RAW precursor-basis block series (H, S, dims, norm) for the engine,
     from the spin-orbital BuildSuperMatrixADCn's raw accessors. PRECURSOR
-    orientation throughout (NO _K2_CLASS_SIGN -- consumers comparing against
-    adc4_base-convention accessors must apply it themselves), norm-UNDIVIDED
+    orientation throughout (NO K2_CLASS_SIGN -- consumers comparing against
+    accessors that carry the k2 class sign must apply it themselves), norm-UNDIVIDED
     (pass `norm` to the engine).
 
     Coverage = the ADC(5) raw content:
       H(0,0) {m: N^(m) diag eps}      S(0,0) {m: N^(m) I}
-      H(0,1) {1,2,3}  (_k1_raw_S)     S(0,1) {2,3}
-      H(1,1) {0: K, 1: C1, 2, 3}      S(1,1) {0: I, 2, 3}   (_class_raw_S)
-      H(0,2) {1,2,3}  (_k2_raw_S)     S(0,2) {1,2,3}
+      H(0,1) {1,2,3}  (k1_raw_S)     S(0,1) {2,3}
+      H(1,1) {0: K, 1: C1, 2, 3}      S(1,1) {0: I, 2, 3}   (class_raw_S)
+      H(0,2) {1,2,3}  (k2_raw_S)     S(0,2) {1,2,3}
       H(1,2) {1, 2}                   S(1,2) {2, 3}  (cross_class_overlap)
       H(2,2) {0: f-block, 1: C1}      S(2,2) {0: I}
       norm   {0: 1, m: N^(m)} m=2..5  (n_norm_order; complete through 5
-                                       now that _amp_at carries order 4)
+                                       since amp_at carries order 4)
 
     The (0,0) raws CARRY the norm series: S(0,0) = <Psi|{a_p+,a_q}|Psi> =
     delta_pq <Psi|Psi> is EXACT (the anticommutator is a c-number), and the
@@ -162,8 +162,8 @@ def collect_spinorbital_raw(solver, sector):
     Hm[(0, 0)] = {m: v * np.diag(eps) for m, v in norm.items() if v}
     Sm[(0, 0)] = {m: v * np.eye(norb) for m, v in norm.items() if v}
 
-    n1 = len(solver._class_idx(sector)[0])
-    u = {m: solver._k1_raw_S(sector, m) for m in (1, 2, 3)}
+    n1 = len(solver.class_idx(sector)[0])
+    u = {m: solver.k1_raw_S(sector, m) for m in (1, 2, 3)}
     Hm[(0, 1)] = {m: u[m][0].T for m in u}
     Sm[(0, 1)] = {m: u[m][1].T for m in (2, 3)}
 
@@ -171,21 +171,21 @@ def collect_spinorbital_raw(solver, sector):
     Hm[(1, 1)] = {0: K, 1: solver.c1_block(sector)}
     Sm[(1, 1)] = {0: np.eye(n1)}
     for m in (2, 3):
-        raw_m, S_m = solver._class_raw_S(sector, m)
+        raw_m, S_m = solver.class_raw_S(sector, m)
         if raw_m is not None:
             Hm[(1, 1)][m] = raw_m
         if S_m is not None:
             Sm[(1, 1)][m] = S_m
 
     dims = {0: norb, 1: n1}
-    n2 = len(solver._class_idx_k2(sector)[0])
+    n2 = len(solver.class_idx_k2(sector)[0])
     if n2:
-        k2 = {m: solver._k2_raw_S(sector, m) for m in (1, 2, 3)}
+        k2 = {m: solver.k2_raw_S(sector, m) for m in (1, 2, 3)}
         Hm[(0, 2)] = {m: k2[m][0].T for m in k2}
         Sm[(0, 2)] = {m: k2[m][1].T for m in k2}
-        sign = solver._K2_CLASS_SIGN[sector]
+        sign = solver.K2_CLASS_SIGN[sector]
         Hm[(1, 2)] = {1: sign * solver.coupling_k1_k2_generated(sector),
-                      2: solver._c12_raw2(sector)}
+                      2: solver.c12_raw2(sector)}
         Sm[(1, 2)] = {2: solver.cross_class_overlap(sector, 2),
                       3: solver.cross_class_overlap(sector, 3)}
         Hm[(2, 2)] = {0: solver.k2_self_block_generated(sector, ham='f'),

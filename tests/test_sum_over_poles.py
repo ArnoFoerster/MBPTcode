@@ -210,7 +210,7 @@ def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
     from src.Base.orbital_spaces import get_occ_virt_indices
     from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
                                                             wc_explicit)
-    from src.SingleReference.GW.real_screening import ov_energies
+    from src.Base.orbital_spaces import ov_energies
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)

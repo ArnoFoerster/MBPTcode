@@ -3,41 +3,45 @@ generalization of LinearResponse.linear_response's RPA blocks and
 solve_rpa_screening_df, feeding the complex-Hermitian CasidaSolver
 (Sander/Maggio/Kresse, PRB 92, 045209).
 
-Two products:
+One transition space serves a gap and a metal: the ordered pairs (m @ ki,
+n @ ka = kconserv[ki]) with f_m > f_n of `pbc_occupations.transition_layout`,
+each carrying sqrt(f_m - f_n) in the stacked factor Mtilde
+(`pbc_occupations.stacked_Lw`). With occupations of 0 or 2 these are the
+occupied-virtual pairs with f_m - f_n = 2.
 
-- build_chi0_aux: the non-interacting RPA polarizability Pi0^q in the DF
-  auxiliary basis, Pi0 = (4/nkpts) sum L_ov f L_ov^H. This is the ingredient
-  the screened W^q is built from, and it matches
+- build_chi0_aux: the non-interacting polarizability Pi0^q in the DF auxiliary
+  basis, Pi0 = (2/nkpts) sum_t (f_m - f_n) L_t g L_t^H. On a gap it matches
   pyscf.pbc.gw.krgw_ac.get_rho_response to machine precision -- the trustworthy
   finite-q oracle for the momentum bookkeeping (pyscf's tdscf get_ab is BUGGY
   at finite kshift and disagrees with its own gen_vind, so it is NOT used).
 
 - build_rpa_matrices: the Kresse time-reversal-adapted Casida blocks A(q),B(q)
-  for the RPA/TDDFT bubble. Per Kresse Eqs. 32-33/56-58, in that basis A and B
-  are both Hermitian and, for the Hartree (bubble) kernel, the coupling is the
-  SAME Hermitian matrix V in A and B (only A carries the extra diagonal
-  A - B = energy differences). So:
+  for the RPA bubble. Per Kresse Eqs. 32-33/56-58, in that basis A and B are
+  both Hermitian and the coupling is the SAME Hermitian matrix in A and B (only
+  A carries the extra diagonal A - B = energy differences):
 
-      A = diag(e_a - e_i) + (2/nkpts) V_dir,   B = (2/nkpts) V_dir,
-      V_dir[(ki,ia),(kj,jb)] = (a_ka i_ki | j_kj b_kb) = (M^H M)[.,.],
+      A = diag(e_n - e_m) + (1/nkpts) Mtilde^H Mtilde,   B = (1/nkpts) Mtilde^H Mtilde,
 
-  with M[L,(ki,i,a)] = L_ov(ki -> ka=kconserv[ki]) the occ-virt DF factor
-  (bra conjugated). A + B coupling is then (4/nkpts) V_dir, consistent with
-  build_chi0_aux's (4/nkpts) prefactor, and reduces to the molecular
-  A = D + 2 V_iajb at nkpts=1.
+  which on a gap is A = D + (2/nkpts) V_dir with V_dir[(ki,ia),(kj,jb)] =
+  (a_ka i_ki | j_kj b_kb), and the molecular A = D + 2 V_iajb at nkpts=1.
 
-The transition space at momentum transfer q is the electron-hole pairs
-(i @ ki, a @ ka=kconserv[ki]) over all ki, flattened (ki, i, a). `kconserv`
-is passed in directly (dfints.kconserv_pair[q] in production), so this code is
-agnostic to the q-labeling convention -- Lblock resolves the k-pairs.
+The full BSE below keeps the integer occupied-virtual rectangle (`ov_layout`,
+`stacked_Lov`): its screened direct term is built per (occupied, virtual) block
+and is defined for a gap only. `kconserv` is passed in directly
+(dfints.kconserv_pair[q] in production), so this code is agnostic to the
+q-labeling convention -- Lblock resolves the k-pairs.
 """
 import numpy as np
 from pyscf.pbc.lib.kpts_helper import conj_mapping
 from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.Base.numerics.constants import PBC_OCCUPATION_THRESHOLD
+from src.SingleReference.Periodic.pbc_occupations import (
+    check_occupation_monotonic, stacked_Lw)
 
 
-def transition_layout(dfints, kconserv):
-    """(offsets, N, nocc, nvirt) for the (ki,i,a) flattened transition space."""
+def ov_layout(dfints, kconserv):
+    """(offsets, N, nocc, nvirt) for the (ki,i,a) flattened occupied-virtual
+    transition space of the BSE."""
     nk = dfints.nkpts
     nocc = dfints.nocc
     nvirt = dfints.nmo - nocc
@@ -50,10 +54,9 @@ def stacked_Lov(dfints, kconserv):
     """M[L, (ki,i,a)]: occ-virt DF factor stacked over ki, and the flat layout.
 
     M is the bra-conjugated occ-virt block so that V_dir = M^H M reproduces the
-    direct Coulomb (a_ka i_ki | j_kj b_kb) and Pi0 = (4/nk) M f M^H reproduces
-    get_rho_response.
+    direct Coulomb (a_ka i_ki | j_kj b_kb).
     """
-    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = ov_layout(dfints, kconserv)
     # naux from the blocks actually used at THIS transfer, not from L[0]: naux
     # can differ between momentum transfers in GDF, so L[0] need not carry the
     # right auxiliary momentum.
@@ -67,7 +70,7 @@ def stacked_Lov(dfints, kconserv):
 
 
 def _diag_energies(dfints, kconserv, mo_energy):
-    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = ov_layout(dfints, kconserv)
     d = np.zeros(N)
     for ki in range(dfints.nkpts):
         ka = kconserv[ki]
@@ -76,122 +79,112 @@ def _diag_energies(dfints, kconserv, mo_energy):
     return d
 
 
-def build_chi0_aux(dfints, kconserv, omega, mo_energy=None, imaginary=True, eta=0.0):
-    """Non-interacting RPA polarizability Pi0^q(omega) in the DF auxiliary basis.
+def build_chi0_aux(dfints, kconserv, omega, mo_energy=None, mo_occ=None,
+                   imaginary=True, eta=0.0,
+                   threshold=PBC_OCCUPATION_THRESHOLD):
+    """Non-interacting polarizability Pi0^q(omega) in the auxiliary basis.
 
-    Matches pyscf.pbc.gw.krgw_ac.get_rho_response on the imaginary axis:
-        Pi0_PQ = (4/nkpts) sum_{ki, i in occ, a in virt}
-                 L_ov[P,ia] * f(omega, e_i - e_a) * conj(L_ov[Q,ia]),
-    with f = d/(omega^2 + d^2) (imaginary axis, d = e_i - e_a < 0), or the
-    real-axis f = 1/(omega - d + i eta) - 1/(omega + d + i eta) style response
-    when imaginary=False. Hermitian (imaginary axis) / complex (real axis).
+        Pi0 = (2/nk) sum_t (f_m - f_n) * g(omega, -gap_t) * L_t L_t^*
+
+    summed over ORDERED pairs with f_m > f_n, which is half the pairs; the
+    reversed pair contributes identically, hence the 2. On a gap f_m - f_n = 2
+    and this is (4/nk) sum over occ-virt, pyscf's krgw_ac.get_rho_response.
+
+    g is d/(omega^2 + d^2) on the imaginary axis with d = e_m - e_n = -gap
+    (negative), or the real-axis 1/(omega - d + i eta) - 1/(omega + d + i eta).
+    Hermitian (imaginary axis) / complex (real axis).
+    """
+    M, pairs, offsets, N, weight, gap = stacked_Lw(
+        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
+    if N == 0:
+        naux = dfints.Lblock(0, kconserv[0]).shape[0]
+        return np.zeros((naux, naux), dtype=np.complex128)
+    d = -gap                                     # e_m - e_n < 0
+    if imaginary:
+        g = d / (omega ** 2 + d * d)
+    else:
+        g = 1.0 / (omega - d + 1j * eta) - 1.0 / (omega + d + 1j * eta)
+    # sqrt(w) sits in M on both sides, so M diag(g) M^H already carries w.
+    return (2.0 / dfints.nkpts) * (M * g[None]) @ M.conj().T
+
+
+def build_rpa_matrices(dfints, kconserv, mo_energy=None, mo_occ=None,
+                       threshold=PBC_OCCUPATION_THRESHOLD,
+                       check_monotonic=True):
+    """Kresse RPA Casida blocks A(q), B(q), both complex Hermitian.
+
+        A = diag(gap_t) + (1/nk) Mtilde^H Mtilde ,   B = (1/nk) Mtilde^H Mtilde
+
+    with Mtilde carrying sqrt(f_m - f_n). A - B = diag(e_n - e_m) stays
+    diagonal and, by the monotonicity `check_occupation_monotonic` checks,
+    positive -- so the CasidaSolver squaring trick applies (Kresse Sec. II.D).
+    Feed straight to CasidaSolver(A, B).solve().
     """
     if mo_energy is None:
         mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    nk = dfints.nkpts
-    naux = dfints.Lblock(0, kconserv[0]).shape[0]   # this transfer's aux dim, not L[0]'s
-
-    Pi = np.zeros((naux, naux), dtype=np.complex128)
-    for ki in range(nk):
-        ka = kconserv[ki]
-        nocc_i = dfints.nocc[ki]
-        nocc_a = dfints.nocc[ka]
-        Lov = dfints.Lblock(ki, ka)[:, :nocc_i, nocc_a:]         # (naux, no, nv)
-        d = mo_energy[ki, :nocc_i][:, None] - mo_energy[ka, nocc_a:][None, :]   # e_i - e_a
-        if imaginary:
-            f = d / (omega**2 + d * d)
-        else:
-            f = (1.0 / (omega - d + 1j * eta) - 1.0 / (omega + d + 1j * eta))
-        Pf = Lov * f[None]
-        Pi += 4.0 / nk * np.einsum('Pia,Qia->PQ', Pf, Lov.conj())
-    return Pi
-
-
-def build_rpa_matrices(dfints, kconserv, mo_energy=None):
-    """Kresse RPA/TDDFT Casida blocks A(q), B(q), both complex Hermitian.
-
-    A = diag(e_a - e_i) + (2/nkpts) V_dir,  B = (2/nkpts) V_dir, with
-    V_dir = M^H M the direct Coulomb bubble coupling. A - B is diagonal
-    (positive energy differences), so the CasidaSolver squaring trick applies
-    at essentially no cost (Kresse Sec. II.D). Feed straight to
-    CasidaSolver(A, B).solve().
-    """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    w = 1.0 / dfints.nkpts
-
-    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
-    d_all = _diag_energies(dfints, kconserv, mo_energy)
-
-    V_dir = M.conj().T @ M                       # Hermitian PSD, (ai|jb)
-    A = np.diag(d_all).astype(np.complex128) + 2.0 * w * V_dir
-    B = 2.0 * w * V_dir
+    if mo_occ is None:
+        mo_occ = dfints.mo_occ
+    if check_monotonic:
+        check_occupation_monotonic(mo_energy, mo_occ)
+    M, pairs, offsets, N, weight, gap = stacked_Lw(
+        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
+    V = M.conj().T @ M
+    A = np.diag(gap).astype(np.complex128) + V / dfints.nkpts
+    B = V / dfints.nkpts
     return A, B
 
 
-def solve_rpa_spectral(dfints, kconserv, mo_energy=None):
+def solve_rpa_spectral(dfints, kconserv, mo_energy=None, mo_occ=None,
+                       threshold=PBC_OCCUPATION_THRESHOLD):
     """RPA eigenpairs at momentum transfer q, projected to the aux basis.
 
-    Solves the Kresse RPA Casida problem (build_rpa_matrices) with the complex
-    CasidaSolver and returns (Omega, rho) where Omega are the RPA excitation
-    energies and rho[P, S] = sum_{ki,ia} M[P,(ki,ia)] (X+Y)_S[(ki,ia)] is the
-    aux-basis projection of the transition eigenvectors -- the periodic
-    analogue of LinearResponse.solve_rpa_spectral_df's XplusY_proj.
+    Returns (Omega, rho) with rho[P, S] = sum_t Mtilde[P, t] (X + Y)_S[t], the
+    periodic analogue of LinearResponse.solve_rpa_spectral_df's XplusY_proj.
+    Mtilde carries sqrt(f_m - f_n), so `build_W_aux_spectral` takes the
+    constant 2/nk.
     """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
-    A, B = build_rpa_matrices(dfints, kconserv, mo_energy=mo_energy)
+    M, pairs, offsets, N, weight, gap = stacked_Lw(
+        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
+    A, B = build_rpa_matrices(dfints, kconserv, mo_energy, mo_occ,
+                              threshold=threshold)
     Omega, X, Y = CasidaSolver(A, B).solve()
-    rho = M @ (X + Y)
-    return Omega, rho
+    return Omega, M @ (X + Y)
 
 
 def build_W_aux_spectral(dfints, Omega, rho, omega=0.0, imaginary=True, eta=0.0):
     """Screened interaction W^q(omega) in the aux basis from RPA eigenpairs.
 
     Spectral form (cross-checked against the (1-Pi0)^{-1} inversion to 1e-15 at
-    all frequencies; the -4/nkpts constant is fixed by that match):
+    all frequencies; the -2/nkpts constant is fixed by that match, with
+    sqrt(f_m - f_n) folded into rho by `solve_rpa_spectral`):
 
-        W(i nu) = I - (4/nkpts) sum_S rho_S rho_S^H * Omega_S / (nu^2 + Omega_S^2)
+        W(i nu) = I - (2/nkpts) sum_S rho_S rho_S^H * Omega_S / (nu^2 + Omega_S^2)
 
     On the real axis (imaginary=False), the retarded continuation
     (i nu -> omega) of Omega/(nu^2+Omega^2) = 1/2 [1/(Omega-omega) +
     1/(Omega+omega)]:
 
-        W(omega) = I - (4/nkpts) sum_S rho_S rho_S^H * 1/2
+        W(omega) = I - (2/nkpts) sum_S rho_S rho_S^H * 1/2
                        [1/(Omega_S - omega - i eta) + 1/(Omega_S + omega + i eta)]
 
-    Both forms coincide at omega = nu = 0, the static limit. rho, Omega from
-    solve_rpa_spectral.
+    Both forms coincide at omega = nu = 0, the static limit.
     """
     naux = rho.shape[0]
-    c = 4.0 / dfints.nkpts
+    c = 2.0 / dfints.nkpts
     if imaginary:
-        denom = Omega / (omega**2 + Omega**2)
+        denom = Omega / (omega ** 2 + Omega ** 2)
     else:
         denom = 0.5 * (1.0 / (Omega - omega - 1j * eta)
                        + 1.0 / (Omega + omega + 1j * eta))
-    W = np.eye(naux, dtype=np.complex128) - c * (rho * denom[None]) @ rho.conj().T
-    return W
-
-
-def build_W_aux_inversion(dfints, kconserv, omega, mo_energy=None, imaginary=True, eta=0.0):
-    """Screened interaction W^q(omega) in the aux basis by direct inversion,
-    W = (I - Pi0(omega))^{-1}, with Pi0 from build_chi0_aux. Independent of the
-    Casida eigensolve -- the cross-check oracle for build_W_aux_spectral."""
-    Pi = build_chi0_aux(dfints, kconserv, omega, mo_energy=mo_energy,
-                        imaginary=imaginary, eta=eta)
-    naux = Pi.shape[0]
-    return np.linalg.inv(np.eye(naux) - Pi)
+    return np.eye(naux, dtype=np.complex128) - c * (rho * denom[None]) @ rho.conj().T
 
 
 # ---------------------------------------------------------------------------
 # Full BSE per momentum transfer q
 # ---------------------------------------------------------------------------
+#
+# Integer occupations only (the occupied-virtual rectangle). No driver calls it
+# yet: `pbc_self_energy`'s vertex self-energy and the tests are its users.
 
 def build_static_W_all_Q(dfints, mo_energy=None):
     """Static screened interaction W^Q in the aux basis for every momentum
@@ -222,7 +215,7 @@ def screened_block(dfints, W_all, k1, k2, k3, k4, s1, s2, s3, s4):
 
     Requires k1-k2+k3-k4 = 0 so the two L-blocks share aux momentum Q = k2-k1.
     """
-    Q = dfints._pair_to_q(k1, k2)
+    Q = dfints.pair_to_q(k1, k2)
     L12 = dfints.Lblock(k1, k2)[:, s1, s2]
     L34 = dfints.Lblock(k3, k4)[:, s3, s4]
     return np.einsum('Ppq,PR,Rrs->pqrs', L12, W_all[Q].conj(), L34)

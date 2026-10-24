@@ -24,7 +24,7 @@ the geometry. Optimizations to the adiabatic minima take 'index': with
 'overlap' the followed vector is carried across rejected optimizer steps, so
 after a crossing the same geometry can return a different root. A solve with
 an unconverged root, in the call or in the force, is warned about and flagged
-(refuse inputs, warn numerics): the call's
+(the policy: refuse inputs, warn numerics): the call's
 info['flags'] holds the fold's flags (ee_fold.FoldResult.flags), the pick's
 and the reference's ({'flag': name, 'message': text} each), and the force's
 info['flags'] the same for its own solve; a root index the solve did not
@@ -48,7 +48,7 @@ import numpy as np
 
 from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_FORCE_OMEGA_MATCH, EE_RI_TILE_GB,
                                          ROOT_FOLLOW_WEIGHT_MIN)
-from src.Base.pyscf.cphf import collecting as cphf_flags_into
+from src.Base.numerical_flags import collecting as cphf_flags_into
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, distributed, lockstep
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, flag,
@@ -170,12 +170,13 @@ class ADC2State:
             if tiled_force_route(self.mp2.force_route, self.mol):
                 F, info = adc2_force_tiled(*args, env=self.lr_environment,
                                            y_ref=y_ref, tile_gb=self.mp2.tile_gb,
-                                           max_memory=self.mp2.max_memory)
+                                           max_memory=self.mp2.max_memory,
+                                           numerics=self.mp2.numerics)
             else:
                 # the dense reference is serial: replicated on every rank
                 with distributed(None):
                     F, info = adc2_force(*args, env=self.lr_environment,
-                                         y_ref=y_ref)
+                                         y_ref=y_ref, numerics=self.mp2.numerics)
         F, dm, lr = lockstep((F, info['dm_eff'], list(info.get('lr', ()))))
         flags = ref_flags + cphf + list(info.get('flags', []))
         if info.get('index') is not None:

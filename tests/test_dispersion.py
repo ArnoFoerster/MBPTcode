@@ -22,11 +22,10 @@ from src.Base.pyscf.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
                                        refuse_dispersion_under_rpa)
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.numerics.numerics import Numerics
-from src.SingleReference.LinearResponse.rpa_energy import (reference_energy,
-                                                           exx_double_counting,
-                                                           rsh_split)
+from src.SingleReference.LinearResponse.rpa_energy import reference_energy, exx_double_counting
+from src.Base.pyscf.pyscf_interface import rsh_split
 from src.gradients.gwbse.dense_surfaces import kohn_sham_gradient_correction
-from src.gradients.mean_field_response import exx_double_counting_skeleton
+from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
 
@@ -115,29 +114,22 @@ def test_direct_rpa_refuses_a_dispersion_corrected_reference():
     with pytest.raises(ValueError, match='counted twice'):
         refuse_dispersion_under_rpa(corrected, 'a caller')
     # the skeleton guards itself, for a chain built before the reference moved
-    from src.gradients.mean_field_response import exx_double_counting_skeleton
+    from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
     with pytest.raises(ValueError, match='skeleton'):
         exx_double_counting_skeleton(corrected, mol)
     # and a plain functional passes both
     refuse_dispersion_under_rpa(mean_field('pbe0'), 'a caller')
 
 
-def test_a_functional_fitted_with_dispersion_refuses_a_second_helping():
-    """Unlike the direct-RPA case, nothing downstream would notice this one:
-    the correction would simply be added twice and the geometry would come out
-    over-bound."""
-    from src.Base.pyscf.dispersion import (functional_carries_dispersion,
-                                     refuse_double_dispersion)
+def test_the_functionals_fitted_with_dispersion_are_named():
+    """A functional fitted with its own dispersion is recognized as such, and
+    a plain hybrid is not."""
+    from src.Base.pyscf.dispersion import functional_carries_dispersion
     for name in ('wB97X-D3', 'wB97X-D4', 'wB97X-V', 'wB97M-V', 'r2SCAN-3c',
                  'B97-3c'):
         assert functional_carries_dispersion(name), name
-        with pytest.raises(ValueError, match='already includes dispersion'):
-            refuse_double_dispersion(name, 'D3BJ')
-        refuse_double_dispersion(name, None)      # the functional alone is fine
-        refuse_double_dispersion(name, 'none')
     for name in ('B3LYP', 'PBE0', 'wB97X', 'M06-2X'):
         assert not functional_carries_dispersion(name), name
-        refuse_double_dispersion(name, 'D3BJ')    # these need the correction
 
 
 def test_the_pcm_factorization_changes_nothing_it_computes():

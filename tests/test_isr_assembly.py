@@ -11,13 +11,13 @@ Three layers, most fundamental last:
        (0,2)@1 == 0 (gauge annihilation)    (0,2)@2 == u2_k2_generated
        (0,2)@3 == u3_k2_generated           (1,2)@1 == coupling_k1_k2
        (1,2)@2 == c12_o2_generated          (2,2)@1 == k2_self('v')
-     (k2 comparisons carry _K2_CLASS_SIGN -- the engine stays in precursor
+     (k2 comparisons carry K2_CLASS_SIGN -- the engine stays in precursor
      orientation.)
   2. RESTRICTED (0,1)@4: the engine's U^(4) == u_dot_orb_isr columns (the
      arbiter-fixed production path), from the restricted raw series.
-  3. ARBITER (validation/ present, else skipped): RAW collector series ==
-     the determinant-space Hsup/Smet blocks, and engine EFFECTIVE blocks ==
-     isr_orthonormalize's, per (pair, order), with per-class column-sign
+  3. ARBITER (tests/exact_isr_oracle.py over tests/lambda_oracle.py): RAW
+     collector series == the determinant-space Hsup/Smet blocks, and engine
+     EFFECTIVE blocks == isr_orthonormalize's, per (pair, order), with per-class column-sign
      pins anchored at order 1 (k1 via H(0,1)^[1], k2 via S(0,2)^[1]).
 
 The engine exceeding the hand assemblies (post-GS W, cross-class GS at
@@ -45,6 +45,8 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_integrals,
                                             get_antisymmetrized_spin_block_eri)
 from tests.generated_runtime import requires_runtime
+from tests import exact_isr_oracle as E5
+from tests.lambda_oracle import LambdaSelfEnergyOracle
 
 pytestmark = requires_runtime(5)
 
@@ -102,7 +104,7 @@ def main():
         for sec in ('IP', 'EA'):
             H, S, dims, norm = collect_spinorbital_raw(gen, sec)
             blocks, _ = isr_effective_blocks(H, S, dims, NMAX, norm=norm)
-            sign = gen._K2_CLASS_SIGN[sec]
+            sign = gen.K2_CLASS_SIGN[sec]
             u1 = gen.u_2h1p() if sec == 'IP' else gen.u_2p1h()
             targets = [
                 ('(0,1)@2 == u_adc3 - U1', blocks[(0, 1)][2].T,
@@ -153,7 +155,7 @@ def main():
                   (0, 1): {m: Ss[m].T for m in Ss},
                   (1, 1): {0: np.eye(n1)}}
             for m in (2, 3):
-                _, S_m = r._class_raw_S(sec, m)
+                _, S_m = r.class_raw_S(sec, m)
                 if S_m is not None:
                     Sr[(1, 1)][m] = S_m
             blk, _ = isr_effective_blocks(Hr, Sr, {0: norb, 1: n1}, NMAX,
@@ -171,19 +173,6 @@ def main():
     # arbiter gates
     # ------------------------------------------------------------------
     print("\n=== exact-ISR arbiter gates ===")
-    vdir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
-                                        'validation', 'lambda_oracle'))
-    sys.path.insert(0, vdir)
-    try:
-        import exact_isr_order5 as E5
-        from lambda_oracle import LambdaSelfEnergyOracle
-    except ImportError as err:
-        print(f"SKIP: exact-ISR arbiter unavailable ({err}); the engine has NO "
-              "determinant-space gate without it -- the layers above are "
-              "accessor parity only")
-        print('\nALL OK' if all_ok else '\nFAILURES')
-        return all_ok
-
     for label, atom in SYSTEMS:
         dd = _build(atom)
         tol = FLOOR_MULT * dd['fov']

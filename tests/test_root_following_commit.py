@@ -66,8 +66,8 @@ def follower():
     chain.conventions = FrozenConventions()
     chain.track, chain.state, chain.nroots = 'overlap', 0, NROOTS
     chain.nocc = 5
-    chain._followed = chain._anchor = None
-    chain._evaluations, chain._owner = GeometryCache(), object()
+    chain.followed = chain.anchor = None
+    chain.evaluations, chain.selection_owner = GeometryCache(), object()
     chain.follow_log, chain.follow_coords = [], []
     chain.timer = None
     return chain
@@ -156,7 +156,7 @@ def test_copies_sharing_the_cache_adopt_their_own_match(mean_field, roots):
     chain = follower()
     match(chain, mol, mf, roots[:, :NROOTS])
     other = copy.copy(chain)
-    assert other._evaluations is chain._evaluations
+    assert other.evaluations is chain.evaluations
     trial = shifted(mol, TINY)
     assert match(chain, trial, mf, mixed(roots))[0] == 1
     assert match(other, trial, mf, roots[:, :NROOTS])[0] == 0

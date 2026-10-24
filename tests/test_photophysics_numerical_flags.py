@@ -58,7 +58,7 @@ def test_an_unconverged_excited_walk_is_kept_and_flagged(tmp_path,
                         lambda stage, *a: kept.setdefault(stage, a))
     with pytest.warns(WalkNotRelaxed, match='S1 did not relax'):
         _, info, root, final = stages.walked_minimum(run, 's1', 'surface',
-                                                     mol, None, 0.0)
+                                                     mol, None)
     assert 's1' in kept, 'the walk is stored as walked, not refused'
     assert info['numerical_flags'] == {'walk_not_converged': 'max cycles'}
     assert walk_fields(info)['numerical_flags'] == info['numerical_flags']

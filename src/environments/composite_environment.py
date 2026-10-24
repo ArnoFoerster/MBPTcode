@@ -57,6 +57,11 @@ class CompositeEnvironment:
         # basis-free half of `dresses_interaction`
         self.screens = any(getattr(m, 'screens', True) for m in self.members)
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
     def for_geometry(self, mol):
         """The same environment: neither fixed charges nor fixed sites ride the atoms."""
         return self
@@ -227,6 +232,11 @@ class ContinuumWithSites:
         self._coupled = None
         self._aux_cache = {}
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
     def for_geometry(self, mol):
         """The same shell and sites around a new solute geometry: the cavity is
         rebuilt around the solute's atoms, the sites stay where they are."""
@@ -307,11 +317,12 @@ class ContinuumWithSites:
             'the auxiliary metric (`aux_kernel`)')
 
     def static_self_energy(self, mf, mol=None):
-        """Refused: a route that never forms W (ADC) would take the
-        continuum's COHSEX term alone, without the sites or their coupling."""
+        """Refused: this medium has no static self-energy of its own; its
+        continuum's COHSEX term alone would leave out the sites and their
+        coupling."""
         raise NotImplementedError(
-            'ContinuumWithSites enters the GW routes as the Eq. (18) shift of '
-            'its coupled kernel; a route without W has no static term for it')
+            'ContinuumWithSites has no static self-energy (static_self_energy): '
+            'it acts only through the Eq. (18) shift of its coupled kernel')
 
     def aux_kernel_adjoint(self, auxmol, v_bar):
         raise NotImplementedError('ContinuumWithSites has no nuclear derivative')

@@ -3,7 +3,7 @@
 block it must reproduce the two-sector elements it generalizes.
 
 The two-sector convention (superop_element_terms, validated numerically
-against adc_spinorbital.py) evaluates IP-class elements with the reversed
+against the hand-written spin-orbital ADC) evaluates IP-class elements with the reversed
 commutator [C_J, H]; the union-space form uses the normal commutator for
 every class and represents an IP class by D = E^dag. The two agree through
 {E_J, [H, E_K^dag]} = ({E_J^dag, [E_K, H]})^dag, which under Omega-dressing

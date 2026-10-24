@@ -326,7 +326,7 @@ def test_the_solvent_Y_matches_the_convention_of_the_existing_one():
     from scipy.linalg import expm
     from pyscf import dft
     from src.SingleReference.GW.qp_solve import static_exchange_diagonal
-    from src.gradients.mean_field_response import qp_xc_correction_Y
+    from src.gradients.gwbse.static_correction import qp_xc_correction_Y
 
     mol = gto.M(atom=ATOM, basis='sto-3g', verbose=0)
     mf = dft.RKS(mol)

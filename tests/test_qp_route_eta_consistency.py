@@ -47,6 +47,7 @@ import pytest
 from pyscf import gto, scf, df
 
 from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_df_coefficients_ov
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.qp_energy import calc_qp_energy
@@ -142,7 +143,8 @@ def test_the_imaginary_axis_route_takes_no_eta(hf_mf):
     nocc = mol.nelectron // 2
     with pytest.raises(TypeError, match='eta'):
         solve_qp_energy_imaginary_axis(hf_mf, mol, nocc, nocc - 1,
-                                       nfreq=NFREQ, eta=ABSURD_ETA)
+                                       numerics=Numerics(imagfreq={'nfreq': NFREQ}),
+                                       eta=ABSURD_ETA)
 
 
 def test_eta_is_live_on_the_casida_route(hf_mf):

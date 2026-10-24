@@ -1,5 +1,5 @@
 """The grid Hellmann-Feynman adjoint of a BSE root (`bse_adjoint='grid'`,
-`LinearResponse.isdf_bse_adjoint`) against the explicit one (`bse_backward`
+`gradients.gwbse.isdf_bse_adjoint`) against the explicit one (`bse_backward`
 on the three-index blocks of `bse_cache`), on RHF/cc-pVDZ at 148 points per
 atom:
 
@@ -65,7 +65,7 @@ a stage this setting does not reach.
 SHOWN TO FAIL, then restored and byte-compared (`cmp`): `_casida` building
 the cache in the forward pass on the grid route too, as the default route
 once did. The scan failed on water, 24 block-shaped arrays seen in the
-`b_block` and `_casida_seeds` frames, and so did the cache
+`b_block` and `casida_seeds` frames, and so did the cache
 count, an energy having built it.
 """
 import math
@@ -82,8 +82,8 @@ from pyscf import dft, gto
 from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.numerics.constants import BSE_ADJOINT_TILE_ROWS, KAPPA
 from src.Base.declaration import Excitation, GroundState
-from src.SingleReference.LinearResponse import isdf_bse_adjoint
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse import isdf_bse_adjoint
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.gradients.gwbse import state_following
 from src.gradients.gwbse.bse_isdf import (bse_backward, bse_cache,
@@ -136,7 +136,7 @@ def casida_inputs(chain):
     x, d, eq, w, no, cache, xn, yn = casida_args(
         chain, *chain.forward(chain.mol0, chain.mf0))
     if not cache:
-        cache = bse_cache(x, d, eq, w, no, spin=chain.spin,
+        cache = bse_cache(x, d, eq, no, spin=chain.spin,
                           bse_tda=chain.bse_tda)
     return x, d, eq, w, no, cache, xn, yn
 
@@ -234,7 +234,7 @@ def magnitudes(route, n, x, d, eq, w, no, xn, yn, spin, tda, bra=None,
                                      omega_bar=omega_bar, bra=bra,
                                      tile_rows=tile_rows)
     else:
-        screened = bse_cache(ax, ad, eq, aw, no, spin='triplet', bse_tda=tda)
+        screened = bse_cache(ax, ad, eq, no, spin='triplet', bse_tda=tda)
         bare = dict(screened, kappa=KAPPA[spin], B_vo=None,
                     B_oo=np.zeros_like(screened['B_oo']))
 
@@ -311,7 +311,7 @@ def captured(chain):
     """Every call of the chain's Casida-level adjoint: its forward and solution,
     root, bra and copies of its seeds, which the fold consumes."""
     calls = []
-    seeds_of = chain.follower._casida_seeds
+    seeds_of = chain.follower.casida_seeds
 
     def probed(shared, solution, n, m=None):
         out = seeds_of(shared, solution, n, m)
@@ -319,7 +319,7 @@ def captured(chain):
                           seeds=tuple(np.array(a, copy=True) for a in out)))
         return out
 
-    chain.follower._casida_seeds = probed
+    chain.follower.casida_seeds = probed
     return calls
 
 
@@ -466,7 +466,7 @@ def test_benzene_agreement_and_timing():
     x, d, eq, w, no, _, xn, yn = casida_args(chain,
                                              *chain.forward(mol, chain.mf0))
     t0 = time.perf_counter()
-    cache = bse_cache(x, d, eq, w, no)
+    cache = bse_cache(x, d, eq, no)
     ref = bse_backward(0, x, d, eq, w, no, cache, xn, yn)
     t1 = time.perf_counter()
     got = isdf_bse_backward(0, x, d, eq, w, no, xn, yn)

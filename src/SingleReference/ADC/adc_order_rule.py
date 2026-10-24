@@ -131,7 +131,7 @@ def new_structures_at(n, max_rank=4, kind='u'):
 
     NOTE the rule places a structure at its pure order-counting order, which
     for the two always-pruned f-family cases (ft2, l2f) is one order lower than
-    the hand-written _u2_split_defs put them -- immaterial, since pdaggerq
+    a hand-written U^(2) split would put them -- immaterial, since pdaggerq
     emits 0 blocks for both. Generation is a superset game: emitting a
     structure that prunes costs nothing, missing one that survives would be a
     bug, and the ASSEMBLY rule (u_order_terms) is what is exactness-critical
@@ -168,9 +168,8 @@ def struct_ungenerated(name, kind, max_generated):
 #
 # The module above is order-general along the AMPLITUDE/dressing axis
 # (l_j, ham, t_k) only. Which CLASSES appear -- 2h1p, 3h2p, 4h3p, ... -- and
-# the order of each block used to be hand-wired per level in the runtime
-# (`has_c2 = level in ('adc4_base','adc4')`, `has_k2 = ...`), i.e. hand-added per
-# order. That is what these functions replace.
+# the order of each block follow from the rule below, not from per-level
+# hand-wiring.
 #
 # RULE (Schirmer's ISR block-order rule): the supermatrix block between
 # excitation classes of level mu_I and mu_J is required through order
@@ -181,14 +180,15 @@ def struct_ungenerated(name, kind, max_generated):
 # k for the (k+1)h-kp class. A block with order(I, J) < 0 is absent; a block
 # with order(I, J) == 0 carries only its zeroth-order part (the K diagonal).
 #
-# VALIDATED against every hand-wired fact in this repo (test_adc_order_rule):
+# VALIDATED against the block orders stated elsewhere in the code
+# (tests/test_adc_order_rule_manifold.py):
 #   ADC(4): orb-2h1p -> 3 (U^(3)); 2h1p-2h1p -> 2 (C^(2)); orb-3h2p -> 2
 #           (U2_3h2p); 2h1p-3h2p -> 1 (C135, first order); 3h2p-3h2p -> 0,
 #           i.e. K ONLY -- which is precisely why the downfold's Schur
 #           complement over the 3-particle manifold is EXACT at ADC(4).
 #   ADC(3): kmax = 1, so no 3h2p at all -- matches level 'adc3'.
-#   ADC(5): 3h2p-3h2p -> 1, the "3h2p x 3h2p self-coupling" that is the last block to make matrix-free.
-#           Predicted, not assumed.
+#   ADC(5): 3h2p-3h2p -> 1, the 3h2p x 3h2p self-coupling. Predicted, not
+#           assumed.
 # ----------------------------------------------------------------------
 
 
@@ -260,15 +260,6 @@ def cross_blocks_at(n):
     return out
 
 
-def blocks_at_union(n):
-    """blocks_at(n) with a sector axis: ('same', mu_i, mu_j, order) for the
-    blocks both constructions share (each same-sector block appears once per
-    sector at runtime) and ('cross', k_i, k_j, order) for the D x C blocks
-    the two-sector convention deletes."""
-    return ([('same',) + b for b in blocks_at(n)]
-            + [('cross',) + b for b in cross_blocks_at(n)])
-
-
 def amplitude_max_rank(n):
     """LOOSE order-counting bound on amplitude rank in ADC(n): r <= 2*(n-1).
 
@@ -285,7 +276,7 @@ def amplitude_rank_surviving(n):
     in ADC(n) -- i.e. n-1, HALF the loose bound above.
 
     Every candidate structure at U orders 2/3/4 was derived and checked for
-    nonzero terms (2026-07-19/20):
+    nonzero terms:
 
         U order  candidates  loose bound  SURVIVING max rank
               2           9            4                   2

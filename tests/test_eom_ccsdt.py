@@ -6,8 +6,8 @@ the generator) diagonalized with pyscf's non-Hermitian Davidson
 (pyscf.lib.davidson_nosym1) -- the same matvec+diag+davidson_nosym1
 architecture pyscf's own eom_rccsd/eom_gccsd use.
 
-Oracle: full CCSDT vs determinant_space. EOM-CCSD is retired here (it is
-pyscf's); level='ccsd' is refused, which check_ccsd_level_is_refused gates.
+Oracle: full CCSDT vs determinant_space. EOM-CCSD is not implemented here
+(use pyscf's); level='ccsd' is refused, which check_ccsd_level_is_refused gates.
   Full CCSDT (level='ccsdt', genuinely nonzero T3) vs
      src/SingleReference/CC/determinant_space.py, an exact (exponential-scaling,
      small-system-only) determinant-space diagonalization of the SAME
@@ -37,7 +37,7 @@ H2_STO3G = dict(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
 
 
 def check_ccsd_level_is_refused():
-    """EOM-CCSD is retired here (it is pyscf's): level='ccsd' is refused."""
+    """EOM-CCSD is not implemented here (use pyscf's): level='ccsd' is refused."""
     mf = scf.RHF(gto.M(**H2_STO3G)).run()
     try:
         EOMCC(mf, level='ccsd')

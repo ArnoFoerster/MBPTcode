@@ -6,7 +6,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Solvers.qp_equation import solve_qp_equation
+from src.Base.numerics.numerics import Numerics
+from src.Solvers.qp_equation import solve_qp_equation_pole_strength
 
 
 def check(ok, label, detail=''):
@@ -31,8 +32,8 @@ if __name__ == '__main__':
     for method in ('pole_strength',):
         s = Counted(f)
         v = Counted(f)
-        r_s = solve_qp_equation(s, -0.2, method=method)
-        r_v = solve_qp_equation(v, -0.2, method=method, vectorized=True)
+        r_s = solve_qp_equation_pole_strength(s, -0.2)
+        r_v = solve_qp_equation_pole_strength(v, -0.2, vectorized=True)
         all_ok &= check(r_s == r_v, f'{method}: same root, scalar vs vectorized grid',
                          f'{r_v:.12f}')
         all_ok &= check(v.calls < s.calls - 100, f'{method}: grid took one call',
@@ -41,7 +42,7 @@ if __name__ == '__main__':
     bad = lambda w: np.atleast_2d(f(w))
     for method in ('pole_strength',):
         try:
-            solve_qp_equation(bad, -0.2, method=method, vectorized=True)
+            solve_qp_equation_pole_strength(bad, -0.2, vectorized=True)
             raised = False
         except ValueError:
             raised = True
@@ -50,7 +51,7 @@ if __name__ == '__main__':
     # --- worker count: the keyword, else OMP_NUM_THREADS, else the affinity
     # mask; never above the mask (with a warning) or the state count; Slurm's
     # variables are not read ---
-    from src.SingleReference.GW.qp_energy import resolve_workers
+    from src.Base.utils.parallel.threads import resolve_workers
     saved_env = {k: os.environ.get(k) for k in ('SLURM_CPUS_PER_TASK',
                                                  'OMP_NUM_THREADS')}
     saved_mask = getattr(os, 'sched_getaffinity', None)
@@ -96,7 +97,8 @@ if __name__ == '__main__':
             os.sched_getaffinity = saved_mask
 
     from pyscf import gto, scf, dft, df
-    from src.Base.numerics.constants import HARTREE_TO_EV, get_method_info
+    from src.Base.numerics.constants import HARTREE_TO_EV
+    from src.SingleReference.GW.self_energy import get_method_info
     from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                           get_density_fitting_coefficients)
     from src.SingleReference.GW.qp_energy import (
@@ -127,8 +129,7 @@ if __name__ == '__main__':
                 w - eps[p] - x - se.calculate_self_energy(
                     p, w, nocc, om, chi_a, None, spin_channel='alpha',
                     vertex_mode='GW'))
-            out[p] = solve_qp_equation(func, eps[p],
-                                       method='pole_strength') * HARTREE_TO_EV
+            out[p] = solve_qp_equation_pole_strength(func, eps[p]) * HARTREE_TO_EV
         return out
 
     mol = gto.M(atom='H 0 0 0; F 0 0 0.9', basis='6-31g', verbose=0)
@@ -224,8 +225,7 @@ if __name__ == '__main__':
         with warnings.catch_warnings():
             # two cycles need not converge; the scans are counted
             warnings.simplefilter('ignore', EvGWNotConverged)
-            calc_qp_energy(mf, mode='casida', self_consistency='evGW',
-                           n_workers=3, max_cycle=2)
+            calc_qp_energy(mf, mode='casida', self_consistency='evGW', n_workers=3, numerics=Numerics(evgw={'max_cycle': 2}))
     finally:
         qp_module.qp_energies_from_spectrum = real_scan
     all_ok &= check(len(seen) > 0 and set(seen) == {3},

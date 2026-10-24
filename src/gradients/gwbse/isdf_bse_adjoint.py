@@ -92,10 +92,10 @@ import numpy as np
 from src.Base.numerics.constants import (BSE_ADJOINT_AUX_ROWS, BSE_ADJOINT_TILE_ROWS,
                                          KAPPA)
 from src.Base.factorization.sliced_factors import SlicedFactors
-from src.Base.utils.parallel.mpi_grid import (allgather_ranges, allgather_rows,
-                                              broadcast_rows, contiguous_block,
-                                              current_comm, exchange_blocks, lockstep)
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, allgather_rows, broadcast_rows,
+                                              contiguous_block, current_comm, lockstep)
 from src.Base.orbital_spaces import get_occ_virt_indices
+from src.SingleReference.LinearResponse.block_actions import GridTiles
 
 #: S = -(H + H^T) as products of blocks of P_T ('P') and of P_T^T ('Q'),
 #: Casida blocks 0 x_m, 1 x_n, 2 y_m, 3 y_n; Tamm-Dancoff keeps x alone.
@@ -111,91 +111,6 @@ PBAR = {True: ((('P', 1),), (('P', 0),)),
 PBAR_T = {True: ((('Q', 1),), (('Q', 0),)),
           False: ((('Q', 1), ('P', 3)), (('Q', 0), ('P', 2)),
                   (('Q', 3), ('P', 1)), (('Q', 2), ('P', 0)))}
-
-
-class GridTiles:
-    """Fixed tiles of the grid index and the rank that computes each: the one
-    whose `contiguous_block` holds the tile's first row.
-
-    bounds: [start, stop) of every tile; owner: its rank; mine: this rank's
-    tiles, consecutive; rows: this rank's block of the grid.
-    """
-
-    def __init__(self, npts, edge, comm):
-        self.comm = comm
-        self.size = 1 if comm is None else comm.Get_size()
-        self.rank = 0 if comm is None else comm.Get_rank()
-        self.npts = int(npts)
-        self.bounds = [(t0, min(t0 + int(edge), self.npts))
-                       for t0 in range(0, self.npts, int(edge))]
-        self.blocks = [contiguous_block(self.npts, r, self.size)
-                       for r in range(self.size)]
-        self.owner = [next(r for r, (b0, b1) in enumerate(self.blocks)
-                           if b0 <= t0 < b1) for t0, _ in self.bounds]
-        self.mine = [t for t, r in enumerate(self.owner) if r == self.rank]
-        self.rows = self.blocks[self.rank]
-
-    def owned(self, rank):
-        """[start, stop) of every tile `rank` computes, in order."""
-        return [self.bounds[t] for t, r in enumerate(self.owner) if r == rank]
-
-    def tile_rows(self, rows):
-        """{tile: its rows} for this rank's tiles out of this rank's block
-        `rows`: a view where the tile lies inside the block, else a new array
-        completed with the rows other ranks hold."""
-        r0, r1 = self.rows
-        out = {}
-        for t in self.mine:
-            t0, t1 = self.bounds[t]
-            if t1 <= r1:
-                out[t] = rows[t0 - r0:t1 - r0]
-            else:
-                out[t] = np.empty((t1 - t0,) + rows.shape[1:])
-                out[t][:r1 - t0] = rows[t0 - r0:]
-        self._move([rows], [[b] for b in self.blocks],
-                   [out[t] for t in self.mine],
-                   [self.owned(r) for r in range(self.size)], rows.shape[1:])
-        return out
-
-    def block_rows(self, tiles, block):
-        """Fill this rank's `block` rows from the tiles every rank computed:
-        a tile inside its owner's block is already a view of it, the rest of
-        a tile's rows travel to the ranks whose blocks hold them."""
-        r0, r1 = self.rows
-        for t in self.mine:
-            t0, t1 = self.bounds[t]
-            if t1 > r1:
-                block[t0 - r0:] = tiles[t][:r1 - t0]
-        self._move([tiles[t] for t in self.mine],
-                   [self.owned(r) for r in range(self.size)], [block],
-                   [[b] for b in self.blocks], block.shape[1:])
-
-    def _move(self, src, have, dst, want, tail):
-        """The rows of `dst` held in another rank's `src`, verbatim, in one
-        `exchange_blocks`: src[i] holds rows have[rank][i], dst[j] wants
-        want[rank][j]; the lists are the same on every rank."""
-        if self.size == 1:
-            return
-        rank = self.rank
-        send, shapes = [], []
-        for peer in range(self.size):
-            pieces = [] if peer == rank else [
-                src[i][lo - have[rank][i][0]:hi - have[rank][i][0]]
-                for i, _, lo, hi in _overlaps(have[rank], want[peer])]
-            send.append(np.concatenate(pieces) if pieces
-                        else np.empty((0,) + tuple(tail)))
-            n = 0 if peer == rank else sum(
-                hi - lo for _, _, lo, hi in _overlaps(have[peer], want[rank]))
-            shapes.append((n,) + tuple(tail))
-        got = exchange_blocks(send, shapes, self.comm)
-        for peer in range(self.size):
-            if peer == rank:
-                continue
-            at = 0
-            for _, j, lo, hi in _overlaps(have[peer], want[rank]):
-                w0 = want[rank][j][0]
-                dst[j][lo - w0:hi - w0] = got[peer][at:at + hi - lo]
-                at += hi - lo
 
 
 def isdf_bse_backward(n, X_mo, D, eps_qp, W_aux, nocc, Xn, Yn,
@@ -533,13 +448,3 @@ def _index_ranges(grid, rank):
     """The tile indices `rank` computes as [start, stop) ranges."""
     own = [t for t, r in enumerate(grid.owner) if r == rank]
     return [(own[0], own[-1] + 1)] if own else []
-
-
-def _overlaps(have, want):
-    """(i, j, lo, hi) for every pair of ranges have[i], want[j] sharing rows
-    [lo, hi), in the order of `have`, then of `want`."""
-    for i, (h0, h1) in enumerate(have):
-        for j, (w0, w1) in enumerate(want):
-            lo, hi = max(h0, w0), min(h1, w1)
-            if hi > lo:
-                yield i, j, lo, hi

@@ -46,19 +46,6 @@ def functional_carries_dispersion(name):
     return any(key.endswith(tail) or f'{tail}-' in key for tail in _SELF_CONTAINED)
 
 
-def refuse_double_dispersion(xc, dispersion):
-    """Raise if a separate correction is asked for on top of a functional that
-    already has one."""
-    if not dispersion or str(dispersion).lower() == 'none':
-        return
-    if functional_carries_dispersion(xc):
-        raise ValueError(
-            f'{xc!r} already includes dispersion by construction, so adding '
-            f'{dispersion!r} on top of it counts the same physics twice. Ask '
-            f'for the plain functional with a correction, or the corrected '
-            f'functional with none.')
-
-
 def _pyscf_dispersion():
     """pyscf's dispersion module, or a clear failure. Imported on use, so a
     pyscf without it still serves the name checks above."""
@@ -84,9 +71,9 @@ def dispersion_version(mf):
 def dispersion_energy(mf):
     """The dispersion energy of `mf` in Hartree, or 0 if it carries none.
 
-    pyscf already adds this inside `mf.e_tot`; it is exposed separately so a
-    surface can report what the term contributes, and so a test can assert
-    that an excitation energy does not move when it is switched on.
+    pyscf already adds this inside `mf.e_tot`; it is exposed separately for
+    the tests alone, which assert with it that an excitation energy does not
+    move when the correction is switched on: a gate oracle no route reads.
     """
     version = dispersion_version(mf)
     if version is None:

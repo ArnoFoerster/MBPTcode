@@ -1,8 +1,8 @@
-"""Regression test for src/SingleReference/ADC/precursor_classes.py (Phase 1
-of the automated ADC(n) generator):
+"""Regression test for src/SingleReference/ADC/precursor_classes.py (the
+excitation classes of the automated ADC(n) generator):
 
 class_configs(nocc, norb, k, sector) must reproduce base.py's hand-written
-_configs_2h1p/_configs_3h2p (sector='IP', k=1/2) and _configs_2p1h/_configs_3p2h
+configs_2h1p/configs_3h2p (sector='IP', k=1/2) and configs_2p1h/configs_3p2h
 (sector='EA', k=1/2) BYTE-FOR-BYTE -- this is the cheap, high-signal check that
 the generic combinatorics/flattening convention matches the existing,
 already-validated ADC(3)/(4) configuration-index bookkeeping before any new
@@ -31,10 +31,10 @@ def main():
         base = ADCSolverUnrestricted.from_arrays(np.arange(norb, dtype=float), np.zeros((norb,) * 4))
 
         checks = [
-            ('IP k=1 vs _configs_2h1p', class_configs(nocc, norb, 1, 'IP'), base._configs_2h1p(nocc)),
-            ('IP k=2 vs _configs_3h2p', class_configs(nocc, norb, 2, 'IP'), base._configs_3h2p(nocc)),
-            ('EA k=1 vs _configs_2p1h', class_configs(nocc, norb, 1, 'EA'), base._configs_2p1h(nocc)),
-            ('EA k=2 vs _configs_3p2h', class_configs(nocc, norb, 2, 'EA'), base._configs_3p2h(nocc)),
+            ('IP k=1 vs configs_2h1p', class_configs(nocc, norb, 1, 'IP'), base.configs_2h1p(nocc)),
+            ('IP k=2 vs configs_3h2p', class_configs(nocc, norb, 2, 'IP'), base.configs_3h2p(nocc)),
+            ('EA k=1 vs configs_2p1h', class_configs(nocc, norb, 1, 'EA'), base.configs_2p1h(nocc)),
+            ('EA k=2 vs configs_3p2h', class_configs(nocc, norb, 2, 'EA'), base.configs_3p2h(nocc)),
         ]
         for name, got, expect in checks:
             ok = len(got) == len(expect) and all(np.array_equal(g, e) for g, e in zip(got, expect))

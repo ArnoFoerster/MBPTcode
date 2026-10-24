@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics.constants import METHOD_REGISTRY
+from src.SingleReference.GW.self_energy import METHOD_REGISTRY
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_eri,
                                             get_density_fitting_coefficients,
                                             get_orbital_energies,

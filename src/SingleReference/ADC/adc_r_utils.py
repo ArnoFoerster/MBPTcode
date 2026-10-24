@@ -231,6 +231,56 @@ def upper_pair(Vmat, iu, ju, O_, Vv):
     return Vup
 
 
+# The 2p1h class blocks the two hand-written restricted matrix-free routes
+# (adc_r_sigma_full, dense integrals; adc_r_sigma_df, DF) share. Apps are the
+# (App1, App2, App3, App4) contractions of a virtual-pair amplitude with
+# g_ovov/g_ovvo, Term0 the pp-ladder product, each in the route's own integrals.
+
+def upper_virtual_pair(Vmat, iu, ju, O_, Vv):
+    """(O_, n_pair) on the a<b pairs -> (O_, Vv, Vv), zero below the diagonal."""
+    Vup = np.zeros((O_, Vv, Vv))
+    Vup[:, iu, ju] = Vmat
+    return Vup
+
+
+def c_ip_ip(Vmat, g_aabb, inner_Ip):
+    """The I'-I' block on an (O, V) amplitude."""
+    term1 = np.einsum('ic,ac->ia', Vmat, g_aabb, optimize=True)
+    term2 = np.einsum('iak,ka->ia', inner_Ip, Vmat, optimize=True)
+    return term1 + term2
+
+
+def c_iip_iip(Term0, Apps, iu, ju):
+    """The II'-II' block: Term0 plus the Apps of the II' amplitude."""
+    App1, App2, App3, App4 = Apps
+    A, B = iu, ju
+    return (Term0 - App3[:, A, B] + App1[:, A, B] + 1.5 * App2[:, B, A]
+            - App1[:, B, A] - 1.5 * App4[:, B, A] + App3[:, B, A]
+            - 1.5 * App2[:, A, B] + 1.5 * App4[:, A, B])
+
+
+def c_iiip_iiip(Term0, Apps, iu, ju):
+    """The III'-III' block: Term0 plus the Apps of the III' amplitude."""
+    App1, App2, App3, App4 = Apps
+    A, B = iu, ju
+    return (Term0 - (App1[:, A, B] + App1[:, B, A]) - (App3[:, A, B] + App3[:, B, A])
+            + 0.5 * (App2[:, A, B] + App2[:, B, A]) + 0.5 * (App4[:, A, B] + App4[:, B, A]))
+
+
+def c_iip_iiip(Apps_IIIp, iu, ju, s3):
+    """The II'-III' block from the Apps of the III' amplitude."""
+    App1, App2, App3, App4 = Apps_IIIp
+    A, B = iu, ju
+    return 0.5 * s3 * (App2[:, B, A] - App2[:, A, B]) + 0.5 * s3 * (App4[:, B, A] - App4[:, A, B])
+
+
+def c_iiip_iip(Apps_IIp, iu, ju, s3):
+    """The III'-II' block from the Apps of the II' amplitude."""
+    App1, App2, App3, App4 = Apps_IIp
+    A, B = iu, ju
+    return 0.5 * s3 * (App2[:, B, A] + App2[:, A, B]) - 0.5 * s3 * (App4[:, A, B] + App4[:, B, A])
+
+
 G_BLOCK_NAMES = ('g_oovv', 'g_vvoo', 'g_vv_pv', 'g_vv_vp', 'g_oo_po', 'g_oo_op',
                  'g_vopo', 'g_voho', 'g_ovpv', 'g_ovvp', 'g_oo_pp', 'g_vv_pp',
                  'g_ii', 'g_aa', 'g_voov', 'g_vovo', 'g_oooo', 'g_vvvv',

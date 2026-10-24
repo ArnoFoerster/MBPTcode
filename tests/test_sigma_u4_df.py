@@ -1,5 +1,5 @@
-"""GATE for the U^(4) DF/RI twin (adc5_u4_blocks_restricted_df) -- closing the
-DF requirement for the ADC(5) orbital<->k1 layer.
+"""GATE for the U^(4) DF/RI twin (adc5_u4_blocks_restricted_df) -- the DF
+form of the ADC(5) orbital<->k1 layer.
 
 Two levels, both with an EXACT RI factor (naux = norb^2,
 DFIntegrals.from_scf(exact=True)) so any disagreement is codegen/plumbing,
@@ -9,7 +9,7 @@ never fitting error:
      u4_*/s4_* function's DF twin == the dense function, fed the same
      amplitude pool (rank-4 l4/t4 included). The summed |max| over blocks is
      asserted NONZERO first -- a DF==dense agreement between zeros proves
-     nothing (section 19's trap).
+     nothing.
 
   2. ASSEMBLY level (task-spec gate): sigma_driver.u_dot_orb_order(rsolver,
      sector, p_orb, 4, s2cr_module) evaluated WITH the DF modules (B leaves ->
@@ -80,9 +80,9 @@ def main():
 
     # ---- level 1: every u4_/s4_ block, DF twin == dense --------------------
     amp_pool = {}
-    for d in r._amps_order(max_order=4).values():
+    for d in r.amps_order(max_order=4).values():
         amp_pool.update(d)
-    pool = {**r._rargs, **amp_pool}
+    pool = {**r.rargs, **amp_pool}
     pool_df = {**pool, 'B_aa': B_aa, 'B_bb': B_bb}
     names = [n for n in dir(dense) if n.startswith(('u4_', 's4_'))]
     checked, worst, biggest, missing = 0, 0.0, 0.0, []

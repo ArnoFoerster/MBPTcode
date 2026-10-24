@@ -1,47 +1,25 @@
 """generateADC(order) -- the master-formula-driven ADC(n) generation driver.
 
-The design target: ``generateADC(order=n)`` shall
-  (a) use the master formula (block_order(n, mu_i, mu_j) = n - mu_i - mu_j,
-      class mu present iff 2*mu <= n) to decide WHICH blocks are needed,
-  (b) derive every needed block via the ISR + pdaggerq machinery,
-  (c) emit the spin-free (restricted) twins,
-  (d) wire in DF and Laplace (rule: NO materialized intermediate may carry
-      more than 4 indices => every rank>=3 amplitude is Laplace-fused),
-  (e) emit everything matrix-free (apply form),
-  (f) wire the even-order closed-form downfold + diagonal approximation,
-  (g) package as a callable the production solve entry can consume,
-  incrementally: ADC(n) generates only what ADC(n-1) did not already emit.
+plan(order) uses the master formula (block_order(n, mu_i, mu_j) = n - mu_i -
+mu_j, class mu present iff 2*mu <= n) to decide which blocks ADC(n) needs.
+coverage(order) checks which of them already exist as generated modules and
+reports every missing block as a precise gap, never silently skipped: at
+runtime a missing module cannot be told apart from a block pdaggerq pruned, so
+generation asserts coverage. generateADC / GenerateADC dispatch each gap to the
+per-family generator registered in REGISTRY (generate_adcn.generate_adc_u,
+generate_adc_class_pair, generate_adc_u_k2, ...; one emitter for the
+spin-orbital, restricted and DF twins, with every rank>=3 amplitude
+Laplace-fused so no intermediate carries more than 4 indices) and skip module
+files that already exist: the generatedADC/ files are the incremental cache,
+so ADC(n) generates only what ADC(n-1) did not already emit.
 
-THIS MODULE is the driver skeleton: plan (a) is fully implemented and
-order-general; (b,c,d,e) dispatch to the existing per-family generators via a
-REGISTRY, skipping module files that already exist (the generatedADC/ files
-ARE the incremental cache); everything the registry cannot yet produce is
-reported as a PRECISE gap, never silently skipped (the l3f lesson: a missing
-module is indistinguishable from a pruned one at runtime unless generation
-asserts coverage).
-
-Current state:
-  * plan/coverage/dispatch: order-general, this file.
-  * per-family generators: order-general, their dressing structures derived
-    from adc_order_rule (generate_adcn.generate_adc_u, generate_adc_class_pair,
-    generate_adc_u_k2, ...; one emitter for the spin-orbital, restricted and
-    DF twins); the undressed first-order blocks are per class.
-  * runtime assembly: hand-wired per order up to ADC(4)+ADC(5)-blocks; the
-    order-general series assembly (sequential class-GS + Loewdin convolutions
-    mirroring validation/lambda_oracle/exact_isr_order5.py) is Phase 2.
-  * amplitudes: numerator generator is order-general
-    (t_numerator_terms_restricted(rank, order, block) works at any order);
-    the recursion driver is wired through order 3 (+t1_4) -- Phase 1 wires
-    the general loop.
+The amplitude numerator generator is order-general
+(t_numerator_terms_restricted(rank, order, block) works at any order).
 """
 import ast
 import importlib
 import os
 import re
-
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.SingleReference.ADC.adc_order_rule import (
     kmax, blocks_at, u_order_terms, s_order_terms,
@@ -68,11 +46,10 @@ def _module_path(mod):
 
 def _amp_census():
     """{order: ranks or None} of generated amplitude numerators. Orders 1-3
-    are the legacy mpn_density_pieces chain (census pinned to match
+    are the mpn_density_pieces chain (census pinned to match
     ranks_present at its generation); higher orders come from the
-    RANKS_PRESENT manifests of generated_mpn/mpn_amp_numerators_o*.py --
-    parsed TEXTUALLY (ast.literal_eval) so this driver never imports
-    SingleReference modules (repo convention). A rank absent from a listed
+    RANKS_PRESENT manifests of generated_mpn/mpn_amp_numerators_o*.py,
+    parsed textually (ast.literal_eval). A rank absent from a listed
     order's census is pdaggerq-PRUNED, not a gap."""
     census = {1: [2], 2: [1, 2, 3, 4], 3: [1, 2, 3, 4]}
     if os.path.isdir(_MPN_GEN_DIR):
@@ -106,11 +83,9 @@ def _amp_census():
 #            (callable identity, frozen kwargs) across the whole REGISTRY, so
 #            a producer shared by two keys (e.g. generate_adc4_base_k2 under
 #            both ('C_1_2',1) and ('U_k2',2)) runs exactly once per
-#            GenerateADC pass. Every entry here was confirmed by reading the
-#            real producer's _write_module/_write_apply_module call and
-#            matching its output filename against 'modules' -- nothing here
-#            is a guess (2026-07-24 GenerateADC audit).
-#   'generator': legacy display string (coverage()'s printout only).
+#            GenerateADC pass. The output filenames of each entry's
+#            producers (_write_module/_write_apply_module) are the 'modules'.
+#   'generator': display string (coverage()'s printout only).
 #   'note': honest one-liner (what representation, what is missing).
 # ---------------------------------------------------------------------------
 REGISTRY = {
@@ -179,8 +154,7 @@ REGISTRY = {
                       generator='generate_adcn.generate_adc_class_pair',
                       note='k1<->k2 order-2 (l1f/l2v/l2ft2) + runtime '
                            'c12_o2_generated (sequential class-GS assembly, '
-                           'arbiter 6e-10/6e-9) -- the gap generateADC(5) '
-                           'found, closed 2026-07-21.',
+                           'arbiter 6e-10/6e-9)',
                       calls=[('generate_adcn.generate_adc_class_pair',
                               {'order': 2, 'pair': 'k1k2', 'kinds': ('u',),
                                'fname': 'adc5_c12_blocks.py'})]),
@@ -211,7 +185,7 @@ REGISTRY = {
     ('C_k2', 1): dict(modules=['adc5_k2k2_blocks',
                                'adc5_k2k2_apply_restricted_blocks'],
                       generator='generate_adcn.generate_adc5_k2k2',
-                      note='(2,2) C^(1): the ADC(5) block; every required property (apply twin '
+                      note='(2,2) C^(1): the ADC(5) block; matrix-free (apply twin '
                            'is sigma_codegen.generate_c1_self_apply(k=2); dense '
                            "call SHARED with ('C_k2',0))",
                       calls=[('generate_adcn.generate_adc5_k2k2', {}),
@@ -440,7 +414,7 @@ def generateADC(order, dry_run=True):
     """Walk the plan; (re)generate every missing module with a registered
     generator; report what cannot be generated yet. Incremental: existing
     module files are the cache and are skipped (coverage() re-run after
-    dispatch confirms this). dry_run=True only reports (unchanged behavior).
+    dispatch confirms this). dry_run=True only reports.
 
     dry_run=False actually invokes the REGISTRY 'calls' for every gap that has
     them, then re-checks coverage: any gap still open after dispatch --
@@ -482,8 +456,8 @@ def generateADC(order, dry_run=True):
 def GenerateADC(orders=(2, 3, 4, 5)):
     """One-shot setup entry point: generate every module production runs need
     at the given orders, so a fresh machine only needs to call this once
-    before any solve_adc(...) run (generated code is not committed to git --
-    see README.md). Incremental: skips whatever generatedADC/ already has.
+    before any generated-ADC run (generated code is not committed to git --
+    see docs/installation.md). Incremental: skips whatever generatedADC/ already has.
     Thin loop over generateADC(order, dry_run=False) -- no new machinery.
 
     Fails fast at the first order it cannot fully close (never silently
@@ -536,7 +510,7 @@ def GenerateRuntime(orders=(2, 3, 4), verbose=True):
     # (generated_mpn/mpn_amp_numerators_o{o}), first consumed by ADC(o + 1): the
     # order-4 amplitudes of the ADC(5) accessors (norm series, spin-orbital
     # non-Dyson blocks; orders <= 3 are hand-chained); with ADC(5) the restricted
-    # order-4 ground state of non-Dyson ADC(5) (_amps_order(5))
+    # order-4 ground state of non-Dyson ADC(5) (amps_order(5))
     dm_modules = [(os.path.join(_MPN_GEN_DIR, f'mpn_amp_numerators_o{o}.py'),
                    'generate_mpn_density.generate_amplitude_numerator_module',
                    dict(orders=[o], basename=f'mpn_amp_numerators_o{o}'))

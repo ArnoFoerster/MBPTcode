@@ -1,5 +1,6 @@
 """Numerical events of the generated charged-ADC solves warn and flag the
-result, they do not refuse (policy: refuse inputs, warn numerics), and the
+result, they do not refuse (inputs are refused, numerical events warned
+about), and the
 one-step on-shell scheme is not such an event. Each path is starved on purpose
 (LiH/sto-3g, generated restricted ADC(3)/(4)):
 

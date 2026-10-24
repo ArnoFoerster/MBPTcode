@@ -47,6 +47,7 @@ from src.Base.numerics.constants import (SCF_HISTORY_GRAD_MARKS,
                                          SCF_NEWTON_RESIDUAL_FRACTION,
                                          SCF_WARM_START_MAX_SHIFT)
 from src.Base.utils.parallel.mpi_grid import lockstep
+from src.Base.factorization.distributed_df import distributed_timings
 
 
 class SCFHistory:
@@ -327,7 +328,7 @@ def scf_record(mf):
     if mf is None:
         return None
     history = mf.callback if isinstance(mf.callback, SCFHistory) else None
-    timings = getattr(mf, '_distributed_timings', None)
+    timings = distributed_timings(mf)
     return {'conv_tol': float(mf.conv_tol),
             'conv_tol_grad': (None if mf.conv_tol_grad is None
                               else float(mf.conv_tol_grad)),

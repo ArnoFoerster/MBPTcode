@@ -20,7 +20,7 @@ import warnings
 import numpy as np
 import pytest
 
-from src.Base.numerics.constants import (QP_CD_NEWTON_TOL, QP_POLE_OFFSET,
+from src.Base.numerics.constants import (QP_ROOT_TOL, QP_POLE_OFFSET,
                                          QP_WINDOW_Z_MIN)
 from src.SingleReference.GW.contour_deformation import qp_energy_cd
 from src.SingleReference.GW.real_screening import ResidueRefused
@@ -60,7 +60,7 @@ def test_a_root_beside_its_orbital_energy_is_found_quietly(screening):
     wc = np.full((len(NU), len(EPS)), screening)
     w_f, z_f, _ = qp_energy_cd(NOCC - 1, Bp, EPS, NOCC, NU, WT, wc=wc,
                                follow=w)
-    assert abs(w_f - w) < QP_CD_NEWTON_TOL and abs(z_f - z) < 1e-9
+    assert abs(w_f - w) < QP_ROOT_TOL and abs(z_f - z) < 1e-9
 
 
 def test_a_root_on_its_orbital_energy_is_not_answered_without_its_residue():
@@ -95,7 +95,7 @@ SATELLITE = dict(s0=-0.068, A=4e-5)
 
 
 def every_root(f, fprime, a):
-    source = SampledEquation(f, fprime, tol=QP_CD_NEWTON_TOL)
+    source = SampledEquation(f, fprime, tol=QP_ROOT_TOL)
     return [rz for lo, hi in source.windows(a)[:1]
             for br in source.brackets(lo, hi)[0] for rz in source.solve(br)]
 
@@ -166,5 +166,5 @@ def test_a_misleading_slope_cannot_leave_the_bracket():
         return 1.074
 
     w, z = solve_qp_equation_scan(f, fprime, float(eps[p]))
-    assert abs(w - eps[p] - root) < QP_CD_NEWTON_TOL
-    assert abs(z - 1.0 / 1.074) < QP_CD_NEWTON_TOL
+    assert abs(w - eps[p] - root) < QP_ROOT_TOL
+    assert abs(z - 1.0 / 1.074) < QP_ROOT_TOL

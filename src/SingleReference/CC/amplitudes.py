@@ -917,8 +917,8 @@ def kernel(t1, t2, t3, fock, g, o, v, e_ai, e_abij, e_abcijk, hf_energy, max_ite
            stopping_eps=1.0E-8, diis_size=6, diis_start_cycle=2, out=None):
     """Iterate CCSDT amplitude equations to convergence. e_ai/e_abij/e_abcijk are 1/orbital-energy-denominators.
 
-    diis_size: DIIS subspace dimension; 0 (or None) restores the plain
-        fixed-point iteration this used to do unconditionally.
+    diis_size: DIIS subspace dimension; 0 (or None) gives the plain
+        fixed-point iteration.
     out: optional dict; receives 'converged' and 'n_iter'. Running out of
         iterations warns (fixed_point.CCNotConverged) and returns the last
         iterate; the loop itself is fixed_point.iterate.

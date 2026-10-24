@@ -3,7 +3,7 @@
 The functional itself -- the block fold of the ACFDT log-determinant over a
 non-overlapping solvent, its reaction-field matrix N and its solute-solvent
 dispersion term `solute_solvent_dispersion_energy` (not the empirical D3/D4
-correction of `Base.dispersion`) -- is
+correction of `Base.pyscf.dispersion`) -- is
 `SingleReference.LinearResponse.solvated_rpa_energy`.
 
 THE FOLD HAS A FORCE. `rpa_energy_and_adjoint` carries the adjoints of the

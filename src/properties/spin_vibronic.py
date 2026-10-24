@@ -58,26 +58,12 @@ and one Z-vector per coupling pair (T1-T2, S1-S2).
 import numpy as np
 
 from src.Base.pyscf.pyscf_interface import occupied_count
-from src.gradients.gwbse.derivative_coupling import evaluated_coupling
-from src.properties.spin_orbit import ground_state_element, interstate_element
-from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
+from src.gradients.surface import require
+from src.properties.spin_orbit import soc_vectors
 from src.properties.franck_condon import require_vibrational_modes
 from src.properties.vibronic import project_coupling
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization)
-
-
-def soc_vector(h_mo, nocc, singlet, triplet):
-    """(3,) spin-factored real <S|H_SO^eta|T>, Hartree; |.| is `spin_orbit.coupling`.
-
-    singlet: (X, Y) of one singlet root, or None for the ground state;
-    triplet: (X, Y) of one triplet root.
-    """
-    xt, yt = (np.asarray(a, float).ravel() for a in triplet)
-    if singlet is None:
-        return GROUND_SPIN_FACTOR * ground_state_element(h_mo, nocc, xt, yt)
-    xs, ys = (np.asarray(a, float).ravel() for a in singlet)
-    return EXCITED_SPIN_FACTOR * interstate_element(h_mo, nocc, xs, xt, ys, yt)
 
 
 def second_order_derivative(v_singlet_paths, v_triplet_paths, d_singlet,
@@ -176,6 +162,7 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     with modes, masses and omega given, 'dv_dq' (nmode,) and 'dv_dq_vector'
     (nmode, 3), plus 'dv_dq_paths' {label: (nmode,)}.
     """
+    coupling = require(ev, 'coupling', 'spin_vibronic_coupling')
     nocc = occupied_count(ev.mf)
     for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
         if ev.target[key][0] != spin:
@@ -184,19 +171,19 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     _, xt, yt, _ = _root(ev, triplet)
     check_normalization(np.c_[xs], np.c_[ys])
     check_normalization(np.c_[xt], np.c_[yt])
-    v0 = soc_vector(h_mo, nocc, (xs, ys), (xt, yt))
+    v0 = soc_vectors(h_mo, nocc, (xs, ys), (xt, yt))
     v_s, d_s, v_t, d_t, labels = {}, {}, {}, {}, {}
     scf = []
     for key in triplet_paths:
         _, xn, yn, _ = _root(ev, key)
-        v_t[key] = soc_vector(h_mo, nocc, (xs, ys), (xn, yn))
-        d_t[key], diags = evaluated_coupling(ev, key, triplet)
+        v_t[key] = soc_vectors(h_mo, nocc, (xs, ys), (xn, yn))
+        d_t[key], diags = coupling(key, triplet)
         merge_scf_flags(scf, diags.get('scf_flags'))
         labels[key] = f'{key[0]}{key[1] + 1}'
     for key in singlet_paths:
         _, xm, ym, _ = _root(ev, key)
-        v_s[key] = soc_vector(h_mo, nocc, (xm, ym), (xt, yt))
-        d_s[key], diags = evaluated_coupling(ev, key, singlet)
+        v_s[key] = soc_vectors(h_mo, nocc, (xm, ym), (xt, yt))
+        d_s[key], diags = coupling(key, singlet)
         merge_scf_flags(scf, diags.get('scf_flags'))
         labels[key] = f'{key[0]}{key[1] + 1}'
     paths = {}

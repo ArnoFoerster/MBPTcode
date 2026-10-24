@@ -60,7 +60,8 @@ from src.Base.factorization.separable_ri import UnrepresentedOrbitals
 from src.gradients.gwbse.state_manifold import StateEvaluation, StateManifold
 from src.photophysics import chain
 from src.photophysics.records import log
-from src.properties.excitations import grid_record, qp_bookkeeping, surface_of
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from src.properties.excitations import grid_record, surface_of
 from src.gradients.gwbse.surface_factory import reference_mean_field
 
 #: The quasiparticle arms.

@@ -88,7 +88,7 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.fragment_diabatic import DiabaticGradient, DiabaticSurface
 from src.gradients.gwbse import fragment_bse
 from src.Base.geometry.geometry import displaced
-from src.properties.diabatic import (derivative_ladder, diabatic_derivative,
+from tests.fragment_diabatic_fd import (derivative_ladder, diabatic_derivative,
                                      linear_vibronic_coupling)
 from tests.isdf_test_grid import g1
 from src.gradients.gwbse.bse_isdf import bse_solve

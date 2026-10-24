@@ -1,5 +1,5 @@
 """Gates for the adaptive explicit set's check at the end of a walk
-(`properties.excitations.adaptive_check`, `ExcitedStateChain.
+(`gradients.gwbse.diagnostics.adaptive_check`, `ExcitedStateChain.
 posteriori_check`).
 
 The partition is frozen at the reference geometry; at the walk's last
@@ -28,7 +28,7 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.qp_selection import first_order_weights
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.excitations import adaptive_check
+from src.gradients.gwbse.diagnostics import adaptive_check
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
 

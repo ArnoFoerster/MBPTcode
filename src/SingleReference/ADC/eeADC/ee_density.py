@@ -171,24 +171,3 @@ def spin_free_difference_density(eps, V, no, v, level='adc2', parity=None,
         p0 = _eq.density2(be, amps)
         out = spin_summed(difference_density_terms(be, u1, u2, amps['t2_1'], p0))
     return out if terms else assemble(out, no, nv)
-
-
-def spin_orbital_difference_density(eps, g, nocc, v, level='adc2',
-                                    terms=False):
-    """Delta rho of one full eigenvector of the spin-orbital route
-    (ee_u_dense_full: singles, then unique-configuration doubles), in the
-    spin-orbital basis (norb, norb); the validation form."""
-    norb = len(eps)
-    nv = norb - nocc
-    be = _eq.NUMPY
-    n_s = nocc * nv
-    v = np.asarray(v, float)
-    u1 = v[:n_s].reshape(nocc, nv)
-    if level == 'adc1':
-        out = difference_density_terms(be, u1)
-    else:
-        u2 = ee_utils.unfold_doubles(v[n_s:], nocc, norb) / ee_utils.PAPER_DOUBLES_SCALE
-        amps = ee_utils.mp_amplitudes(eps, g, nocc, norb, order=2)
-        out = difference_density_terms(be, u1, u2, amps['t2_1'],
-                                       ee_utils.mp_density2(amps))
-    return out if terms else assemble(out, nocc, nv)

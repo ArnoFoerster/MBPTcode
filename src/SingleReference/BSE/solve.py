@@ -170,7 +170,7 @@ def solve_bse(mf, mol=None, nocc=None, numerics=None, solver='davidson',
         # Resolved here and nowhere else, so every check below -- and every
         # route, keyword and info key -- sees a real solver.
         n_ov = nocc * (np.asarray(mf.mo_coeff).shape[-1] - nocc)
-        solver = solver_choice(n_ov, tda=bool(route_kwargs.get('tda', False)))
+        solver = solver_choice(n_ov)
     if solver == 'davidson' and integrals == 'full':
         raise NotImplementedError(
             "solver='davidson' with integrals='full' is the one combination "
@@ -201,8 +201,7 @@ def solve_bse(mf, mol=None, nocc=None, numerics=None, solver='davidson',
     # One shape for every route: the keys a route cannot fill are present and
     # None, never a stand-in that reads like a measurement.
     # A Davidson root left unconverged is returned as solved and named in
-    # 'davidson_flags' (refuse inputs, warn
-    # numerics); the dense route has none to name.
+    # 'davidson_flags' (refuse inputs, warn numerics); the dense route has none to name.
     info = {'factors': None, 'coeff_df': None, 'stats': None, 'n_states': None,
             'davidson_flags': {}, **info, 'solver': solver,
             'integrals': integrals}
@@ -248,15 +247,14 @@ def _bse_setup(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
     choices the GW stage, the fit and the static W read alike.
     """
     numerics = numerics_or_default(numerics)
-    # the space-time GW reads the object; the Casida GW routes take keywords
+    # every GW stage reads the one object: the space-time route its grids,
+    # the evGW loop its settings
     refuse_second_numerics(gw_kwargs)
-    st_kwargs = dict(gw_kwargs or {}, numerics=numerics)
     if integrals == 'isdf' and factors is None:
         factors = separable_factors(mf, mol, numerics=numerics, **fit_kwargs)
 
     diagonal = qp_diagonal(mf, mol, nocc, integrals, qp, self_consistency,
-                           screen_at,
-                           st_kwargs if integrals == 'isdf' else gw_kwargs,
+                           screen_at, dict(gw_kwargs or {}, numerics=numerics),
                            factors=factors)
     eps, eps_mf, mf = diagonal['eps'], diagonal['eps_mf'], diagonal['mf']
     gw_extras, evgw_info = diagonal['extras'], diagonal['evgw']
@@ -351,7 +349,7 @@ def _solve_bse_dense(mf, mol, nocc, integrals, nroots, numerics, qp='G0W0',
 
 #: `GW/space_time.py`'s own `timings` keys, renamed for `info['timings']`'s
 #: `qp_` prefix: `t_qp_static`/`t_qp_states` fold their `t_qp_` in with the
-#: shared prefix rather than doubling it. `t_qp` -- `_finish_qp`'s own total,
+#: shared prefix rather than doubling it. `t_qp` -- `finish_qp`'s own total,
 #: static + states -- carries nothing beyond the two keys it sums and is not
 #: re-exposed under a third name.
 QP_TIMING_RENAME = {'t_chi0': 'qp_chi0', 't_dyson': 'qp_dyson',
@@ -362,7 +360,7 @@ QP_TIMING_RENAME = {'t_chi0': 'qp_chi0', 't_dyson': 'qp_dyson',
 class _QPStageTimings:
     """`timings=` target for the space-time QP solve, G0W0 or one evGW cycle.
 
-    `solve_qp_energy_space_time`/`_qp_blocked`/`_finish_qp` write each
+    `solve_qp_energy_space_time`/`_qp_blocked`/`finish_qp` write each
     per-stage key once per call with a plain assignment, and evGW re-enters
     that call once per cycle on the same object (`gw_kwargs['timings']` is
     fixed for the whole loop in `evgw_eigenvalues`), so a plain dict would
@@ -472,7 +470,8 @@ def qp_diagonal(mf, mol, nocc, integrals, qp, self_consistency, screen_at,
     screens with -- the one rule of every BSE driver.
 
     integrals: 'isdf' runs the space-time GW on `factors`, `gw_kwargs` being
-    its keywords (the Numerics among them); 'df' and 'full' the Casida GW
+    its keywords (the run's Numerics among them, which the evGW loop reads on
+    every route); 'df' and 'full' the Casida GW
     on pyscf's fitted or four-index integrals. self_consistency 'evGW' puts
     the loop's fixed point on the diagonal and screens there (`gw_kwargs`
     may not choose its 'screening': the kernel screens at the fixed point,
@@ -662,7 +661,7 @@ def solve_bse_isdf(mf, mol, nocc, numerics=None, qp='G0W0', factors=None,
     pair rows a rank holds (`trial_space_memory`); outside one within
     DAVIDSON_SPACE_GB. On a slow interconnect weigh the GW stage's
     all-reduce of nfreq x naux^2 first: on 1 GbE it costs more than it saves
-    (`Base.utils.mpi_grid`).
+    (`Base.utils.parallel.mpi_grid`).
     grid_accuracy: the named way to ask for the interpolation grid: an
     accuracy level of `ISDF_GRID_ACCURACY`, measured on this quantity
     (the three lowest BSE roots against `solve_bse_df`), or four explicit shell
@@ -980,10 +979,11 @@ def solve_bse_df(mf, mol, nocc, numerics=None, qp='G0W0', probe=False,
               f'nao={mol.nao_nr()} nocc={nocc} nroots={nroots} qp={qp}',
               flush=True)
 
-    # the Casida GW stage takes keywords, never a second Numerics
+    # the GW stage reads the driver's one Numerics, never a second
     refuse_second_numerics(gw_kwargs)
     diagonal = qp_diagonal(mf, mol, nocc, 'df', qp, self_consistency,
-                           screen_at, gw_kwargs, clock=(_begin, _end),
+                           screen_at, dict(gw_kwargs or {}, numerics=numerics),
+                           clock=(_begin, _end),
                            progress=progress, tag='bse-df')
     eps, eps_mf, mf = diagonal['eps'], diagonal['eps_mf'], diagonal['mf']
     evgw_info = diagonal['evgw']

@@ -5,28 +5,19 @@ just the validated-but-opt-in `_df`-suffixed methods.
 
 Covers:
 1. src.SingleReference.ADC.static_correction._static_correction_from_dgamma_restricted_df
-   (genuinely new RI-J/RI-K derivation, no prior phase touched this).
+   (the RI-J/RI-K form of the static correction).
 2. src.SingleReference.DensityMatrix.mpn_density_driver_restricted
-   .MPnDensityDriverRestricted.compute_delta_gamma23_df (new, mirrors the
-   dense compute_delta_gamma23 but calls the Phase 1/3 _df methods).
+   .MPnDensityDriverRestricted.compute_delta_gamma23_df (mirrors the dense
+   compute_delta_gamma23 but calls the _df methods).
 3. build_mp2_static_correction_restricted/build_mp3_static_correction_restricted's
-   new B_aa= parameter (unrelaxed AND relaxed -- relax=True exercises
+   B_aa= parameter (unrelaxed AND relaxed -- relax=True exercises
    solve_cphf_relaxation, an independent code path DF doesn't touch, so this
    is also a check that DF density plugs correctly into an otherwise-
    untouched pipeline).
-4. build_adc_solver's use_df= parameter (the DF-wiring logic solve_adc's
-   handwritten backend uses): 'auto' detection via mf.with_df, explicit True
-   (and its error when mf.with_df isn't set), explicit False -- checked both
-   directly on the solver it returns (.B_aa) and end-to-end through solve_adc.
-
-(This file originally tested solve_ip_ea_adc_restricted, which owned this DF-
-wiring logic before adc.py's legacy-interface cleanup 2026-07-30 moved it into
-build_adc_solver -- solve_adc's handwritten backend now calls that directly,
-no more delegating to a separate "legacy" function. It also checked that
-level='adc4' was unaffected by use_df, since it dispatched to a separate
-hand-written spin-orbital solver; that branch was removed 2026-07-30 too --
-hand-written ADC(4) is gone, backend='handwritten'+level='adc4' now raises
-via resolve_backend, earlier and more directly than before.)
+4. ADCSolverRestricted's df= flag: df=True on a DF mean field sets .B_aa and
+   skips the dense eri, the default leaves .B_aa unset, df=True on a non-DF
+   mean field raises; end to end, the DF solve matches the dense reference at
+   RI level. level='adc4' without a pdaggerq construction raises.
 """
 import os
 import sys

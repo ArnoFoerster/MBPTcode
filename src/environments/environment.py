@@ -60,6 +60,11 @@ class PointCharges:
             return self.coords
         return self.coords / BOHR_TO_ANGSTROM
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
     def for_geometry(self, mol):
         return self
 

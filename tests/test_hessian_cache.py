@@ -17,7 +17,7 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import (HESSIAN_ASYMMETRY_WORST, NUCLEAR_FD_STEP,
                                          PIN_CROSS_BLAS_GRADIENT_BAR)
-from src.properties.hessian import surface_hessian
+from src.properties.hessian import HessianAsymmetric, surface_hessian
 from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.blas_bar import assert_same_within
 
@@ -33,12 +33,19 @@ class Counted:
         self.calls += 1
         return self.surface.total_gradient(mol)
 
+    def identity(self):
+        return None
+
 
 class Recorded(Counted):
-    """A counted surface that writes a record (`surface_record`)."""
+    """A counted surface that writes a record (`surface_record`) and names
+    its forces by it (`identity`)."""
 
     def to_record(self):
         return self.record
+
+    def identity(self):
+        return {'class': type(self).__name__, 'record': self.record}
 
 #: Hessian bar on a BLAS other than the pin files': a force's class bar over
 #: the central difference's 2 * step.
@@ -115,12 +122,14 @@ def test_a_cache_written_before_frames_were_frozen_is_refused(tmp_path):
                         cache_dir=tmp_path)
 
 
-def test_a_refused_hessian_leaves_its_asymmetry(tmp_path):
+def test_an_asymmetric_hessian_is_flagged_and_leaves_its_asymmetry(tmp_path):
     mol, surface = water()
     info = {}
-    with pytest.raises(RuntimeError, match='asymmetric'):
+    with pytest.warns(HessianAsymmetric, match='asymmetric'):
         surface_hessian(surface, mol, cache_dir=tmp_path, info=info,
                         asymmetry_tol=0.0)
+    assert info['hessian_asymmetric']
+    assert [f['flag'] for f in info['flags']] == ['hessian_asymmetric']
     dump = json.loads((tmp_path / 'asymmetry.json').read_text())
     assert dump['asymmetry'] == info['asymmetry'] > 0.0
     assert dump['asymmetry_rel'] == info['asymmetry_rel']

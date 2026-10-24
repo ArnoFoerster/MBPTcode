@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
+from src.Base.numerics.numerics import Numerics
 from src.properties.optimize import optimize
 
 #: Bohr: the radius asked for, and the cap every accepted step clips it to.
@@ -40,7 +41,7 @@ class Bond:
 def test_the_refrozen_walk_starts_at_the_asked_radius():
     mol = gto.M(atom='N 0 0 0; N 0 0 1.6', unit='Bohr', basis='sto-3g',
                 verbose=0)
-    _, info = optimize(Bond(mol), mol, verbose=False, nudge=0, trust=TRUST,
-                       trust_max=TRUST_MAX, refreeze=1)
+    _, info = optimize(Bond(mol), mol, verbose=False, nudge=0, refreeze=1,
+                       numerics=Numerics(walk={'trust': TRUST, 'trust_max': TRUST_MAX}))
     assert info['history'][-1]['trust'] <= TRUST_MAX
     assert info['refreeze_info']['history'][0]['trust'] == pytest.approx(TRUST)

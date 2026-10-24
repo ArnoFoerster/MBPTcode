@@ -64,6 +64,7 @@ every displaced mean field inside `frozen_pair_layout`, the way a walk does.
 import json
 import os
 import pathlib
+import warnings
 
 import numpy as np
 
@@ -135,12 +136,12 @@ class ForceCache:
     """The displaced forces of one finite-difference Hessian on disk, one
     file per displacement, each carrying what it is a force of: the
     geometry the Hessian is taken at (Bohr), the step and the hash of the
-    surface's conventions (`cached_conventions`). A file whose header
+    surface's conventions (`surface_identity.force_identity`). A file whose header
     differs is refused, not overwritten: it is a force of another Hessian."""
 
     def __init__(self, directory, mol, step, surface, frames=None):
         self.dir = pathlib.Path(directory)
-        record = cached_conventions(surface)
+        record = force_identity(surface)
         self.header = {'coords': np.array(mol.atom_coords(), float),
                        'step': np.array(float(step)),
                        'conventions': np.array(
@@ -184,15 +185,6 @@ class ForceCache:
         os.replace(tmp, path)
 
 
-def cached_conventions(surface):
-    """What a cached force is a force of: `force_identity`, the one answer
-    the walk's first point and checkpoint give too -- each half's
-    conventions, grid, settings, environment, mean field, SCF layout, frames
-    and span, not the walk's history; None for a surface that freezes
-    nothing and writes no record, which a dense surface is."""
-    return force_identity(surface)
-
-
 def component_step(mol, ia, x, step):
     """(natm, 3) Bohr: `step` on atom `ia`'s axis `x`, zero elsewhere -- the
     one-component displacement `geometry.displaced` moves a molecule by."""
@@ -212,7 +204,7 @@ def ladder_ratios(differences):
                              FD_LADDER_RATIO_FLOOR)
 
 
-def displacement_list(natm, step=NUCLEAR_FD_STEP):
+def displacement_list(natm):
     """Every (atom, component, sign) central-difference displacement.
 
     Ordered so that the two members of a pair are adjacent, which is what lets
@@ -419,7 +411,7 @@ def numerical_hessian(mol, scf_factory, step=NUCLEAR_FD_STEP, map_fn=None,
     frames = stencil_frames(mol, frames)
 
     def forces_at(h):
-        jobs = displacement_list(natm, h)
+        jobs = displacement_list(natm)
 
         def one(item):
             k, (ia, x, sign) = item
@@ -463,9 +455,9 @@ def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
 
     The 6N displaced forces go through `evaluate`, one after another, each
     over every rank of the region it runs in. `info` takes the asymmetry
-    and the sum rule (`hessian_from_gradients`), refused above
-    `asymmetry_tol` (`check_hessian_noise`, which writes `asymmetry.json`
-    into `cache_dir` first).
+    and the sum rule (`hessian_from_gradients`), warned about and flagged
+    'hessian_asymmetric' above `asymmetry_tol` (`check_hessian_noise`, which
+    writes `asymmetry.json` into `cache_dir` then).
 
     cache_dir: each displaced force is kept there as it is computed
     (`ForceCache`: `<atom>_<axis>_<sign>.npz`, with the geometry, the step
@@ -478,7 +470,7 @@ def surface_hessian(surface, mol, step=NUCLEAR_FD_STEP, verbose=False,
         the cache's header; the surface's own factors keep the frames they
         froze.
     """
-    jobs = displacement_list(mol.natm, step)
+    jobs = displacement_list(mol.natm)
     frames = stencil_frames(mol, frames)
     cache = (None if cache_dir is None
              else ForceCache(cache_dir, mol, step, surface, frames))
@@ -519,12 +511,20 @@ def record_frames(info, frames, mol):
     info['frame_turning'] = frame_turning_record(mol)
 
 
-def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL, dump_dir=None):
-    """Raise if the asymmetry is too large for the difference to mean anything.
+class HessianAsymmetric(RuntimeWarning):
+    """A finite-difference Hessian whose two halves disagree by more than
+    the tolerance: kept, symmetrized, and flagged 'hessian_asymmetric'."""
 
-    dump_dir: where `asymmetry.json` is written before the refusal (rank 0):
-    the asymmetry, absolute and relative, the step and the worst elements
-    with their atom/axis pairs (`worst_asymmetry`).
+
+def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL, dump_dir=None):
+    """Warn (`HessianAsymmetric`) and flag where the asymmetry is too large
+    for the difference to mean much: `info['hessian_asymmetric']` (False
+    within the tolerance) and, above it, the flag 'hessian_asymmetric' in
+    `info['flags']`; the symmetrized Hessian is kept.
+
+    dump_dir: where `asymmetry.json` is written when the tolerance is passed
+    (rank 0): the asymmetry, absolute and relative, the step and the worst
+    elements with their atom/axis pairs (`worst_asymmetry`).
 
     A SYMMETRIC MATRIX IS NOT EVIDENCE: `hessian_from_gradients` symmetrizes,
     so the asymmetry it measured beforehand is the only record of how far the
@@ -536,6 +536,7 @@ def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL, dump_dir=None):
     scale = max(float(np.abs(np.asarray(h)).max()), 1e-30)
     rel = info['asymmetry'] / scale
     info['asymmetry_rel'] = rel
+    info['hessian_asymmetric'] = bool(rel > tol)
     if rel <= tol:
         return
     if dump_dir is not None and writes():
@@ -546,15 +547,16 @@ def check_hessian_noise(h, info, tol=HESSIAN_FD_ASYMMETRY_TOL, dump_dir=None):
             'tolerance': tol, 'step': info.get('step'),
             'largest_force_constant': scale,
             'worst': info.get('asymmetry_worst')}, indent=1))
-    raise RuntimeError(
-        f'the finite-difference Hessian is asymmetric by {info["asymmetry"]:.2e} '
-        f'Ha/Bohr^2 ({rel:.2e} of the largest force constant), above '
-        f'{tol:.1e}, at a step of {info["step"]:.1e} Bohr. Either the forces '
-        f'are not reproducible at this geometry -- build the same mean field '
-        f'twice and difference the forces -- or the surface is not smooth on '
-        f'the scale of the step, which on an ISDF-K mean field means its grid '
-        f'is too coarse. A Hessian built from them puts imaginary modes at '
-        f'real minima.')
+    text = (f'the finite-difference Hessian is asymmetric by {info["asymmetry"]:.2e} '
+            f'Ha/Bohr^2 ({rel:.2e} of the largest force constant), above '
+            f'{tol:.1e}, at a step of {info["step"]:.1e} Bohr. Either the forces '
+            f'are not reproducible at this geometry -- build the same mean field '
+            f'twice and difference the forces -- or the surface is not smooth on '
+            f'the scale of the step, which on an ISDF-K mean field means its grid '
+            f'is too coarse. A Hessian built from them can put imaginary modes at '
+            f'real minima; it is kept, symmetrized, and flagged')
+    info.setdefault('flags', []).append({'flag': 'hessian_asymmetric', 'message': text})
+    warnings.warn(text, HessianAsymmetric, stacklevel=2)
 
 
 def writes():

@@ -65,9 +65,8 @@ import types
 
 import numpy as np
 import scipy.linalg
-from pyscf import df, dft, scf
+from pyscf import df, scf
 from pyscf.lib import logger
-from pyscf.scf.dispersion import parse_disp
 
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_JK_CHECK_TOL,
@@ -75,54 +74,31 @@ from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_JK_CHECK_TOL,
 from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.numerics import (ISDF_JK_REQUEST_FIELDS, IsdfNumerics,
                                         numerics_or_default, requested, same_setting)
-from src.Base.factorization.separable_ri import (aux_metric_sqrt, fit_M_streaming,
+from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
+                                                 fit_M_streaming,
                                                  molecular_points_covariant,
                                                  refuse_unrepresented_factors, require_grid,
                                                  resolve_grid, resolve_isdf_grid)
 from src.Base.geometry.body_frame import BodyFrame
-from src.Base.factorization.separable_ri import atomic_frames, atomic_points
+from src.Base.factorization.separable_ri import atomic_frames
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.Base.factorization.separable_ri import points_on_frames
 
-#: Hartree-Fock minus its own exchange, for `exchange_free_reference`: the
-#: empty functional, so a pure Hartree-Fock mean field keeps none of it.
-_NO_FUNCTIONAL = '0*LDA'
 
 #: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on,
 #: and the frames one built inside `frozen_frames` places its points on.
 _FROZEN = threading.local()
 
 
-@contextlib.contextmanager
-def range_coulomb(mol, auxmol, omega):
-    """`omega` on both molecules, the way `pyscf/df/df.py::range_coulomb` does.
-
-    omega > 0 is the long-range erf(omega r)/r, omega < 0 the short-range
-    complement, 0 or None the bare operator -- pyscf's convention, which
-    `dft/rks.py::get_veff` relies on when it asks for `omega=-omega`.
-
-    Both molecules, because a three-centre integral is driven by a concatenated
-    Mole whose _env inherits the first argument's range-omega slot; setting only
-    the auxiliary one silently leaves int3c2e bare.
-    """
-    if omega is None:
-        omega = 0.0
-    saved = (mol.omega, None if auxmol is None else auxmol.omega)
-    mol.omega = omega
-    if auxmol is not None:
-        auxmol.omega = omega
-    try:
-        yield
-    finally:
-        mol.omega = saved[0]
-        if auxmol is not None:
-            auxmol.omega = saved[1]
-
+def omega_key(omega):
+    """The key one attenuation omega is stored under (None is the bare 0)."""
+    return '%.6f' % (0.0 if omega is None else omega)
 
 @contextlib.contextmanager
 def frozen_pair_layout(layout):
     """Every ISDFJK built inside fits on `layout`, a reference geometry's
-    `test_set_layout` (mu, nu, weight), in place of the screen at its own
+    `fit_test_set_layout` (mu, nu, weight), in place of the screen at its own
     points, and keeps it (`ISDFJK.pair_layout`); None leaves each its own.
 
     The screen is a discrete choice: re-taken at every geometry of a walk,
@@ -225,18 +201,6 @@ def reference_frames(mf):
             'another geometry: it belongs to that anchor\'s surface and '
             'cannot be the reference of a new one')
     return held
-
-
-def points_on_frames(mol, radii, origins, frames):
-    """`molecular_points_covariant`'s points with the frames given, (natm, 3,
-    3) rows the axes: the same expression, so equal frames give the same bits."""
-    out = []
-    for ia in range(mol.natm):
-        sym = mol.atom_pure_symbol(ia)
-        pts = atomic_points(radii[sym], centre=(0.0, 0.0, 0.0),
-                            origin=(origins or {}).get(sym, False))
-        out.append(pts @ frames[ia] + mol.atom_coord(ia))
-    return np.vstack(out)
 
 
 def isdf_grid(mol, counts=None, radii=None, auxbasis=None, n_start=1,
@@ -499,6 +463,34 @@ class ISDFJK(df.df.DF):
     def nk(self):
         return 0 if self.coords is None else len(self.coords)
 
+    @property
+    def built(self):
+        """Whether the factors (points, collocation, fit) are built."""
+        return self._built
+
+    @property
+    def named_counts(self):
+        """Whether the caller named the grid's counts (else a level's)."""
+        return self._named_counts
+
+    def mark_distributed(self):
+        """A `DistributedISDFJK` divides this handle over the ranks: building
+        it whole is then refused (`build`)."""
+        self._distributed_twin = True
+
+    def place_grid(self):
+        """(points, radii, origins) of this handle's interpolation grid: its
+        counts (when named), radii, auxiliary basis, frames and the run's
+        `runtime_radii`, in the one `isdf_grid` call the serial build and the
+        distributed one (`DistributedISDFJK`) both make, so the two fit one
+        grid."""
+        return isdf_grid(
+            self.mol, counts=self.counts if self._named_counts else None,
+            radii=self.radii,
+            auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
+            frames=self.fit_frames(),
+            runtime_radii=self.numerics.isdf.runtime_radii)
+
     def build(self):
         if self._built:
             return self
@@ -518,13 +510,8 @@ class ISDFJK(df.df.DF):
         if self.auxmol is None:
             self.auxmol = df.addons.make_auxmol(mol, auxbasis=self.auxbasis)
         if self.coords is None:
-            self.coords, self.grid_radii, self.grid_origins = isdf_grid(
-                mol, counts=self.counts if self._named_counts else None,
-                radii=self.radii,
-                auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
-                frames=self.fit_frames(),
-                runtime_radii=self.numerics.isdf.runtime_radii)
-        self.X = mol.eval_gto('GTOval_sph', self.coords)
+            self.coords, self.grid_radii, self.grid_origins = self.place_grid()
+        self.X = ao_values(mol, self.coords)
         self.M = fit_M_streaming(mol, self.auxmol, self.coords,
                                  numerics=self.numerics,
                                  progress=self.progress,
@@ -565,7 +552,7 @@ class ISDFJK(df.df.DF):
         if self.z_mode != 'auto':
             return self.z_mode
         nk = self.nk
-        free = (self.max_memory - memory.current_memory_mb()) * 1e6
+        free = memory.left_mb(self.max_memory) * 1e6
         # Dense Z plus one row block plus the (nk, nao) buffers; a third of the
         # remaining memory is the budget, so an SCF still has room to breathe.
         return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
@@ -573,7 +560,7 @@ class ISDFJK(df.df.DF):
 
     def _zrows(self, omega):
         """Z for one operator, built once and cached by omega."""
-        key = '%.6f' % (0.0 if omega is None else omega)
+        key = omega_key(omega)
         if key in self._z:
             return self._z[key]
         if not self._built:
@@ -583,7 +570,7 @@ class ISDFJK(df.df.DF):
         om = 0.0 if omega is None else omega
 
         M = self.M
-        with range_coulomb(self.mol, self.auxmol, om):
+        with self.mol.with_range_coulomb(om), self.auxmol.with_range_coulomb(om):
             V = self.auxmol.intor('int2c2e', aosym='s1')
 
         # Resolved once: it reads the process's memory, which the dense branch
@@ -602,7 +589,7 @@ class ISDFJK(df.df.DF):
         if self.block:
             return self.block
         nk, nao = self.X.shape
-        free = max((self.max_memory - memory.current_memory_mb()) * 1e6, 2e8)
+        free = max(memory.left_mb(self.max_memory) * 1e6, 2e8)
         # A row block costs b*nk (the Hadamard argument) and, in factored mode,
         # b*nk again for the rebuilt Z rows.
         b = int(0.25 * free / (2 * nk * 8))
@@ -757,7 +744,7 @@ class ISDFJK(df.df.DF):
         with only the (naux, naux) metric held: no three-index tensor on disk
         or in core, and J from the RI-V fit rather than the interpolation.
         """
-        key = '%.6f' % (0.0 if omega is None else omega)
+        key = omega_key(omega)
         if key not in self._jdf:
             d = df.DF(self.mol, auxbasis=self.auxbasis)
             d.max_memory = self.max_memory
@@ -821,11 +808,11 @@ def separable_factors_from_jk(mf):
     if not isinstance(with_df, ISDFJK):
         raise TypeError(
             'separable_factors_from_jk needs an SCF whose with_df is an ISDFJK '
-            f'(got {type(with_df).__name__}); use space_time.separable_factors '
-            'for a mean field that did not fit one.')
+            f'(got {type(with_df).__name__}); a mean field that did not fit '
+            'one needs its factors built by build_separable_ri.')
     # cycle: pyscf_interface -> distributed_df -> this module
     from src.Base.pyscf.pyscf_interface import occupied_count
-    if not with_df._built:
+    if not with_df.built:
         with_df.build()
     V = with_df.auxmol.intor('int2c2e', aosym='s1')
     root = aux_metric_sqrt(V=V)
@@ -988,134 +975,18 @@ def without_force(mf):
 
     pySCF's gradient of an ISDF mean field differentiates the FITTED
     interaction, not the interpolated one whose energy the mean field reports.
-    The ISDF force belongs to the gradient layer, which hands it to the mean
-    field as an object: `src.gradients.isdf_mean_field.attach_isdf_gradient`
-    binds the force and leaves itself on the mean field as `force_hook`, so a
-    continuum wrapped around it later (`SolventScreening`) rebinds it without
-    importing the gradient layer.
+    The ISDF force is handed to the mean field as an object: whatever attaches
+    it binds the force and leaves itself on the mean field as `force_hook`, so
+    a continuum wrapped around it later (`SolventScreening`) rebinds it
+    without knowing where the force comes from.
     """
     def refuse(m):
         raise ISDFForceNotAttached(
             'this ISDF mean field carries no force: pySCF\'s own gradient '
             'differentiates the fitted interaction, not the interpolated one '
-            'its energy comes from. Attach the ISDF force with '
-            'src.gradients.isdf_mean_field.attach_isdf_gradient(mf), or build '
-            'the mean field with isdf_jk_with_force')
+            'its energy comes from. Attach an ISDF force to the mean field '
+            '(attach_isdf_gradient), or build it with isdf_jk_with_force')
     mf.nuc_grad_method = types.MethodType(refuse, mf)
     mf.Gradients = mf.nuc_grad_method
     mf.force_hook = None
     return mf
-
-
-class _NoExactExchange(dft.numint.NumInt):
-    """A numint reporting no exact exchange, with the functional untouched.
-
-    pyscf's Kohn-Sham `get_veff` and its gradient both read the exchange
-    fractions from `rsh_and_hybrid_coeff` and never by re-parsing the string,
-    so zeroing them here removes the exact exchange and leaves `eval_xc` as it
-    was, which for a range-separated functional is the short-range DFT
-    exchange libxc holds under the same name.
-
-    Appending "- a_x*HF" to the functional instead could not express a
-    range-separated hybrid and could not survive a dispersion suffix
-    (`b3lyp-d3bj - 0.2*HF` is not a name pyscf can split).
-    """
-
-    def rsh_and_hybrid_coeff(self, xc_code, spin=0):
-        return 0.0, 0.0, 0.0
-
-    def hybrid_coeff(self, xc_code, spin=0):
-        return 0.0
-
-    def rsh_coeff(self, xc_code):
-        return 0.0, 0.0, 0.0
-
-
-def base_functional(xc):
-    """`xc` with any empirical-dispersion suffix removed.
-
-    Keyed on the dispersion version, not on `parse_disp`'s first return: that
-    element is "xc_code_for_dftd3", the name to hand the DFTD3 library, and
-    can be None for a plain functional; with no dispersion suffix `xc` itself
-    is returned.
-
-    The dispersion is a function of the geometry alone and the caller that
-    takes this reference's gradient adds its force back separately.
-    """
-    base, disp, _ = parse_disp(xc)
-    out = xc if disp is None else base
-    if not out:
-        raise ValueError(
-            f'could not read a functional out of {xc!r}: parse_disp gave '
-            f'{(base, disp)}. The exchange-free reference cannot be built '
-            f'without one, and pyscf fails far from here if it is handed None.')
-    return out
-
-
-def exchange_free_reference(mf):
-    """`mf` at its own orbitals with the exact-exchange fraction taken out.
-
-    Everything the ISDF route did not interpolate, in one pyscf mean field: the
-    functional minus its a_x*HF term, density-fitted on the same auxiliary basis
-    (which is where `j_route='df-direct'` takes J from) and carrying the
-    converged coefficients, orbital energies and occupations, so that its
-    gradient's one-electron, Coulomb, exchange-correlation and energy-weighted
-    overlap terms are the ISDF route's own.
-
-    The same grid objects as the mean field's: a Kohn-Sham energy is a property
-    of its quadrature, and a finite difference taken against a different grid
-    would be differencing two functionals.
-
-    An empirical dispersion correction is left out of the name (see
-    `base_functional`); the caller adds its force back separately.
-    """
-    # Kohn-Sham iff the reference carries a functional, the same test
-    # `mean_field_skeleton_force` makes below.
-    is_ks = hasattr(mf, 'xc')
-    # Hartree-Fock minus its exchange is the empty functional, which is what
-    # `_NO_FUNCTIONAL` already is. A Kohn-Sham reference keeps its own
-    # functional and has the exact-exchange fractions zeroed instead of
-    # subtracted by name (`_NoExactExchange`).
-    xc = base_functional(mf.xc) if is_ks else _NO_FUNCTIONAL
-    ref = dft.RKS(mf.mol, xc=xc).density_fit(auxbasis=mf.with_df.auxbasis)
-    if is_ks:
-        ref._numint = _NoExactExchange()
-        ref.grids, ref.nlcgrids = mf.grids, mf.nlcgrids
-    ref.mo_coeff, ref.mo_energy = mf.mo_coeff, mf.mo_energy
-    ref.mo_occ, ref.converged = mf.mo_occ, True
-    return ref
-
-
-def refuse_isdf_jk_gradient(mf, what):
-    """Raise if `mf` answers its exchange from ISDF factors and a nuclear force
-    is about to be taken from pyscf's own gradient.
-
-    pyscf's density-fitted gradient differentiates the integrals of a fitted
-    interaction and knows nothing of the interpolation points or the fit
-    matrix this route builds K from, so it returns a gradient of a different
-    function than the energy reported.
-
-    The ground-state force itself is built elsewhere
-    (`src.gradients.isdf_mean_field.isdf_mean_field_gradient`). What remains
-    fitted, and why every caller of this guard is refused, is the Lagrangian a
-    correlated chain adds on top: `fock_partial_skeleton` routes a
-    density-fitted mean field to `fock_partial_skeleton_df`, whose exchange
-    half is built from the auxiliary basis, and `exx_double_counting_skeleton`
-    differences two fitted pyscf gradients. Energies are unaffected.
-    """
-    with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
-        return
-    raise NotImplementedError(
-        f'{what} takes a nuclear force from a mean field whose exchange comes '
-        f'from ISDF factors, and pyscf\'s gradient does not know about them: '
-        f'it differentiates the FITTED interaction rather than the '
-        f'interpolated one this route actually built. Use '
-        f'`src.gradients.isdf_mean_field.isdf_mean_field_gradient` for the SCF '
-        f'force; a correlated (GW/BSE/dRPA) force on this reference is not '
-        f'built at all.')
-
-
-# The old private name, read by the gradients layer until it imports the
-# public one; nothing in this layer reads it.
-_base_functional = base_functional

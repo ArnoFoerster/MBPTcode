@@ -89,7 +89,7 @@ def _factory(mol):
 
 
 def _screen(mol):
-    lay = separable_ri.test_set_layout(
+    lay = separable_ri.fit_test_set_layout(
         mol, isdf_grid(mol, counts=COUNTS, auxbasis=AUXBASIS))
     return set(zip(lay[0].tolist(), lay[1].tolist()))
 

@@ -49,8 +49,8 @@ from src.SingleReference.GW.qp_states import (is_quasiparticle_root,
                                               resolve_qp_states)
 from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.excitations import (SurfaceSpec, driven_chain,
-                                        qp_bookkeeping, surface_of)
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from src.properties.excitations import SurfaceSpec, driven_chain, surface_of
 
 #: Ethylene, in Bohr.
 ETHYLENE = [('C', (0.0, 0.0, 1.2604473250848962)),

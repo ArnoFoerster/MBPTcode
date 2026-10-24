@@ -268,10 +268,11 @@ def test_evgw_builds_the_static_matrix_once(water, monkeypatch):
     not one per cycle."""
     w = water
     calls, _ = count_builds(monkeypatch)
-    _, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 2}),
+    _, _, _, info = solve_bse_isdf(w['mf'], w['mol'], w['nocc'],
+                                   numerics=Numerics(bse={'nroots': 2},
+                                                     evgw={'max_cycle': 3, 'tol': 1e-2}),
                                    factors=w['factors'], probe=False,
-                                   progress=False, self_consistency='evGW',
-                                   gw_kwargs={'max_cycle': 3, 'tol': 1e-2})
+                                   progress=False, self_consistency='evGW')
     cycles = info['evgw']['cycles']
     assert cycles > 1, 'one cycle cannot show a per-cycle rebuild'
     assert len(calls) == 1, f'{len(calls)} static builds for {cycles} cycles'
@@ -301,8 +302,8 @@ def test_one_operator_serves_the_term_and_its_orbital_responses(xc):
 
     Breaks if a consumer builds its own again (two or three K) or if the key
     misses the density (the held operator after the orbitals moved)."""
-    from src.gradients.mean_field_response import (exx_double_counting_Y,
-                                                   qp_xc_correction_Y)
+    from src.gradients.gwbse.static_correction import qp_xc_correction_Y
+    from src.gradients.rpa.exchange_double_counting import exx_double_counting_Y
     from src.Base.utils.parallel.threads import blas_single_threaded
     mf, mol, nocc = mean_field(xc)
     mo, dm = mf.mo_coeff, mf.make_rdm1()

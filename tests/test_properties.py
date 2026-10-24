@@ -22,6 +22,8 @@ import pytest
 from pyscf import gto, scf
 from pyscf.hessian import thermo
 
+from src.properties.optimize import derived_walk
+from src.Base.numerics.numerics import Numerics
 from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, GEOM_OPT_CONV, HARTREE_TO_CM,
                                          HARTREE_TO_EV, SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
@@ -81,11 +83,14 @@ class HarmonicToySurface(PotentialEnergySurface):
         grad[0] = -grad[1]
         return grad, self.total_energy(mol), {}
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
         return type(self)(mol, k=self.k, r_e=self.r_e)
 
     def label(self):
         return f'harmonic toy, k = {self.k} Ha/Bohr^2, r_e = {self.r_e} Bohr'
+
+    def identity(self):
+        return None
 
 
 def scf_factory(mol):
@@ -172,7 +177,8 @@ def test_toy_surface_refreeze_rebuilds_at_the_new_geometry(h2_toy):
 # ------------------------------------------------------------------ optimizer
 def test_toy_optimizer_finds_the_known_minimum(h2_toy):
     """The analytic gradient walks an exactly quadratic surface to r = r_e."""
-    opt, info = optimize(h2_toy, trust=0.3, max_cycle=40, verbose=False)
+    opt, info = optimize(h2_toy, verbose=False,
+                         numerics=Numerics(walk={'trust': 0.3, 'max_cycle': 40}))
     assert info['converged'] and info['status'] == 'ok'
     assert info['omega'] is None, 'a ground-state surface has no excitation'
     r = np.linalg.norm(opt.atom_coords()[1] - opt.atom_coords()[0])
@@ -193,7 +199,8 @@ def test_toy_optimizer_through_finite_differences(h2_toy):
     assert diags['fd_step'] == 1e-3
     assert np.abs(g_fd - g_exact).max() < 1e-8
 
-    opt, info = optimize(fd, trust=0.3, max_cycle=40, verbose=False)
+    opt, info = optimize(fd, verbose=False,
+                         numerics=Numerics(walk={'trust': 0.3, 'max_cycle': 40}))
     assert info['converged']
     r = np.linalg.norm(opt.atom_coords()[1] - opt.atom_coords()[0])
     assert r == pytest.approx(h2_toy.r_e, abs=1e-3)
@@ -357,9 +364,11 @@ def test_optimizer_relaxes_and_lowers_the_energy(ch2o):
     """Formaldehyde S1: converges, lengthens C=O, never raises the energy."""
     mol, mf = ch2o
     ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
-    opt, info = optimize(ch, max_cycle=30, verbose=False)
+    opt, info = optimize(ch,
+                         numerics=derived_walk(ch, 'a capped test walk', max_cycle=30),
+                         verbose=False)
     assert info['converged'] and info['status'] == 'ok'
-    assert info['grad_max'] < GEOM_OPT_CONV['grad_max']
+    assert info['opt_grad_max'] < GEOM_OPT_CONV['opt_grad_max']
     e = [h['e'] for h in info['history']]
     assert e[-1] < e[0]
     rco = lambda m: (np.linalg.norm(m.atom_coords()[1] - m.atom_coords()[0])
@@ -373,9 +382,11 @@ def test_optimizer_reports_a_state_it_cannot_follow(water):
     """Water's S1 is DISSOCIATIVE; the run must end with a diagnosis, not a
     traceback, and must not claim convergence."""
     mol, mf = water
-    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
-    _, info = optimize(ch, max_cycle=12, trust=0.5, trust_max=0.8,
-                       verbose=False)
+    short = g1_numerics(mol).derive('a short walk with long steps',
+                                    walk={'max_cycle': 12, 'trust': 0.5,
+                                          'trust_max': 0.8})
+    ch = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=short)
+    _, info = optimize(ch, verbose=False)
     assert not info['converged']
     assert info['status'] != 'ok'      # either a diagnosis or the cycle limit
     assert info['history'], 'the geometries walked are still the useful output'

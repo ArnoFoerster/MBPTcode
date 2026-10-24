@@ -39,8 +39,7 @@ from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT,
                                                  minimax_convergence_floor,
                                                  minimax_points_for_accuracy,
                                                  minimax_points_for_ranges,
-                                                 minimax_transform_weights,
-                                                 resolve_grid_size)
+                                                 minimax_transform_weights)
 from tests.pins import RECORDING_BLAS, matches
 
 E_MIN, E_MAX = 0.4, 40.0
@@ -406,8 +405,7 @@ def check_transform_pseudo_inverse():
 
 
 def check_grid_size_resolution():
-    """'auto' or None resolves over EVERY ratio, the widest binding; an
-    explicit count passes through with nothing measured."""
+    """The count resolves over EVERY ratio, the widest binding."""
     ratios = (40.0, 486.0, 3000.0)
     n, worst = minimax_points_for_ranges(ratios)
     per = [minimax_points_for_accuracy(1.0, R, target=DEFAULT_TAU_TARGET)
@@ -417,13 +415,6 @@ def check_grid_size_resolution():
                'the widest ratio sets the count and the reported error',
                f'n={n}, worst={worst:.1e}, per ratio '
                + ', '.join(f'{p[0]}' for p in per))
-    ok &= check(resolve_grid_size('auto', ratios) == (n, worst)
-                and resolve_grid_size(None, ratios) == (n, worst)
-                and resolve_grid_size('AUTO', ratios) == (n, worst),
-                "'auto', 'AUTO' and None are the same sentinel")
-    ok &= check(resolve_grid_size(18, ratios) == (18, None)
-                and resolve_grid_size('22', ratios) == (22, None),
-                'an explicit count passes through unmeasured')
     missed = minimax_points_for_ranges(ratios, target=1e-30)
     ok &= check(np.isfinite(missed[1]) and missed[1] > 1e-30,
                 'a target nothing reaches returns the best count WITH the error '

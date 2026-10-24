@@ -6,7 +6,7 @@ whose dense spin-orbital NonDysonISR is its reference through n = 4.
 Raw blocks <E_I^dag H E_J> and <E_I^dag E_J> come from the generated apply
 twins adc{N}_nd{m}_k{i}k{j}_apply_restricted_blocks
 (sigma_codegen.generate_nondyson_pair_apply_restricted) on the alpha-sector
-configurations of each class (the Dyson solver's _kconfigs, S_z = -1/2 for IP
+configurations of each class (the Dyson solver's kconfigs, S_z = -1/2 for IP
 and +1/2 for EA), evaluated at the amplitude orders of u_order_terms /
 s_order_terms with the restricted solver's amplitudes. The E0 series times the
 lower-order overlaps is subtracted, so the eigenvalues are E(N -/+ 1) - E0; the
@@ -15,7 +15,7 @@ ground-state norm drops out, every class being Loewdin-normalized.
 Ground state: through ADC(4) the amplitudes of Dyson ADC(5) and E^(4). ADC(5)
 reads the whole order-4 ground state -- the 1h-1h block's f- and v-dressed
 structures at amplitude orders (2, 3) and (1, 4): T4^(3), T2^(4), T3^(4), T1^(5)
--- and E^(5), all from the restricted chain (_amps_order(5)); T4^(3) is the one
+-- and E^(5), all from the restricted chain (amps_order(5)); T4^(3) is the one
 rank-4 amplitude without a product form, materialized (O(no^4 nv^4)) or, with
 the solver's quadruples_ntau, Laplace-fused and never formed. The raw blocks
 within ISR_DENSE_BLOCK_ELEMENTS (the 1h and 2h1p/2p1h classes) are held as
@@ -80,7 +80,7 @@ class NonDysonRestricted:
 
     # ----- classes and configurations --------------------------------------
     def configs(self, k):
-        return self.r._kconfigs(self.sector, k)
+        return self.r.kconfigs(self.sector, k)
 
     def dim(self, k):
         return len(self.configs(k)['K'])
@@ -91,7 +91,7 @@ class NonDysonRestricted:
 
     def diagonal(self, n):
         """Zeroth-order E(N -/+ 1) - E0 of every configuration, class by class."""
-        sign = -1.0 if self.sector == 'IP' else 1.0     # _kconfigs' K is the Dyson pole
+        sign = -1.0 if self.sector == 'IP' else 1.0     # kconfigs' K is the Dyson pole
         return np.concatenate([sign * self.configs(k)['K'] for k in self.classes(n)])
 
     # ----- generated structures --------------------------------------------
@@ -117,13 +117,13 @@ class NonDysonRestricted:
     def _amps(self, n):
         """Amplitudes through order n (the f-dressed structures at order n read
         t1^(n))."""
-        return self.r._amps_order(max_order=max(n, 2))
+        return self.r.amps_order(max_order=max(n, 2))
 
     def _raw(self, kind, k_i, k_j, m, n):
         """The raw H^(m) ('u') or S^(m) ('s') block of (k_i, k_j) as a linear map
         (class k_j -> class k_i), or None when every structure is pruned."""
         A = self._amps(n)
-        base = self.r._rargs
+        base = self.r.rargs
         no, nv = self.r.nocc, self.r.nvir
         cfg_i, cfg_j = self.configs(k_i), self.configs(k_j)
         terms = u_order_terms(m) if kind == 'u' else s_order_terms(m)

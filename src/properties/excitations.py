@@ -25,11 +25,12 @@ representation: `Excitation(irrep=...)` has no realization that follows it and
 the spectrum at the reference geometry, the lowest root of that state
 symmetry, and returns the root to declare.
 
-Every vertical block also says what its quasiparticle treatment was
-(`qp_bookkeeping`): which orbitals were solved explicitly, which carry the
-frozen scissor and what shift, which route each explicit state took, how many
-poles the sum-over-poles model used; and which interpolation grid the
-factorization held (`held_grid`).
+Every vertical block also carries what the method reports of its own state
+through the `diagnostics` ingredient: for GW-BSE (`gradients.gwbse.diagnostics`)
+which orbitals were solved explicitly, which carry the frozen scissor and what
+shift, which route each explicit state took, how many poles the sum-over-poles
+model used, which interpolation grid the factorization held, and its warning
+logs. A surface whose method provides no diagnostics records None there.
 """
 import datetime
 import functools
@@ -64,8 +65,7 @@ from src.properties.hessian import surface_hessian
 from src.properties.optimize import escape_saddle
 from src.gradients.surface import (evaluate, lockstep_geometry,
                                    surface_mean_field)
-from src.gradients.surface import (driven_chain, followed_root,
-                                   provides, require)
+from src.gradients.surface import driven_chain, ground_half, provides, require
 from src.gradients.gwbse.surface_factory import (compare_surfaces, environment_label,
                                                  find_row, numerics_read_by,
                                                  potential_energy_surface,
@@ -265,19 +265,25 @@ def time_stages(surface, timer):
         chain.timer = timer
 
 
-def surface_parts(surface):
-    """What building the chain behind `surface` spent its seconds on (its
-    constructor's steps and its factorization's conventions) and the reference
-    mean field's max |F_ia| it measured; None for a surface with no chain."""
+def diagnostics_of(surface, mol, mf=None, posteriori=False):
+    """The `diagnostics` ingredient of the chain that owns `surface`'s state
+    at `mol` (a dict of record fields), {} for a method that provides none."""
     chain = driven_chain(surface)
-    seconds = getattr(chain, 'construction_seconds', None)
-    if seconds is None:
-        return None
-    factorization = getattr(chain, 'factorization', None)
-    residual = getattr(chain, 'scf_residual', None)
-    return {'chain': dict(seconds),
-            'factorization': dict(getattr(factorization, 'seconds', {}) or {}),
-            'scf_residual': None if residual is None else float(residual)}
+    if not provides(chain, 'diagnostics'):
+        return {}
+    return chain.diagnostics(mol, mf=mf, posteriori=posteriori)
+
+
+def merged_logs(name, *diagnostics):
+    """The entries of log `name` across several `diagnostics_of` results,
+    each once by the key its method gave it, in the order logged."""
+    out, seen = [], set()
+    for d in diagnostics:
+        for key, entry in (d.get('logs') or {}).get(name, []):
+            if key not in seen:
+                seen.add(key)
+                out.append(dict(entry))
+    return out
 
 
 def physics_record(surface):
@@ -333,227 +339,6 @@ def grid_record(spec, mol):
                                       else grid_points_per_atom(counts)),
                 grid_n_start=n_start, grid_label=label,
                 grid_identity=identity)
-
-
-def held_grid(surface):
-    """The grid the factorization of `surface`'s chain actually holds, or None.
-
-    Read off the frozen factorization rather than the request: the counts and
-    recipe that fitted the radii, and the Coulomb-metric fit error each
-    element's grid reached, which is what says whether the grid resolves the
-    basis for that element.
-    """
-    factorization = getattr(driven_chain(surface), 'factorization', None)
-    if factorization is None:
-        return None
-    out = {'counts': dict(factorization.counts),
-           'points_per_atom': grid_points_per_atom(factorization.counts),
-           'n_start': factorization.n_start,
-           'fit_errors': {el: float(err) for el, err
-                          in factorization.fit_errors.items()}}
-    failed = getattr(factorization, 'fit_failed', None)
-    if failed:
-        # the warned-about failed fits, as a named flag
-        # (numerical events warn and are flagged)
-        out['fit_failed'] = list(failed)
-    return out
-
-
-def scissor_tiers(shifts, probes):
-    """The frozen outside shifts grouped by the explicit root that supplied them.
-
-    `probes` is the frozen map {orbital: the explicit orbitals it borrows
-    from}: one probe for an orbital `calibrate_scissor` gave the nearest
-    probe's shift, a degenerate block for a hole lent the block's mean. The
-    orbitals sharing one shift are one tier. Shifts in eV.
-    """
-    by_shift = {}
-    for p, shift in shifts.items():
-        by_shift.setdefault(float(shift), []).append(int(p))
-    tiers = []
-    for shift, orbitals in sorted(by_shift.items()):
-        lent = (probes or {}).get(min(orbitals))
-        probe = (None if lent is None else int(lent[0]) if len(lent) == 1
-                 else [int(q) for q in lent])
-        tiers.append({'probe': probe, 'shift_eV': shift * HARTREE_TO_EV,
-                      'n_orbitals': len(orbitals), 'orbitals': sorted(orbitals)})
-    return tiers
-
-
-def explicit_routes(chain):
-    """{orbital: route} of every explicitly solved state.
-
-    'sop' is the pole model; 'scissor' a state inside the set that Eq. (27)
-    does not admit, solved once at the reference geometry by the fallback and
-    frozen as a shift; anything else is the chain's own residue route, which
-    is what a state carries when no pole model or calibration claimed it. The
-    chain's own record of the routes its last solve took wins where it keeps
-    one.
-    """
-    taken = {int(p): r for p, r in
-             ((getattr(chain, 'qp_diagnostics', None) or {})
-              .get('routes') or {}).items()}
-    view = chain.resolved
-    routes = {}
-    for p in (int(q) for q in view.qp_set):
-        if p in taken:
-            routes[p] = taken[p]
-        elif p in view.sop_poles:
-            routes[p] = 'sop'
-        elif p in view.scissor_map:
-            routes[p] = 'scissor'
-        else:
-            routes[p] = chain.residue_route
-    return routes
-
-
-def subspaces_at(chain, frozen, mol):
-    """The frozen quasiparticle-Hamiltonian record, with `dropped_here`: the
-    members that left their groups at `mol` when it is the geometry the
-    chain evaluated last and some did."""
-    record = getattr(frozen, 'qp_subspace_record', None)
-    here = getattr(chain, 'qp_subspace_drops', None)
-    if (not here or not here['dropped']
-            or not np.array_equal(here['coords'], mol.atom_coords())):
-        return record
-    return dict(record or {}, dropped_here=here['dropped'])
-
-
-def qp_bookkeeping(surface, mol):
-    """What the quasiparticle treatment of `surface`'s state was, orbital by orbital.
-
-    The explicitly solved set (with the root each carries and the route it
-    took), the orbitals outside it and what they carry -- the frozen scissor,
-    in tiers, or the bare mean-field eigenvalue on the dense route, which has
-    no scissor -- and for the sum-over-poles model the number of auxiliary
-    poles each state used and where they sit. Read after the first evaluation,
-    when the chain has frozen its conventions at the reference geometry;
-    `explicit` and `outside` partition the orbitals. None for a surface with
-    no quasiparticle set.
-
-    `z_outside`: the explicit orbitals whose reference root has a pole
-    strength outside (0, 1], kept as solved, with the reason, the route and
-    the root and Z.
-
-    Shifts and roots are in eV; `z` is the pole strength per explicit state,
-    None until the chain keeps it; `qp_root` (dense only) which root of the
-    quasiparticle equation each explicit state carries, the nearest by Newton
-    or the one of largest pole strength; `nfreq_cd` (cubic only) the
-    contour-deformation quadrature the chain settled on, which the numerics
-    record as asked. `blocks`: the orbitals sharing one correction (members,
-    energy and correction spreads in Ha) and the candidate blocks rejected,
-    with why; None before the cubic chain's first forward. `subspaces`
-    (qp_hamiltonian only): the subspaces the quasiparticle Hamiltonian
-    couples, the ones carried from the surface refrozen from, and `dropped`,
-    each member that took no pole model at this geometry, with the subspace
-    it left, its route and whether it was carried, and `groups`, each group's
-    Hamiltonian at the last forward (poles, pole strengths, Newton steps);
-    None otherwise. `conventions` (cubic only): `FrozenConventions.record`,
-    the groups, the holes promoted into them, and the keys' moves.
-    """
-    chain = driven_chain(surface)
-    # the cubic chain's set is a frozen convention, the dense surface's its own
-    cubic = provides(chain, 'conventions')
-    if not cubic and not provides(chain, 'qp_set'):
-        return None
-    view, frozen = ((chain.resolved, chain.conventions) if cubic
-                    else (chain, chain))
-    norb = int(len(chain.mf0.mo_energy)) if cubic else int(mol.nao)
-    explicit = sorted(int(p) for p in view.qp_set)
-    outside = [p for p in range(norb) if p not in set(explicit)]
-    roots = {int(p): float(w) for p, w in
-             (view.qp_seeds if cubic else chain.seeds).items()}
-    record = {'kind': 'cubic' if cubic else 'dense', 'n_orbitals': norb,
-              'explicit': explicit, 'n_explicit': len(explicit),
-              'outside': outside, 'n_outside': len(outside),
-              'qp_root_eV': {p: w * HARTREE_TO_EV for p, w in roots.items()},
-              'blocks': getattr(frozen, 'qp_block_record', None),
-              'subspaces': subspaces_at(chain, frozen, mol)}
-    if not cubic:
-        record.update(outside_treatment='mean-field', n_scissor=0,
-                      scissor_tiers=[], route=None, inside_scissor_eV={},
-                      sop=None, z_outside={}, qp_root=chain.qp_root,
-                      z={int(p): float(v) for p, v in chain.qp_z.items()})
-        return record
-    eps = np.asarray(chain.mf0.mo_energy, float)
-    # a charged state's chain never calibrates a scissor: no BSE diagonal
-    scissored = view.outside_shift is not None
-    shifts = view.outside_shift or {}
-    diagnostics = getattr(chain, 'qp_diagnostics', None) or {}
-    routes = explicit_routes(chain)
-    sop = None
-    if chain.residue_route == 'sop':
-        poles = {int(p): np.asarray(v, float)
-                 for p, v in view.sop_poles.items()}
-        sop = {'n_poles_asked': int(chain.n_poles),
-               'sop_stride': chain.sop_stride,
-               'poles_per_state': {p: int(len(v)) for p, v in poles.items()},
-               'poles_hartree': {p: v.tolist() for p, v in poles.items()}}
-    record.update(
-        outside_treatment='scissor' if scissored else None,
-        outside_scissor=getattr(chain, 'outside_scissor', 'tiers'),
-        # outside_scissor='curve': the frozen Delta(eps) beyond the window,
-        # its knots, probes and the probes it dropped; the tiers then cover
-        # only the orbitals off both curves
-        scissor_curve=frozen.curve_record(),
-        n_scissor=len(outside) if scissored else 0,
-        scissor_tiers=scissor_tiers(shifts, view.outside_probe),
-        scissor_eV={int(p): float(s) * HARTREE_TO_EV
-                    for p, s in sorted(shifts.items())},
-        route=routes, n_sop=sum(r == 'sop' for r in routes.values()),
-        n_inside_scissor=sum(r == 'scissor' for r in routes.values()),
-        inside_scissor_eV={int(p): float(s) * HARTREE_TO_EV
-                           for p, s in sorted(view.scissor_map.items())},
-        eps_mean_field_eV={p: float(eps[p]) * HARTREE_TO_EV for p in explicit},
-        sop=sop, z=diagnostics.get('z'),
-        # quasiparticles kept on their followed branch where the largest
-        # weight had moved to another root, by orbital and geometry
-        qp_branch_warnings=list(getattr(chain, 'qp_branch_log', [])),
-        # quasiparticle-Hamiltonian groups kept with Z outside (0, 1] or
-        # carried on short of self-consistency, by group and geometry
-        # (`_log_qp_hamiltonian`)
-        qp_hamiltonian_warnings=list(getattr(chain, 'qp_hamiltonian_log', [])),
-        # explicit roots of pole strength outside (0, 1] at the reference
-        # (`_flag_z_outside`), kept as solved
-        z_outside={int(p): {'reason': d['reason'], 'z': d['z'],
-                            'route': d['route'],
-                            'root_eV': d['root'] * HARTREE_TO_EV}
-                   for p, d in sorted(view.qp_z_outside.items())},
-        # the contour-deformation quadrature the first forward settled on,
-        # doubled from the asked count where a root sat near an eps_q
-        nfreq_cd=int(frozen.nfreq_cd),
-        # kind='adaptive': how the explicit set was selected out of the
-        # admitted candidates, and what that costs each target state
-        adaptive=(chain.selection_record()
-                  if view.qp_partition is not None else None),
-        # the frozen conventions keyed by orbital identity: the groups, the
-        # holes promoted into them and how the keys moved along the walk
-        conventions=frozen.record())
-    return record
-
-
-def adaptive_check(surface, mol, mf=None):
-    """The adaptive explicit set's check at the end of a walk, or None for
-    another set.
-
-    One forward at `mol` on the surface that walked, then one analytic-
-    continuation GW there (`ExcitedStateChain.posteriori_check`): the
-    first-order budget of the followed state with the partition frozen at
-    the reference geometry, its probes' shifts at `mol` and the exact weights
-    there. It warns when the budget is exceeded and records it; it neither
-    reselects nor reruns the walk.
-    """
-    chain = driven_chain(surface)
-    if (not provides(chain, 'conventions')
-            or chain.resolved.qp_partition is None):
-        return None
-    mol, mf = chain.mean_field(mol, mf)
-    solution = chain.forward(mol, mf)[1]
-    root = (followed_root(chain, mol) if chain.track is not None
-            else int(chain.state))
-    return chain.posteriori_check(
-        mol, mf, {chain.spin: (solution.omega, solution.x, solution.y)},
-        ((chain.spin, root),))
 
 
 def spectrum_of(surface, mol, mf):
@@ -692,8 +477,8 @@ def relaxation_flags(stage, info):
     or a saddle check's escape walk) whose record is `info`, each warned about
     (`WalkNotRelaxed`): 'walk_not_converged' (the last walk's status) and
     'refreeze_not_converged' (the drift, meV). Empty for a relaxed walk; the stage
-    carries on where the walk stopped (refuse
-    inputs, warn numerics)."""
+    carries on where the walk stopped (the policy: refuse inputs, warn
+    numerics)."""
     name = stage.upper()
     last = info.get('refreeze_info') or info
     flags = {}
@@ -712,17 +497,23 @@ def relaxation_flags(stage, info):
     return flags
 
 def saddle_verdict(stage, record):
-    """{flag: what it says} of a saddle check's `record` (`saddle_check`): a
+    """{flag: what it says} of a saddle check's `record` (`saddle_check`):
+    'hessian_asymmetric' where either Hessian was (its relative asymmetry by
+    Hessian, already warned about by `hessian.check_hessian_noise`), and a
     check that did not end on a minimum (a second saddle, an escape walk that
     did not converge) is warned about (`WalkNotRelaxed`) and flagged
-    'saddle_check'; empty when it escaped or found a minimum. The caller
-    carries on where the escape walk stopped."""
+    'saddle_check'; empty when it escaped or found a minimum on Hessians
+    within the asymmetry tolerance. The caller carries on where the escape
+    walk stopped."""
+    flags = {}
+    if record.get('hessian_asymmetric'):
+        flags['hessian_asymmetric'] = record['hessian_asymmetric']
     if record.get('status') in ('minimum', 'escaped'):
-        return {}
+        return flags
     warnings.warn(f'{stage.upper()}: {record["status"]} (saddle check); the '
                   f'walk carries on where the escape walk stopped and its '
                   f'record is flagged', WalkNotRelaxed, stacklevel=2)
-    return {'saddle_check': record['status']}
+    return dict(flags, saddle_check=record['status'])
 
 def nudge_record(nudge):
     """A walk's `start_nudge` record with its displacement as nested lists
@@ -755,19 +546,18 @@ def excitation_energy(info, e_n, e_0):
 def state_specific_record(surface, mol):
     """Scheme B's classical state-specific term at `mol`, in eV, or None.
 
-    A surface whose environment is `split_equilibrium.ClassicalStateSpecific`
-    (`environment.solvent_scheme(env, 'classical-ss')`) adds
-    E_SS = 1/2 dV^T Q dV of its declared density difference to omega_B
-    (`ExcitedStateChain.state_specific_correction`). It is a single-point
-    term: the surface's energy and force stay omega_B's, so the record
-    carries E_SS and E_B beside them and moves nothing else. Any other
-    environment carries its state-specific part inside omega (or has none):
-    None.
+    A surface whose medium answers a classical state-specific term
+    (`state_specific_term`, scheme B) adds E_SS = 1/2 dV^T Q dV of its
+    declared density difference to omega_B (the
+    `state_specific_correction` ingredient). It is a single-point term: the
+    surface's energy and force stay omega_B's, so the record carries E_SS and
+    E_B beside them and moves nothing else. Any other medium carries its
+    state-specific part inside omega (or has none): None.
     """
     chain = driven_chain(surface)
     if not provides(chain, 'state_specific_correction'):
         return None
-    if getattr(chain.environment_at(mol), 'scheme', None) != 'classical-ss':
+    if chain.environment_at(mol).state_specific_term() is None:
         return None
     rec = chain.state_specific_correction(mol)
     return {'omega_B_eV': rec['omega_B'] * HARTREE_TO_EV,
@@ -805,16 +595,16 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
     as the chain reports it (None where it does not), zero for an exact
     derivative, and `total_translation_residual` the same of `gradient`.
     `davidson_solves` is the excited chain's record of each Davidson it ran
-    with a stage timer set, None for a chain that keeps none. `timer` times
+    with a stage timer set, None for a chain that keeps none (`diagnostics`). `timer` times
     the force and E_0 as 'record_force' and 'record_ground'.
 
     `qp_bookkeeping` and `held_grid` are what the quasiparticle set and the
-    interpolation grid were; both are read after the evaluation, when the
-    chain has frozen its conventions at R0. `scf_flags`: every mean field
-    the two surfaces' chains read with |F_ia| above `scf_force_tol`, warned
-    about and carried on (`scf_flags`); `casida_warnings`: every Casida
-    solve whose read roots were left above read_tol or unconfirmed, kept as
-    solved (`casida_warnings`).
+    interpolation grid were (the `diagnostics` ingredient, None for a method
+    that provides none); both are read after the evaluation, when the chain
+    has frozen its conventions at R0. `scf_flags`: every mean field the two
+    surfaces' chains read with |F_ia| above `scf_force_tol`, warned about and
+    carried on (`scf_flags`); `casida_warnings`: every Casida solve whose read
+    roots were left above read_tol or unconfirmed, kept as solved.
     """
     refuse_other_numerics(excited, ground)
     with stage(timer, 'record_force'):
@@ -834,7 +624,7 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
                                                   'adjoint_held')
               if name in info}
     residual = info.get('translation_residual')
-    solves = getattr(driven_chain(excited), 'davidson_solves', None)
+    diagnostics = diagnostics_of(excited, mol)
     forces = {'driving_force_max': None, 'gradient': None,
               'total_translation_residual': None}
     if force is not None:
@@ -848,17 +638,17 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
             'en_hartree': float(e_n), **forces,
             'translation_residual': (None if residual is None
                                      else float(residual)),
-            'davidson_solves': None if solves is None else list(solves),
+            'davidson_solves': diagnostics.get('davidson_solves'),
             'opt_grad_max': None, 'refreeze_drift_meV': None,
             'refreeze_shift_bohr': None, 'refreeze_denergy_meV': None,
             'refreeze_converged': None, 'refreeze': NOT_RELAXED,
             'optimizer': None, 'converged': None, 'cycles': 0,
             'status': NOT_RELAXED,
             'qp_z': z, 'residue_route_taken': route,
-            'qp_bookkeeping': qp_bookkeeping(excited, mol),
-            'held_grid': held_grid(excited),
+            'qp_bookkeeping': diagnostics.get('qp_bookkeeping'),
+            'held_grid': diagnostics.get('held_grid'),
             'scf_flags': scf_flags(excited, ground),
-            'casida_warnings': casida_warnings(excited),
+            'casida_warnings': merged_logs('casida_warnings', diagnostics),
             'physics': physics_record(excited),
             'state_specific': state_specific_record(excited, mol),
             'realization': excited.realization,
@@ -871,9 +661,11 @@ def saddle_check(surface, mol, walk, verbose=False, cache_dir=None):
     walk's minimum `mol` on `surface`: the state's Hessian there (6N forces,
     `surface_hessian`) and a saddle left along its negative mode and walked
     again by `walk(surface, start) -> (mol, info)` (`escape_saddle`). The
-    record carries the Hessian's asymmetry and how many forces each Hessian
-    read back from `cache_dir` (its force cache; the second Hessian's is
-    its subdirectory 'second')."""
+    record carries the Hessian's asymmetry, 'hessian_asymmetric' ({'first' /
+    'second': relative asymmetry} of each Hessian `check_hessian_noise`
+    flagged, None when neither was) and how many forces each Hessian read
+    back from `cache_dir` (its force cache; the second Hessian's is its
+    subdirectory 'second')."""
     info, second = {}, {}
     hess = surface_hessian(surface, mol, verbose=verbose, info=info,
                            cache_dir=cache_dir)
@@ -885,6 +677,9 @@ def saddle_check(surface, mol, walk, verbose=False, cache_dir=None):
         cache_dir=cache_dir)
     record['hessian_asymmetry'] = info.get('asymmetry')
     record['hessian_asymmetry_rel'] = info.get('asymmetry_rel')
+    record['hessian_asymmetric'] = {
+        which: h['asymmetry_rel'] for which, h in (('first', info), ('second', second))
+        if h.get('hessian_asymmetric')} or None
     record['forces_reused'] = {'first': info.get('forces_reused'),
                                'second': second.get('forces_reused')}
     return moved, again, record
@@ -901,8 +696,8 @@ def saddle_checked_state(relaxed, engine='auto', **walk_kw):
     it escaped, its record replaces the first.
 
     Every event is numerical and is warned about and flagged, the state kept
-    where its walk stopped (refuse inputs, warn
-    numerics; the same policy as the photophysics stages): a first walk that
+    where its walk stopped (the policy: refuse inputs, warn numerics; the same
+    policy as the photophysics stages): a first walk that
     did not converge is not checked (a Hessian at a point with a residual
     force tests nothing; status 'not run: the walk did not relax'); a second
     saddle, or an escape walk that does not converge, returns the escape
@@ -973,8 +768,12 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
     e_0 = ground_state_at(ground_at_minimum(ground, excited, relaxed),
                           relaxed['mol'])
     e_n = float(relaxed['e_total'])
-    # the adaptive set the last walk ran on, judged where it ended
-    check = adaptive_check(relaxed['surface'], relaxed['mol'], relaxed['mf'])
+    # the adaptive set the last walk ran on, judged where it ended, before
+    # the logs are read: its forward logs too
+    at_minimum = diagnostics_of(relaxed['surface'], relaxed['mol'], relaxed['mf'],
+                                posteriori=True)
+    check = at_minimum.get('adaptive_check')
+    logs = (diagnostics_of(excited, mol), at_minimum)
     adaptive = (record.get('qp_bookkeeping') or {}).get('adaptive')
     if check is not None and adaptive is not None:
         adaptive['posteriori'] = check
@@ -988,83 +787,31 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
         state_specific_at_excited_minimum=state_specific_record(
             relaxed['surface'], relaxed['mol']),
         hessian_at_excited_minimum=relaxed['info'].get('hessian'),
-        qp_branch_warnings=qp_branch_warnings(excited, relaxed['surface']),
-        qp_hamiltonian_warnings=qp_hamiltonian_warnings(
-            excited, relaxed['surface']),
+        qp_branch_warnings=merged_logs('qp_branch_warnings', *logs),
+        qp_hamiltonian_warnings=merged_logs('qp_hamiltonian_warnings', *logs),
         scf_flags=scf_flags(excited, relaxed['surface'], ground),
-        casida_warnings=casida_warnings(excited, relaxed['surface']),
+        casida_warnings=merged_logs('casida_warnings', *logs),
         **relaxation_fields(relaxed['info']))
     return record, relaxed
-
-
-def qp_hamiltonian_warnings(*surfaces):
-    """Every quasiparticle-Hamiltonian group the chains of `surfaces` kept
-    with eigenvectors of Z outside (0, 1] or carried on short of
-    self-consistency, once per kind, group and geometry, in the order logged
-    (`ExcitedStateChain.qp_hamiltonian_log`)."""
-    out, seen = [], set()
-    for surface in surfaces:
-        for entry in (getattr(driven_chain(surface), 'qp_hamiltonian_log',
-                              None) or []):
-            key = (entry['kind'], tuple(entry['orbitals']), entry['geometry'])
-            if key not in seen:
-                seen.add(key)
-                out.append(dict(entry))
-    return out
-
-
-def casida_warnings(*surfaces):
-    """Every matrix-free Casida solve the chains of `surfaces` ran whose
-    roots the force reads were left above read_tol ('not_converged') or not
-    confirmed as the lowest ('unconfirmed'), kept as solved, once per kind,
-    roots, spin, state and geometry, in the order logged
-    (`ExcitedStateChain.casida_log`)."""
-    out, seen = [], set()
-    for surface in surfaces:
-        for entry in (getattr(driven_chain(surface), 'casida_log', None)
-                      or []):
-            key = (entry['kind'], tuple(entry['roots']), entry['spin'],
-                   entry['state'], entry['geometry'])
-            if key not in seen:
-                seen.add(key)
-                out.append(dict(entry))
-    return out
 
 
 def scf_flags(*surfaces):
     """Every mean field the chains of `surfaces` read with |F_ia| above
     `scf_force_tol` (`ReferenceMeanField.flag_scf_quality`): where, the
     residual, the tolerance and the nuclei (Bohr), once each, in the order
-    flagged. The run carried on (refuse inputs,
-    warn numerics); a number off a flagged mean field carries the residual
-    in its force."""
+    flagged. The run carried on; a number off a flagged mean field carries
+    the residual in its force."""
     out, seen = [], set()
     # a composed surface's ground half reads mean fields of its own
-    holders = [h for s in surfaces
-               for h in (driven_chain(s), getattr(s, 'ground', None))]
+    holders = [h for s in surfaces for h in (driven_chain(s), ground_half(s))
+               if h is not None and provides(h, 'scf_flags')]
     for holder in holders:
-        for flag in getattr(holder, 'scf_flags', None) or []:
+        for flag in holder.scf_flags or []:
             coords = np.asarray(flag['coords'], float)
             key = (flag['where'], flag['residual'], coords.tobytes())
             if key not in seen:
                 seen.add(key)
                 out.append(dict(flag, coords=coords.tolist()))
-    return out
-
-
-def qp_branch_warnings(*surfaces):
-    """Every quasiparticle the walks on `surfaces` kept on its followed
-    branch where the largest weight had moved to another root, once per
-    orbital and geometry, in the order logged (`ExcitedStateChain.
-    qp_branch_log`): orbital (slot), index, geometry hash, root and Z, the
-    largest weight there, and whether the branch continued."""
-    out, seen = [], set()
-    for surface in surfaces:
-        for entry in getattr(driven_chain(surface), 'qp_branch_log', None) or []:
-            key = (entry['orbital'], entry['geometry'])
-            if key not in seen:
-                seen.add(key)
-                out.append(dict(entry))
     return out
 
 
@@ -1076,9 +823,7 @@ def ground_at_minimum(ground, excited, relaxed):
     would put E_0 and the excited energy on two references."""
     if relaxed['surface'] is excited:
         return ground
-    if 'mf' in inspect.signature(ground.refreeze).parameters:
-        return ground.refreeze(relaxed['mol'], mf=relaxed['mf'])
-    return ground.refreeze(relaxed['mol'])
+    return ground.refreeze(relaxed['mol'], mf=relaxed['mf'])
 
 
 def refuse_incomparable(physics_a, physics_b):
@@ -1168,7 +913,8 @@ def calc_vertical_excitation(spec, excitation, mol, scf_factory, timer=None,
     record = vertical_block(excited, ground, mol, timer=timer,
                             gradient=gradient)
     if timer is not None:
-        record.update(surface_seconds=parts, surface_parts=surface_parts(excited),
+        record.update(surface_seconds=parts,
+                      surface_parts=diagnostics_of(excited, mol).get('surface_parts'),
                       reference_scf=scf_record(mf))
     record['provenance'] = provenance(time.perf_counter() - started)
     return record
@@ -1238,7 +984,8 @@ def calc_vertical_states(spec, excitations, mol, scf_factory, timer=None,
                                     energy=shared.energy[target])
         if timer is not None:
             record.update(surface_seconds=parts,
-                          surface_parts=surface_parts(excited),
+                          surface_parts=diagnostics_of(excited, mol).get(
+                              'surface_parts'),
                           reference_scf=scf_record(mf))
         record['provenance'] = provenance(time.perf_counter() - started)
         records[excitation] = record

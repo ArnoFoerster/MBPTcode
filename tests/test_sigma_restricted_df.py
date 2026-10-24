@@ -1,4 +1,4 @@
-"""DF end-to-end through the RESTRICTED matrix-free operator (item #3): the
+"""DF end-to-end through the RESTRICTED matrix-free operator: the
 whole excitation-space matvec (C^(1) self, C^(2) via the Loewdin-assembled
 raw+s2c, and the k=1<->k=2 coupling) runs off the RI factor B_aa/B_bb with no
 (nso^4) g tensor -- by passing the *_df_blocks apply modules + {'B_aa','B_bb'}
@@ -92,7 +92,7 @@ def main():
             all_ok = compare(op_g, op_df, f"{sector} ADC(4)-base sector op", all_ok)
 
             # FULL multi-class operator: full-g vs DF (skip if no k2 configs)
-            if len(r._kconfigs(sector, 2)['K']) == 0:
+            if len(r.kconfigs(sector, 2)['K']) == 0:
                 print(f"    (skip {sector} full op: no 3h2p/3p2h configs)")
                 continue
             U2_k2 = r.u2_k2_generated(sector)

@@ -8,7 +8,7 @@ order: the 2h1p-dagger x 2p1h block through order 3 (X^(2) and the effective
 X^(3), raw block minus its order-3 class Gram-Schmidt terms) and the
 2h1p-dagger x 3p2h and 3h2p-dagger x 2p1h blocks at order 2 (Tarantelli and
 Cederbaum, PRA 45, 2790 (1992)). The oracle folds the same theory in the
-determinant space (cross_block_test.SeriesFold, mode 'union', adc_rule(5)).
+determinant space (tests/union_space_oracle.py: SeriesFold, mode 'union', adc_rule(5)).
 Diagrammatic ADC(5) is the two-sector supermatrix plus the coupling rows of the
 cross blocks decoupled through fifth order (sigma_driver._diagrammatic_adc5_rows);
 the oracle decouples its union series (decouple_cross_blocks) and truncates.
@@ -30,8 +30,8 @@ import pytest
 
 from src.SingleReference.ADC.sigma_driver import restricted_dyson_operator
 from tests.generated_runtime import requires_runtime
-from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.test_adc5_poles import NORD, _production
+from tests import union_space_oracle as CB
 
 SYSTEMS = ['H4lin_r1.0', 'LiH']
 NSTATES = 2
@@ -41,7 +41,7 @@ TOL_SYM = 1e-12
 pytestmark = requires_runtime(5)
 
 
-def _principal(M, norb, CB):
+def _principal(M, norb):
     w, V = np.linalg.eigh(0.5 * (M + M.T))
     strength = np.sum(V[:norb] ** 2, axis=0)
     ip, _ = CB.principal_poles(w, strength, -1, NSTATES)
@@ -49,11 +49,11 @@ def _principal(M, norb, CB):
     return np.asarray(ip), np.asarray(ea)
 
 
-def _oracle_poles(CB, us, mode):
+def _oracle_poles(us, mode):
     """Principal poles of the oracle's ADC(5) in construction `mode`; the
     diagrammatic one is the union series decoupled (decouple_cross_blocks)."""
     psi, E, nser = us.rspt_series(NORD)
-    Ssr, Msr, _, _, _ = us.series_matrices(psi, E, nser, NORD)
+    Ssr, Msr = us.series_matrices(psi, E, nser, NORD)
     orb = us.idx[(0, 'o')]
     Fs = sum(Msr[k][np.ix_(orb, orb)] for k in range(NORD))
     sf = CB.SeriesFold(us, Ssr, Msr, NORD, 'twosector' if mode == 'twosector' else 'union',
@@ -63,7 +63,7 @@ def _oracle_poles(CB, us, mode):
     B, D = sf.truncated(CB.adc_rule(5), kcap=2)
     keep = sf.kseg <= 2
     M = np.block([[Fs, sum(B)[:, keep]], [sum(B)[:, keep].T, sum(D)[np.ix_(keep, keep)]]])
-    return _principal(M, us.norb, CB)
+    return _principal(M, us.norb)
 
 
 def _dense(op):
@@ -85,15 +85,14 @@ def _diff(a, b):
 @pytest.mark.parametrize('name', SYSTEMS)
 @pytest.mark.parametrize('construction', ['union', 'diagrammatic'])
 def test_adc5_construction_matches_oracle(name, construction):
-    CB = _oracle()
-    sysd = _build_system(CB, name)
+    sysd = CB.build_system(name)
     us = CB.UnionSpace(sysd)
-    ref = _oracle_poles(CB, us, construction)
-    ref_two = _oracle_poles(CB, us, 'twosector')
+    ref = _oracle_poles(us, construction)
+    ref_two = _oracle_poles(us, 'twosector')
     r, f_orb = _production(sysd)
     M = _dense(restricted_dyson_operator(r, 'adc5', f_orb=f_orb, construction=construction)[0])
     asym = float(np.max(np.abs(M - M.T)))
-    mine = _principal(M, len(f_orb), CB)
+    mine = _principal(M, len(f_orb))
     d = _diff(mine, ref)
     d_two = _diff(ref, ref_two)
     print(f"{name} {construction} ADC(5): IP {np.round(mine[0], 9)} EA {np.round(mine[1], 9)}; "

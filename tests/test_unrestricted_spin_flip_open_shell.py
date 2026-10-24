@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import ao2mo, gto, scf
 
-from src.Base.numerics.constants import METHOD_REGISTRY
+from src.SingleReference.GW.self_energy import METHOD_REGISTRY
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver

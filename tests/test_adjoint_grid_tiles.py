@@ -44,7 +44,7 @@ from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.numerics.numerics import Numerics, numerics_of
-from src.Base.factorization.separable_ri import fit_rows_adjoint
+from src.gradients.isdf_fit_adjoint import fit_rows_adjoint
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
@@ -264,7 +264,7 @@ def ladder_chain(mol):
 def tau_split_path(chain):
     """The chain on the tau-split ranked path: whole adjoints, the tau-split
     sweeps, no tape."""
-    chain.reverse._adjoint_rows = lambda x_mo: None
+    chain.reverse.adjoint_rows = lambda x_mo: None
     forward = chain.forward
 
     def untaped(mol, mf):
@@ -294,11 +294,11 @@ def test_the_tape_is_read_back_bitwise():
         x_mo, d, eps, mu, tape = sh.x_mo, sh.d, sh.eps, sh.mu, sh.qp_tape
         xc = chain.xc_correction(mf, chain.resolved.qp_set, None)
         weights = np.linspace(0.3, 1.0, len(chain.resolved.qp_set))
-        kw = chain.quasiparticles._qp_kw()
+        kw = chain.quasiparticles.qp_kw()
         args = (x_mo, d, eps, chain.nocc, chain.conventions.gw_grid, chain.conventions.nu, chain.conventions.wt,
                 chain.resolved.qp_set)
         out = {}
-        for block in (None, chain.reverse._adjoint_rows(x_mo)):
+        for block in (None, chain.reverse.adjoint_rows(x_mo)):
             if comm.Get_size() == 1 and block is not None:
                 block = CHAIN_BLOCK
             runs = []
@@ -462,7 +462,7 @@ class AdjointCensus:
 def reverse(chain, shared, solution):
     """The excitation force's reverse pass: the BSE seeds, then everything
     `fold_to_nuclei` folds them through; (force, rows the seed holds)."""
-    seeds = chain.follower._casida_seeds(shared, solution, chain.state)
+    seeds = chain.follower.casida_seeds(shared, solution, chain.state)
     held = (seeds[1].rows if isinstance(seeds[1], GridTileRows)
             else seeds[1]).shape[0]
     return chain.reverse.fold_to_nuclei(shared, *seeds)[0], held

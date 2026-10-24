@@ -1,5 +1,5 @@
 """K-diagonal-preconditioned Davidson (solve_symmetric, through solve.follow_roots) on
-the restricted matrix-free operators -- item #4.
+the restricted matrix-free operators.
 
 Validates, on the restricted ADC(4)-base sector operator and the FULL multi-class
 operator (both sectors, LiH/H2O):
@@ -109,14 +109,14 @@ def main():
 
         print(f"\n=== {label} ===")
         for sector in ('IP', 'EA'):
-            cfg1 = r._sector_configs(sector)
+            cfg1 = r.sector_configs(sector)
             homo = nocc_sp - 1                       # HOMO spatial orbital index
             U = r.u_adc3(sector)
             op = restricted_sector_operator(sector, r, U, c1r, c2r, s2r)
             diag = np.concatenate([eps_sp, cfg1['K']])
             all_ok = check(op, diag, homo, f"{sector} ADC(4)-base sector op", all_ok)
 
-            cfg2 = r._kconfigs(sector, 2)
+            cfg2 = r.kconfigs(sector, 2)
             # full multi-class op: skip the (dense reconstruction + Davidson)
             # check for large dims -- the k2-coupled matvec is heavy and the
             # LiH full ops (dim 70/174) already exercise the full-operator path.

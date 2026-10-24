@@ -128,10 +128,9 @@ class ReferenceMeanField:
         if fresh and not getattr(mf, 'converged', True):
             # an SCF this chain ran that stopped short -- not converged, and
             # its |F_ia| above what it was asked for -- is a numerical event:
-            # warned about and flagged, and the run carries on.
-            # One flagged unconverged on its energy alone (a
-            # Kohn-Sham quadrature's noise against a tight conv_tol) with its
-            # orbitals converged is neither.
+            # warned about and flagged, and the run carries on. One flagged
+            # unconverged on its energy alone (a Kohn-Sham quadrature's noise
+            # against a tight conv_tol) with its orbitals converged is neither.
             self.flag_scf_quality(mf, 'the SCF at this geometry stopped short')
         elif fresh:
             self.residual_of(mf)
@@ -150,43 +149,21 @@ class ReferenceMeanField:
 
     def flag_scf_quality(self, mf, where):
         """Warn about, and flag in `scf_flags`, a mean field whose |F_ia|
-        exceeds `scf_force_tol`, once per entry `where` and mean field; the
-        run carries on (refuse inputs, warn
-        numerics). Returns the residual."""
-        resid, tol = self.residual_of(mf), scf_force_tol(mf)
-        if resid > tol:
-            coords = np.array(mf.mol.atom_coords(), float)
-            # a chain rebuilt from a record, or a copy, may not have the list
-            flags = self.__dict__.setdefault('scf_flags', [])
-            if any(f['where'] == where and f['residual'] == float(resid)
-                   and np.array_equal(f['coords'], coords) for f in flags):
-                return resid
-            flags.append({'where': where, 'residual': float(resid),
-                          'tol': float(tol), 'coords': coords})
-            warnings.warn(
-                f'{where}: the mean field carries |F_ia| = {resid:.2e}, above '
-                f'the {tol:.0e} a force on it may carry (`scf_force_tol`); '
-                f'the gradient Lagrangian assumes the block vanishes',
-                RuntimeWarning, stacklevel=3)
+        exceeds `scf_force_tol`, once per entry `where` and mean field
+        (`scf_quality_flags`). Returns the residual."""
+        resid = self.residual_of(mf)
+        # a chain rebuilt from a record, or a copy, may not have the list
+        scf_quality_flags(self.__dict__.setdefault('scf_flags', []), mf, resid,
+                          where, stacklevel=4)
         return resid
 
     def require_scf_quality(self, mf, where='force'):
         """The flags (`scf_flags`) a force or coupling `where` on `mf`
-        carries: one when its |F_ia| exceeds `scf_force_tol`, warned about
-        (`flag_scf_quality`), none otherwise. The Lagrangian assumes the
-        block vanishes, so what is left rides, amplified, in the force; a
-        numerical event, flagged, and the run carries on
-        (refuse inputs, warn numerics). A mean field that was
-        never run is an input and is refused."""
-        if getattr(mf, 'mo_coeff', None) is None:
-            raise ValueError(
-                f'{where}: the mean field handed in was never run (no '
-                f'mo_coeff)')
-        self.flag_scf_quality(mf, where)
-        coords = np.array(mf.mol.atom_coords(), float)
-        return [dict(f) for f in getattr(self, 'scf_flags', [])
-                if f['where'] == where and np.array_equal(f['coords'], coords)
-                and f['residual'] == float(self.residual_of(mf))]
+        carries: one when its |F_ia| exceeds `scf_force_tol`, warned about,
+        none otherwise (`scf_quality_flags`)."""
+        require_run(mf, where)
+        return scf_quality_flags(self.__dict__.setdefault('scf_flags', []), mf,
+                                 self.residual_of(mf), where, stacklevel=4)
 
     def scf_layout(self):
         """The AO-pair columns the reference mean field's ISDF-K fit kept,
@@ -197,6 +174,11 @@ class ReferenceMeanField:
         if 'layout' not in self._scf_layout:
             self._scf_layout['layout'] = scf_pair_layout(self.mf0)
         return self._scf_layout['layout']
+
+    def hold_scf_layout(self, layout):
+        """Hold `layout` as the reference mean field's pair layout (a record
+        read back), so `scf_layout` returns it without a new SCF."""
+        self._scf_layout = {'layout': layout}
 
 
 def converged_factory(scf_factory):
@@ -218,6 +200,41 @@ def converged_factory(scf_factory):
         return mf
 
     return build
+
+
+def require_run(mf, where):
+    """Refuse a mean field that was never run (no mo_coeff): an input that
+    cannot work."""
+    if getattr(mf, 'mo_coeff', None) is None:
+        raise ValueError(
+            f'{where}: the mean field handed in was never run (no '
+            f'mo_coeff)')
+
+
+def scf_quality_flags(flags, mf, residual, where, once=False, stacklevel=3):
+    """The one policy on a mean field a force or coupling is taken on: its
+    |F_ia| (`residual`) above `scf_force_tol` is warned about and appended to
+    `flags` -- {'where', 'residual', 'tol', 'coords'} -- once per entry
+    `where`, residual and geometry (once=True: once at all, the first entry
+    standing for every later one); the run carries on. The Lagrangian
+    assumes the block vanishes, so what is left rides, amplified, in the
+    force. Returns copies of the flags this entry carries (once=True:
+    every flag held)."""
+    tol = scf_force_tol(mf)
+    coords = np.array(mf.mol.atom_coords(), float)
+
+    def this_entry(f):
+        return (f['where'] == where and f['residual'] == float(residual)
+                and np.array_equal(f['coords'], coords))
+    if residual > tol and not (flags if once else any(map(this_entry, flags))):
+        flags.append({'where': where, 'residual': float(residual),
+                      'tol': float(tol), 'coords': coords})
+        warnings.warn(
+            f'{where}: the mean field carries |F_ia| = {residual:.2e}, above '
+            f'the {tol:.0e} a force on it may carry (`scf_force_tol`); '
+            f'the gradient Lagrangian assumes the block vanishes',
+            RuntimeWarning, stacklevel=stacklevel)
+    return [dict(f) for f in flags if once or this_entry(f)]
 
 
 def scf_force_tol(mf):

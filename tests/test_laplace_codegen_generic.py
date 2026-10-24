@@ -1,7 +1,7 @@
 """Validates the generic Laplace-fusion code generator
 (src/CodeGeneration/laplace_codegen.py) by using it to independently
 re-derive the SAME two quantities mpn_density_driver_restricted.py's
-hand-ported laplace_aaaaaa_contribution computes (the t3_2_aaaaaa
+hand-written laplace_aaaaaa_contribution computes (the t3_2_aaaaaa
 contribution to t1_3_aa's numerator, and to the ov M3 block) -- if the
 generic, rank-agnostic fuser reproduces that already-oracle-validated
 hand derivation exactly, that's strong evidence it's correct and ready to

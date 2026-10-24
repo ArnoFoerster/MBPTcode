@@ -13,7 +13,7 @@ Checks:
   2. build_effective_hamiltonian's active_space= keyword reproduces the same
      g_eff as the equivalent manual window/permuted mean field, including a
      scattered window only reachable via permutation
-  3. the unavailable solvers ('pyhast', 'pdaggerq', 'ccsdt') refuse cleanly
+  3. a solver name that is not a backend ('pyhast', 'ccsdt', a typo) is refused
   4. the 'dmrg' backend, run in its own subprocess (see qdpt_dmrg_check.py
      for why), agrees with 'pyscf_fci' on the same downfolded g_eff
 """
@@ -158,17 +158,17 @@ def check_unavailable_solvers_refuse_cleanly():
     g_eff, space = build_effective_hamiltonian(mol, mf, 0, 3, max_pt_order=2,
                                                max_vertex=2)
     ok = True
-    for name in ('pyhast', 'pdaggerq', 'ccsdt', 'CCSDT'):
+    for name in ('pyhast', 'pdaggerq', 'ccsdt', 'CCSDT', 'pyscf-fci'):
         try:
             solve(name, g_eff, space['n_orbs'], space['n_elec_active'],
                  space['act_idx'], space['act_occ_idx'], space['act_vir_idx'])
             ok = False
-        except NotImplementedError:
+        except ValueError:
             pass
         except Exception as exc:  # pragma: no cover - diagnostic only
-            print(f"  {name} raised {type(exc).__name__}, not NotImplementedError")
+            print(f"  {name} raised {type(exc).__name__}, not ValueError")
             ok = False
-    print(f"pyhast/pdaggerq/ccsdt/CCSDT all raise NotImplementedError: "
+    print(f"pyhast/pdaggerq/ccsdt/CCSDT/pyscf-fci all raise ValueError: "
           f"{'OK' if ok else 'FAIL'}")
     return ok
 

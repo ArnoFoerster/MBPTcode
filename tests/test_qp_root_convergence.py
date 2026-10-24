@@ -16,8 +16,7 @@ import pytest
 
 from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.Base.step_failed import StepFailed
-from src.Solvers.qp_equation import (QPRootNotConverged, solve_qp_equation,
-                                     solve_qp_equation_pole_strength)
+from src.Solvers.qp_equation import QPRootNotConverged, solve_qp_equation_pole_strength
 
 EPS = -0.4
 
@@ -37,42 +36,31 @@ def satellite_only(w):
     return 50.0 * (w - EPS - 0.05)
 
 
-@pytest.mark.parametrize('method', ['pole_strength'])
-def test_no_root_in_the_window_warns_by_default(method):
+def test_no_root_in_the_window_warns_by_default():
     with pytest.warns(RuntimeWarning, match='no root'):
-        root = solve_qp_equation(no_root, EPS, method=method)
+        root = solve_qp_equation_pole_strength(no_root, EPS)
     assert np.isnan(root)
 
 
-@pytest.mark.parametrize('method', ['pole_strength'])
-def test_no_root_in_the_window_is_refused_when_asked(method):
+def test_no_root_in_the_window_is_refused_when_asked():
     with pytest.raises(QPRootNotConverged) as err:
-        solve_qp_equation(no_root, EPS, method=method, refuse_unconverged=True)
+        solve_qp_equation_pole_strength(no_root, EPS, refuse_unconverged=True)
     assert isinstance(err.value, StepFailed)
     assert err.value.reason == 'no_root'
 
 
-@pytest.mark.parametrize('method', ['pole_strength'])
-def test_full_output_carries_the_flag(method):
+def test_full_output_carries_the_flag():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        _, ok = solve_qp_equation(no_root, EPS, method=method,
+        _, ok = solve_qp_equation_pole_strength(no_root, EPS,
                                   full_output=True)
     assert ok is False or ok == np.False_
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        root, ok = solve_qp_equation(quasiparticle, EPS, method=method,
+        root, ok = solve_qp_equation_pole_strength(quasiparticle, EPS,
                                      full_output=True)
     assert ok
     assert abs(root - (EPS + 0.01)) < 1e-6
-
-
-@pytest.mark.parametrize('method', ['graphical', 'bisection', 'newton'])
-def test_the_retired_rules_are_refused(method):
-    """One rule serves every route: the nearest-root and fixed-bracket rules
-    are refused by name, not solved by a second finder."""
-    with pytest.raises(ValueError, match='retired'):
-        solve_qp_equation(quasiparticle, EPS, method=method)
 
 
 def test_a_satellite_alone_is_returned_flagged_and_quiet():
@@ -107,7 +95,7 @@ def test_a_root_beyond_the_first_window_is_found_by_widening():
     far = lambda w: w - EPS - 0.8
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        assert abs(solve_qp_equation(far, EPS) - (EPS + 0.8)) < 1e-6
+        assert abs(solve_qp_equation_pole_strength(far, EPS) - (EPS + 0.8)) < 1e-6
 
 
 def test_the_quasiparticle_beyond_a_satellite_window_wins():

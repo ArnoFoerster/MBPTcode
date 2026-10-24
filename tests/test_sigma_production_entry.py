@@ -94,7 +94,7 @@ def test_main():
     "spans: on spin-orbital H2O/sto-3g the two extra roots have overlaps near "
     "zero among many satellites, the pick changes between iterations and no "
     "root converges (the hand-written route's davidson_follow fails the same "
-    "way); the reference Davidson converged this case"))
+    "way)"))
 def test_three_followed_roots():
     assert main(nroots=3)
 

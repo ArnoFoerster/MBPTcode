@@ -2,12 +2,11 @@
 
 Why
 ---
-`_sector_data` built the orbital<->k1 coupling as
-`u_adc3(sector) + u3_generated(sector)`, and `u3_generated` materializes the
-dense (n_k1, n_k1) class-GS S^(2) purely to form -1/2 (S2C @ U1) -- the
-~17.5 GB / 284 s aug-cc-pVTZ blocker. That made full ADC(4) (and the new
-downfolded solver, which routes through the same operator) unusable at
-production basis sets, and left a block that was not matrix-free.
+The dense orbital<->k1 coupling `u_adc3(sector) + u3_generated(sector)`
+materializes the dense (n_k1, n_k1) class-GS S^(2) purely to form
+-1/2 (S2C @ U1) -- ~17.5 GB / 284 s at aug-cc-pVTZ. That would make full
+ADC(4) (and the downfolded solver, which routes through the same operator)
+unusable at production basis sets; every block is to be matrix-free.
 
 U^(3) factorizes as  M - 1/2 (S2C - n2) U1  with M and U1 both (n_k1, norb),
 so BOTH directions follow from cheap stitches plus one S^(2) MATVEC:
@@ -22,7 +21,7 @@ The gate compares against the dense path via an EXPLICIT `u3_matrix_free` flag.
 That flag exists because `restricted_dyson_operator` DEFAULTS s2cr_module to
 the real module when it is None -- so "pass s2cr_module to select matrix-free"
 silently selects it in both branches, and a comparison written that way comes
-back 0.0 by construction while testing nothing. (Observed: it did.)
+back 0.0 by construction while testing nothing.
 """
 import os
 import sys

@@ -26,8 +26,8 @@ import warnings
 
 import numpy as np
 
-from src.Base.numerics.constants import (EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
-                                         EVGW_MAX_CYCLE, EVGW_TOL, HARTREE_TO_EV)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.SingleReference.CC.diis import DIIS
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
@@ -39,8 +39,8 @@ SCREENINGS = ('updated', 'fixed')
 
 class EvGWNotConverged(RuntimeWarning):
     """The evGW loop ended without a fixed point: the spectrum returned is the
-    last iterate and its record says info['converged'] False
-    (refuse inputs, warn numerics; as qsGW)."""
+    last iterate and its record says info['converged'] False (refuse inputs,
+    warn numerics), as qsGW's `QsGWNotConverged`."""
 
 
 def shifted_mean_field(mf, eps):
@@ -75,9 +75,7 @@ def quasiparticle_spectrum(mf, mol, mode, eps_anchor, spin_channel='alpha',
 
 
 def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
-                     converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
-                     diis_size=EVGW_DIIS_SIZE, diis_start=EVGW_DIIS_START,
-                     damping=EVGW_DAMPING, eps_init=None, update=None,
+                     converge_on=None, eps_init=None, update=None,
                      verbose=False, **route_kw):
     """(eps_qp, info): the eigenvalue-self-consistent GW spectrum, in Hartree.
 
@@ -92,13 +90,13 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
         Sigma_c alone, on the Casida route.
     converge_on: orbitals whose movement decides convergence. Default is the
         HOMO and the LUMO.
-    tol:    convergence on max |delta eps| over `converge_on`, in Hartree.
-        A loop that has not reached it in `max_cycle` cycles returns its last
+    numerics: in `route_kw`, the one `Numerics` of the run, which the route
+        reads too; its evgw section holds the loop's tol (max |delta eps|
+        over `converge_on`, Hartree), max_cycle, diis_size (0: linear mixing
+        by damping, eps <- (1 - d) eps_new + d eps_old) and diis_start. A
+        loop that has not converged in max_cycle cycles returns its last
         iterate with info['converged'] False and an `EvGWNotConverged`
         warning.
-    diis_size: DIIS subspace; 0 falls back to linear mixing through `damping`.
-    damping: linear mixing, eps <- (1 - d) eps_new + d eps_old, used only when
-        DIIS is off.
     eps_init: the first iterate, default the mean field's eigenvalues; a
         converged spectrum handed in tests whether it is a fixed point.
     update: orbitals allowed to move, as flat (channel, orbital) indices.
@@ -120,6 +118,9 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
     channel's step rebuilds the one W from both spins of the iterate.
     """
     mol = mf.mol if mol is None else mol
+    loop = numerics_or_default(route_kw.get('numerics')).evgw
+    tol, max_cycle, diis_size, diis_start, damping = (
+        loop.tol, loop.max_cycle, loop.diis_size, loop.diis_start, loop.damping)
     if mode not in qp_energy.EVGW_MODES:
         raise ValueError(f'mode={mode!r}: choose one of '
                          f'{sorted(qp_energy.EVGW_MODES)}')
@@ -157,7 +158,11 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
     frozen = np.setdiff1d(flat, moving)
 
     if mode == 'casida':
-        step = qp_energy.casida_evgw_step(mf, mol, screening, **route_kw)
+        # the Casida step reads no grid or quadrature: the loop's settings
+        # were read above
+        step = qp_energy.casida_evgw_step(
+            mf, mol, screening,
+            **{k: v for k, v in route_kw.items() if k != 'numerics'})
     else:
         def step(eps):
             view = shifted_mean_field(mf, eps)

@@ -1,8 +1,12 @@
 # Tests
 
-Every file runs both as a script and under pytest. As a script it runs its
-calculations, prints a verdict per check and exits non-zero if any of them
-failed:
+A test file is a pytest file or a script, as its line in the CI tier lists
+(`tools/ci/fast.txt`, `slow.txt`, `heavy.txt`, `triage.txt`) says; every
+`test_*.py` is in exactly one of them (`test_conventions.py` checks it). A
+script has a `__main__` block and no `test_*` function, so pytest collects
+nothing from it and `tools/ci/run_tier.py` runs it as `python tests/<file>`:
+it runs its calculations, prints a verdict per check and exits non-zero if any
+of them failed. Most pytest files run as a script too:
 
 ```bash
 python tests/test_adc3.py
@@ -24,7 +28,8 @@ optional third-party one.
 
 | area | tests |
 |---|---|
-| imports, constants, interfaces; the gradient layer below the property layer | `test_imports`, `test_constants_registry`, `test_base`, `test_layering` |
+| imports, constants, interfaces; the gradient layer below the property layer; module paths named in comments and docstrings | `test_imports`, `test_constants_registry`, `test_base`, `test_layering`, `test_text_names_resolve` |
+| a numerical fallback warns with its own class and leaves a named flag | `test_numerical_flags` |
 | thread and memory policy | `test_blas_single_threaded`, `test_allocation_memory` |
 | basis sets read from CP2K | `test_cp2k_basis` |
 | the shared symmetric Davidson | `test_davidson_symmetric` |
@@ -37,7 +42,7 @@ optional third-party one.
 | eigenvalue self-consistency | `test_evgw` |
 | imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
-| ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache` |
+| ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian` |
 | BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_solvated_ground_surface` |
 | a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |

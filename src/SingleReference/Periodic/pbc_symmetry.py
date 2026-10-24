@@ -1,6 +1,7 @@
 """
 Point-group and time-reversal symmetry of a Gamma-centred k-mesh, for every
-k-point route that sums over momentum transfers.
+k-point route that sums over momentum transfers. No driver uses it yet; its
+tests are its only users.
 
 An operation S = {R|t} of the crystal (or R followed by time reversal) maps
 the Bloch AOs at k onto those at Sk by a unitary U(S, k), so a one-body

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics.constants import get_method_info, METHOD_REGISTRY
+from src.SingleReference.GW.self_energy import get_method_info, METHOD_REGISTRY
 
 if __name__ == '__main__':
     all_ok = True

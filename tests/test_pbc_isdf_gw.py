@@ -65,10 +65,10 @@ def gwfix():
     kplus = get_momentum_transfer_map(cell, kpts)
     kminus = kpoint_minus_map(cell, kpts)
     X, V, _ = build_isdf_kpts(cell, mo, kpts, ALPHA * nmo)
-    mu = rpa.chemical_potential_occ(mo_energy, mo_occ)
+    mu = rpa.chemical_potential(mo_energy, mo_occ)
     rW, rS = gw.self_energy_fit_ranges_k(mo_energy, mo_occ, mu)
     omega_in, _ = gauss_legendre_grid(64, w0=0.5 * rW[0])
-    Pi = [rpa.polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q, omega_in)
+    Pi = [rpa.polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q, omega_in)
           for q in range(len(kpts))]
     tau = 0.5 * minimax_time_grid(NTAU, *rS)[0]
     return dict(cell=cell, kpts=kpts, mf=mf, mo_energy=mo_energy, mo_occ=mo_occ,
@@ -125,7 +125,7 @@ def test_qp_energies_match_the_gdf_spectral_oracle(gwfix):
     for kn in (0, 1):
         for n in (nocc - 1, nocc):
             qp_ref = pse.qp_energy_g0w0(dfi, eig, kn, n,
-                                        exchange_minus_vxc=xmv[kn, n])
+                                        exchange_minus_vxc=xmv[kn, n])['qp']
             z_fit, iw = imaginary_axis_sample_points(
                 gauss_legendre_grid(16, w0=0.5 * f['rW'][0])[0], nocc, n, f['mu'])
             sig = gw.sigma_c_diag_thc(f['X'], f['V'], f['Pi'], f['mo_energy'],
@@ -164,7 +164,7 @@ def test_driver_reproduces_the_hand_assembled_chain(gwfix):
 
     worst = 0.0
     for i, n in enumerate((nocc - 1, nocc)):
-        ref = pse.qp_energy_g0w0(dfi, eig, kn, n, exchange_minus_vxc=xmv[kn, n])
+        ref = pse.qp_energy_g0w0(dfi, eig, kn, n, exchange_minus_vxc=xmv[kn, n])['qp']
         worst = max(worst, abs(qp[i] - ref) * HARTREE_TO_EV)
     assert worst < 2e-3, f"worst QP deviation {worst:.4f} eV"
 
@@ -236,8 +236,9 @@ def test_matsubara_green_function_keeps_only_the_greater_branch(gwfix):
     beta, tau = 400.0, 3.0
     G = gw.green_function_tau_matsubara(f['X'], f['mo_energy'], f['mo_occ'],
                                         tau, beta, f['mu'])
-    _, G_g = gw.green_functions_tau_gw(f['X'], f['mo_energy'], f['mo_occ'],
-                                       tau, f['mu'])
+    _, Gv = rpa.green_functions_tau(f['X'], f['mo_energy'], f['mo_occ'],
+                                    tau, f['mu'])
+    G_g = -0.5 * Gv.conj()                  # the greater branch sigma_c_diag_thc uses
     assert abs(G - G_g).max() / abs(G_g).max() < 1e-8
 
 
@@ -270,7 +271,7 @@ def test_matsubara_route_reproduces_the_t0_route(gwfix):
     beta = 400.0
     wmax = gw.self_energy_range_k(f['mo_energy'], f['mo_occ'], f['rW'][1], f['mu'])
     nuB = gw.bosonic_sampling(beta, wmax)
-    Pi_b = [rpa.polarizability_q_frequency_occ(f['X'], f['mo_energy'], f['mo_occ'],
+    Pi_b = [rpa.polarizability_q_frequency(f['X'], f['mo_energy'], f['mo_occ'],
                                                f['kplus'], q, nuB)
             for q in range(len(f['kpts']))]
     nocc = f['nocc']

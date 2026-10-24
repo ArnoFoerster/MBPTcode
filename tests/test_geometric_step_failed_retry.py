@@ -56,6 +56,9 @@ class GatedSpring:
         self.anchor = None
         self.failures = 0
 
+    def identity(self):
+        return None
+
     def commit(self, mol):
         self.anchor = distances(mol.atom_coords())
 

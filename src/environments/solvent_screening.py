@@ -870,6 +870,17 @@ class SolventScreening:
     differentiable = True
     screens = True
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
+    @property
+    def pcm(self):
+        """The pySCF PCM object of this medium's cavity, at its optical
+        constant: the surface, its settings and the matrices pySCF built."""
+        return self._pcm
+
     def for_geometry(self, mol):
         """The same continuum around the atoms of `mol`.
 
@@ -1407,13 +1418,6 @@ def detach_solvent_screening(mf):
     """Drop the screening, returning mf to gas-phase integrals."""
     mf.with_screening = None
     return mf
-
-
-def solvent_static_selfenergy(mf, mol=None):
-    """The static one-body term of the environment attached to `mf`, in that
-    mean field's own MO basis, or None in the gas phase (so callers add it
-    unconditionally, the way build_ks_static_correction is added)."""
-    return environment_of(mf).static_self_energy(mf, mol)
 
 
 def symmetrized_response(pcmobj):

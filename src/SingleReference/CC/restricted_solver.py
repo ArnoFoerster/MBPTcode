@@ -3,8 +3,7 @@
 Mirrors amplitudes.py::kernel + solver.py::solve_lambda_ccsdt/ccsdt_one_rdm,
 but over 6 T-blocks (t1_aa, t2_aaaa, t2_abab, t3_aaaaaa, t3_aabaab,
 t3_abbabb) and 6 L-blocks (l1_aa, l2_aaaa, l2_abab, l3_aaaaaa, l3_aabaab,
-l3_abbabb) instead of 3+3, mirroring the T side now that Lambda3 is
-generated. Wherever a
+l3_abbabb) instead of 3+3, mirroring the T side. Wherever a
 generated residual function needs a '_bb'/'_bbbb'/'_bbbbbb'-suffixed
 argument, the matching '_aa'/'_aaaa'/'_aaaaaa' array is passed in directly --
 a genuine numerical identity for a closed-shell reference (alpha and beta
@@ -13,7 +12,7 @@ share the same spatial orbitals), not an approximation.
 Final 1-RDM: only the '_aa'-block D1 is generated (off-diagonal spin blocks
 of a closed-shell 1-RDM vanish exactly, and the beta-diagonal block is
 numerically identical to the alpha one), so the full spatial 1-RDM block is
-2x the generated block. D1 now includes full Lambda1/Lambda2/Lambda3
+2x the generated block. D1 includes full Lambda1/Lambda2/Lambda3
 feedback.
 """
 import numpy as np

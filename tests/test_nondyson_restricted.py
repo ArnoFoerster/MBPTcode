@@ -30,7 +30,7 @@ from src.SingleReference.ADC.batched_apply import restricted_class_matmat
 from src.SingleReference.ADC.nondyson_isr import NonDysonISR
 from src.SingleReference.ADC.nondyson_restricted import NonDysonRestricted
 from src.SingleReference.ADC.sigma_driver import restricted_class_matvec
-from tests.generated_runtime import requires_runtime
+from tests.generated_runtime import requires_mp_numerators, requires_runtime
 from tests.test_nondyson_adc import _spinorb, _distinct
 
 SYSTEMS = [('LiH', 'Li 0 0 0; H 0 0 1.6'), ('H2O', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0')]
@@ -55,6 +55,7 @@ def _match(a, b):
 
 
 @requires_runtime(4)
+@requires_mp_numerators(4)
 @pytest.mark.parametrize('label,atom', SYSTEMS)
 @pytest.mark.parametrize('sector', ['IP', 'EA'])
 def test_restricted_matches_spin_orbital_and_pyscf(label, atom, sector):
@@ -97,7 +98,7 @@ def test_batched_twin_equals_column_apply(sector):
     r = _restricted(mf)
     nd = NonDysonRestricted(r, sector)
     mod, fwd, tr = nd._resolve('u', 'v', 1, 1, 2)
-    pool = {**r._rargs}
+    pool = {**r.rargs}
     c1, c2 = nd.configs(1), nd.configs(2)
     rng = np.random.default_rng(3)
     worst = 0.0

@@ -117,7 +117,7 @@ src/gradients/                 the method-neutral core: surface.py (the
 src/properties/                optimize.py (walks, refreeze), vibronic.py,
                                hessian.py, conformers.py, spin_orbit.py,
                                spin_vibronic.py, nonadiabatic.py,
-                               diabatic.py, characters.py, band_shape.py,
+                               characters.py, band_shape.py,
                                franck_condon.py, excitations.py (vertical
                                and adiabatic energies from one SurfaceSpec)
 src/photophysics/              rates.py (golden-rule and Marcus rates, the

@@ -40,13 +40,6 @@ NOT what this module does.)
 import numpy as np
 from pyscf import symm
 
-#: N2 valence CAS(6,6): 3sigma_g + the 1pi_u pair occupied, the 1pi_g* pair +
-#: 3sigma_u* virtual. Stable in character all the way from 0.8 to 4.0 A, unlike
-#: the energy ordering.
-N2_VALENCE_66 = ({'A1g': 1, 'E1ux': 1, 'E1uy': 1},
-                 {'E1gx': 1, 'E1gy': 1, 'A1u': 1})
-
-
 class ReorderedMF:
     """Minimal mean-field shim with the MOs permuted to
     [core occupied | active occupied | active virtual | external virtual].

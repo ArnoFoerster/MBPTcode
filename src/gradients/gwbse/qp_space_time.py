@@ -59,7 +59,7 @@ import numpy as np
 
 from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                          RESIDUE_ROUTES_ALL,
-                                         LAPLACE_SCREENING_TOL, QP_CD_NEWTON_TOL,
+                                         LAPLACE_SCREENING_TOL, QP_ROOT_TOL,
                                          SOP_N_POLES)
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
                                               contiguous_block, current_comm, lockstep,
@@ -222,7 +222,7 @@ def carried_analytically(states, eps, nocc, residue_route, scissor, w0,
     """Whether every state of the set takes the pole model or a frozen
     scissor (`ANALYTIC_ROUTES`), so that nothing of the set is integrated on
     the contour-deformation quadrature and the grid only feeds the pole fits
-    (`ExcitedStateChain._fix_cd_grid` sizes it for that)."""
+    (`QuasiparticleSet.fix_cd_grid` sizes it for that)."""
     return all(pole_model_route(residue_route, scissor, int(p), eps, nocc, w0,
                                 sop_poles)[0] in ANALYTIC_ROUTES
                for p in np.atleast_1d(states))
@@ -411,7 +411,7 @@ def fold_residue_adjoints(proj_bar, backends, tau_indices=None):
 
 def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
                            *, residue_route, mu=None, xc_correction=0.0,
-                           w0=None, tol=QP_CD_NEWTON_TOL,
+                           w0=None, tol=QP_ROOT_TOL,
                            laplace_tol=LAPLACE_SCREENING_TOL,
                            want_grad=True, tile_gb=ISDF_TILE_GB,
                            follow=None, route_out=None,
@@ -1015,7 +1015,7 @@ def pair_contractions(tape, grid, pairs, tile_gb=None, comm=None):
 
 def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                     weights, *, residue_route, mu=None, xc_correction=0.0,
-                    w0=None, tol=QP_CD_NEWTON_TOL,
+                    w0=None, tol=QP_ROOT_TOL,
                     laplace_tol=LAPLACE_SCREENING_TOL,
                     tile_gb=ISDF_TILE_GB, follow=None, route_out=None,
                     n_poles=SOP_N_POLES, sop_stride=None,
@@ -1033,7 +1033,8 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
     three-index slice, a screening contraction and a root search, all
     (naux, norb) at worst.
 
-    This is the same weight-folding the dense pilot does in `bse_qb._qp_chain`,
+    This is the same weight-folding the dense pilot does in
+    `quasi_boson_adjoint.BSEqbAdjoint._qp_chain`,
     where hoisting the maps out of the orbital loop was worth 29.8x.
 
     Only states with a non-zero weight are solved at all, so a quasiparticle

@@ -5,7 +5,7 @@ import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.ADC.adc_u_utils import (
-    u2_denominators, u1_dressing_shift,
+    assemble_operator, u2_denominators, u1_dressing_shift,
     u1_shift_terms_2h1p, u1_shift_terms_2p1h)
 
 
@@ -97,7 +97,7 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None,
 def apply_C_2h1p(s, nocc, V):
     """(Vfull, c_2h1p): C_2h1p sigma-vector contribution (K added by the
     caller); Vfull is the antisymmetric extension of the packed V."""
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     iu, ju, nvirt = ing['iu'], ing['ju'], ing['nvirt']
     Vfull = np.zeros((nocc, nocc, nvirt))
     Vfull[iu, ju, :] = V
@@ -112,7 +112,7 @@ def apply_C_2h1p(s, nocc, V):
 
 def apply_C_2p1h(s, nocc, V):
     """Mirror of apply_C_2h1p (occ<->virt swapped)."""
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     au, bu, nvirt = ing['au'], ing['bu'], ing['nvirt']
     Vfull = np.zeros((nocc, nvirt, nvirt))
     Vfull[:, au, bu] = V
@@ -128,41 +128,8 @@ def apply_C_2p1h(s, nocc, V):
 def build_operator(s, nocc, static_correction=None, t2_ijcd=None):
     """(aop, diag, dims): matrix-free spin-orbital ADC(3) operator.
     t2_ijcd: optional EN-dressed T2^(1) (u1 shift threaded automatically)."""
-    ing = s._build_matrix_free_ingredients(nocc)
-    norb = s.norb
-    eps = s.eps
-    d = ing['d']
-    nH = d['nH']
-    npair_o, npair_v = ing['npair_o'], ing['npair_v']
-    off_2h1p, off_2p1h = ing['off_2h1p'], ing['off_2p1h']
-    K_2h1p, K_2p1h = ing['K_2h1p'], ing['K_2p1h']
-    iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
-
-    if static_correction is None:
-        F = np.diag(eps)
-    else:
-        F = np.diag(eps) + static_correction
-
     u1_shift = None
     if t2_ijcd is not None:
         u1_shift = u1_dressing_shift(s, nocc, t2_ijcd)
-
-    def aop(z):
-        z_p = z[:norb]
-        z_2h1p = z[off_2h1p:off_2p1h].reshape(npair_o, -1)
-        z_2p1h = z[off_2p1h:nH].reshape(nocc, npair_v)
-
-        Vfull_2h1p, c_2h1p = apply_C_2h1p(s, nocc, z_2h1p)
-        Vfull_2p1h, c_2p1h = apply_C_2p1h(s, nocc, z_2p1h)
-        u2h1p_full, u_from_2h1p = apply_U_2h1p(s, nocc, z_p, Vfull_2h1p, t2_ijcd,
-                                               u1_shift=u1_shift)
-        u2p1h_full, u_from_2p1h = apply_U_2p1h(s, nocc, z_p, Vfull_2p1h, t2_ijcd,
-                                               u1_shift=u1_shift)
-
-        y_p = F @ z_p + u_from_2h1p + u_from_2p1h
-        y_2h1p = u2h1p_full[iu, ju, :].reshape(-1) + K_2h1p * z_2h1p.reshape(-1) + c_2h1p.reshape(-1)
-        y_2p1h = u2p1h_full[:, au, bu].reshape(-1) + K_2p1h * z_2p1h.reshape(-1) + c_2p1h.reshape(-1)
-        return np.concatenate([y_p, y_2h1p, y_2p1h])
-
-    diag = np.concatenate([np.diag(F), K_2h1p, K_2p1h])
-    return aop, diag, d
+    return assemble_operator(s, nocc, static_correction, t2_ijcd, u1_shift, apply_C_2h1p,
+                             apply_C_2p1h, apply_U_2h1p, apply_U_2p1h)

@@ -18,12 +18,8 @@ derivation, no hermiticity assumption (verified == forward^T to machine zero).
 Trial-vector operand is named 'x' (NOT 'v' -- 'v' is the virtual-slice
 argument used inside the emitted g[v,v,o,o]-style operands).
 """
-import os
 import re
-import sys
 from itertools import product
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.CodeGeneration.pdaggerq_interface import raw_terms_to_sigma_einsum, exact_coefficient
 from src.CodeGeneration.codegen_common import (
@@ -184,7 +180,7 @@ def generate_adc_class_pair_apply(order, pair='k1k1', restricted=False, df=False
 
     drop_fov_zero skips every structure whose terms all carry f[o,v]
     (_is_fov_zero): zero on this code path, since the class blocks always
-    see the canonical f (BuildSuperMatrixADCnRestricted._rargs sets
+    see the canonical f (BuildSuperMatrixADCnRestricted.rargs sets
     f_aa = diag(eps)); at C^(3) these are l2ft3 and l1ft2, which leaves
     C^(3) with rank <= 2 amplitudes only, so it needs no Laplace fusion.
     No s3c apply exists: pdaggerq prunes every order-3 within-class overlap,
@@ -278,8 +274,7 @@ def generate_adc5_s12_apply_restricted(df=False):
     (block_structures with leading order 2), of which pdaggerq keeps only l1
     (at l1^(2)); the order-3 survivors of the dense module (l2t1, l3t2) need
     budget >= 3 and are NOT in this module -- bundling them fed
-    restricted_class_matvec's prefix sweep order-3 content (the
-    c12_matfree_validate.py KeyError)."""
+    restricted_class_matvec's prefix sweep order-3 content (a KeyError)."""
     funcs = []
     for sector in SECTORS:
         tag1, tag2 = CLASS_TAGS[1][sector], CLASS_TAGS[2][sector]
@@ -348,7 +343,7 @@ def generate_adc_u_k2_apply_restricted(orders=(1, 2, 3), df=False, fname=None):
     """The apply twin of generate_adcn.generate_adc_u_k2: every orbital<->k2
     structure first reachable at each order in `orders`, named by its home
     order (apply_u{o}_ / apply_u{o}t_ / apply_s{o}_ ...), so the driver resolves
-    a structure by its home-order prefix exactly as the dense _k2_raw_S does.
+    a structure by its home-order prefix exactly as the dense k2_raw_S does.
     (1, 2, 3) is ADC(5)'s U^(3)_k2 apply; it is self-contained (orders 1-2
     re-derived rather than resolved across modules)."""
     for o in orders:

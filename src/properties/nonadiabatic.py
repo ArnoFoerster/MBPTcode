@@ -1,7 +1,8 @@
 """Derivative couplings d_IJ = <Psi_I | d/dR Psi_J> between BSE states, and
 between the ground state and one of them.
 
-The second of the two electronic couplings `rates.py` is written around. The
+The second of the two electronic couplings `photophysics/rates.py` is written
+around. The
 spin-orbit one is a matrix element of a GIVEN operator over the Casida vectors
 and costs nothing beyond them. This one differentiates the WAVEFUNCTION, so it
 sees the geometry dependence of the orbitals and of the amplitudes -- the same
@@ -89,19 +90,16 @@ intersection.
 """
 import numpy as np
 
-from src.Base.numerics.constants import NUCLEAR_FD_STEP
+from src.Base.numerics.constants import (EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR,
+                                         NUCLEAR_FD_STEP)
 from src.Base.geometry.geometry import displaced
 from src.Base.pyscf.pyscf_interface import occupied_count
 from src.SingleReference.LinearResponse.linear_response import check_normalization
 from src.gradients.state_identity import (aligned_overlap, mo_overlap,
                                           state_overlap)
-from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from src.gradients.surface import driven_chain, provides, require
 
-#: Bohr displacement of one Cartesian component. The central difference has an
-#: O(h^2) truncation error and an O(eps/h) noise floor from the Casida vectors'
-#: own convergence, the same trade `FiniteDifferenceGradient` makes for an
-#: energy; a mean field converged to 1e-13 and a dense Casida support 1e-3.
+
 class DerivativeCouplings:
     """d_IJ over the ground state and a set of BSE roots, in 1/Bohr.
 

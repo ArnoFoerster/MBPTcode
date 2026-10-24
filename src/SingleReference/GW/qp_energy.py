@@ -22,21 +22,19 @@ evGW/evGW0 (`GW.evGW`, eigenvalues reinjected) on any mode, and qsGW/qsGW0
 its mode's default continuation only; `calc_qp_energy`'s docstring gives the
 order the dispatch decides in.
 """
-import os
-import warnings
 
 import numpy as np
 from pyscf import scf
 
-from src.Base.numerics.constants import (BYTES_PER_GB, get_method_info, DEFAULT_BROADENING_ETA,
-                                         HARTREE_TO_EV)
+from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_BROADENING_ETA, HARTREE_TO_EV
+from src.SingleReference.GW.self_energy import get_method_info
 from src.Base.pyscf.pyscf_interface import (require_closed_shell_or_unrestricted,
                                             unrestricted_reference_diagnostics,
                                             get_orbital_energies,
                                             get_density_fitting_coefficients,
                                             get_two_electron_integrals_chemist,
                                             spin_index)
-from src.environments.solvent_screening import solvent_static_selfenergy
+from src.Base.environment_seam import environment_of
 from src.Base.utils.parallel.threads import blas_single_threaded, row_map
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift, equilibrium_level_shift,
@@ -54,6 +52,7 @@ from src.SingleReference.GW import qsGW  # module import: qsGW imports this file
 from src.Solvers.qp_equation import solve_qp_equation_pole_strength
 
 IMAGINARY_AXIS_MODES = ('imagfrequency', 'imag-frequency', 'space-time')
+from src.Base.utils.parallel.threads import resolve_workers
 
 #: `mode` values the evGW loop can drive, in its own naming.
 EVGW_MODES = {'casida': 'casida', 'imagfrequency': 'imagfrequency',
@@ -86,15 +85,22 @@ CONTOUR_KEYWORDS = frozenset({'w0_cd', 'diagnostics'})
 #: `numerics.qp` fields, and it is FITTED on the CD frequency grid.
 
 #: Route keywords only a Pade continuation's drivers read.
-PADE_KEYWORDS = frozenset({'nfreq', 'npade', 'w0', 'grid', 'greedy',
-                           'tau_target', 'freq_block', 'scratch_dir', 'extras',
-                           'screen_r_cut', 'distribute', 'comm', 'timings'})
+PADE_KEYWORDS = frozenset({'w0', 'grid', 'greedy', 'freq_block', 'scratch_dir',
+                           'extras', 'screen_r_cut', 'distribute', 'comm',
+                           'timings'})
+
+#: Grid sizes a route reads from `numerics` alone: passed as a keyword they
+#: are refused by name.
+NUMERICS_KEYWORDS = {'nfreq': 'imagfreq.nfreq', 'npade': 'quadrature.npade',
+                     'tau_target': 'quadrature.tau_target',
+                     'ntau': 'quadrature.ntau_st'}
 
 #: Route keywords naming the ISDF factorization or its imaginary-time grid,
-#: which no Casida route has; `numerics` carries the space-time routes'
-#: quadrature and pole model.
-ISDF_KEYWORDS = frozenset({'ntau', 'counts', 'radii', 'factors', 'auxbasis',
-                          'grid_accuracy', 'sigma_x', 'numerics'})
+#: which no Casida route has. `numerics`, the run's one Numerics, is read by
+#: every route and loop that has a setting in it (the space-time quadrature and
+#: pole model, the imaginary-frequency grid, the evGW and qsGW loops).
+ISDF_KEYWORDS = frozenset({'counts', 'radii', 'factors', 'auxbasis',
+                          'grid_accuracy', 'sigma_x'})
 
 #: What `solver` accepts on the Casida route. 'auto' is resolved through
 #: `casida.solver_choice`, the repository's one eigensolver rule.
@@ -133,7 +139,7 @@ def refuse_unbuilt_casida_solver(solver, mf, mol, tda):
     n_ov = casida_pair_count(mf, mol)
     if solver == 'auto':
         # the one dense-or-Davidson rule of every Casida solve
-        if solver_choice(n_ov, tda) == 'dense':
+        if solver_choice(n_ov) == 'dense':
             return
     reached = ('the memory rule refuses the dense (A, B) pair at '
                f'n_ov={n_ov} ({2 * int(n_ov)**2 * 8 / BYTES_PER_GB:.1f} GB)'
@@ -163,6 +169,12 @@ def _continuation_of(mode_key, continuation, route_kwargs, return_z):
     a keyword aimed at another continuation is an error rather than a request
     that quietly does nothing.
     """
+    given = sorted(set(NUMERICS_KEYWORDS) & set(route_kwargs))
+    if given:
+        raise TypeError(
+            f"{given} are Numerics settings ("
+            f"{', '.join(f'numerics.{NUMERICS_KEYWORDS[k]}' for k in given)}): "
+            f"pass numerics=Numerics().derive(...) instead of a keyword")
     allowed = MODE_CONTINUATIONS[mode_key]
     name = allowed[0] if continuation is None else str(continuation).lower()
     if name not in allowed:
@@ -194,7 +206,9 @@ def _continuation_of(mode_key, continuation, route_kwargs, return_z):
             f"continuation is not differentiable -- forward mode through its "
             f"recursion divides by inverse differences approaching zero -- so "
             f"the only Z available is a difference of the continued Sigma_c, "
-            f"which is noise; and the Casida route's root finder "
+            f"which is noise as a weight (the space-time driver's with_z "
+            f"returns it, and the window selection reads it only as a coarse "
+            f"admission gate); and the Casida route's root finder "
             f"(`Solvers.qp_equation.solve_qp_equation_pole_strength`) "
             f"returns the root alone, its pole strength being an internal "
             f"finite difference. "
@@ -324,8 +338,9 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                     'spectral' the Lehmann sum at omega + i.eta over the Casida
                         spectrum; mode='casida' only, and its only choice.
                     'pade'     Thiele-Pade of Sigma_c(i.omega), the default on
-                        both imaginary-axis modes. Reads nfreq/npade/w0 and the
-                        rest of their quadrature; returns no Z, since
+                        both imaginary-axis modes. Reads w0, grid and greedy;
+                        its point counts are `numerics`' (imagfreq.nfreq,
+                        quadrature.npade); returns no Z, since
                         differentiating a Thiele recursion divides by inverse
                         differences approaching zero.
                     'cd'       contour deformation: the imaginary-axis integral
@@ -433,8 +448,7 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
     continuation = _continuation_of(mode_key, continuation, route_kwargs,
                                     return_z)
     require_closed_shell_or_unrestricted(mf, 'calc_qp_energy', mol=mol)
-    # named flags for the caller's record (refuse
-    # inputs, warn numerics)
+    # named flags for the caller's record (refuse inputs, warn numerics)
     diagnostics = unrestricted_reference_diagnostics(mf, 'calc_qp_energy')
     if out is not None:
         out['reference_diagnostics'] = diagnostics
@@ -494,8 +508,11 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
             raise NotImplementedError(
                 'self_consistency=qsGW builds the density from its own orbitals '
                 'every cycle; dm_correction has no place in it')
-        route_kwargs = dict(route_kwargs, df=df, eta=eta, tda=tda,
-                            n_workers=n_workers)
+        if given_eta is not None:
+            raise TypeError(
+                'self_consistency=qsGW reads the broadening of its static '
+                'self-energy from numerics.qsgw.eta, not from eta=')
+        route_kwargs = dict(route_kwargs, df=df, tda=tda, n_workers=n_workers)
         return _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability,
                                state, QSGW_SCREENING[consistency], route_kwargs,
                                spin_channel=spin_channel)
@@ -507,6 +524,8 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
             mf, mol, mode_key, continuation, selfenergy, polarizability, df,
             state, spin_channel, dm_correction, tda, return_z,
             route_kwargs)
+    # the Casida route has no setting in the run's Numerics
+    route_kwargs = {k: v for k, v in route_kwargs.items() if k != 'numerics'}
     if route_kwargs:
         raise TypeError(
             f"unexpected keyword(s) {sorted(route_kwargs)} for mode='casida'")
@@ -674,7 +693,7 @@ def _reaction_field_terms(mf, mol, nocc_spin, spin_channel):
         if unrestricted:
             shift = shift[spin_index(spin_channel)]
         return shift, np.diag(shift)
-    sigma_solvent = solvent_static_selfenergy(mf, mol)
+    sigma_solvent = environment_of(mf).static_self_energy(mf, mol)
     if isinstance(sigma_solvent, tuple):
         sigma_solvent = sigma_solvent[spin_index(spin_channel)]
     return None, sigma_solvent
@@ -849,37 +868,6 @@ def _static_correction(mf, mol, dm_correction, sigma_solvent, spin_channel,
     if sigma_solvent is not None:
         xc_correction = xc_correction + np.diag(np.asarray(sigma_solvent))
     return xc_correction
-
-
-def _positive_int_env(name):
-    """The environment variable `name` as a positive int, or None."""
-    value = os.environ.get(name, '').strip()
-    return int(value) if value.isdigit() and int(value) > 0 else None
-
-
-def resolve_workers(n_workers, n_states):
-    """Threads for the per-state scan, and for the qsGW static self-energy.
-
-    The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
-    too, else the CPUs in this thread's affinity mask. Never more than those
-    CPUs, since the pool threads inherit the mask, and never more than there
-    are states. A mask narrower than the request warns: with OMP_PROC_BIND set,
-    the OpenMP runtime binds this thread to one core as pyscf loads, and the
-    whole pool would share that core.
-    """
-    try:
-        cpus = len(os.sched_getaffinity(0))
-    except AttributeError:
-        cpus = os.cpu_count() or 1
-    if n_workers is None:
-        n_workers = _positive_int_env('OMP_NUM_THREADS') or cpus
-    n_workers = int(n_workers)
-    if n_workers > cpus:
-        warnings.warn(
-            f'{n_workers} threads requested for a thread pool, but this thread may '
-            f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
-            f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
-    return max(1, min(n_workers, cpus, n_states))
 
 
 def qp_energies_from_spectrum(se_solver, nocc, spectrum, method_infos, methods,
@@ -1235,10 +1223,11 @@ def _qp_energy_imaginary_axis_route(mf, mol, mode_key, continuation, selfenergy,
                                          **route_kwargs)
         out, z = [e * HARTREE_TO_EV for e in out], None
     else:
-        out = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p,
-                                              dm_correction=dm_correction,
-                                              **route_kwargs)
-               for p in states]
+        # One call for the whole window: W(i omega), the exchange and v_xc are
+        # built once and their rows sliced for every state.
+        out = solve_qp_energy_imaginary_axis(mf, mol, nocc, np.asarray(states),
+                                             dm_correction=dm_correction,
+                                             **route_kwargs)
         out, z = [e * HARTREE_TO_EV for e in out], None
 
     if not isinstance(state, list):

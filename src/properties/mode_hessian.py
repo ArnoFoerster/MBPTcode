@@ -24,12 +24,14 @@ live on the vibrational modes only. A vibrationally relaxed excited state is
 probed at its own minimum, so evaluate there when the frequency is meant to
 be compared with a measured one.
 """
+import warnings
+
 import numpy as np
 
 from src.Base.numerics.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
                                          NUCLEAR_FD_STEP)
 from src.Base.geometry.geometry import displaced
-from src.properties.hessian import ladder_ratios
+from src.properties.hessian import HessianAsymmetric, ladder_ratios
 from src.gradients.surface import evaluate
 
 
@@ -92,7 +94,9 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
     and `vectors` (in the selected-mode basis) from the symmetrized `block`;
     `rows`, the unsymmetrized rows over every mode; `leakage_cm`, the
     second-order shift from the modes left out; `omega_ground_cm`;
-    `asymmetry`; `steps` (h_k, mass-weighted Bohr); `gradients`.
+    `asymmetry`, with `hessian_asymmetric` and the flag of that name in
+    `flags` where it is above `asymmetry_tol` (warned, `HessianAsymmetric`);
+    `steps` (h_k, mass-weighted Bohr); `gradients`.
     """
     selected = [int(k) for k in selected]
     hs = [mode_step(modes[:, k], masses, step) for k in selected]
@@ -117,13 +121,16 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
     block_raw = rows[:, selected]
     asymmetry = float(np.abs(block_raw - block_raw.T).max())
     scale = max(float(np.abs(block_raw).max()), 1e-30)
+    flags = []
     if asymmetry / scale > asymmetry_tol:
-        raise RuntimeError(
-            f'the mode-projected force constants are asymmetric by '
-            f'{asymmetry:.2e} ({asymmetry / scale:.2e} of the largest), above '
-            f'{asymmetry_tol:.1e}: the displaced gradients carry more noise '
-            f'than curvature at this step. Check the gradient reproducibility '
-            f'at this geometry, or take a larger step through `frequency_ladder`.')
+        text = (f'the mode-projected force constants are asymmetric by '
+                f'{asymmetry:.2e} ({asymmetry / scale:.2e} of the largest), above '
+                f'{asymmetry_tol:.1e}: the displaced gradients carry more noise '
+                f'than curvature at this step. Check the gradient reproducibility '
+                f'at this geometry, or take a larger step through '
+                f'`frequency_ladder`; the block is kept, symmetrized, and flagged')
+        flags.append({'flag': 'hessian_asymmetric', 'message': text})
+        warnings.warn(text, HessianAsymmetric, stacklevel=2)
     block = 0.5 * (block_raw + block_raw.T)
     lam, vec = np.linalg.eigh(block)
     freq = np.sign(lam) * np.sqrt(np.abs(lam))
@@ -145,6 +152,7 @@ def mode_hessian(surface, mol, omega, modes, masses, selected,
             'rows': rows,
             'leakage_cm': leakage * HARTREE_TO_CM,
             'asymmetry': asymmetry,
+            'hessian_asymmetric': bool(flags), 'flags': flags,
             'steps': np.asarray(hs),
             'gradients': len(jobs)}
 

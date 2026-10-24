@@ -104,12 +104,16 @@ def test_auto_ntau_binds_on_the_self_energy_range(diamond_scf):
     assert n_all == n_rS, (n_all, n_rS, ratios)
 
 
-def test_auto_ntau_refuses_an_unreachable_target(diamond_scf):
-    """An unmeetable target must raise from the driver, not pass silently."""
-    from src.SingleReference.Periodic.pbc_isdf_gw import qp_energy_thc
+def test_auto_ntau_warns_and_flags_an_unreachable_target(diamond_scf):
+    """An unmeetable target is a numerical shortfall, never silent: the driver
+    runs the largest tabulated grid, warns, and flags the error it reached."""
+    from src.SingleReference.Periodic.pbc_isdf_gw import MinimaxGridShort, qp_energy_thc
     cell, mf, kpts, _ = diamond_scf
-    with pytest.raises(ValueError, match='no tabulated minimax grid'):
-        qp_energy_thc(cell, mf, alpha=4, exxdiv=None, tau_target=1e-30)
+    with pytest.warns(MinimaxGridShort, match='no tabulated minimax grid'):
+        qp, diag = qp_energy_thc(cell, mf, alpha=4, exxdiv=None, tau_target=1e-30,
+                                 return_diagnostics=True)
+    assert np.all(np.isfinite(qp))
+    assert diag['numerical_flags']['minimax_tau_target_missed'] > 1e-30
 
 
 if __name__ == '__main__':

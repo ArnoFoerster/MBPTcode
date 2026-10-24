@@ -19,6 +19,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.properties.optimize import derived_walk
+from src.Base.numerics.numerics import Numerics
 from src.Base.step_failed import StepFailed
 from src.SingleReference.LinearResponse.casida import CasidaInstability
 from src.gradients.gwbse.excited_state import ExcitedStateChain
@@ -86,7 +88,8 @@ def _walk(engine, surface, mol):
         if not HAVE_GEOMETRIC:
             pytest.skip('geomeTRIC is not installed')
         return optimize_geometric(surface, mol, verbose=False, nudge=0)
-    return optimize(surface, mol, verbose=False, nudge=0, trust=0.3)
+    return optimize(surface, mol, verbose=False, nudge=0,
+                    numerics=Numerics(walk={'trust': 0.3}))
 
 
 def test_the_step_failures_are_step_failed():
@@ -152,4 +155,6 @@ def test_a_defect_in_the_quasiparticle_solve_leaves_a_real_walk():
 
     chain.quasiparticles.qp_set_solve = at_the_start_only
     with pytest.raises(NotImplementedError, match='no pole model'):
-        optimize(chain, max_cycle=5, verbose=False)
+        optimize(chain,
+                 numerics=derived_walk(chain, 'a capped test walk', max_cycle=5),
+                 verbose=False)

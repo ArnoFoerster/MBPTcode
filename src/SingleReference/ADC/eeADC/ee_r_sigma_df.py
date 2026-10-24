@@ -26,6 +26,7 @@ shows up at machine precision rather than as a plausible small error.
 """
 import numpy as np
 
+from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
@@ -34,10 +35,6 @@ from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4
 
 LEVELS = _r.LEVELS
-# (no, nj, nv, nv) slab blocks one slab of coupling_kernel holds at once (traced
-# peak, check 34 of tests/test_ee_adc_fold.py), what _sb.slab_plan budgets with
-_K_LIVE = 11      # a module constant until src/Base/numerics/constants.py (another
-                  # caller) takes it, with ee_gw_pieces' twin
 
 
 # ----------------------------------------------------------------------
@@ -93,7 +90,7 @@ class DFVvvvKernels(_eq.VvvvKernels):
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------
-    def _ldir(self, Y):
+    def ladder_direct(self, Y):
         """sum_cd (sum_Q B[Q,a,c] B[Q,b,d]) Y[i,j,c,d]."""
         no2 = Y.shape[0] * Y.shape[1]
         out = np.zeros(Y.shape[:2] + (self.nv,) * 2)
@@ -132,7 +129,7 @@ class DFVvvvKernels(_eq.VvvvKernels):
         for key, blk in X.items():
             if key in derived and derived[key][0] in X.keys():
                 continue
-            L[key] = self._ldir(blk)
+            L[key] = self.ladder_direct(blk)
         for key, (base, perm, sign) in derived.items():
             if base in L:
                 L[key] = sign * L[base].transpose(perm)
@@ -299,7 +296,7 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         if y1.parity is not None:
             raise NotImplementedError('coupling_kernel takes y1 without a flip parity')
         S, G = gb['ovvv_ajbc'], gb['ooov']
-        width, workers = _sb.slab_plan(no, no * nv * nv, _K_LIVE)
+        width, workers = _sb.slab_plan(no, no * nv * nv, EE_COUPLING_SLAB_BLOCKS)
 
         def divide(Y, den):
             # Y_K / (D_K - ω) in place; sigma_d_from_s_slab's blocks share no memory

@@ -23,7 +23,8 @@ import pytest
 from pyscf import dft, gto
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
-from src.Base.factorization.isdf_jk import ISDFJK, refuse_isdf_jk_gradient
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.gradients.isdf_mean_field import refuse_isdf_jk_gradient
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests.isdf_test_grid import g1

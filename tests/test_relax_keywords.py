@@ -11,6 +11,7 @@ import pytest
 from pyscf import gto
 
 import src.properties.optimize as optimize_module
+from src.Base.numerics.numerics import Numerics
 from src.properties.optimize import relax
 
 pytest.importorskip('geometric')
@@ -43,14 +44,15 @@ def n2():
 
 def test_auto_drops_the_cartesian_keywords_for_geometric(n2):
     _, info = relax(Bond(n2), n2, engine='auto', verbose=False, nudge=0,
-                    trust=0.2, max_cycle=30, conv={'opt_grad_max': 1e-4})
+                    numerics=Numerics(walk={'trust': 0.2, 'max_cycle': 30}),
+                    conv={'opt_grad_max': 1e-4})
     assert info['optimizer'] == 'geometric' and info['converged']
 
 
 def test_auto_drops_the_geometric_keywords_for_cartesian(n2, monkeypatch):
     monkeypatch.setattr(optimize_module, 'HAVE_GEOMETRIC', False)
     _, info = relax(Bond(n2), n2, engine='auto', verbose=False, nudge=0,
-                    maxiter=30, coordsys='cart', trust=0.2)
+                    maxiter=30, coordsys='cart', numerics=Numerics(walk={'trust': 0.2}))
     assert info['optimizer'] == 'internal' and info['converged']
 
 

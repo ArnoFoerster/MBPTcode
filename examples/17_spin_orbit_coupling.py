@@ -7,6 +7,8 @@ Both states can still be spin-orbit coupled, mediated through higher-lying
 excited states. This coupling is mediated through vibrational modes.
 
     python examples/17_spin_orbit_coupling.py
+
+It runs for more than five minutes on two threads.
 """
 import logging
 import os

@@ -7,6 +7,7 @@ import numpy as np
 from pyscf import gto, scf, df
 from pyscf.gw.rpa import RPA as PyscfRPA
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients, \
     get_two_electron_integrals_chemist
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -36,7 +37,7 @@ if __name__ == '__main__':
         lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted')
 
         e_casida = rpa_correlation_energy_casida(lr, nocc)
-        e_ac = rpa_correlation_energy_imaginary_axis(lr, nocc, nfreq=20, grid='minimax')
+        e_ac = rpa_correlation_energy_imaginary_axis(lr, nocc, grid='minimax', numerics=Numerics(quadrature={'nfreq_rpa': 20}))
 
         rpa_ref = PyscfRPA(mf)
         rpa_ref.verbose = 0
@@ -64,7 +65,7 @@ if __name__ == '__main__':
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted')
 
     e_casida = rpa_correlation_energy_casida(lr, nocc)
-    e_ac_gl = rpa_correlation_energy_imaginary_axis(lr, nocc, nfreq=30, grid='gauss_legendre')
+    e_ac_gl = rpa_correlation_energy_imaginary_axis(lr, nocc, grid='gauss_legendre', numerics=Numerics(quadrature={'nfreq_rpa': 30}))
     ok = abs(e_casida - e_ac_gl) < 1e-5
     all_ok &= ok
     print(f"HF/6-31g gauss_legendre(nfreq=30) vs Casida: AC={e_ac_gl:.8f}  "

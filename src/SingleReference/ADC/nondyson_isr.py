@@ -109,7 +109,7 @@ class NonDysonISR:
             return float(np.sum(self.eps[o]))
         if c == 1:
             return -0.5 * float(np.einsum('klkl->', self.g[o, o, o, o]))
-        return float(self.mpn.compute_E(self.gen._amp_at(2, c - 1)))
+        return float(self.mpn.compute_E(self.gen.amp_at(2, c - 1)))
 
     # ----- raw and effective blocks -----------------------------------------
     def raw_block(self, k_i, k_j, m, strict=True):
@@ -119,7 +119,7 @@ class NonDysonISR:
         bra = tuple(x[:, None] for x in ci)
         ket = tuple(x[None, :] for x in cj)
         shape = (len(ci[0]), len(cj[0]))
-        base = dict(self.gen._args())
+        base = dict(self.gen.kernel_args())
         H = np.zeros(shape)
         S = np.eye(shape[0]) if (m == 0 and k_i == k_j) else np.zeros(shape)
         missing = []
@@ -131,7 +131,7 @@ class NonDysonISR:
                 fn = self._resolve(kind, name, m, k_i, k_j)
                 if fn is None:
                     continue
-                ds = self.gen._amp_pair(j, a, k, b)
+                ds = self.gen.amp_pair(j, a, k, b)
                 if ds is None:
                     missing.append(f"{name}(l{j}^{a},t{k}^{b})")
                     continue

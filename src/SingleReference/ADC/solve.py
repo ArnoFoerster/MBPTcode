@@ -11,6 +11,12 @@ from src.Base.utils.linear_algebra.matrix_functions import eigh_sym, invsqrtm_sy
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 
 
+class ADCNotConverged(RuntimeWarning):
+    """An iteration inside an ADC route (CC or ladder amplitudes, a Lanczos
+    resolvent or inverse square root) stopped before its tolerance. The last
+    iterate is used and the result carries converged=False."""
+
+
 def koopmans_seed(n, homo_index, v0=None, space='the operator space'):
     """The Davidson guess of an IP/EA root, one length-n vector: v0
     normalized, or the Koopmans unit vector at homo_index (never an n x n
@@ -63,7 +69,7 @@ def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
 def solve_handwritten(s, static_correction, nroots, homo_index, ref_vec, tol,
                       threshold, verbose, max_cycle):
     """The hand-written routes of either solver class: dense eigh
-    (benchmarking) or root-following Davidson on s._handwritten_operator
+    (benchmarking) or root-following Davidson on s.handwritten_operator
     (production). Returns (e, Z); vectors and the convergence flag 'conv' on
     s.last_result."""
     nocc = s.nocc
@@ -74,7 +80,7 @@ def solve_handwritten(s, static_correction, nroots, homo_index, ref_vec, tol,
         # really is all-True rather than a stand-in for an unread flag
         s.last_result = {'vec': vec, 'conv': np.ones_like(e, dtype=bool)}
         return e, Z
-    aop, diag, nH = s._handwritten_operator(nocc, static_correction)
+    aop, diag, nH = s.handwritten_operator(nocc, static_correction)
     homo = homo_index if homo_index is not None else nocc - 1
     e, Z, vec, conv = davidson_follow(aop, diag, nH, s.norb, homo, ref_vec, nroots,
                                       tol=tol, max_cycle=max_cycle, verbose=verbose)
@@ -273,7 +279,7 @@ def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
 
     Raises when a Ritz value of N is not positive (N indefinite: the input is
     not a metric). An approximation that has not settled in max_steps is a
-    numerical shortfall: it warns (RuntimeWarning) and returns the last
+    numerical shortfall: it warns (ADCNotConverged) and returns the last
     approximation."""
     v = np.asarray(v, dtype=float)
     vnorm = np.linalg.norm(v)
@@ -296,7 +302,7 @@ def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
             return cur
         prev = cur
     warnings.warn(f"apply_inverse_sqrt: not settled to {tol:g} in {max_steps} Lanczos "
-                  "steps; the last approximation is returned", RuntimeWarning, stacklevel=2)
+                  "steps; the last approximation is returned", ADCNotConverged, stacklevel=2)
     return cur
 
 

@@ -1,6 +1,6 @@
-"""The legacy chain's defaults, the renamed keys, and the aliases beside them.
+"""The legacy chain's defaults and the renamed keys.
 
-WHAT BREAKS IF THIS FAILS. Three names would mean two things at once, and each
+WHAT BREAKS IF THIS FAILS. Two names would mean two things at once, and each
 would cost a comparison that looks sound:
 
   `solver`    `ExcitedStateChain` defaulting to 'dense' while every CLI above
@@ -15,8 +15,8 @@ would cost a comparison that looks sound:
               repository and the residual at a converged one in the other, and
               the geometry optimizer's THRESHOLD in `constants.py`. The
               constant's key is `opt_grad_max`, the residual it is compared
-              against; `grad_max` is accepted as an alias and sets the same
-              number.
+              against; `grad_max` in a walk's `conv` is refused as a name the
+              walk does not hold.
 
 The qp_window default stays the frontier set, QPStates('frontier', 2), which
 this class solves; it is gated here.
@@ -34,11 +34,9 @@ What breaks each equivalence gate:
     0.3111593161151481 by the dense one. THE TOTAL ENERGY STILL MATCHES: 9e-15
     Ha is below the last bit of E_0 + Omega at 75.7 Ha, which is why Omega is
     compared on its own.
-  * test_an_optimization_runs_the_same_under_either_spelling:
-    src/properties/optimize.py with `resolved_conv` dropping the alias key
-    instead of mapping it gives 9 cycles under 'opt_grad_max' against 10
-    under 'grad_max': the alias silently leaves the default threshold in
-    force and the run relaxes past the one it was given.
+  * test_the_old_spelling_is_refused: src/properties/optimize.py with
+    `resolved_conv` merging an unknown key silently leaves the default
+    threshold in force under a name the caller thinks is read.
 
 Every check ASSERTS: pytest discards a returned verdict and passes on False.
 """
@@ -57,7 +55,7 @@ from src.Base.numerics.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_
 from src.SingleReference.LinearResponse.casida import solver_choice
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.optimize import optimize, resolved_conv
+from src.properties.optimize import resolved_conv
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
 
@@ -85,44 +83,10 @@ def scf_factory(mol):
     return mf
 
 
-class QuarticSurface:
-    """E = a (r - r_e)^4 / 4 in the bond length of a diatomic."""
-
-    def __init__(self, mol, a=QUARTIC, r_e=R_E):
-        self.mol0, self.a, self.r_e = mol, a, r_e
-
-    def scf_factory(self, mol):
-        """No mean field: the surface is a function of the nuclei alone."""
-        return None
-
-    def mean_field(self, mol=None, mf=None):
-        return (self.mol0 if mol is None else mol), mf
-
-    def total_gradient(self, mol=None, mf=None):
-        mol = self.mol0 if mol is None else mol
-        d = mol.atom_coords()[1] - mol.atom_coords()[0]
-        r = float(np.linalg.norm(d))
-        grad = np.zeros((mol.natm, 3))
-        grad[1] = self.a * (r - self.r_e) ** 3 * d / r
-        grad[0] = -grad[1]
-        return grad, 0.25 * self.a * (r - self.r_e) ** 4, {}
-
-    def label(self):
-        return f'quartic toy, r_e = {self.r_e} Bohr'
-
-
 @pytest.fixture(scope='module')
 def water():
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
     return mol, scf_factory(mol)
-
-
-@pytest.fixture
-def n2_toy():
-    """A homonuclear pair 0.8 Bohr inside the minimum of the toy surface."""
-    mol = gto.M(atom='N 0 0 0; N 0 0 1.4', unit='Bohr', basis='sto-3g',
-                verbose=0)
-    return QuarticSurface(mol), mol
 
 
 def pair_count(mol, mf):
@@ -183,57 +147,16 @@ def test_the_solver_default_moved_no_number(water):
 
 
 # ------------------------------------------------- the optimizer's threshold
-def test_the_constant_names_the_residual_and_keeps_the_old_spelling():
-    """One number under two keys, and the unambiguous one is canonical."""
-    assert GEOM_OPT_CONV['grad_max'] == GEOM_OPT_CONV['opt_grad_max']
-    resolved = resolved_conv(None)
-    assert resolved['opt_grad_max'] == GEOM_OPT_CONV['opt_grad_max']
-    assert resolved['grad_max'] == resolved['opt_grad_max']
+def test_the_constant_names_the_residual():
+    """One number under one key, the residual the convergence test reads."""
+    assert 'grad_max' not in GEOM_OPT_CONV
+    assert resolved_conv(None)['opt_grad_max'] == GEOM_OPT_CONV['opt_grad_max']
 
 
-def test_the_old_spelling_still_sets_the_threshold_and_says_it_is_old():
-    """A caller's stored `conv` keeps working, and hears that it is superseded."""
-    with pytest.warns(DeprecationWarning, match='opt_grad_max'):
-        out = resolved_conv({'grad_max': 1e-3})
-    assert out['opt_grad_max'] == 1e-3
-    assert out['grad_max'] == 1e-3
-    assert out['step_max'] == GEOM_OPT_CONV['step_max']
+def test_the_old_spelling_is_refused():
+    """A threshold under a name the walk does not read would leave the
+    default in force."""
+    with pytest.raises(ValueError, match='no convergence'):
+        resolved_conv({'grad_max': 1e-3})
 
 
-def test_the_two_spellings_disagreeing_are_refused():
-    """Two thresholds under one meaning: one of them is not in force, and
-    which is not something a caller can be left to guess."""
-    with pytest.raises(ValueError, match='one threshold under two names'):
-        resolved_conv({'opt_grad_max': 1e-3, 'grad_max': 1e-5})
-    # The allowed case: the same number twice is the mirrored dict, not a
-    # contradiction, and passes silently.
-    agreeing = resolved_conv({'opt_grad_max': 1e-3, 'grad_max': 1e-3})
-    assert agreeing['opt_grad_max'] == 1e-3
-
-
-def test_an_optimization_runs_the_same_under_either_spelling(n2_toy):
-    """The alias is not decoration: it has to reach the convergence test.
-
-    The threshold is looser than GEOM_OPT_CONV's own and the step criteria are
-    wide open, so the run stops on the FORCE and on the number this dict names.
-    The residual it stops at is checked to sit above the default: a spelling
-    that never reached the convergence test would relax further and land on the
-    default threshold instead, which is what makes this a measurement of the
-    alias rather than of the optimizer.
-    """
-    surface, mol = n2_toy
-    loose = {'opt_grad_max': 1e-3, 'grad_rms': 1e-3,
-             'step_max': 1.0, 'step_rms': 1.0}
-    new_mol, new_info = optimize(surface, mol, conv=dict(loose), verbose=False)
-    old = dict(loose)
-    old['grad_max'] = old.pop('opt_grad_max')
-    with pytest.warns(DeprecationWarning):
-        old_mol, old_info = optimize(surface, mol, conv=old, verbose=False)
-    assert new_info['converged'] and old_info['converged']
-    assert new_info['cycles'] == old_info['cycles']
-    assert_same(new_info['opt_grad_max'], old_info['opt_grad_max'],
-                quantity='gradient', label='opt_grad_max')
-    assert_same(new_mol.atom_coords(), old_mol.atom_coords(), unit='1',
-                quantity='root', label='geometry')
-    assert (GEOM_OPT_CONV['opt_grad_max'] < old_info['opt_grad_max']
-            < loose['opt_grad_max'])

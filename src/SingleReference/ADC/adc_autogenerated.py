@@ -9,9 +9,10 @@ module is plain Python and safe to edit.
 Sign convention: the generator's sector-dependent commutator direction
 ([C_J, H] for IP-sector classes -- Dyson hole-propagator convention, see
 generate_adcn.superop_element_terms) makes every generated block match
-adc_spinorbital.py's validated convention at +1 exactly, so nothing is
-sign-adjusted here (pinned by tests/test_adcn_generated_adc2.py).
+the hand-written spin-orbital ADCSolverUnrestricted's convention at +1
+exactly, so nothing is sign-adjusted here (pinned by tests/test_adcn_generated_adc2.py).
 """
+import functools
 import inspect
 import math
 from itertools import combinations
@@ -31,8 +32,6 @@ from src.SingleReference.common.mp_amplitudes import orbital_denominator, to_l
 from src.SingleReference.common.mp_amplitudes import to_l as tl
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted,
-    laplace_aaaaaa_contribution,
-    gen_lap3,
 )
 from src.SingleReference.EpsteinNesbet import (
     epstein_nesbet_denominator,
@@ -79,6 +78,37 @@ def cross_block_module(order, pair='k1k1', restricted=False, df=False, apply=Fal
 K2_CLASS_SIGN = {'IP': -1.0, 'EA': +1.0}
 
 
+def amplitude_leaves(A, j, a, k, b):
+    """{leafname: array} of the amplitudes l_j^(a) and t_k^(b) (rank 0 = none)
+    from an amplitude map A keyed 'L{rank}_{order}' / 'T{rank}_{order}' (the
+    amps_order providers); None when one of them is not in A."""
+    ds = {}
+    for lead, rank, order in (('L', j, a), ('T', k, b)):
+        if not rank:
+            continue
+        key = f'{lead}{rank}_{order}'
+        if key not in A:
+            return None
+        ds.update(A[key])
+    return ds
+
+
+def _contract_term_table(terms, out, letter, idx):
+    """sum_terms coef * einsum(term) of a generated term table
+    (pdaggerq_interface.raw_terms_to_term_list) over the output letters `out`,
+    restricted to the positions idx of the output letter `letter`: every
+    operand carrying that letter is sliced to idx first, so the full output
+    is never formed."""
+    res = None
+    for coef, pieces in terms:
+        subs = [sub for sub, _ in pieces]
+        ops = [np.take(arr, idx, axis=sub.find(letter)) if letter in sub else arr
+               for sub, arr in pieces]
+        val = coef * np.einsum(f"{','.join(subs)}->{out}", *ops, optimize=True)
+        res = val if res is None else res + val
+    return res
+
+
 class BuildSuperMatrixADCn:
     """Strict Dyson-ADC(2) from generated blocks: F = diag(eps), U^(1)
     couplings, K diagonals (all pdaggerq-derived; the Loewdin layer is
@@ -122,7 +152,7 @@ class BuildSuperMatrixADCn:
         self.kd = np.eye(self.norb)
         self.o, self.v = slice(0, nocc), slice(nocc, self.norb)
 
-    def _args(self):
+    def kernel_args(self):
         return dict(f=self.f, g=self.g, kd=self.kd, o=self.o, v=self.v,
                     no=self.no, nv=self.nv)
 
@@ -132,7 +162,7 @@ class BuildSuperMatrixADCn:
         return dict(f=self.f, g=self.g_c1, kd=self.kd, o=self.o, v=self.v,
                     no=self.no, nv=self.nv)
 
-    def _class_idx(self, sector):
+    def class_idx(self, sector):
         """Ordered-config index arrays with virtual axes localized (0-based
         within the vir block), in the class's own axis order (holes asc,
         particles asc -- class_configs' convention)."""
@@ -141,9 +171,9 @@ class BuildSuperMatrixADCn:
 
     def u_2h1p(self):
         """(n2h1p, norb) generated U^(1), 2h1p rows x all orbital columns."""
-        occ_rows = gen.u1_2h1p_occ(**self._args())   # axes (i,j,a_loc, p_occ)
-        vir_rows = gen.u1_2h1p_vir(**self._args())   # axes (i,j,a_loc, p_vir)
-        i_, j_, al = self._class_idx('IP')
+        occ_rows = gen.u1_2h1p_occ(**self.kernel_args())   # axes (i,j,a_loc, p_occ)
+        vir_rows = gen.u1_2h1p_vir(**self.kernel_args())   # axes (i,j,a_loc, p_vir)
+        i_, j_, al = self.class_idx('IP')
         U = np.empty((len(i_), self.norb))
         U[:, :self.nocc] = occ_rows[i_, j_, al, :]
         U[:, self.nocc:] = vir_rows[i_, j_, al, :]
@@ -151,9 +181,9 @@ class BuildSuperMatrixADCn:
 
     def u_2p1h(self):
         """(n2p1h, norb) generated U^(1), 2p1h rows x all orbital columns."""
-        occ_rows = gen.u1_2p1h_occ(**self._args())   # axes (i, a_loc, b_loc, p_occ)
-        vir_rows = gen.u1_2p1h_vir(**self._args())
-        i_, al, bl = self._class_idx('EA')
+        occ_rows = gen.u1_2p1h_occ(**self.kernel_args())   # axes (i, a_loc, b_loc, p_occ)
+        vir_rows = gen.u1_2p1h_vir(**self.kernel_args())
+        i_, al, bl = self.class_idx('EA')
         U = np.empty((len(i_), self.norb))
         U[:, :self.nocc] = occ_rows[i_, al, bl, :]
         U[:, self.nocc:] = vir_rows[i_, al, bl, :]
@@ -162,14 +192,14 @@ class BuildSuperMatrixADCn:
     def _gather_class_block(self, tensor6, sector):
         """(ncfg, ncfg) gather of a bra-class x ket-class 6-index tensor at
         the ordered configs (both sides same class/ordering)."""
-        idx = self._class_idx(sector)
+        idx = self.class_idx(sector)
         bra = tuple(x[:, None] for x in idx)
         ket = tuple(x[None, :] for x in idx)
         return tensor6[bra + ket]
 
     def k_block(self, sector):
         fn = gen.k0_2h1p if sector == 'IP' else gen.k0_2p1h
-        return self._gather_class_block(fn(**self._args()), sector)
+        return self._gather_class_block(fn(**self.kernel_args()), sector)
 
     def c1_block(self, sector):
         fn = gen.c1_2h1p if sector == 'IP' else gen.c1_2p1h
@@ -177,7 +207,7 @@ class BuildSuperMatrixADCn:
 
     def s0_block(self, sector):
         fn = gen.s0_2h1p if sector == 'IP' else gen.s0_2p1h
-        return self._gather_class_block(fn(**self._args()), sector)
+        return self._gather_class_block(fn(**self.kernel_args()), sector)
 
     def build_supermatrix_adc2(self):
         """Dense strict-ADC(2) supermatrix [[diag(eps), U^T],[U, K]] over
@@ -223,7 +253,7 @@ class BuildSuperMatrixADCn:
     # ------------------------------------------------------------------
     # Order-2 U (ADC(3)-level coupling corrections)
     # ------------------------------------------------------------------
-    def _amplitude_pool(self):
+    def amplitude_pool(self):
         """First- and second-order MBPT amplitudes for the generated u2
         splits (see generate_adcn.generate_adc3_u's docstring: vt2/l2v/
         l2ft2 consume FIRST-order t2/l2, ft{r}/l{r}f SECOND-order arrays),
@@ -248,20 +278,20 @@ class BuildSuperMatrixADCn:
         return self._amp_pool
 
     def _u2_amplitude_pool(self):
-        """Amplitude pool for _u2_sum: identical to _amplitude_pool() unless
+        """Amplitude pool for _u2_sum: identical to amplitude_pool() unless
         self.u2_denom_dress is set, in which case ONLY t2/l2 (the T2^(1)
         amplitude that U^(2) contracts against the vertex) are rebuilt with
         the Epstein-Nesbet-dressed denominator
         (EpsteinNesbet.epstein_nesbet_denominator) -- t1/l1/t3/l3 (used
         elsewhere, e.g. C^(2)) are untouched and stay bare, and the shared
-        _amplitude_pool() cache is never mutated (other consumers -- C^(2),
+        amplitude_pool() cache is never mutated (other consumers -- C^(2),
         S^(2), ADC(4) -- still see the bare amplitudes).
 
         This is the Epstein-Nesbet denominator dressing:
         it: dresses the amplitude's own energy denominator instead of
         replacing the interaction vertex. See
         u2_denom_dress's docstring on __init__."""
-        pool = dict(self._amplitude_pool())
+        pool = dict(self.amplitude_pool())
         if not self.u2_denom_dress:
             return pool
         mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
@@ -300,7 +330,7 @@ class BuildSuperMatrixADCn:
 
         Amplitudes come from _u2_amplitude_pool (bare g unless u2_denom_dress
         dresses t2/l2); the interaction vertex is always the bare g."""
-        pool = dict(self._args())
+        pool = dict(self.kernel_args())
         pool.update(self._u2_amplitude_pool())
         total = None
         prefix = f'u2_{tag}_{row}_'
@@ -317,9 +347,9 @@ class BuildSuperMatrixADCn:
         """(ncfg, norb) gathered cross-block overlap S^(2)_{Jp} from the
         surviving generated s2 splits (pdaggerq pruning left exactly one
         t1^(2)-shaped structure per sector)."""
-        idx = self._class_idx(sector)
-        pool = dict(self._args())
-        pool.update(self._amplitude_pool())
+        idx = self.class_idx(sector)
+        pool = dict(self.kernel_args())
+        pool.update(self.amplitude_pool())
         S = np.zeros((len(idx[0]), self.norb))
         for row, sl in (('occ', slice(0, self.nocc)),
                         ('vir', slice(self.nocc, self.norb))):
@@ -347,7 +377,7 @@ class BuildSuperMatrixADCn:
         orthogonalization stays Loewdin (S^(1)=0 keeps it inert here)."""
         U = u1()
         occ2, vir2 = self._u2_sum(tag, 'occ'), self._u2_sum(tag, 'vir')
-        idx = self._class_idx(sector)
+        idx = self.class_idx(sector)
         U[:, :self.nocc] += gather(occ2, idx)
         U[:, self.nocc:] += gather(vir2, idx)
         U -= self.eps[None, :] * self._s2_block(tag, sector)
@@ -369,8 +399,8 @@ class BuildSuperMatrixADCn:
         """Gathered (ncfg, ncfg) sum of every surviving generated 6-index
         class-class split matching `prefix` in `module`, amplitude args
         introspected from the pool."""
-        pool = dict(self._args())
-        pool.update(self._amplitude_pool())
+        pool = dict(self.kernel_args())
+        pool.update(self.amplitude_pool())
         total = None
         for name in dir(module):
             if not name.startswith(prefix):
@@ -386,7 +416,7 @@ class BuildSuperMatrixADCn:
         piece of <Psi0|Psi0>, needed to normalize both-side-dressed raw
         elements (their disconnected <l2 t2><X> pieces survive pdaggerq's
         simplify, same as in the MPn density c^(n) machinery)."""
-        t2 = self._amplitude_pool()['t2']
+        t2 = self.amplitude_pool()['t2']
         return 0.25 * float(np.sum(t2 * t2))
 
     def c2_block_generated(self, sector):
@@ -414,10 +444,10 @@ class BuildSuperMatrixADCn:
     # ------------------------------------------------------------------
     # ORDER-GENERAL class-class C^(n) -- the ADC(5) C^(3) path
     # ------------------------------------------------------------------
-    def _amp_at(self, rank, order):
+    def amp_at(self, rank, order):
         """MP amplitude array of excitation `rank` at MP `order`, or None.
 
-        The class-class analogue of the restricted `_amps_order` map that
+        The class-class analogue of the restricted `amps_order` map that
         sigma_driver's order-general U^(n) assembly indexes; spin-orbital here
         because this solver is the oracle reference path. Returns the t-
         convention array -- callers wrap with to_l for the pdaggerq 'l' tag.
@@ -446,7 +476,7 @@ class BuildSuperMatrixADCn:
         return cache.get((rank, order))
 
     @staticmethod
-    def _resolve_class_struct(name, tag, kind):
+    def resolve_class_struct(name, tag, kind):
         """(module, module_order) holding class-class tag structure `name`,
         or None. `kind` is 'c' (the K+C element) or 's' (within-class overlap,
         spelled `s{order}c_`).
@@ -466,10 +496,10 @@ class BuildSuperMatrixADCn:
     def class_struct_ungenerated(name, kind, max_generated=3):
         """adc_order_rule.struct_ungenerated for the class-class modules:
         max_generated is 3, the highest class-class order an ADC(5) block
-        needs (adc5_c3_blocks; order 4 belongs to ADC(6), never in MBPTcode)."""
+        needs (adc5_c3_blocks; order 4 belongs to ADC(6), which is not implemented)."""
         return struct_ungenerated(name, kind, max_generated)
 
-    def _class_raw_S(self, sector, n, strict=True):
+    def class_raw_S(self, sector, n, strict=True):
         """(raw^(n), S^(n)) class-class blocks in the PRECURSOR basis, before
         any normalization or ISR correction.
 
@@ -482,7 +512,7 @@ class BuildSuperMatrixADCn:
         it. One whose amplitude at the required order is unavailable would
         silently UNDER-COMPUTE, so it raises under `strict`."""
         tag = '2h1p' if sector == 'IP' else '2p1h'
-        base = dict(self._args())
+        base = dict(self.kernel_args())
         missing_amp, ungenerated = [], []
 
         def amps(j, a, k, b):
@@ -491,7 +521,7 @@ class BuildSuperMatrixADCn:
             for lead, rank, order in (('l', j, a), ('t', k, b)):
                 if not rank:
                     continue
-                arr = self._amp_at(rank, order)
+                arr = self.amp_at(rank, order)
                 if arr is None:
                     return None
                 out[f'{lead}{rank}'] = (to_l(arr, rank) if lead == 'l'
@@ -504,7 +534,7 @@ class BuildSuperMatrixADCn:
                 name = t[0]
                 j, a, k, b = ((t[1], t[4], t[3], t[5]) if kind == 'c'
                               else (t[1], t[3], t[2], t[4]))
-                res = self._resolve_class_struct(name, tag, kind)
+                res = self.resolve_class_struct(name, tag, kind)
                 if res is None:
                     if self.class_struct_ungenerated(name, kind):
                         ungenerated.append(name)
@@ -563,7 +593,7 @@ class BuildSuperMatrixADCn:
             raws[1] = self.c1_block(sector)
             Ss[1] = np.zeros((dim, dim))      # S^(1) = 0 (particle counting)
         for m in range(2, n + 1):
-            raw_m, S_m = self._class_raw_S(sector, m)
+            raw_m, S_m = self.class_raw_S(sector, m)
             raw_m = np.zeros((dim, dim)) if raw_m is None else raw_m
             S_m = np.zeros((dim, dim)) if S_m is None else S_m
             for j in range(2, m + 1):
@@ -627,7 +657,7 @@ class BuildSuperMatrixADCn:
                 # pairs with a nonexistent partner are zero and never fetched
                 if a < mp_min_order(rank) or b < mp_min_order(rank):
                     continue
-                ta, tb = self._amp_at(rank, a), self._amp_at(rank, b)
+                ta, tb = self.amp_at(rank, a), self.amp_at(rank, b)
                 if ta is None or tb is None:
                     continue
                 total += float(np.sum(ta * tb)) / math.factorial(rank) ** 2
@@ -636,7 +666,7 @@ class BuildSuperMatrixADCn:
     # ------------------------------------------------------------------
     # k=2 class blocks (3h2p/3p2h)
     # ------------------------------------------------------------------
-    def _class_idx_k2(self, sector):
+    def class_idx_k2(self, sector):
         cols = class_configs(self.nocc, self.norb, 2, sector)
         return tuple(c - self.nocc if len(c) and c.min() >= self.nocc else c
                      for c in cols)
@@ -658,9 +688,9 @@ class BuildSuperMatrixADCn:
         """
         fn = getattr(genk2k2, f"{'k0' if ham == 'f' else 'c1'}_"
                               f"{'3h2p' if sector == 'IP' else '3p2h'}")
-        tensor = fn(**self._args())
-        bra = tuple(x[:, None] for x in self._class_idx_k2(sector))
-        ket = tuple(x[None, :] for x in self._class_idx_k2(sector))
+        tensor = fn(**self.kernel_args())
+        bra = tuple(x[:, None] for x in self.class_idx_k2(sector))
+        ket = tuple(x[None, :] for x in self.class_idx_k2(sector))
         return tensor[bra + ket]
 
     def c12_o2_generated(self, sector):
@@ -668,26 +698,26 @@ class BuildSuperMatrixADCn:
         (1,2) increment (block_order(5,1,2)=2; the block generateADC(5)'s
         coverage scan found missing).
 
-            eff = _K2_CLASS_SIGN * [ raw^(2)
+            eff = K2_CLASS_SIGN * [ raw^(2)
                                      - U^(1) @ S^(1)_orb,k2^T
                                      - K_k1[:,None] * S_{k1,k2}^(2) ]
 
         raw^(2) = l1f(l1^2) + l2v(l2^1) + l2ft2(l2^1,t2^1) (adc5_c12_blocks;
         order-rule assignments, pdaggerq-pruned census). The two subtractions
         are the sequential class-GS of the k2 precursor against the orbital
-        block (via its order-1 gauge overlap S^(1)_orb,k2 = _k2_raw_S(.,1))
+        block (via its order-1 gauge overlap S^(1)_orb,k2 = k2_raw_S(.,1))
         and against the k1 class (via the cross-class overlap S12^(2)).
         VALIDATED against the exact-ISR (k1,k2)^[2] block at 6e-10 (H4) /
         6e-9 (LiH), both sectors, k2 column orientation pinned at order 1
         (tests/test_adcn_generated_c12.py). In the ADC(4) fold this block is
         lambda^5-only (measured: c4 bit-identical with/without), which is why
         it was never emitted before ADC(5) needed it."""
-        raw2 = self._c12_raw2(sector)
+        raw2 = self.c12_raw2(sector)
         U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
-        _, S1k2 = self._k2_raw_S(sector, 1)
+        _, S1k2 = self.k2_raw_S(sector, 1)
         S12 = self.cross_class_overlap(sector, 2)
         K1 = np.diag(self.k_block(sector))
-        return self._K2_CLASS_SIGN[sector] * (
+        return self.K2_CLASS_SIGN[sector] * (
             raw2 - U1 @ S1k2.T - K1[:, None] * S12)
 
 
@@ -708,10 +738,10 @@ class BuildSuperMatrixADCn:
         mods = []
         for o in range(order, lead - 1, -1):
             mods.append((o, cross_block_module(o, 'k1k1')))
-        idx_b, idx_k = self._class_idx('IP'), self._class_idx('EA')
+        idx_b, idx_k = self.class_idx('IP'), self.class_idx('EA')
         bra = tuple(x[:, None] for x in idx_b)
         ket = tuple(x[None, :] for x in idx_k)
-        base = dict(self._args())
+        base = dict(self.kernel_args())
         X = np.zeros((len(idx_b[0]), len(idx_k[0])))
         missing = []
         for nm, j, ham, k, a, b in u_order_terms(order):
@@ -722,7 +752,7 @@ class BuildSuperMatrixADCn:
                     break
             if fn is None:
                 continue
-            ds = self._amp_pair(j, a, k, b)
+            ds = self.amp_pair(j, a, k, b)
             if ds is None:
                 missing.append(f"{nm}(l{j}^{a},t{k}^{b})")
                 continue
@@ -734,25 +764,25 @@ class BuildSuperMatrixADCn:
                                f"no amplitude for {sorted(set(missing))}")
         return X
 
-    def _c12_raw2(self, sector):
+    def c12_raw2(self, sector):
         """(n_k1, n_k2) RAW order-2 k1<->k2 coupling (precursor basis, no
-        class-GS, no _K2_CLASS_SIGN): the l1f/l2v/l2ft2 order-rule splits of
+        class-GS, no K2_CLASS_SIGN): the l1f/l2v/l2ft2 order-rule splits of
         adc5_c12_blocks -- the raw layer both c12_o2_generated and the
         order-general ISR assembly (isr_assembly) consume."""
         tag1 = '2h1p' if sector == 'IP' else '2p1h'
         tag2 = '3h2p' if sector == 'IP' else '3p2h'
-        p1 = self._amplitude_pool()
+        p1 = self.amplitude_pool()
         amp = {'l1f': dict(l1=p1['l1']),
                'l2v': dict(l2=p1['l2']),
                'l2ft2': dict(l2=p1['l2'], t2=p1['t2'])}
-        b = tuple(x[:, None] for x in self._class_idx(sector))
-        k = tuple(x[None, :] for x in self._class_idx_k2(sector))
+        b = tuple(x[:, None] for x in self.class_idx(sector))
+        k = tuple(x[None, :] for x in self.class_idx_k2(sector))
         raw2 = None
         for split, extra in amp.items():
             fn = getattr(genc12, f'c2_{tag1}_{tag2}_{split}', None)
             if fn is None:
                 continue
-            kwargs = dict(self._args())
+            kwargs = dict(self.kernel_args())
             kwargs.update(extra)
             kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
             blk = fn(**kwargs)[b + k]
@@ -762,16 +792,16 @@ class BuildSuperMatrixADCn:
     def coupling_k1_k2_generated(self, sector):
         """(n_k1, n_k2) first-order 2h1p<->3h2p (IP) / 2p1h<->3p2h (EA)
         coupling from the generated 8-index element, gathered at ordered
-        configs on both sides (adc4_base k=2 phase convention -- see
-        _K2_CLASS_SIGN)."""
+        configs on both sides (the k=2 phase convention of
+        K2_CLASS_SIGN)."""
         fn = genk2.c1_2h1p_3h2p if sector == 'IP' else genk2.c1_2p1h_3p2h
-        tensor = fn(**self._args())
-        bra = tuple(x[:, None] for x in self._class_idx(sector))
-        ket = tuple(x[None, :] for x in self._class_idx_k2(sector))
-        return self._K2_CLASS_SIGN[sector] * tensor[bra + ket]
+        tensor = fn(**self.kernel_args())
+        bra = tuple(x[:, None] for x in self.class_idx(sector))
+        ket = tuple(x[None, :] for x in self.class_idx_k2(sector))
+        return self.K2_CLASS_SIGN[sector] * tensor[bra + ket]
 
     def _amplitude_pool_order2(self):
-        """Second-order l2 (in addition to _amplitude_pool's first-order
+        """Second-order l2 (in addition to amplitude_pool's first-order
         one) -- the k=2 U splits need the SAME generated function evaluated
         at different amplitude orders (l2f at l2^(1) is the pure-gauge
         order-1 layer, at l2^(2) an order-2 contribution; see
@@ -787,25 +817,24 @@ class BuildSuperMatrixADCn:
         """(n_k2, norb) stitch of an occ-rows/vir-rows generated pair
         (either may be absent -- pdaggerq pruning is row-asymmetric for
         k=2), gathered at ordered configs."""
-        idx = self._class_idx_k2(sector)
+        idx = self.class_idx_k2(sector)
         U = np.zeros((len(idx[0]), self.norb))
         for name, sl in ((occ_name, slice(0, self.nocc)),
                          (vir_name, slice(self.nocc, self.norb))):
             fn = getattr(genk2, name, None)
             if fn is None:
                 continue
-            kwargs = dict(self._args())
+            kwargs = dict(self.kernel_args())
             kwargs.update(amp_kwargs)
             kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
             U[:, sl] = fn(**kwargs)[idx]
         return U
 
-    # adc4_base's k=2 config phase convention differs from precursor_ket_string's
-    # by one per-class sign (IP: -1, EA: +1) -- pinned by BOTH the coupling
-    # block and the corrected U^(2) matching adc4_base at exactly that sign
-    # (pure basis gauge; applied uniformly here so generated blocks are
-    # drop-in replacements for adc4_base's).
-    _K2_CLASS_SIGN = K2_CLASS_SIGN
+    # The k=2 config phase convention of the Dyson supermatrix differs from
+    # precursor_ket_string's by one per-class sign (IP: -1, EA: +1), the same
+    # sign for the coupling block and for U^(2) (pure basis gauge; applied
+    # uniformly here so every k=2 block shares one orientation).
+    K2_CLASS_SIGN = K2_CLASS_SIGN
 
     def u2_k2_generated(self, sector):
         """(n_k2, norb) U^(2) orbital<->3h2p/3p2h coupling in the Dyson
@@ -819,11 +848,12 @@ class BuildSuperMatrixADCn:
             U^(2) = sign * [ l2v(l2^(1)) + l1f(l1^(2)) + l2f(l2^(2))
                              - eps_p * S^(2)(l2^(2)) ]
 
-        Same -eps_p*S^(2) class-GS rule as the U^(2)_2h1p; fit
-        against the oracle-confirmed adc4_base U2_orbital blocks gave
-        alpha=+1.0000, beta(K_J term)=0.0000, leftover 8e-17."""
+        Same -eps_p*S^(2) class-GS rule as the U^(2)_2h1p; a fit
+        of alpha * eps_p-term + beta * K_J-term against independently built
+        orbital<->k2 U^(2) blocks gave alpha=+1.0000, beta=0.0000, leftover
+        8e-17."""
         tag2 = '3h2p' if sector == 'IP' else '3p2h'
-        pool1 = self._amplitude_pool()
+        pool1 = self.amplitude_pool()
         l2_2 = self._amplitude_pool_order2()['l2_2']
 
         U = self._stitch_k2(sector, f'u2_{tag2}_occ_l2v', f'u2_{tag2}_vir_l2v',
@@ -834,22 +864,22 @@ class BuildSuperMatrixADCn:
                              l2=l2_2)
         S2 = self._stitch_k2(sector, f's2_{tag2}_occ_l2', f's2_{tag2}_vir_l2',
                              l2=l2_2)
-        return self._K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
+        return self.K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
 
     # ------------------------------------------------------------------
     # ORDER-GENERAL orbital<->k=2 coupling + cross-class overlap -- the
     # ADC(5) U^(3)_k2 path (block_order(5, 0, 2) == 3)
     # ------------------------------------------------------------------
-    def _amp_pair(self, j, a, k, b):
+    def amp_pair(self, j, a, k, b):
         """{tagname: array} for the (l_j^(a), t_k^(b)) dressing assignment, or
         None when an amplitude at the required order is unavailable -- the
-        method twin of the closure inside _class_raw_S (which cannot be
+        method twin of the closure inside class_raw_S (which cannot be
         reused), for the k=2 and cross-class assemblies."""
         out = {}
         for lead, rank, order in (('l', j, a), ('t', k, b)):
             if not rank:
                 continue
-            arr = self._amp_at(rank, order)
+            arr = self.amp_at(rank, order)
             if arr is None:
                 return None
             out[f'{lead}{rank}'] = to_l(arr, rank) if lead == 'l' else arr
@@ -861,7 +891,7 @@ class BuildSuperMatrixADCn:
         'u' or 's', `row` 'occ'/'vir'), or None. Searches the ADC(5) module
         (adc5_u3_k2_blocks: u1_/u3_/s3_ home-order prefixes), then the
         order-2 module (adc4_k2_blocks: u2_/s2_). None is AMBIGUOUS exactly
-        as _resolve_class_struct documents (pruned vs ungenerated) --
+        as resolve_class_struct documents (pruned vs ungenerated) --
         class_struct_ungenerated separates the two."""
         for mod in (genu3k2, genk2):
             for o in (1, 2, 3):
@@ -870,13 +900,13 @@ class BuildSuperMatrixADCn:
                     return fn
         return None
 
-    def _k2_raw_S(self, sector, n, strict=True):
+    def k2_raw_S(self, sector, n, strict=True):
         """(raw^(n), S^(n)) orbital<->k=2 coupling/overlap sums, (n_k2, norb),
         in the PRECURSOR basis, UNNORMALIZED (no N^(j) subtraction, no
-        class-GS, no _K2_CLASS_SIGN). Order bookkeeping from adc_order_rule
+        class-GS, no K2_CLASS_SIGN). Order bookkeeping from adc_order_rule
         (every tag structure x amplitude-order assignment with
         a + b + [ham == 'v'] == n), physics selection pdaggerq's -- the k=2
-        twin of what _class_raw_S does for the k=1 class-class block.
+        twin of what class_raw_S does for the k=1 class-class block.
 
         Unlike k=1, the k=2 element has a NONZERO order-1 layer:
         raw^(1) = u1_v + l2f(l2^(1)) == eps_p * S^(1) with
@@ -885,9 +915,9 @@ class BuildSuperMatrixADCn:
         tests/test_adcn_generated_u3_k2.py). The order-3 normalization needs
         raw^(1)/S^(1) explicitly, which is why u1_v exists at all."""
         tag2 = '3h2p' if sector == 'IP' else '3p2h'
-        idx = self._class_idx_k2(sector)
+        idx = self.class_idx_k2(sector)
         nk2 = len(idx[0])
-        base = dict(self._args())
+        base = dict(self.kernel_args())
         missing_amp, ungenerated = [], []
 
         def accumulate(terms, kind):
@@ -903,7 +933,7 @@ class BuildSuperMatrixADCn:
                             name, 'c' if kind == 'u' else 's'):
                         ungenerated.append(name)
                     continue
-                ds = self._amp_pair(j, a, k, b)
+                ds = self.amp_pair(j, a, k, b)
                 if ds is None:
                     missing_amp.append(f"{kind}:{name}(l{j}^{a},t{k}^{b})")
                     continue
@@ -939,8 +969,8 @@ class BuildSuperMatrixADCn:
 
         RAW precursor-basis orientation on BOTH classes == the exact-ISR
         metric block Smet[n][k1,k2] (gate: tests/test_adcn_generated_u3_k2).
-        NO _K2_CLASS_SIGN -- that phase belongs to consumers mixing this with
-        adc4_base-convention k=2 objects (u3_k2_generated applies it to the whole
+        NO K2_CLASS_SIGN -- that phase belongs to consumers mixing this with
+        k=2 objects in the K2_CLASS_SIGN convention (u3_k2_generated applies it to the whole
         bracket, this factor included).
 
         Normalization S^(n) -= sum_{j>=2} N^(j) S^(n-j) vanishes identically
@@ -950,20 +980,20 @@ class BuildSuperMatrixADCn:
         first."""
         tag1, tag2 = (('2h1p', '3h2p') if sector == 'IP'
                       else ('2p1h', '3p2h'))
-        bra_idx = self._class_idx(sector)
-        ket_idx = self._class_idx_k2(sector)
+        bra_idx = self.class_idx(sector)
+        ket_idx = self.class_idx_k2(sector)
         bra = tuple(x[:, None] for x in bra_idx)
         ket = tuple(x[None, :] for x in ket_idx)
         missing_amp, ungenerated = [], []
         S = np.zeros((len(bra_idx[0]), len(ket_idx[0])))
-        base = dict(self._args())
+        base = dict(self.kernel_args())
         for name, j, k, a, b in s_order_terms(n):
             fn = getattr(gens12, f's_{tag1}_{tag2}_{name}', None)
             if fn is None:
                 if self.class_struct_ungenerated(name, 's'):
                     ungenerated.append(name)
                 continue
-            ds = self._amp_pair(j, a, k, b)
+            ds = self.amp_pair(j, a, k, b)
             if ds is None:
                 missing_amp.append(f"{name}(l{j}^{a},t{k}^{b})")
                 continue
@@ -990,7 +1020,7 @@ class BuildSuperMatrixADCn:
                              - eps_p (S^(3) - N^(2) S^(1))
                              - S12^(2).T @ U^(1)_k1 ]
 
-        raw/S from _k2_raw_S (order rule x pdaggerq survivors; raw^(3) =
+        raw/S from k2_raw_S (order rule x pdaggerq survivors; raw^(3) =
         l2v(l2^2) + l1f(l1^3) + l2f(l2^3) + l1v(l1^2) + l3v(l3^2) +
         l2vt2(l2^1,t2^1) + l2ft1(l2^1,t1^2) + l3ft2(l3^2,t2^1) +
         l4ft2(l4^2,t2^1); S^(3) = s2_l2(l2^3) + s3_l4t2(l4^2,t2^1)).
@@ -1005,7 +1035,7 @@ class BuildSuperMatrixADCn:
         object) is nonzero from order 2 -- a term no per-class assembly ever
         contained. The within-class Loewdin contributes nothing at this order
         because the effective order-1 coupling vanishes identically
-        (raw^(1) == eps_p S^(1), the gauge gate). _K2_CLASS_SIGN multiplies
+        (raw^(1) == eps_p S^(1), the gauge gate). K2_CLASS_SIGN multiplies
         the WHOLE bracket (every factor with one k=2 index), exactly as
         u2_k2_generated.
 
@@ -1013,12 +1043,12 @@ class BuildSuperMatrixADCn:
         order-3 block from the determinant-space machinery of
         exact_isr_full_fold (H4, both sectors), plus the order-2 control
         re-derived through THIS pipeline == u2_k2_generated at 0.0."""
-        raw3, S3 = self._k2_raw_S(sector, 3)
-        raw1, S1 = self._k2_raw_S(sector, 1)
+        raw3, S3 = self.k2_raw_S(sector, 3)
+        raw1, S1 = self.k2_raw_S(sector, 1)
         n2 = self.n2_norm()
         U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
         S12 = self.cross_class_overlap(sector, 2)
-        return self._K2_CLASS_SIGN[sector] * (
+        return self.K2_CLASS_SIGN[sector] * (
             (raw3 - n2 * raw1)
             - self.eps[None, :] * (S3 - n2 * S1)
             - S12.T @ U1)
@@ -1042,23 +1072,23 @@ class BuildSuperMatrixADCn:
     def _stitch_k1(self, module, sector, occ_name, vir_name, **amp_kwargs):
         """(n_k1, norb) stitch of an occ/vir generated pair from `module`
         at explicit amplitude arrays (missing functions contribute 0)."""
-        idx = self._class_idx(sector)
+        idx = self.class_idx(sector)
         U = np.zeros((len(idx[0]), self.norb))
         for name, sl in ((occ_name, slice(0, self.nocc)),
                          (vir_name, slice(self.nocc, self.norb))):
             fn = getattr(module, name, None)
             if fn is None:
                 continue
-            kwargs = dict(self._args())
+            kwargs = dict(self.kernel_args())
             kwargs.update(amp_kwargs)
             kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
             U[:, sl] = fn(**kwargs)[idx]
         return U
 
-    def _k1_raw_S(self, sector, n):
+    def k1_raw_S(self, sector, n):
         """(raw^(n), S^(n)) orbital<->k1 coupling/overlap, (n_k1, norb),
         PRECURSOR basis, UNNORMALIZED (no N^(j), no class-GS, no Loewdin) --
-        the k=1 twin of _k2_raw_S, extracted from u3_generated's stitch list
+        the k=1 twin of k2_raw_S, extracted from u3_generated's stitch list
         so the order-general ISR assembly (isr_assembly) can consume the raw
         layer directly. n=1 is the bare U^(1) (S^(1) = 0 by particle
         counting); n=2/3 enumerate the surviving tag-structure evaluations
@@ -1068,7 +1098,7 @@ class BuildSuperMatrixADCn:
             u1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
             return u1, np.zeros_like(u1)
         if n == 2:
-            idx = self._class_idx(sector)
+            idx = self.class_idx(sector)
             raw = np.zeros((len(idx[0]), self.norb))
             raw[:, :self.nocc] = self._u2_sum(tag, 'occ')[idx]
             raw[:, self.nocc:] = self._u2_sum(tag, 'vir')[idx]
@@ -1077,7 +1107,7 @@ class BuildSuperMatrixADCn:
             raise NotImplementedError(
                 f"k1 raw coupling at order {n}: only 1..3 are stitched here "
                 f"(the restricted path has the order-general u_raw_series).")
-        p1 = self._amplitude_pool()
+        p1 = self.amplitude_pool()
         a3 = self._amplitudes_order3()
 
         raw = self._stitch_k1(genu3, sector, f'u3_{tag}_occ_l2vt2', f'u3_{tag}_vir_l2vt2',
@@ -1113,15 +1143,15 @@ class BuildSuperMatrixADCn:
             U^(3) = raw^(3) - N^(2) U^(1) - eps_p S^(3)_pJ
                     - 1/2 U^(1) S^(2)_class
 
-        raw^(3)/S^(3) from _k1_raw_S (v-family l2vt2(l2^1,t2^1), vt1(t1^2),
+        raw^(3)/S^(3) from k1_raw_S (v-family l2vt2(l2^1,t2^1), vt1(t1^2),
         l1v(l1^2), l2v(l2^2); f-family l2ft2 at (l2^1,t2^2)+(l2^2,t2^1),
         l2ft1(l2^1,t1^2), l3ft2(l3^2,t2^1), l1f(l1^3)). Corrections:
         N^(2) U^(1) removes l2vt2's disconnected piece; -eps_p S^(3) is
         the SAME class-GS rule validated at orders 2 (k=1) and 2 (k=2);
         -1/2 U^(1) S^(2)_class is the within-class Loewdin (Y^(2)) first
-        becoming active. Arbiter check: tests/test_adcn_generated_u3.py
-        against the lambda-oracle's exact-FCI H2 requirement."""
-        raw, S3 = self._k1_raw_S(sector, 3)
+        becoming active. tests/test_isr_assembly.py checks it against the
+        ISR assembly's (0,1) block at order 3."""
+        raw, S3 = self.k1_raw_S(sector, 3)
 
         U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
         n2 = self.n2_norm()
@@ -1136,7 +1166,7 @@ class BuildSuperMatrixADCn:
         """Dense Dyson-ADC(3) supermatrix assembled ENTIRELY from generated
         blocks: F = diag(eps) [+ static_correction], U through order 2
         (u_2h1p_adc3/u_2p1h_adc3, Dyson class-GS representation), class
-        blocks K + C^(1). Must equal adc_spinorbital.build_supermatrix
+        blocks K + C^(1). Must equal ADCSolverUnrestricted.build_supermatrix
         exactly (tests/test_adcn_generated_u2.py)."""
         n1 = class_dimension(self.no, self.nv, 1, 'IP')
         n2 = class_dimension(self.no, self.nv, 1, 'EA')
@@ -1170,8 +1200,8 @@ class BuildSuperMatrixADCn:
 
 
 # =====================================================================
-# Restricted (spin-blocked, RHF) Dyson-ADC(2) -- increment 2 of the
-# spin-free ADC(2)-(5) plan. Assembles a single Ms-Dyson sector from the
+# Restricted (spin-blocked, RHF) Dyson-ADC(2). Assembles a single Ms-Dyson
+# sector from the
 # spatial spin-block functions of adc2_blocks_restricted.py.
 # =====================================================================
 
@@ -1213,7 +1243,7 @@ class BuildSuperMatrixADCnRestricted:
     def __init__(self, eps, g_aaaa, g_abab, g_bbbb, nocc, u2_denom_dress=None,
                  amplitudes=None, B_aa=None, quadruples_ntau=None):
         """quadruples_ntau: the third-order quadruples T4^(3), read by the order-4
-        ground state (non-Dyson ADC(5), _amps_order(5)), Laplace-fused at this many
+        ground state (non-Dyson ADC(5), amps_order(5)), Laplace-fused at this many
         minimax points and never formed; None materializes them (O(no^4 nv^4) per
         spin block).
 
@@ -1242,8 +1272,9 @@ class BuildSuperMatrixADCnRestricted:
         from the *_df generated twins (3-index B leaves) instead of the
         4-index g_ssss, and g_aaaa/g_abab/g_bbbb may be None -- the ONLY way
         past the norb^4 wall (aug-cc-pVQZ: 15 GB for CO, 115 GB for SiH4).
-        The MBPT amplitude pool and the EN dressing still need dense g, so a
-        g-free solver must be given `amplitudes` and no u2_denom_dress."""
+        A g-free solver builds its MBPT amplitude pool from the DF numerators
+        (the rank <= 2 and Laplace-fused providers; the materialized rank >= 3
+        ones refuse) or takes `amplitudes`; the EN dressing needs dense g."""
         if amplitudes is not None and u2_denom_dress:
             raise ValueError(
                 "amplitudes= and u2_denom_dress= are two different "
@@ -1257,17 +1288,12 @@ class BuildSuperMatrixADCnRestricted:
         d = np.eye(self.norb)
         if g_aaaa is None and B_aa is None:
             raise ValueError("give either dense spin-block g or a DF factor B_aa")
-        if g_aaaa is None:
-            # (an EN dressing here is already refused above -- it needs
-            # amplitudes=None to reach this point, and then this guard fires;
-            # DF EN-ADC(3) is the hand-written route's job either way)
-            if amplitudes is None:
-                raise ValueError(
-                    "g-free (B_aa-only) construction has no MBPT amplitude "
-                    "pool and no EN hook -- both read dense g slices; pass "
-                    "amplitudes= (CC-ADC), or supply g_aaaa/g_abab/g_bbbb as "
-                    "well (for DF EN-ADC(3) use the hand-written route, "
-                    "ADCSolverRestricted(..., df=True, en_dress=...))")
+        if g_aaaa is None and u2_denom_dress:
+            raise ValueError(
+                "g-free (B_aa-only) construction has no EN hook -- the EN "
+                "shifts read dense g slices; supply g_aaaa/g_abab/g_bbbb as well "
+                "(for DF EN-ADC(3) use the hand-written route, "
+                "ADCSolverRestricted(..., df=True, en_dress=...))")
         self.g_aaaa, self.g_abab, self.g_bbbb = g_aaaa, g_abab, g_bbbb
         self.B_aa = B_aa
         self.df = B_aa is not None
@@ -1277,30 +1303,47 @@ class BuildSuperMatrixADCnRestricted:
         self.u2_denom_dress = u2_denom_dress
         self.amplitudes = amplitudes
         self.quadruples_ntau = quadruples_ntau
-        self._rargs = dict(f_aa=f, f_bb=f, g_aaaa=g_aaaa, g_abab=g_abab,
+        self.rargs = dict(f_aa=f, f_bb=f, g_aaaa=g_aaaa, g_abab=g_abab,
                            g_bbbb=g_bbbb, d_aa=d, d_bb=d,
                            o=self.o, v=self.v, no=nocc, nv=self.nvir)
         if self.df:
             # closed shell: the beta factor IS the alpha one (aliased, not copied)
-            self._rargs.update(B_aa=B_aa, B_bb=B_aa)
+            self.rargs.update(B_aa=B_aa, B_bb=B_aa)
 
     # ------------------------------------------------------------------
     # Restricted MBPT amplitude pool (spin-blocked) for the order-2 U^(2)
     # dressed splits -- same amplitude-ORDER assignment as the spin-orbital
-    # BuildSuperMatrixADCn._amplitude_pool (vt2/l2v/l2ft2 first-order t2/l2,
+    # BuildSuperMatrixADCn.amplitude_pool (vt2/l2v/l2ft2 first-order t2/l2,
     # l1f second-order t1; the surviving restricted splits use only l1/l2/t2).
     # Closed-shell twins (_bbbb/_bb == _aaaa/_aa) aliased here.
     # ------------------------------------------------------------------
-    def _amplitude_pool(self):
-        """See BuildSuperMatrixADCn._amplitude_pool; self.amplitudes
-        overrides it wholesale (CC-ADC)."""
+    def _mpn(self):
+        """The restricted MPn driver of the MBPT amplitude pool: on the dense
+        spin-block g, or with g None (g-free) on its DF twins from B_aa."""
+        return MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc,
+            B_aa=self.B_aa, B_bb=self.B_aa)
+
+    def require_dense_g(self, what):
+        if self.g_aaaa is None:
+            raise NotImplementedError(
+                f"{what} materializes rank >= 3 MBPT amplitudes from dense g (validation "
+                f"scale); the g-free (B_aa-only) solver serves the rank <= 2 and "
+                f"Laplace-fused providers only -- pass laplace_ntau")
+
+    def amplitude_pool(self):
+        """See BuildSuperMatrixADCn.amplitude_pool; self.amplitudes
+        overrides it wholesale (CC-ADC). g-free: the same amplitudes from the
+        DF numerators (MPnDensityDriverRestricted's *_df twins)."""
         if self.amplitudes is not None:
             return InjectedAmplitudePool(self.amplitudes, 'restricted CC')
         if not hasattr(self, '_amp_pool'):
-            mpn = MPnDensityDriverRestricted(
-                np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
-            t2_aaaa, t2_abab = mpn.compute_t2_1()
-            t1_2_aa = mpn.compute_order2_amplitudes(t2_aaaa, t2_abab, max_rank=1)[0]
+            mpn = self._mpn()
+            t2_aaaa, t2_abab = mpn.amplitudes_t2_1()
+            if self.g_aaaa is None:
+                t1_2_aa = mpn.compute_t1_2_aa_df(t2_aaaa, t2_abab)
+            else:
+                t1_2_aa = mpn.compute_order2_amplitudes(t2_aaaa, t2_abab, max_rank=1)[0]
             # Lambda (bra-dressing) amplitudes: the pdaggerq 'l{rank}' tag's
             # own axis convention, block-dependent (pure blocks reverse the
             # vir side + sign; mixed blocks plain occ<->vir transpose) -- the
@@ -1322,9 +1365,9 @@ class BuildSuperMatrixADCnRestricted:
 
     def _u2_amplitude_pool(self):
         """Amplitude pool for the order-2 U^(2)/S^(2) splits: identical to
-        _amplitude_pool() unless self.u2_denom_dress is set, in which case ONLY
+        amplitude_pool() unless self.u2_denom_dress is set, in which case ONLY
         t2/l2 are rebuilt with Epstein-Nesbet-dressed denominators -- t1/l1
-        stay bare and the shared _amplitude_pool() cache is never mutated, so
+        stay bare and the shared amplitude_pool() cache is never mutated, so
         C^(2)/S^(2)'s other consumers still see the bare amplitudes. Exactly
         the scope of the spin-orbital BuildSuperMatrixADCn._u2_amplitude_pool.
 
@@ -1336,7 +1379,7 @@ class BuildSuperMatrixADCnRestricted:
         contamination is a genuine property of Epstein-Nesbet partitioning,
         present identically in the spin-orbital formulation -- it is not an
         artifact of working in spin blocks."""
-        pool = dict(self._amplitude_pool())
+        pool = dict(self.amplitude_pool())
         if not self.u2_denom_dress:
             return pool
         o, v = self.o, self.v
@@ -1352,8 +1395,8 @@ class BuildSuperMatrixADCnRestricted:
         # orbital_denominator's [a,b,i,j] order == EpsteinNesbetDenominators' 'abkl'
         # layout (particles @ (0,1), holes @ (2,3), bare_sign = +1).
         D_bare = orbital_denominator(self.eps[:O], self.eps[O:O + V], 2)
-        e_pair = (1.0 / (D_bare - dens._delta('abkl', 'same')),
-                  1.0 / (D_bare - dens._delta('abkl', 'opp')))
+        e_pair = (1.0 / (D_bare - dens.shift('abkl', 'same')),
+                  1.0 / (D_bare - dens.shift('abkl', 'opp')))
         mpn = MPnDensityDriverRestricted(
             np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb,
             self.nocc, e_abij=e_pair)
@@ -1370,11 +1413,11 @@ class BuildSuperMatrixADCnRestricted:
         """N^(2) = <Psi^(1)|Psi^(1)> = 0.25 sum_spinorbital |t2^(1)|^2, in
         spin blocks (RHF): 0.5 sum |t2_aaaa|^2 + sum |t2_abab|^2 -- verified
         == the spin-orbital BuildSuperMatrixADCn.n2_norm."""
-        p = self._amplitude_pool()
+        p = self.amplitude_pool()
         return 0.5 * float(np.sum(p['t2_aaaa'] ** 2)) + float(np.sum(p['t2_abab'] ** 2))
 
     # ------------------------------------------------------------------
-    # Order-2 class-class C^(2) block (ISR/class-GS) -- increment 4 arbiter
+    # Order-2 class-class C^(2) block (ISR/class-GS)
     # ------------------------------------------------------------------
     def _class_block_sum(self, module, prefix, sector, amps=None):
         """(ncfg, ncfg) alpha-sector class-class sum of every surviving
@@ -1383,19 +1426,19 @@ class BuildSuperMatrixADCnRestricted:
         the restricted analogue of BuildSuperMatrixADCn._sum_gathered.
 
         amps: explicit {leafname: array} overriding the default minimum-order
-        `_amplitude_pool()`. Needed by the order-general assembly, where the
+        `amplitude_pool()`. Needed by the order-general assembly, where the
         SAME tag structure is evaluated at several amplitude-order assignments
         (e.g. s2c_l2t2 at (l2^1,t2^2) and (l2^2,t2^1) for S^(3)). Passing a
         `prefix` that ends in '_' isolates a single structure -- without the
         trailing underscore 'l2v' would also match 'l2vt2'."""
         s = self._SECTOR[sector]
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         spins = cfg['spins']
         cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
                [cfg['part_sp'][:, k] for k in range(s['npart'])]
-        pool = dict(self._rargs)
-        pool.update(self._amplitude_pool() if amps is None else amps)
+        pool = dict(self.rargs)
+        pool.update(self.amplitude_pool() if amps is None else amps)
         C = np.zeros((ncfg, ncfg))
         uniq, inv = np.unique(spins, axis=0, return_inverse=True)
         for gi, bp in enumerate(uniq):
@@ -1430,7 +1473,7 @@ class BuildSuperMatrixADCnRestricted:
         assemble_kplusc) runs on the alpha-sector-gathered blocks -- valid
         because C^(2) is spin-conserving (block-diagonal in Sz)."""
         tag = self._SECTOR[sector]['tag']
-        K = np.diag(self._sector_configs(sector)['K'])
+        K = np.diag(self.sector_configs(sector)['K'])
         raw = self._class_block_sum(genc2r, f'c2_{tag}_', sector)
         s2_raw = self._class_block_sum(genc2r, f's2c_{tag}_', sector)
         n2 = self.n2_norm()
@@ -1443,9 +1486,9 @@ class BuildSuperMatrixADCnRestricted:
     # ORDER-GENERAL class-class C^(n) / Delta S^(n) -- restricted twin
     # ------------------------------------------------------------------
     @staticmethod
-    def _resolve_class_struct(name, tag, kind):
+    def resolve_class_struct(name, tag, kind):
         """(module, module_order) holding restricted class-class structure
-        `name`, or None. Twin of BuildSuperMatrixADCn._resolve_class_struct;
+        `name`, or None. Twin of BuildSuperMatrixADCn.resolve_class_struct;
         None is AMBIGUOUS (pruned vs ungenerated) -- see that docstring."""
         for order, mod in ((2, genc2r), (3, genc3r)):
             prefix = (f'c{order}_{tag}_{name}_' if kind == 'c'
@@ -1454,17 +1497,17 @@ class BuildSuperMatrixADCnRestricted:
                 return mod, order
         return None
 
-    def _class_raw_S(self, sector, n, strict=True, laplace_ntau=None):
+    def class_raw_S(self, sector, n, strict=True, laplace_ntau=None):
         """(raw^(n), Delta S^(n)) restricted class-class blocks in the
         PRECURSOR basis, before normalization/ISR -- the spatial twin of
-        BuildSuperMatrixADCn._class_raw_S.
+        BuildSuperMatrixADCn.class_raw_S.
 
         Delta S^(n) is the object the dense oracle `u_dot_orb_isr` (tests/u_isr_oracle.py) needs at orders
         2..n-1 and currently refuses to run without beyond order 2 (it raises
         rather than silently TRUNCATE the Loewdin series), which is what blocks
         the order-general U^(n) ISR at n=4.
 
-        laplace_ntau (int): the amps come from _amps_order_lowrank_laplace (NO
+        laplace_ntau (int): the amps come from amps_order_lowrank_laplace (NO
         t3_2/t4_2/t3_3 materialized) -- what lets the dense oracle's ISR Delta S
         (class_overlap_series) stop materializing rank>=3 (wall #2's amplitude
         side). BIT-EXACT: Delta S^(n) is built entirely from the l2t2 structure
@@ -1474,20 +1517,11 @@ class BuildSuperMatrixADCnRestricted:
         (the low-rank provider omits t3_2) drops nothing. The dense (n_k1)^2
         Delta S matrix itself is a separate matrix-free-ISR item."""
         tag = self._SECTOR[sector]['tag']
-        A = (self._amps_order_lowrank_laplace(laplace_ntau)
-             if laplace_ntau is not None else self._amps_order(max_order=n))
+        A = (self.amps_order_lowrank_laplace(laplace_ntau)
+             if laplace_ntau is not None else self.amps_order(max_order=n))
         missing_amp, ungenerated = [], []
 
-        def amps(j, a, k, b):
-            ds = {}
-            for lead, rank, order in (('L', j, a), ('T', k, b)):
-                if not rank:
-                    continue
-                key = f'{lead}{rank}_{order}'
-                if key not in A:
-                    return None
-                ds.update(A[key])
-            return ds
+        amps = functools.partial(amplitude_leaves, A)
 
         def accumulate(terms, kind):
             acc = None
@@ -1495,7 +1529,7 @@ class BuildSuperMatrixADCnRestricted:
                 name = t[0]
                 j, a, k, b = ((t[1], t[4], t[3], t[5]) if kind == 'c'
                               else (t[1], t[3], t[2], t[4]))
-                res = self._resolve_class_struct(name, tag, kind)
+                res = self.resolve_class_struct(name, tag, kind)
                 if res is None:
                     if BuildSuperMatrixADCn.class_struct_ungenerated(name, kind):
                         ungenerated.append(name)
@@ -1534,15 +1568,15 @@ class BuildSuperMatrixADCnRestricted:
 
         This is what the dense oracle `u_dot_orb_isr` (tests/u_isr_oracle.py) assembles inline for m=2 only
         and then hard-fails on for m>=3; feeding it this series is what lets the
-        order-general U^(n) ISR run at n>=4. laplace_ntau routes _class_raw_S
+        order-general U^(n) ISR run at n>=4. laplace_ntau routes class_raw_S
         through the low-rank Laplace provider so the ISR Delta S stops
         materializing t3_2/t4_2/t3_3 (BIT-EXACT -- Delta S is rank<=2 only);
         N^(j) is n_norm_order (rank<=2), so the whole series is rank>=3-free."""
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         Ss = {0: np.eye(ncfg), 1: np.zeros((ncfg, ncfg))}
         for m in range(2, n + 1):
-            _, S_m = self._class_raw_S(sector, m, strict=strict,
+            _, S_m = self.class_raw_S(sector, m, strict=strict,
                                        laplace_ntau=laplace_ntau)
             S_m = np.zeros((ncfg, ncfg)) if S_m is None else S_m
             for j in range(2, m + 1):
@@ -1557,14 +1591,14 @@ class BuildSuperMatrixADCnRestricted:
 
         VALIDATED at n=2 against c2_block_generated (bit-exact) and at n=3
         against the spin-orbital twin (tests/test_adcn_generated_c3.py)."""
-        K = np.diag(self._sector_configs(sector)['K'])
+        K = np.diag(self.sector_configs(sector)['K'])
         dim = K.shape[0]
         raws = {0: K}
         Ss = {0: np.eye(dim), 1: np.zeros((dim, dim))}
         if n >= 1:
             raws[1] = self._c1_block(sector)
         for m in range(2, n + 1):
-            raw_m, S_m = self._class_raw_S(sector, m)
+            raw_m, S_m = self.class_raw_S(sector, m)
             raw_m = np.zeros((dim, dim)) if raw_m is None else raw_m
             S_m = np.zeros((dim, dim)) if S_m is None else S_m
             for j in range(2, m + 1):
@@ -1583,28 +1617,29 @@ class BuildSuperMatrixADCnRestricted:
         restricted twin of BuildSuperMatrixADCn._orbital_gs_cross. Adds
         -(S^(orb,k1)^T U^(1) + h.c.) at order 3 (the sequential ISR GS of k1
         against the orbital block, omitted by the within-class assembly).
-        S^(orb,k1) = the S^(2) returned by _u2_and_s2; U^(1) = _u_block."""
+        S^(orb,k1) = the S^(2) returned by u2_and_s2; U^(1) = u_block."""
         if n != 3:
             raise NotImplementedError(
                 f"orbital-GS cross term is implemented only at order 3 "
                 f"(the ADC(5) requirement); order {n} needs the general series.")
-        u1 = self._u_block(sector)                 # (ncfg, norb)
-        _, s2 = self._u2_and_s2(sector)            # (ncfg, norb)
+        u1 = self.u_block(sector)                 # (ncfg, norb)
+        _, s2 = self.u2_and_s2(sector)            # (ncfg, norb)
         M = s2 @ u1.T
         return -(M + M.T)
 
     # ------------------------------------------------------------------
-    # U^(3) orbital<->k=1 (ADC(4) arbiter #3) -- increment 4
+    # U^(3) orbital<->k=1
     # ------------------------------------------------------------------
-    def _u3_amps(self):
+    def u3_amps(self):
         """Restricted amplitude block-dicts at the specific orders the U^(3)
         assembly consumes, keyed by role+order (L2_1, T2_1, L1_2, T1_2,
         L2_2, T2_2, L3_2, L1_3). Each is {leafname: array} with closed-shell
         twins aliased; lambda blocks via to_l (the pdaggerq 'l'
-        tag layout). Mirrors the spin-orbital _amplitude_pool/_amplitudes_
+        tag layout). Mirrors the spin-orbital amplitude_pool/_amplitudes_
         order3 order assignment."""
-        if hasattr(self, '_u3a'):
-            return self._u3a
+        if hasattr(self, 'u3a'):
+            return self.u3a
+        self.require_dense_g('u3_amps (T3^(2) materialized)')
         mpn = MPnDensityDriverRestricted(
             np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
         t2_1a, t2_1b = mpn.compute_t2_1()
@@ -1634,12 +1669,12 @@ class BuildSuperMatrixADCnRestricted:
         L3_2 = {'l3_aaaaaa': l3aaa, 'l3_aabaab': l3aab,
                 'l3_abbabb': l3abb, 'l3_bbbbbb': l3aaa}
 
-        self._u3a = dict(
+        self.u3a = dict(
             L2_1=L2(t2_1a, t2_1b), T2_1=T2(t2_1a, t2_1b),
             L1_2=L1(t1_2a), T1_2={'t1_aa': t1_2a, 't1_bb': t1_2a},
             L2_2=L2(t2_2a, t2_2b), T2_2=T2(t2_2a, t2_2b),
             L3_2=L3_2, L1_3=L1(t1_3a))
-        return self._u3a
+        return self.u3a
 
     def n_norm_order(self, m):
         """N^(m): the order-m coefficient of the ground-state norm <Psi|Psi>,
@@ -1658,7 +1693,7 @@ class BuildSuperMatrixADCnRestricted:
         if m == 2:
             return self.n2_norm()
         if m == 3:
-            A = self._amps_order(max_order=2)
+            A = self.amps_order(max_order=2)
             t1a, t1b = A['T2_1']['t2_aaaa'], A['T2_1']['t2_abab']
             t2a, t2b = A['T2_2']['t2_aaaa'], A['T2_2']['t2_abab']
             return 2.0 * (0.5 * float(np.sum(t1a * t2a)) + float(np.sum(t1b * t2b)))
@@ -1667,10 +1702,10 @@ class BuildSuperMatrixADCnRestricted:
             f"through order 3, which ADC(5) needs; U^(n>={m + 1}) on the restricted "
             f"route (sigma_driver._un_pieces) needs N^({m}) as well.")
 
-    def _amps_order(self, max_order=4):
+    def amps_order(self, max_order=4):
         """ORDER-GENERAL amplitude map {L{rank}_{order}: leafdict, T{rank}_{order}: ...}
         -- the provider the order-general assembly (sigma_driver.u_dot_orb_order)
-        indexes. Superset of _u3_amps (which stops at what order 3 needs).
+        indexes. Superset of u3_amps (which stops at what order 3 needs).
 
         Covers, through max_order=4: T/L at (2,1) (1,2) (2,2) (3,2) (1,3) (2,3)
         (3,3) (1,4) -- which is exactly what adc_order_rule demands for n<=4
@@ -1683,11 +1718,12 @@ class BuildSuperMatrixADCnRestricted:
         compute_order3_amplitudes' signature, T4^(2) (O(no^4 nv^4)). That is
         fine for the small-system validation this provider exists for, but NOT
         for production at scale -- there the Laplace-fused routes
-        (generate_mp4_laplace_restricted's t2_3/t3_3 t4-laplace variants, and
+        (generate_mpn_laplace's t2_3/t3_3 t4-laplace variants, and
         the l3 stitch fusion) must be used instead. Cached; a map built to a
         higher order serves every lower one."""
         if getattr(self, '_amps_ord', None) is not None and self._amps_ord_max >= max_order:
             return self._amps_ord
+        self.require_dense_g('amps_order')
         mpn = MPnDensityDriverRestricted(
             np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
 
@@ -1745,7 +1781,7 @@ class BuildSuperMatrixADCnRestricted:
 
     def _amps_order_lowrank(self):
         """RANK<=2, ORDER<=2 amplitude map {L2_1,T2_1,L1_2,T1_2,L2_2,T2_2} for
-        the Laplace U^(4) route -- the PRODUCTION twin of _amps_order that NEVER
+        the Laplace U^(4) route -- the PRODUCTION twin of amps_order that NEVER
         materializes t3_2/t4_2 (O(no^3 nv^3)/O(no^4 nv^4)); compute_order2_
         amplitudes(max_rank=2) returns them as None. Complete for the
         non-Laplace part of raw^(<=4): every SURVIVING rank<=2 U/S structure at
@@ -1756,26 +1792,23 @@ class BuildSuperMatrixADCnRestricted:
         _assemble_raw_S (missing_amp), never silently under-compute. Cached."""
         if getattr(self, '_amps_lowrank', None) is not None:
             return self._amps_lowrank
-        mpn = MPnDensityDriverRestricted(
-            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
+        mpn = self._mpn()
         L2 = lambda ta, tb: {'l2_aaaa': tl(ta, 2, 'aaaa'),
                              'l2_abab': tl(tb, 2, 'abab'),
                              'l2_bbbb': tl(ta, 2, 'aaaa')}
         T2 = lambda ta, tb: {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
         L1 = lambda t: {'l1_aa': tl(t, 1, 'aa'), 'l1_bb': tl(t, 1, 'aa')}
         T1 = lambda t: {'t1_aa': t, 't1_bb': t}
-        t2_1a, t2_1b = mpn.compute_t2_1()
-        o2 = mpn.compute_order2_amplitudes(t2_1a, t2_1b, max_rank=2)  # no t3/t4
-        t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
+        t2_1a, t2_1b = mpn.amplitudes_t2_1()
+        t1_2a, t2_2a, t2_2b = mpn.amplitudes_order2(t2_1a, t2_1b)  # no t3/t4
         A = {'L2_1': L2(t2_1a, t2_1b), 'T2_1': T2(t2_1a, t2_1b),
              'L1_2': L1(t1_2a), 'T1_2': T1(t1_2a),
              'L2_2': L2(t2_2a, t2_2b), 'T2_2': T2(t2_2a, t2_2b)}
         self._amps_lowrank = A
         return A
 
-
-    def _u3_amps_laplace(self, ntau):
-        """t3/l3-FREE twin of _u3_amps for the Laplace-fused U^(3) downfold
+    def u3_amps_laplace(self, ntau):
+        """t3/l3-FREE twin of u3_amps for the Laplace-fused U^(3) downfold
         path (u3_dot_orb(..., laplace_ntau=ntau)). Identical L2_1/T2_1/L1_2/
         T1_2/L2_2/T2_2/L1_3 blocks, but T1^(3) is built through the driver's
         existing minimax-quadrature route (compute_order2_amplitudes(
@@ -1787,7 +1820,7 @@ class BuildSuperMatrixADCnRestricted:
         Also the order-<=3 rank-<=2 amplitude provider for the C^(3) (1,1)
         matvec (sigma_driver.assembled_c3_matvec_restricted(laplace_ntau=...)):
         C^(3)'s only surviving structures are rank<=2, so its whole rank>=3
-        materialization is _amps_order(3) building t3_2/t4_2 as RSPT
+        materialization is amps_order(3) building t3_2/t4_2 as RSPT
         intermediates for the order-3 singles T1^(3). Every key C^(3) consumes
         -- {L1_2,T1_2,T1_3,L2_1,T2_1,L2_2,T2_2} -- is served here WITHOUT ever
         forming a rank>=3 array (compute_order2_amplitudes(max_rank=2) returns
@@ -1795,19 +1828,10 @@ class BuildSuperMatrixADCnRestricted:
         harmless superset for the U^(3) caller (which reads only L1_3)."""
         if getattr(self, '_u3a_lap', None) is not None and self._u3a_lap_ntau == ntau:
             return self._u3a_lap
-        mpn = MPnDensityDriverRestricted(
-            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
-        t2_1a, t2_1b = mpn.compute_t2_1()
-        o2 = mpn.compute_order2_amplitudes(t2_1a, t2_1b, laplace_ntau=ntau, max_rank=2)
-        t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
-        args = mpn._args()
-        lap_t1_3, _ = laplace_aaaaaa_contribution(
-            mpn._eps_a[mpn.o], mpn._eps_a[mpn.v], mpn.g_aaaa, mpn.o, mpn.v, t2_1a, ntau)
-        lap_t1_3_cs = gen_lap3.t1_3_aa_t3crossspin_laplace(
-            **args, eps_a=mpn._eps_a, t2_1_aaaa=t2_1a, t2_1_abab=t2_1b, ntau=ntau)
-        t1_3a = mpn.compute_t1_3(t1_2a, t2_2a, t2_2b, None, None, None,
-                                 laplace_t1_3_contrib=lap_t1_3,
-                                 laplace_t1_3_crossspin_contrib=lap_t1_3_cs)
+        mpn = self._mpn()
+        t2_1a, t2_1b = mpn.amplitudes_t2_1()
+        t1_2a, t2_2a, t2_2b = mpn.amplitudes_order2(t2_1a, t2_1b, laplace_ntau=ntau)
+        t1_3a = mpn.laplace_t1_3(t1_2a, t2_2a, t2_2b, t2_1a, t2_1b, ntau)
 
         def L2(ta, tb):
             return {'l2_aaaa': tl(ta, 2, 'aaaa'), 'l2_abab': tl(tb, 2, 'abab'),
@@ -1827,14 +1851,14 @@ class BuildSuperMatrixADCnRestricted:
         self._u3a_lap_ntau = ntau
         return self._u3a_lap
 
-    def _amps_order_lowrank_laplace(self, ntau):
+    def amps_order_lowrank_laplace(self, ntau):
         """Order-<=4 rank-<=2 amplitude map, Laplace-fused so NO rank>=3 tensor
         (t3_2/t4_2/t3_3) is ever materialized -- the PRODUCTION twin of
-        _amps_order for the U^(4) raw/S orbital<->k1 coupling (the low-rank
+        amps_order for the U^(4) raw/S orbital<->k1 coupling (the low-rank
         structures it feeds; the rank>=3 STRUCTURES are routed to fused blocks
         by sigma_driver._lap_rank3_stitch instead).
 
-        Superset of _u3_amps_laplace (L2_1/T2_1/L1_2/T1_2/L2_2/T2_2/L1_3/T1_3),
+        Superset of u3_amps_laplace (L2_1/T2_1/L1_2/T1_2/L2_2/T2_2/L1_3/T1_3),
         adding every order-<=4 rank-<=2 amplitude the U^(4) raw/S structures
         consume, all Laplace-fused (NO t3_2/t4_2/t3_3 formed):
           * T2_3/L2_3 -- compute_t2_3_laplace (the t3_2/t4_2 CONTRIBUTIONS
@@ -1842,14 +1866,15 @@ class BuildSuperMatrixADCnRestricted:
           * T1_4/L1_4 -- compute_t1_4_laplace, the NESTED case (t1_4 -> t3_3 ->
             t3_2/t4_2, depth-qualified taus).
         Both == the materialized amplitude to the quadrature accuracy (T2_3
-        ~1-3e-9, T1_4 ~6e-10 at ntau=6 NH3). This is now a DROP-IN for
-        _amps_order(4) over the low-rank structures of the U^(4) raw/S coupling:
+        ~1-3e-9, T1_4 ~6e-10 at ntau=6 NH3). This is a DROP-IN for
+        amps_order(4) over the low-rank structures of the U^(4) raw/S coupling:
         every amplitude those consume -- {T1_3,L1_3,L2_3,L1_4} at order>=3 plus
         order<=2 -- is present and rank>=3-free. Cached per ntau."""
         if getattr(self, '_amps_lr_lap', None) is not None \
                 and self._amps_lr_lap_ntau == ntau:
             return self._amps_lr_lap
-        A = dict(self._u3_amps_laplace(ntau))          # order-<=3 rank-<=2 set
+        self.require_dense_g('amps_order_lowrank_laplace (T2^(3), T1^(4))')
+        A = dict(self.u3_amps_laplace(ntau))          # order-<=3 rank-<=2 set
         mpn = MPnDensityDriverRestricted(
             np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
         t2_1a, t2_1b = mpn.compute_t2_1()
@@ -1870,13 +1895,13 @@ class BuildSuperMatrixADCnRestricted:
         self._amps_lr_lap_ntau = ntau
         return A
 
-    def _stitch_k1r(self, module, occ_base, vir_base, sector, pool):
+    def stitch_k1r(self, module, occ_base, vir_base, sector, pool):
         """(ncfg, norb) sum of one occ/vir split pair (missing functions
         contribute 0) at explicit amplitude arrays `pool`, gathered per
         config spin pattern -- the restricted analogue of
         BuildSuperMatrixADCn._stitch_k1."""
         s = self._SECTOR[sector]
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         U = np.zeros((ncfg, self.norb))
         spins = cfg['spins']
@@ -1899,7 +1924,7 @@ class BuildSuperMatrixADCnRestricted:
     def u3_generated(self, sector):
         """(ncfg, norb) restricted U^(3) coupling in the Dyson class-GS
         representation -- the spatial counterpart of
-        BuildSuperMatrixADCn.u3_generated (ADC(4) arbiter #3):
+        BuildSuperMatrixADCn.u3_generated:
 
             U^(3) = raw^(3) - N^(2) U^(1) - eps_p S^(3)_pJ - 1/2 U^(1) S^(2)_class
 
@@ -1908,48 +1933,48 @@ class BuildSuperMatrixADCnRestricted:
         orders); reused u2/s2 restricted blocks appear at higher amplitude
         orders exactly as in the spin-orbital driver."""
         tag = self._SECTOR[sector]['tag']
-        A = self._u3_amps()
+        A = self.u3_amps()
 
         def merge(*dicts):
-            p = dict(self._rargs)
+            p = dict(self.rargs)
             for d in dicts:
                 p.update(d)
             return p
 
-        raw = self._stitch_k1r(genu3r, f'u3_{tag}_occ_l2vt2', f'u3_{tag}_vir_l2vt2',
+        raw = self.stitch_k1r(genu3r, f'u3_{tag}_occ_l2vt2', f'u3_{tag}_vir_l2vt2',
                                sector, merge(A['L2_1'], A['T2_1']))
-        raw += self._stitch_k1r(genu3r, f'u3_{tag}_occ_vt1', f'u3_{tag}_vir_vt1',
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_vt1', f'u3_{tag}_vir_vt1',
                                 sector, merge(A['T1_2']))
-        raw += self._stitch_k1r(genu3r, f'u3_{tag}_occ_l1v', f'u3_{tag}_vir_l1v',
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l1v', f'u3_{tag}_vir_l1v',
                                 sector, merge(A['L1_2']))
-        raw += self._stitch_k1r(genr3, f'u2_{tag}_occ_l2v', f'u2_{tag}_vir_l2v',
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2v', f'u2_{tag}_vir_l2v',
                                 sector, merge(A['L2_2']))
-        raw += self._stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
                                 sector, merge(A['L2_1'], A['T2_2']))
-        raw += self._stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
                                 sector, merge(A['L2_2'], A['T2_1']))
-        raw += self._stitch_k1r(genu3r, f'u3_{tag}_occ_l2ft1', f'u3_{tag}_vir_l2ft1',
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l2ft1', f'u3_{tag}_vir_l2ft1',
                                 sector, merge(A['L2_1'], A['T1_2']))
-        raw += self._stitch_k1r(genu3r, f'u3_{tag}_occ_l3ft2', f'u3_{tag}_vir_l3ft2',
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l3ft2', f'u3_{tag}_vir_l3ft2',
                                 sector, merge(A['L3_2'], A['T2_1']))
-        raw += self._stitch_k1r(genr3, f'u2_{tag}_occ_l1f', f'u2_{tag}_vir_l1f',
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l1f', f'u2_{tag}_vir_l1f',
                                 sector, merge(A['L1_3']))
 
-        S3 = self._stitch_k1r(genu3r, f's3_{tag}_occ_l2t1', f's3_{tag}_vir_l2t1',
+        S3 = self.stitch_k1r(genu3r, f's3_{tag}_occ_l2t1', f's3_{tag}_vir_l2t1',
                               sector, merge(A['L2_1'], A['T1_2']))
-        S3 += self._stitch_k1r(genu3r, f's3_{tag}_occ_l3t2', f's3_{tag}_vir_l3t2',
+        S3 += self.stitch_k1r(genu3r, f's3_{tag}_occ_l3t2', f's3_{tag}_vir_l3t2',
                                sector, merge(A['L3_2'], A['T2_1']))
-        S3 += self._stitch_k1r(genr3, f's2_{tag}_occ_l1', f's2_{tag}_vir_l1',
+        S3 += self.stitch_k1r(genr3, f's2_{tag}_occ_l1', f's2_{tag}_vir_l1',
                                sector, merge(A['L1_3']))
 
-        U1 = self._u_block(sector)
+        U1 = self.u_block(sector)
         n2 = self.n2_norm()
         s2c_raw = self._class_block_sum(genc2r, f's2c_{tag}_', sector)
         s2c = s2c_raw - n2 * np.eye(s2c_raw.shape[0])
         return raw - n2 * U1 - self.eps[None, :] * S3 - 0.5 * (s2c @ U1)
 
     # ------------------------------------------------------------------
-    def _sector_configs(self, sector):
+    def sector_configs(self, sector):
         """Alpha-Dyson-sector determinant configs of the class, enumerated
         in spin-orbital form (the deduplicated determinant list -- 2h1p:
         i<j occ, a virt; 2p1h: i occ, a<b virt) then decoded to spatial
@@ -2011,7 +2036,7 @@ class BuildSuperMatrixADCnRestricted:
             # spin-orbital class_configs ordering.
             cols = class_configs(2 * self.nocc, 2 * self.norb, 1, sector)
             cols = tuple(np.asarray(c) for c in cols)
-            cfg = self._sector_configs(sector)
+            cfg = self.sector_configs(sector)
             s = self._SECTOR[sector]
             no_s = 2 * self.nocc
             out = np.empty(len(cfg['K']), dtype=int)
@@ -2027,13 +2052,13 @@ class BuildSuperMatrixADCnRestricted:
             setattr(self, key, out)
         return getattr(self, key)
 
-    def _u_block(self, sector):
+    def u_block(self, sector):
         """(ncfg, norb) alpha-sector U^(1): couplings of each class config to
         every spatial (alpha) orbital, gathered from the spin-blocked
         u1_{tag}_{occ,vir}_{classpattern+a} functions (grouped by the
         config's class spin pattern)."""
         s = self._SECTOR[sector]
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         U = np.zeros((ncfg, self.norb))
         spins = cfg['spins']
@@ -2048,8 +2073,8 @@ class BuildSuperMatrixADCnRestricted:
             idx = tuple(col[mask] for col in gather_cols)
             occ_fn = getattr(self._genr, f"u1_{s['tag']}_occ_{suffix}")
             vir_fn = getattr(self._genr, f"u1_{s['tag']}_vir_{suffix}")
-            occ_t = occ_fn(*[self._rargs[p] for p in _sig(occ_fn)])
-            vir_t = vir_fn(*[self._rargs[p] for p in _sig(vir_fn)])
+            occ_t = occ_fn(*[self.rargs[p] for p in _sig(occ_fn)])
+            vir_t = vir_fn(*[self.rargs[p] for p in _sig(vir_fn)])
             U[mask, :self.nocc] = occ_t[idx]
             U[mask, self.nocc:] = vir_t[idx]
         return U
@@ -2059,15 +2084,15 @@ class BuildSuperMatrixADCnRestricted:
         [[diag(eps), U^T],[U, diag(K)]] over {alpha orbitals} + {2h1p
         Sz=-1/2} + {2p1h Sz=+1/2} -- the spatial counterpart of
         BuildSuperMatrixADCn.build_supermatrix_adc2."""
-        cfg_ip = self._sector_configs('IP')
-        cfg_ea = self._sector_configs('EA')
+        cfg_ip = self.sector_configs('IP')
+        cfg_ea = self.sector_configs('EA')
         n1, n2 = len(cfg_ip['K']), len(cfg_ea['K'])
         norb = self.norb
         nH = norb + n1 + n2
         off1, off2 = norb, norb + n1
         H = np.zeros((nH, nH))
         H[:norb, :norb] = np.diag(self.eps)
-        U1, U2 = self._u_block('IP'), self._u_block('EA')
+        U1, U2 = self.u_block('IP'), self.u_block('EA')
         H[off1:off2, :norb] = U1
         H[:norb, off1:off2] = U1.T
         H[off2:nH, :norb] = U2
@@ -2077,9 +2102,9 @@ class BuildSuperMatrixADCnRestricted:
         return H
 
     # ------------------------------------------------------------------
-    # Order-2 U (ADC(3)-level) + first-order C^(1) class block -- increment 3
+    # Order-2 U (ADC(3)-level) + first-order C^(1) class block
     # ------------------------------------------------------------------
-    def _u2_and_s2(self, sector):
+    def u2_and_s2(self, sector):
         """(U2_raw, S2) each (ncfg, norb): the raw order-2 U^(2) dressed-split
         sum and the cross-block S^(2) overlap, gathered per config spin
         pattern from the surviving u2_/s2_ restricted splits (amplitude arrays
@@ -2087,14 +2112,14 @@ class BuildSuperMatrixADCnRestricted:
         set, same as the spin-orbital driver's _u2_sum/_s2_block)."""
         s = self._SECTOR[sector]
         tag = s['tag']
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         U2 = np.zeros((ncfg, self.norb))
         S2 = np.zeros((ncfg, self.norb))
         spins = cfg['spins']
         gather_cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
                       [cfg['part_sp'][:, k] for k in range(s['npart'])]
-        pool = dict(self._rargs)
+        pool = dict(self.rargs)
         pool.update(self._u2_amplitude_pool())   # EN-dressed t2/l2 if requested
         uniq, inv = np.unique(spins, axis=0, return_inverse=True)
         for gi, pat in enumerate(uniq):
@@ -2128,8 +2153,8 @@ class BuildSuperMatrixADCnRestricted:
         same U is recomputed 5-7 times per molecule."""
         cached = self._u_adc3_cache.get(sector)
         if cached is None:
-            U1 = self._u_block(sector)
-            U2, S2 = self._u2_and_s2(sector)
+            U1 = self.u_block(sector)
+            U2, S2 = self.u2_and_s2(sector)
             cached = U1 + U2 - self.eps[None, :] * S2
             self._u_adc3_cache[sector] = cached
         return cached.copy()          # callers add U^(3) rows in place
@@ -2140,7 +2165,7 @@ class BuildSuperMatrixADCnRestricted:
         restricted c1_{tag}_{braspins+ketspins} blocks."""
         s = self._SECTOR[sector]
         tag = s['tag']
-        cfg = self._sector_configs(sector)
+        cfg = self.sector_configs(sector)
         ncfg = len(cfg['K'])
         spins = cfg['spins']
         cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
@@ -2155,7 +2180,7 @@ class BuildSuperMatrixADCnRestricted:
                 if fn is None:
                     continue
                 krows = np.where(inv == gj)[0]
-                T = fn(*[self._rargs[p] for p in _sig(fn)])
+                T = fn(*[self.rargs[p] for p in _sig(fn)])
                 bra_idx = tuple(c[brows][:, None] for c in cols)
                 ket_idx = tuple(c[krows][None, :] for c in cols)
                 C[np.ix_(brows, krows)] = T[bra_idx + ket_idx]
@@ -2175,8 +2200,8 @@ class BuildSuperMatrixADCnRestricted:
         (the previous behaviour, which had no parameter at all) silently gave
         a Sigma(1)/bare-F calculation, which is NOT comparable to an
         ADCSolverRestricted run carrying Sigma(3+)."""
-        cfg_ip = self._sector_configs('IP')
-        cfg_ea = self._sector_configs('EA')
+        cfg_ip = self.sector_configs('IP')
+        cfg_ea = self.sector_configs('EA')
         n1, n2 = len(cfg_ip['K']), len(cfg_ea['K'])
         norb = self.norb
         nH = norb + n1 + n2
@@ -2208,21 +2233,21 @@ class BuildSuperMatrixADCnRestricted:
         spin-orbital MP2 self-energy."""
         sigma = np.zeros((self.norb, self.norb))
         for sector in ('IP', 'EA'):
-            u = self._u_block(sector)
-            k = self._sector_configs(sector)['K']
+            u = self.u_block(sector)
+            k = self.sector_configs(sector)['K']
             sigma += u.T @ (u / (omega - k)[:, None])
         return sigma
 
     # ------------------------------------------------------------------
     # k=2 (3h2p/3p2h) extended-space blocks -- ADC(5) push increment A
     # ------------------------------------------------------------------
-    _K2_CLASS_SIGN = K2_CLASS_SIGN
+    K2_CLASS_SIGN = K2_CLASS_SIGN
 
-    def _kconfigs(self, sector, k, block_size=2_000_000):
+    def kconfigs(self, sector, k, block_size=2_000_000):
         """Alpha-Dyson-sector configs of precursor class k (spatial indices +
         spins + K), in the spin-orbital class_configs(k) ordering filtered to
-        the kept Sz (-1/2 IP / +1/2 EA). Generalizes _sector_configs to any
-        k; for k=1 it reproduces _sector_configs' ordering.
+        the kept Sz (-1/2 IP / +1/2 EA). Generalizes sector_configs to any
+        k; for k=1 it reproduces sector_configs' ordering.
 
         CHUNKED enumeration (memory foundation for the k=2 3p2h large-molecule
         and k=3 4p3h/ADC(5) sweeps): the full spin-orbital (holes x parts)
@@ -2284,13 +2309,13 @@ class BuildSuperMatrixADCnRestricted:
     def coupling_k1_k2_generated(self, sector):
         """(n_k1, n_k2) alpha-sector first-order k=1<->k=2 coupling
         (2h1p<->3h2p / 2p1h<->3p2h) from the restricted 8-index c1 blocks,
-        gathered per (bra pattern, ket pattern), with the adc4_base k=2 phase
-        (_K2_CLASS_SIGN) -- the spatial counterpart of the spin-orbital
+        gathered per (bra pattern, ket pattern), with the k=2 phase
+        (K2_CLASS_SIGN) -- the spatial counterpart of the spin-orbital
         coupling_k1_k2_generated."""
         s1 = self._SECTOR[sector]
         tag1, tag2 = s1['tag'], ('3h2p' if sector == 'IP' else '3p2h')
-        cfg1 = self._sector_configs(sector)
-        cfg2 = self._kconfigs(sector, 2)
+        cfg1 = self.sector_configs(sector)
+        cfg2 = self.kconfigs(sector, 2)
         cols1 = [cfg1['hole_sp'][:, k] for k in range(s1['nh'])] + \
                 [cfg1['part_sp'][:, k] for k in range(s1['npart'])]
         cols2 = self._k2_cols(cfg2)
@@ -2304,11 +2329,11 @@ class BuildSuperMatrixADCnRestricted:
                 if fn is None:
                     continue
                 krows = np.where(i2 == gj)[0]
-                T = fn(*[self._rargs[p] for p in _sig(fn)])
+                T = fn(*[self.rargs[p] for p in _sig(fn)])
                 bra_idx = tuple(c[brows][:, None] for c in cols1)
                 ket_idx = tuple(c[krows][None, :] for c in cols2)
                 C[np.ix_(brows, krows)] = T[bra_idx + ket_idx]
-        return self._K2_CLASS_SIGN[sector] * C
+        return self.K2_CLASS_SIGN[sector] * C
 
     def cross_block_generated(self, order=2, module=None, extra_leaves=None):
         """(n_2h1p, n_2p1h) alpha-sector union-space cross block X^(order)
@@ -2318,21 +2343,38 @@ class BuildSuperMatrixADCnRestricted:
         spin-blocked x{order}_2h1p_2p1h_{structure}_{spins} functions, each
         structure at its order-rule amplitude assignments. `module` defaults
         to the dense restricted module; pass its DF twin together with
-        extra_leaves={'B_aa': B, 'B_bb': B} for the density-fitted block."""
+        extra_leaves={'B_aa': B, 'B_bb': B} for the density-fitted block.
+        Dense (n_2h1p x n_2p1h): validation scale; the decoupling rows at scale
+        are cross_block_decoupling_rows."""
         if module is None:
             module = cross_block_module(order, 'k1k1', restricted=True)
-        A = self._amps_order(max_order=order)
-        cfg_b, cfg_k = self._sector_configs('IP'), self._sector_configs('EA')
+        cfg_b, cfg_k = self.sector_configs('IP'), self.sector_configs('EA')
+        X = np.zeros((len(cfg_b['K']), len(cfg_k['K'])))
+        for fn, args, bra_idx, ket_idx, brows, krows in self._cross_groups(order, module,
+                                                                           extra_leaves):
+            T = fn(*args)
+            X[np.ix_(brows, krows)] += T[bra_idx + ket_idx]
+        return X
+
+    def _cross_groups(self, order, module, extra_leaves):
+        """Every surviving (structure, bra spin pattern, ket spin pattern)
+        function of the 2h1p x 2p1h cross block X^(order) in `module`, in
+        summation order: (fn, args, bra gather index, ket gather index,
+        bra config rows, ket config rows), each structure at its order-rule
+        amplitude assignments. Order 2 reads rank <= 2 amplitudes of order
+        <= 2 only: the low-rank provider (no T3^(2)/T4^(2), g-free capable;
+        the same arrays)."""
+        A = self._amps_order_lowrank() if order <= 2 else self.amps_order(max_order=order)
+        cfg_b, cfg_k = self.sector_configs('IP'), self.sector_configs('EA')
         cols_b = [cfg_b['hole_sp'][:, k] for k in range(2)] + [cfg_b['part_sp'][:, 0]]
         cols_k = [cfg_k['hole_sp'][:, 0]] + [cfg_k['part_sp'][:, k] for k in range(2)]
-        X = np.zeros((len(cfg_b['K']), len(cfg_k['K'])))
         ub, ib = np.unique(cfg_b['spins'], axis=0, return_inverse=True)
         uk, ik = np.unique(cfg_k['spins'], axis=0, return_inverse=True)
         for nm, j, ham, k, a, b in u_order_terms(order):
             prefix = f'x{order}_2h1p_2p1h_{nm}_'
             if not any(n.startswith(prefix) for n in dir(module)):
                 continue
-            pool = dict(self._rargs)
+            pool = dict(self.rargs)
             pool.update(extra_leaves or {})
             for lead, rank, ordr in (('L', j, a), ('T', k, b)):
                 if rank:
@@ -2344,16 +2386,55 @@ class BuildSuperMatrixADCnRestricted:
                     if fn is None:
                         continue
                     krows = np.where(ik == gj)[0]
-                    T = fn(*[pool[p] for p in _sig(fn)])
                     bra_idx = tuple(c[brows][:, None] for c in cols_b)
                     ket_idx = tuple(c[krows][None, :] for c in cols_k)
-                    X[np.ix_(brows, krows)] += T[bra_idx + ket_idx]
-        return X
+                    yield fn, [pool[p] for p in _sig(fn)], bra_idx, ket_idx, brows, krows
+
+    def cross_block_decoupling_rows(self, u_ip, u_ea, k_ip, k_ea, order=2, extra_leaves=None,
+                                    hole_chunk=1):
+        """(du_ip, du_ea): the order-3 image of the cross block X^(order) on
+        the two k1 couplings, cross_block_decoupling.delta_u_rows_k1(u_ip, u_ea,
+        k_ip, k_ea, X) evaluated without forming X or its six-index tensors.
+
+        The term tables of X (cross_module_name(..., terms=True), DF twin when
+        extra_leaves carries B_aa) are contracted for `hole_chunk` ket holes at
+        a time: per slice the (n_2h1p x slice) piece of X, its division by
+        K_C - K_D, the complete du_ea rows of the slice and the slice's part of
+        du_ip. Peak memory: one six-index slice (no^2 nv^3 hole_chunk) and the
+        (n_2h1p x slice) block, instead of no^3 nv^3 and n_2h1p x n_2p1h."""
+        df = bool(extra_leaves and 'B_aa' in extra_leaves)
+        module = generated(cross_module_name(order, 'k1k1', restricted=True, df=df,
+                                             terms=True)[:-3])
+        out = module.OUT
+        hole = out[len(out) // 2]                       # the ket hole letter
+        cfg_k = self.sector_configs('EA')
+        khole = cfg_k['hole_sp'][:, 0]
+        du_ip = np.zeros_like(u_ip)
+        du_ea = np.zeros_like(u_ea)
+        groups = list(self._cross_groups(order, module, extra_leaves))
+        for k0 in range(0, self.nocc, hole_chunk):
+            ks = np.arange(k0, min(self.nocc, k0 + hole_chunk))
+            cols = np.where(np.isin(khole, ks))[0]
+            pos = -np.ones(len(khole), dtype=int)
+            pos[cols] = np.arange(len(cols))
+            X = np.zeros((len(k_ip), len(cols)))
+            for fn, args, bra_idx, ket_idx, brows, krows in groups:
+                kr = krows[np.isin(khole[krows], ks)]
+                if not len(kr):
+                    continue
+                T = _contract_term_table(fn(*args), out, hole, ks)
+                kidx = (khole[kr][None, :] - k0,) + tuple(c[:, np.isin(khole[krows], ks)]
+                                                         for c in ket_idx[1:])
+                X[np.ix_(brows, pos[kr])] += T[bra_idx + kidx]
+            w = X / (k_ea[cols][None, :] - k_ip[:, None])     # X_DC / (K_C - K_D)
+            du_ea[cols] = w.T @ u_ip
+            du_ip -= w @ u_ea[cols]
+        return du_ip, du_ea
 
     def _stitch_k2r(self, occ_base, vir_base, sector, pool):
         """(n_k2, norb) stitch of one occ/vir k=2 split pair at explicit
         amplitude arrays `pool`, gathered per k=2 config spin pattern."""
-        cfg2 = self._kconfigs(sector, 2)
+        cfg2 = self.kconfigs(sector, 2)
         cols = self._k2_cols(cfg2)
         U = np.zeros((len(cfg2['K']), self.norb))
         uniq, inv = np.unique(cfg2['spins'], axis=0, return_inverse=True)
@@ -2374,12 +2455,12 @@ class BuildSuperMatrixADCnRestricted:
         """(n_k2, norb) alpha-sector U^(2) orbital<->3h2p/3p2h coupling
         (Dyson class-GS), same explicit per-split amplitude-ORDER assignment
         as the spin-orbital u2_k2_generated: l2v(l2^1) + l1f(l1^2) + l2f(l2^2)
-        - eps_p S^(2)(l2^2), times _K2_CLASS_SIGN."""
+        - eps_p S^(2)(l2^2), times K2_CLASS_SIGN."""
         tag2 = '3h2p' if sector == 'IP' else '3p2h'
-        A = self._u3_amps()
+        A = self.u3_amps()
 
         def merge(*dicts):
-            p = dict(self._rargs)
+            p = dict(self.rargs)
             for d in dicts:
                 p.update(d)
             return p
@@ -2392,10 +2473,10 @@ class BuildSuperMatrixADCnRestricted:
                               sector, merge(A['L2_2']))
         S2 = self._stitch_k2r(f's2_{tag2}_occ_l2', f's2_{tag2}_vir_l2',
                               sector, merge(A['L2_2']))
-        return self._K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
+        return self.K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
 
     # ------------------------------------------------------------------
-    # CSF-basis assembly (increment 5): numerical doublet-CSF isometry T
+    # CSF-basis assembly: numerical doublet-CSF isometry T
     # applied on top of the ms-blocked spatial blocks -- NO hand CSF
     # formulas (spin_adapt.py builds T numerically).
     # ------------------------------------------------------------------
@@ -2415,10 +2496,10 @@ class BuildSuperMatrixADCnRestricted:
         spatial blocks sandwiched with the numerical doublet-CSF isometry T
         (spin_adapt.build_T output): the orbital block is spatial diag(eps);
         U/C^(1)/K/C^(2)/U^(3) come from the restricted driver, mapped with
-        T_alpha = T[sector][alpha rows]. Must match ADCSolverCSF's
-        build_supermatrix ('adc3'), _M_SD_adc4_base ('adc4_base', + C^(2)) and
-        _M_SD_adc4 ('adc4', + U^(3)) -- the production CSF route, now sourced
-        from spatial blocks instead of lifted through spin-orbital builders.
+        T_alpha = T[sector][alpha rows]. At 'adc3' it matches ADCSolverCSF's
+        build_supermatrix; at 'adc4' it adds the generated C^(2) and U^(3),
+        equal to the spin-orbital generated blocks lifted through the same T
+        (tests/test_adcn_generated_csf_restricted.py).
 
         level: 'adc3' | 'adc4'.
         """
@@ -2438,9 +2519,9 @@ class BuildSuperMatrixADCnRestricted:
         H[:norb, off2:nH] = U_ea
         H[off2:nH, :norb] = U_ea.T
 
-        # class blocks: K diagonal + C^(1) (+ C^(2) at adc4_base/adc4)
+        # class blocks: K diagonal + C^(1) (+ C^(2) at adc4)
         for sector, o0, o1 in (('IP', off1, off2), ('EA', off2, nH)):
-            K = np.diag(self._sector_configs(sector)['K'])
+            K = np.diag(self.sector_configs(sector)['K'])
             block = K + self._c1_block(sector)
             if level == 'adc4':
                 block = block + self.c2_block_generated(sector)

@@ -15,14 +15,13 @@ under [Threads](parallel.md#threads).
 `opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
 
-The coupled-cluster integral path additionally needs `openfermion` and
-`openfermionpyscf`, and the determinant-basis active-space solver
-(`Solvers.active_space_solver.ExactDiagonalizationSolver`, the default
-backend of `Solvers.active_space.solve`) needs `openfermion`; both are
-imported only when they are reached:
+The restricted coupled-cluster integral path and the determinant-basis
+active-space solver (`Solvers.active_space_solver.ExactDiagonalizationSolver`,
+the default backend of `Solvers.active_space.solve`) need `openfermion`, which
+is imported only when they are reached:
 
 ```bash
-pip install openfermion openfermionpyscf
+pip install openfermion
 ```
 
 Three more optional dependencies, each imported only when the feature is

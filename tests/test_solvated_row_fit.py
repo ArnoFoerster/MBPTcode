@@ -4,7 +4,7 @@ In a dressing environment every factor a chain reads is a gauge of ONE fit,
 D_g = M^T (V + vtilde_g)^1/2: the dressed one (the BSE kernel), the bare one
 (the self-energy and Eq. (18)) and a split continuum's static one. On the row
 fit each gauge is formed by rows from the one fit's M^T tiles, and the fit
-adjoint (`separable_ri.fit_rows_adjoints`) carries every gauge in one pass:
+adjoint (`isdf_fit_adjoint.fit_rows_adjoints`) carries every gauge in one pass:
 D_bar_g R_g summed into MT_bar, each root's adjoint M D_bar_g on rank 0, and
 the cavity's own derivative (`aux_kernel_adjoint`) from there.
 
@@ -59,8 +59,8 @@ from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.numerics.numerics import Numerics, numerics_of
-from src.Base.factorization.separable_ri import (GaugeSeeds, fit_rows_adjoint,
-                                                 resolve_isdf_grid)
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.isdf_fit_adjoint import GaugeSeeds, fit_rows_adjoint
 from src.Base.factorization.sliced_factors import GridTileRows
 from src.environments.solvent_screening import SolventScreening
 from src.environments.split_equilibrium import SplitEquilibrium

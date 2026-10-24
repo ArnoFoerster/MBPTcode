@@ -1,7 +1,7 @@
 """GATE for the Laplace-fused order-4 singles amplitude T1^(4)/L1^(4) -- the
 NESTED-amplitude case (t1_4 -> t3_3 -> t3_2/t4_2, a fusion two deep):
 MPnDensityDriverRestricted.compute_t1_4_laplace and the ADC provider
-BuildSuperMatrixADCnRestricted._amps_order_lowrank_laplace (which now completes
+BuildSuperMatrixADCnRestricted.amps_order_lowrank_laplace (which now completes
 the order-<=4 rank-<=2 amplitude set the U^(4) coupling consumes).
 
 Builds t1_4 with NONE of the O(no^3 nv^3) t3_3 (nor t3_2/t4_2) tensors formed,
@@ -13,7 +13,7 @@ collision), not just smallness.
 
   * compute_t1_4_laplace == materialized compute_t1_4 (ntau=6 ~6e-10 -> ntau=10
     ~5e-13).
-  * _amps_order_lowrank_laplace(ntau)['L1_4'] == _amps_order(4)['L1_4'] (exact),
+  * amps_order_lowrank_laplace(ntau)['L1_4'] == amps_order(4)['L1_4'] (exact),
     and the provider is a complete rank>=3-free {..,L2_3,L1_4} set.
 
 NH3/sto-3g (5 occ / 3 vir): smallest system with t3 genuinely nonzero.
@@ -85,8 +85,8 @@ def main():
 
     # --- ADC provider: L1_4 correct + complete rank>=3-free set ---
     r = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, nocc)
-    lap = r._amps_order_lowrank_laplace(6)
-    exact = r._amps_order(max_order=4)
+    lap = r.amps_order_lowrank_laplace(6)
+    exact = r.amps_order(max_order=4)
     bad = [k for k in lap if any(k.startswith(p) for p in _RANK_GE3)]
     all_ok &= _check(not bad,
                      f"provider carries NO rank>=3 key (keys={sorted(lap)})")
@@ -94,7 +94,7 @@ def main():
         worst = max(float(np.abs(lap[key][leaf] - exact[key][leaf]).max())
                     for leaf in lap[key])
         all_ok &= _check(worst < 1e-8,
-                         f"provider {key} == _amps_order(4) {key} ({worst:.2e})")
+                         f"provider {key} == amps_order(4) {key} ({worst:.2e})")
 
     print('\nALL OK' if all_ok else '\nFAILURES')
     return 0 if all_ok else 1

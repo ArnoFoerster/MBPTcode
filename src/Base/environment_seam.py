@@ -56,6 +56,14 @@ class Environment(Protocol):
     #: pass, so a missing derivative costs a message rather than the run.
     differentiable: bool
 
+    def state_specific_term(self):
+        """
+        The classical state-specific term this medium adds beside a state's
+        excitation energy (an object with `ss_density`, `ss_equilibrium` and
+        `ss_continuum()`), or None for a medium whose state-specific part, if
+        any, is inside the excitation energy already.
+        """
+
     def for_geometry(self, mol):
         """
         This environment around the atoms of `mol` (a cavity moves with them).
@@ -121,6 +129,11 @@ class NoEnvironment:
 
     screens = False
     differentiable = True
+
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
 
     def for_geometry(self, mol):
         return self

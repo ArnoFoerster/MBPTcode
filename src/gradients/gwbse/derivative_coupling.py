@@ -88,8 +88,9 @@ def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
                                  step=NUCLEAR_FD_STEP):
     """A_pq = <phi_p | d phi_q / dR> for the CANONICAL orbitals, by difference.
 
-    Mean fields only -- no GW and no BSE. Not on the production path: this is
-    the independent check that `configuration_coupling`'s Z-vector reproduces,
+    Mean fields only -- no GW and no BSE. A test gate, not on the production
+    path: this is the independent check that `configuration_coupling`'s
+    Z-vector reproduces,
     and it is also the cheapest way to SEE the gauge.
 
     Each displaced solve returns its orbitals up to a sign, which is fixed by

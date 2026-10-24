@@ -25,9 +25,11 @@ or was asked for agrees:
     span         a digest of the canonical span every SCF is solved in
                  (`FactorChain.span_basis`), None where nothing is cut
 
-per half of a composed surface. The walk's history -- which root was followed
-where -- is not in it: it says how the surface was walked, not which surface
-it is.
+per half of a composed surface. Every surface answers it itself
+(`PotentialEnergySurface.identity`): a factor chain from `chain_identity`, a
+composed surface from its halves (`composed_identity`), a surface that freezes
+nothing None. The walk's history -- which root was followed where -- is not in
+it: it says how the surface was walked, not which surface it is.
 """
 from dataclasses import dataclass
 
@@ -40,51 +42,39 @@ from src.Base.utils.record_io import record_hash
 #: What a factorization record holds that is not a convention.
 NOT_A_CONVENTION = ('seconds',)
 
-#: The halves a composed surface is made of.
-HALVES = ('ground', 'excited')
-
 
 def force_identity(surface):
     """What a force of `surface` is a force of, as a record
-    (`record_io.record_hash` makes it one string); None for a surface that
-    freezes nothing and holds no halves."""
-    halves = {name: getattr(surface, name, None) for name in HALVES}
-    if any(h is not None for h in halves.values()):
-        return dict({'class': class_name(surface)},
-                    **{name: half_identity(h) for name, h in halves.items()
-                       if h is not None})
-    return half_identity(surface)
+    (`record_io.record_hash` makes it one string): the surface's own answer
+    (`PotentialEnergySurface.identity`), None for a surface that freezes
+    nothing."""
+    return surface.identity()
 
 
-#: What makes an object a chain whose identity is assembled field by field.
-CHAIN_PARTS = ('factorization', 'conventions', 'settings_record')
-
-
-def half_identity(half):
-    """The identity of one chain: its class, grid, conventions, settings,
-    environment, mean field, SCF layout and span, each None where the chain
-    has none. An object that is no chain but writes a record of what it
-    computes on (a driver's mean-field settings, `to_record`) is that record;
-    one that is neither freezes nothing and has no identity (None)."""
-    if not any(hasattr(half, part) for part in CHAIN_PARTS):
-        record = getattr(half, 'to_record', None)
-        return (None if record is None
-                else {'class': class_name(half), 'record': record()})
-    factorization = getattr(half, 'factorization', None)
-    conventions = getattr(half, 'conventions', None)
-    settings = getattr(half, 'settings_record', None)
+def chain_identity(chain, conventions=None):
+    """The identity of one factor chain (module docstring): its class, grid,
+    conventions (the chain's `FrozenConventions`, None for a chain that holds
+    none), settings, environment, mean field, SCF layout, SCF frames and
+    span."""
+    factorization = chain.factorization
     return {
-        'class': class_name(half),
+        'class': class_name(chain),
         'grid': None if factorization is None else grid_record(factorization),
         'conventions': (None if conventions is None
                         else conventions.to_record()),
-        'settings': None if settings is None else numerics_view(settings()),
-        'environment': environment_label(getattr(half, 'environment', None)),
-        'mean_field': mean_field_identity(getattr(half, 'mf0', None)),
-        'scf_layout': (digest(half.scf_layout())
-                       if hasattr(half, 'scf_layout') else None),
-        'scf_frames': frames_record(getattr(half, 'scf_frames', None)),
-        'span': digest(getattr(half, 'span_basis', None))}
+        'settings': numerics_view(chain.settings_record()),
+        'environment': environment_label(chain.environment),
+        'mean_field': mean_field_identity(chain.mf0),
+        'scf_layout': digest(chain.scf_layout()),
+        'scf_frames': frames_record(chain.scf_frames),
+        'span': digest(chain.span_basis)}
+
+
+def composed_identity(surface, **halves):
+    """The identity of a surface composed of halves: its class and each
+    half's own (`identity`), by the half's name."""
+    return dict({'class': class_name(surface)},
+                **{name: half.identity() for name, half in halves.items()})
 
 
 def numerics_view(record):

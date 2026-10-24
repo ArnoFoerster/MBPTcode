@@ -248,7 +248,7 @@ def build_pencil(s, nocc, static_correction=None, route='phonon',
     S = diag(1, N_I, N_II), over the ADC(3) segments (orbitals, 2h1p, 2p1h).
     H is the dense ADC(3) supermatrix (adc_u_dense_full) with the channel
     coupling U in place of ADC(3)'s and the pair corrections dH added."""
-    s._require_dense_g('Faddeev-ADC(3) (dense spin-orbital reference)')
+    s.require_dense_g('Faddeev-ADC(3) (dense spin-orbital reference)')
     eps, g, norb = s.eps, s.g, s.norb
     if channels is None:
         channels = pair_channels(eps, g, nocc, route=route)

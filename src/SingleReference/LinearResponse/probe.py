@@ -1,33 +1,32 @@
 """The (A - B) probe: the lowest eigenvalue of A - B, whose sign decides whether the Casida omega^2 reduction is valid.
 
-A symmetric Lanczos on the block action's A - B, ARPACK serially and a
-distributed Lanczos over ranks (`_lanczos_lowest`), run cold from 1/d or
+The one symmetric Davidson (`Solvers.davidson.solve_symmetric`) on the block
+action's A - B, the same iteration serially and over ranks, run cold from 1/d or
 started from a Davidson's converged roots (`_lowest_amb_local`).
 """
 import time
+from types import SimpleNamespace
 
 import numpy as np
-from scipy.sparse.linalg import LinearOperator, eigsh
 
-from src.Base.numerics.constants import (AMB_LANCZOS_MAXITER_PER_DIM, AMB_LANCZOS_NCV,
+from src.Base.numerics.constants import (AMB_PROBE_SIGN_TOLS, AMB_PROBE_TOL,
                                          PROBE_START_MIX)
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.Solvers.davidson import diagonal_seeds, solve_symmetric
 from src.SingleReference.LinearResponse.block_actions import block_action
 
 
 class AmbProbeNotConverged(RuntimeError):
-    """The (A-B) Lanczos (`_lanczos_lowest`) ran out of operator applications
-    with a root above its residual bar; ARPACK's serial counterpart is
-    `ArpackNoConvergence`."""
+    """The (A-B) Davidson left a root above its residual bar."""
 
 
 def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
-                          isdf_factors=None, k=1, tol=1e-6, sign_only=False,
+                          isdf_factors=None, k=1, tol=AMB_PROBE_TOL, sign_only=False,
                           stats=None, comm=None):
     """Lowest eigenvalue(s) of (A - B): the sign that decides whether the
     Casida omega^2 reduction is valid at all.
 
-    Matrix-free (a symmetric Lanczos on z -> (A-B)z through the same block
+    Matrix-free (the symmetric Davidson on z -> (A-B)z through the same block
     action the solver uses), so it runs at any size the action runs at: the
     instability check where nothing dense fits. min eig < 0 confirms the
     regime `solve_casida_davidson` refuses; comparing the DF and ISDF actions'
@@ -54,7 +53,7 @@ def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
     out of the difference and a triplet has the same (A - B) as its singlet.
 
     comm: the communicator the ISDF action divides its rows over, by default
-    the current `distributed` region's; every rank then runs the same Lanczos
+    the current `distributed` region's; every rank then runs the same Davidson
     and returns rank 0's value (`lowest_amb_from_action`).
 
     Standalone the probe has no converged roots to try first, so it starts
@@ -68,20 +67,16 @@ def lowest_amb_eigenvalue(lr_solver, nocc, polarizability='BSE', W_aux=None,
                                    sign_only=sign_only, stats=stats, comm=comm)
 
 
-def lowest_amb_from_action(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
+def lowest_amb_from_action(apply_AB, diag_d, k=1, tol=AMB_PROBE_TOL, sign_only=False,
                             stats=None, comm=None, start=None):
     """The (A-B) probe, the same iteration on every rank, rank 0's value on each.
 
-    Serially the Lanczos is ARPACK's. Under any rank count it is
-    `_lanczos_lowest` on every rank, over the distributed action's lockstepped
-    output: eigsh holds one process-wide lock across its whole iteration,
-    matvecs included, so over ranks that are threads of one process
-    (`run_simulated`) the first rank inside waits in its matvec's collective
-    for a rank that waits for the lock -- and simulated ranks have to run the
-    algorithm MPI ranks run. The value is lockstepped at the end;
-    ranks whose iterations had fallen apart meet that lockstep against another
-    rank's block-action lockstep and raise ValueError together instead of
-    deadlocking.
+    The Davidson is a function of the operator's outputs alone, so ranks handed
+    the distributed action's lockstepped output take the same steps, threads of
+    one process (`run_simulated`) included. The value is lockstepped at the
+    end; ranks whose iterations had fallen apart meet that lockstep against
+    another rank's block-action lockstep and raise ValueError together instead
+    of deadlocking.
 
     start: the converged Casida roots' X - Y, (n_pair, nroots) with the
     lowest root first, or one root's (n_pair,), the same on every rank; read
@@ -93,26 +88,25 @@ def lowest_amb_from_action(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
     return lockstep(out, comm) if replicated else out
 
 
-def _lowest_amb_local(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
+def _lowest_amb_local(apply_AB, diag_d, k=1, tol=AMB_PROBE_TOL, sign_only=False,
                       stats=None, comm=None, start=None):
-    """The Lanczos itself: lowest eigenvalue(s) of (A - B), by ARPACK, or by
-    `_lanczos_lowest` where the action is distributed over `comm`; the
-    sign-only probe after a Davidson tries the converged roots (`start`)
-    first.
+    """The probe itself: lowest eigenvalue(s) of (A - B) by the symmetric
+    Davidson; the sign-only probe after a Casida solve tries its converged
+    roots (`start`) first.
 
     What the roots prove: Rayleigh-Ritz of (A - B) on the span of the roots'
     X - Y gives a Ritz value theta and residual r, and |lambda - theta| <= r
     holds for some eigenvalue lambda of (A - B): theta - r > 0 proves that
     one positive. theta is at least the minimum over the span, so the bound
     reaches the minimum only when the span does; a minimum in a pair irrep no
-    root lies in is invisible to it. The general probe is the Lanczos from
+    root lies in is invisible to it. The general probe is the Davidson from
     1/d, which has weight in every irrep: the escalating passes below and the
     converged probe start there.
 
     stats receives `probe_matvecs` (every block action the probe applied,
     one per root in the span), `probe_action_s` and `probe_source`: 'roots'
-    where the span's certificate held, 'lanczos-warm' for the pass started
-    from the lowest root, 'lanczos-cold' for one started from 1/d.
+    where the span's certificate held, 'davidson-warm' for the pass started
+    from the lowest root, 'davidson-cold' for one started from 1/d.
     """
     replicated = comm is not None
     no, nv = diag_d.shape
@@ -130,28 +124,43 @@ def _lowest_amb_local(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
     def matvec(z):
         return block(z)[0]
 
-    op = LinearOperator((no * nv, no * nv), matvec=matvec, dtype=float)
-    # A fixed start vector, not ARPACK's random one: ARPACK draws its start
-    # from process-global state, which makes the answer depend on what else
-    # in the process has drawn from it; the start must be a function of the
-    # data alone for the probe to be reproducible. It must also carry weight
-    # in every pair irrep:
+    # (A - B) for `solve_symmetric`: one vector, or a batch as columns
+    Operator = SimpleNamespace(matvec=matvec,
+                               matmat=lambda X: block(np.asarray(X).T).T)
+
+    # A fixed start vector, a function of the data alone, so the probe is
+    # reproducible. It must carry weight in every pair irrep:
     # (A - B) is block diagonal over Gamma_i x Gamma_a and a unit vector would
     # confine the Krylov space to one block, returning that block's minimum as
     # if it were the global one. 1/d has both properties and leans on the low
     # pairs.
     cold = 1.0 / diag_d.ravel()
     cold /= np.linalg.norm(cold)
-    source = 'lanczos-cold'
+    source = 'davidson-cold'
+    diag = diag_d.ravel()
 
-    def lowest(nroots, tol_used, vectors, v0=cold):
-        """The nroots lowest Ritz values from the start v0, with their vectors
-        as columns if asked for."""
-        if not replicated:
-            return eigsh(op, k=nroots, which='SA', tol=tol_used, v0=v0,
-                         return_eigenvectors=vectors)
-        w, x = _lanczos_lowest(matvec, v0, nroots, tol_used)
-        return (w, x.T) if vectors else w
+    def lowest(nroots, tol_used, vectors, v0=cold, relative=False):
+        """The nroots lowest eigenvalues from the start v0 (with the lowest
+        pairs' unit vectors beside it for nroots > 1), to |r| <= tol_used
+        Hartree, or with `relative` to |r| <= tol_used |v0^T (A - B) v0| (a
+        sign pass: a residual below |theta| is what certifies the sign, so the
+        bar follows the value's own size), with their vectors as columns if
+        asked for."""
+        x0 = np.column_stack([v0] + diagonal_seeds(diag, nroots - 1)
+                             if nroots > 1 else [v0])
+        if relative:
+            tol_used = tol_used * max(abs(float(v0 @ matvec(v0))),
+                                      float(np.finfo(float).eps))
+        w, x, conv = solve_symmetric(Operator, diag, nroots=nroots, x0=x0,
+                                     tol_residual=tol_used,
+                                     max_cycle=max(200, diag.size),
+                                     warn_unconverged=False,
+                                     label='the (A - B) probe')
+        if not conv.all():
+            raise AmbProbeNotConverged(
+                f'the (A - B) Davidson left {int((~conv).sum())} of {conv.size} '
+                f'roots above |r| <= {tol_used:g}')
+        return (w, x) if vectors else w
 
     def _record(extra=None):
         if stats is not None:
@@ -169,8 +178,8 @@ def _lowest_amb_local(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
         # sign. Escalate the tolerance only until one of them holds, which for
         # a value far from zero is the first pass and a fraction of the
         # iterations a converged 'SA' solve would take.
-        passes = [(cold, 'lanczos-cold', tol_try)
-                  for tol_try in (1e-2, 1e-3, 1e-4, tol)]
+        passes = [(cold, 'davidson-cold', tol_try)
+                  for tol_try in (*AMB_PROBE_SIGN_TOLS, tol)]
         if start is not None:
             roots = np.asarray(start, dtype=float).reshape(no * nv, -1)
             # Rayleigh-Ritz on the roots' span, one block action per root.
@@ -193,10 +202,10 @@ def _lowest_amb_local(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
             # PROBE_START_MIX share of 1/d, which reaches the irreps it lacks.
             warm = (roots[:, 0] / np.linalg.norm(roots[:, 0])
                     + PROBE_START_MIX * cold)
-            passes[0] = (warm / np.linalg.norm(warm), 'lanczos-warm',
+            passes[0] = (warm / np.linalg.norm(warm), 'davidson-warm',
                          passes[0][2])
         for v0, source, tol_try in passes:
-            w, v = lowest(1, tol_try, True, v0)
+            w, v = lowest(1, tol_try, True, v0, relative=True)
             theta = float(w[0])
             vec = v[:, 0]
             resid = float(np.linalg.norm(matvec(vec) - theta * vec))
@@ -211,63 +220,9 @@ def _lowest_amb_local(apply_AB, diag_d, k=1, tol=1e-6, sign_only=False,
                  'probe_residual': resid})
         return np.array([theta])
 
-    # A Ritz value is good to |r|^2 / gap, so the replicated Lanczos converges
-    # to |r| <= sqrt(eps) |theta| rather than stopping at tol: at water/cc-pVDZ
-    # BSE@HF that is 88 matvecs where ARPACK takes 81, for a value 3e-15 Ha
-    # from the dense eigenvalue where ARPACK's sits 7e-14 from it.
-    if replicated:
-        tol = min(tol, float(np.sqrt(np.finfo(float).eps)))
+    # A Ritz value is good to |r|^2 / gap, so a residual of tol leaves the
+    # value far below it.
     out = np.sort(lowest(min(k, no * nv - 1), tol, False))
     _record()
     return out
 
-
-def _lanczos_lowest(matvec, v0, k, tol):
-    """(theta, x): the k lowest eigenpairs of the symmetric operator
-    `matvec`, the vectors as rows, from the start vector `v0`.
-
-    A Lanczos with full reorthogonalization, thick-restarted on the lower
-    half of its Ritz vectors whenever the basis reaches eigsh's own size
-    (Wu and Simon, SIAM J. Matrix Anal. Appl. 22, 602 (2000)), converged at
-    ARPACK's test |r| <= tol |theta|. The Rayleigh quotient is formed from the
-    stored products, never from a recurrence, so the iteration is a function
-    of the operator's outputs alone and ranks handed the same outputs take the
-    same steps; every array is this call's own, so rank threads can run it
-    side by side. One start vector spans one direction of a degenerate
-    eigenspace, so for k > 1 a repeated eigenvalue can appear once, as in
-    ARPACK; the lowest value itself is found either way.
-    """
-    n = v0.size
-    ncv = min(n, max(2 * k + 1, AMB_LANCZOS_NCV))
-    V = np.zeros((ncv, n))
-    AV = np.zeros((ncv, n))
-    q = v0 / np.linalg.norm(v0)
-    m = 0
-    for _ in range(AMB_LANCZOS_MAXITER_PER_DIM * n):
-        V[m] = q
-        AV[m] = matvec(V[m])                 # a distributed action locksteps V[m]
-        m += 1
-        H = V[:m] @ AV[:m].T
-        theta, s = np.linalg.eigh(0.5 * (H + H.T))
-        nk = min(k, m)
-        x = s[:, :nk].T @ V[:m]
-        r = s[:, :nk].T @ AV[:m] - theta[:nk, None] * x
-        rnorm = np.linalg.norm(r, axis=1)
-        if m == n or (m >= k and np.all(rnorm <= tol * np.abs(theta[:k]))):
-            return theta[:nk], x
-        # In a Lanczos basis every Ritz residual is the same next direction;
-        # the longest is its most accurate copy.
-        q = r[np.argmax(rnorm)]
-        if m == ncv:
-            m = max(k, ncv // 2)
-            V[:m] = s[:, :m].T @ V
-            AV[:m] = s[:, :m].T @ AV
-        q -= (V[:m] @ q) @ V[:m]
-        q -= (V[:m] @ q) @ V[:m]             # twice is enough (Kahan, Parlett)
-        norm = np.linalg.norm(q)
-        if norm <= np.finfo(float).eps * np.abs(theta).max():
-            return theta[:nk], x             # an invariant subspace
-        q /= norm
-    raise AmbProbeNotConverged(
-        f'the (A - B) Lanczos left roots above |r| <= {tol:g} |theta| after '
-        f'{AMB_LANCZOS_MAXITER_PER_DIM * n} operator applications')

@@ -115,7 +115,7 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     from src.Base.orbital_spaces import get_occ_virt_indices
     from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
                                                             wc_explicit)
-    from src.SingleReference.GW.real_screening import ov_energies
+    from src.Base.orbital_spaces import ov_energies
     from src.SingleReference.GW.sum_over_poles import (compressible,
                                                        qp_energy_sop,
                                                        sop_from_wc)

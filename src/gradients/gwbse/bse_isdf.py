@@ -132,7 +132,7 @@ def _factorized_block_backward(X, D, p_idx, q_idx, cP, alpha, beta,
         X_bar[k0:k1, q_idx] += (E * S1.T) @ beta
 
 
-def bse_cache(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
+def bse_cache(X, D, eps_qp, nocc, spin='singlet', bse_tda=False):
     """The three-index blocks `bse_backward` needs, WITHOUT any (n_ov, n_ov).
 
     `bse_blocks` builds the dense Casida matrices and is the small-system
@@ -174,8 +174,9 @@ def bse_blocks(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
     return A, Bb, cache
 
 
-def bse_solve(A, Bb, nroots=None):
-    """(Omega, Xn, Yn) from the Casida problem; Xn, Yn are (n_ov, nroots).
+def bse_solve(A, Bb):
+    """(Omega, Xn, Yn) from the Casida problem, every root; Xn, Yn are
+    (n_ov, n_ov).
     The Tamm-Dancoff A alone by `eigh`; the full problem by THE dense Casida
     eigensolve (`casida.casida_eigensolve`, A - B factored), replicated on
     every rank, which raises `CasidaInstability` where the reference is
@@ -192,9 +193,12 @@ def bse_solve(A, Bb, nroots=None):
     return omega, x, y
 
 
-def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
+def bse_backward(n, X, D, eps_qp, W_aux, _nocc, cache, Xn, Yn, omega_bar=1.0,
                  tile_gb=ISDF_TILE_GB, bra=None):
     """(eps_qp_bar, X_bar, D_bar, W_aux_bar) of omega_bar * Omega_n.
+
+    `_nocc` is not read: the cache holds the occupied split; the argument
+    keeps the call shape of the grid route (`isdf_bse_backward`).
 
     `bra` makes the element INTERSTATE: with bra = m the routine returns the
     adjoint of <m| dH |n> instead of dOmega_n, which is the numerator of the
@@ -279,7 +283,7 @@ def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
     # (n_aux, n_vir, n_occ) block. Factorized on the grid term by term it
     # needs four (M, M) passes of M^2 n_aux each; sharing ONE Hadamard weight
     # and one Zt tile across every screened term instead is
-    # `LinearResponse.isdf_bse_adjoint`, which forms no three-index block and
+    # `gradients.gwbse.isdf_bse_adjoint`, which forms no three-index block and
     # costs M^2 (4 n_aux + 32 n_occ) against M n_aux n_occ n_vir here.
     if B_vo is not None:
         g = np.zeros_like(B_vo)
@@ -297,7 +301,7 @@ def bse_backward(n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn, omega_bar=1.0,
     return eps_qp_bar, X_bar, D_bar, W_aux_bar
 
 
-def interstate_backward(m, n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn,
+def interstate_backward(m, n, X, D, eps_qp, W_aux, _nocc, cache, Xn, Yn,
                         omega_bar=1.0, tile_gb=ISDF_TILE_GB):
     """Adjoints of the SYMMETRIZED interstate element <m| dH |n>, m != n.
 
@@ -317,7 +321,7 @@ def interstate_backward(m, n, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn,
     X, D = whole_factor(X, 'X_mo'), whole_factor(D, 'D')
     out = None
     for bra, ket in ((m, n), (n, m)):
-        part = bse_backward(ket, X, D, eps_qp, W_aux, nocc, cache, Xn, Yn,
+        part = bse_backward(ket, X, D, eps_qp, W_aux, _nocc, cache, Xn, Yn,
                             omega_bar=0.5 * omega_bar, tile_gb=tile_gb, bra=bra)
         out = part if out is None else tuple(a + b for a, b in zip(out, part))
     return out

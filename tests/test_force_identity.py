@@ -2,9 +2,8 @@
 
 Three hashes could answer it, each its own way: `conventions_hash` (the
 excited half's conventions record, which a FirstPoint is matched on),
-`hessian.cached_conventions` (the surface's whole record, walk history
-included, or the halves' records, or a factorization's, which a ForceCache
-header is matched on) and `optimize.surface_record` (the record a walk
+the ForceCache header's (the surface's whole record, walk history included,
+or the halves' records, or a factorization's) and `optimize.surface_record` (the record a walk
 checkpoint keeps, None for a composed surface). So three hashes would let a
 FirstPoint handed between
 two chains differing only in their numerics replay one's force on the
@@ -29,7 +28,6 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.gradients.gwbse.excited_state import ExcitedStateChain, conventions_hash
 from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from src.gradients.rpa.ground_state import RPAGroundStateChain
-from src.properties.hessian import cached_conventions
 from src.gradients.surface_identity import force_identity
 from src.properties.optimize import restored_surface, surface_record
 from tests.reference_scf import rhf_df_differentiable_checked
@@ -73,12 +71,10 @@ def test_the_three_answers_are_one(h2, mf0, counts):
     chain = excited(h2, mf0, counts)
     identity = force_identity(chain)
     assert conventions_hash(chain) == record_hash(identity)
-    assert same(cached_conventions(chain), identity)
     surface = composed(h2, mf0, counts)
     assert conventions_hash(surface) == record_hash(force_identity(surface))
-    assert same(cached_conventions(surface), force_identity(surface))
     ground = RPAGroundStateChain(h2, rhf_df_differentiable_checked, mf=mf0, numerics=Numerics(isdf={'counts': counts}))
-    assert same(cached_conventions(ground), force_identity(ground))
+    assert force_identity(ground) is not None
 
 
 def test_settings_are_part_of_the_identity(h2, mf0, counts):
@@ -92,10 +88,10 @@ def test_settings_are_part_of_the_identity(h2, mf0, counts):
 
 def test_the_walks_history_is_not(h2, mf0, counts):
     chain = excited(h2, mf0, counts)
-    before = record_hash(cached_conventions(chain))
+    before = record_hash(force_identity(chain))
     chain.follow_log.append({'root': 0, 'overlap': 1.0})
     chain.follow_coords.append(np.array(h2.atom_coords()))
-    assert record_hash(cached_conventions(chain)) == before
+    assert record_hash(force_identity(chain)) == before
     assert conventions_hash(chain) == before
 
 
@@ -139,7 +135,7 @@ def test_the_scf_frames_layout_and_span_are_in_it(h2, mf0, counts):
     other.scf_frames = Frames([[0.0, 0.0, 0.1]])
     assert len({base, conventions_hash(framed), conventions_hash(other)}) == 3
     laid = copy.copy(chain)
-    laid._scf_layout = {'layout': np.arange(3)}
+    laid.hold_scf_layout(np.arange(3))
     assert conventions_hash(laid) != base
     spanned = copy.copy(chain)
     spanned.span_basis = np.eye(2)

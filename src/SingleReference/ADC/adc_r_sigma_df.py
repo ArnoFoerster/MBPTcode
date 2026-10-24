@@ -14,7 +14,8 @@ from src.SingleReference.ADC.adc_utils import (
     g_diag_df, g_diag_mid_df, g_diag_outer_df,
     b_factor, b_chunk_einsum)
 from src.SingleReference.ADC.adc_r_utils import (
-    build_g_blocks_df, csf_layout, dress_is_streamable, unfold_pair, upper_pair,
+    build_g_blocks_df, c_iip_iip, c_iip_iiip, c_iiip_iip, c_iiip_iiip, c_ip_ip, csf_layout,
+    dress_is_streamable, unfold_pair, upper_pair, upper_virtual_pair,
     u_2h1p_unfold, u_2p1h_unfold, u_2p1h_zparts_df, u_pv_vp_contract_df,
     build_u_blocks_unstreamed, no_u_blocks)
 from src.SingleReference.common.mp_amplitudes import (u2_2h1p_amplitude_chunks,
@@ -472,7 +473,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     else:
         F = np.diag(eps) + static_correction
 
-    _u_streamable = not s._is_adc2x and dress_is_streamable(s.u2_denom_dress)
+    _u_streamable = not s.is_adc2x and dress_is_streamable(s.u2_denom_dress)
 
     # Common integral slices, DF-gathered; the streamed paths skip every
     # slice they rebuild chunkwise from B themselves.
@@ -481,11 +482,11 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
                              need_ovpv_ovvp=False,
                              need_oo_pp=False, need_vopo_voho=False,
                              need_oovv_vvoo=(not _u_streamable
-                                             and not s._is_adc2x),
+                                             and not s.is_adc2x),
                              need_voov_vovo=False,
                              need_ovov_ovvo=False,
                              need_oo_po_op=(not _u_streamable
-                                            and not s._is_adc2x),
+                                            and not s.is_adc2x),
                              need_oooo=False)
     g_oovv, g_vvoo = blk.get('g_oovv'), blk.get('g_vvoo')
     g_oo_po, g_oo_op = blk.get('g_oo_po'), blk.get('g_oo_op')
@@ -561,7 +562,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     # See build_supermatrix's identical block for the layout key and the
     # spin-resolved EN rationale (kept in sync deliberately).
     _deltas = (None, None, None)
-    if s.u2_denom_dress and not s._is_adc2x:
+    if s.u2_denom_dress and not s.is_adc2x:
         _deltas = restricted_channel_shifts(
             s.u2_denom_dress, s.B_aa,
             g_oooo_bare, g_vvvv_bare, O, vidx_abs,
@@ -596,7 +597,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
             s.B_aa, O, V, norb, eps_o, eps_v, dens,
             Bo_full, Bv_full, Bov_full, Boo_full, Bvo_full, Bv_pp,
             iu_o, ju_o, iu_v, ju_v, _u_ints,
-            is_adc2x=s._is_adc2x, use_materialized=False, w_chemist=None)
+            is_adc2x=s.is_adc2x, use_materialized=False, w_chemist=None)
     # ===================== K diagonals =====================
     e_I = (2 * eps_o[:, None] - eps_v[None, :]).ravel()
     e_II = (eps_o[iu_o, None] + eps_o[ju_o, None] - eps_v[None, :]).ravel()
@@ -694,19 +695,10 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     g_kaia = g_diag_outer_df(_B_scr, oidx, vidx_abs, oidx)
     inner_Ip = (g_kaai - 2 * g_kaia).transpose(2, 1, 0)
 
-    def apply_C_Ip_Ip(Vmat):
-        term1 = np.einsum('ic,ac->ia', Vmat, g_aabb, optimize=True)
-        term2 = np.einsum('iak,ka->ia', inner_Ip, Vmat, optimize=True)
-        return term1 + term2
-    # --- App1..4 building blocks for the virt-pair (2p1h) C-blocks ---
-    def make_upper_k(Vmat, iu, ju, O_, Vv):
-        Vup = np.zeros((O_, Vv, Vv))
-        Vup[:, iu, ju] = Vmat
-        return Vup
     # Streamed replacement for compute_Apps and the four Ip-IIp/Ip-IIIp
     def _apply_C_2p1h_coupled(z_Ip, z_IIp, z_IIIp):
-        Vk_IIp = make_upper_k(z_IIp, iu_v, ju_v, O, V)
-        Vk_IIIp = make_upper_k(z_IIIp, iu_v, ju_v, O, V)
+        Vk_IIp = upper_virtual_pair(z_IIp, iu_v, ju_v, O, V)
+        Vk_IIIp = upper_virtual_pair(z_IIIp, iu_v, ju_v, O, V)
 
         App1_IIp = np.zeros((O, V, V)); App2_IIp = np.zeros((O, V, V))
         App3_IIp = np.zeros((O, V, V)); App4_IIp = np.zeros((O, V, V))
@@ -766,31 +758,6 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
 
         def _term0_IIIp(Vmat):
             return _pp_ladder_matvec_df(Bv_pp, Vmat, iu_v, ju_v, V, antisymmetric=False)
-    def apply_C_IIp_IIp(Vmat, Apps):
-        App1, App2, App3, App4 = Apps
-        Term0 = _term0_IIp(Vmat)
-        A, B = iu_v, ju_v
-        return (Term0 - App3[:, A, B] + App1[:, A, B] + 1.5 * App2[:, B, A]
-                - App1[:, B, A] - 1.5 * App4[:, B, A] + App3[:, B, A]
-                - 1.5 * App2[:, A, B] + 1.5 * App4[:, A, B])
-
-    def apply_C_IIIp_IIIp(Vmat, Apps):
-        App1, App2, App3, App4 = Apps
-        Term0 = _term0_IIIp(Vmat)
-        A, B = iu_v, ju_v
-        return (Term0 - (App1[:, A, B] + App1[:, B, A]) - (App3[:, A, B] + App3[:, B, A])
-                + 0.5 * (App2[:, A, B] + App2[:, B, A]) + 0.5 * (App4[:, A, B] + App4[:, B, A]))
-
-    def apply_C_IIp_IIIp(Apps_IIIp):
-        App1, App2, App3, App4 = Apps_IIIp
-        A, B = iu_v, ju_v
-        return 0.5 * s3 * (App2[:, B, A] - App2[:, A, B]) + 0.5 * s3 * (App4[:, B, A] - App4[:, A, B])
-
-    def apply_C_IIIp_IIp(Apps_IIp):
-        App1, App2, App3, App4 = Apps_IIp
-        A, B = iu_v, ju_v
-        return 0.5 * s3 * (App2[:, B, A] + App2[:, A, B]) - 0.5 * s3 * (App4[:, A, B] + App4[:, B, A])
-
     def aop(z):
         z_p = z[:norb]
         z_I = z[oI:oII].reshape(O, V)
@@ -813,12 +780,15 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         c2p1h_Ip, c2p1h_IIp, c2p1h_IIIp, Apps_IIp, Apps_IIIp = _apply_C_2p1h_coupled(
             z_Ip, z_IIp, z_IIIp)
 
-        y_Ip = (U_Ip.T @ z_p) + e_Ip * z_Ip.reshape(-1) + (apply_C_Ip_Ip(z_Ip) + c2p1h_Ip).reshape(-1)
+        y_Ip = (U_Ip.T @ z_p) + e_Ip * z_Ip.reshape(-1) + (
+            c_ip_ip(z_Ip, g_aabb, inner_Ip) + c2p1h_Ip).reshape(-1)
         uT_IIp, uT_IIIp = apply_U_2p1h_adj(z_p)
         y_IIp = uT_IIp.reshape(-1) + e_IIp * z_IIp.reshape(-1) + (
-            c2p1h_IIp + apply_C_IIp_IIp(z_IIp, Apps_IIp) + apply_C_IIp_IIIp(Apps_IIIp)).reshape(-1)
+            c2p1h_IIp + c_iip_iip(_term0_IIp(z_IIp), Apps_IIp, iu_v, ju_v)
+            + c_iip_iiip(Apps_IIIp, iu_v, ju_v, s3)).reshape(-1)
         y_IIIp = uT_IIIp.reshape(-1) + e_IIIp * z_IIIp.reshape(-1) + (
-            c2p1h_IIIp + apply_C_IIIp_IIp(Apps_IIp) + apply_C_IIIp_IIIp(z_IIIp, Apps_IIIp)).reshape(-1)
+            c2p1h_IIIp + c_iiip_iip(Apps_IIp, iu_v, ju_v, s3)
+            + c_iiip_iiip(_term0_IIIp(z_IIIp), Apps_IIIp, iu_v, ju_v)).reshape(-1)
 
         return np.concatenate([y_p, y_I, y_II, y_III, y_Ip, y_IIp, y_IIIp])
 

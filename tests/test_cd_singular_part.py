@@ -41,8 +41,8 @@ from src.SingleReference.GW.contour_deformation import (cd_integral_weights,
                                                         residue_set, sigma_cd,
                                                         sigma_cd_slope,
                                                         wc_explicit)
-from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   ov_energies)
+from src.SingleReference.GW.real_screening import ExplicitRealScreening
+from src.Base.orbital_spaces import ov_energies
 from src.gradients.gwbse.contour_deformation_adjoint import sigma_cd_backward
 
 #: Distances from the orbital energy, both sides, from just outside the

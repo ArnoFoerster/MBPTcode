@@ -184,7 +184,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
         with blas_single_threaded():
             mf.kernel()
         if not mf.converged:
-            # Refuse inputs, warn numerics; the
+            # the policy: refuse inputs, warn numerics; the
             # stage that built it counts it ('scf_not_converged')
             history.not_converged = True
             warnings.warn(f'SCF did not converge in {mf.max_cycle} cycles; '

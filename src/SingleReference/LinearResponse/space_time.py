@@ -28,7 +28,7 @@ and chi0 = 2 (C_ov f) C_ov^T; the cosine transform maps e^{-d tau} to
 One kernel serves both sides: `polarizability_projected_tau` is the N^3
 sweep and its only implementation. The energy routes stream
 it into chi0 here, and the gradient chain
-(`gradients.space_time_adjoint.polarizability_tau`) runs it over every tau
+(`gradients.rpa.space_time_adjoint.polarizability_tau`) runs it over every tau
 point through `polarizability_projected_sweep` and keeps the result whole,
 because every contour-deformation frequency is a fixed linear combination of
 proj(tau) and the adjoint lands back on an array of that shape. The reverse
@@ -54,7 +54,7 @@ chi0 is the serial update of its proj rows, bitwise.
 reason: one bra state's pair density, an arbitrary index block and the
 particle-hole block are the forward halves of the three-index chain, read by
 the contour-deformation energy route and the gradient chain alike, while their
-adjoints stay in `gradients.space_time_adjoint` and `gradients.bse_isdf`
+adjoints stay in `gradients.rpa.space_time_adjoint` and `gradients.gwbse.bse_isdf`
 beside the rest of the reverse pass.
 
 `rpa_correlation_energy_space_time` is the dRPA energy's own forward sweep, and
@@ -76,6 +76,8 @@ supplying X_o and X_v.
 """
 from dataclasses import dataclass
 from typing import NamedTuple
+
+import warnings
 
 import numpy as np
 
@@ -224,7 +226,7 @@ class ProjRows:
         """An adjoint accumulator in the same rows, zeroed."""
         return ProjRows(np.zeros_like(self.rows), self.naux, self.comm)
 
-    def _size_rank(self):
+    def size_rank(self):
         return ((1, 0) if self.comm is None
                 else (self.comm.Get_size(), self.comm.Get_rank()))
 
@@ -251,7 +253,7 @@ class ProjRows:
         auxiliary row at a time, so a frequency's rows are the same bits
         whoever owns it.
         """
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         nfreq = cosft_wt.shape[0]
         spans = frequency_blocks(nfreq, self.naux, tile_gb, live=live)
         if freq_indices is not None and size > 1:
@@ -286,7 +288,7 @@ class ProjRows:
         factorizations run concurrently between two collectives instead of
         one owner at a time. A round holds one (naux, naux) of rows a rank
         on top of the serial block."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
         todo, ready = iter(spans), {}
         serial = SerialFolds(spans)
@@ -318,7 +320,7 @@ class ProjRows:
         time -- the serial association, at every rank count. A round's
         adjoints come back in one exchange and wait in `fb.serial` until
         their serial block is whole, which is then folded as one."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         if fb.serial is not None:
             nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
             rows = np.empty((len(fb.block) * nrows, self.naux))
@@ -351,7 +353,7 @@ class ProjRows:
         in every round. tau_indices: the round-robin `partition`, or None for
         every point on every rank. The slice buffer is reused: read it before
         asking for the next."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         ntau = self.rows.shape[0]
         if size == 1:
             which = range(ntau) if tau_indices is None else tau_indices
@@ -387,7 +389,7 @@ class ProjRows:
         the t-th slice of its list from every rank's rows, verbatim. The
         lists travel first (one small allgather), so the rounds pair. The
         slice buffer is reused: read it before asking for the next."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         wants = [int(k) for k in wants]
         if size == 1:
             for k in wants:
@@ -487,7 +489,7 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
 
     The one kernel of the N^3 sweep, for the energy routes and the gradient
     chain alike (see the module docstring). The reverse pass in
-    `gradients.space_time_adjoint.polarizability_backward` mirrors this tiling,
+    `gradients.rpa.space_time_adjoint.polarizability_backward` mirrors this tiling,
     so the row budget here, 3 * M * 8 bytes per row, is a convention and not a
     private detail.
 
@@ -543,7 +545,7 @@ def polarizability_projected_sweep(X, D, eps, nocc, tau_points, mu=None,
 
     tau_indices: the points to compute; the other slots stay zero, so the sum
     over disjoint subsets is the full sweep. That is the partition
-    `Base.utils.mpi_grid` hands out, and an all-reduce of the result is exact.
+    `Base.utils.parallel.mpi_grid` hands out, and an all-reduce of the result is exact.
     """
     X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
     tau_points = np.asarray(tau_points, float)
@@ -1007,7 +1009,7 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,
     The one build of the static screened interaction: the BSE kernel's W_aux
     (`isdf_bse_factors`), the reaction field of Duchemin, Guido, Jacquemin and
     Blase, Chem. Sci. 9, 4430 (2018) Eq. (18)
-    (`gradients.reaction_field_adjoint.static_screening`), the space-time GW
+    (`gradients.gwbse.reaction_field_adjoint.static_screening`), the space-time GW
     route's W(0) (its BSE extras and its Eq. (18) shift) and the dense ISDF
     BSE are this matrix on `static_screening_grid`, in the auxiliary gauge of
     the factors handed in.
@@ -1065,23 +1067,32 @@ def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,
     return dyson_screening(chi0)
 
 
-def dielectric_log_determinant(c, k):
-    """log det(I - c) for the dielectric argument c at frequency index `k`,
-    refused where the determinant is not positive.
+class NonPositiveDielectric(RuntimeWarning):
+    """det(1 - chi0) is not positive at an imaginary frequency."""
+
+
+def dielectric_log_determinant(one_minus_c, where, flags=None):
+    """log|det(1 - c)| of the dRPA energy, from the matrix `one_minus_c`
+    (real, or complex on a k-point mesh) at `where`: the frequency index, or
+    (transfer q, frequency index) on a mesh.
 
     On the imaginary axis chi0(i.w) is negative semidefinite in any real gauge,
-    so I - chi0 >= I and the logarithm of the dRPA energy exists. A
-    determinant that is not positive is a broken chi0 or a convention error,
-    and log|det| of it would be the energy of another functional;
-    `Periodic.pbc_isdf_rpa.ecorr_q_from_pi` refuses the same case.
+    so 1 - chi0 >= 1 and the logarithm exists. A determinant that is not
+    positive is a numerical outcome (a broken chi0, or a convention error),
+    not an input to refuse: log|det| is returned with a
+    `NonPositiveDielectric` warning, and `where` is appended to
+    flags['nonpositive_det'] when a dict is passed. Either way the energy
+    built on it is not the dRPA correlation energy.
     """
-    sign, logdet = np.linalg.slogdet(np.eye(c.shape[-1]) - c)
-    if not sign > 0:
-        raise RuntimeError(
-            f'det(1 - chi0) is non-positive at frequency index {k} (sign '
-            f'{sign}): the RPA dielectric has been driven singular, which on '
-            f'a gapped system means a convention error rather than physics, '
-            f'and its log-determinant is not the correlation energy.')
+    sign, logdet = np.linalg.slogdet(one_minus_c)
+    if not sign.real > 0:
+        warnings.warn(f'det(1 - chi0) is not positive at {where} (sign {sign}): '
+                      f'the RPA dielectric has been driven singular, which on a '
+                      f'gapped system means a convention error rather than '
+                      f'physics; log|det| is used.',
+                      NonPositiveDielectric, stacklevel=3)
+        if flags is not None:
+            flags.setdefault('nonpositive_det', []).append(where)
     return logdet
 
 
@@ -1148,7 +1159,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
             # dressed interaction, so S = I and c is untouched there.
             one_minus_g = 0.0 if n_mat is None else 1.0 - g[k]
             c = c0 if n_mat is None else c0 - one_minus_g * (n_mat @ c0)
-            logdet = dielectric_log_determinant(c, k)
+            logdet = dielectric_log_determinant(np.eye(c.shape[-1]) - c, k)
             terms.append((k, np.array(grid.omega_weights[k]
                                       * (logdet + linear))))
     # every frequency's term added in frequency order: the one-rank bits

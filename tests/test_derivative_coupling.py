@@ -261,9 +261,9 @@ def test_the_shared_forward_is_the_forward_before_the_casida_step(chain):
                     np.asarray(getattr(full, name), float),
                     quantity='root', label=name)
     # the fold consumes x_bar and d_bar, so each fold gets its own seeds
-    ref = chain.reverse.fold_to_nuclei(full, *chain.follower._casida_seeds(full, solution, 0),
+    ref = chain.reverse.fold_to_nuclei(full, *chain.follower.casida_seeds(full, solution, 0),
                                release_tape=False)[0]
-    got = chain.reverse.fold_to_nuclei(kern, *chain.follower._casida_seeds(full, solution, 0),
+    got = chain.reverse.fold_to_nuclei(kern, *chain.follower.casida_seeds(full, solution, 0),
                                release_tape=False)[0]
     assert np.abs(got - ref).max() <= 1e-12 * np.abs(ref).max()
 

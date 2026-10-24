@@ -264,7 +264,7 @@ class CasidaSolver:
         return CasidaResult(omega, X, Y, is_distributed)
 
 
-def solver_choice(n_ov, tda=False):
+def solver_choice(n_ov):
     """'dense' or 'davidson' for a particle-hole space of n_ov pairs.
 
     Dense while the Casida pair (A, B) fits in BSE_DENSE_MAX_GB -- the dense
@@ -273,11 +273,11 @@ def solver_choice(n_ov, tda=False):
     three-index factor and a handful of trial vectors instead, so nothing else
     on the dense route grows as n_ov**2.
 
-    tda: not exempt, and it does not move the boundary. The Tamm-Dancoff
-    problem diagonalizes A alone, but the dense route BUILDS both blocks either
-    way (`build_casida_matrices` returns the pair; only `CasidaSolver.solve`
-    drops B), so a TDA solve holds the same memory and flips to the matrix-free
-    route at the same size. The argument is here to state that, not to change
-    the answer: a rule that exempts TDA lets a dense solve ask for terabytes.
+    The Tamm-Dancoff problem is not exempt and does not move the boundary: it
+    diagonalizes A alone, but the dense route BUILDS both blocks either way
+    (`build_casida_matrices` returns the pair; only `CasidaSolver.solve` drops
+    B), so a TDA solve holds the same memory and flips to the matrix-free route
+    at the same size. A rule that exempted TDA would let a dense solve ask for
+    terabytes.
     """
     return 'dense' if 2 * int(n_ov)**2 * 8 / BYTES_PER_GB <= BSE_DENSE_MAX_GB else 'davidson'

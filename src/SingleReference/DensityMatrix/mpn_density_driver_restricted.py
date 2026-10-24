@@ -11,7 +11,7 @@ depend on whether a spin block is "pure" (all letters equal, e.g. 'aaaa',
 'aaaaaa') or "mixed" (e.g. 'abab', 'aabaab', 'abbabb') -- these need
 genuinely DIFFERENT transposes, not just different signs:
 
-- Pure blocks: same as the spin-orbital case (mpn_density_driver.py::to_l)
+- Pure blocks: same as the spin-orbital case (common/mp_amplitudes.to_l)
   -- axis layout (occ ascending, vir REVERSED) with sign (-1)**(rank//2), the
   parity of reversing `rank` genuinely-antisymmetric (same-spin) indices.
 - Mixed blocks: NO vir reversal at all, sign always +1 -- l2_abab[i,j,a,b] =
@@ -88,22 +88,14 @@ def order4_ground_state_module():
 def laplace_aaaaaa_contribution(ei_a, ea_a, g_aaaa, o, v, t2_1_aaaa, ntau):
     """Laplace-quadrature replacement for T3^(2)_aaaaaa's contribution to
     (t1_3_aa's numerator, the ov M3 block), without ever forming the six-index
-    t3_aaaaaa tensor -- direct port of
-    density_matrix.py::MP3DensityMatrixSolverUnrestricted._laplace_aaa_contribution
-    to this module's generic generated pipeline, "same trick" per
-    that method's docstring (see it for the full derivation and validation
-    history: 1/D3 = -sum_tau sigma_tau*exp(D3*tau) via GreenX minimax
-    quadrature, D3's additive separability across the six external indices
+    t3_aaaaaa tensor: 1/D3 = -sum_tau sigma_tau*exp(D3*tau) via GreenX minimax
+    quadrature, and D3's additive separability across the six external indices
     lets exp(D3*tau) factorize into per-orbital dressings applied to the
-    numerator's own inputs before contracting).
+    numerator's own inputs before contracting.
 
-    Confirmed applicable unchanged: the generator
-    generated t3_2_aaaaaa_numerator (this module's
-    generated_mpn_restricted/mpn_density_pieces_restricted.py) has the exact
-    same 8 raw terms, same letters, same signs as the hand-derived
-    compute_t3_second_order this method's original was built against --
-    verified via the generator own generation log and
-    this module's own n=3 validation (tests/test_mpn_density_restricted.py).
+    The terms are those of the generated t3_2_aaaaaa_numerator (this module's
+    generated_mpn_restricted/mpn_density_pieces_restricted.py): 8 raw terms,
+    checked by this module's n=3 validation (tests/test_mpn_density_restricted.py).
 
     Returns (t1_3_aa_numerator_contrib, ov_a_contrib) -- t1_3_aa_numerator_contrib
     is added to t1_3_aa's numerator (pre-division by e_ai, matching
@@ -201,12 +193,11 @@ def _g_df(B, p_idx, q_idx, r_idx, s_idx):
     ALREADY antisymmetrized-within-spin (get_antisymmetrized_spin_block_eri's
     own convention -- <pq||rs>, exchange term included), so this helper must
     include the exchange subtraction too, or it silently reproduces only the
-    Coulomb half of g_aaaa (caught by test_mp3_density_df.py's exact-
-    plumbing check: the bare-Coulomb version was ~0.1-0.4 absolute off on
-    every one of the three slices this function builds, non-negligible
-    error that only showed up once LiH/H2O exercised a nontrivial aaaaaa
-    T3^(2) sector -- HF/sto-3g's single occupied orbital happened to mask
-    it). p_idx/q_idx/r_idx/s_idx may be plain Python slice objects (this
+    Coulomb half of g_aaaa (test_mp3_density_df.py's exact-plumbing check
+    guards this: a bare-Coulomb version is ~0.1-0.4 absolute off on every
+    one of the three slices this function builds once LiH/H2O exercise a
+    nontrivial aaaaaa T3^(2) sector -- HF/sto-3g's single occupied orbital
+    masks it). p_idx/q_idx/r_idx/s_idx may be plain Python slice objects (this
     module's own o/v convention) or integer index arrays."""
     Bpr = B[:, p_idx][:, :, r_idx]
     Bqs = B[:, q_idx][:, :, s_idx]
@@ -247,7 +238,7 @@ def compute_delta_gamma2_df_streamed(B_aa, eps, nocc, dh=None, dp=None, e_ai=Non
     e_ai: optional dressed (V,O) singles denominator (build_dressed_e_ai);
     bare when None. 'hp'/spin-resolved dressing is NOT representable here --
     callers must use the materialized compute_delta_gamma2_df for those
-    (same policy/exception as the ADC solver's dress_is_streamable gate).
+    (same rule and exception as the ADC solver's dress_is_streamable gate).
 
     Index algebra (l2 = sign*transpose of t2 absorbed into the subscripts;
     terms sharing t2's FIRST occupied axis converted to the chunked LAST
@@ -342,10 +333,10 @@ class MPnDensityDriverRestricted:
         # unconditionally also builds e_abcijk, an O(nv^3*no^3) dense array (~3GB
         # at nv=103/no=7, cc-pVQZ CO) that production (laplace_ntau is not None)
         # never touches: t3_2_aaaaaa/aabaab/abbabb (its only consumers, see
-        # compute_order2_amplitudes) are skipped entirely in Laplace mode. Measured
-        # via staged peak-RSS profiling: this was the single largest contributor to
+        # compute_order2_amplitudes) are skipped entirely in Laplace mode. Built
+        # eagerly it would be the single largest contributor to
         # compute_delta_gamma23's memory footprint, dwarfing even the g_aaaa/g_abab/
-        # g_bbbb integral tensors. e_abcijk itself is now built lazily, on demand,
+        # g_bbbb integral tensors. e_abcijk itself is built lazily, on demand,
         # only inside the laplace_ntau is None branch that actually needs it (see
         # compute_order2_amplitudes below), via the equivalent
         # 1/orbital_denominator(..., rank=3) -- same formula energy_denominators uses
@@ -369,12 +360,12 @@ class MPnDensityDriverRestricted:
             self.e_abij_aaaa = self.e_abij_abab = e_abij
         self.e_abij = self.e_abij_abab   # back-compat alias (rank-2 consumers)
 
-    def _args(self):
+    def kernel_args(self):
         return dict(g_aaaa=self.g_aaaa, g_abab=self.g_abab, g_bbbb=self.g_bbbb,
                     d_aa=self.d_aa, o=self.o, v=self.v, nv=self.nv, no=self.no)
 
     def compute_t2_1(self):
-        args = self._args()
+        args = self.kernel_args()
         t2_1_aaaa = gen.t2_1_aaaa_numerator(**args) * self.e_abij_aaaa
         t2_1_abab = gen.t2_1_abab_numerator(**args) * self.e_abij_abab
         return t2_1_aaaa, t2_1_abab
@@ -396,7 +387,7 @@ class MPnDensityDriverRestricted:
         compute_delta_gamma4 asks for max_rank=4 (always with laplace_ntau=None,
         since it needs the full materialized T3^(2)/T4^(2) for its own
         overlap3/overlap4/m4_22 terms -- see compute_delta_gamma4's docstring)."""
-        args = self._args()
+        args = self.kernel_args()
         t1_2_aa = gen.t1_2_aa_numerator(**args, t2_1_aaaa=t2_1_aaaa, t2_1_abab=t2_1_abab) * self.e_ai
         t2_2_aaaa = gen.t2_2_aaaa_numerator(**args, t2_1_aaaa=t2_1_aaaa, t2_1_abab=t2_1_abab) * self.e_abij_aaaa
         t2_2_abab = gen.t2_2_abab_numerator(**args, t2_1_aaaa=t2_1_aaaa, t2_1_abab=t2_1_abab) * self.e_abij_abab
@@ -434,7 +425,7 @@ class MPnDensityDriverRestricted:
 
     def compute_t1_3(self, t1_2_aa, t2_2_aaaa, t2_2_abab, t3_2_aaaaaa, t3_2_aabaab, t3_2_abbabb,
                      laplace_t1_3_contrib=None, laplace_t1_3_crossspin_contrib=None):
-        args = self._args()
+        args = self.kernel_args()
         if t3_2_aaaaaa is None:
             # Laplace mode: T3^(2)'s entire contribution comes from
             # laplace_t1_3_contrib/laplace_t1_3_crossspin_contrib below, so
@@ -447,7 +438,7 @@ class MPnDensityDriverRestricted:
             num = gen.t1_3_aa_numerator(**args, t1_2_aa=t1_2_aa, t2_2_aaaa=t2_2_aaaa, t2_2_abab=t2_2_abab,
                                         t3_2_aaaaaa=t3_2_aaaaaa, t3_2_aabaab=t3_2_aabaab, t3_2_abbabb=t3_2_abbabb)
         if laplace_t1_3_contrib is not None:
-            # laplace_t1_3_contrib is (no,nv) (density_matrix.py's own
+            # laplace_t1_3_contrib is (no,nv) (laplace_aaaaaa_contribution's
             # convention); this module's t1_3_aa_numerator is (nv,no) (this
             # module's amp_out_indices convention, vir-first) -- transpose.
             num = num + laplace_t1_3_contrib.T
@@ -467,7 +458,7 @@ class MPnDensityDriverRestricted:
             t1_2_aa = order2[0]
         else:
             t1_2_aa, *_ = self.compute_order2_amplitudes(t2_1_aaaa, t2_1_abab, max_rank=2)
-        return self._gamma2_blocks(self._args(), t2_1_aaaa, t2_1_abab, t1_2_aa)
+        return self._gamma2_blocks(self.kernel_args(), t2_1_aaaa, t2_1_abab, t1_2_aa)
 
     def _gamma_hf(self):
         return {'oo': self.d_aa[self.o, self.o],
@@ -483,7 +474,7 @@ class MPnDensityDriverRestricted:
 
     def _gamma2_blocks(self, margs, t2_1_aaaa, t2_1_abab, t1_2_aa):
         """Delta_gamma^(2) = M^(2) + c^(2) gamma_HF from the amplitudes; margs the
-        generated pieces' integral arguments (self._args() or self._dead_args())."""
+        generated pieces' integral arguments (self.kernel_args() or self._dead_args())."""
         l2_1_aaaa = to_l(t2_1_aaaa, 2, 'aaaa')
         l2_1_abab = to_l(t2_1_abab, 2, 'abab')
         l1_2_aa = to_l(t1_2_aa, 1, 'aa')
@@ -568,6 +559,45 @@ class MPnDensityDriverRestricted:
             num = num + laplace_t1_3_crossspin_contrib
         return num * self.e_ai
 
+    # ---- dense or DF by the integrals the driver holds ------------------
+    # g_aaaa None (B_aa given) is the g-free driver: every amplitude below comes
+    # from the DF twins; with dense g the dense methods, exactly as before.
+    def amplitudes_t2_1(self):
+        """(t2_1_aaaa, t2_1_abab): compute_t2_1, or its DF twin when g is None."""
+        return self.compute_t2_1_df() if self.g_aaaa is None else self.compute_t2_1()
+
+    def amplitudes_order2(self, t2_1_aaaa, t2_1_abab, laplace_ntau=None):
+        """(t1_2_aa, t2_2_aaaa, t2_2_abab), the rank <= 2 second-order
+        amplitudes: compute_order2_amplitudes(max_rank=2), or its DF twin."""
+        if self.g_aaaa is None:
+            return self.compute_order2_amplitudes_df(t2_1_aaaa, t2_1_abab, laplace_ntau=laplace_ntau,
+                                                     max_rank=2)[:3]
+        return self.compute_order2_amplitudes(t2_1_aaaa, t2_1_abab, laplace_ntau=laplace_ntau,
+                                              max_rank=2)[:3]
+
+    def laplace_t1_3(self, t1_2_aa, t2_2_aaaa, t2_2_abab, t2_1_aaaa, t2_1_abab, ntau):
+        """T1^(3) with the T3^(2) contributions minimax-Laplace-fused on ntau
+        points (no O(no^3 nv^3) tensor), dense or DF: the same-spin part
+        (laplace_aaaaaa_contribution) and the cross-spin part
+        (t1_3_aa_t3crossspin_laplace) added to the t3-free numerator."""
+        ei_a, ea_a = self._eps_a[self.o], self._eps_a[self.v]
+        if self.g_aaaa is None:
+            lap, _ = _laplace_aaaaaa_contribution_df(ei_a, ea_a, self.B_aa, self.o, self.v,
+                                                     t2_1_aaaa, ntau)
+            cs = gen_lap3_df.t1_3_aa_t3crossspin_laplace_df(
+                **self._args_df(), eps_a=self._eps_a, t2_1_aaaa=t2_1_aaaa,
+                t2_1_abab=t2_1_abab, ntau=ntau)
+            t1_3 = self.compute_t1_3_df
+        else:
+            lap, _ = laplace_aaaaaa_contribution(ei_a, ea_a, self.g_aaaa, self.o, self.v,
+                                                 t2_1_aaaa, ntau)
+            cs = gen_lap3.t1_3_aa_t3crossspin_laplace(
+                **self.kernel_args(), eps_a=self._eps_a, t2_1_aaaa=t2_1_aaaa,
+                t2_1_abab=t2_1_abab, ntau=ntau)
+            t1_3 = self.compute_t1_3
+        return t1_3(t1_2_aa, t2_2_aaaa, t2_2_abab, None, None, None,
+                    laplace_t1_3_contrib=lap, laplace_t1_3_crossspin_contrib=cs)
+
     def compute_delta_gamma3_df(self, laplace_ntau=None, t2_1=None, order2=None):
         """DF/RI variant of compute_delta_gamma3 -- T2^(1)/T1^(2)/T2^(2)/
         T3^(2)/T1^(3) come from the DF-dressed numerators above (including
@@ -608,7 +638,7 @@ class MPnDensityDriverRestricted:
         amplitudes amps2 = (t1_2, t2_2 aaaa/abab, t3_2 aaaaaa/aabaab/abbabb),
         dense (df False) or DF (df True: DF numerators, DF Laplace pieces,
         dead integral arguments for the m3_* pieces)."""
-        args = self._args_df() if df else self._args()
+        args = self._args_df() if df else self.kernel_args()
         margs = self._dead_args() if df else args
         t2_1_aaaa, t2_1_abab = t2_1
         t1_2_aa, t2_2_aaaa, t2_2_abab, t3_2_aaaaaa, t3_2_aabaab, t3_2_abbabb = amps2
@@ -639,7 +669,7 @@ class MPnDensityDriverRestricted:
                                     laplace_t1_3_crossspin_contrib=laplace_t1_3_cs_contrib)
 
         # rank 2/3 of Psi^(3) never actually contribute to m3_*_30/m3_*_03
-        # (0 terms in the generated bodies,.py's spin-
+        # (0 terms in the generated bodies), as in mpn_density_driver.py's spin-
         # orbital compute_delta_gamma3, just per spin block here.
         z_aaaa = np.zeros((self.nv, self.nv, self.no, self.no))
         z_aaaaaa = np.zeros((self.nv, self.nv, self.nv, self.no, self.no, self.no))
@@ -751,8 +781,8 @@ class MPnDensityDriverRestricted:
         laplace_ntau: if not None, t4_2_aaaaaaaa is not read for t2_3_aaaa's
         or t3_3_aaaaaa's own numerator (pass None for that argument) --
         their t4_2_aaaaaaaa-dependent piece is instead filled in via
-        generate_mp4_laplace_restricted.py's Laplace-fused
-        t2_3_aaaa_t4_laplace/t3_3_aaaaaa_t4_laplace (see that module's
+        the Laplace-fused t2_3_aaaa_t4_laplace/t3_3_aaaaaa_t4_laplace of
+        mp4_laplace_restricted (CodeGeneration/generate_mpn_laplace.py; see its
         docstring for scope: only these two of the five T2^(3)/T3^(3)
         equations reference t4_aaaaaaaa at all). t4_2_aaaaaaaa itself is
         NOT eliminated everywhere by this -- m4_{oo,vv,ov}_22_restricted and
@@ -760,7 +790,7 @@ class MPnDensityDriverRestricted:
         docstring for why: T4^(2) appears in BOTH bra and ket roles there
         simultaneously, a harder sub-problem not attempted here).
         """
-        args = self._args()
+        args = self.kernel_args()
         d1 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 1)
         d2 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 2)
         d3 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 3)
@@ -826,7 +856,7 @@ class MPnDensityDriverRestricted:
         materialized t2_3 to the minimax accuracy (converges with ntau; gate
         tests/test_mp4_t2_3_amplitude.py, 3-10e-9 at ntau=6 on NH3). Returns
         (t2_3_aaaa, t2_3_abab)."""
-        args = self._args()
+        args = self.kernel_args()
         no, nv = self.no, self.nv
         d2 = orbital_denominator(self._eps_a[:no], self._eps_a[no:no + nv], 2)
         z3 = np.zeros((nv, nv, nv, no, no, no))
@@ -866,7 +896,7 @@ class MPnDensityDriverRestricted:
         (5.6e-10 @ntau=6 -> 4.5e-13 @ntau=10 on NH3; gate
         tests/test_mp4_t1_4_laplace.py). Returns t1_4_aa."""
         d1 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 1)
-        pool = {**self._args(), 'eps_a': self._eps_a, 'ntau': ntau,
+        pool = {**self.kernel_args(), 'eps_a': self._eps_a, 'ntau': ntau,
                 't1_3_aa': t1_3_aa, 't2_3_aaaa': t2_3_aaaa, 't2_3_abab': t2_3_abab,
                 't2_2_aaaa': t2_2_aaaa, 't2_2_abab': t2_2_abab, 't1_2_aa': t1_2_aa,
                 't2_1_aaaa': t2_1_aaaa, 't2_1_abab': t2_1_abab}
@@ -876,7 +906,7 @@ class MPnDensityDriverRestricted:
 
     def compute_t1_4(self, t1_3_aa, t2_3_aaaa, t2_3_abab, t3_3_aaaaaa, t3_3_aabaab, t3_3_abbabb, t1_2_aa, E2):
         """T1^(4)_aa needs the -E^(2)*T1^(2)_aa correction."""
-        args = self._args()
+        args = self.kernel_args()
         d1 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 1)
         num = gen.t1_4_aa_numerator(**args, t1_3_aa=t1_3_aa, t2_3_aaaa=t2_3_aaaa, t2_3_abab=t2_3_abab,
                                     t3_3_aaaaaa=t3_3_aaaaaa, t3_3_aabaab=t3_3_aabaab,
@@ -889,7 +919,7 @@ class MPnDensityDriverRestricted:
         numerator, the connected third-order quadruples have no product form.
         laplace_ntau=None materializes every block (O(no^4 nv^4)); an int returns
         them as LaplaceAmplitude over the numerator term tables, never formed."""
-        pool = {**self._args(), 't2_2_aaaa': t2_2_aaaa, 't2_2_abab': t2_2_abab,
+        pool = {**self.kernel_args(), 't2_2_aaaa': t2_2_aaaa, 't2_2_abab': t2_2_abab,
                 **_blocks('t3_2', 3, t3_2), **_blocks('t4_2', 4, t4_2)}
         eps_o, eps_v = self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv]
         if laplace_ntau is None:
@@ -911,7 +941,7 @@ class MPnDensityDriverRestricted:
         gen4 = order4_ground_state_module()
         t2_2a, t2_2b, t3_2 = order2[1], order2[2], order2[3:6]
         t1_3, t2_3a, t2_3b, t3_3 = order3[0], order3[1], order3[2], order3[3:6]
-        pool = {**self._args(), 't1_3_aa': t1_3, 't2_3_aaaa': t2_3a, 't2_3_abab': t2_3b,
+        pool = {**self.kernel_args(), 't1_3_aa': t1_3, 't2_3_aaaa': t2_3a, 't2_3_abab': t2_3b,
                 **_blocks('t3_3', 3, t3_3), **_blocks('t4_3', 4, t4_3),
                 **_blocks('t3_2', 3, t3_2), 't2_1_aaaa': t2_1_aaaa, 't2_1_abab': t2_1_abab}
         eps_o, eps_v = self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv]
@@ -925,7 +955,7 @@ class MPnDensityDriverRestricted:
 
     def compute_t1_5(self, t1_4_aa, t2_4_aaaa, t2_4_abab, t3_4, t1_3_aa, t1_2_aa, E2, E3):
         """T1^(5) = (<S|v|Psi^(4)> - E^(2) T1^(3) - E^(3) T1^(2)) / D_1 (T1^(1) = 0)."""
-        pool = {**self._args(), 't1_4_aa': t1_4_aa, 't2_4_aaaa': t2_4_aaaa,
+        pool = {**self.kernel_args(), 't1_4_aa': t1_4_aa, 't2_4_aaaa': t2_4_aaaa,
                 't2_4_abab': t2_4_abab, **_blocks('t3_4', 3, t3_4)}
         d1 = orbital_denominator(self._eps_a[:self.no], self._eps_a[self.no:self.no + self.nv], 1)
         num = _call(order4_ground_state_module().t1_5_aa_numerator, pool)
@@ -938,7 +968,8 @@ class MPnDensityDriverRestricted:
 
         laplace_ntau: if not None, t2_3_aaaa/t3_3_aaaaaa's own
         t4_2_aaaaaaaa-dependent piece is computed via the Laplace-fused
-        generate_mp4_laplace_restricted.py path instead of directly from the
+        mp4_laplace_restricted path (CodeGeneration/generate_mpn_laplace.py)
+        instead of directly from the
         materialized t4_2_aaaaaaaa tensor -- see
         compute_order3_amplitudes's docstring for exactly which two of the
         many T4^(2)-touching equations this affects (only these two;
@@ -946,16 +977,15 @@ class MPnDensityDriverRestricted:
         materialized, which compute_order2_amplitudes always builds
         regardless of this flag).
         """
-        args = self._args()
+        args = self.kernel_args()
         t2_1_aaaa, t2_1_abab = self.compute_t2_1()
         (t1_2_aa, t2_2_aaaa, t2_2_abab, t3_2_aaaaaa, t3_2_aabaab, t3_2_abbabb,
          t4_2_aaaaaaaa, t4_2_aaabaaab, t4_2_aabbaabb, t4_2_abbbabbb) = \
             self.compute_order2_amplitudes(t2_1_aaaa, t2_1_abab)
-        # E^(2) = compute_E(t2^(1)) -- order 1, NOT order 2 (an earlier
-        # version of this line wrongly passed t2_2_aaaa/t2_2_abab; caught by
-        # comparing against mpn_density_driver.py's spin-orbital compute_E,
-        # which correctly uses t2_1 -- see compute_order3_amplitudes'/
-        # compute_t1_4's own docstrings for where E2 is consumed).
+        # E^(2) = compute_E(t2^(1)) -- order 1, NOT order 2, as in
+        # mpn_density_driver.py's spin-orbital compute_E (see
+        # compute_order3_amplitudes'/compute_t1_4's own docstrings for where
+        # E2 is consumed).
         E2 = self.compute_E(t2_1_aaaa, t2_1_abab)
         t1_3_aa, t2_3_aaaa, t2_3_abab, t3_3_aaaaaa, t3_3_aabaab, t3_3_abbabb = \
             self.compute_order3_amplitudes(t1_2_aa, t2_2_aaaa, t2_2_abab, t3_2_aaaaaa, t3_2_aabaab, t3_2_abbabb,

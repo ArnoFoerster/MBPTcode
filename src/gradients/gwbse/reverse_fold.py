@@ -53,7 +53,7 @@ class ReversePass:
     def __init__(self, chain):
         self.chain = chain
 
-    def _adjoint_rows(self, x_mo):
+    def adjoint_rows(self, x_mo):
         """The tile edge the factors' adjoints are held in over the ranks,
         or None serially, where they are whole.
 
@@ -70,7 +70,7 @@ class ReversePass:
         return FIT_CHOLESKY_BLOCK if self.chain.fit_block is None else self.chain.fit_block
 
     @staticmethod
-    def _as_rows(a, block):
+    def as_rows(a, block):
         """`a` as `GridTileRows` in tiles of `block`: a whole array cut to
         this rank's tiles, verbatim, and tiles handed back as they are."""
         if isinstance(a, GridTileRows):
@@ -91,7 +91,7 @@ class ReversePass:
         reverse pass holds one pair of the factors' shape beside the stage
         at work however many stages feed it.
 
-        Over ranks the pair is `GridTileRows` (`_adjoint_rows`): the
+        Over ranks the pair is `GridTileRows` (`adjoint_rows`): the
         seeds are cut to this rank's tiles, and the quasiparticle and chi0
         sweeps return their adjoints in the same tiles, tile-major.
 
@@ -103,7 +103,7 @@ class ReversePass:
         static correction it read is reused.
 
         h_bar: the adjoint on the quasiparticle Hamiltonian's off-diagonal
-        elements (`_one_body_seed`), None on the diagonal route.
+        elements (`one_body_seed`), None on the diagonal route.
         """
         st = self._fold_seeds(shared, eqp_bar, x_bar, d_bar, h_bar)
         self._fold_quasiparticle(shared, st, eqp_bar, release_tape)
@@ -117,29 +117,29 @@ class ReversePass:
         x_mo, d, eps, d_bare = shared.x_mo, shared.d, shared.eps, shared.d_bare
         # the conventions in the indices the forward read them in
         if shared.resolved is not None:
-            self.chain._rv = shared.resolved
+            self.chain.resolved_view = shared.resolved
         xc = shared.xc_correction
-        block = self._adjoint_rows(x_mo)
+        block = self.adjoint_rows(x_mo)
         if block is not None:
-            x_bar, d_bar = self._as_rows(x_bar, block), self._as_rows(d_bar,
+            x_bar, d_bar = self.as_rows(x_bar, block), self.as_rows(d_bar,
                                                                       block)
         d_sigma = d if d_bare is None else d_bare
         d_bar_bare = (None if d_bare is None
                       else self.chain.zero_adjoint(d_bare, block))
         if d_bar_bare is not None and block is not None:
-            d_bar_bare = self._as_rows(d_bar_bare, block)
+            d_bar_bare = self.as_rows(d_bar_bare, block)
         eps_bar = np.zeros_like(eps)
         mask = self.chain.quasiparticles.outside_window(len(eps))
         lam = None
         qp_h = shared.qp_h
         # a near-degenerate block's shared correction: the mean seed on
         # its roots, the remainder straight onto its eigenvalues
-        seed_set, eps_direct = self.chain.quasiparticles._block_seeds(eqp_bar)
+        seed_set, eps_direct = self.chain.quasiparticles.block_seeds(eqp_bar)
         eps_bar += eps_direct
         pairs = ()
         if qp_h is not None:
             # a group's members are H's diagonal, not their own roots
-            grouped, eps_h, pairs, lam = self.chain.quasiparticles._qp_hamiltonian_backward(
+            grouped, eps_h, pairs, lam = self.chain.quasiparticles.qp_hamiltonian_backward(
                 qp_h, h_bar, eqp_bar, eps)
             seed_set[grouped] = 0.0
             eps_bar += eps_h
@@ -172,7 +172,7 @@ class ReversePass:
         # to the mean-field eigenvalue and the shift adds no term of its own.
         st.eps_bar[st.mask] += eqp_bar[st.mask]
         # a curve's Delta(eps_p) moves with eps_p: its slope rides too
-        for idx, _, slope in self.chain.quasiparticles._curve_at(eps):
+        for idx, _, slope in self.chain.quasiparticles.curve_at(eps):
             st.eps_bar[idx] += eqp_bar[idx] * slope
         st.x_bar += x_qp
         # Sigma screened with the BARE factor, so its adjoint lands there
@@ -198,7 +198,7 @@ class ReversePass:
             d_w = split.d
             d_bar_w = self.chain.zero_adjoint(d_w, st.block)
             if st.block is not None:
-                d_bar_w = self._as_rows(d_bar_w, st.block)
+                d_bar_w = self.as_rows(d_bar_w, st.block)
             t_bar = (w_bar + w_bar.T) @ split.t @ split.w
             w_aux, w_bar = split.w, split.t.T @ w_bar @ split.t
         with self.chain.phase('t_screening_backward'):
@@ -238,7 +238,7 @@ class ReversePass:
         # (`add_reaction_field`): no Newton equation renormalizes it, so it
         # rides at the bare adjoint everywhere -- the set's own seed (a
         # degenerate block's mean), H's on a group, and eqp_bar outside the
-        # window, where `_env_static_outside` put it on the BSE diagonal.
+        # window, where `env_static_outside` put it on the BSE diagonal.
         w_env = np.zeros(len(eps))
         w_env[self.chain.resolved.qp_set] = st.seed_set
         for g in (qp_h.groups if qp_h is not None else ()):
@@ -288,7 +288,7 @@ class ReversePass:
             static = st.w_corr
             if lam is not None and self.chain.is_ks:
                 static = np.diag(st.w_corr) + lam - np.diag(np.diag(lam))
-            y_xc, g_xc = self.chain._xc_chain(mf, static)
+            y_xc, g_xc = self.chain.xc_chain(mf, static)
             grad, diags = self.chain.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 st.eps_bar, st.x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,
@@ -301,8 +301,8 @@ class ReversePass:
         """(dOmega_root/dR, diagnostics) off one forward and its Casida
         solution."""
         with self.chain.phase('t_bse_backward'):
-            seeds = self.chain.follower._casida_seeds(shared, solution, root)
-            h_bar = self.chain.quasiparticles._one_body_seed(shared, solution, root)
+            seeds = self.chain.follower.casida_seeds(shared, solution, root)
+            h_bar = self.chain.quasiparticles.one_body_seed(shared, solution, root)
         grad, diags = self.fold_to_nuclei(shared, *seeds,
                                           release_tape=release_tape,
                                           h_bar=h_bar)
@@ -314,8 +314,8 @@ class ReversePass:
         """(d<m|H|n>/dR, diagnostics) off one forward and its Casida
         solution."""
         with self.chain.phase('t_bse_backward'):
-            seeds = self.chain.follower._casida_seeds(shared, solution, n, m)
-            h_bar = self.chain.quasiparticles._one_body_seed(shared, solution, n, m)
+            seeds = self.chain.follower.casida_seeds(shared, solution, n, m)
+            h_bar = self.chain.quasiparticles.one_body_seed(shared, solution, n, m)
         grad, diags = self.fold_to_nuclei(shared, *seeds,
                                           release_tape=release_tape,
                                           h_bar=h_bar)

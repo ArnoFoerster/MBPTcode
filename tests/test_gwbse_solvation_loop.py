@@ -581,7 +581,7 @@ def test_a_walks_commit_reaches_the_chain(mol):
     assert chain.conventions.commits == 0
     commit(surf, moved)
     assert chain.conventions.commits == 1
-    assert np.array_equal(chain._followed[0].atom_coords(), moved.atom_coords())
+    assert np.array_equal(chain.followed[0].atom_coords(), moved.atom_coords())
 
 
 def test_the_solvated_surface_force_is_its_energy_derivative(mol):

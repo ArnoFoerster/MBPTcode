@@ -69,7 +69,7 @@ gradient needs a continuation-free equation; `contour_deformation` supplies it a
 
 The reverse passes differentiate the forward routines the energy routes
 evaluate (`SingleReference.GW.imaginary_time`, `LinearResponse.space_time`,
-the transforms of `Base/utils/time_frequency.py`), imported from there.
+the transforms of `Base/utils/grids/time_frequency.py`), imported from there.
 """
 from dataclasses import dataclass
 

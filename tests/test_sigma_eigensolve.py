@@ -19,7 +19,7 @@ Two checks per sector/system:
      starts from a fixed-seed generic block of 2k+4 vectors, which has weight
      on every copy of a level of multiplicity up to the block size. Its
      default start (unit vectors on the lowest diagonal entries) is not
-     enough: on a cluster's MKL it converged the sixth Ritz pair onto the true
+     enough: under MKL it converged the sixth Ritz pair onto the true
      eigenpair -21.95368 Ha of H2O/sto-3g IP before the second copy of the
      -22.046211 pair entered, and stopped there.
 

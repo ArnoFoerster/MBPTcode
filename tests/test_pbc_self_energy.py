@@ -83,10 +83,11 @@ if __name__ == '__main__':
           f"maxerr={max_err:.2e} {'OK' if ok else 'FAIL'}")
     all_ok &= ok
 
-    # QP linearization runs and is finite
-    qp = pse.qp_energy_g0w0(dfints, eig, 0, nocc - 1, mo_energy=e)
-    ok = np.isfinite(qp)
-    print(f"2. G0W0 QP linearization runs (HOMO QP={qp:.4f} Ha): {'OK' if ok else 'FAIL'}")
+    # the QP equation's root is found and is a quasiparticle
+    got = pse.qp_energy_g0w0(dfints, eig, 0, nocc - 1, mo_energy=e)
+    qp = got['qp']
+    ok = np.isfinite(qp) and got['quasiparticle']
+    print(f"2. G0W0 QP root (HOMO QP={qp:.4f} Ha, Z={got['Z']:.3f}): {'OK' if ok else 'FAIL'}")
     all_ok &= ok
 
     # ---- 3. FINITE-q G0W0@HF QP vs pyscf krgw_ac (fc=False), 1x1x2 mesh ----
@@ -122,7 +123,7 @@ if __name__ == '__main__':
     for kn in range(nk2):
         for n in (nocc2 - 1, nocc2):
             mine = pse.qp_energy_g0w0(df2, eig2, kn, n, mo_energy=e2,
-                                      exchange_minus_vxc=vxc2[kn, n])
+                                      exchange_minus_vxc=vxc2[kn, n])['qp']
             max_gw = max(max_gw, abs(mine - qp_ref[kn, n]))
     # 5 meV, NOT 0.05 Ha: a 0.05 Ha tolerance passes at 36.7 meV while Sigma_c
     # is too large by a factor of nkpts, the residual being misread as

@@ -49,13 +49,7 @@ class SigmaPairs:
                  block_memory_gb=ISDF_TILE_GB, coords=None, screen_r_cut=None):
         occ, virt = get_occ_virt_indices(eps, nocc)
         blocks = sigma_blocks(X_ao.shape[0], D.shape[1], block_memory_gb)
-        far = None
-        if coords is not None and screen_r_cut:
-            idx = _morton_order(np.asarray(coords))
-            X_ao = np.ascontiguousarray(X_ao[idx])
-            D = np.ascontiguousarray(D[idx])
-            far = _far_block_pairs(np.asarray(coords)[idx], blocks,
-                                   screen_r_cut)
+        X_ao, D, far = spatially_ordered(X_ao, D, coords, blocks, screen_r_cut)
         X_mo = X_ao @ mo_coeff
         del X_ao
         # the branches, and the whole diagonal's states, are column ranges of
@@ -394,6 +388,18 @@ def _far_block_pairs(points, blocks, screen_r_cut):
     return sep - rad[:, None] - rad[None, :] > screen_r_cut
 
 
+def spatially_ordered(X_ao, D, coords, blocks, screen_r_cut):
+    """(X_ao, D, far): the grid rows in Morton order and the block pairs
+    `screen_r_cut` drops, where both are given; else the rows as they are and
+    far None. Permuting the grid index relabels a summation index and leaves
+    Sigma unchanged."""
+    if coords is None or not screen_r_cut:
+        return X_ao, D, None
+    idx = _morton_order(np.asarray(coords))
+    return (np.ascontiguousarray(X_ao[idx]), np.ascontiguousarray(D[idx]),
+            _far_block_pairs(np.asarray(coords)[idx], blocks, screen_r_cut))
+
+
 def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
                                       tau_points, omega_in, omega_out,
                                       mu=None, ranges=None, tau_indices=None,
@@ -488,14 +494,10 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
     # Spatial order first, then block: the screen is geometric, so the blocks
     # have to be. Permuting P is a relabelling of a summation index and leaves
     # Sigma unchanged.
-    far = None
-    if coords is not None and screen_r_cut:
-        idx = _morton_order(np.asarray(coords))
-        X_ao = np.ascontiguousarray(X_ao[idx])
-        D = np.ascontiguousarray(D[idx])
+    X_ao, D, far = spatially_ordered(X_ao, D, coords, pairs, screen_r_cut)
+    if far is not None:
         X_mo = X_ao @ mo_coeff
         X_o, X_v = X_mo[:, occ], X_mo[:, virt]
-        far = _far_block_pairs(np.asarray(coords)[idx], pairs, screen_r_cut)
 
     which = range(ntau) if tau_indices is None else np.atleast_1d(tau_indices)
     for k in which:
@@ -567,7 +569,7 @@ def self_energy_branch_sums(pairs, Wt, tau_points):
     """(Sigma^<_pp(tau), Sigma^>_pp(tau)), (2, ntau, nstates), whole on every
     rank: the (tau point, block pair) items in `sweep_waves` windows, each
     rank's items added in their order and the ranks' partials reduced."""
-    size, rank = Wt._size_rank()
+    size, rank = Wt.size_rank()
     ntau = len(tau_points)
     sig = np.zeros((2, ntau, pairs.X_s.shape[1]))    # lesser, greater branch
     for k0, k1 in sweep_waves(ntau, size):
@@ -578,12 +580,6 @@ def self_energy_branch_sums(pairs, Wt, tau_points):
             pairs.add(sig[:, k], slabs.pop(k), tau_points[k],
                       [j for kk, j in mine if kk == k])
     return reduce_sum(sig, Wt.comm)
-
-
-def sigma_ao_to_mo(sigma_ao, mo_coeff):
-    """Full MO-basis Sigma, (nfreq, nmo, nmo) -- what qsGW and scGW need."""
-    return np.einsum('mp,wmn,nq->wpq', mo_coeff, sigma_ao, mo_coeff,
-                     optimize=True)
 
 
 def sigma_ao_to_mo_diagonal(sigma_ao, mo_coeff, states=None):
@@ -637,6 +633,38 @@ def screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=ISDF_TILE_GB,
     return Wt_tau
 
 
+def _screened_sweep(X, D, eps, nocc, grid, states, transforms, mu, memory,
+                    comm, label, audited):
+    """What `selfenergy_block` and `selfenergy_diag` share before their
+    self-energy sums: the branches, the tau split over the ranks, proj(tau)
+    (reduced), Wt(tau) and the states' slices B_p. `memory` is the caller's
+    tile budget in GB; `audited` is the inputs an audited run digests under
+    `label`.
+
+    Returns (comm, nranks, tau_mine, e_o, e_v, occ, virt, proj_tau, Wt_tau,
+    states, Bs)."""
+    Ctw = transforms[0]
+    _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
+    comm = current_comm() if comm is None else comm
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    if nranks > 1:
+        agreement(audited, comm, audit_only=True, label=f'{label} inputs')
+    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
+    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
+                                              mu=mu, tau_indices=tau_mine,
+                                              tile_memory_gb=memory)
+    if nranks > 1:
+        reduce_sum(proj_tau, comm)            # the others' slots are zero
+    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=memory,
+                                      comm=comm)
+    states = np.atleast_1d(states)
+    Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=memory)
+                   for s in states])                        # (nstates, naux, norb)
+    return (comm, nranks, tau_mine, e_o, e_v, occ, virt, proj_tau, Wt_tau,
+            states, Bs)
+
+
 def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
                      intermediate=None, tile_gb=ISDF_TILE_GB, comm=None):
     """Sigma^c_pq(i.omega_out) for p, q in `states`: the self-energy matrix on a
@@ -657,7 +685,7 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
 
     Returns (Sigma, cache) as `selfenergy_diag` does; the cache holds proj(tau),
     Wt(tau) and the state slices B_p, which is what the reverse pass
-    (`gradients.space_time_adjoint.selfenergy_block_backward`) reads.
+    (`gradients.rpa.space_time_adjoint.selfenergy_block_backward`) reads.
 
     comm: an MPI communicator (or `simulated_world` rank) whose ranks all call
     this in lockstep. Three sweeps, each on the axis that carries its own
@@ -670,24 +698,11 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
     None is `current_comm()`; the inputs are identical by construction and an
     audited run compares their digests and the outputs' (`mpi_grid.agreement`).
     """
-    Ctw, C, S = transforms
-    _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
-    comm = current_comm() if comm is None else comm
-    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
-                    else (0, 1))
-    if nranks > 1:
-        agreement((X, D, eps, transforms, states, intermediate), comm,
-                  audit_only=True, label='selfenergy_block inputs')
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
-    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
-                                              mu=mu, tau_indices=tau_mine,
-                                              tile_memory_gb=tile_gb)
-    if nranks > 1:
-        reduce_sum(proj_tau, comm)            # the others' slots are zero
-    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb,
-                                      comm=comm)
-
-    states = np.atleast_1d(states)
+    C, S = transforms[1:]
+    (comm, nranks, tau_mine, e_o, e_v, occ, virt, proj_tau, Wt_tau, states,
+     Bs) = _screened_sweep(X, D, eps, nocc, grid, states, transforms, mu,
+                           tile_gb, comm, 'selfenergy_block',
+                           (X, D, eps, transforms, states, intermediate))
     n_s = len(states)
     keep = np.ones(len(eps), bool)
     if intermediate is not None:
@@ -695,8 +710,6 @@ def selfenergy_block(X, D, eps, nocc, grid, states, transforms, mu,
         keep[np.atleast_1d(intermediate)] = True
     w_occ = np.where(keep[occ], 1.0, 0.0)
     w_virt = np.where(keep[virt], 1.0, 0.0)
-    Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=tile_gb)
-                   for s in states])                        # (nstates, naux, norb)
     ntau = len(grid.tau_points)
     sig_l = np.zeros((ntau, n_s, n_s))
     sig_g = np.zeros((ntau, n_s, n_s))
@@ -735,26 +748,11 @@ def selfenergy_diag(X, D, eps, nocc, grid, states, transforms, mu,
     two branch sums. None is `current_comm()`; an audited run compares the
     digests of the inputs and outputs, as `selfenergy_block` does.
     """
-    Ctw, C, S = transforms
-    _, _, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
-    comm = current_comm() if comm is None else comm
-    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
-                    else (0, 1))
-    if nranks > 1:
-        agreement((X, D, eps, transforms, states), comm, audit_only=True,
-                  label='selfenergy_diag inputs')
-    tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
-    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
-                                              mu=mu, tau_indices=tau_mine,
-                                              tile_memory_gb=tile_gb)
-    if nranks > 1:
-        reduce_sum(proj_tau, comm)            # the others' slots are zero
-    Wt_tau = screened_interaction_tau(proj_tau, grid, Ctw, tile_gb=tile_gb,
-                                      comm=comm)
-
-    states = np.atleast_1d(states)
-    Bs = np.stack([three_index_slice(X, D, int(s), tile_gb=tile_gb)
-                   for s in states])                        # (nstates, naux, norb)
+    C, S = transforms[1:]
+    (comm, nranks, tau_mine, e_o, e_v, occ, virt, proj_tau, Wt_tau, states,
+     Bs) = _screened_sweep(X, D, eps, nocc, grid, states, transforms, mu,
+                           tile_gb, comm, 'selfenergy_diag',
+                           (X, D, eps, transforms, states))
     ntau = len(grid.tau_points)
     sig_l = np.zeros((ntau, len(states)))
     sig_g = np.zeros((ntau, len(states)))
@@ -772,5 +770,3 @@ def selfenergy_diag(X, D, eps, nocc, grid, states, transforms, mu,
         agreement((sigma, Bs), comm, audit_only=True,
                   label='selfenergy_diag outputs')
     return sigma, (proj_tau, Wt_tau, Bs)
-
-

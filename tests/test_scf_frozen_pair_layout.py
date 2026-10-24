@@ -77,7 +77,7 @@ def _screen(mol):
 
 
 def _layout(mol):
-    return separable_ri.test_set_layout(mol, isdf_grid(mol, auxbasis=AUXBASIS, counts=g1(mol)))
+    return separable_ri.fit_test_set_layout(mol, isdf_grid(mol, auxbasis=AUXBASIS, counts=g1(mol)))
 
 
 @pytest.mark.xfail(strict=True, reason=(

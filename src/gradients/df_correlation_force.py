@@ -19,15 +19,18 @@ The orbitals. For C -> C (1 + kappa) (kappa general), dL/dkappa_rp = Y_rp,
            + Y_extra_rp,
 
 Gs2 = Gamma + Gamma^T over (pq), G[D] = J[D] - K[D]/2 in the SCF's JK fit.
-L = E_c + sum z_ai f_ai + sum z'_ci f_ci (frozen core c) is made stationary by
-the Z-vector (src.Base.pyscf.cphf) and z'_ci = (Y_ic - Y_ci) / (e_c - e_i);
-gamma then carries (z + z^T)/2 and (z' + z'^T)/2, gamma_AO = C gamma C^T is
-dE_c/dh (the relaxed correlation density), and Y is symmetric (returned as a
-check). The overlap enters through W = (Y + Y^T)/4.
+L = E_c + sum Lambda_pq f_pq over the virtual-occupied and frozen-core-active
+pairs is made stationary by the one Z-vector entry of every gradient
+(`multipliers.solve_orbital_multipliers`, Y[Lambda] from
+`multipliers.rotation_gradient`); the active occupied and virtual pairs need
+no multiplier, so Y is symmetric there by construction (returned as a check).
+gamma then carries Lambda, gamma_AO = C gamma C^T is dE_c/dh (the relaxed
+correlation density), and the overlap enters through W = (Y + Y^T)/4.
 
 The force of E_c at fixed orbitals, the orbitals' response through W:
     sum gamma_AO dh/dR - sum W_AO dS/dR             (one-electron skeleton)
-  + sum gamma_AO G'[D_HF]                           (the SCF's JK fit)
+  + sum gamma_AO G'[D_HF]                           (the SCF's JK fit,
+                                                     `skeleton_tiles.fitted_fock_skeleton`)
   + 2 sum Gamma3 dJ - sum Gamma2 dV                 (the correlation fit)
     Gamma3_pq,Q = (1/2) sum_P Gs^P_pq X_PQ,  Gamma2 = K^T Gamma3,  K = J V^-1,
 with Gs = Gs2 / 2 and D_HF = 2 C_o C_o^T. dh/dR is the VACUUM core Hamiltonian's:
@@ -40,13 +43,12 @@ import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf import scf
 
-from src.Base.numerics.constants import CORRELATION_CPHF_TOL, CPHF_MAX_CYCLE
-from src.Base.numerics.numerics import Numerics
-from src.Base.pyscf import cphf
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator)
-from src.gradients.df_assembly import two_electron_skeleton_df
+from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
 from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
+from src.gradients.skeleton_tiles import fitted_fock_skeleton
 
 
 class RIFactors:
@@ -89,96 +91,81 @@ def mp2_pieces(B, eps, nf, nocc):
     return e, gamma, Gam
 
 
-def _jk(mf):
-    """get_jk of mf's own interaction (its JK fit), no environment."""
-    m = scf.RHF(mf.mol).density_fit(auxbasis=mf.with_df.auxbasis)
-    m.with_df = mf.with_df
-    return m.get_jk
+def jk_fit(mf):
+    """The auxiliary basis of mf's JK fit. A correlation force takes the
+    Fock skeleton of that fit, so a mean field without one is refused."""
+    with_df = getattr(mf, 'with_df', None)
+    if with_df is None:
+        raise ValueError('the DF correlation force needs a density-fitted mean '
+                         'field (mf.density_fit()): its JK skeleton is the fit\'s, '
+                         f'and this {type(mf).__name__} has none')
+    return with_df.auxbasis
 
 
-def relax(mf, mol, B, gamma0, Gam, nf, Y_extra=None, tol=CORRELATION_CPHF_TOL,
-          max_cycle=CPHF_MAX_CYCLE):
+def scf_kernel(mf):
+    """G(x) = J[x] - K[x]/2 of mf's own interaction (its JK fit, or the exact
+    integrals when it has none), no environment, built serially whatever the
+    mean field's distribution."""
+    with_df = getattr(mf, 'with_df', None)
+    m = scf.RHF(mf.mol)
+    if with_df is not None:
+        m = m.density_fit(auxbasis=with_df.auxbasis)
+        m.with_df = with_df
+
+    def kernel(x):
+        vj, vk = m.get_jk(mf.mol, x, hermi=1)
+        return vj - 0.5 * vk
+    return kernel
+
+
+def relax(mf, mol, B, gamma0, Gam, nf, Y_extra=None, numerics=None, flags=None):
     """(gamma, Y): the relaxed gamma (MO, multipliers included) and the
     orbital gradient of the stationary Lagrangian (module docstring)."""
     YG = np.einsum('pqP,rqP->rp', Gam + Gam.transpose(1, 0, 2), B, optimize=True)
     if Y_extra is not None:
         YG = YG + Y_extra
-    return relax_gradient(mf, mol, YG, gamma0, nf, tol, max_cycle)
+    return relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
 
 
-def relax_gradient(mf, mol, YG, gamma0, nf, tol=CORRELATION_CPHF_TOL,
-                   max_cycle=CPHF_MAX_CYCLE):
+def relax_gradient(mf, mol, YG, gamma0, nf, numerics=None, flags=None):
     """relax from the Gamma part of the orbital gradient, YG_rp = sum_qP
-    Gs2^P_pq B^P_rq (+ Y_extra), however it was assembled."""
+    Gs2^P_pq B^P_rq (+ Y_extra), however it was assembled: the multipliers of
+    the virtual-occupied and frozen-core-active pairs (module docstring),
+    their tolerances from `numerics`, a short solve flagged into `flags`."""
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)
     nmo, nocc = C.shape[1], mol.nelectron // 2
-    get_jk = _jk(mf)
+    kernel, fock = scf_kernel(mf), np.diag(eps)
 
     def Y_of(gam):
-        vj, vk = get_jk(mol, C @ gam @ C.T, hermi=1)
-        Y = YG + 2.0 * eps[:, None] * gam
-        Y[:, :nocc] += 4.0 * (C.T @ (vj - 0.5 * vk) @ C)[:, :nocc]
-        return Y
-
-    gamma = gamma0.copy()
-    if nf:
-        zc = ((YG[nf:nocc, :nf].T - YG[:nf, nf:nocc])
-              / (eps[:nf, None] - eps[None, nf:nocc]))
-        gamma[:nf, nf:nocc] += 0.5 * zc
-        gamma[nf:nocc, :nf] += 0.5 * zc.T
-    Y0 = Y_of(gamma)
-    Xvo = Y0[nocc:, :nocc] - Y0[:nocc, nocc:].T
-    Co, Cv = C[:, :nocc], C[:, nocc:]
-
-    def fvind(z):
-        z = z.reshape(nmo - nocc, nocc)
-        dm = Cv @ z @ Co.T
-        vj, vk = get_jk(mol, dm + dm.T, hermi=1)
-        return (Cv.T @ (2.0 * vj - vk) @ Co).ravel()
-    e_ai = eps[nocc:, None] - eps[None, :nocc]
-    z = cphf.solve(fvind, e_ai, -Xvo, numerics=Numerics(
-        scf={'cphf_tol': tol, 'cphf_max_cycle': max_cycle}))
-    z = z.reshape(nmo - nocc, nocc)
-    gamma[nocc:, :nocc] += 0.5 * z
-    gamma[:nocc, nocc:] += 0.5 * z.T
+        return YG + rotation_gradient(C, fock, gam, nocc, kernel)
+    free = np.zeros((nmo, nmo), bool)
+    free[:nocc, nocc:] = True
+    free[:nf, nf:nocc] = True
+    Lam, _ = solve_orbital_multipliers(
+        lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_of(gamma0), eps,
+        numerics=numerics, free=free, flags=flags)
+    gamma = gamma0 + Lam
     return gamma, Y_of(gamma)
 
 
-def _jk_skeleton(mol, mf, Dc, Dhf):
-    """(auxmol, Gamma3, Gamma2) of sum Dc G'[Dhf] in the SCF's JK fit for
-    two_electron_skeleton_df: Gamma4 = Dc (x) Dhf - (1/2) exchange,
-    symmetrized over both pairs and the pair swap."""
-    auxmol = pyscf_df.addons.make_auxmol(mol, mf.with_df.auxbasis)
-    J = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1')
-    J = J.reshape(mol.nao, mol.nao, auxmol.nao)
-    V = auxmol.intor('int2c2e')
-    K = np.linalg.solve(V, J.reshape(-1, auxmol.nao).T).T.reshape(J.shape)
-    cD = np.einsum('mnQ,mn->Q', K, Dc)
-    cP = np.einsum('mnQ,mn->Q', K, Dhf)
-    G3 = 0.5 * (Dc[:, :, None] * cP + Dhf[:, :, None] * cD)
-    ex = np.einsum('ml,lsQ,sn->mnQ', Dc, K, Dhf, optimize=True)
-    G3 -= 0.25 * (ex + ex.transpose(1, 0, 2))
-    G2 = np.einsum('mnP,mnQ->PQ', K, G3, optimize=True)
-    return auxmol, G3, 0.5 * (G2 + G2.T)
-
-
-def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None):
+def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
+                      flags=None):
     """(force (natm, 3) of E_c, gamma (MO, relaxed), max |Y - Y^T|)."""
     C = np.asarray(mf.mo_coeff)
     nocc = mol.nelectron // 2
-    gamma, Y = relax(mf, mol, ri.B, gamma0, Gam, nf, Y_extra)
+    gamma, Y = relax(mf, mol, ri.B, gamma0, Gam, nf, Y_extra, numerics, flags)
     asym = float(np.max(np.abs(Y - Y.T)))
     W = 0.25 * (Y + Y.T)
     gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
     f1 = one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao])[0]
-    Dhf = 2.0 * C[:, :nocc] @ C[:, :nocc].T
-    auxjk, G3jk, G2jk = _jk_skeleton(mol, mf, gamma_ao, Dhf)
-    fjk = two_electron_skeleton_df(mol, auxjk, [G3jk], [G2jk])[0]
+    Co = C[:, :nocc]
+    auxjk = pyscf_df.addons.make_auxmol(mol, jk_fit(mf))
+    fjk = fitted_fock_skeleton(mol, auxjk, gamma_ao, 2.0 * Co @ Co.T,
+                               occ=np.sqrt(2.0) * Co, exchange=1.0)
     Gs = 0.5 * (Gam + Gam.transpose(1, 0, 2))
     G3 = 0.5 * np.einsum('pqP,PQ->pqQ', Gs, ri.X, optimize=True)
-    K = np.linalg.solve(ri.V, ri.J.reshape(-1, ri.V.shape[0]).T).T.reshape(ri.J.shape)
-    G2 = np.einsum('pqP,pqQ->PQ', K, G3, optimize=True)
+    G2 = np.einsum('pqP,pqQ->PQ', fit_coefficients(ri.J, ri.V), G3, optimize=True)
     G3_ao = np.einsum('mp,nq,pqQ->mnQ', C, C, G3, optimize=True)
     fri = two_electron_skeleton_df(mol, ri.auxmol, [G3_ao], [0.5 * (G2 + G2.T)])[0]
     return f1 + fjk + fri, gamma, asym
@@ -196,10 +183,13 @@ def hf_force(mf):
     return g.kernel()
 
 
-def mp2_force(mf, mol, frozen, auxbasis, excited=None):
+def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None):
     """(dE/dR (natm, 3), (e_mp2, gamma (MO, relaxed), max |Y - Y^T|, extra)) of
     E_HF + E_MP2 on the dense reference; excited(C, nocc, nmo) -> (gamma,
-    Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout."""
+    Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout.
+    numerics: the caller's (the Z-vector's tolerances); flags: the list a
+    short Z-vector solve appends its flag to."""
+    jk_fit(mf)
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
     ri = RIFactors(mol, mf, auxbasis)
@@ -208,5 +198,6 @@ def mp2_force(mf, mol, frozen, auxbasis, excited=None):
     if excited is not None:
         g1, G1, Y_extra, extra = excited(C, nocc, nmo)
         gamma, Gam = gamma + g1, Gam + G1
-    fc, gam, asym = correlation_force(mol, mf, ri, gamma, Gam, frozen, Y_extra)
+    fc, gam, asym = correlation_force(mol, mf, ri, gamma, Gam, frozen, Y_extra,
+                                      numerics, flags)
     return hf_force(mf) + fc, (e2, gam, asym, extra)

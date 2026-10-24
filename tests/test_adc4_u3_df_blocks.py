@@ -3,10 +3,9 @@
 Why
 ---
 Every emitted block is to be spin-restricted AND Laplace AND DF AND
-matrix-free. U^(3) had the first, second and (since the matrix-free apply) the
-fourth, but NO `_df_blocks` twin -- so it consumed the full 4-index g and DF
-could not be used end-to-end anywhere in ADC(4). `generate_adc4_u3_restricted(
-df=True)` now emits adc4_u3_blocks_restricted_df.py by composing
+matrix-free. Without a `_df_blocks` twin U^(3) would consume the full 4-index
+g and DF could not be used end-to-end anywhere in ADC(4).
+`generate_adcn.generate_adc_u(3, restricted=True, df=True)` emits the DF twin by composing
 df_codegen.dress_integral_factor with the same restricted emitter.
 
 Test method (same as test_sigma_codegen_restricted_df): feed the DF functions
@@ -66,7 +65,7 @@ def main():
                   "-- RI is exact here, so any block mismatch is codegen")
             all_ok &= ok
 
-        pool = {**r._rargs, **r._amplitude_pool()}
+        pool = {**r.rargs, **r.amplitude_pool()}
         pool_df = {**pool, 'B_aa': B_aa, 'B_bb': B_bb}
 
         names = [n for n in dir(dense) if n.startswith(('u3_', 's3_'))]

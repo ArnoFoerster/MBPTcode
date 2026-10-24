@@ -100,7 +100,7 @@ def check_gwcc_vs_paper():
 
 
 def check_ccsd_screening_is_refused():
-    """EOM-CCSD is retired from MBPTcode (pyscf has it); CC
+    """EOM-CCSD is not in MBPTcode (pyscf has it); CC
     screening at the CCSD level is refused at the EOM build, by name."""
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()

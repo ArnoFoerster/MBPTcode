@@ -71,7 +71,7 @@ def chain_on(water, nfreq_cd=None, **route):
     mol, mf = water
     chain = ExcitedStateChain(mol, factory, mf=mf,
                               numerics=g1_numerics(mol, numerics_of({**route, 'nfreq_cd': nfreq_cd})))
-    x_mo, d, eps, mu = chain._factors_for(mol, mf)[:4]
+    x_mo, d, eps, mu = chain.factors_for(mol, mf)[:4]
     return chain, (x_mo, d, eps, mu, 0.0, np.zeros(len(chain.resolved.qp_set)))
 
 

@@ -1,7 +1,7 @@
 """Spin-orbit coupling between excited states: <S_I|H_SO|T_J>.
 
 The element the reverse-intersystem-crossing rate needs, and the last of the
-five inputs `rates.py` was written around. It is computed from the Casida
+five inputs `photophysics/rates.py` was written around. It is computed from the Casida
 eigenvectors and the mean field alone:
 
     <S_I|H_SO^eta|T_J> = Tr[ h_SO^eta . gamma^IJ ]
@@ -56,7 +56,7 @@ WHAT COMES OUT is the rotational invariant
 which is what the golden rule wants (the sum over the three degenerate triplet
 sublevels) and which, being a rotational invariant of a real vector, is free of
 the phase convention the literature disagrees about for the M = +-1 pair. The
-per-sublevel elements are available through `sublevel_elements`. `rates.py` is
+per-sublevel elements are available through `sublevel_elements`. `photophysics/rates.py` is
 handed |V|, not a rate: it averages a crossing out of a triplet over the three
 thermalized initial sublevels (|V|^2 / 3; Bredas 2017 keeps the sum).
 """
@@ -322,7 +322,7 @@ def sublevel_elements(t_vec, spin_factor):
 
 
 def coupling(t_vec, spin_factor):
-    """|V| = sqrt(sum_M |<S|H_SO|T,M>|^2) in Hartree -- what `rates.py` takes.
+    """|V| = sqrt(sum_M |<S|H_SO|T,M>|^2) in Hartree -- what `photophysics/rates.py` takes.
 
     A rotational invariant of a real three-vector, so no phase convention and
     no molecular orientation can move it.
@@ -342,6 +342,28 @@ def interstate_vectors(h_mo, nocc, x_s, y_s, x_t, y_t):
                 None if y_s is None else y_s[:, i],
                 None if y_t is None else y_t[:, j])
     return out
+
+
+def soc_vectors(h_mo, nocc, singlet, triplet):
+    """The spin-factored real T_eta = <S|H_SO^eta|T> (Hartree) whose norm is
+    the spin-orbit coupling (`coupling`), the one place the spin factor is
+    applied to a vector: singlet (X, Y) of the singlet roots, or None for the
+    ground state (GROUND_SPIN_FACTOR); triplet (X, Y) of the triplet roots
+    (EXCITED_SPIN_FACTOR between excited states). One root of each, as
+    vectors, gives (3,) (`interstate_element`, `ground_state_element`);
+    roots as the solver's (n_ov, nroots) columns give (n_s, n_t, 3)
+    (`interstate_vectors`). Y None is Tamm-Dancoff."""
+    xt, yt = triplet
+    if singlet is None:
+        xt, yt = (None if a is None else np.asarray(a, float).ravel()
+                  for a in (xt, yt))
+        return GROUND_SPIN_FACTOR * ground_state_element(h_mo, nocc, xt, yt)
+    xs, ys = singlet
+    if np.ndim(xs) == 2:
+        return interstate_vectors(h_mo, nocc, xs, ys, xt, yt) * EXCITED_SPIN_FACTOR
+    xs, ys, xt, yt = (None if a is None else np.asarray(a, float).ravel()
+                      for a in (xs, ys, xt, yt))
+    return EXCITED_SPIN_FACTOR * interstate_element(h_mo, nocc, xs, xt, ys, yt)
 
 
 def slope_from_squares(v2_plus, v2_minus, v2_centre, dq):

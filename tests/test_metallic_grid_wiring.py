@@ -42,6 +42,7 @@ from pyscf import gto as mgto, scf as mscf
 from pyscf.pbc import gto as pgto, scf as pscf
 from pyscf.pbc.scf import addons as pbc_addons
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
                                             self_energy_range,
                                             thermal_e_min)
@@ -335,9 +336,9 @@ def check_pade_cap_is_sized_from_sigma_not_from_w():
     ia.ir_continuation_order = lambda b, w, **kw: (seen.append((b, w)),
                                                    real_order(b, w, **kw))[1]
     try:
-        ia.solve_qp_energy_imaginary_axis(mf, mol, mol.nelectron // 2,
-                                          mol.nelectron // 2 - 1, nfreq=12,
-                                          beta=100.0)
+        ia.solve_qp_energy_imaginary_axis(
+            mf, mol, mol.nelectron // 2, mol.nelectron // 2 - 1,
+            numerics=Numerics(imagfreq={'nfreq': 12}), beta=100.0)
     finally:
         ia.ir_continuation_order = real_order
 

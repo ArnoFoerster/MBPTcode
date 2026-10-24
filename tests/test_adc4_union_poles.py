@@ -4,8 +4,8 @@ Both constructions are the two-sector ISR-ADC(4) supermatrix plus one object
 built from the generated 2h1p x 2p1h cross block X^(2): the block itself
 (construction='union') or its order-3 image on the k1 couplings
 (construction='diagrammatic', cross_block_decoupling). Gates, on linear H4
-(r = 1.0) and LiH in sto-3g with the SCF converged to the f[o,v] floor, the
-oracle's own systems (validation/lambda_oracle/cross_block_test.py):
+(r = 1.0) and LiH in sto-3g with the SCF converged to the f[o,v] floor,
+against the union-space oracle (tests/union_space_oracle.py):
 
   1. static self-energy: the production Sigma(inf) through order 4 (v times
      the second- plus third-order RSPT density, dense spin-orbital) equals the
@@ -47,8 +47,8 @@ from src.SingleReference.ADC.delta_u3_dressing import delta_u3_rows
 from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_block_eri)
-from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.generated_runtime import requires_runtime
+from tests import union_space_oracle as CB
 
 pytestmark = requires_runtime(4)
 
@@ -85,7 +85,7 @@ def _dense(op):
     return np.column_stack([op.matvec(e) for e in np.eye(n)])
 
 
-def _principal(M, norb, CB):
+def _principal(M, norb):
     """Principal IP/EA poles (strength > PRINCIPAL_STRENGTH) of a symmetric supermatrix."""
     asym = float(np.max(np.abs(M - M.T)))
     w, V = np.linalg.eigh(0.5 * (M + M.T))
@@ -115,12 +115,11 @@ def _alpha_indices(nocc, norb):
 def _data(name):
     if name in _CACHE:
         return _CACHE[name]
-    CB = _oracle()
-    sysd = _build_system(CB, name)
+    sysd = CB.build_system(name)
     eps, g, nocc, norb = sysd['eps'], sysd['g'], sysd['nocc'], sysd['norb']
     us = CB.UnionSpace(sysd)
     psi, E, nser = us.rspt_series(NORD)
-    Ssr, Msr, _, _, _ = us.series_matrices(psi, E, nser, NORD)
+    Ssr, Msr = us.series_matrices(psi, E, nser, NORD)
     orb = us.idx[(0, 'o')]
     F = [Msr[k][np.ix_(orb, orb)] for k in range(NORD)]
     sf = {'union': CB.SeriesFold(us, Ssr, Msr, NORD, 'union', us.kmax),
@@ -135,7 +134,7 @@ def _data(name):
         Bs = sum(B)[:, keep]
         Ds = sum(D)[np.ix_(keep, keep)]
         Fs = sum(F)
-        oracle[mode] = _principal(np.block([[Fs, Bs], [Bs.T, Ds]]), norb, CB)
+        oracle[mode] = _principal(np.block([[Fs, Bs], [Bs.T, Ds]]), norb)
     static = _exact_static(eps, g, nocc)
     shim = types.SimpleNamespace(eps=eps, g=g, norb=norb)
     prod = {}
@@ -143,7 +142,7 @@ def _data(name):
         op, _, _ = build_sigma_operator(shim, nocc, 'adc4', static_correction=static,
                                         construction=c)
         prod[c] = _dense(op)
-    d = dict(CB=CB, sysd=sysd, eps=eps, g=g, nocc=nocc, norb=norb, F=F, oracle=oracle,
+    d = dict(sysd=sysd, eps=eps, g=g, nocc=nocc, norb=norb, F=F, oracle=oracle,
              static=static, prod=prod, decouple_resid=resid)
     _CACHE[name] = d
     return d
@@ -163,8 +162,8 @@ def test_static_self_energy_matches_oracle_series(name):
 @pytest.mark.parametrize('construction', CONSTRUCTIONS)
 def test_production_poles_match_oracle(name, construction):
     d = _data(name)
-    CB, norb = d['CB'], d['norb']
-    mine = _principal(d['prod'][construction], norb, CB)
+    norb = d['norb']
+    mine = _principal(d['prod'][construction], norb)
     ref = d['oracle'][construction]
     diff = _pole_diff(mine, ref)
     print(f"{name} {construction}: symmetry {mine['asym']:.1e}; IP {mine['ip']} "
@@ -178,7 +177,7 @@ def test_production_poles_match_oracle(name, construction):
 @pytest.mark.parametrize('construction', CONSTRUCTIONS)
 def test_restricted_operator_matches_spin_orbital(name, construction):
     d = _data(name)
-    CB, nocc, norb = d['CB'], d['nocc'], d['norb']
+    nocc, norb = d['nocc'], d['norb']
     mol, mf = d['sysd']['mol'], d['sysd']['mf']
     eps_sp = get_orbital_energies(mf, representation='spatial')
     ga, gb, gab = get_antisymmetrized_spin_block_eri(mol, mf)
@@ -186,8 +185,8 @@ def test_restricted_operator_matches_spin_orbital(name, construction):
     alpha = _alpha_indices(nocc, norb)
     f_orb = np.diag(eps_sp) + d['static'][np.ix_(alpha, alpha)]
     op, _ = restricted_dyson_operator(r, 'adc4', f_orb=f_orb, construction=construction)
-    mine = _principal(_dense(op), len(eps_sp), CB)
-    ref = _principal(d['prod'][construction], norb, CB)
+    mine = _principal(_dense(op), len(eps_sp))
+    ref = _principal(d['prod'][construction], norb)
     diff = _pole_diff(mine, ref)
     print(f"{name} {construction}: restricted symmetry {mine['asym']:.1e}; "
           f"|restricted - spin-orbital| = {diff:.2e}")
@@ -234,8 +233,7 @@ def test_decoupled_rows_equal_delta_u3_and_series(name):
 
 
 def test_symmetry_zero_system_union_equals_two_sector():
-    CB = _oracle()
-    sysd = _build_system(CB, 'H4rect')
+    sysd = CB.build_system('H4rect')
     eps, g, nocc, norb = sysd['eps'], sysd['g'], sysd['nocc'], sysd['norb']
     X = BuildSuperMatrixADCn(eps, g, nocc).cross_block_generated(2)
     shim = types.SimpleNamespace(eps=eps, g=g, norb=norb)
@@ -250,7 +248,7 @@ def test_symmetry_zero_system_union_equals_two_sector():
     # that floor only; the poles must be unchanged to the same floor
     d_union = float(np.max(np.abs(M['union'] - M['twosector'])))
     d_diag = float(np.max(np.abs(M['diagrammatic'] - M['twosector'])))
-    poles = {c: _principal(M[c], norb, CB) for c in M}
+    poles = {c: _principal(M[c], norb) for c in M}
     dp = max(_pole_diff(poles['union'], poles['twosector']),
              _pole_diff(poles['diagrammatic'], poles['twosector']))
     print(f"H4rect: |X2| = {float(np.max(np.abs(X))):.1e}; |union - two-sector| = {d_union:.1e}, "
@@ -262,11 +260,11 @@ def test_symmetry_zero_system_union_equals_two_sector():
 
 def test_restricted_solver_union_end_to_end():
     d = _data('H4lin_r1.0')
-    CB, nocc, norb = d['CB'], d['nocc'], d['norb']
+    nocc, norb = d['nocc'], d['norb']
     mol, mf = d['sysd']['mol'], d['sysd']['mf']
     alpha = _alpha_indices(nocc, norb)
     static_sp = d['static'][np.ix_(alpha, alpha)]
-    ref = _principal(d['prod']['union'], norb, CB)
+    ref = _principal(d['prod']['union'], norb)
     solver = ADCSolverRestricted(mf, mol=mol, level='adc4', pdaggerq=True,
                                  construction='union')
     e, _ = solver.solve(static_correction=static_sp, homo_index=nocc // 2 - 1)

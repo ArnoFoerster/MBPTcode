@@ -1,5 +1,4 @@
-"""Increment 3 gate of the spin-free ADC(2)-(5) plan
-the restricted
+"""Spin-free ADC(3) generator check: the restricted
 (spin-blocked, RHF) BuildSuperMatrixADCnRestricted.build_supermatrix_adc3
 assembles the alpha-Dyson-sector Dyson-ADC(3) supermatrix -- F + U through
 order 2 (the spin-blocked order-2 dressed U^(2) splits + the same class-GS
@@ -8,14 +7,14 @@ from SPATIAL spin-block tensors and restricted MPn amplitudes.
 
 Validated against TWO independent references:
 1. The spin-orbital GENERATED ADC(3) supermatrix
-   (BuildSuperMatrixADCn.build_supermatrix_adc3, itself == the validated
-   adc_spinorbital at 1e-15): every restricted alpha-sector eigenvalue is
+   (BuildSuperMatrixADCn.build_supermatrix_adc3, itself == the hand-written
+   spin-orbital ADCSolverUnrestricted at 1e-15): every restricted alpha-sector eigenvalue is
    a spin-orbital ADC(3) pole.
-2. restricted.py's validated CSF-basis ADC(3) supermatrix: every CSF
+2. ADCSolverRestricted's CSF-basis ADC(3) supermatrix: every CSF
    pole is an eigenvalue of the restricted determinant-basis matrix (the
    alpha-sector determinant space contains the doublet CSF space).
 
-The order-2 amplitude convention is the crux (fixed here): the l1/l2 dressed
+The order-2 amplitude convention is the crux: the l1/l2 dressed
 splits index the lambda amplitudes in the pdaggerq 'l{rank}' tag layout
 (to_l: pure blocks reverse the vir side + sign, mixed blocks a
 plain occ<->vir transpose) -- a plain transpose is wrong for abab.

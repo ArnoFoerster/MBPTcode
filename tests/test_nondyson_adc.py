@@ -5,8 +5,8 @@ over the generated adc{N}_nd{m}_k{i}k{j} block modules).
      ADC(3) (Banerjee and Sokolov, J. Chem. Phys. 151, 224112 (2019)) on
      LiH, H2O and BeH2 in sto-3g: every pyscf root (principal and satellite)
      has a partner in the spin-orbital spectrum to the Davidson tolerance.
-  2. The lambda oracle's SectorISR (validation/lambda_oracle/cross_block_test.py,
-     the same construction in the determinant space, skipped when absent) on
+  2. The union-space oracle's SectorISR (tests/union_space_oracle.py, the same
+     construction in the determinant space) on
      linear H4 and LiH, n = 2..5: every effective block (class-GS + Loewdin
      orthonormalized, per pair and order) equals the oracle's after the
      configuration map (IP class k: (-1)^(k(k+1)/2) from the descending hole
@@ -29,8 +29,8 @@ from src.SingleReference.ADC.nondyson_isr import NonDysonISR
 from src.SingleReference.ADC.precursor_classes import class_configs
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_integrals)
-from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.generated_runtime import requires_runtime
+from tests import union_space_oracle as CB
 
 pytestmark = requires_runtime(5)
 
@@ -117,12 +117,11 @@ def _config_map(us, nd_oracle, nocc, norb, sector, k):
 def _oracle_data(name):
     if name in _CACHE:
         return _CACHE[name]
-    CB = _oracle()
-    sysd = _build_system(CB, name)
+    sysd = CB.build_system(name)
     us = CB.UnionSpace(sysd)
     nord = NMAX + 1
     psi, E, nser = us.rspt_series(nord)
-    d = dict(CB=CB, sysd=sysd, us=us, psi=psi, E=E, nser=nser, nord=nord, oracle={}, prod={})
+    d = dict(sysd=sysd, us=us, psi=psi, E=E, nser=nser, nord=nord, oracle={}, prod={})
     for sector in ('IP', 'EA'):
         d['oracle'][sector] = CB.SectorISR(us, psi, E, nser, nord, sector)
         d['prod'][sector] = NonDysonISR(sysd['eps'], sysd['g'], sysd['nocc'], sector)
@@ -158,7 +157,7 @@ def test_effective_blocks_match_oracle(name, sector):
 @pytest.mark.parametrize('sector', ['IP', 'EA'])
 def test_spectra_and_taylor_pin_match_oracle(name, sector):
     d = _oracle_data(name)
-    CB, orc, prod, us = d['CB'], d['oracle'][sector], d['prod'][sector], d['us']
+    orc, prod, us = d['oracle'][sector], d['prod'][sector], d['us']
     nocc = us.nocc
     no_sp = nocc // 2
     probes = [no_sp - 1, no_sp - 2] if sector == 'IP' else [nocc]

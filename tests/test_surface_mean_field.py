@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.properties.optimize import derived_walk
 from src.environments.environment import PointCharges
 from src.Base.numerics.numerics import Numerics
 from src.environments.solvent_screening import SolventScreening
@@ -164,7 +165,8 @@ def test_a_relaxed_record_is_on_the_surface_it_was_relaxed_on(water, solvated):
     its `e_scf` from, so a bare one there puts the Huang-Rhys factors on a
     different surface from the geometry.
     """
-    record = relax_state(solvated, water, engine='cartesian', max_cycle=0,
+    record = relax_state(solvated, water, engine='cartesian',
+                         numerics=derived_walk(solvated, 'a capped test walk', max_cycle=0),
                          verbose=False)
     assert hasattr(record['mf'], 'with_solvent'), 'the record came back bare'
     assert record['e_scf'] == pytest.approx(float(record['mf'].e_tot), rel=1e-14)

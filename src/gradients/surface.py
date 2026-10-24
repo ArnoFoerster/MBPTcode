@@ -43,9 +43,9 @@ from src.Base.utils.parallel.mpi_grid import lockstep
 # root, which half of a composed surface owns the spectrum, which root it
 # followed to a geometry, and the walk's acceptance of a geometry.
 #
-# Below the property layer, because both a manifold in `src.gradients` and the
-# property routines in `src.properties` drive a surface through it; a copy on
-# either side would be two answers to which half owns the spectrum.
+# Here, below the property layer, because both a manifold in `src.gradients`
+# and the property routines in `src.properties` drive a surface through it; a
+# copy on either side would be two answers to which half owns the spectrum.
 
 def root_attribute(surface):
     """The name of the attribute that selects `surface`'s root: its class's
@@ -97,6 +97,13 @@ def driven_chain(surface):
     return surface if half is None else getattr(surface, half)
 
 
+def ground_half(surface):
+    """The ground-state half of a composed surface, the attribute its class
+    declares as `GROUND_HALF`; None for a surface that is not composed."""
+    half = getattr(type(surface), 'GROUND_HALF', None)
+    return None if half is None else getattr(surface, half)
+
+
 def followed_root(surface, mol):
     """The root `surface` followed at `mol`: the newest root-following entry
     evaluated nearest to `mol`, the constructor's `state` with none.
@@ -131,12 +138,13 @@ def commit(surface, mol):
         accept(mol)
 
 
-#: What a property may ask of a surface beyond `PotentialEnergySurface`'s
-#: members (total_energy, total_gradient, refreeze, label, mol0), by name. A
-#: method that provides an ingredient is interchangeable with any other that
-#: does (GW-BSE, ADC); one that lacks it is refused by name at the call
-#: that needs it (`require`), never by a type check deeper down.
-INGREDIENTS = {
+#: What a property may ask of a surface, by name, and what each name is: the
+#: vocabulary of the ingredients a surface class declares it provides (its
+#: class attribute `INGREDIENTS`, which `provides` reads). A method that
+#: provides an ingredient is interchangeable with any other that does
+#: (GW-BSE, ADC); one that lacks it is refused by name at the call that needs
+#: it (`require`), never by a type check deeper down.
+INGREDIENT_DOCS = {
     'mean_field': 'mean_field(mol, mf) -> (mol, mf), the mean field its energy '
                   'is evaluated on',
     'energy': 'energy(mol, mf) -> (E_0 + Omega, E_0, Omega) of an excited '
@@ -160,20 +168,27 @@ INGREDIENTS = {
     'composed': 'composed(ground, excited), the total of a composed surface',
     'solver_used': 'solver_used(n_ov), the eigensolver a chain resolves',
     'spin': 'spin, the spin of the states a chain solves',
+    'diagnostics': 'diagnostics(mol, mf=None, posteriori=False) -> {record '
+                   'field: value}, the method\'s own bookkeeping of its state '
+                   'at mol that a record carries beside the energies',
+    'scf_flags': 'scf_flags, the mean fields it read with |F_ia| above '
+                 'scf_force_tol, warned about and carried on',
+    'coupling': 'coupling(m, n) -> (d_mn (natm, 3) in 1/Bohr, diagnostics), '
+                'the derivative coupling between two states of one evaluation',
 }
 
 
 class MissingIngredient(TypeError):
-    """A property asked a surface for an ingredient (`INGREDIENTS`) its method
+    """A property asked a surface for an ingredient (`INGREDIENT_DOCS`) its method
     does not provide."""
 
 
 def provides(surface, ingredient):
-    """Whether `surface` provides `ingredient`, one of `INGREDIENTS`; a name
-    outside the vocabulary is a programming error and refused."""
-    if ingredient not in INGREDIENTS:
+    """Whether `surface` provides `ingredient`, one of `INGREDIENT_DOCS`; a
+    name outside the vocabulary is a programming error and refused."""
+    if ingredient not in INGREDIENT_DOCS:
         raise ValueError(f'{ingredient!r} is not a surface ingredient '
-                         f'({", ".join(sorted(INGREDIENTS))})')
+                         f'({", ".join(sorted(INGREDIENT_DOCS))})')
     declared = getattr(type(surface), 'INGREDIENTS', None)
     if declared is not None:
         # a surface class declares what it provides; an instance still has to
@@ -188,7 +203,7 @@ def require(surface, ingredient, where):
     if not provides(surface, ingredient):
         raise MissingIngredient(
             f'{type(surface).__name__} provides no {ingredient} '
-            f'({INGREDIENTS[ingredient]}), which {where} needs')
+            f'({INGREDIENT_DOCS[ingredient]}), which {where} needs')
     return getattr(surface, ingredient)
 
 
@@ -205,14 +220,14 @@ class PotentialEnergySurface(ABC):
     dielectric constant for a continuum, the classical charges in h_core for a
     point-charge field. Every surface that a property routine asks for its
     mean field owes this accessor, a gas-phase one returning its factory's
-    mean field; there is no fallback to `scf_factory`. It is not a member of
-    the structural check below, which a walk-only toy satisfies.
+    mean field; there is no fallback to `scf_factory`.
 
-    Two class attributes declare how a manifold or a coupling drives the
-    surface (`src.gradients.surface`): `ROOT_ATTR`, the attribute
-    that selects its root (absent or None: it has none), and `DRIVEN_HALF`,
-    the attribute holding the half that owns the spectrum on a composed
-    surface (absent or None: the surface itself).
+    Three class attributes declare how a manifold or a coupling drives the
+    surface (`root_attribute`, `driven_chain`, `ground_half` above):
+    `ROOT_ATTR`, the attribute that selects its root (absent or None: it has
+    none), `DRIVEN_HALF`, the attribute holding the half that owns the
+    spectrum on a composed surface (absent or None: the surface itself), and
+    `GROUND_HALF`, the one holding its ground-state half.
 
     `scf_factory(mol) -> mf` IS NOT PART OF THIS PROTOCOL. It is the raw user
     function each surface keeps so that `refreeze` and a displaced geometry can
@@ -222,8 +237,8 @@ class PotentialEnergySurface(ABC):
     gradient to ~1e-11, since the Lagrangian assumes the occupied-virtual Fock
     block vanishes.
 
-    THE BASE CLASS EVERY SURFACE INHERITS: `total_energy`,
-    `total_gradient`, `refreeze`, `label` and `mean_field` are abstract, so a
+    THE BASE CLASS EVERY SURFACE INHERITS: `total_energy`, `total_gradient`,
+    `refreeze`, `label`, `identity` and `mean_field` are abstract, so a
     surface that lacks one fails when it is created, not at the call deep
     inside a walk that needs it. `evaluate` is the one evaluation a property
     routine hands a geometry to (`evaluate` below), inherited.
@@ -232,9 +247,9 @@ class PotentialEnergySurface(ABC):
     methods its parts define come before the abstract ones in its MRO.
     """
 
-    #: The ingredients (`surface.INGREDIENTS`) a class provides,
-    #: declared on the class: `provides` reads this. `mean_field` is one of the
-    #: five members, so every surface has it.
+    #: The ingredients (`INGREDIENT_DOCS`) a class provides, declared on the
+    #: class: `provides` reads this. `mean_field` is one of the abstract
+    #: members, so every surface has it.
     INGREDIENTS = frozenset({'mean_field'})
 
     @abstractmethod
@@ -246,12 +261,22 @@ class PotentialEnergySurface(ABC):
         """(dE/dR of shape (natm, 3), E, diagnostics), everything in Hartree."""
 
     @abstractmethod
-    def refreeze(self, mol):
-        """The same surface with every frozen convention rebuilt at `mol`."""
+    def refreeze(self, mol, mf=None):
+        """The same surface with every frozen convention rebuilt at `mol`;
+        mf: the mean field at `mol` where the caller holds one, which a
+        surface whose conventions stand on a mean field builds on (a factor
+        chain) instead of converging its own."""
 
     @abstractmethod
     def label(self):
         """A short name for the state and the method, for logs and records."""
+
+    @abstractmethod
+    def identity(self):
+        """What a force of this surface is a force of, as a record
+        (`surface_identity`): two forces at one geometry belong to one
+        surface exactly when their identities agree; None for a surface that
+        freezes nothing."""
 
     @abstractmethod
     def mean_field(self, mol=None, mf=None):
@@ -290,7 +315,7 @@ class FiniteDifferenceGradient(PotentialEnergySurface):
     not itself distribute over the same communicator (see `mpi_map`).
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field'})
 
     def __init__(self, surface, h=NUCLEAR_FD_STEP, map_fn=None):
@@ -348,10 +373,15 @@ class FiniteDifferenceGradient(PotentialEnergySurface):
                                / (2.0 * self.h))
         return grad, e0, {'fd_step': self.h}
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
         """Refreeze the wrapped surface and keep differencing it."""
-        return FiniteDifferenceGradient(self.surface.refreeze(mol), self.h,
+        return FiniteDifferenceGradient(self.surface.refreeze(mol, mf=mf), self.h,
                                         map_fn=self.map_fn)
+
+    def identity(self):
+        """None: a differenced surface's forces are told apart by nothing
+        of their own."""
+        return None
 
     def label(self):
         return f'{self.surface.label()} [finite difference, h = {self.h} Bohr]'

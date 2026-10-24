@@ -9,7 +9,7 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_block_eri,
                                             get_uhf_spin_orbital_arrays_blockstacked,
                                             get_uhf_spin_orbital_df_factor_blockstacked,
                                             uhf_blockstacked_order)
-from src.environments.solvent_screening import solvent_static_selfenergy
+from src.Base.environment_seam import environment_of
 from src.SingleReference.CC.pipeline import (compute_ccsd_density_matrix,
                                              compute_ccsd_density_matrix_uhf,
                                              compute_ccsdt_density_matrix)
@@ -29,7 +29,7 @@ from src.SingleReference.EpsteinNesbet import (build_dressed_e_ai, build_dressed
                                                 restricted_channel_shifts,
                                                 validate_en_dress)
 from src.SingleReference.EpsteinNesbet.shifts import (
-    diag_ladder_df, diag_ladder_df_screened, epstein_nesbet_denominator)
+    diag_ladder_df, epstein_nesbet_denominator)
 from src.SingleReference.LinearResponse.linear_response import (
     static_screened_coulomb_aux_uhf)
 from src.SingleReference.ADC.adc_r_utils import dress_is_streamable
@@ -606,9 +606,8 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
         D = epstein_nesbet_denominator(D_bare, None, nocc, layout='pphh',
                                        bare_sign=1.0, B=B_so, **channels)
         # The dense reference (build_dressed_denoms_uhf) gates the SINGLES
-        # denominator shift on the 'singles' key (default True, see
-        # -- both routes used to apply it
-        # unconditionally). Spin-orbital form: d1 + diag ladder <ai||ai>[a,i]
+        # denominator shift on the 'singles' key (default True).
+        # Spin-orbital form: d1 + diag ladder <ai||ai>[a,i]
         # (cross-spin (a,i) elements are irrelevant: those t1 numerators
         # vanish by spin symmetry).
         singles = u2_denom_dress.get('singles', True)
@@ -628,7 +627,7 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
             B_b_full = B_so[:, idx_b][:, :, idx_b]
             W_aux = static_screened_coulomb_aux_uhf(eps_a, eps_b, B_a_full, B_b_full,
                                                      nocc_a, nocc_b)
-            d1 = d1 + diag_ladder_df_screened(B_so, W_aux, v, o)
+            d1 = d1 + diag_ladder_df(B_so, v, o, W_aux=W_aux)
         elif singles:
             d1 = d1 + diag_ladder_df(B_so, v, o)
     else:
@@ -909,7 +908,7 @@ def build_solvent_static_correction(mf, mol=None):
     v -> v + vtilde substitution in the integrals themselves only reaches
     order vtilde*v. See SolventScreening.cohsex_correction.
     """
-    corr = solvent_static_selfenergy(mf, mol)
+    corr = environment_of(mf).static_self_energy(mf, mol)
     if corr is None:
         return None
     if isinstance(corr, tuple):
@@ -926,7 +925,7 @@ def build_solvent_static_correction(mf, mol=None):
 
 def build_solvent_static_correction_restricted(mf, mol=None):
     """Restricted (spatial-MO) counterpart of build_solvent_static_correction."""
-    corr = solvent_static_selfenergy(mf, mol)
+    corr = environment_of(mf).static_self_energy(mf, mol)
     if isinstance(corr, tuple):
         raise NotImplementedError(
             "build_solvent_static_correction_restricted is RHF-only -- use "

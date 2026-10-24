@@ -1,11 +1,10 @@
-"""Phase 3 falsification test for the automated ADC(n) generator: does the
+"""Falsification test for the automated ADC(n) generator: does the
 superoperator-element + Omega-dressing machinery reproduce Dyson-ADC(3)'s
 U^(2) coupling corrections?
 
-This is exactly the territory where the earlier naive attempt failed
-(generic denominator-insertion could not
-produce U^(2)'s "dangerous" 4-orbital denominators that mix external and
-dummy labels). The present machinery is structurally different: the only
+Generic denominator-insertion cannot produce U^(2)'s "dangerous" 4-orbital
+denominators that mix external and dummy labels. This machinery is
+structurally different: the only
 denominators anywhere live INSIDE the separately-computed MBPT amplitudes
 (t2^(1) carries exactly the eps_i+eps_k-eps_c-eps_a-type combination that
 the generic rule couldn't build), and the element itself is a plain
@@ -14,11 +13,12 @@ identically, the Loewdin layer is inert at this order and the raw dressed
 elements ARE the orthogonalized U^(2) -- so the comparison is direct:
 
     u_2h1p_adc3()/u_2p1h_adc3()  vs  the U blocks sliced straight out of
-    adc_spinorbital.build_supermatrix (term0 + corr_cd + corr_kc1 +
-    corr_kc2, validated against QuAcK + the Ne/aug-cc-pVDZ reference).
+    the hand-written spin-orbital ADCSolverUnrestricted.build_supermatrix
+    (term0 + corr_cd + corr_kc1 + corr_kc2, validated against QuAcK + the
+    Ne/aug-cc-pVDZ reference).
 
 Outcome either way is decisive: exact match validates the generator's
-core claim (Phase 3 gate passes); a mismatch localizes exactly which
+core claim; a mismatch localizes exactly which
 dressing split disagrees (falsification with a pointer, not a mystery).
 """
 import os

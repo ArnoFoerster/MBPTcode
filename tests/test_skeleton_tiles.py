@@ -60,8 +60,8 @@ from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk  # no
 from src.Base.factorization.isdf_jk import isdf_grid
 from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
 from src.Base.numerics.numerics import Numerics
-from src.Base.factorization.separable_ri import (RowFit, RowFitAdjoint,  # noqa: E402
-                                                 screened_layout)
+from src.Base.factorization.separable_ri import RowFit, screened_layout  # noqa: E402
+from src.gradients.isdf_fit_adjoint import RowFitAdjoint  # noqa: E402
 from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
                                           fitted_fock_skeleton,
                                           isdf_exchange_rows)
@@ -73,8 +73,7 @@ from src.gradients.isdf_derivatives import (  # noqa: E402
 from src.gradients.mean_field_response import (  # noqa: E402
     exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa
-from src.SingleReference.LinearResponse.rpa_energy import (  # noqa: E402
-    exchange_channels)
+from src.Base.pyscf.pyscf_interface import exchange_channels  # noqa: E402
 from tests import test_force_serial_shaped as shaped  # noqa: E402
 from tests.test_mpi_routes import HeldCensus  # noqa: E402
 from tests.isdf_test_grid import g1
@@ -367,7 +366,7 @@ def test_rows_is_replicated_where_every_pair_is_kept():
     mf = mean_field('water', 'pbe0', 'isdf')
     wd = mf.with_df
     wd.build()
-    layout = separable_ri.test_set_layout(mf.mol, wd.coords)
+    layout = separable_ri.fit_test_set_layout(mf.mol, wd.coords)
     assert len(layout[0]) == mf.mol.nao_nr() ** 2
     rows = isdf_mean_field_gradient(mf, fit='rows')
     whole = isdf_mean_field_gradient(mf, fit='replicated')
@@ -381,7 +380,7 @@ def test_the_distributed_screen_is_the_whole_screen():
         mf = mean_field(name, 'pbe0', 'isdf')
         mf.with_df.build()
         crd = mf.with_df.coords
-        whole = separable_ri.test_set_layout(mf.mol, crd)
+        whole = separable_ri.fit_test_set_layout(mf.mol, crd)
         for size in (1, 3):
             got = run_simulated(
                 lambda comm: screened_layout(mf.mol, crd, block=ROW_BLOCK),

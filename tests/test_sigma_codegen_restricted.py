@@ -1,10 +1,10 @@
 """Regression test for restricted x sigma: the spin-blocked matrix-free C^(2)
 apply module (generatedADC/adc4_c2_apply_restricted_blocks.py, from
-sigma_codegen.generate_adc4_base_c2_apply_restricted).
+sigma_codegen.generate_adc_class_pair_apply(2, restricted=True)).
 
 Validates every generated spin-blocked apply function against its SHIPPED
-dense restricted counterpart (adc4_c2_blocks_restricted.py, the parallel
-committed increment 4) contracted with a trial vector:
+dense restricted counterpart (adc4_c2_blocks_restricted.py) contracted with a
+trial vector:
 
     apply_c2_TAG_SPLIT_SPINS(..., x)  ==  einsum('bra,ket->bra', dense, x)
 
@@ -47,7 +47,7 @@ def main():
         eps_sp = get_orbital_energies(mf, representation='spatial')
         g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf)
         r = BuildSuperMatrixADCnRestricted(eps_sp, g_aaaa, g_abab, g_bbbb, nocc_sp)
-        pool = {**r._rargs, **r._amplitude_pool()}
+        pool = {**r.rargs, **r.amplitude_pool()}
         rng = np.random.default_rng(0)
 
         # every apply_* function must match its dense c2_* counterpart

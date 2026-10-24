@@ -646,7 +646,7 @@ def rate_table(s1, t1, e0, omega, s_isc, temperature, lambda_env, s_ic=None,
     'fc_integrand_not_decayed', the densities ('S1-T1', 'S0-S1', 'S0-T1')
     whose time integrand had not decayed (`FCIntegrandNotDecayed`, warned
     about; the rates are computed on the truncated density). Empty when
-    clean (refuse inputs, warn numerics).
+    clean (the policy: refuse inputs, warn numerics).
     """
     omega = np.asarray(omega, float)
     require_vibrational_modes(omega, 'rate_table')

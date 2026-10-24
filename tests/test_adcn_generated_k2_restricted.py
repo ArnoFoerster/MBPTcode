@@ -37,7 +37,7 @@ def check(label, diff, tol=1e-11):
 def _kmap(r, sector, nocc_spin, norb_spin, k):
     """restricted class-k config -> spin-orbital class_configs(k) index."""
     cols = [np.asarray(c) for c in class_configs(nocc_spin, norb_spin, k, sector)]
-    cfg = r._kconfigs(sector, k)
+    cfg = r.kconfigs(sector, k)
     nh, npart = cfg['nh'], cfg['npart']
     out = []
     for c in range(len(cfg['K'])):

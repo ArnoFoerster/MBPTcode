@@ -35,6 +35,8 @@ from src.environments.reaction_field import ContinuumField
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients import df_correlation_force_tiled as tcf
+from src.gradients import df_factors
+from src.gradients.adc.fold_factors import ground_factors
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.gradients.adc import ee_gradient as eg
 from src.gradients.adc.ee_state_model import ADC2State
@@ -79,7 +81,7 @@ def check_against_dense():
         nf = frozen_of(mol)
         mf = scf_tight(mol)
         # MP2, gas
-        op = tcf.ground_operator(mol, mf, nf, AUX, 1e-9, aux_chunk=AUX_CHUNK)
+        op = ground_factors(mol, mf, nf, AUX, 1e-9, aux_chunk=AUX_CHUNK).op
         Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, nf, AUX)
         Ft, (_, _, gt, _, at, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED)
         e, eD = float(np.max(np.abs(Fd - Ft))), float(np.max(np.abs(gd - gt)))
@@ -132,7 +134,7 @@ def check_ranks():
     root_s = eg._pick(rs, 0, None)[1]
 
     def mp2(comm):
-        op = tcf.ground_operator(mol, mf, nf, AUX, 1e-9, comm, AUX_CHUNK)
+        op = ground_factors(mol, mf, nf, AUX, 1e-9, comm, AUX_CHUNK).op
         F, (_, _, g, _, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED)
         return [F, g]
 
@@ -207,14 +209,14 @@ def check_memory_refusal():
     nf = frozen_of(mol)
     mf = scf_tight(mol)
     called = []
-    real = tcf.ground_operator
+    real = df_factors.mp2_factors
     est = tcf.estimate(mol, nf, AUX, JKFIT, excited=False, block_gb=TILED['block_gb'])
 
     def spy(*a, **k):
         called.append(1)
         return real(*a, **k)
 
-    tcf.ground_operator = spy
+    df_factors.mp2_factors = spy
     try:
         try:
             eg.adc2_force_tiled(mf, mol, None, frozen=nf, auxbasis=AUX, ground=True,
@@ -229,7 +231,7 @@ def check_memory_refusal():
         ok &= check(bool(called) and 0.0 < peak * 1024 < 4000,
                     'above the estimate it runs', f'estimated peak {peak * 1024:.1f} MB')
     finally:
-        tcf.ground_operator = real
+        df_factors.mp2_factors = real
     return ok
 
 

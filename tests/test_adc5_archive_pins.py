@@ -1,6 +1,5 @@
 """ADC(5) in the constructions behind the published SupInf IP-ADC numbers,
-pinned to the code that produced them (an earlier tree of this code):
-the
+pinned to the code that produced them: the
 dense spectra of union-space, diagrammatic (exact and Laplace decoupling at
 8 points) and two-sector Dyson ADC(5) on linear H4 (r = 1.0) and of
 non-Dyson IP/EA-ADC(5) on LiH, all in sto-3g with diag(eps) as the orbital

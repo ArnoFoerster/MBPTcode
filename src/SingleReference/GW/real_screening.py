@@ -22,11 +22,11 @@ This is what a contour-deformation residue evaluates: `GW.contour_deformation`
 sweeps a pole of G at eps_q and asks for W(|eps_q - omega|) there. A residue
 frequency landing on a particle-hole transition d makes W and its frequency
 derivative arbitrarily large -- that is a real pole of chi0, not a numerical
-accident, and `residue_pole_distance` reports the distance to the nearest one.
+accident.
 
 Both classes serve one protocol -- apply(freq, b) = W(freq) b and
 slope(freq, y) = y^T [dchi0/dfreq] y -- and neither records anything;
-`gradients.contour_deformation_adjoint` subclasses each with the reverse half,
+`gradients.gwbse.contour_deformation_adjoint` subclasses each with the reverse half,
 push/adjoints.
 
 The spin factor 2 is the restricted-singlet convention of
@@ -42,7 +42,8 @@ from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, dyson_screening, laplace_representation_error)
-from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
+from src.Base.orbital_spaces import particle_hole_window
+from src.Base.orbital_spaces import ov_energies
 
 
 class ResidueRefused(ValueError):
@@ -62,7 +63,7 @@ class ExplicitRealScreening:
     the particle-hole gap. eta broadens the particle-hole poles -- biased, off
     by default, see `imaginary_frequency.frequency_factor`.
 
-    `gradients.contour_deformation_adjoint.ExplicitRealScreeningAdjoint` adds
+    `gradients.gwbse.contour_deformation_adjoint.ExplicitRealScreeningAdjoint` adds
     the reverse half of the protocol, push/adjoints; nothing here records
     anything.
 
@@ -103,7 +104,7 @@ class LaplaceRealScreening:
     imaginary-time form: that regime belongs to the explicit backend, and this
     one REFUSES rather than integrate a fit it has failed.
 
-    `gradients.contour_deformation_adjoint.LaplaceRealScreeningAdjoint` adds
+    `gradients.gwbse.contour_deformation_adjoint.LaplaceRealScreeningAdjoint` adds
     the reverse half, push/adjoints, which lands the residues' adjoint on
     proj(tau) so they ride the same `polarizability_backward` sweep as the
     integral term.
@@ -165,12 +166,6 @@ def residue_set(eps, nocc, omega, tol=RESIDUE_ON_CONTOUR_TOL):
         elif q >= nocc and gap < 0.0:
             out.append((q, 1.0))
     return out
-
-
-def ov_energies(eps, nocc):
-    """d_(i,a) = eps_a - eps_i on the flattened pair index of C_ov."""
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    return (eps[virt][None, :] - eps[occ][:, None]).ravel()
 
 
 def screening_aux(C_ov, d, omega, imaginary, eta=0.0):

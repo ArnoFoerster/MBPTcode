@@ -3,6 +3,7 @@ singlet (A, B) and the bare boson couplings, which the dense quasi-boson GW
 (`GW.quasi_boson`) and the Riccati solve (`riccati`) are built on."""
 import numpy as np
 
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.common.eri_blocks import as_blocks
 from src.Base.utils.linear_algebra.matrix_functions import eigh_sym, sqrtm_sym
 
@@ -12,7 +13,7 @@ class RPA:
 
     Solved in the Bogoliubov/drUCCD form -- ring-diagram coupled-cluster
     doubles, whose amplitudes ARE the RPA ones -- which is where t comes from.
-    The energy is dRPA's, and `gradients.rpa_ground_state.RPAGroundStateChain`
+    The energy is dRPA's, and `gradients.rpa.ground_state.RPAGroundStateChain`
     is the same quantity on the cubic space-time factorization rather than the
     dense one.
 
@@ -21,7 +22,7 @@ class RPA:
     TDA screening (B = 0) gives t = 0 exactly and Abar = A.
 
     The reverse mode -- the boson density matrices and the Frechet/adjoint maps
-    at this t -- is `gradients.quasi_boson_adjoint.RPAAdjoint`.
+    at this t -- is `gradients.gwbse.quasi_boson_adjoint.RPAAdjoint`.
     """
 
     def __init__(self, A, B):
@@ -95,10 +96,7 @@ def build_rpa_AB(eps, eri_mo, nocc, tda_screening=False):
     tda_screening=True zeroes B (TDA screening variant: bosons from the
     Hermitian TDA problem, t = 0 downstream).
     """
-    norb = len(eps)
-    occ = np.arange(nocc)
-    virt = np.arange(nocc, norb)
-    d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
+    d = ov_energies(eps, nocc)
     n_ov = d.size
     V_iajb = as_blocks(eri_mo, nocc).ovov.reshape(n_ov, n_ov)
     A = np.diag(d) + 2.0 * V_iajb

@@ -1,12 +1,10 @@
 """Finite-difference nuclear derivatives of the fragment-diabatic BSE matrix,
-Tamm-Dancoff or full (the chain's kernel).
+Tamm-Dancoff or full (the chain's kernel): the test oracle.
 
 The reference the analytic diabatic gradient (`src.gradients.gwbse.fragment_diabatic`)
 has to reproduce, in the role `nonadiabatic.derivative_couplings` plays for the
-derivative coupling and `FiniteDifferenceGradient` for forces. It is also the
-cheap route when only a few nuclear directions matter: one displaced pair of
-calculations gives the derivative of EVERY diabatic element along one
-direction, where the analytic route spends one reverse pass per element.
+derivative coupling and `FiniteDifferenceGradient` for forces
+(tests/test_fragment_diabatic.py, tests/test_protein_environment.py).
 
 AT EVERY DISPLACED GEOMETRY EVERYTHING IS REDONE: the mean field, the
 quasiparticle energies and screening, the fragment localization, the diabats

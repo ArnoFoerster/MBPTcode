@@ -20,6 +20,7 @@ import pytest
 from pyscf import gto, scf
 
 import src.Base.factorization.separable_ri as sri
+from src.Base.numerics.numerics import Numerics
 from src.properties.optimize import (UnconvergedRelaxation,
                                      relax_ground_state)
 
@@ -41,7 +42,7 @@ def test_an_unconverged_relaxation_warns_and_flags(engine):
     mol = gto.M(atom=STRETCHED_WATER, basis='sto-3g', verbose=0)
     with pytest.warns(UnconvergedRelaxation, match='relaxation_converged'):
         opt, mf = relax_ground_state(mol, tight_rhf, engine=engine,
-                                     maxsteps=1)
+                                     numerics=Numerics(walk={'ground_max_cycle': 1}))
     flag = mf.relaxation
     assert flag['relaxation_converged'] is False
     assert flag['engine'] == ('geometric' if engine == 'auto'

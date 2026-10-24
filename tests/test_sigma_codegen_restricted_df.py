@@ -1,7 +1,7 @@
 """Regression test for restricted x sigma x DF: the spin-blocked +
 density-fitted matrix-free C^(2) apply module
 (generatedADC/adc4_c2_apply_restricted_df_blocks.py, from
-sigma_codegen.generate_adc4_base_c2_apply_restricted(df=True)).
+sigma_codegen.generate_adc_class_pair_apply(2, restricted=True, df=True)).
 
 All three emission axes composed on one path -- spin-restricted, matrix-free,
 DF -- validated against the SHIPPED dense restricted blocks
@@ -65,7 +65,7 @@ def main():
         all_ok &= check("B reconstructs g_aaaa", np.abs(g_aaaa_rec - g_aaaa).max())
         all_ok &= check("B reconstructs g_abab", np.abs(g_abab_rec - g_abab).max())
 
-        pool = {**r._rargs, **r._amplitude_pool(), 'B_aa': B_aa, 'B_bb': B_bb}
+        pool = {**r.rargs, **r.amplitude_pool(), 'B_aa': B_aa, 'B_bb': B_bb}
         rng = np.random.default_rng(0)
         n_checked, worst = 0, 0.0
         for aname in [n for n in dir(appl) if n.startswith('apply_c2_')]:

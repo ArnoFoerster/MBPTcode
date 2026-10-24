@@ -21,7 +21,6 @@ because v is diagonal in G; a damped kernel is just a different multiplier.
 The G-sum is blocked for memory. Imaginary-frequency integration uses the repo
 grids (src.Base.utils.grids.grids), not pyscf's.
 """
-import warnings
 
 import numpy as np
 from pyscf import lib
@@ -29,17 +28,18 @@ from pyscf.pbc import tools
 from pyscf.pbc.df import ft_ao
 from pyscf.df import addons
 
-from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_frequency_grid,
-                                   minimax_supported_sizes)
+from src.Base.numerics.constants import PBC_METRIC_EIG_FLOOR, PBC_RPA_NFREQ
+from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
+                                        minimax_frequency_grid, minimax_supported_sizes)
 from src.Base.utils.grids.matsubara import beta_from_mf, thermal_e_min
-from src.SingleReference.Periodic.pbc_occupations import (build_chi0_aux_occ,
-                                                          is_integer_occupation,
+from src.SingleReference.Periodic.pbc_occupations import (is_integer_occupation,
                                                           split_transition_window,
                                                           transition_window)
 from src.SingleReference.Periodic.pbc_casida import build_chi0_aux
 from src.SingleReference.Periodic.pbc_integrals import (bz_index,
                                                         get_momentum_transfer_map)
 from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
+from src.SingleReference.LinearResponse.space_time import dielectric_log_determinant
 
 einsum = lib.einsum
 
@@ -86,30 +86,8 @@ def build_freq_grid(mo_energy, nocc, nw, grid='gauss_legendre', beta=None,
             raise ValueError(f"nw={nw} not in minimax sizes {minimax_supported_sizes()}")
         return minimax_frequency_grid(nw, e_min, e_max)
     elif grid == 'gauss_legendre':
-        return gauss_legendre_grid(nw, w0=0.5 * e_min)
+        return gauss_legendre_grid(nw, w0=gap_scaled_w0(gap=e_min))
     raise ValueError(f"unknown grid '{grid}'")
-
-
-def rpa_log_determinant(one_minus_pi, q, w, flags=None):
-    """log det(1 - Pi) of the dRPA energy at transfer q, frequency index w.
-
-    On the imaginary axis Pi is negative semidefinite, so 1 - Pi >= 1 and the
-    determinant is positive. One that is not is a numerical outcome (a broken
-    Pi, or a convention error) rather than an input to refuse: log|det| is
-    returned with a RuntimeWarning, and (q, w) is appended to
-    flags['nonpositive_det'] when a dict is passed. Either way the energy built
-    on it is not the dRPA correlation energy.
-    """
-    sign, logdet = np.linalg.slogdet(one_minus_pi)
-    if not sign.real > 0:
-        warnings.warn(f"det(1 - Pi) is not positive at q={q}, w={w} (sign "
-                      f"{sign}): the RPA dielectric has been driven singular, "
-                      f"which on a gapped system means a convention error "
-                      f"rather than physics; log|det| is used.",
-                      RuntimeWarning, stacklevel=3)
-        if flags is not None:
-            flags.setdefault('nonpositive_det', []).append((int(q), int(w)))
-    return logdet
 
 
 def make_auxcell(cell, auxbasis='weigend'):
@@ -130,7 +108,7 @@ def make_auxcell(cell, auxbasis='weigend'):
     return aux
 
 
-def coulomb_metric_inv_sqrt(J, tol=1e-10):
+def coulomb_metric_inv_sqrt(J, tol=PBC_METRIC_EIG_FLOOR):
     """J^{-1/2} for the RI-V Coulomb-metric fit, refusing an indefinite metric.
 
     J_{PQ}(q) = sum_G chi_P(q+G)^* v(q+G) chi_Q(q+G) is positive SEMIdefinite
@@ -274,7 +252,7 @@ def build_Pi_all(cell, aux, mo_coeff, mo_energy, nocc, kpts, coulG_fn,
     return Pi_out
 
 
-def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
+def ri_rpa_ecorr_from_dfints(dfints, nw=PBC_RPA_NFREQ, grid='gauss_legendre',
                              mo_energy=None, verbose=False, return_per_q=False,
                              beta=None, mo_occ=None, flags=None):
     """Direct-RPA correlation energy from a prebuilt integrals object, with the
@@ -292,13 +270,12 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
     limit lives in the KERNEL (pbc_rpa_damping, pbc_wav) rather than in a
     special q-grid -- see pbc_smallq for the head analysis.
 
-    Pi comes from pbc_casida.build_chi0_aux, which is validated EXACTLY against
-    pyscf's krgw_ac.get_rho_response and carries the same (4/nkpts) normalization
-    as build_Pi_all's (2/nkpts) * [2 e/(w^2+e^2)] -- or, when `mo_occ` is
-    fractional, from pbc_occupations.build_chi0_aux_occ, which reduces to it
-    exactly for integer occupations.
+    Pi comes from pbc_casida.build_chi0_aux, occupation-weighted, so a metal
+    and a gap take the same path. On a gap it is validated against pyscf's
+    krgw_ac.get_rho_response and carries the same (4/nkpts) normalization as
+    build_Pi_all's (2/nkpts) * [2 e/(w^2+e^2)].
 
-    flags: a dict that receives the numerical flags (`rpa_log_determinant`:
+    flags: a dict that receives the numerical flags (`dielectric_log_determinant`:
     'nonpositive_det', the (Q, w) whose det(1 - Pi) was not positive).
     """
     if mo_energy is None:
@@ -314,31 +291,23 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
     freqs, wts = build_freq_grid(list(mo_energy.real), nocc, nw, grid=grid,
                                  beta=beta, mo_occ=mo_occ)
 
-    # With fractional occupations the response itself has to be
-    # occupation-weighted, not just the grid it is sampled on. Threading beta
-    # into the grid while leaving Pi on the integer path produces a metal whose
-    # correlation energy jumps DISCONTINUOUSLY with volume, because the integer
-    # nocc changes in steps: measured on BCC Li at 2x2x2, nocc at one k-point
-    # goes 3 -> 6 between a = 3.50 and 3.60 A, the transition space 509 -> 536,
-    # and E_c jumps by 0.011 Ha in the middle of an equation of state. The
-    # occupation-weighted chi0 is continuous there because the weights go to
-    # zero smoothly.
-    fractional = mo_occ is not None and not is_integer_occupation(mo_occ)
-
+    # The response is occupation-weighted, not just the grid it is sampled on.
+    # An integer-occupation Pi on a metal jumps DISCONTINUOUSLY with volume,
+    # because the integer nocc changes in steps: measured on BCC Li at 2x2x2,
+    # nocc at one k-point goes 3 -> 6 between a = 3.50 and 3.60 A, the
+    # transition space 509 -> 536, and E_c jumps by 0.011 Ha in the middle of
+    # an equation of state. The occupation-weighted chi0 is continuous there
+    # because the weights go to zero smoothly.
     per_q = np.zeros(nq)
     for Q in range(nq):
         kconserv = dfints.kconserv_pair[Q]
         ec_q = 0.0
         for w in range(nw):
-            if fractional:
-                Pi = build_chi0_aux_occ(dfints, kconserv, freqs[w],
-                                        mo_energy=mo_energy, mo_occ=mo_occ,
-                                        imaginary=True)
-            else:
-                Pi = build_chi0_aux(dfints, kconserv, freqs[w],
-                                    mo_energy=mo_energy, imaginary=True)
+            Pi = build_chi0_aux(dfints, kconserv, freqs[w],
+                                mo_energy=mo_energy, mo_occ=mo_occ,
+                                imaginary=True)
             naux = Pi.shape[0]
-            logdet = rpa_log_determinant(np.eye(naux) - Pi, Q, w, flags)
+            logdet = dielectric_log_determinant(np.eye(naux) - Pi, (int(Q), int(w)), flags)
             ec_q += wts[w] / (2 * np.pi) * (logdet + np.trace(Pi).real)
         per_q[Q] = ec_q.real
         if verbose:
@@ -349,7 +318,7 @@ def ri_rpa_ecorr_from_dfints(dfints, nw=32, grid='gauss_legendre',
     return e_corr
 
 
-def ri_rpa_ecorr(mf, auxbasis='weigend', nw=32, coulG_fn=None, mesh=None,
+def ri_rpa_ecorr(mf, auxbasis='weigend', nw=PBC_RPA_NFREQ, coulG_fn=None, mesh=None,
                  grid='gauss_legendre', verbose=False, check_support=True,
                  beta=None, flags=None):
     """Direct-RPA correlation energy per unit cell for a KRHF/KRKS mean field.
@@ -388,7 +357,7 @@ def ri_rpa_ecorr(mf, auxbasis='weigend', nw=32, coulG_fn=None, mesh=None,
         ec_q = 0.0
         for w in range(nw):
             Pi = Pi_all[iq][w]
-            logdet = rpa_log_determinant(np.eye(naux) - Pi, iq, w, flags)
+            logdet = dielectric_log_determinant(np.eye(naux) - Pi, (int(iq), int(w)), flags)
             ec_q += wts[w] / (2 * np.pi) * (logdet + np.trace(Pi).real)
         if verbose:
             print(f"  q={iq:3d}  Ec(q) = {ec_q.real: .10f}")

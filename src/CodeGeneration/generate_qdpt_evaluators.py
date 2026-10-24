@@ -12,11 +12,9 @@ permutations of one skeleton share one intermediate (generate_term_code_cached,
 cached per canonical key and freed after its last use).
 """
 import os
-import sys
 import re
 import itertools
 import time
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.CodeGeneration.codegen_common import QDPT_OUT_DIR, generated_header, write_source
 from src.CodeGeneration.qdpt_wick import (
     run_wick_contractions, get_skeleton_hash, get_external_signature, Term, CORES, VIRS, ACTS,

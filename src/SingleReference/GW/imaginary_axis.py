@@ -1,3 +1,11 @@
+"""GW quasiparticle energies on the imaginary-frequency axis.
+
+The RPA screened interaction W(i omega) on a minimax or Gauss-Legendre grid,
+the correlation self-energy by numerical convolution over that grid
+(`self_energy_imaginary_axis`), and its continuation to the real axis by Pade
+(`solve_qp_energy_imaginary_axis`), restricted and unrestricted, at T = 0 or
+at a finite temperature.
+"""
 import time as _time
 
 import numpy as np
@@ -5,6 +13,7 @@ import numpy as np
 from pyscf import scf
 
 from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
 from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
                                             self_energy_range, thermal_e_min)
@@ -24,18 +33,18 @@ from src.SingleReference.GW.qp_solve import (finish_qp,
 
 def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_weights,
                                 W_grid, query_freqs):
-    """
-    Correlation self-energy Sigma_c,pp(i*query_freqs) 
-    by numerical convolution over the imaginary-frequency grid.
+    """Correlation self-energy Sigma_c,pp(i*query_freqs) by numerical
+    convolution over the imaginary-frequency grid:
 
     Sigma_pp(i*w) = -(1/2pi) sum_m sum_k weight_k * [G_m(i*(w+wk)) + G_m(i*(w-wk))] * w_pp^m(i*wk)
-    Wc = W - I is the correlation-only screened interaction
-    exchange handled separately via the static Sigma_x - v_xc term). 
-    Returns complex array of shape (len(query_freqs)).
+
+    with w_pp^m built from Wc = W - I, the correlation-only screened
+    interaction (the exchange is the separate static Sigma_x - v_xc term).
+    Returns a complex array of shape (len(query_freqs)).
 
     eps and query_freqs share an origin: passing eps - mu returns
-    Sigma_pp(mu + i*w), i.e. samples on the vertical line Re z = mu. 
-    Pick mu inside the gap!!!
+    Sigma_pp(mu + i*w), i.e. samples on the vertical line Re z = mu, so mu
+    must lie inside the gap.
     """
     
     # w_pm^m(i*w_k) for all m, all grid points k: shape (nfreq, norb)
@@ -88,7 +97,7 @@ def _unrestricted_screening(mol, mf, nocc, states, spin):
     return spectra, lr, rows
 
 
-def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
+def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, numerics=None, w0=None, grid='minimax',
                                     greedy=True,
                                     dm_correction=None, timings=None, beta=None,
                                     eps_anchor=None, spin_channel='alpha',
@@ -97,21 +106,23 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     GW@RPA quasiparticle energy via the imaginary-frequency-axis route:
     RPA W(i*omega) -> convolution -> Pade continuation.
 
+    numerics: the run's `Numerics`; its imagfreq section holds the W(i omega)
+    quadrature's point count, nfreq.
+
     No broadening to set: chi0(i*omega) has the real denominator
     -2d/(d^2 + w^2) and Sigma_c reaches the real axis by Pade rather than at
     w + i.eta, so this signature advertises none -- a caller wanting eta
     reaches mode='casida' instead, the only route it acts on.
 
     beta: inverse temperature in inverse Hartree, for a system whose gap is too
-    small for a T = 0 grid. 
-    gap exceeds pi/beta:
+    small for a T = 0 grid. Setting it does two things:
       * the grid's e_min (or w0) is floored at the first Matsubara frequency
         pi/beta. This makes the tabulated minimax and Gauss-Legendre
         quadratures defined at all when the gap closes;
       * the Pade continuation is capped at `ir_continuation_order(beta, wmax)`
-        nodes. This is the the number of structures the imaginary-axis data can 
-        actually resolve at that temperature and bandwidth, rather than however 
-        many sample points happen to exist.
+        nodes: the number of structures the imaginary-axis data can actually
+        resolve at that temperature and bandwidth, rather than however many
+        sample points happen to exist.
     `beta=None` reads it off the mean field when that carries Fermi-Dirac
     smearing (`beta_from_mf`), and otherwise leaves everything at T = 0.
 
@@ -126,12 +137,13 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     at each root, as the space-time route's Pade does: (roots, z).
 
     pade_freq: the imaginary frequencies Sigma_c is sampled at for the Pade
-    continuation. None takes this route's own W nodes; `analyticalContinuation.
-    pade_nodes()` is the space-time route's node rule.
+    continuation. None takes this route's own W nodes;
+    `analytic_continuation.pade_nodes` is the space-time route's node rule.
     """
 
     require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_imaginary_axis',
                                          mol=mol)
+    nfreq = numerics_or_default(numerics).imagfreq.nfreq
     unrestricted = isinstance(mf, scf.uhf.UHF)
     spin = spin_index(spin_channel) if unrestricted else None
     eps = get_orbital_energies(mf, representation='spatial')

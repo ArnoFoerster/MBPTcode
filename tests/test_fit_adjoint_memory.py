@@ -1,7 +1,7 @@
 """What the whole-fit gradient holds at once, read off tracemalloc.
 
 The replicated fit's adjoint (`isdf_derivatives.fit_adjoint`) and the test set
-it differentiates (`separable_ri.test_set_D`) are the widest arrays of a
+it differentiates (`separable_ri.fit_test_set_D`) are the widest arrays of a
 state-pair force: D is (M, npair + naux). On ethylene/cc-pVDZ at 148 points
 per atom each is compared with a whole-array form written out below, which
 gives the same numbers to a few ulp. The blocked adjoint holds two arrays of D's shape beside
@@ -44,7 +44,7 @@ from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_FIT_REGULARIZA
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.numerics.numerics import Numerics, numerics_of
 # aliased on import: pytest collects a module-level `test_*` callable
-from src.Base.factorization.separable_ri import test_set_D as build_test_set
+from src.Base.factorization.separable_ri import fit_test_set_D as build_test_set
 from src.gradients import isdf_derivatives
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
@@ -109,7 +109,7 @@ def chain_scf(mol):
 
 
 def hstacked_test_set(mol, auxmol, coords, layout):
-    """`test_set_D` as the three whole-width products and a concatenation."""
+    """`fit_test_set_D` as the three whole-width products and a concatenation."""
     mu, nu, w = layout
     ao = mol.eval_gto('GTOval_sph', coords)
     pairs = ao[:, mu] * ao[:, nu] * w[None, :]
@@ -340,7 +340,7 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
     mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)))
     mf.with_df.build()
     monkeypatch.setattr(isdf_derivatives, 'WHOLE_FIT_ADJOINT_MAX_GB', 1e-4)
-    monkeypatch.setattr(isdf_derivatives, 'test_set_D', built)
+    monkeypatch.setattr(isdf_derivatives, 'fit_test_set_D', built)
     monkeypatch.setattr(isdf_derivatives.pyscf_df.incore, 'aux_e2', built)
     d_bar = np.zeros((len(crd), auxmol.nao_nr()))
     stub = SimpleNamespace(factorization=SimpleNamespace(fit='replicated'))

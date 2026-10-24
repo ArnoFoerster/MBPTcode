@@ -39,9 +39,6 @@ from src.gradients.isdf_derivatives import pair_positions, product_pairs
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
-# `test_set_layout` and `test_set_D` stay module-qualified: imported by name,
-# pytest collects them as test functions.
-
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 MOLECULES = {
     'water': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
@@ -95,7 +92,7 @@ def whole_form(mol, auxmol, crd, layout, fit=fit_M_stable):
     F[:, pair_positions(layout, gram, mol.nao_nr())] = (
         np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :])
     F[:, len(gram[0]):] = np.eye(naux)
-    return fit(separable_ri.test_set_D(mol, auxmol, crd, gram), F)
+    return fit(separable_ri.fit_test_set_D(mol, auxmol, crd, gram), F)
 
 
 def screened_gram(mol, auxmol, crd, layout):
@@ -108,7 +105,7 @@ def screened_gram(mol, auxmol, crd, layout):
     e3c = e3c.reshape(mol.nao_nr(), mol.nao_nr(), naux)
     F = np.hstack([np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :],
                    np.eye(naux)])
-    return fit_M_stable(separable_ri.test_set_D(mol, auxmol, crd, layout), F)
+    return fit_M_stable(separable_ri.fit_test_set_D(mol, auxmol, crd, layout), F)
 
 
 def realizations(name):
@@ -173,7 +170,7 @@ def test_the_frozen_layout_is_what_the_fit_keeps():
     mol = molecule(DISPLACED['ethylene'])
     fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
-    own = separable_ri.test_set_layout(mol, crd)
+    own = separable_ri.fit_test_set_layout(mol, crd)
     free = fit_M_streaming(mol, auxmol, crd)
     assert_same(fit_M_streaming(mol, auxmol, crd, layout=own), free, unit='1',
                 quantity='root', label='own layout')
@@ -222,7 +219,7 @@ def test_the_fit_is_determined_only_up_to_the_conditioning(fits, name):
     singular: most of its spectrum lies under the Tikhonov shift, which sets
     cond(G + shift) between 1e8 and 1e10."""
     w = fits[name]
-    D = separable_ri.test_set_D(w['mol'], w['auxmol'], w['coords'],
+    D = separable_ri.fit_test_set_D(w['mol'], w['auxmol'], w['coords'],
                                 product_pairs(w['mol']))
     s = np.sqrt(np.einsum('kr,kr->k', D, D))
     Dt = D / np.where(s == 0.0, 1.0, s)[:, None]

@@ -20,19 +20,22 @@ import pathlib
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 #: The packages the object covers: GW-BSE, gradients and properties, and what they build on.
-PACKAGES = ('src/gradients', 'src/properties', 'src/Base',
+PACKAGES = ('src/gradients', 'src/properties', 'src/Base', 'src/Solvers',
             'src/SingleReference/GW', 'src/SingleReference/LinearResponse',
-            'src/SingleReference/BSE',
+            'src/SingleReference/BSE', 'src/SingleReference/Periodic',
             'src/photophysics', 'src/environments', 'src/fragments',
             'src/SingleReference/common')
 
 #: Parameter names that are a numerical choice of a run: grids, quadratures, the ISDF fit,
-#: the Davidson, the memory and layout knobs.
+#: the Davidson, the self-consistent loops' tolerances and mixing, the memory and layout
+#: knobs.
 SIGNATURE_NAMES = frozenset(
     'ntau ntau_gw ntau_w nfreq nfreq_cd nfreq_rpa ntau_rpa npade e_min_below_gap '
     'tau_target n_poles sop_stride conv_tol conv_tol_grad max_cycle nroots guess_factor '
     'preconditioner tile_gb fit_block fit_gb block_memory_gb counts radii n_start '
-    'grid_accuracy l_max_second pair_tol regularization orbital_tol'.split())
+    'grid_accuracy l_max_second pair_tol regularization orbital_tol '
+    'tol max_iter tile_memory_gb stride npoints_max w0 w0_cd damping diis_size dm_tol '
+    'threshold'.split())
 
 #: Functions and modules exempt by construction.
 EXEMPT_FUNCTIONS = frozenset({'derive'})

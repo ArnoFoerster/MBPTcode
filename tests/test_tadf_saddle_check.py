@@ -7,11 +7,14 @@ again (`escape_saddle`). Driven here with the run's own `walk` (refreeze
 passes, the production nudge) on the planar saddle of `test_walk_nudge`'s
 surface.
 """
+import numpy as np
 import pytest
 
-from src.Base.numerics.constants import START_NUDGE_BOHR
+from src.properties.optimize import derived_walk
+from src.Base.numerics.constants import HESSIAN_FD_ASYMMETRY_TOL, START_NUDGE_BOHR
+from src.properties.hessian import HessianAsymmetric
 from src.photophysics.records import walk_fields
-from src.properties.excitations import WalkNotRelaxed
+from src.properties.excitations import WalkNotRelaxed, saddle_verdict
 from src.properties import excitations
 from src.properties.optimize import optimize
 from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
@@ -21,6 +24,19 @@ from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
 class Walked(DoubleWell):
     """The double well with the root a walk followed."""
     state = 0
+
+
+class Noisy(Walked):
+    """Its forces with seeded noise of `eps` Ha/Bohr on every element: a
+    finite-difference Hessian of them is asymmetric."""
+
+    def __init__(self, mol, eps):
+        super().__init__(mol)
+        self.rng, self.eps = np.random.default_rng(7), eps
+
+    def total_gradient(self, mol=None, mf=None):
+        g, e, info = super().total_gradient(mol, mf)
+        return g + self.eps * self.rng.standard_normal(g.shape), e, info
 
 
 def test_the_nudge_is_declared_and_stamped(tmp_path):
@@ -39,7 +55,8 @@ def test_a_saddle_minimum_is_left_and_recorded(tmp_path):
     x = PLANAR.copy()
     x[1, 0] += 0.15
     surface = Walked(molecule(x))
-    saddle, info = optimize(surface, surface.mol0, max_cycle=200,
+    saddle, info = optimize(surface, surface.mol0,
+                            numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
                             verbose=False, nudge=0)
     assert abs(pyramidalization(saddle.atom_coords())) < 1e-10
     run = run_of(tmp_path, '--engine', 'auto', '--saddle-check', '1')
@@ -64,7 +81,8 @@ def test_a_second_saddle_is_flagged_and_walked_on(tmp_path, monkeypatch):
     x = PLANAR.copy()
     x[1, 0] += 0.15
     surface = Walked(molecule(x))
-    saddle, info = optimize(surface, surface.mol0, max_cycle=200,
+    saddle, info = optimize(surface, surface.mol0,
+                            numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
                             verbose=False, nudge=0)
     real = excitations.surface_hessian
     calls = []
@@ -84,6 +102,32 @@ def test_a_second_saddle_is_flagged_and_walked_on(tmp_path, monkeypatch):
         'saddle_check': 'second saddle: stopped'}
     assert walk_fields(again)['numerical_flags'] == again['numerical_flags']
     assert root == 0 and final is surface
+
+
+def test_an_asymmetric_hessian_is_flagged_on_the_walk_the_stage_keeps(tmp_path):
+    """A Hessian above HESSIAN_FD_ASYMMETRY_TOL is warned about, kept, and
+    named 'hessian_asymmetric' in the check's record, its verdict and the
+    stage's numerical_flags, also where the check finds a minimum; a clean
+    one carries no such flag."""
+    x = PLANAR.copy()
+    x[0, 2] += 0.3
+    surface = Walked(molecule(x))
+    minimum, info = optimize(surface, surface.mol0,
+                             numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
+                             verbose=False, nudge=0)
+    run = run_of(tmp_path, '--engine', 'auto', '--saddle-check', '1')
+    _, kept, _, _, record = run.saddle_checked('s1', minimum, info, 0, surface, 0.0)
+    assert record['status'] == 'minimum' and record['hessian_asymmetric'] is None
+    assert 'hessian_asymmetric' not in kept['numerical_flags']
+    noisy = Noisy(minimum, 1e-5)
+    run = run_of(tmp_path / 'noisy', '--engine', 'auto', '--saddle-check', '1')
+    with pytest.warns(HessianAsymmetric):
+        _, kept, _, _, record = run.saddle_checked('s1', minimum, info, 0, noisy, 0.0)
+    assert record['status'] == 'minimum'
+    rel = record['hessian_asymmetric']['first']
+    assert rel == record['hessian_asymmetry_rel'] > 10 * HESSIAN_FD_ASYMMETRY_TOL
+    assert saddle_verdict('s1', record) == {'hessian_asymmetric': {'first': rel}}
+    assert kept['numerical_flags']['hessian_asymmetric'] == {'first': rel}
 
 
 def test_an_unrelaxed_walk_is_not_saddle_checked(tmp_path):

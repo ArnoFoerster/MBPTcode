@@ -62,6 +62,7 @@ import pytest
 import scipy.linalg
 from pyscf import df as pyscf_df, gto
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.constants import ISDF_FIT_REGULARIZATION
 from src.gradients.rpa.chain_settings import with_setting
 from src.Base.numerics.numerics import Numerics, numerics_of
@@ -71,6 +72,7 @@ from src.Base.numerics.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIAT
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base.factorization import separable_ri
+from src.gradients import isdf_fit_adjoint
 from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_stable
 from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
                                                    whole_factor)
@@ -427,7 +429,9 @@ def observables(surface, log=None, rank=0, size=1):
     roots = ex.forward(ex.mol0, ex.mf0)[1].omega
     force, energy, diags = evaluate(surface, own_water(H2O_DISPLACED))
     drpa = surface.ground.total_gradient(own_water(H2O_DISPLACED))[0]
-    mol_opt, info = optimize(surface, max_cycle=1, verbose=False)
+    mol_opt, info = optimize(surface,
+                             numerics=derived_walk(surface, 'a capped test walk', max_cycle=1),
+                             verbose=False)
     if log is not None:
         log.append((whole_fit_arrays(surface),
                     ledger_faults(surface, rank, size)))
@@ -550,6 +554,7 @@ def test_state_pair_on_the_row_fit(size, monkeypatch):
     whole, rows = run('whole'), run('rows')
     with monkeypatch.context() as patch:
         patch.setattr(separable_ri, 'ao_blocks', per_shell_reversed)
+        patch.setattr(isdf_fit_adjoint, 'ao_blocks', per_shell_reversed)
         bar = run('whole')
     for r in range(size):
         lines, ratios = anchored(whole[r], bar[r], rows[r], GATED,
@@ -605,7 +610,7 @@ def product_fit_factors(fit, gram=True):
         F[:, pair_positions(chain.layout, cols, mol.nao_nr())] = (
             np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :])
         F[:, len(cols[0]):] = np.eye(naux)
-        M = lockstep(fit(separable_ri.test_set_D(mol, auxmol, crd, cols), F))
+        M = lockstep(fit(separable_ri.fit_test_set_D(mol, auxmol, crd, cols), F))
         x_ao = mol.eval_gto('GTOval_sph', crd)
         whole = (x_ao @ mf.mo_coeff, M.T @ aux_metric_sqrt(auxmol, None, V=V),
                  x_ao, crd)

@@ -36,7 +36,7 @@ from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENER
 from src.Base.pyscf.dispersion import dispersion_gradient
 from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.factorization.isdf_jk import exchange_free_reference
+from src.gradients.isdf_mean_field import exchange_free_reference
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
                                           one_electron_energy_skeleton, tile_sum,
@@ -46,7 +46,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_derivatives import auxmol_of
 from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient)
-from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from tests.test_skeleton_tiles import GEOMS
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same

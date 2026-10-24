@@ -16,8 +16,8 @@ At one geometry it is the MO dot product.
 The best overlap should reach ROOT_FOLLOW_WEIGHT_MIN (else the followed root
 is not among the roots solved) and beat the runner-up by
 ROOT_FOLLOW_MARGIN_MIN (else two roots have mixed and the pick is decided by
-noise). Either is a numerical event (refuse inputs,
-warn numerics): the best overlap is taken, warned about (FollowingWarning) and
+noise). Either is a numerical event (inputs are refused, numerical events
+are warned about): the best overlap is taken, warned about (FollowingWarning) and
 flagged 'root_following_lost' or 'root_following_mixed'; a root that is not
 converged is flagged 'adc_roots_not_converged' (flag_unconverged). A root
 that is not there at all -- a solve shorter than the root index asked for --

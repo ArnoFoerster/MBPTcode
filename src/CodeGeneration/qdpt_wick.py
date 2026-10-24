@@ -1,13 +1,10 @@
-import os
 import re
-import sys
 import itertools
 import argparse
 import networkx as nx
 from dataclasses import dataclass
 from typing import List
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from src.CodeGeneration.pdaggerq_interface import pq_helper
 
 _PQ = []

@@ -1,4 +1,4 @@
-"""The refreeze loop of BOTH optimizers, and which gradient `grad_max` names.
+"""The refreeze loop of BOTH optimizers, and which gradient `opt_grad_max` names.
 
 WHAT BREAKS IF THIS FAILS. A geometry optimization freezes the discrete
 conventions -- the quasiparticle set, the frame, the interpolation layout --
@@ -17,9 +17,8 @@ REFREEZE_MAX_PASSES is warned about and flagged (RefreezeNotConverged,
 walk_flags 'refreeze_not_converged'; refuse inputs,
 warn numerics), the last pass's geometry kept; nothing stands in between.
 
-`grad_max` in these records is the RESIDUAL |dE/dR| at the converged geometry
-R*, while the same name elsewhere in the repository is the driving force at the
-input geometry R0. `opt_grad_max` names the residual unambiguously.
+`opt_grad_max` in these records is the RESIDUAL |dE/dR| at the converged
+geometry R*, not the driving force at the input geometry R0.
 
 The drift, refusal and one-pass tests see a refreeze that records no
 `refreeze_drift`, never flags a drift above the tolerance, or accepts refreeze=2.
@@ -124,6 +123,9 @@ class DriftingHarmonicSurface:
     def label(self):
         return f'drifting harmonic toy, r_e = {self.r_e} Bohr'
 
+    def identity(self):
+        return None
+
 
 class OffsetHarmonicSurface(DriftingHarmonicSurface):
     """A refreeze that lifts the ENERGY by `lift` meV and leaves the minimum
@@ -212,8 +214,8 @@ def test_the_residual_gradient_has_its_own_name(engine, n2):
     """`opt_grad_max` is the residual at R*, and the record says which engine."""
     _, info = _run(engine, DriftingHarmonicSurface(n2), n2)
     assert info['converged']
-    assert info['opt_grad_max'] == info['grad_max']
-    assert info['opt_grad_max'] < GEOM_OPT_CONV['grad_max']
+    assert 'grad_max' not in info
+    assert info['opt_grad_max'] < GEOM_OPT_CONV['opt_grad_max']
     assert info['optimizer'] == engine
 
 

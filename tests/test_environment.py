@@ -37,13 +37,11 @@ from src.Base.numerics.numerics import Numerics
 from src.environments.polarizable_sites import PolarizableSites
 from src.Base.factorization.separable_ri import aux_metric_sqrt
 from src.environments.solvent_screening import (SolventScreening,
-                                                attach_solvent_screening,
-                                                solvent_static_selfenergy)
+                                                attach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
-from tests.pins import RECORDING_BLAS, matches
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
@@ -259,18 +257,16 @@ def check_a_screening_environment_without_a_form_refuses_rather_than_returns_non
 
 
 def check_the_static_term_production_adds_is_the_environment_own(small):
-    """`solvent_static_selfenergy` reads the attached environment; nothing else."""
+    """The static term production adds is the attached environment's own:
+    none in the gas phase, the continuum's (nao, nao) term in solvent, none
+    for fixed charges."""
     mol, mf, _ = small
-    ok = check(solvent_static_selfenergy(mf, mol) is None,
+    ok = check(environment_of(mf).static_self_energy(mf, mol) is None,
                'no static term in the gas phase')
     attach_solvent_screening(mf, solvent='water')
     try:
         env = environment_of(mf)
-        # two calls build the term twice: to a few ulp, not bitwise
         ok &= check(isinstance(env, SolventScreening)
-                    and matches(solvent_static_selfenergy(mf, mol),
-                                env.static_self_energy(mf, mol),
-                                RECORDING_BLAS, quantity='root')
                     and env.static_self_energy(mf, mol).shape
                     == (mol.nao, mol.nao),
                     "the static term production adds is the continuum's own")

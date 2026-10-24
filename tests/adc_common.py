@@ -1,10 +1,13 @@
 """Shared helpers of the ADC and solvation test files: verdict printing, water geometries, tight SCF
-builders, finite differences, a stand-in for a killed job."""
+builders, spin-orbital integrals, finite differences, a stand-in for a killed job."""
 import numpy as np
-from pyscf import gto, scf
+import pytest
+from pyscf import ao2mo, gto, scf
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_integrals,
+                                            get_orbital_energies)
 
 #: Water, bent and non-symmetric so that every nuclear coordinate moves (Angstrom).
 ATOMS = [('O', (0.02, -0.01, 0.1173)), ('H', (0.0, 0.7672, -0.4592)),
@@ -117,3 +120,47 @@ def converge_newton(mf, dm0=None):
     m.conv_tol, m.conv_tol_grad = SCF_TOL_NEWTON, SCF_GRAD_TIGHT
     m.kernel(mf.mo_coeff, mf.mo_occ)
     return m
+
+
+def spin_orbital_sto3g(atom):
+    """(eps, g, nelectron): spin-orbital energies and antisymmetrized integrals of a
+    tight RHF in STO-3G."""
+    mol = gto.M(atom=atom, basis='sto-3g', verbose=0)
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-13
+    mf.run()
+    n = mf.mo_coeff.shape[1]
+    eri = ao2mo.kernel(mol, mf.mo_coeff, compact=False).reshape(n, n, n, n)
+    h1_mo = mf.mo_coeff.T @ (mol.intor('int1e_kin')
+                             + mol.intor('int1e_nuc')) @ mf.mo_coeff
+    h1, g = get_antisymmetrized_spin_integrals(h1_mo, eri)
+    return get_orbital_energies(mf, representation='spin'), g, mol.nelectron
+
+
+def alpha_to_class_index(cfg, sector, cols, nocc):
+    """Map each restricted alpha-sector config to its spin-orbital class
+    (class_configs) index."""
+    idx = []
+    for c in range(len(cfg['K'])):
+        hs, ps, sp = cfg['hole_sp'][c], cfg['part_sp'][c], cfg['spins'][c]
+        if sector == 'IP':
+            hso = sorted([2 * hs[0] + sp[0], 2 * hs[1] + sp[1]])
+            pso = [nocc + 2 * ps[0] + sp[2]]
+            m = np.where((cols[0] == hso[0]) & (cols[1] == hso[1]) & (cols[2] == pso[0]))[0]
+        else:
+            hso = [2 * hs[0] + sp[0]]
+            pso = sorted([nocc + 2 * ps[0] + sp[1], nocc + 2 * ps[1] + sp[2]])
+            m = np.where((cols[0] == hso[0]) & (cols[1] == pso[0]) & (cols[2] == pso[1]))[0]
+        idx.append(m[0])
+    return np.array(idx)
+
+
+@pytest.fixture(scope='module')
+def water_df():
+    """DF-RHF water in cc-pVDZ (cc-pvdz-ri), the starting point of the DF routes."""
+    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+                basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol = 1e-12
+    mf.run()
+    return mf

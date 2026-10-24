@@ -18,7 +18,7 @@ from typing import NamedTuple
 
 import numpy as np
 from src.Base.numerics.constants import (
-    QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL,
+    QP_ROOT_MAX_ITER, QP_ROOT_TOL,
     QP_SEARCH_WINDOW_TIERS,
     QP_GRAPHICAL_TOL, QP_GRAPHICAL_N_OMEGA, QP_GRAPHICAL_MAX_BISECTION,
     QP_POLE_OFFSET, QP_SUBSPACE_TOL, QP_SUBSPACE_MAX_ITER,
@@ -46,16 +46,14 @@ class QPRootNotConverged(StepFailed):
 
 class QPNoRoot(RuntimeWarning):
     """A quasiparticle equation without a root in its widest scan window:
-    the root is NaN, and a caller's `out` dict carries 'no_root'
-    (refuse inputs, warn numerics; a number that does not
-    exist is a flagged NaN)."""
+    the root is NaN, and a caller's `out` dict carries 'no_root' (refuse
+    inputs, warn numerics: a number that does not exist is a flagged NaN)."""
 
 
 class QPWeightOutside(RuntimeWarning):
     """The root of largest weight of a positive-weight pole sum with Z
     outside (0, 1], which no root of such a self-energy has: a numerical
-    event, kept with a warning and 'z_outside' in a caller's `out` dict
-    (no demotion, no refusal)."""
+    event, kept with a warning and 'z_outside' in a caller's `out` dict."""
 
 
 def _report(message, reason, last, refuse):
@@ -1315,28 +1313,6 @@ def pole_strength(func, w, h=QP_Z_DERIV_STEP):
 # The routes' entry points, each one build of `find_qp_root`
 # ---------------------------------------------------------------------------
 
-def solve_qp_equation(func, e_start, method='pole_strength', **kwargs):
-    """The quasiparticle root of func(w) = w - eps - Sigma(w) about e_start
-    for a self-energy known pointwise: `solve_qp_equation_pole_strength`.
-    Kept for its one caller outside this layer's sweep,
-    `gradients.space_time_adjoint`; every other caller reads
-    `solve_qp_equation_pole_strength`, and this goes with that caller's switch.
-
-    method names the selection rule and has one value, 'pole_strength' (the
-    largest valid weight); the nearest-root and fixed-bracket rules are
-    retired, one rule serving every route. vectorized=True: func accepts and
-    returns arrays; the search grid is one call. refuse_unconverged raises
-    QPRootNotConverged where no root is found; full_output also returns
-    whether the root is a quasiparticle."""
-    if method != 'pole_strength':
-        raise ValueError(
-            f"Unknown QP-equation method {method!r}: every quasiparticle "
-            f"equation is solved by the one bracket-and-refine finder with "
-            f"the largest-weight rule, method='pole_strength'; the "
-            f"nearest-root ('graphical') and fixed-bracket ('bisection') "
-            f"rules are retired.")
-    return solve_qp_equation_pole_strength(func, e_start, **kwargs)
-
 
 def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP_GRAPHICAL_N_OMEGA,
                                     max_bisection=QP_GRAPHICAL_MAX_BISECTION,
@@ -1382,8 +1358,8 @@ def solve_qp_equation_pole_strength(func, eigKS, tol=QP_GRAPHICAL_TOL, nOmega=QP
 
 
 def solve_qp_equation_scan(residual, fprime, a, follow=None,
-                           tol=QP_CD_NEWTON_TOL,
-                           max_iter=QP_CD_NEWTON_MAX_ITER, label='',
+                           tol=QP_ROOT_TOL,
+                           max_iter=QP_ROOT_MAX_ITER, label='',
                            refusals=(), out=None, positive_weight=False,
                            rescan=True):
     """(w*, Z) of residual(w) = w - a - Sigma(w) = 0 for a self-energy known
@@ -1408,7 +1384,7 @@ def solve_qp_equation_scan(residual, fprime, a, follow=None,
     return float(got.w), float(got.z)
 
 
-def solve_qp_equation_poles(num, pol, a, tol=QP_CD_NEWTON_TOL, label='',
+def solve_qp_equation_poles(num, pol, a, tol=QP_ROOT_TOL, label='',
                             follow=None, out=None):
     """(w*, Z) of f(w) = w - a - sum_i num_i/(w - pol_i) = 0, the root of
     largest weight, for weights num of either sign: `find_qp_root` on a
@@ -1463,54 +1439,25 @@ def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL, out=None):
     return best_w, best_z
 
 
-def bracketed_root(num, pol, a, w0, tol=QB_QP_ROOT_TOL, out=None):
-    """(w, Z) of the root of f(w) = w - a - sum_i num_i/(w - pol_i) = 0 in the
-    interval between the coupled poles that bracket w0: the root a reference
-    seed names, decided exactly from the poles (`find_qp_root` with
-    `follow`), a warning where the largest weight has left it; out: a dict
-    that receives its branch instead (`_note_branch`, 'flipped')."""
-    got = find_qp_root(PoleSum(num, pol, a, tol), a, follow=(w0, None))
+def bracketed_root(num, pol, a, w0, labels=None, tol=QB_QP_ROOT_TOL, out=None):
+    """(w, Z) of the root of f(w) = w - a - sum_i num_i/(w - pol_i) = 0 that
+    a reference seed names, decided exactly from the poles (`find_qp_root`
+    with `follow`): between the poles labelled `labels` (`bracket_labels` of
+    the reference root) wherever they have moved, or, labels None, in the
+    interval holding w0. A warning where the largest weight has left it;
+    out: a dict that receives its branch instead (`_note_branch`,
+    'flipped')."""
+    got = find_qp_root(PoleSum(num, pol, a, tol), a, follow=(w0, labels))
     _note_branch(got, '', tol, out)
     return float(got.w), float(got.z)
 
 
-def ranked_root(num, pol, a, k, label='', tol=QB_QP_ROOT_TOL):
-    """(w, Z) of the k-th smallest eigenvalue of the arrowhead matrix
-    [[a, sqrt(num)], [sqrt(num), diag(pol)]], positive weights.
-
-    One root of the secular equation lies in each interval between coupled
-    poles; a pole with no coupling at all is an eigenvalue of its own, and
-    holding the k-th place it is refused, being no root of the equation.
-    """
-    num, pol, loose = _coupled_poles(num, pol)
-    hi = min(k, num.size) - 1
-    # the rank of the root in interval m is m + 1 plus the loose poles below
-    # it, rising with m: bisect for the interval whose root has rank k
-    lo = max(-1, k - 1 - loose.size)
-    while lo <= hi:
-        m = (lo + hi) // 2
-        w, z = root_between(num, pol, a, m, tol)
-        rank = m + 1 + int(np.searchsorted(loose, w))
-        if rank == k:
-            return float(w), float(z)
-        if rank < k:
-            lo = m + 1
-        else:
-            hi = m - 1
-    raise RuntimeError(
-        f'eigenvalue {k} of {label or "the arrowhead matrix"} is an uncoupled '
-        f'pole, not a root of the quasiparticle equation')
-
-
-def _coupled_poles(num, pol):
-    """(num, pol) of the coupled poles in increasing order, and the sorted
-    positions of the poles no coupling reaches."""
-    num = np.asarray(num, float).ravel()
-    pol = np.asarray(pol, float).ravel()
-    order = np.argsort(pol, kind='stable')
-    num, pol = num[order], pol[order]
-    loose = np.sort(pol[num == 0.0])
-    return num[num > 0.0], pol[num > 0.0], loose
+def bracket_labels(num, pol, a, w):
+    """(lo, hi): the labels of the poles bounding the root w of the pole sum
+    (`PoleSum.labels_of`), which `bracketed_root` follows at other
+    geometries; None for the unbounded side of an outer interval."""
+    poles = PoleSum(num, pol, a)
+    return poles.labels_of(int(np.searchsorted(poles.pol, w)) - 1)
 
 
 def solve_qp_hamiltonian(newton_step, seed, tol=QP_SUBSPACE_TOL,

@@ -37,16 +37,20 @@ triplet on II'); the particle-hole ones recouple the spins and act on Q (R).
 Both follow from the spin-orbital formulas of adc_u_faddeev evaluated on
 these components, and are checked against it through the CSF isometry.
 """
+import warnings
+
 import numpy as np
 import scipy.linalg as la
 
 from src.Base.numerics.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER_JACOBI
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.common.eri_blocks import g_slice
 from src.SingleReference.ADC import adc_r_dense_df, adc_r_dense_full
 from src.SingleReference.ADC import adc_r_sigma_df, adc_r_sigma_full
 from src.SingleReference.ADC.adc_r_utils import u_2h1p_unfold, u_2p1h_unfold
 from src.SingleReference.ADC.eeADC.ee_r_sigma_df import DFVvvvKernels
-from src.SingleReference.ADC.solve import apply_inverse_sqrt, inverse_sqrt_psd
+from src.SingleReference.ADC.solve import (ADCNotConverged, apply_inverse_sqrt,
+                                           inverse_sqrt_psd)
 from src.SingleReference.CC.diis import DIIS
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -98,7 +102,7 @@ def eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
         eps, coeff_df=B_aa, eri_chemist=eri_chemist).build_casida_matrices(
             nocc, lBSE=True, triplet=(spin == 'triplet'))
     n = A.shape[0]
-    D = (eps[None, nocc:] - eps[:nocc, None]).ravel()          # eps_a - eps_i
+    D = ov_energies(eps, nocc)                                 # eps_a - eps_i
     if treatment == 'rpa':
         require_stable_channel(A, B, f'TDHF {spin} channel')
         if route == 'phonon':
@@ -219,7 +223,7 @@ def _vvvv_ladder(B_aa, eri_chemist, nocc, norb):
     """t -> sum_ef t[k,l,e,f] <ef|cd>, through the DF factor (eeADC
     DFVvvvKernels) or the dense tensor."""
     if B_aa is not None:
-        return DFVvvvKernels(B_aa, nocc, norb)._ldir
+        return DFVvvvKernels(B_aa, nocc, norb).ladder_direct
     v = slice(nocc, norb)
     g_vvvv = g_slice(None, eri_chemist, v, v, v, v)            # <ef|cd>
     return lambda t: np.einsum('klef,efcd->klcd', t, g_vvvv, optimize=True)
@@ -244,7 +248,9 @@ def solve_ladder_amplitudes_restricted(eps, nocc, B_aa=None, eri_chemist=None,
 
     Jacobi steps with the orbital-energy denominators and DIIS; the vvvv
     ladder goes through the DF factor (eeADC DFVvvvKernels), or the dense
-    tensor. Converged when max|R| < conv_tol. Returns a LadderAmplitudes."""
+    tensor. Converged when max|R| < conv_tol. Returns a LadderAmplitudes;
+    one that has not converged in max_iter steps warns (ADCNotConverged) and
+    carries the last iterate with info['converged'] False."""
     eps = np.asarray(eps)
     norb = len(eps)
     o, v = slice(0, nocc), slice(nocc, norb)
@@ -269,16 +275,17 @@ def solve_ladder_amplitudes_restricted(eps, nocc, B_aa=None, eri_chemist=None,
         rmax = float(np.max(np.abs(R)))
         if verbose:
             print(f"  ladder CCD iter {it:3d}  max|R| = {rmax:.3e}", flush=True)
-        if rmax < conv_tol:
-            TA = _ladder_TA(lad, ev, t)
-            return LadderAmplitudes(t, TA, V, G_oooo,
-                                    {'niter': it, 'residual': rmax})
-        if it == max_iter:
+        if rmax < conv_tol or it == max_iter:
             break
         t_new = t - R / D
         t = diis.compute_new_vec(t_new.ravel(), (t_new - t).ravel()).reshape(t.shape)
-    raise RuntimeError(f"ladder CCD not converged in {max_iter} iterations "
-                       f"(max|R| = {rmax:.3e})")
+    converged = rmax < conv_tol
+    if not converged:
+        warnings.warn(f"ladder CCD not converged in {max_iter} iterations (max|R| = "
+                      f"{rmax:.3e}); the last iterate is used (converged=False)",
+                      ADCNotConverged, stacklevel=2)
+    return LadderAmplitudes(t, _ladder_TA(lad, ev, t), V, G_oooo,
+                            {'niter': it, 'residual': rmax, 'converged': converged})
 
 
 def ladder_channels(eps, nocc, B_aa=None, eri_chemist=None, verbose=0):
@@ -682,7 +689,7 @@ class Pieces:
         if (getattr(s, 'u2_denom_dress', None)
                 or getattr(s, 'W_chemist', None) is not None
                 or getattr(s, 'W_aux', None) is not None
-                or getattr(s, '_is_adc2x', False)):
+                or getattr(s, 'is_adc2x', False)):
             raise ValueError("Faddeev-ADC(3) takes no EN dressing, screening "
                              "or ADC(2)-X: its couplings and pair channels "
                              "replace them")

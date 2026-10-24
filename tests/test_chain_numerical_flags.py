@@ -44,8 +44,8 @@ import src.gradients.gwbse.qp_set as qp_set
 from src.gradients.gwbse.qp_set import QuasiparticleRootLost, QuasiparticleSet
 from src.gradients.gwbse.state_following import CasidaSolution, StateFollower
 from src.Base.step_failed import DavidsonNotConverged
-from src.properties.excitations import (casida_warnings, held_grid,
-                                        qp_hamiltonian_warnings, scf_flags)
+from src.gradients.gwbse.diagnostics import held_grid, log_entries
+from src.properties.excitations import merged_logs, scf_flags
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
 
@@ -104,7 +104,7 @@ class Follower(StateFollower):
     def __init__(self):
         self.follow_log, self.follow_coords = [], []
         x = np.eye(4)[:, :2]
-        self._followed = self._anchor = (None, np.eye(2), x, 0 * x)
+        self.followed = self.anchor = (None, np.eye(2), x, 0 * x)
 
     def _match_followed(self, here, solution):
         return 0, 0.6, 0.5 * constants.ROOT_FOLLOW_MARGIN_MIN
@@ -231,7 +231,7 @@ def test_a_group_of_z_outside_keeps_its_h_and_is_logged(monkeypatch):
 
     chain = GroupChain()
     with pytest.warns(RuntimeWarning, match=r'outside \(0, 1\], kept'):
-        qp_h = chain.quasiparticles._qp_hamiltonian(
+        qp_h = chain.quasiparticles.qp_hamiltonian(
             MeanField(), np.linspace(-1, 1, 6), [-0.5, 0.2],
             {'tape': Tape(), 'xc_correction': None})
     assert qp_h.groups[0].z.tolist() == [0.8, 1.2]
@@ -261,7 +261,9 @@ def test_a_group_short_of_self_consistency_carries_on_and_is_logged(
     assert [e['orbitals'] for e in chain.qp_hamiltonian_log] == [[3, 4], [4]]
     surface = type('Surface', (), {'qp_hamiltonian_log':
                                    chain.qp_hamiltonian_log})()
-    assert qp_hamiltonian_warnings(surface, surface) == chain.qp_hamiltonian_log
+    logs = {'logs': log_entries(surface)}
+    assert (merged_logs('qp_hamiltonian_warnings', logs, logs)
+            == chain.qp_hamiltonian_log)
 
 
 def test_a_non_finite_group_h_still_refuses_the_step(monkeypatch):
@@ -338,7 +340,8 @@ def test_a_read_root_left_unconverged_is_kept_warned_and_recorded(
     assert entry['residuals'] == [1e-3] and entry['geometry'] == 'geometry-a'
     assert entry['read_tol'] == max(1e-8, constants.BSE_FORCE_RESIDUAL_TOL)
     # the record carries it, once for the vertical and the relaxed surface
-    assert casida_warnings(chain, chain) == [entry]
+    logs = {'logs': log_entries(chain)}
+    assert merged_logs('casida_warnings', logs, logs) == [entry]
 
 
 def test_an_unconfirmed_read_root_is_logged(monkeypatch):

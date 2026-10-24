@@ -21,7 +21,7 @@ from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.GW.qp_solve import add_reaction_field
 from src.SingleReference.GW.qp_states import frozen_scissor
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_bse_backward_rows, isdf_interstate_backward)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
@@ -118,7 +118,7 @@ class StateFollower:
         The cache is what the explicit adjoint reads. The dense route's blocks
         are the ones its Casida matrices were built from and ride along on the
         explicit route; the matrix-free route returns it empty and
-        `_casida_seeds` fills it at the first reverse call, so an energy
+        `casida_seeds` fills it at the first reverse call, so an energy
         never builds a three-index block. On the grid route it stays empty.
         """
         n_ov = self.chain.nocc * (len(eps_qp) - self.chain.nocc)
@@ -143,8 +143,8 @@ class StateFollower:
         # state and those below it, every root when the state is followed by
         # overlap), and only above the residual the force needs,
         # BSE_FORCE_RESIDUAL_TOL. Such a root is kept as solved, warned about
-        # and logged in `casida_log` (refuse inputs,
-        # warn numerics); the timings always ride along, since the per-root
+        # and logged in `casida_log` (the policy: refuse inputs, warn
+        # numerics); the timings always ride along, since the per-root
         # residuals the verdict reads are recorded there.
         solve = ({'stats': {}, 'timings': {}} if self.chain.timer is not None
                  else {'stats': None, 'timings': {}})
@@ -244,16 +244,16 @@ class StateFollower:
         # the roots a matrix-free solve checks for a force: all of them for
         # a followed state, else the state and those below it (`_casida`)
         read = None if self.chain.track is not None else self.chain.state + 1
-        held = self.chain._evaluations.get(mol)
+        held = self.chain.evaluations.get(mol)
         if (held is not None and held.mf is mf and held.shared is not None
                 and (held.read is None or (read is not None
                                            and read <= held.read))):
             return held.shared, held.solution
         shared, solution = self._forward_pass(mol, mf)
-        for other in self.chain._evaluations.values():
+        for other in self.chain.evaluations.values():
             other.shared = None
         if held is None or held.mf is not mf:
-            held = self.chain._evaluations.put(mol, Evaluation(mf))
+            held = self.chain.evaluations.put(mol, Evaluation(mf))
         held.shared, held.solution, held.read = shared, solution, read
         return shared, solution
 
@@ -297,16 +297,16 @@ class StateFollower:
         step, which reads neither `spin` nor `state`, on the conventions
         resolved in this geometry's orbital indices; a first one elsewhere
         than the reference geometry is preceded by the reference's
-        (`_anchored_first`). The quasiparticle set's tape rides with it: the
+        (`anchored_first`). The quasiparticle set's tape rides with it: the
         reverse solve reads proj(tau) and the slices from it instead of
         sweeping them again, bitwise. A quantity that needs the kernel but
         not the supermolecular roots -- the fragment-diabatic elements
         (`fragment_bse`) -- starts here, and so does its gradient
         (`fold_to_nuclei` reads nothing from the roots). With no roots there
         is no eigenvector check of an adaptive set (`verify_selection`)."""
-        self._anchored_first(mol, lambda: self.chain.forward(self.chain.mol0, self.chain.mf0))
-        resolved = self.chain._resolve_at(mol, mf)
-        x_mo, d, eps, mu, auxmol, crd, _, d_bare = self.chain._factors_for(mol, mf)
+        self.anchored_first(mol, lambda: self.chain.forward(self.chain.mol0, self.chain.mf0))
+        resolved = self.chain.resolve_at(mol, mf)
+        x_mo, d, eps, mu, auxmol, crd, _, d_bare = self.chain.factors_for(mol, mf)
         # A SPLIT EQUILIBRIUM continuum screens the density terms -- the
         # direct W and Eq. (18) -- with the static-dressed D_s, while the
         # kernel's exchange keeps the optical D (`split_equilibrium`).
@@ -330,14 +330,14 @@ class StateFollower:
         # THE SELF-ENERGY SCREENS BARE. Eq. (18) is the static approximation to
         # Sigma[W_solv] - Sigma[W_gas], so screening Sigma dynamically as well
         # counts the reaction field twice; the kernel below keeps D.
-        shift, screening = self.chain._reaction_field(x_mo, d_w, d_bare, eps,
+        shift, screening = self.chain.reaction_field(x_mo, d_w, d_bare, eps,
                                                 screening=pair)
         d_sigma = d if d_bare is None else d_bare
         qp_h = None
         with self.chain.phase('t_qp'):
-            if (self.chain.qp_select is not None and self.chain._selecting is None
+            if (self.chain.qp_select is not None and self.chain.selecting is None
                     and self.chain.resolved.qp_partition is None):
-                self.chain.selection._select_qp_set(mol, mf, x_mo, d, d_sigma, eps,
+                self.chain.selection.select_qp_set(mol, mf, x_mo, d, d_sigma, eps,
                                     w_aux, shift)
             while True:
                 xc = self.chain.xc_correction(mf, self.chain.resolved.qp_set, shift)
@@ -349,16 +349,16 @@ class StateFollower:
                 # G0W0: Eq. (18) whole on each root, never Z x shift inside
                 ws = add_reaction_field(np.asarray(out[0], float), shift,
                                         self.chain.resolved.qp_set)
-                if not self.chain.selection._refine_selection(eps, ws, shift):
+                if not self.chain.selection.refine_selection(eps, ws, shift):
                     break
                 tape = route_out.get('tape')
                 if tape is not None:
                     tape.release()
         qp_tape = route_out.get('tape')
         eps_qp = eps.copy()
-        eps_qp[self.chain.resolved.qp_set] = self.chain.quasiparticles._block_shared(eps, ws)
+        eps_qp[self.chain.resolved.qp_set] = self.chain.quasiparticles.block_shared(eps, ws)
         if self.chain.qp_hamiltonian:
-            qp_h = self.chain.quasiparticles._qp_hamiltonian(
+            qp_h = self.chain.quasiparticles.qp_hamiltonian(
                 mf, eps, ws, route_out,
                 None if shift is None else (x_mo, d_w, d_bare, screening,
                                             shift))
@@ -374,17 +374,17 @@ class StateFollower:
         # environment's static term below is added on top of it, not
         # instead of it.
         if self.chain.outside_scissor != 'tiers':
-            self.chain.quasiparticles._freeze_outside_curve(
+            self.chain.quasiparticles.freeze_outside_curve(
                 mol, mf, x_mo, d_sigma, eps, eps_qp, shift)
-        self.chain.quasiparticles._freeze_outside_shift(eps, ws, shift)
+        self.chain.quasiparticles.freeze_outside_shift(eps, ws, shift)
         for p in np.flatnonzero(self.chain.quasiparticles.outside_window(len(eps))):
             scissor_p = frozen_scissor(self.chain.resolved.outside_shift, p)
             if scissor_p is not None:
                 eps_qp[p] = eps[p] + scissor_p
         # beyond the window, Delta(eps_p) at this geometry's eps_p
-        for idx, delta, _ in self.chain.quasiparticles._curve_at(eps):
+        for idx, delta, _ in self.chain.quasiparticles.curve_at(eps):
             eps_qp[idx] = eps[idx] + delta
-        env_outside = self.chain.quasiparticles._env_static_outside(shift, len(eps))
+        env_outside = self.chain.quasiparticles.env_static_outside(shift, len(eps))
         if env_outside is not None:
             eps_qp = eps_qp + env_outside
         if self.chain.resolved.qp_partition is not None:
@@ -396,7 +396,7 @@ class StateFollower:
                              mu, d_bare, shift, screening, qp_tape, xc, split,
                              qp_h, resolved)
 
-    def _anchored_first(self, mol, at_reference):
+    def anchored_first(self, mol, at_reference):
         """Run `at_reference`, an evaluation at (mol0, mf0), before the first
         one at `mol` when that is another geometry: what the first forward
         freezes -- the set, the scissor, the quadrature, the seeds -- is the
@@ -408,29 +408,29 @@ class StateFollower:
             return
         at_reference()
 
-    def _tracked(self, mol, mf):
+    def tracked(self, mol, mf):
         """(root, `SharedForward`, `CasidaSolution`) of the followed state at
         `mol` on `mf`, off the evaluation held there (`forward`); a wider
         re-solve (`tracked_root`) replaces the solution held."""
         shared, solution = self.chain.forward(mol, mf)
         root, wider = self.chain.tracked_root(mol, mf, shared, solution)
-        held = self._held(mol, mf)
+        held = self.held(mol, mf)
         if wider is not solution and held is not None:
             held.solution = wider
         return root, shared, wider
 
-    def _held(self, mol, mf):
+    def held(self, mol, mf):
         """The `Evaluation` held at `mol` on `mf`, or None."""
-        held = self.chain._evaluations.get(mol)
+        held = self.chain.evaluations.get(mol)
         return held if held is not None and held.mf is mf else None
 
     def _matched_at(self, mol, mf, followed):
         """Hold `followed`, the state this chain matched at `mol` on `mf`,
         in that geometry's `Evaluation` until `commit` adopts it."""
-        held = self._held(mol, mf)
+        held = self.held(mol, mf)
         if held is None:
-            held = self.chain._evaluations.put(mol, Evaluation(mf))
-        held.followed[self.chain._owner] = followed
+            held = self.chain.evaluations.put(mol, Evaluation(mf))
+        held.followed[self.chain.selection_owner] = followed
 
     def tracked_state(self, mol, mf, solution):
         """Which root of THIS geometry is the state being followed, among the
@@ -473,11 +473,11 @@ class StateFollower:
         if self.chain.track is None:
             return self.chain.state, solution
         here = (mol, np.asarray(mf.mo_coeff, float))
-        if self.chain._followed is None:
-            self.chain._followed = here + (xn[:, [self.chain.state]].copy(),
+        if self.chain.followed is None:
+            self.chain.followed = here + (xn[:, [self.chain.state]].copy(),
                                      solution.y[:, [self.chain.state]].copy())
-            self.chain._anchor = self.chain._followed
-            self._matched_at(mol, mf, self.chain._followed)
+            self.chain.anchor = self.chain.followed
+            self._matched_at(mol, mf, self.chain.followed)
             self.chain.follow_log.append(dict(index=self.chain.state, weight=1.0,
                                         margin=1.0, anchor=1.0,
                                         identity=ORBITAL_IDENTITY))
@@ -505,8 +505,8 @@ class StateFollower:
                 f'geometry may not be the one asked for.',
                 RuntimeWarning, stacklevel=2)
         anchor = float(np.abs(transported_overlap(
-            self.chain._anchor[:2], here, self.chain.nocc, self.chain._anchor[2],
-            self.chain._anchor[3], xn[:, [index]], yn[:, [index]])[1, 1]))
+            self.chain.anchor[:2], here, self.chain.nocc, self.chain.anchor[2],
+            self.chain.anchor[3], xn[:, [index]], yn[:, [index]])[1, 1]))
         self._matched_at(mol, mf, here + (xn[:, [index]].copy(),
                                           yn[:, [index]].copy()))
         step = dict(index=int(index), weight=weight, margin=margin,
@@ -525,14 +525,14 @@ class StateFollower:
         (mol, mo_coeff, X, Y) -- that a surface built afresh carries on
         (`hand_over`); None when this chain follows nothing (by index, or
         nothing committed yet)."""
-        if self.chain.track is None or self.chain._followed is None:
+        if self.chain.track is None or self.chain.followed is None:
             return None
-        return self.chain._followed, self.chain._anchor
+        return self.chain.followed, self.chain.anchor
 
     def hand_over(self, held):
         """Follow on from `held`, another chain's `following()`: its first
         evaluation is matched against that state by overlap, not by index."""
-        self.chain._followed, self.chain._anchor = held
+        self.chain.followed, self.chain.anchor = held
 
     def commit(self, mol):
         """Accept `mol`: the state matched there is what every later geometry
@@ -548,16 +548,16 @@ class StateFollower:
         there, or dropped from the cache since -- refuses (`RuntimeError`):
         walking on would match the next step against a geometry the walk
         left. Committing the geometry already followed adopts nothing."""
-        held = self.chain._evaluations.get(mol)
-        following = self.chain.track is not None and self.chain._followed is not None
-        matched = None if held is None else held.followed.get(self.chain._owner)
+        held = self.chain.evaluations.get(mol)
+        following = self.chain.track is not None and self.chain.followed is not None
+        matched = None if held is None else held.followed.get(self.chain.selection_owner)
         if following and matched is None and not np.array_equal(
-                np.asarray(self.chain._followed[0].atom_coords()),
+                np.asarray(self.chain.followed[0].atom_coords()),
                 np.asarray(mol.atom_coords())):
             raise RuntimeError(
                 'commit: no state matched at this geometry is held (it was '
                 'not evaluated here with the state followed, or is older '
-                f'than the last {self.chain._evaluations.size} geometries); the '
+                f'than the last {self.chain.evaluations.size} geometries); the '
                 'followed state and the keys stay where they were last '
                 'committed')
         if held is not None:
@@ -568,7 +568,7 @@ class StateFollower:
             holder.accept(mol)
         if not following or matched is None:
             return False
-        self.chain._followed = matched
+        self.chain.followed = matched
         return True
 
     def _match_followed(self, here, solution):
@@ -578,7 +578,7 @@ class StateFollower:
         matched by `body_overlap`, in which the core rides with its atoms,
         relative to the overlap of the two reference determinants, which it
         keeps near 1."""
-        mol0, mo0, x0, y0 = self.chain._followed
+        mol0, mo0, x0, y0 = self.chain.followed
         return follow_state(transported_overlap(
             (mol0, mo0), here, self.chain.nocc, x0, y0, solution.x, solution.y), 0)
 
@@ -594,7 +594,7 @@ class StateFollower:
         finally:
             self.chain.nroots = nroots
 
-    def _casida_seeds(self, shared, solution, n, m=None):
+    def casida_seeds(self, shared, solution, n, m=None):
         """(eps_qp_bar, X_bar, D_bar, W_aux_bar) of Omega_n, or of the
         interstate element <m| dH |n>, by the realization `bse_adjoint` names.
 
@@ -604,7 +604,7 @@ class StateFollower:
         """
         x_mo, d, eps_qp, w_aux = shared.x_mo, shared.d, shared.eps_qp, shared.w_aux
         nocc, cache, xn, yn = self.chain.nocc, solution.cache, solution.x, solution.y
-        block = self.chain.reverse._adjoint_rows(x_mo)
+        block = self.chain.reverse.adjoint_rows(x_mo)
         if self.chain.bse_adjoint == 'grid' and block is not None:
             # the grid adjoint's own rows, moved into the adjoint's tiles:
             # X_bar and D_bar are never whole on any rank
@@ -626,13 +626,13 @@ class StateFollower:
             return isdf_interstate_backward(m, n, x_mo, d, eps_qp, w_aux, nocc,
                                             xn, yn, **kw)
         if not cache:
-            cache.update(bse_cache(x_mo, d, eps_qp, w_aux, nocc,
+            cache.update(bse_cache(x_mo, d, eps_qp, nocc,
                                    spin=self.chain.spin, bse_tda=self.chain.bse_tda))
         if m is None:
             return bse_backward(n, x_mo, d, eps_qp, w_aux, nocc, cache, xn, yn,
-                                **self.chain.quasiparticles._tile_kw())
+                                **self.chain.quasiparticles.tile_kw())
         return interstate_backward(m, n, x_mo, d, eps_qp, w_aux, nocc, cache,
-                                   xn, yn, **self.chain.quasiparticles._tile_kw())
+                                   xn, yn, **self.chain.quasiparticles.tile_kw())
 
 
 def coupled(qp_h):

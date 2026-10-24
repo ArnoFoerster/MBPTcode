@@ -95,7 +95,7 @@ def main():
     ga, gb, gab = get_antisymmetrized_spin_block_eri(mol, mf)
     eps = get_orbital_energies(mf, representation='spatial')
     r = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, mol.nelectron // 2)
-    base = dict(r._rargs); A = r._amps_order(max_order=4)
+    base = dict(r.rargs); A = r.amps_order(max_order=4)
     lp = {**base, 'eps_a': eps,
           't2_1_aaaa': A['T2_1']['t2_aaaa'], 't2_1_abab': A['T2_1']['t2_abab'],
           't2_2_aaaa': A['T2_2']['t2_aaaa'], 't2_2_abab': A['T2_2']['t2_abab'],

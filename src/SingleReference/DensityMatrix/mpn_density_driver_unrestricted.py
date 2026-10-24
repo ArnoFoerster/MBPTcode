@@ -10,8 +10,8 @@ either materialized (O(nv^3*no^3) per spin sector) or Laplace-fused
 modules).
 
 l-tag axis convention: same pure-vs-mixed rule as the restricted driver
-(to_l's docstring has the full derivation/validation history):
-pure blocks (all one spin, now including the genuinely distinct all-beta
+(to_l's docstring has the full derivation):
+pure blocks (all one spin, including the genuinely distinct all-beta
 ones) get (occ, vir-REVERSED) with sign (-1)**(rank//2); mixed blocks get a
 plain occ<->vir side swap, sign +1, no internal reordering.
 
@@ -67,7 +67,7 @@ class MPnDensityDriverUnrestricted:
         self._no = {'a': nocc_a, 'b': nocc_b}
         self.custom_denom = custom_denom or {}
 
-    def _args(self):
+    def kernel_args(self):
         return dict(g_aaaa=self.g_aaaa, g_abab=self.g_abab, g_bbbb=self.g_bbbb,
             d_aa=self.d_aa, d_bb=self.d_bb,
             o_a=self.o_a, v_a=self.v_a, o_b=self.o_b, v_b=self.v_b,
@@ -93,7 +93,7 @@ class MPnDensityDriverUnrestricted:
         return tuple(nv[s] for s in spins) + tuple(no[s] for s in spins)
 
     def compute_t2_1(self):
-        args = self._args()
+        args = self.kernel_args()
         return {b: getattr(gen, f't2_1_{b}_numerator')(**args) / self._denom(b) for b in T2_BLOCKS}
 
     def compute_order2_amplitudes(self, t2_1, max_rank=3, laplace_ntau=None):
@@ -104,8 +104,8 @@ class MPnDensityDriverUnrestricted:
         m3_ov_{a,b}_12_unrestricted's t3-dependent terms) are instead filled
         in via gen_lap3's Laplace-fused pieces by compute_t1_3/
         compute_delta_gamma3 below (see
-        generate_mp3_t3_laplace_unrestricted.py)."""
-        args = self._args()
+        src/CodeGeneration/generate_mpn_laplace.py)."""
+        args = self.kernel_args()
         kw = {f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}
         t1_2 = {b: getattr(gen, f't1_2_{b}_numerator')(**args, **kw) / self._denom(b) for b in T1_BLOCKS}
         t2_2 = t3_2 = None
@@ -127,7 +127,7 @@ class MPnDensityDriverUnrestricted:
         NOT the ordinary t1_3_{aa,bb}_numerator with a zero placeholder,
         since the ndim<=4 invariant is enforced per-operand regardless of
         value."""
-        args = self._args()
+        args = self.kernel_args()
         kw = {}
         kw.update({f't1_2_{b}': t1_2[b] for b in T1_BLOCKS})
         kw.update({f't2_2_{b}': t2_2[b] for b in T2_BLOCKS})
@@ -159,7 +159,7 @@ class MPnDensityDriverUnrestricted:
         same amplitudes -- see compute_delta_gamma23."""
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1()
         t1_2 = order2[0] if order2 is not None else self.compute_order2_amplitudes(t2_1, max_rank=1)[0]
-        return self._gamma2_blocks(self._args(), t2_1, t1_2)
+        return self._gamma2_blocks(self.kernel_args(), t2_1, t1_2)
 
     def _dead_args(self):
         """The m2_*/m3_* cross-density pieces carry no bracket integral, so the DF
@@ -170,7 +170,7 @@ class MPnDensityDriverUnrestricted:
 
     def _gamma2_blocks(self, margs, t2_1, t1_2):
         """Delta_gamma^(2) per spin channel from the amplitudes; margs the
-        generated pieces' integral arguments (self._args() or self._dead_args())."""
+        generated pieces' integral arguments (self.kernel_args() or self._dead_args())."""
         l2_1 = {b: to_l(t2_1[b], len(b) // 2, b) for b in T2_BLOCKS}
         l1_2 = {b: to_l(t1_2[b], len(b) // 2, b) for b in T1_BLOCKS}
 
@@ -283,13 +283,13 @@ class MPnDensityDriverUnrestricted:
         the four O(nv^3*no^3) t3_2_* tensors are ever materialized -- their
         only two live consumers (t1_3_{aa,bb}'s and
         m3_ov_{a,b}_12_unrestricted's t3-dependent terms) are filled in via
-        gen_lap3 instead (see generate_mp3_t3_laplace_unrestricted.py). Every
+        gen_lap3 instead (see src/CodeGeneration/generate_mpn_laplace.py). Every
         other m3_{oo,vv}_{a,b}_12/m3_{oo,vv,ov}_{a,b}_21 body declares
         t_3_2_*/l_3_2_* as a parameter but never references it in an einsum
         (confirmed dead, same pattern as the restricted driver), so a zero
         placeholder there is always exact, laplace mode or not -- pass
-        laplace_ntau=None to get the old fully-materialized behavior (kept
-        for tests/oracle cross-checks only)."""
+        laplace_ntau=None to materialize the t3_2_* tensors (for
+        cross-checks only)."""
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1()
         order2 = order2 if order2 is not None else \
             self.compute_order2_amplitudes(t2_1, max_rank=3, laplace_ntau=laplace_ntau)
@@ -299,7 +299,7 @@ class MPnDensityDriverUnrestricted:
         """Delta_gamma^(3) per spin channel from T2^(1) and the order-2
         amplitudes (t1_2, t2_2, t3_2), dense (df False) or DF (df True: DF
         Laplace pieces and t1_3, dead integral arguments for the m3_* pieces)."""
-        args = self._args_df() if df else self._args()
+        args = self._args_df() if df else self.kernel_args()
         margs = self._dead_args() if df else args
         lap = gen_lap3_df if df else gen_lap3
         sfx = '_df' if df else ''

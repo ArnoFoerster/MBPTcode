@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
 from src.Base.numerics.numerics import Numerics
 from src.gradients.evaluation import GeometryCache, geometry_key
@@ -111,7 +112,8 @@ def test_a_relaxed_state_reads_the_walks_own_evaluation(ch2o):
     chain = ExcitedStateChain(
         ch2o, factory, spin='singlet',
         numerics=g1_numerics(ch2o, Numerics(bse={'track': 'overlap'})))
-    record = relax_state(chain, ch2o, engine='cartesian', max_cycle=3,
+    record = relax_state(chain, ch2o, engine='cartesian',
+                         numerics=derived_walk(chain, 'a capped test walk', max_cycle=3),
                          nudge=0, verbose=False)
     minimum = geometry_key(record['mol'])
     assert record['e_total'] == record['info']['energy']

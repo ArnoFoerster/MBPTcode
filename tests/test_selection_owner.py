@@ -1,6 +1,6 @@
 """Only the chain that started the adaptive selection refines or verifies it.
 
-A spin view is a shallow copy and shares `_selecting` by reference; the
+A spin view is a shallow copy and shares `selecting` by reference; the
 selection's rounds belong to the chain that opened it. The owner is a token
 per chain, not `id(self)`, which CPython hands to the next object allocated at
 a freed chain's address. Here every identity is made equal, the reuse case at
@@ -17,8 +17,8 @@ def selecting_chain():
     """A chain holding a selection it opened, nothing else built."""
     chain = ExcitedStateChain.__new__(ExcitedStateChain)
     chain.__dict__.update(conventions=FrozenConventions(qp_set=[]),
-                          _owner=object())
-    chain._selecting = {'owner': chain._owner,
+                          selection_owner=object())
+    chain.selecting = {'owner': chain.selection_owner,
                         'verify_pending': True, 'candidates': ()}
     return chain
 
@@ -27,7 +27,7 @@ def test_a_copy_does_not_take_over_the_selection(monkeypatch):
     monkeypatch.setattr(adaptive_selection, 'id', lambda obj: 0, raising=False)
     chain = selecting_chain()
     view = copy.copy(chain)
-    assert view._selecting is chain._selecting
-    assert view.selection._refine_selection(None, None, None) is False
+    assert view.selecting is chain.selecting
+    assert view.selection.refine_selection(None, None, None) is False
     assert view.selection.verify_selection(None, None) is False
-    assert chain.selection._owns_selection(chain._selecting)
+    assert chain.selection._owns_selection(chain.selecting)

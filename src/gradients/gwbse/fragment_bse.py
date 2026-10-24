@@ -70,7 +70,7 @@ WHICH KERNEL is the chain's: `ExcitedStateChain(bse_tda=...)`.
 
 WHAT IS NOT HERE. No nuclear derivatives: those are
 `src.gradients.gwbse.fragment_diabatic`, and their finite-difference reference is
-`src.properties.diabatic`.
+`tests/fragment_diabatic_fd.py`.
 """
 import warnings
 from dataclasses import dataclass, field
@@ -306,8 +306,8 @@ class FragmentCanonical:
 def flag_numerics(flags, name, text, **detail):
     """Warn `text` and record `detail` under `name` in the dict `flags` (None:
     warn only): the one way a solve of this module that stopped short reports
-    it, its last iterate kept (refuse inputs, warn
-    numerics). Called on every rank with rank 0's verdict."""
+    it, its last iterate kept (the policy: refuse inputs, warn numerics).
+    Called on every rank with rank 0's verdict."""
     if flags is not None:
         flags[name] = dict(detail)
     warnings.warn(text, RuntimeWarning, stacklevel=3)
@@ -490,8 +490,8 @@ class FragmentPartition:
     block_energies: list = field(default_factory=list)
     gaps: np.ndarray = None        # each diabat's gap to its block neighbours
     block_rows: list = field(default_factory=list)   # each diabat's block rows
-    # the pole guard's numerical events (refuse
-    # inputs, warn numerics): 'q_lowest_unconverged', the residual and
+    # the pole guard's numerical events (the policy: refuse inputs, warn
+    # numerics): 'q_lowest_unconverged', the residual and
     # tolerance of a Davidson on Q that stopped short and still decided
     guard_flags: dict = field(default_factory=dict)
 
@@ -758,6 +758,8 @@ class FragmentPartition:
 
 class FeshbachOracle:
     """Dense reference: Sigma(Omega), roots of A_eff(Omega) c = Omega c, Z.
+    A test gate, read by no production route: the oracle the fragment-diabatic
+    solves are checked against (tests/test_fragment_diabatic.py).
 
     K (n, n), a P basis (n, n_p) with P^T S P = 1, and the metric S as its
     diagonal (`metric`, default ones: the Tamm-Dancoff case) in the same basis;

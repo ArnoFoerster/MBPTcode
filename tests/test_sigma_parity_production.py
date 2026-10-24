@@ -1,6 +1,6 @@
 """READ-ONLY parity benchmark: the generated matrix-free ADC(3) operator
 (sigma_driver.full_adc3_operator) vs the production dense ADC(3) supermatrix
-(ADCSolver.build_supermatrix -- the hand-written adc_spinorbital reference
+(ADCSolver.build_supermatrix -- the hand-written spin-orbital reference
 production actually runs). Touches NO production code; instantiates the real
 solver read-only and prints both spectra side by side.
 

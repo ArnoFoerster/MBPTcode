@@ -1,10 +1,10 @@
 """Restricted (spin-free / RHF) FULL multi-class matrix-free operator
 (sigma_driver.restricted_full_operator) -- the spin-free analog of
-full_adc4_operator, closing item #2 of the matrix-free plan.
+full_adc4_operator.
 
 Extends restricted_sector_operator with the 3h2p/3p2h precursor class:
 diagonal K2, the k=1<->k=2 coupling applied matrix-free BOTH directions
-(apply_c1_{tag}_{tag2} / apply_c1_{tag2}_{tag} times _K2_CLASS_SIGN), and the
+(apply_c1_{tag}_{tag2} / apply_c1_{tag2}_{tag} times K2_CLASS_SIGN), and the
 dense orbital<->k=2 U^(2). Validated == the dense restricted supermatrix
 
     H = | diag(eps)  U1^T          U2_k2^T |
@@ -13,7 +13,7 @@ dense orbital<->k=2 U^(2). Validated == the dense restricted supermatrix
 
 assembled entirely from BuildSuperMatrixADCnRestricted's own dense blocks
 (u_adc3, _c1_block, c2_block_generated, coupling_k1_k2_generated,
-u2_k2_generated, _kconfigs K), plus eigsh == eigh. Both sectors, LiH/H2O
+u2_k2_generated, kconfigs K), plus eigsh == eigh. Both sectors, LiH/H2O
 (H2 has no 3h2p/3p2h configs). All READ-ONLY off the restricted solver.
 """
 import os
@@ -55,8 +55,8 @@ def main():
 
         print(f"\n=== {label} ===")
         for sector in ('IP', 'EA'):
-            cfg1 = r._sector_configs(sector)
-            cfg2 = r._kconfigs(sector, 2)
+            cfg1 = r.sector_configs(sector)
+            cfg2 = r.kconfigs(sector, 2)
             n1, nk2 = len(cfg1['K']), len(cfg2['K'])
             U1 = r.u_adc3(sector)                    # (n1, norb)
             U2_k2 = r.u2_k2_generated(sector)        # (nk2, norb)

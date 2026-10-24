@@ -244,7 +244,7 @@ from src.Base.numerics.constants import DEFAULT_NPADE, QP_DEGENERACY_TOL
 from src.SingleReference.GW.space_time import (_dyson_owned,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
@@ -264,7 +264,7 @@ from src.gradients.isdf_derivatives import (collocation_adjoint,
 from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from src.gradients.gwbse.qp_space_time import (qp_gradient_space_time,
                                                qp_set_gradient)
-from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.gwbse.reaction_field_adjoint import static_screening
 from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
                                                   rpa_energy_and_adjoint,
                                                   selfenergy_block_backward,
@@ -1310,7 +1310,7 @@ def single_state_qp(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
 def screening_and_sigma(gate, X_mo, D, eps, nocc, grid, mu):
     """Static W and the self-energy matrix and diagonal with their adjoints."""
     gate.section('static W and the self-energy from the gradient package')
-    w_grid = static_grid(eps, nocc)
+    w_grid = static_screening_grid(eps, nocc)
     ref_ss = serial(static_screening, X_mo, D, eps, nocc, w_grid)
     transforms = sigma_transforms(eps, nocc, grid.tau_points, grid.omega_points,
                                   grid.omega_points, mu=mu)
@@ -1995,7 +1995,7 @@ def probe_explicit_seeds(ex, log):
     """Wrap the default chain's Casida-level adjoint: compare its seeds with
     `bse_cache` and `bse_backward` run serially on the gathered factors; one
     record per call into `log`."""
-    seeds_of = ex.follower._casida_seeds
+    seeds_of = ex.follower.casida_seeds
 
     def probed(shared, solution, n, m=None):
         out = seeds_of(shared, solution, n, m)
@@ -2003,11 +2003,11 @@ def probe_explicit_seeds(ex, log):
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
         with distributed(None):
-            cache = bse_cache(X, D, eq, w, no, **kw)
+            cache = bse_cache(X, D, eq, no, **kw)
             ref = (bse_backward(n, X, D, eq, w, no, cache, xn, yn,
-                                **ex.quasiparticles._tile_kw()) if m is None else
+                                **ex.quasiparticles.tile_kw()) if m is None else
                    interstate_backward(m, n, X, D, eq, w, no, cache, xn, yn,
-                                       **ex.quasiparticles._tile_kw()))
+                                       **ex.quasiparticles.tile_kw()))
         # copies: the fold adds into X_bar and D_bar in place
         seeds = tuple(np.array(a, copy=True) for a in out)
         log.append(dict(seeds=seeds,
@@ -2016,7 +2016,7 @@ def probe_explicit_seeds(ex, log):
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex.follower._casida_seeds = probed
+    ex.follower.casida_seeds = probed
 
 
 def probe_grid_seeds(ex, log):
@@ -2026,9 +2026,8 @@ def probe_grid_seeds(ex, log):
     makes, and compare its seeds with the same kernel run serially on the
     gathered factors, which the record keeps for the fold; one record per
     call into `log`."""
-    seeds_of = ex.follower._casida_seeds
-    kernel = os.path.join(SRC, 'SingleReference', 'LinearResponse',
-                          'isdf_bse_adjoint.py')
+    seeds_of = ex.follower.casida_seeds
+    kernel = os.path.join(SRC, 'gradients', 'gwbse', 'isdf_bse_adjoint.py')
     boundary = 'adjoints_at_the_boundary'
 
     def probed(shared, solution, n, m=None):
@@ -2084,7 +2083,7 @@ def probe_grid_seeds(ex, log):
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex.follower._casida_seeds = probed
+    ex.follower.casida_seeds = probed
 
 
 def lockstep_counters(gate, stats):

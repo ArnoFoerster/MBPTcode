@@ -46,27 +46,27 @@ import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.SingleReference.LinearResponse.quasi_boson_rpa import (RPA,
                                                                 build_rpa_AB,
                                                                 couplings_V)
-# Read through this module's namespace by ADC/solve.py, gradients/__init__.py
-# and gradients/quasi_boson_adjoint.py until they import them from their homes
-# (Base.utils.linearAlgebra.matrix_functions, LinearResponse.quasi_boson_rpa).
-from src.Base.utils.linear_algebra.matrix_functions import (  # noqa: F401
-    eigh_sym, invsqrtm_sym)
-from src.Solvers.qp_equation import (bracketed_root, largest_weight_root,
-                                     ranked_root)
+from src.Solvers.qp_equation import (bracket_labels, bracketed_root,
+                                     largest_weight_root)
+
+
+class QPLowWeightRoot(RuntimeWarning):
+    """A root followed from a seed whose pole strength is at or below QP_WINDOW_Z_MIN."""
 
 
 class QPqb:
     """Diagonal-mode quasi-boson EOM G0W0 quasiparticle energies.
 
-    The eta = 0 quasiparticle equation exactly, by Newton on the closed-form
+    The eta = 0 quasiparticle equation exactly, by the bracketed root search on the closed-form
     Sigma_pp: no broadening, no analytic continuation and no residue set. Z is
     the exact slope of the equation that was solved.
 
-    The reverse mode is `gradients.quasi_boson_adjoint.QPqbAdjoint`, which
+    The reverse mode is `gradients.gwbse.quasi_boson_adjoint.QPqbAdjoint`, which
     differs only in `boson`.
     """
 
@@ -125,19 +125,21 @@ class QPqb:
         nh, ph, npp, pp = self._pole_arrays(p)
         return float((nh / (w - ph)).sum() + (npp / (w - pp)).sum())
 
-    def solve_diag(self, p, w0=None):
+    def solve_diag(self, p, w0=None, labels=None):
         """(w*, Z) of w = eps_p + delta_p + Sigma_pp(w), solved exactly over
         every root: the largest-weight one (`quasiparticle_root`), or with a
-        seed w0 the root between the poles bracketing it (`bracketed_root`),
-        a reference root followed. Z <= QP_WINDOW_Z_MIN is a lost QP. A
+        seed w0 a reference root followed (`bracketed_root`): between the
+        poles labelled `labels` (`root_labels` at the reference) wherever they
+        have moved, else between the poles bracketing w0 here. The labels
+        keep the branch where a pole drifts across w0, which the interval
+        holding w0 would trade for a satellite. Z <= QP_WINDOW_Z_MIN is a lost QP. A
         followed root the largest weight has left is kept on its branch,
-        warned about and logged in `branch_log`
-        (refuse inputs, warn numerics)."""
+        warned about and logged in `branch_log` (refuse inputs, warn numerics)."""
         if w0 is None:
             return self.quasiparticle_root(p)
         num, pol, a = self._all_poles(p)
         seen = {}
-        w, z = bracketed_root(num, pol, a, w0, out=seen)
+        w, z = bracketed_root(num, pol, a, w0, labels=labels, out=seen)
         if seen.get('flipped'):
             largest = seen.get('largest')
             self.branch_log.append({
@@ -152,6 +154,11 @@ class QPqb:
                 f'branch_log', RuntimeWarning, stacklevel=2)
         return w, z
 
+    def root_labels(self, p, w):
+        """(lo, hi): the labels of the poles bracketing the root w of orbital
+        p, the branch `solve_diag` follows at another geometry."""
+        return bracket_labels(*self._all_poles(p), w)
+
     def quasiparticle_root(self, p):
         """(w*, Z) of the root of w = eps_p + Sigma_pp(w) carrying the largest Z.
 
@@ -159,7 +166,7 @@ class QPqb:
         Z its weight on the bare orbital, so the weights sum to one and the
         quasiparticle is decidable from the exact poles alone: no seed, no
         starting point, the same root at every geometry the weights single it
-        out at. A Newton from eps_p reaches whichever root is nearest, a
+        out at. A local search from eps_p reaches whichever root is nearest, a
         satellite with Z ~ 1e-3 for formaldehyde/cc-pVDZ's virtuals above
         38 eV. Where two roots share the weight the choice changes branch;
         nothing in Sigma_pp distinguishes them there.
@@ -180,27 +187,6 @@ class QPqb:
         return (np.concatenate([nh.ravel(), npp.ravel()]),
                 np.concatenate([ph.ravel(), pp.ravel()]),
                 self.eps[p] + self.delta[p])
-
-    def root_rank(self, p, w):
-        """How many eigenvalues of `supermatrix_diag(p)` lie below the root w:
-        the poles of Sigma_pp below it, one root sitting between each pair."""
-        return int(np.count_nonzero(self._all_poles(p)[1] < w))
-
-    def ranked_root(self, p, k):
-        """(w*, Z) of the k-th eigenvalue (from 0) of `supermatrix_diag(p)`.
-
-        The sorted eigenvalues of a symmetric matrix are continuous in its
-        elements (Weyl), so the root of a fixed rank is a continuous function
-        of the geometry wherever the pole count is fixed: the root decided at
-        a reference geometry, followed. It is the root a Newton from that
-        reference root reaches nearby, and stays on its branch where a Newton
-        from a distant seed lands on whichever root is nearest (formaldehyde
-        cc-pVDZ continuum virtuals, 0.02 Bohr off: satellites with Z ~ 1e-3).
-        Where a weakly coupled pole crosses the root, the branch passes it by
-        an avoided crossing, continuously.
-        """
-        num, pol, a = self._all_poles(p)
-        return ranked_root(num, pol, a, k, label=f'orbital {p}')
 
     def eigvec_diag(self, p, w):
         """Closed-form normalized eigenvector (rp, R_h (j,nu), R_p (b,nu))."""
@@ -278,7 +264,7 @@ def qp_energy_general(epsF, eri, nocc, p, screening='rpa', w0=None):
                                    label=f'orbital {p}')[0]
     w, z = bracketed_root(num, pol, epsF[p, p], w0)
     if not z > QP_WINDOW_Z_MIN:
-        warnings.warn(f'the root of orbital {p} that follows {w0} has weight '
-                      f'{z:.4f}, not above {QP_WINDOW_Z_MIN}: kept on its branch',
-                      RuntimeWarning, stacklevel=2)
+        flag('qp_followed_root_low_weight',
+             f'the root of orbital {p} that follows {w0} has weight {z:.4f}, '
+             f'not above {QP_WINDOW_Z_MIN}: kept on its branch', QPLowWeightRoot)
     return w

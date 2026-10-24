@@ -71,7 +71,7 @@ def refrozen(water):
 def test_the_record_carries_the_last_walks_flags(water):
     mol, info, first, capped, moved = refrozen(water)
     assert mol is moved
-    for key in ('converged', 'status', 'cycles', 'opt_grad_max', 'grad_max'):
+    for key in ('converged', 'status', 'cycles', 'opt_grad_max'):
         assert info[key] == capped[key], key
         assert info['first_walk_' + key] == first[key], key
     assert info['energy'] == capped['energy']

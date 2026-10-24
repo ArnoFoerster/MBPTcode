@@ -26,8 +26,8 @@ from src.SingleReference.ADC.sigma_driver import restricted_dyson_operator, solv
 from src.SingleReference.ADC.static_correction import build_mp4_static_correction_restricted
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_block_eri)
-from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.generated_runtime import requires_runtime
+from tests import union_space_oracle as CB
 
 pytestmark = requires_runtime(5)
 
@@ -36,10 +36,10 @@ NSTATES = 2
 TOL = 1e-10
 
 
-def _oracle_adc5(CB, sysd, us):
+def _oracle_adc5(us):
     """(IPs, EAs) of the oracle's two-sector ADC(5) supermatrix at lambda = 1."""
     psi, E, nser = us.rspt_series(NORD)
-    Ssr, Msr, _, _, _ = us.series_matrices(psi, E, nser, NORD)
+    Ssr, Msr = us.series_matrices(psi, E, nser, NORD)
     orb = us.idx[(0, 'o')]
     Fs = sum(Msr[k][np.ix_(orb, orb)] for k in range(NORD))
     sf = CB.SeriesFold(us, Ssr, Msr, NORD, 'twosector', us.kmax)
@@ -63,10 +63,9 @@ def _production(sysd):
 
 
 def test_full_spectrum_matches_oracle_h4():
-    CB = _oracle()
-    sysd = _build_system(CB, 'H4lin_r1.0')
+    sysd = CB.build_system('H4lin_r1.0')
     us = CB.UnionSpace(sysd)
-    ip_or, ea_or = _oracle_adc5(CB, sysd, us)
+    ip_or, ea_or = _oracle_adc5(us)
     r, f_orb = _production(sysd)
     op, _ = restricted_dyson_operator(r, 'adc5', f_orb=f_orb, construction='twosector')
     n = op.shape[0]
@@ -86,10 +85,9 @@ def test_full_spectrum_matches_oracle_h4():
 
 
 def test_davidson_ip_matches_oracle_lih():
-    CB = _oracle()
-    sysd = _build_system(CB, 'LiH')
+    sysd = CB.build_system('LiH')
     us = CB.UnionSpace(sysd)
-    ip_or, _ = _oracle_adc5(CB, sysd, us)
+    ip_or, _ = _oracle_adc5(us)
     r, f_orb = _production(sysd)
     homo = sysd['nocc'] // 2 - 1
     out = solve_dyson_adc(r, homo, level='adc5', f_orb=f_orb, tol=1e-10, construction='twosector')

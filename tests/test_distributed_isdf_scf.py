@@ -161,7 +161,7 @@ _NOTE_LOCK = threading.Lock()
 #: keys them on: each must run on the whole node pool.
 GEMM_STAGES = {
     ('dpotrf', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's Cholesky",
-    ('_trsm', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's trsm",
+    ('trsm', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's trsm",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_interaction_rows'):
         "G and Z's rows",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_exchange_rows'): 'the K builds',
@@ -670,7 +670,7 @@ def test_each_stage_runs_on_its_pool(monkeypatch):
     seen = collections.defaultdict(set)
     on_the_node_pool(monkeypatch.setattr)
     monkeypatch.setattr(dist_isdf, 'np', CountingNumpy(seen))
-    for owner, name in ((separable_ri, '_trsm'),
+    for owner, name in ((separable_ri, 'trsm'),
                         (scipy.linalg.lapack, 'dpotrf'),
                         (scipy.linalg, 'cho_factor'),
                         (scipy.linalg, 'cho_solve'), (numint, 'nr_rks'),

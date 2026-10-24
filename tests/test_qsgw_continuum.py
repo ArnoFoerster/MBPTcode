@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, solvent
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.environments.solvent_screening import (attach_solvent_screening,
                                                 detach_solvent_screening)
@@ -83,7 +84,7 @@ def test_the_ground_state_reaction_field_stays_in_the_fock_matrix():
     pcm.with_solvent.eps = 78.355
     pcm.conv_tol = 1e-12
     pcm.kernel()
-    eps, _, info = qsgw_eigenvalues(pcm, flow=0.0, tol=1e-9, dm_tol=1e-9)
+    eps, _, info = qsgw_eigenvalues(pcm, numerics=Numerics(qsgw={'flow': 0.0, 'tol': 1e-9, 'dm_tol': 1e-9}))
     assert info['converged']
     assert np.abs(eps - pcm.mo_energy).max() < 1e-7, \
         np.abs(eps - pcm.mo_energy).max()
@@ -117,8 +118,8 @@ def test_closed_shell_carried_unrestricted(continuum):
         for mf in (rhf, uhf):
             attach_solvent_screening(mf, solvent='water')
     try:
-        ref, _, _ = qsgw_eigenvalues(rhf, tol=1e-8, dm_tol=1e-8)
-        got, mo, info = qsgw_eigenvalues(uhf, tol=1e-8, dm_tol=1e-8)
+        ref, _, _ = qsgw_eigenvalues(rhf, numerics=Numerics(qsgw={'tol': 1e-8, 'dm_tol': 1e-8}))
+        got, mo, info = qsgw_eigenvalues(uhf, numerics=Numerics(qsgw={'tol': 1e-8, 'dm_tol': 1e-8}))
     finally:
         for mf in (rhf, uhf):
             detach_solvent_screening(mf)

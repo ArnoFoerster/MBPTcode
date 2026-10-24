@@ -61,8 +61,8 @@ refreeze_drift_meV, refreeze_shift_bohr, refreeze_converged and
 refreeze_passes (each pass's drift, shift and walk convergence); the saddle
 check and G are taken on the last rebuilt surface. A drift still above the
 tolerance after the last pass is warned about, the minimum kept and flagged
-(`flags`: 'refreeze_not_converged'; refuse inputs, warn
-numerics). ADC(2), and the GW-BSE reference (S0), freeze nothing: their
+(`flags`: 'refreeze_not_converged'; the policy: refuse inputs, warn numerics).
+ADC(2), and the GW-BSE reference (S0), freeze nothing: their
 walks are not refrozen and are what they were.
 walk_vs_vertical_G_Ha in the record is G_eq of the state at its minimum on
 the walk's surface minus the same on the vertical's (for ADC(2) a
@@ -78,10 +78,10 @@ its path --, bases, solvent, frozen core, roots,
 following, saddle check, loop tolerances, code) is refused: its pieces and
 the new ones would not belong to one calculation. The code is
 `src.Base.utils.record_io.code_id`: the short commit, with '+dirty:' and a digest
-of the edit on an edited tree; a record stamped with a full commit (before
-2026-10-22) resumes on a clean checkout of that commit.
-Numerical events warn, are flagged and the run carries on
-(refuse inputs, warn numerics). A walk that does not reach its
+of the edit on an edited tree; a record stamped with a full commit (an
+older record) resumes on a clean checkout of that commit.
+Numerical events warn, are flagged and the run carries on (the policy: refuse
+inputs, warn numerics). A walk that does not reach its
 minimum is kept as `S0` / `minimum` with converged false and the flag
 'walk_not_converged' (no saddle check is taken there); a solvation loop that
 does not converge, an SCF that stops short, an unconverged or lost ADC(2)
@@ -346,7 +346,7 @@ def _minimum(args, surf, start, nudge, kind):
     converged (`excitations.saddle_check`, the photophysics stages' check);
     `flags` the names flagged at its last geometry (module docstring): the
     surface's, and the walk's own 'walk_not_converged',
-    'refreeze_not_converged' and 'saddle_check', each warned about
+    'refreeze_not_converged', 'saddle_check' and 'hessian_asymmetric', each warned about
     (`excitations.relaxation_flags`, `saddle_verdict`). The saddle check, its
     escape walk (refrozen as the first) and G are taken on the surface the
     last walk ran on."""
@@ -370,9 +370,12 @@ def _minimum(args, surf, start, nudge, kind):
             negative_modes=first['negative_modes'],
             tolerance=first['tolerance'],
             hessian_asymmetry_rel=chk.get('hessian_asymmetry_rel'),
+            hessian_asymmetric=chk.get('hessian_asymmetric'),
             energy_drop=chk.get('energy_drop'),
             second_lowest_curvature=(chk['second'] or {}).get('lowest_curvature'))
-        if again is not None:
+        if again is None:
+            flags = dict(flags, **saddle_verdict(kind, chk))
+        else:
             out['first_walk'] = dict(out)
             out.update(_walk_record(again, asked))
             final = again.get('final_surface', final)
@@ -385,7 +388,7 @@ def _minimum(args, surf, start, nudge, kind):
     return m, out
 
 
-def _store_minimum(rec, out, R, key, entry, what):
+def _store_minimum(rec, out, R, key, entry):
     """Store a walk's entry under R[key]; one that did not converge was warned
     about by `_minimum` and carries 'walk_not_converged' (module docstring)."""
     R[key] = entry
@@ -444,8 +447,7 @@ def _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw):
     if 'S0' not in R:
         surf = SolvatedSurface(mol0, make_field, make_state('S0'),
                                label=f'S0 {medium}', **loop_kw)
-        _store_minimum(rec, args.out, R, 'S0', _minimum(args, surf, mol0, 0, 'S0')[1],
-                       f'S0 minimum ({medium})')
+        _store_minimum(rec, args.out, R, 'S0', _minimum(args, surf, mol0, 0, 'S0')[1])
 
 
 def _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw):
@@ -466,8 +468,7 @@ def _excited_minimum(args, rec, X, key, kind, medium, mS0, make_field, make_stat
         surf = SolvatedSurface(mS0, make_field, make_state(kind),
                                label=f'{key} {medium}', **loop_kw)
         _store_minimum(rec, args.out, X, 'minimum',
-                       _minimum(args, surf, mS0, START_NUDGE_BOHR, kind)[1],
-                       f'{key} minimum ({medium})')
+                       _minimum(args, surf, mS0, START_NUDGE_BOHR, kind)[1])
 
 
 def _emission(args, rec, R, X, kind, make_field, make_state, loop_kw):

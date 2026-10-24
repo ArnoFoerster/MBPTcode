@@ -8,7 +8,7 @@ on a fresh chain on conventions frozen at the nudged start: `optimize` starts
 an excited-state walk `START_NUDGE_BOHR` from the reference (`start_nudge`),
 with the window and the quadrature range taken from the reference mean
 field, and nothing recorded which. A first evaluation elsewhere is
-preceded by the reference's (`ExcitedStateChain._anchored_first`), and
+preceded by the reference's (`ExcitedStateChain.anchored_first`), and
 `FrozenConventions.anchored_at` holds the geometry they were frozen at.
 
 H2/cc-pVDZ Hartree-Fock on the dense Casida route.
@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.numerics import Numerics
 from src.gradients.evaluation import geometry_hash
 from src.gradients.gwbse.excited_state import ExcitedStateChain
@@ -73,7 +74,7 @@ def same(a, b):
 def test_a_walk_on_a_fresh_chain_freezes_at_the_reference(reference):
     mol, mf, ref = reference
     walked = fresh(mol, mf)
-    optimize(walked, max_cycle=1, refreeze=0)
+    optimize(walked, numerics=derived_walk(walked, 'a capped test walk', max_cycle=1), refreeze=0)
     for name in FROZEN:
         got, want = (getattr(c.conventions, name) for c in (walked, ref))
         if name == 'qp_seeds':

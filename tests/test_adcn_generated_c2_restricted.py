@@ -29,6 +29,7 @@ from src.SingleReference.ADC.precursor_classes import class_configs
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri, get_antisymmetrized_spin_block_eri)
+from tests.adc_common import alpha_to_class_index
 from tests.generated_runtime import requires_runtime
 
 pytestmark = requires_runtime(4)
@@ -38,24 +39,6 @@ def check(label, diff, tol=1e-11):
     ok = diff < tol
     print(f"[{'OK' if ok else 'FAIL'}] {label}: {diff:.3e}")
     return ok
-
-
-def _alpha_to_class_index(r, cfg, sector, cols, nocc):
-    """Map each restricted alpha-sector config to its spin-orbital class
-    (class_configs) index."""
-    idx = []
-    for c in range(len(cfg['K'])):
-        hs, ps, sp = cfg['hole_sp'][c], cfg['part_sp'][c], cfg['spins'][c]
-        if sector == 'IP':
-            hso = sorted([2 * hs[0] + sp[0], 2 * hs[1] + sp[1]])
-            pso = [nocc + 2 * ps[0] + sp[2]]
-            m = np.where((cols[0] == hso[0]) & (cols[1] == hso[1]) & (cols[2] == pso[0]))[0]
-        else:
-            hso = [2 * hs[0] + sp[0]]
-            pso = sorted([nocc + 2 * ps[0] + sp[1], nocc + 2 * ps[1] + sp[2]])
-            m = np.where((cols[0] == hso[0]) & (cols[1] == pso[0]) & (cols[2] == pso[1]))[0]
-        idx.append(m[0])
-    return np.array(idx)
 
 
 def main():
@@ -85,8 +68,8 @@ def main():
             C2r = r.c2_block_generated(sector)
             C2so = so.c2_block_generated(sector)
             cols = class_configs(nocc, len(eps), 1, sector)
-            cfg = r._sector_configs(sector)
-            idx = _alpha_to_class_index(r, cfg, sector, cols, nocc)
+            cfg = r.sector_configs(sector)
+            idx = alpha_to_class_index(cfg, sector, cols, nocc)
             diff = np.abs(C2r - C2so[np.ix_(idx, idx)]).max()
             all_ok &= check(f"C^(2) {sector} restricted == spin-orbital generated", diff)
 

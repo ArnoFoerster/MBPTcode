@@ -65,7 +65,7 @@ def chain():
 
 def test_term_table_is_the_numerator(chain):
     mpn, _, _, _, o2, _ = chain
-    pool = {**mpn._args(), 't2_2_aaaa': o2[1], 't2_2_abab': o2[2],
+    pool = {**mpn.kernel_args(), 't2_2_aaaa': o2[1], 't2_2_abab': o2[2],
             **_blocks('t3_2', 3, o2[3:6]), **_blocks('t4_2', 4, o2[6:10])}
     tables = _ground_state()
     for b in STORED_BLOCKS[4]:

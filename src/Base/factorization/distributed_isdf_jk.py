@@ -72,7 +72,6 @@ bits), and the reductions re-associate J and K, so the distributed SCF lands
 on the serial ISDF-K SCF within the SCF's own convergence threshold, the same
 on every rank.
 """
-import contextlib
 import time
 
 import numpy as np
@@ -85,11 +84,12 @@ from pyscf.scf import _vhf, jk
 from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION,
                                          ISDF_SCF_METRIC_SLAB)
-from src.Base.factorization.distributed_df import (add_count, lockstep_density,
+from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
+                                                   lockstep_density,
                                                    reduce_parts, add_seconds,
                                                    distributed_handles)
-from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid, range_coulomb
-from src.Base.factorization.separable_ri import (FitTiles, fit_settings,
+from src.Base.factorization.isdf_jk import ISDFJK, omega_key
+from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  fit_M_streaming, screened_layout)
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast,
@@ -118,8 +118,7 @@ class _DirectCoulomb:
         self.comm = comm
         size = 1 if comm is None else comm.Get_size()
         self.rank = 0 if comm is None else comm.Get_rank()
-        with (range_coulomb(mol, None, omega) if omega
-              else contextlib.nullcontext()):
+        with mol.with_range_coulomb(omega or None):
             auxmol = addons.make_auxmol(mol, auxbasis)
             opt = _vhf._VHFOpt(mol, 'int3c2e', 'CVHFnr3c2e_schwarz_cond',
                                dmcondname='CVHFnr_dm_cond',
@@ -195,7 +194,7 @@ class _DirectCoulomb:
         return vj
 
 
-class DistributedISDFJK(df.df.DF):
+class DistributedISDFJK(InstalledWithDF, df.df.DF):
     """A `with_df` answering J and K of an ISDF mean field from this rank's
     tiles of the interpolation grid and block of the auxiliary shells.
 
@@ -219,7 +218,7 @@ class DistributedISDFJK(df.df.DF):
         super().__init__(source.mol, auxbasis=source.auxbasis)
         comm = current_comm() if comm is None else comm
         self.comm, self.timings, self.source = comm, timings, source
-        source._distributed_twin = True
+        source.mark_distributed()
         self.max_memory = source.max_memory
         self.stdout, self.verbose = source.stdout, source.verbose
         self.tile = FIT_CHOLESKY_BLOCK if tile is None else int(tile)
@@ -277,13 +276,7 @@ class DistributedISDFJK(df.df.DF):
         with blas_full_pool() as pool:
             coords = source.coords
             if coords is None:
-                # `ISDFJK.build`'s own grid call, so the two handles fit one
-                # grid
-                counts = source.counts if source._named_counts else None
-                coords = isdf_grid(mol, counts=counts, radii=source.radii,
-                                   auxbasis=source.auxbasis,
-                                   n_start=source.n_start,
-                                   frames=source.fit_frames())
+                coords = source.place_grid()[0]
             coords = lockstep(np.array(coords, dtype=float, order='C'), comm,
                               check=True)
             self.coords = coords
@@ -316,8 +309,7 @@ class DistributedISDFJK(df.df.DF):
     def _collocation(self, t):
         """X_t, the AOs on tile t's points: one call per tile, so its owner's
         tile and any other rank's evaluation of it are the same bits."""
-        return self.mol.eval_gto('GTOval_sph',
-                                 self.coords[slice(*self.tiles[t])])
+        return ao_values(self.mol, self.coords[slice(*self.tiles[t])])
 
     def _hold(self, name, arrays):
         """`held[name]`: the most bytes the arrays named so have summed to."""
@@ -335,7 +327,7 @@ class DistributedISDFJK(df.df.DF):
             rows = sum(t1 - t0 for t0, t1 in (self.tiles[t]
                                               for t in self.mine))
             mine = 2 * rows * len(self.coords) * 8
-            free = (self.max_memory - memory.current_memory_mb()) * 1e6
+            free = memory.left_mb(self.max_memory) * 1e6
             mode = ('dense' if mine < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
                     else 'factored')
         self.z_mode = broadcast(mode, self.comm)
@@ -349,7 +341,7 @@ class DistributedISDFJK(df.df.DF):
         G_t = M^T_t V, V in fixed slabs of auxiliary shells, each rank its
         own; dense, Z_t = G_t M^T with M^T's tiles broadcast in tile order.
         """
-        key = '%.6f' % (0.0 if omega is None else omega)
+        key = omega_key(omega)
         if key in self.omega_kernels:
             return self.omega_kernels[key]
         if self.MT is None:
@@ -370,8 +362,8 @@ class DistributedISDFJK(df.df.DF):
         aux_loc = auxmol.ao_loc
         G = {t: np.empty((len(mt), naux)) for t, mt in self.MT.items()}
         om = 0.0 if omega is None else float(omega)
-        with (range_coulomb(self.mol, auxmol, om) if om
-              else contextlib.nullcontext()):
+        with self.mol.with_range_coulomb(om or None), \
+                auxmol.with_range_coulomb(om or None):
             for s0, s1 in _shell_slabs(aux_loc, ISDF_SCF_METRIC_SLAB):
                 c0, c1 = int(aux_loc[s0]), int(aux_loc[s1])
                 with blas_single_threaded():
@@ -451,7 +443,7 @@ class DistributedISDFJK(df.df.DF):
 
     def _coulomb_engine(self, omega, direct_scf_tol):
         """The integral-direct J for `omega`, built on first request."""
-        key = '%.6f' % (0.0 if omega is None else omega)
+        key = omega_key(omega)
         if key not in self._coulomb:
             self._coulomb[key] = _DirectCoulomb(
                 self.mol, self.auxbasis, omega, direct_scf_tol, self.comm)
@@ -470,7 +462,7 @@ class DistributedISDFJK(df.df.DF):
         same requests on the same locked densities, so it takes the same
         decisions, and each partial is the bits a pass of its own makes.
         """
-        key = _omega_key(omega)
+        key = omega_key(omega)
         self._omegas[key] = omega
         last = self._last_k
         same = last is not None and _same_density(last[1], last[2], stack,
@@ -627,25 +619,6 @@ class DistributedISDFJK(df.df.DF):
             'DistributedISDFJK stores no three-index tensor, and a slice of '
             'one would be read as the whole: it answers J and K only.')
 
-    # -- installation --------------------------------------------------------
-
-    def install(self, mf):
-        """Answer this mean field's J/K until `uninstall`."""
-        if mf.with_df is not self:
-            self._replaced = (mf, mf.with_df)
-            mf.with_df = self
-        return self
-
-    def uninstall(self):
-        """Put the mean field's own ISDFJK back, keeping the tiles: a
-        downstream reader of `mf.with_df` (a gradient, the factors a GW run
-        takes from the SCF) would read one rank's tiles as the grid."""
-        pair, self._replaced = self._replaced, None
-        if pair is not None:
-            mf, with_df = pair
-            mf.with_df = with_df
-        return self
-
     def release(self):
         """Drop this rank's tiles and interaction rows."""
         self.uninstall()
@@ -667,11 +640,6 @@ def _shell_slabs(ao_loc, width):
             s0 = s - 1
     out.append((s0, len(ao_loc) - 1))
     return out
-
-
-def _omega_key(omega):
-    """An operator's key in `omega_kernels`: 0.0 for the bare Coulomb."""
-    return '%.6f' % (0.0 if omega is None else omega)
 
 
 def _same_density(stack, factors, other_stack, other_factors):
@@ -784,7 +752,7 @@ def scf_pair_layout(mf):
         return screened_layout(source.mol, handle.coords,
                                numerics=source.numerics,
                                comm=handle.comm, block=handle.tile)
-    if not source._built:
+    if not source.built:
         return None
     return screened_layout(source.mol, source.coords,
                            numerics=source.numerics)

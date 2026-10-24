@@ -2,6 +2,7 @@
 
     python tools/ci/run_tier.py fast --shard 1/4
     python tools/ci/run_tier.py slow --shard 2/3 --timeout 3600
+    python tools/ci/run_tier.py fast slow --generated
 
 A tier is a list in tools/ci/<tier>.txt, one `pytest <file>` or `script <file>`
 per line; a `#` starts a comment (the reason a file is in triage.txt or
@@ -12,6 +13,10 @@ Files written as scripts print their own verdict and exit non-zero
 it exits 0 (test_constants_registry does). Every file runs in its own process.
 The run goes on past a failure and exits non-zero at the end if any file
 failed or timed out.
+
+Several tiers run one after the other. --generated keeps only the files that
+read the generated ADC runtime (GENERATED_MARKERS), for a machine that has
+written it with GenerateRuntime (src.SingleReference.ADC.generated_modules).
 """
 import argparse
 import os
@@ -21,6 +26,17 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
+
+
+# A test file that names one of these reads the generated ADC runtime.
+GENERATED_MARKERS = ('requires_runtime', 'missing_runtime', 'generated_modules',
+                     'generatedADC')
+
+
+def reads_generated_runtime(test):
+    with open(os.path.join(REPO, 'tests', test)) as f:
+        text = f.read()
+    return any(marker in text for marker in GENERATED_MARKERS)
 
 
 def read_tier(name):
@@ -36,13 +52,18 @@ def read_tier(name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('tier')
+    ap.add_argument('tier', nargs='+')
     ap.add_argument('--shard', default='1/1', help='i/n: every n-th file from i')
     ap.add_argument('--timeout', type=int, default=900, help='seconds per file')
+    ap.add_argument('--generated', action='store_true',
+                    help='only the files that read the generated ADC runtime')
     args = ap.parse_args()
 
     i, n = (int(x) for x in args.shard.split('/'))
-    entries = read_tier(args.tier)[i - 1::n]
+    entries = [e for tier in args.tier for e in read_tier(tier)]
+    if args.generated:
+        entries = [e for e in entries if reads_generated_runtime(e[1])]
+    entries = entries[i - 1::n]
 
     env = dict(os.environ)
     # The suite's thread policy (tests/conftest.py, tests/README.md).
@@ -78,7 +99,7 @@ def main():
             failed.append(f'{test}: {status}')
 
     print(f'\n{len(entries) - len(failed)} of {len(entries)} files passed '
-          f'(tier {args.tier}, shard {args.shard})')
+          f"(tier {' '.join(args.tier)}, shard {args.shard})")
     for line in failed:
         print('  ' + line)
     return 1 if failed else 0

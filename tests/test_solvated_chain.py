@@ -353,7 +353,7 @@ def test_ct_beats_local():
     blue-shifted +2186 meV at eps = 2.5 -- the reaction field reached the BSE
     kernel for every orbital pair but reached the diagonal only inside the
     quasiparticle window, and the local root's hole sat outside it
-    (`ExcitedStateChain._env_static_outside`). A check that only ever compares
+    (`QuasiparticleSet.env_static_outside`). A check that only ever compares
     two numbers cannot see both of them move; the cancellation the physics
     rests on is an absolute statement about ONE of them.
     """

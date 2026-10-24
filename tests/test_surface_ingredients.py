@@ -2,14 +2,14 @@
 
 A property that needs only energies, gradients, states and overlaps takes any
 surface that provides them; what it asks beyond `PotentialEnergySurface`'s
-members is a named ingredient (`surface.INGREDIENTS`), and a surface
+members is a named ingredient (`surface.INGREDIENT_DOCS`), and a surface
 lacking one is refused by name at the call (`MissingIngredient`), never by a
 type check deeper down. No SCF here: stand-in surfaces.
 """
 import numpy as np
 import pytest
 
-from src.gradients.surface import (INGREDIENTS, MissingIngredient,
+from src.gradients.surface import (INGREDIENT_DOCS, MissingIngredient,
                                    driven_chain, provides, require,
                                    root_attribute)
 from src.properties import characters
@@ -64,4 +64,4 @@ def test_a_missing_ingredient_is_refused_by_name():
 def test_the_vocabulary_is_closed():
     with pytest.raises(ValueError, match='not a surface ingredient'):
         provides(States(), 'forward')
-    assert 'excited_states' in INGREDIENTS and 'mean_field' in INGREDIENTS
+    assert "excited_states" in INGREDIENT_DOCS and "mean_field" in INGREDIENT_DOCS

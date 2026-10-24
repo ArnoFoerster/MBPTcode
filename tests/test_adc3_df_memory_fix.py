@@ -501,7 +501,7 @@ if __name__ == '__main__':
 
     D_ikca_ref, _ = dens5.build('ikca')
 
-    # Direct D-construction check (mirrors scratchpad/en_dressed_chunks.py exactly)
+    # Direct chunked D-construction check
     def _chunked_D_ikca(lo, hi):
         eo_c = eps_o5[lo:hi]
         D_bare = (eo_c[:, None, None, None] + eps_o5[None, :, None, None]
@@ -519,7 +519,7 @@ if __name__ == '__main__':
     print(f"chunked EN-dressed D_ikca matches EpsteinNesbetDenominators.build(): "
           f"worst diff={worst:.2e}  {'OK' if ok else 'FAIL'}")
 
-    # The FULL rank-4 ban list (adc_spinorbital rank rule): the O^2V^2
+    # The FULL rank-4 ban list (no O^2V^2 tensor in the DF route): the O^2V^2
     # class, plus g_oooo (O^4) and g_oo_po/g_oo_op ((O,O,norb,O)) -- the
     # last two eliminated via _oooo_contract_df /
     # _corr_kl_Ip_streamed_df / the DF-direct g_klpi chains.

@@ -70,7 +70,7 @@ def main():
     t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
     t3_2 = o2[3:6]
     t4_2 = o2[6:10]
-    args = d._args()
+    args = d.kernel_args()
     print(f"NH3/sto-3g norb={d.no + d.nv} nocc={d.no} nvir={d.nv}")
     mx3 = max(float(np.abs(x).max()) for x in t3_2)
     mx4 = max(float(np.abs(x).max()) for x in t4_2)

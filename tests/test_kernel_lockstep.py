@@ -76,7 +76,8 @@ from src.SingleReference.GW.space_time import (replicate_factors,
                                                separable_factors,
                                                solve_qp_energy_space_time)
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
-from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.gwbse.reaction_field_adjoint import static_screening
+from src.SingleReference.LinearResponse.space_time import static_screening_grid
 from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
                                                   rpa_energy_and_adjoint,
                                                   screened_interaction_tau_backward,
@@ -115,7 +116,7 @@ def water():
                                   grid.omega_points, mu=mu)
     return dict(mf=mf, mol=mol, nocc=nocc, factors=factors, X=factors[0],
                 D=factors[1], eps=eps, grid=grid, nu=nu, wt=wt, mu=mu,
-                transforms=transforms, w_grid=static_grid(eps, nocc),
+                transforms=transforms, w_grid=static_screening_grid(eps, nocc),
                 states=[nocc - 2, nocc - 1, nocc, nocc + 1],
                 sigma_states=[nocc - 1, nocc],
                 weights=np.array([0.3, -1.1, 0.8, 0.45]))

@@ -77,6 +77,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
 from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.declaration import Excitation, GroundState
@@ -293,7 +294,9 @@ def test_state_pair_chain_on_slices(size, pyscf_one_thread):
             ground = surface.ground.total_gradient(own_water(H2O_DISPLACED))
             log = []
             watch_between_steps(surface, log)
-            mol_opt, info = optimize(surface, max_cycle=1, verbose=False)
+            mol_opt, info = optimize(surface,
+                                     numerics=derived_walk(surface, 'a capped test walk', max_cycle=1),
+                                     verbose=False)
             log.append(whole_factor_arrays(
                 surface, surface.ground.M,
                 {surface.ground.mf0.mo_coeff.shape[1],

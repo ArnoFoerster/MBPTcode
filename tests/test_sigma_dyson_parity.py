@@ -62,7 +62,7 @@ def main():
         print(f"[{'OK' if ok else 'FAIL'}] {label} Dyson-ADC(3) spectrum == build_supermatrix_adc3: {diff:.2e}")
 
         # matrix-free u3_dot_orb == u3_generated @ p_orb (guards the downfold's
-        # U^(3) term / its stitch-list replication against front-track drift)
+        # U^(3) term / its stitch-list replication against drift)
         _s2r = generated('adc4_c2_s2c_apply_restricted_blocks')
         pv = np.random.default_rng(1).standard_normal(r.norb)
         u3d = max(np.abs(u3_dot_orb(r, sec, pv, _s2r) - r.u3_generated(sec) @ pv).max()
@@ -72,7 +72,7 @@ def main():
 
         # Laplace-fused l3 path (t3/l3 never materialized) converges to the
         # exact u3_dot_orb with ntau -- guards adc4_u3_l3_laplace_restricted +
-        # _u3_amps_laplace against the exact stitch list.
+        # u3_amps_laplace against the exact stitch list.
         u3l = max(np.abs(u3_dot_orb(r, sec, pv, _s2r, laplace_ntau=20)
                          - u3_dot_orb(r, sec, pv, _s2r)).max() for sec in ('IP', 'EA'))
         all_ok &= u3l < 1e-9

@@ -3,7 +3,7 @@ the row fit's.
 
 `isdf_derivatives.fit_adjoint` forms the Gram matrix's adjoint in the
 low-rank form G_bar = -B^T A_bar from its two single solves, as the row fit's
-adjoint does (G_bar = -W Z^T, `separable_ri.fit_rows_adjoints`). On
+adjoint does (G_bar = -W Z^T, `isdf_fit_adjoint.fit_rows_adjoints`). On
 water/cc-pVDZ RHF, the BSE@GW excitation force of a sliced Davidson chain:
 the four Casida-level seeds at its reverse call, every element moved one ulp
 up or down by `ULP_DRAWS` fixed draws, are folded through the chain's own
@@ -78,7 +78,7 @@ def ulp_responses(**fit):
         mol, chain_scf, mf=chain_scf(mol),
         numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': True, **fit})))
     rec = {}
-    seeds_of = chain.follower._casida_seeds
+    seeds_of = chain.follower.casida_seeds
 
     def probed(shared, solution, n, m=None):
         out = seeds_of(shared, solution, n, m)
@@ -86,7 +86,7 @@ def ulp_responses(**fit):
                    seeds=tuple(np.array(a, copy=True) for a in out))
         return out
 
-    chain.follower._casida_seeds = probed
+    chain.follower.casida_seeds = probed
     g = np.asarray(chain.excitation_gradient()[0])
 
     def fold(seeds):

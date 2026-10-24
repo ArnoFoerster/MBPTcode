@@ -64,6 +64,7 @@ never the arithmetic pyscf does.
 import contextlib
 import os
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 from src.Base.numerics.constants import BLAS_WRAP_MIN_THREADS
@@ -243,7 +244,32 @@ def _row_pool(threads):
         return _ROW_POOLS[key]
 
 
-# The old private names, read by src/SingleReference/ADC/eeADC/ee_spin_blocks.py
-# until it imports the public ones; nothing in this layer reads them.
-_BlasLimit = BlasLimit
-_pool_is_ours = pool_is_ours
+def _positive_int_env(name):
+    """The environment variable `name` as a positive int, or None."""
+    value = os.environ.get(name, '').strip()
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def resolve_workers(n_workers, n_states):
+    """Threads for the per-state scan, and for the qsGW static self-energy.
+
+    The keyword, else OMP_NUM_THREADS, the per-process thread budget BLAS reads
+    too, else the CPUs in this thread's affinity mask. Never more than those
+    CPUs, since the pool threads inherit the mask, and never more than there
+    are states. A mask narrower than the request warns: with OMP_PROC_BIND set,
+    the OpenMP runtime binds this thread to one core as pyscf loads, and the
+    whole pool would share that core.
+    """
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    if n_workers is None:
+        n_workers = _positive_int_env('OMP_NUM_THREADS') or cpus
+    n_workers = int(n_workers)
+    if n_workers > cpus:
+        warnings.warn(
+            f'{n_workers} threads requested for a thread pool, but this thread may '
+            f'run on {cpus} CPU(s) and the pool inherits that; using {cpus}. '
+            f'Unset OMP_PROC_BIND if it is set.', RuntimeWarning, stacklevel=3)
+    return max(1, min(n_workers, cpus, n_states))

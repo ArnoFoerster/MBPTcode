@@ -1,6 +1,6 @@
 """The row fit's own adjoint in the nuclear assembly: `FrozenFactorization(
 sliced=True, fit='rows')` differentiates `separable_ri.fit_rows`' estimator
-with `separable_ri.fit_rows_adjoint`, in the fit's tiles, so no rank forms
+with `isdf_fit_adjoint.fit_rows_adjoint`, in the fit's tiles, so no rank forms
 the Gram matrix, the test set's collocation, (mu nu|P), M, F D^T or an
 adjoint of their size whole at any force, and the X_mo collocation adjoint
 and the orbital-rotation product X_mo^T X_bar run in the same tiles.
@@ -63,7 +63,8 @@ from src.Base.numerics.constants import (FIT_REALIZATION_REL_TOL,
                                          REASSOCIATED_SUM_REL_TOL)
 from src.Base.factorization import separable_ri
 from src.Base.numerics.numerics import Numerics, numerics_of
-from src.Base.factorization.separable_ri import fit_rows_adjoint
+from src.gradients import isdf_fit_adjoint
+from src.gradients.isdf_fit_adjoint import fit_rows_adjoint
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
@@ -196,7 +197,9 @@ def per_shell_blocks(mol, nk, n2, naux, block_memory_gb):
 def test_the_force_on_the_row_fit_adjoint(size, monkeypatch):
     """The composed and the dRPA force of the row fit, the tiled assembly
     against the whole one at the same rank count, every force scanned."""
+    # the fit and its adjoint each read the blocking they were handed
     monkeypatch.setattr(separable_ri, 'ao_blocks', per_shell_blocks)
+    monkeypatch.setattr(isdf_fit_adjoint, 'ao_blocks', per_shell_blocks)
 
     def run(tag):
         def rank(comm):
@@ -265,7 +268,9 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
         surface.ground.total_gradient(own_water(H2O_DISPLACED))
         return log
 
+    # the fit and its adjoint each read the blocking they were handed
     monkeypatch.setattr(separable_ri, 'ao_blocks', per_shell_blocks)
+    monkeypatch.setattr(isdf_fit_adjoint, 'ao_blocks', per_shell_blocks)
     with monkeypatch.context() as patch:
         patch_whole_assembly(patch)
         out = run_simulated(rank, 2)
@@ -303,7 +308,7 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
                 m.set_geom_(mol.atom_coords() + shift, unit='Bohr')
                 m.build(False, False)
                 # the screen here, which the row fit must not follow
-                columns = separable_ri.test_set_layout(m, chain.coords(m))
+                columns = separable_ri.fit_test_set_layout(m, chain.coords(m))
                 if not bitwise_arrays(columns, chain.layout):
                     crossed.append((ia, x, k))
                 values.append(chain.energy(m)[0])

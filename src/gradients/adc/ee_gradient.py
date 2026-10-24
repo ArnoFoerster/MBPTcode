@@ -29,6 +29,8 @@ from src.Base.numerics.constants import (DF_FORCE_AUX_CHUNK, DF_FORCE_BLOCK_GB,
                                  EE_RI_TILE_GB)
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
+from src.gradients import df_factors
+from src.gradients.adc import fold_factors
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC.ee_follow import (flag_unconverged, pick_followed,
@@ -134,9 +136,11 @@ def _missing(mf, mol, flags):
         lr=[], asymmetry=np.nan, index=None, y=None, flags=flags)
 
 
-def dense_force(mf, mol, frozen, auxbasis, op=None, root=None, rf=None, env=None):
+def dense_force(mf, mol, frozen, auxbasis, op=None, root=None, rf=None, env=None,
+                numerics=None, flags=None):
     """(dE/dR (natm, 3), info) of E_HF + E_MP2 (+ omega of root = (y, omega,
-    t1), a root of op) on the dense reference."""
+    t1), a root of op) on the dense reference; numerics and flags the
+    Z-vector's (df_correlation_force.mp2_force)."""
     excited = None
     if root is not None:
         y, omega, t1 = root
@@ -144,13 +148,14 @@ def dense_force(mf, mol, frozen, auxbasis, op=None, root=None, rf=None, env=None
         def excited(C, nocc, nmo):
             return adc2_pieces(op, y, omega, t1, op.spin, frozen, nocc, nmo, rf, env,
                                mol, C)
-    F, (e2, gam, asym, rho_t) = dcf.mp2_force(mf, mol, frozen, auxbasis, excited)
+    F, (e2, gam, asym, rho_t) = dcf.mp2_force(mf, mol, frozen, auxbasis, excited,
+                                              numerics, flags)
     return F, _record(e2, gam, asym, root, rho_t)
 
 
 def tiled_force(mf, mol, op, frozen, auxbasis, root=None, env=None,
                 tile_gb=EE_RI_TILE_GB, block_gb=DF_FORCE_BLOCK_GB,
-                width=DF_FORCE_AUX_CHUNK):
+                width=DF_FORCE_AUX_CHUNK, numerics=None, flags=None):
     """dense_force on the fold's tiles and ranks: a collective over op's
     communicator, the same bits on every rank."""
     excited = None
@@ -161,8 +166,9 @@ def tiled_force(mf, mol, op, frozen, auxbasis, root=None, env=None,
             pc = erd.tiled_pieces(op, y, omega, tile_gb)
             Y_extra, rho_t = _lr_terms(pc, env, mol, C, frozen, nocc, nmo, t1)
             return d.plus(t1, pc), Y_extra, rho_t
-    F, (e2, gam, asym, rho_t) = tcf.force(mf, mol, op, frozen, auxbasis, excited,
-                                          tile_gb, block_gb, width)
+    F, (e2, gam, asym, rho_t) = tcf.force(mf, mol, fold_factors.FoldFactors(op), frozen,
+                                          auxbasis, excited, tile_gb, block_gb, width,
+                                          numerics, flags)
     return F, _record(e2, gam, asym, root, rho_t)
 
 
@@ -177,25 +183,28 @@ def _record(e2, gam, asym, root, rho_t):
 
 
 def adc2_force(mf, mol, spin, root=0, nroots=3, frozen=0, auxbasis=None,
-               conv_tol=EE_FORCE_ROOT_TOL, ground=False, env=None, y_ref=None):
+               conv_tol=EE_FORCE_ROOT_TOL, ground=False, env=None, y_ref=None,
+               numerics=None):
     """dE/dR (natm, 3) of E_HF + E_MP2 (+ omega of the root unless ground)
     on a closed-shell DF-RHF mf, with the external operator's own derivative
     left to the medium, and a dict: energy, omega, dm_corr (the relaxed
     correlation density, AO), dm_eff (D_HF + dm_corr), lr = [(weight,
     rho_t)], asymmetry (max |Y - Y^T|), index (the root taken: the one
-    overlapping y_ref most, if given). The dense reference."""
+    overlapping y_ref most, if given), flags (the root's and the Z-vector's
+    numerical events). The dense reference; numerics the caller's (the
+    Z-vector's tolerances)."""
     C = np.asarray(mf.mo_coeff)
     op = rf = rt = k = None
+    flags = []
     if not ground:
         op, rf, out = solve_root(mol, mf, spin, nroots, frozen, auxbasis, env, conv_tol)
         k, rt, flags = _pick(out, root, y_ref)
         if rt is None:
             return _missing(mf, mol, flags)
     F, (e2, omega, gam, lr, asym, y) = dense_force(mf, mol, frozen, auxbasis, op,
-                                                   rt, rf, env)
+                                                   rt, rf, env, numerics, flags)
     info = _info(mf, C, e2, omega, gam, lr, asym, k, y)
-    if not ground:
-        info['flags'] = flags
+    info['flags'] = flags
     return F, info
 
 
@@ -203,17 +212,20 @@ def adc2_force_tiled(mf, mol, spin, root=0, nroots=3, frozen=0, auxbasis=None,
                      conv_tol=EE_FORCE_ROOT_TOL, ground=False, env=None, y_ref=None,
                      tile_gb=EE_RI_TILE_GB, max_memory=None,
                      block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK, comm=None,
-                     aux_chunk=None):
+                     aux_chunk=None, numerics=None):
     """adc2_force on the tiled route over comm's ranks (default: the current
     communicator), refused up front (MemoryError) when the per-rank estimate
     (df_correlation_force_tiled.estimate) exceeds max_memory (MB; default
     mol.max_memory)."""
     if ground:
-        F, (e2, gam, asym, est) = tcf.mp2_force_tiled(mf, mol, frozen, auxbasis,
-                                                      tile_gb, max_memory, block_gb,
-                                                      width, comm, aux_chunk)
+        flags = []
+        F, (e2, gam, asym, est) = tcf.mp2_force_tiled(mf, mol,
+                                                      df_factors.mp2_factors,
+                                                      frozen, auxbasis, tile_gb,
+                                                      max_memory, block_gb, width,
+                                                      comm, aux_chunk, numerics, flags)
         info = _info(mf, np.asarray(mf.mo_coeff), e2, 0.0, gam, [], asym, None, None)
-        info['estimate'] = est
+        info['estimate'], info['flags'] = est, flags
         return F, info
     comm, est = tcf.prepare(mf, mol, frozen, auxbasis, True, tile_gb, block_gb,
                             max_memory, comm)
@@ -226,7 +238,8 @@ def adc2_force_tiled(mf, mol, spin, root=0, nroots=3, frozen=0, auxbasis=None,
         info['estimate'] = est
         return F, info
     F, (e2, omega, gam, lr, asym, y) = tiled_force(mf, mol, op, frozen, auxbasis,
-                                                   rt, env, tile_gb, block_gb, width)
+                                                   rt, env, tile_gb, block_gb, width,
+                                                   numerics, flags)
     info = _info(mf, C, e2, omega, gam, lr, asym, k, y)
     info['estimate'], info['flags'] = est, flags
     return F, info

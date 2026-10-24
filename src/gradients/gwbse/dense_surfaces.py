@@ -22,13 +22,15 @@ one rank to the next. Each energy and force a surface returns is therefore one
 `lockstep` of what the call computed: rank 0's on every rank, and serially the
 value itself.
 """
+import warnings
+
 import numpy as np
 from pyscf import gto, scf
 from pyscf.df.addons import make_auxmol
 
 from src.Base.numerics.constants import (HARTREE_TO_EV, QP_BLOCK_CORRECTION_TOL,
                                          QP_DEGENERACY_TOL, QP_ORDER_SEARCH,
-                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL, SCF_MAX_CYCLE,
                                          SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
@@ -40,14 +42,16 @@ from src.Base.utils.parallel.mpi_grid import lockstep
 from src.Base.utils.parallel.threads import blas_single_threaded
 from src.SingleReference.GW.qp_selection import true_degenerate_blocks
 from src.SingleReference.GW.qp_states import valence_qp_states
-from src.SingleReference.LinearResponse.rpa_energy import (
-    declared_ground_state, ground_state_energy, xc_hybrid_coeff)
+from src.SingleReference.LinearResponse.rpa_energy import (declared_ground_state,
+                                                           ground_state_energy)
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.grad_engine import correlation_gradients
 from src.gradients.surface import PotentialEnergySurface
-from src.gradients.mean_field_response import (exx_double_counting_Y,
-                                               exx_double_counting_skeleton,
-                                               qp_xc_correction_Y,
-                                               qp_xc_correction_skeleton)
+from src.gradients.gwbse.diagnostics import chain_diagnostics
+from src.gradients.rpa.exchange_double_counting import (exx_double_counting_Y,
+                                                        exx_double_counting_skeleton)
+from src.gradients.gwbse.static_correction import (qp_xc_correction_Y,
+                                                   qp_xc_correction_skeleton)
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
                                                      QPqbAdjoint as QPqb)
@@ -80,16 +84,21 @@ def tight_rhf(mol):
     The gradient Lagrangian assumes the occupied-virtual Fock block vanishes,
     so a loose SCF biases the force rather than degrading it gracefully; and a
     density-fitted mean field gives different orbitals, which the quasiparticle
-    energy inherits directly.
+    energy inherits directly. An SCF that stops short is warned about and
+    kept where it stopped, carrying the flag 'scf_not_converged' in
+    `mf.flags`.
     """
     mf = scf.RHF(mol)
     mf.conv_tol = SCF_TIGHT_CONV_TOL
     mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
-    mf.max_cycle = 200
+    mf.max_cycle = SCF_MAX_CYCLE
     with blas_single_threaded():
         mf.kernel()
     if not mf.converged:
-        raise RuntimeError('SCF did not converge; nothing follows from it')
+        text = (f'the SCF did not converge in {mf.max_cycle} cycles; it is kept '
+                f'where it stopped, and what follows carries its residual')
+        warnings.warn(text, RuntimeWarning, stacklevel=2)
+        mf.flags = [{'flag': 'scf_not_converged', 'message': text}]
     return mf
 
 
@@ -296,7 +305,7 @@ class DenseRPASurface(PotentialEnergySurface):
     silently computing E_c[v] on one is `refuse_a_solvated_mean_field`'s job.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field', 'physics'})
 
     def __init__(self, mol, scf_factory=None):
@@ -360,9 +369,15 @@ class DenseRPASurface(PotentialEnergySurface):
             'e0_terms': e0.terms,
             'stationarity': float(diag['stationarity'])}))
 
-    def refreeze(self, mol):
-        """Nothing is frozen on this surface; the copy is for the protocol."""
+    def refreeze(self, mol, mf=None):
+        """Nothing is frozen on this surface; the copy is for the protocol.
+        mf: not read; the surface converges its own SCF at `mol`."""
         return DenseRPASurface(mol, self._scf)
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         return 'E_HF + E_c(dRPA)'
@@ -387,7 +402,7 @@ class QuasiparticleSurface(PotentialEnergySurface):
     stays the derivative of the energy this object reports.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field', 'physics'})
 
     def __init__(self, mol, scf_factory, charge_change=-1, screening='rpa',
@@ -562,10 +577,16 @@ class QuasiparticleSurface(PotentialEnergySurface):
             'e0_terms': e0.terms,
             'stationarity': float(diag['stationarity'])}))
 
-    def refreeze(self, mol):
-        """The same process with the orbital re-chosen at `mol`."""
+    def refreeze(self, mol, mf=None):
+        """The same process with the orbital re-chosen at `mol`. mf: not
+        read; the surface converges its own SCF at `mol`."""
         return QuasiparticleSurface(mol, self._scf, self.charge_change,
                                     self.screening)
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         kind = 'E^(N-1)' if self.charge_change == -1 else 'E^(N+1)'
@@ -582,14 +603,14 @@ class DenseBSESurface(PotentialEnergySurface):
 
     The quasiparticle set and its roots are frozen at `mol` on construction and
     pinned everywhere else, so the surface is continuous. `refreeze` rebuilds
-    them and is the honest error bar on any minimum found here. Under
-    qp_root='weight' the frozen roots are the largest-weight ones at `mol`,
-    and every other geometry follows each by its rank among the eigenvalues
-    of the diagonal supermatrix (`QPqb.ranked_root`), which is continuous: a
-    largest-weight root decided per geometry jumps branch where two roots
-    share the weight (formaldehyde/cc-pVDZ orbital 22, Z 0.19: 20 mHa within
-    1e-3 Bohr), and a Newton from the frozen root lands on a satellite a walk
-    step away.
+    them and is the honest error bar on any minimum found here. The frozen
+    roots are the largest-weight ones at `mol`, and every geometry
+    follows each from its frozen root between the two poles that bracket it
+    there, wherever they have moved (`QPqb.solve_diag` with a seed and its
+    labels; the interval holding the frozen energy would land on a satellite
+    once a pole drifts across it): a largest-weight root
+    decided per geometry jumps branch where two roots share the weight
+    (formaldehyde/cc-pVDZ orbital 22, Z 0.19: 20 mHa within 1e-3 Bohr).
 
     Truly degenerate orbitals of the set (closer than QP_DEGENERACY_TOL
     at `mol`, with their own reference corrections within
@@ -598,16 +619,16 @@ class DenseBSESurface(PotentialEnergySurface):
     candidate was kept or rejected.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
-    INGREDIENTS = frozenset({'excitation', 'excited_states', 'mean_field',
-                             'physics', 'qp_set', 'spin'})
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
+    INGREDIENTS = frozenset({'diagnostics', 'excitation', 'excited_states',
+                             'mean_field', 'physics', 'qp_set', 'spin'})
 
     #: The root index (`surface.root_attribute`).
     ROOT_ATTR = 'state'
 
     def __init__(self, mol, variant='BSE@GW', state=0, qp_orbs=None,
-                 filter_z=True, scf=None, auxbasis=None, eri_blocks=False,
-                 spin='singlet', qp_root='newton'):
+                 filter_z=False, scf=None, auxbasis=None, eri_blocks=False,
+                 spin='singlet'):
         """eri_blocks: build only the MO blocks the energy needs.
 
         The full (pq|rs) is nao^4, which is what puts the letter's own basis
@@ -615,16 +636,11 @@ class DenseBSESurface(PotentialEnergySurface):
         (pq|ia) alone, about a factor nao^2 / (nocc * nvirt) smaller. Energies
         only: gradients need the whole tensor and refuse.
 
-        qp_root: 'newton' (the name is historical) takes the root of largest
-        weight at the reference and follows it through the interval between
-        the poles that bracket it (`QPqb.solve_diag`); 'weight' takes the
-        root of largest pole strength at `mol` (`QPqb.quasiparticle_root`),
-        which no satellite nearer eps_p can capture, and follows it by its
-        rank elsewhere. Values at `mol` itself are the largest-weight roots'
-        own.
+        filter_z: True drops from the set the orbitals whose root has a pole
+        strength at or below QP_WINDOW_Z_MIN at `mol` (warned and flagged);
+        False, the default, keeps the whole window with every root.
         """
         self.eri_blocks = eri_blocks
-        self.qp_root = qp_root
         self.mol0 = mol
         self.variant = variant
         # Kappa weights the bare exchange alone; the screening and the
@@ -659,16 +675,13 @@ class DenseBSESurface(PotentialEnergySurface):
         probe = BSEqb(mf, eri, nocc, screening=self.screening,
                       bse_tda=self.bse_tda, qp_orbs=window,
                       pinned=not filter_z, delta=self.xc_shift(mf),
-                      spin=spin, qp_root=qp_root)
+                      spin=spin)
         self.qp_set = sorted(probe.qp_roots)
-        # The reference roots: 'newton' follows them through their bracket,
-        # 'weight' by their rank among the eigenvalues of the diagonal
-        # supermatrix.
+        # The reference roots, followed elsewhere between the poles that
+        # bracket them here.
         self.seeds = dict(probe.qp_roots)
+        self.seed_labels = dict(probe.qp_labels)
         self.qp_z = dict(probe.qp_z)
-        self.ranks = ({p: probe.qp.root_rank(p, w)
-                       for p, w in self.seeds.items()}
-                      if qp_root == 'weight' else None)
         # the probe solves without blocks: its roots are each orbital's own
         blocks, record = true_degenerate_blocks(
             mf.mo_energy, {p: w - mf.mo_energy[p] for p, w in
@@ -773,16 +786,11 @@ class DenseBSESurface(PotentialEnergySurface):
         refuse_a_foreign_mean_field(mf, mol, 'DenseBSESurface')
         nocc = mol.nelectron // 2
         eri = self._eri(mol, mf)
-        # the largest-weight root is decided at the reference geometry only
-        weigh = (self.qp_root == 'weight'
-                 and np.array_equal(mol.atom_coords(), self.mol0.atom_coords()))
-        rule = ('weight' if weigh else
-                'rank' if self.qp_root == 'weight' else 'newton')
+        # the largest-weight roots decided at the reference, followed
         b = BSEqb(mf, eri, nocc, screening=self.screening, bse_tda=self.bse_tda,
-                  qp_orbs=self.qp_set, pinned=True,
-                  seeds=self.seeds if rule == 'newton' else None,
-                  ranks=self.ranks if rule == 'rank' else None,
-                  delta=self.xc_shift(mf), spin=self.spin, qp_root=rule,
+                  qp_orbs=self.qp_set, pinned=True, seeds=self.seeds,
+                  seed_labels=self.seed_labels,
+                  delta=self.xc_shift(mf), spin=self.spin,
                   blocks=self.qp_blocks)
         return b, eri, nocc, mol.nao, self._e0(mol, mf, b).total
 
@@ -815,7 +823,7 @@ class DenseBSESurface(PotentialEnergySurface):
         Omega carries no E_HF and no E_c, so the two routes mean the same thing
         by it, which is not true of their total energies.
 
-        Refuses a Kohn-Sham `mf` through `BSEqb.partials`, per the class
+        Refuses a Kohn-Sham `mf` through `BSEqbAdjoint.partials`, per the class
         docstring: the shift's gradient on a BSE root is not carried here.
         """
         mol = mol or self.mol0
@@ -892,23 +900,32 @@ class DenseBSESurface(PotentialEnergySurface):
             return b.partials(self.state) + (None,)
         return b.partials_with_shift(self.state)
 
-    def refreeze(self, mol):
-        """The same surface with the quasiparticle set rebuilt at `mol`.
+    def diagnostics(self, mol, mf=None, posteriori=False):
+        """This surface's bookkeeping of its state at `mol`, the record fields
+        beside the energies (`diagnostics.chain_diagnostics`)."""
+        return chain_diagnostics(self, mol, mf, posteriori)
+
+    def refreeze(self, mol, mf=None):
+        """The same surface with the quasiparticle set rebuilt at `mol`
+        (mf: not read; the surface converges its own SCF at `mol`).
 
         EVERY constructor setting travels. A refreeze that dropped one would
         change which functional the walk is on halfway through it: without
         `spin` a triplet comes back a singlet, 0.75 eV below itself on water,
         and without `eri_blocks` a surface that fits in memory rebuilds the
-        full nao^4 tensor at the next geometry. Under qp_root='weight' the
-        largest-weight roots are decided again at `mol`, the branch the walk
-        follows from there.
+        full nao^4 tensor at the next geometry. The largest-weight roots are
+        decided again at `mol`, the branch the walk follows from there.
         """
         return DenseBSESurface(mol, self.variant, self.state,
                                qp_orbs=self._qp_orbs_in,
                                filter_z=self.filter_z, scf=self._scf,
                                auxbasis=self.auxbasis,
-                               eri_blocks=self.eri_blocks, spin=self.spin,
-                               qp_root=self.qp_root)
+                               eri_blocks=self.eri_blocks, spin=self.spin)
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         return f'{self.variant}[S{self.state + 1}]'

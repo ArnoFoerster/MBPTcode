@@ -50,6 +50,19 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.autograd_oracle.frozen import dump, frozen_conventions_of
 
 
+def df_rhf_factory(auxbasis):
+    """The SCF factory both gates build their chain on: density-fitted RHF on
+    `auxbasis`, converged for differentiation (energy to 1e-14, orbital
+    gradient to 1e-11, 200 cycles), refused unconverged: a gate differences
+    nothing on an unconverged reference."""
+    def scf_factory(mol):
+        mf = scf.RHF(mol).density_fit(auxbasis=auxbasis)
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+        mf.kernel()
+        assert mf.converged
+        return mf
+    return scf_factory
+
 def say(*args, **kwargs):
     """print, flushed: the progress lines must interleave with the torch process."""
     print(*args, flush=True, **kwargs)
@@ -90,13 +103,7 @@ def main(argv=None):
     BASIS = args.basis
     AUX = args.auxbasis or paired_auxbasis(BASIS)
 
-    def scf_factory(mol):
-        mf = scf.RHF(mol).density_fit(auxbasis=AUX)
-        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
-        mf.kernel()
-        assert mf.converged
-        return mf
-
+    scf_factory = df_rhf_factory(AUX)
     # --------------------------------------------------------------- production
     t0 = time.perf_counter()
     mol = gto.M(atom=args.atom, basis=BASIS, verbose=0)

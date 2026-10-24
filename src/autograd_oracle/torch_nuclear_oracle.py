@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from src.autograd_oracle import torch_chain as tc
+from src.autograd_oracle.frozen import load
 from src.autograd_oracle import torch_nuclear as tn
 
 torch.set_num_threads(1)
@@ -42,7 +43,7 @@ def pin(name, mine, ref, tol=1e-9):
 
 def main():
     f_in, f_out = sys.argv[1], sys.argv[2]
-    x_mo, d, d_bare, eps_ref, fz, extra = tc.load(f_in)
+    x_mo, d, d_bare, eps_ref, fz, extra = load(f_in)
     z = np.load(f_in, allow_pickle=False)
     c = tn.Constants(z)
     target = str(z['target'])

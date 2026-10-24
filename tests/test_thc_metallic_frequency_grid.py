@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.utils.grids.grids import gauss_legendre_grid              # noqa: E402
 from src.Base.utils.grids.matsubara import thermal_e_min                # noqa: E402
 from src.SingleReference.Periodic.pbc_isdf_rpa import (           # noqa: E402
-    frequency_grid_occ, rpa_ecorr_thc, rpa_ecorr_thc_streaming)
+    frequency_grid, rpa_ecorr_thc, rpa_ecorr_thc_streaming)
 
 # (kmesh, e_min, e_max), measured on bulk Li:
 # gth-dzv, PBE, Fermi smearing at sigma = 0.01 Ha, default FFT grid.
@@ -86,8 +86,8 @@ def test_coverage_degrades_with_the_mesh_without_the_floor():
 def test_frequency_grid_occ_applies_the_floor(k, e_min, e_max):
     """The helper both drivers call, on each measured window."""
     mo_e, mo_occ = _synthetic(e_min)
-    _, _, raw_min, _ = frequency_grid_occ(mo_e, mo_occ, 32, beta=None)
-    freqs, _, flo_min, _ = frequency_grid_occ(mo_e, mo_occ, 32, beta=BETA)
+    _, _, raw_min, _ = frequency_grid(mo_e, mo_occ, 32, beta=None)
+    freqs, _, flo_min, _ = frequency_grid(mo_e, mo_occ, 32, beta=BETA)
     assert flo_min >= np.pi / BETA - 1e-12
     assert flo_min >= raw_min
     assert freqs[-1] > e_max
@@ -97,8 +97,8 @@ def test_a_gap_above_the_floor_is_untouched():
     """A gapped system keeps its own window: max(gap, pi/beta) is the gap."""
     gap = 0.5                                  # well above pi/beta = 0.0314
     mo_e, mo_occ = _synthetic(gap)
-    f_raw, w_raw, min_raw, _ = frequency_grid_occ(mo_e, mo_occ, 24, beta=None)
-    f_flo, w_flo, min_flo, _ = frequency_grid_occ(mo_e, mo_occ, 24, beta=BETA)
+    f_raw, w_raw, min_raw, _ = frequency_grid(mo_e, mo_occ, 24, beta=None)
+    f_flo, w_flo, min_flo, _ = frequency_grid(mo_e, mo_occ, 24, beta=BETA)
     assert min_flo == min_raw
     assert np.allclose(f_raw, f_flo, rtol=0, atol=0), 'gapped grid must be bit-identical'
     assert np.allclose(w_raw, w_flo, rtol=0, atol=0)
@@ -112,8 +112,8 @@ def test_beta_zero_reproduces_the_unfloored_grid():
     raises.
     """
     mo_e, mo_occ = _synthetic(1.873e-03)
-    f_none, _, _, _ = frequency_grid_occ(mo_e, mo_occ, 32, beta=None)
-    f_zero, _, _, _ = frequency_grid_occ(mo_e, mo_occ, 32, beta=0.0)
+    f_none, _, _, _ = frequency_grid(mo_e, mo_occ, 32, beta=None)
+    f_zero, _, _, _ = frequency_grid(mo_e, mo_occ, 32, beta=0.0)
     assert np.allclose(f_none, f_zero, rtol=0, atol=0)
 
 

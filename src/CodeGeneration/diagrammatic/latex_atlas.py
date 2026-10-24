@@ -4,7 +4,7 @@ Truth-in-rendering: every drawing comes from the same Skeleton/ordering
 objects that pass the exact-oracle gates (goldstone.py); nothing is drawn
 that the engine does not evaluate.
 
-Missing-in-ISR criterion (established 2026-08-07): ISR-ADC(n) carries
+Missing-in-ISR criterion: ISR-ADC(n) carries
 configuration manifolds up to k_max = floor(n/2), i.e. omega-cuts of at
 most 2*k_max + 1 lines.  A time ordering with a wider omega-cut cannot be
 hosted -- its group-resummed content is exactly the delta = diagram - ISR
@@ -20,11 +20,6 @@ ordering count (full atlas).  Time runs upward; particle lines solid with
 up-arrows, hole lines dashed with down-arrows; omega-cuts annotated.
 """
 import argparse
-
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 from src.CodeGeneration.diagrammatic.goldstone import (
     BLOCKS, build_skeletons, ordering_sector, ordering_cuts)

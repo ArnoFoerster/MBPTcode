@@ -33,6 +33,7 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.properties.optimize import derived_walk
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.SingleReference.common.eri_blocks import mo_eri
 from src.SingleReference.GW.quasi_boson import QPqb, largest_weight_root
@@ -162,19 +163,23 @@ def test_the_all_orbital_force_is_the_derivative_of_its_energy():
 def test_the_formaldehyde_s1_walk_converges():
     """The walk on the largest-weight roots reaches its minimum."""
     surface = all_orbital_surface(formaldehyde())
-    _, info = optimize(surface, max_cycle=100, verbose=False)
+    _, info = optimize(surface,
+                       numerics=derived_walk(surface, 'a capped test walk', max_cycle=100),
+                       verbose=False)
     assert info['converged'], info['status']
 
 
-def test_the_rule_is_refused_with_a_seed_and_by_an_unknown_name():
-    """A seed would be ignored under 'weight', so it is refused."""
+def test_a_seed_is_followed_and_no_seed_takes_the_largest_weight():
+    """One root rule: unseeded, the root of largest pole strength; seeded at
+    that root, the same root followed through its bracket."""
     mol = water()
     mf = tight_rhf(mol)
     eri = mo_eri(mf, mol)
-    with pytest.raises(ValueError, match='follows no seed'):
-        BSEqb(mf, eri, 5, qp_orbs=[4], seeds={4: -0.5}, qp_root='weight')
-    with pytest.raises(ValueError, match='qp_root'):
-        BSEqb(mf, eri, 5, qp_orbs=[4], qp_root='nearest')
+    free = BSEqb(mf, eri, 5, qp_orbs=[4])
+    w, _ = free.qp.quasiparticle_root(4)
+    assert free.qp_roots[4] == w
+    followed = BSEqb(mf, eri, 5, qp_orbs=[4], seeds={4: w})
+    assert abs(followed.qp_roots[4] - w) < 1e-10
 
 
 @pytest.mark.parametrize('seed', range(4))

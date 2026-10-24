@@ -100,6 +100,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.properties.optimize import derived_walk
+from src.Base.numerics.numerics import Numerics
 from src.Base.numerics.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
@@ -123,9 +125,9 @@ GEOMETRY_FLOOR = 1e-6
 #: geometry gate is derived from, and the smallest kind of defect that can
 #: move a minimum at all: a rescaling cannot (see the module docstring).
 FORCE_OFFSET = 1e-3
-#: The first trust radius of a ground-state walk, the one `relax_ground_state`
+#: The walk of a ground state, the first trust radius `relax_ground_state`
 #: uses: the excited-state default of 0.1 Bohr is for a fragile surface.
-GROUND_TRUST = 0.3
+GROUND_WALK = Numerics(walk={'trust': 0.3})
 #: The optimizer MODULE; `src.properties` re-exports its `optimize` function
 #: under the same name, which shadows the submodule as a package attribute.
 OPTIMIZER = importlib.import_module('src.properties.optimize')
@@ -208,9 +210,11 @@ def bse_surface(factory):
         excitation=Excitation('singlet')), mol
 
 
-def walked(surface, mol, **kw):
+def walked(surface, mol, steps=None, **kw):
     """What one walk is compared on: the geometry, the record's decisions,
-    and the whole record."""
+    and the whole record; `steps` caps the walk (`derived_walk`)."""
+    if steps is not None:
+        kw['numerics'] = derived_walk(surface, 'a capped test walk', max_cycle=steps)
     mol_opt, info = optimize(surface, mol, verbose=False, **kw)
     return {'coords': mol_opt.atom_coords(), 'cycles': info['cycles'],
             'converged': info['converged'], 'energy': info['energy'],
@@ -222,7 +226,7 @@ def ground_walk(factory, **kw):
     """A full relaxation of the mean-field ground state, on every rank of the
     context it runs in."""
     surface, mol = mean_field_surface(factory)
-    return walked(surface, mol, trust=GROUND_TRUST, **kw)
+    return walked(surface, mol, numerics=GROUND_WALK, **kw)
 
 
 def same_record(a, b):
@@ -328,14 +332,14 @@ def test_the_refreeze_loop_runs_over_the_ranks(size):
 def test_one_bse_at_gw_step_is_the_serial_step():
     """One optimizer step on the full cubic surface, which is two chains' sweeps.
 
-    `max_cycle=1` is one accepted step and two gradients -- the driving force
+    One step (`steps=1`) is one accepted step and two gradients -- the driving force
     at R0 and the force where it lands -- which is all a BSE@GW walk needs to
     show that the geometry the ranks stepped to is rank 0's.
     """
     reference, bar = serial_walk(
-        lambda: walked(*bse_surface(converged), max_cycle=1))
+        lambda: walked(*bse_surface(converged), steps=1))
     results = run_simulated(
-        lambda comm: walked(*bse_surface(built), max_cycle=1), 2)
+        lambda comm: walked(*bse_surface(built), steps=1), 2)
 
     assert reference['cycles'] == 1
     assert_same_walk(reference, results, bar)
@@ -351,16 +355,18 @@ def test_the_adiabatic_entry_point_relaxes_both_surfaces_over_the_ranks():
     `ExcitedStateChain` and the ground state is the mean field's own energy,
     whose only stage is the SCF.
 
-    `max_cycle=1` is one step on each surface, which is what makes this
+    One step on each surface (walk.max_cycle 1) is what makes this
     affordable; the walks themselves are gated above.
     """
     def one_run(factory):
         mol = own_water()
+        # both surfaces walk on the spec's numerics: one step each
         spec = SurfaceSpec(GroundState('dft', 'hf'),
-                           qp_states=QPStates('frontier'))
+                           qp_states=QPStates('frontier'),
+                           numerics=Numerics(walk={'max_cycle': 1}))
         record = calc_adiabatic_excitation(
             spec, Excitation('singlet'), mol, factory, refreeze=0,
-            engine='cartesian', max_cycle=1, verbose=False)
+            engine='cartesian', verbose=False)
         return {'adiabatic_eV': record['adiabatic_eV'],
                 'cycles': record['cycles'],
                 'ground_cycles': record['ground_cycles'],
@@ -395,7 +401,7 @@ def test_a_refusal_on_the_driver_reaches_every_rank():
     """
     def one_rank(comm):
         surface, mol = mean_field_surface(built)
-        with pytest.raises(ValueError, match='force threshold'):
+        with pytest.raises(ValueError, match='no convergence'):
             optimize(surface, mol, verbose=False,
                      conv={'grad_max': 1e-4, 'opt_grad_max': 1e-5})
         return 'refused'
@@ -406,7 +412,7 @@ def test_a_refusal_on_the_driver_reaches_every_rank():
 def offset_walk(rank):
     """A ground-state walk with `rank`'s own force wrong by FORCE_OFFSET."""
     surface, mol = mean_field_surface(built)
-    return walked(OffsetForce(surface, rank=rank), mol, trust=GROUND_TRUST)
+    return walked(OffsetForce(surface, rank=rank), mol, numerics=GROUND_WALK)
 
 
 def test_a_worker_ranks_own_force_decides_nothing():

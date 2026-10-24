@@ -23,7 +23,7 @@ within REFREEZE_TOL_MEV ends the loop; above it the next pass refreezes at
 the new minimum. A fixed-point iteration of a geometry and a discrete
 convention set has no guarantee of converging, so the loop stops after
 REFREEZE_MAX_PASSES; a drift still above the tolerance is a numerical event
-(refuse inputs, warn numerics): warned about
+(the policy: refuse inputs, warn numerics): warned about
 (RefreezeNotConverged), the last pass's geometry kept, the record flagged.
 
 ONE WALK, HOWEVER MANY RANKS. Inside `with distributed(comm):` every rank runs
@@ -40,7 +40,7 @@ import inspect
 import os
 import tempfile
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from pyscf import grad  # noqa: F401  registers mf.Gradients/nuc_grad_method
@@ -67,7 +67,8 @@ from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
 from src.Base.geometry.geometry import molecule_at
 from src.Base.utils.record_io import record_class, record_hash
 from src.Base.factorization.isdf_jk import ISDFJK
-from src.Base.numerics.numerics import Numerics, surface_numerics
+from src.Base.numerics.numerics import (Numerics, require_same_identity,
+                                        surface_numerics)
 from src.Base.step_failed import StepFailed
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.gradients.mean_field_surface import MeanFieldSurface, mean_field_force
@@ -212,32 +213,15 @@ def walk_resolution(grad, hess, coords):
 
 
 def resolved_conv(conv):
-    """GEOM_OPT_CONV with a caller's overrides, either spelling of the force.
-
-    The force threshold is `opt_grad_max`, the residual at the converged
-    geometry the convergence test compares against. The deprecated spelling
-    `grad_max` sets the same threshold with a DeprecationWarning; the two
-    given together and different raise rather than pick. The resolved dict
-    carries both spellings of the one number.
-    """
+    """GEOM_OPT_CONV with a caller's overrides. The force threshold is
+    `opt_grad_max`, the residual at the converged geometry the convergence
+    test compares against; a name GEOM_OPT_CONV does not hold is refused."""
     asked = dict(conv or {})
-    old = asked.pop('grad_max', None)
-    if old is not None:
-        if 'opt_grad_max' not in asked:
-            warnings.warn(
-                "conv={'grad_max': ...} names the geometry optimizer's force "
-                "threshold under a superseded name; it is 'opt_grad_max', the "
-                'residual at the converged geometry', DeprecationWarning,
-                stacklevel=3)
-            asked['opt_grad_max'] = old
-        elif asked['opt_grad_max'] != old:
-            raise ValueError(
-                f'conv gives both spellings of the force threshold and they '
-                f"disagree: opt_grad_max={asked['opt_grad_max']!r}, "
-                f'grad_max={old!r}. They are one threshold under two names')
-    out = dict(GEOM_OPT_CONV, **asked)
-    out['grad_max'] = out['opt_grad_max']
-    return out
+    unknown = sorted(set(asked) - set(GEOM_OPT_CONV))
+    if unknown:
+        raise ValueError(f'conv names {unknown}, which are no convergence '
+                         f'thresholds of the walk ({sorted(GEOM_OPT_CONV)})')
+    return dict(GEOM_OPT_CONV, **asked)
 
 
 def rank_zero_walk(mol_opt, info):
@@ -262,12 +246,6 @@ def with_final_surface(surface, mol_opt, info):
     mol_opt, info = rank_zero_walk(mol_opt, info)
     info['final_surface'] = final
     return mol_opt, info
-
-
-def excited_surface(surface):
-    """Whether `surface` is an excited state's: it reports an excitation
-    energy beside its total (the `excitation` ingredient)."""
-    return provides(surface, 'excitation')
 
 
 def nudge_vector(coords, amplitude=START_NUDGE_BOHR, seed=START_NUDGE_SEED):
@@ -297,14 +275,15 @@ def start_nudge(surface, mol, nudge=None):
     excited-state walk therefore starts `nudge_vector` away from `mol`.
 
     nudge: the largest atomic displacement in Bohr; None is
-        START_NUDGE_BOHR on an excited-state surface (`excited_surface`) and
+        START_NUDGE_BOHR on an excited-state surface (one that provides the
+        `excitation` ingredient) and
         0 on a ground-state one, 0 starts exactly at `mol`.
 
     The record keeps the amplitude, the seed, the displacement (natm, 3) in
     Bohr and its root-mean-square atomic displacement.
     """
     amplitude = (float(nudge) if nudge is not None
-                 else START_NUDGE_BOHR if excited_surface(surface) else 0.0)
+                 else START_NUDGE_BOHR if provides(surface, 'excitation') else 0.0)
     d = nudge_vector(mol.atom_coords(), amplitude)
     record = {'amplitude_bohr': amplitude, 'seed': START_NUDGE_SEED,
               'norm': 'largest atomic displacement',
@@ -384,15 +363,42 @@ def escape_saddle(surface, mol, hessian, walk, hessian_at,
     return moved, info, hess, record
 
 
-def optimize(surface, mol=None, max_cycle=None, trust=None, trust_max=None,
-             trust_min=None, hess_init=None, conv=None,
-             refreeze=0, verbose=True, nudge=None, checkpoint=None,
-             resume=None):
+def walk_numerics(surface, numerics=None):
+    """The `WalkNumerics` a walk on `surface` takes: `numerics.walk` where
+    given, else the surface's own `Numerics` (`surface_numerics`), else the
+    defaults. A `numerics` beside a surface that holds one may differ from it
+    in its walk section only (`derived_walk` makes it); any other difference
+    is refused, the surface's energies standing on its own."""
+    held = surface_numerics(surface)
+    if numerics is None:
+        return (held or Numerics()).walk
+    if held is not None:
+        require_same_identity(held.identity(),
+                              replace(numerics, walk=held.walk).identity(),
+                              'the walk against its surface')
+    return numerics.walk
+
+
+def derived_walk(of, reason, **walk):
+    """The `Numerics` of a walk with the `walk` fields changed (max_cycle,
+    trust, trust_max, trust_min, ...): `of`'s own -- a `Numerics`, or the one
+    a surface holds (`surface_numerics`), the defaults for none -- derived
+    with `reason`, unchanged where nothing differs."""
+    base = of if isinstance(of, Numerics) else (
+        None if of is None else surface_numerics(of))
+    base = Numerics() if base is None else base
+    changes = {k: v for k, v in walk.items() if getattr(base.walk, k) != v}
+    return base.derive(reason, walk=changes) if changes else base
+
+
+def optimize(surface, mol=None, hess_init=None, conv=None, refreeze=0,
+             verbose=True, nudge=None, checkpoint=None, resume=None,
+             numerics=None):
     """Relax `surface`'s state. Returns (mol, info).
 
-    max_cycle, trust, trust_max, trust_min: the walk's settings; a keyword not
-        given is the surface's `Numerics.walk` (`surface_numerics`), the
-        `WalkNumerics` defaults on a surface that holds none.
+    numerics: the walk's settings (`walk_numerics`: max_cycle, trust,
+        trust_max, trust_min of `Numerics.walk`) for a surface that holds no
+        `Numerics`; a surface that holds one walks on its own.
 
     nudge: the walk starts `start_nudge(surface, mol, nudge)` away from
         `mol`: by default START_NUDGE_BOHR on an excited-state surface, so a
@@ -439,12 +445,11 @@ def optimize(surface, mol=None, max_cycle=None, trust=None, trust_max=None,
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
     residual the convergence test was applied to -- not the driving force at
     the input geometry R0, which is what `grad_max` means wherever a gradient
-    is reported at a fixed geometry. `info['grad_max']` is the same float, kept
-    for callers that already read it.
+    is reported at a fixed geometry (a history entry's `grad_max` is the
+    largest component of the force at that entry's geometry).
 
-    conv: thresholds overriding GEOM_OPT_CONV. Its force entry is
-        `opt_grad_max`; the deprecated spelling `grad_max` sets the same
-        threshold (`resolved_conv`).
+    conv: thresholds overriding GEOM_OPT_CONV (`resolved_conv`). Its force
+        entry is `opt_grad_max`.
 
     A state that stops existing along the path -- dissociative, or a reference
     that goes singlet/triplet unstable, each a `StepFailed` at every radius --
@@ -467,11 +472,9 @@ def optimize(surface, mol=None, max_cycle=None, trust=None, trust_max=None,
     (`surface.evaluate`), and every rank comes back holding rank 0's geometry
     and record.
     """
-    walk = (surface_numerics(surface) or Numerics()).walk
-    max_cycle = walk.max_cycle if max_cycle is None else max_cycle
-    trust = walk.trust if trust is None else trust
-    trust_max = walk.trust_max if trust_max is None else trust_max
-    trust_min = walk.trust_min if trust_min is None else trust_min
+    walk = walk_numerics(surface, numerics)
+    max_cycle, trust = walk.max_cycle, walk.trust
+    trust_max, trust_min = walk.trust_max, walk.trust_min
     mol = surface.mol0 if mol is None else mol
     refreeze = refreeze_asked(refreeze)
     start, nudged = start_nudge(surface, mol, nudge)
@@ -674,7 +677,7 @@ class CartesianWalk:
         info = {'converged': self.converged, 'cycles': len(self.history),
                 'history': self.history, 'energy': self.e,
                 'omega': self.diags.get('omega'),
-                'grad_max': residual, 'opt_grad_max': residual,
+                'opt_grad_max': residual,
                 'rejected': self.rejected, 'status': self.status,
                 'optimizer': 'internal', 'hessian': self.hess.copy(),
                 'walk_resolution': (walk_resolution(
@@ -769,8 +772,7 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     refreeze: 0 or 1, exactly as `optimize` (`refreeze_pass`).
 
     `info['opt_grad_max']` is max |dE/dR| at the converged geometry R*, the
-    residual, and not the driving force at R0 that `grad_max` means elsewhere;
-    `info['grad_max']` is the same float, kept for callers that read it.
+    residual, and not the driving force at R0 that `grad_max` means elsewhere.
 
     hess_init: a starting Cartesian Hessian in Ha/Bohr^2 (geomeTRIC's
         `hess_data`, transformed to its internal coordinates), or None for
@@ -1053,7 +1055,7 @@ class GeometricWalk:
         info = {'converged': converged, 'cycles': len(trace),
                 'history': trace, 'energy': trace[-1]['e'],
                 'omega': trace[-1]['omega'],
-                'grad_max': residual, 'opt_grad_max': residual,
+                'opt_grad_max': residual,
                 'status': status, 'engine': 'geometric',
                 'optimizer': 'geometric', 'coordsys': coordsys,
                 'hessian': hessian, 'rejected': self.rejected,
@@ -1116,8 +1118,8 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
 
 #: What a single walk's record says about that walk alone: after a refreeze
 #: these are the last walk's, the one whose geometry is returned.
-WALK_FLAGS = ('converged', 'status', 'cycles', 'opt_grad_max', 'grad_max',
-              'rejected', 'walk_resolution')
+WALK_FLAGS = ('converged', 'status', 'cycles', 'opt_grad_max', 'rejected',
+              'walk_resolution')
 
 
 class RefreezeNotConverged(RuntimeWarning):
@@ -1175,8 +1177,8 @@ def refreeze_pass(walk, surface, mol, info, verbose, checkpoint=None,
     next pass; after REFREEZE_MAX_PASSES, or when the walk did not converge,
     the last pass's geometry and this record are returned with a warning
     (`RefreezeNotConverged`), `refreeze` = 'not converged' and the flag
-    'refreeze_not_converged' in `walk_flags` ({'flag', 'message'} each;
-    refuse inputs, warn numerics). `refreeze_passes` lists
+    'refreeze_not_converged' in `walk_flags` ({'flag', 'message'} each; the
+    policy: refuse inputs, warn numerics). `refreeze_passes` lists
     every pass: its drift, shift and whether its walk converged.
 
     `refreeze_shift` is how far the walk on the rebuilt surface moved the
@@ -1190,7 +1192,7 @@ def refreeze_pass(walk, surface, mol, info, verbose, checkpoint=None,
     did to an adaptive explicit set (`refreeze_growth`, grow-only).
 
     THE RECORD DESCRIBES THE WALK WHOSE GEOMETRY IT RETURNS. `converged`,
-    `status`, `cycles`, `opt_grad_max` (and `grad_max`, `rejected`,
+    `status`, `cycles`, `opt_grad_max` (and `rejected`,
     `walk_resolution`) are the refrozen walk's, so `converged` False means
     the geometry returned is not a minimum of the surface it stands on; the
     first walk's are kept as `first_walk_converged`, ... `history` stays the
@@ -1384,9 +1386,14 @@ def engine_keywords(walker, kw):
     return {k: v for k, v in kw.items() if k in taken[walker.__name__]}
 
 
-def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
-                       verbose=False, converge=None, environment=None):
+def relax_ground_state(mol, scf_factory, engine='auto', verbose=False,
+                       converge=None, environment=None, numerics=None):
     """Relax the mean-field ground state. Returns (mol, mf).
+
+    numerics: the caller's `Numerics`; the relaxation takes at most
+    `walk.ground_max_cycle` steps, and the Cartesian trust region starts at
+    `walk.ground_trust` (a ground state carries no quasiparticle root, so its
+    first step may be as long as a ground-state optimizer takes).
 
     The vibronic quantities are defined about this geometry, not the input
     one: Huang-Rhys factors expand both surfaces in the ground state's normal
@@ -1408,6 +1415,11 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
     a warning (`UnconvergedRelaxation`); `mf.relaxation` is its record flag
     (`relaxation_flag`) on every route, converged or not.
     """
+    walk = (numerics or Numerics()).walk
+    maxsteps = walk.ground_max_cycle
+    walk_on = derived_walk(numerics, 'a mean-field ground state relaxes at its '
+                           'own step cap and trust radius', max_cycle=maxsteps,
+                           trust=walk.ground_trust)
     if environment is not None:
         surface = MeanFieldSurface(mol, scf_factory, environment=environment)
         opt, info, name = None, None, 'cartesian'
@@ -1422,8 +1434,7 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
                 if verbose:
                     print(f'{exc}; using the Cartesian trust-region optimizer')
         if info is None:
-            opt, info = optimize(surface, mol, max_cycle=maxsteps, trust=0.3,
-                                 verbose=verbose)
+            opt, info = optimize(surface, mol, verbose=verbose, numerics=walk_on)
         final = info.get('final_surface', surface).mean_field(opt)[1]
         final.relaxation = relaxation_flag(info, name)
         return opt, final
@@ -1452,7 +1463,7 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
             'converged': bool(converged), 'cycles': None,
             'status': 'converged' if converged else f'stopped at maxsteps '
                                                     f'{maxsteps}',
-            'opt_grad_max': ground_state_residual_force(final, opt)}, name)
+            'opt_grad_max': ground_state_residual_force(final)}, name)
         return opt, final
     # Neither external optimizer is installed: fall back to the Cartesian
     # trust-region method, which needs nothing outside src/.
@@ -1460,7 +1471,7 @@ def relax_ground_state(mol, scf_factory, engine='auto', maxsteps=100,
         print(f'no external optimizer ({"; ".join(tried)}); using the '
               f'Cartesian trust-region optimizer')
     opt, info = optimize(MeanFieldSurface(mol, scf_factory), mol,
-                         max_cycle=maxsteps, trust=0.3, verbose=verbose)
+                         verbose=verbose, numerics=walk_on)
     final = scf_factory(opt)
     final.relaxation = relaxation_flag(info, 'cartesian')
     return opt, final
@@ -1493,7 +1504,7 @@ def relaxation_flag(info, engine):
     return flag
 
 
-def ground_state_residual_force(mf, mol=None):
+def ground_state_residual_force(mf):
     """max |dE_0/dR| -- how far the reference is from its own minimum.
 
     A number worth printing next to any Huang-Rhys spectrum: it is the size of

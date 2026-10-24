@@ -50,22 +50,6 @@ def lowdin_sqrt_inv_series(delta_s, n):
     return y
 
 
-def convolve_pair(a_series, b_series, n, transpose_a=False):
-    """sum_{p+q=n, p,q>=0} A^(p) @ B^(q) (or A^(p).T @ B^(q) if
-    transpose_a), reading missing orders as zero. Generic building block for
-    both the (K+C) and U order-convolution assembly below."""
-    out = None
-    for p in range(0, n + 1):
-        q = n - p
-        a_p = a_series.get(p)
-        b_q = b_series.get(q)
-        if a_p is None or b_q is None:
-            continue
-        term = (a_p.T if transpose_a else a_p) @ b_q
-        out = term if out is None else out + term
-    return out
-
-
 def assemble_kplusc(kplusc_raw, y_series, n):
     """(K+C)^(n)_orthonormal = sum_{p+q+r=n} Y^(p).T @ (K+C)^(q) @ Y^(r),
     the ISR-orthogonalized secular-matrix block at order n, built purely

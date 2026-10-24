@@ -54,9 +54,7 @@ def truncated(mf, max_cycle, mol=None, **kwargs):
     cycle does."""
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', EvGWNotConverged)
-        eps, info = evgw_eigenvalues(
-            mf, mf.mol if mol is None else mol, max_cycle=max_cycle, tol=0.0,
-            **g1_route(mf, kwargs.get('mode', 'space-time')), **kwargs)
+        eps, info = evgw_eigenvalues(mf, mf.mol if mol is None else mol, **g1_route(mf, kwargs.get('mode', 'space-time')), **kwargs, numerics=Numerics(evgw={'max_cycle': max_cycle, 'tol': 0.0}))
     assert not info['converged']
     return eps, info
 
@@ -97,7 +95,7 @@ def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
     it would have the feedback backwards."""
     nocc = mf.mol.nelectron // 2
     ks_gap = (mf.mo_energy[nocc] - mf.mo_energy[nocc - 1]) * HARTREE_TO_EV
-    eps, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20, counts=g1(mf))
+    eps, info = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ev_gap = (eps[nocc] - eps[nocc - 1]) * HARTREE_TO_EV
     first = info['eps_mean_field'] + np.asarray(
         truncated(mf, max_cycle=1)[1]['shift'])
@@ -127,7 +125,7 @@ def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
     convergence, not the count.
     """
     nocc = mf.mol.nelectron // 2
-    _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20, counts=g1(mf))
+    _, info = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ok = check(info['converged'] and set(info['converge_on']) == {nocc - 1, nocc},
                'convergence is decided on the HOMO and LUMO alone',
                f"converge_on={sorted(info['converge_on'])}")
@@ -136,16 +134,14 @@ def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
                 f"{info['residual_untested'] * HARTREE_TO_EV:.3e} eV vs "
                 f"{info['history'][-1] * HARTREE_TO_EV:.3e}")
     all_states = np.arange(len(np.asarray(mf.mo_energy)))
-    _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
-                               max_cycle=20, counts=g1(mf))
+    _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ok &= check(wide['converged'],
                 'converging on every orbital converges too',
                 f"{len(wide['history'])} cycles, "
                 f"{wide['history'][-1] * HARTREE_TO_EV:.3e} eV")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
-                                    max_cycle=3, counts=g1(mf))
+        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 3}))
     message = ' '.join(str(w.message) for w in caught
                        if issubclass(w.category, EvGWNotConverged))
     ok &= check(not short['converged']
@@ -179,7 +175,7 @@ def check_the_anchor_is_what_makes_it_converge(mf):
         gaps.append(eps[nocc] - eps[nocc - 1])
 
     steps = np.diff(gaps)
-    _, good = evgw_eigenvalues(mf, mf.mol, max_cycle=20, counts=g1(mf))
+    _, good = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ok = check((steps > 0).all() and steps.min() * HARTREE_TO_EV > 1.0,
                'anchored on the ITERATE the gap runs away, > 1 eV per cycle',
                ' '.join(f'{s * HARTREE_TO_EV:+.2f}' for s in steps) + ' eV')
@@ -228,9 +224,8 @@ def check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
     accelerator that moved the answer would be extrapolating a different map.
     The comparison is against the damped linear mixing DIIS replaces, since on
     a two-electron system the undamped iteration already converges in five."""
-    plain_eps, plain = evgw_eigenvalues(mf, mf.mol, max_cycle=40, diis_size=0,
-                                        damping=0.5, counts=g1(mf))
-    diis_eps, diis = evgw_eigenvalues(mf, mf.mol, max_cycle=40, counts=g1(mf))
+    plain_eps, plain = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 40, 'diis_size': 0, 'damping': 0.5}))
+    diis_eps, diis = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 40}))
     nocc = mf.mol.nelectron // 2
     worst = max(abs(plain_eps[p] - diis_eps[p]) * HARTREE_TO_EV
                 for p in (nocc - 1, nocc))
@@ -675,8 +670,7 @@ def check_an_unconverged_loop_warns_with_its_residual_and_bar(water):
     refused)."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        _, info = evgw_eigenvalues(water, water.mol, mode='casida',
-                                   max_cycle=1, tol=1e-12)
+        _, info = evgw_eigenvalues(water, water.mol, mode='casida', numerics=Numerics(evgw={'max_cycle': 1, 'tol': 1e-12}))
     message = ' '.join(str(w.message) for w in caught
                        if issubclass(w.category, EvGWNotConverged))
     return check('not converged after 1 of max_cycle = 1 cycles' in message

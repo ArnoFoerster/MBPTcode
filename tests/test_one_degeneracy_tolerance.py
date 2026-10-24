@@ -46,7 +46,7 @@ def test_the_set_blocks_read_the_one_separation():
         ch.conventions = FrozenConventions(qp_set=np.arange(len(eps)))
         ch.qp_hamiltonian = False
         ch.degeneracy_tol = tol
-        ch.quasiparticles._block_shared(eps, eps + OWN)
+        ch.quasiparticles.block_shared(eps, eps + OWN)
         assert ch.resolved.qp_blocks[1] == blocks, tol
         rec = ch.conventions.qp_block_record
         assert rec['energy_tol_Ha'] == tol

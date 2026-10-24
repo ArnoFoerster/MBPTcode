@@ -47,6 +47,7 @@ from src.Base.numerics.constants import (HARTREE_TO_CM, ISDF_HESSIAN_MIN_GRID,
 from src.Base.numerics.numerics import Numerics  # noqa: E402
 from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
 from src.Base.geometry.geometry import displaced  # noqa: E402
+from src.properties.hessian import HessianAsymmetric  # noqa: E402
 from src.properties.mode_hessian import (cartesian_mode,  # noqa: E402
                                          frequency_ladder, mode_hessian,
                                          mode_step, stretch_modes)
@@ -165,11 +166,13 @@ class _NoisySurface:
         return np.asarray(g) + 1e-4 * self.rng.normal(size=np.shape(g)), e, d
 
 
-def test_noisy_gradients_are_refused(ground):
+def test_noisy_gradients_are_flagged(ground):
     mol, mf, omega, modes, masses = ground
     noisy = _NoisySurface(MeanFieldSurface(mol, factory, mf=mf, own=True))
-    with pytest.raises(RuntimeError, match='asymmetric'):
-        mode_hessian(noisy, mol, omega, modes, masses, [2, 3])
+    with pytest.warns(HessianAsymmetric, match='asymmetric'):
+        out = mode_hessian(noisy, mol, omega, modes, masses, [2, 3])
+    assert out['hessian_asymmetric']
+    assert [f['flag'] for f in out['flags']] == ['hessian_asymmetric']
 
 
 def test_the_ladder_refuses_steps_it_cannot_read_an_order_from(ground):

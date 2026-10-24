@@ -1,31 +1,28 @@
-"""Refusals and numerical flags of the folded ADC(2) line (refuse inputs, warn
-numerics).
-Each refusal test raises where the code used to hang,
-returned a number or went on; each flag test shows the warning and the named
-flag (ee_fold.FoldResult.flags) where the code refused before: water 6-31G (bent,
-non-symmetric) unless named.
+"""Refusals and numerical flags of the folded ADC(2) line and the code around
+it: inputs that cannot work are refused, numerical shortfalls warn and set a
+named flag (ee_fold.FoldResult.flags and the records), and the run goes on.
+Water 6-31G (bent, non-symmetric) unless named.
 
-  - a raise inside on_root on rank 0 is raised on every rank (2 and 3
-        simulated ranks), not left in the other ranks' broadcast
-  - an inner eigensolve that does not converge leaves the root unconverged,
-        flagged 'roots_not_converged'
-  - nroots above the channel is refused (an input); the count's missing
-        root is returned short, flagged 'roots_missing'; a root index the
-        solve did not return is NaN, flagged 'adc_root_missing', in the call,
-        the force and the loop (which stops, 'solvation_loop_stopped'), and a
-        walk rejects that step; the upfolded BSE
-        flags an unconverged Davidson and returns a complex dense root as NaN,
-        flagged; an invalid MBPT_STREAM_GB is refused
-  - a model branch that does not reach tol ends the model's roots there,
-        flagged 'model_branch_unsolved', not skipped
-  - the photophysics driver keys a record by the xyz file's content
-  - a force whose root is not the call's is flagged (follow='index')
-  - the walker retries a StepFailed and lets any other exception out; a
-        solvation loop that did not converge is no exception any more (C1)
-  - state_specific='equilibrium' without eps_static is refused before the
-        solve
-  - the solvation loop refuses max_cycle < 1
-  - extend_orthonormal refuses missing thresholds
+  ranks       a raise inside on_root on rank 0 is raised on every rank (2 and 3
+              simulated ranks), not left in the other ranks' broadcast
+  eigensolve  an inner eigensolve that does not converge leaves the root
+              unconverged, flagged 'roots_not_converged'
+  roots       nroots above the channel is refused (an input); the count's
+              missing root is returned short, flagged 'roots_missing'; a root
+              index the solve did not return is NaN, flagged 'adc_root_missing',
+              in the call, the force and the loop (which stops,
+              'solvation_loop_stopped'), and a walk rejects that step; the
+              upfolded BSE flags an unconverged Davidson and returns a complex
+              dense root as NaN, flagged; an invalid MBPT_STREAM_GB is refused;
+              a model branch that does not reach tol ends the model's roots
+              there, flagged 'model_branch_unsolved', not skipped
+  driver      the photophysics driver keys a record by the xyz file's content
+  force       a force whose root is not the call's is flagged (follow='index')
+  walker      the walker retries a StepFailed and lets any other exception out;
+              a solvation loop that did not converge raises no exception
+  solvation   state_specific='equilibrium' without eps_static is refused before
+              the solve; the solvation loop refuses max_cycle < 1
+  davidson    extend_orthonormal refuses missing thresholds
 """
 import importlib
 import json
@@ -63,7 +60,7 @@ from tests.test_solvation_refusals import toluene as sl_toluene
 optimize = importlib.import_module('src.properties.optimize')
 
 
-# ------------------------------------------------------------------------------
+# ranks ------------------------------------------------------------------------
 
 def _on_ranks(size, fn):
     """on_root(fn, [(2,)], comm) on `size` simulated ranks in threads: each
@@ -106,7 +103,7 @@ def test_on_root_returns_rank_0s_arrays(size):
     assert all(exc is None and np.array_equal(res[0], [1.0, 2.0]) for res, exc in out)
 
 
-# ------------------------------------------------------------------------------
+# eigensolve -------------------------------------------------------------------
 
 @pytest.fixture(scope='module')
 def water_pieces():
@@ -138,7 +135,7 @@ def test_an_unconverged_inner_eigensolve_leaves_the_root_unconverged(water_piece
     assert 'roots_not_converged' in [f['flag'] for f in res.flags]
 
 
-# ----------------------------------------------------------------------------
+# roots ------------------------------------------------------------------------
 
 def test_nroots_above_the_channel_is_refused():
     mf = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
@@ -271,7 +268,7 @@ def test_a_model_branch_short_of_tol_is_flagged():
     assert [f['flag'] for f in flags] == ['model_branch_unsolved']
 
 
-# ------------------------------------------------------------------------------
+# driver -----------------------------------------------------------------------
 
 def test_driver_keys_the_geometry_not_the_path(tmp_path):
     mod = driver()
@@ -283,7 +280,7 @@ def test_driver_keys_the_geometry_not_the_path(tmp_path):
         mod._start_record(first)
 
 
-# ------------------------------------------------------------------------------
+# force ------------------------------------------------------------------------
 
 def _patched_root(monkeypatch, change):
     real = ee_gradient.solve_root
@@ -324,7 +321,7 @@ def test_a_force_of_another_omega_is_flagged(monkeypatch):
     assert 'force_omega_mismatch' in [f['flag'] for f in info['flags']]
 
 
-# ------------------------------------------------------------------------------
+# walker -----------------------------------------------------------------------
 
 def _walk(monkeypatch, exc):
     """_trust_region_walk on a stub surface whose every trial step raises exc."""
@@ -393,7 +390,7 @@ def test_driver_records_the_flags_at_a_walks_last_geometry(tmp_path, monkeypatch
     assert 'saddle_check' not in entry
 
 
-# ------------------------------------------------------------------------------
+# solvation --------------------------------------------------------------------
 
 def test_equilibrium_without_eps_static_is_refused_before_the_solve(monkeypatch):
     mol = molecule(ATOMS)
@@ -413,7 +410,7 @@ def test_loop_refuses_max_cycle_below_one():
         sl.equilibrate(None, None, numerics=Numerics(solvent={'loop_max_cycle': 0}))
 
 
-# ------------------------------------------------------------------------------
+# davidson ---------------------------------------------------------------------
 
 def test_extend_orthonormal_refuses_missing_thresholds():
     with pytest.raises(ValueError, match='rtol or atol'):

@@ -1,4 +1,4 @@
-"""Goldstone-diagram engine for the diagram-ADC(n) program (diagram-primary track).
+"""Goldstone-diagram engine for the diagram-ADC(n) generator.
 
 Generates the time-ordered (Goldstone) expansion of the dynamic self-energy
 M_pq(omega) at order n from pdaggerq vertex streams, with the time-ordered
@@ -44,7 +44,7 @@ Pipeline per external (bra, ket) o/v block:
      one-particle-reducible, belongs to the Dyson iteration of G, not to M.
 
 Sign conventions (two global calibration bits, fixed ONCE by the order-2/3
-gates and then frozen -- see tests/test_diagram_goldstone_n2.py):
+gates and then frozen -- see tests/test_diagram_goldstone.py):
   sector_sign[dir]: overall sign multiplying diagrams of each sector.
   FREE_CUT_FLIP: whether omega-free cuts of dir=-1-sector diagrams enter as
   -(sum eps_h - sum eps_p) ("upside-down" reading) instead of as-is.

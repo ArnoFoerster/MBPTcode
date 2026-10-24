@@ -47,6 +47,7 @@ from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                                          ORBITAL_MULTIPLIER_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.cphf import CphfNotConverged
 from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
@@ -56,6 +57,9 @@ from src.gradients.multipliers import solve_orbital_multipliers
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.gwbse.targets import rpa_partials
 from tests.pins import assert_same
+
+#: a solve cut to five lgmres iterations
+FIVE_ITERATIONS = Numerics(scf={'multiplier_max_iter': 5})
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -310,7 +314,8 @@ def test_an_operator_blind_to_one_pair_is_caught_by_the_residual():
     flags = []
     with pytest.warns(CphfNotConverged, match=r'not converged.*residual'):
         Lam, res = solve_orbital_multipliers(_pair_blind_matvec(eps, (0, 1)),
-                                             Y_E, eps, max_iter=5, flags=flags)
+                                             Y_E, eps, numerics=FIVE_ITERATIONS,
+                                             flags=flags)
     assert res > ORBITAL_MULTIPLIER_RESIDUAL_TOL
     assert [f['flag'] for f in flags] == ['orbital_response_not_converged']
 
@@ -323,7 +328,7 @@ def test_the_same_right_hand_side_solves_with_the_whole_operator():
                     [-0.3, 0.6, 0.0, 0.15],
                     [0.5, -0.1, 0.9, 0.0]])
     Lam, res = solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps,
-                                         max_iter=5)
+                                         numerics=FIVE_ITERATIONS)
     assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
     assert np.array_equal(Lam, Lam.T)             # symmetric by construction
     assert np.abs(np.diag(Lam)).max() == 0.0      # zero diagonal by construction

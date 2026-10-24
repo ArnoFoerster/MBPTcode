@@ -10,12 +10,12 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import build_pieces_gw
 
-HARTREE_TO_EV = 27.211386245988
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit().run()

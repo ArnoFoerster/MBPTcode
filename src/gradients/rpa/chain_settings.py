@@ -1,10 +1,10 @@
 """The settings of the cubic BSE@GW chain
-(`gradients.excited_state.ExcitedStateChain`) and of the composed surfaces
+(`gradients.gwbse.excited_state.ExcitedStateChain`) and of the composed surfaces
 over it, read off the one `Numerics` the chain holds.
 
 The physics -- spin, root, kernel, environment, mean field -- are the
 chain's own arguments; how the surface is computed is the `Numerics` its
-driver built (`properties.surfaces.excited_kwargs`), held as `chain.settings`
+driver built (`gradients.gwbse.surface_factory.excited_kwargs`), held as `chain.settings`
 and carried verbatim by `refreeze` and by a checkpoint restore: the grids a
 chain resolved (`CarriedGrids`) travel beside it, so the object stays exactly
 what was asked and its identity is one across a refreeze. It is validated

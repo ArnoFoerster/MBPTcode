@@ -23,7 +23,8 @@ import tempfile
 import numpy as np
 from pyscf import fci
 
-from src.Base.numerics.constants import FCI_CONV_TOL
+from src.Base.numerics.constants import (DMRG_BOND_DIM, DMRG_DAVIDSON_TOL,
+                                         DMRG_N_SWEEPS, DMRG_NOISE, FCI_CONV_TOL)
 from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
                                                spatial_to_spin_orbitals)
 
@@ -159,8 +160,9 @@ class Block2DMRGSolver(ActiveSpaceSolver):
 
     max_roots = None
 
-    def __init__(self, bond_dim=500, n_sweeps=20, tol=FCI_CONV_TOL, noise=1e-4,
-                 davidson_tol=1e-12, scratch=None, n_threads=None):
+    def __init__(self, bond_dim=DMRG_BOND_DIM, n_sweeps=DMRG_N_SWEEPS,
+                 tol=FCI_CONV_TOL, noise=DMRG_NOISE,
+                 davidson_tol=DMRG_DAVIDSON_TOL, scratch=None, n_threads=None):
         self.bond_dim, self.n_sweeps, self.tol = bond_dim, n_sweeps, tol
         self.noise, self.davidson_tol = noise, davidson_tol
         self.scratch, self.n_threads = scratch, n_threads

@@ -23,24 +23,13 @@ from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_fold, ee_ri_fold, ee_u_r_sigma_df)
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis, csf_isometry
-from src.Base.numerics.constants import ADC2_SPIN_SCALING, EE_FOLD_RESIDUAL_GAP
+from src.Base.numerics.constants import (ADC2_SPIN_SCALING, EE_ADC_DENSE_LIMIT,
+                                         EE_FOLD_RESIDUAL_GAP)
 from src.Base.environment_seam import attached_environment, resolve_environment
 from src.Base.utils.parallel import memory
 from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Solvers.davidson import diagonal_seeds, solve_symmetric
-
-DENSE_LIMIT = 2000      # below this, Davidson's subspace goes linearly
-                        # dependent long before it converges; a 59-dim
-                        # open-shell sector hit exactly that. Every route
-                        # honours it.
-
-FOLD_DENSE_LIMIT = 64   # singles channel size up to which the fold builds
-                        # A_eff densely: n products per Newton step against a
-                        # Davidson's dozen, so only where Davidson would run
-                        # out of space
-# DENSE_LIMIT and FOLD_DENSE_LIMIT belong in src/Base/numerics/constants.py, which
-# other modules use; they stay here for now.
 
 CHANNELS = {'singlet': +1.0, 'triplet': -1.0}
 
@@ -255,7 +244,7 @@ def _solve_cis_ri(op, nroots, conv_tol, dense_limit):
 
 def solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
                        en_dress=None, frozen=0, auxbasis=None, df=True,
-                       dense_limit=DENSE_LIMIT, threshold=5000):
+                       dense_limit=EE_ADC_DENSE_LIMIT, threshold=5000):
     """Open-shell production route: unrestricted DF sigma, Delta-Ms = 0.
 
     The sector is enforced by the vector layout rather than by a mask -- there
@@ -299,7 +288,7 @@ def solve_unrestricted(mf, mol, level, nroots, matrix_free, conv_tol,
 def solve_spin_free(mf, mol, level, nroots, df, spin, matrix_free,
                     conv_tol, en_dress=None, frozen=0, auxbasis=None,
                     max_subspace=None, return_parity=False,
-                    dense_limit=DENSE_LIMIT, threshold=5000, env=None):
+                    dense_limit=EE_ADC_DENSE_LIMIT, threshold=5000, env=None):
     """max_subspace caps the Davidson subspace. It is a MEMORY knob, and at
     scale the dominant one: the doubles vector is no^2 nv^2, the solver holds
     the operator's image alongside the subspace (so TWICE that per trial
@@ -448,13 +437,13 @@ def _subspace_memory(mf):
     return max(0, mf.max_memory - memory.current_memory_mb())
 
 
-# kept for ee_fold/ee_gw_pieces: ee_fold imports it from here
+# kept for ee_fold, which imports it from here
 _channel_basis = channel_basis
 
 
 def solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
                        conv_tol, en_dress=None, ms_sector='auto',
-                       dense_limit=DENSE_LIMIT, threshold=5000):
+                       dense_limit=EE_ADC_DENSE_LIMIT, threshold=5000):
     eps, g, nocc = spin_orbital_arrays(mf, mol)
     norb = len(eps)
     is_uhf = isinstance(mf, _scf.uhf.UHF)

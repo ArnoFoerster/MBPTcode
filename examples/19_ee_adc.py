@@ -7,9 +7,9 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
-HARTREE_TO_EV = 27.211386245988
 basis = 'aug-cc-pvdz'
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis=basis, verbose=0)

@@ -34,8 +34,8 @@ from src.Base.numerics.constants import (CD_NFREQ, ISDF_GRID_ACCURACY_TARGET_EV,
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.numerics.numerics import numerics_of
 from src.SingleReference.GW.qp_states import is_quasiparticle_root
-from src.properties.excitations import (SurfaceSpec, driven_chain,
-                                        qp_bookkeeping, surface_of)
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from src.properties.excitations import SurfaceSpec, driven_chain, surface_of
 
 FORMALDEHYDE = ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
                 'H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123')

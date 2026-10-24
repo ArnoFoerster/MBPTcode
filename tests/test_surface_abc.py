@@ -1,11 +1,12 @@
-"""Every potential-energy surface inherits the abstract base class `PotentialEnergySurface`:
-a surface that lacks one of the five members is refused
-when it is created."""
+"""Every potential-energy surface inherits the abstract base class `PotentialEnergySurface`
+: a surface that lacks one of its six members is refused when it is
+created."""
 import pytest
 
 from src.gradients.surface import PotentialEnergySurface
 
-MEMBERS = ('total_energy', 'total_gradient', 'refreeze', 'label', 'mean_field')
+MEMBERS = ('total_energy', 'total_gradient', 'refreeze', 'label', 'mean_field',
+           'identity')
 
 
 def toy(skip=None):
@@ -95,7 +96,7 @@ def held_ingredients(cls):
     import ast
     import inspect
     import textwrap
-    from src.gradients.surface import INGREDIENTS
+    from src.gradients.surface import INGREDIENT_DOCS
     found = set()
     for k in cls.__mro__:
         if not k.__module__.startswith('src.') or k is PotentialEnergySurface:
@@ -107,7 +108,7 @@ def held_ingredients(cls):
         found |= {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
                   and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name)
                   and n.value.id == 'self'}
-    return found & set(INGREDIENTS)
+    return found & set(INGREDIENT_DOCS)
 
 
 def test_every_surface_declares_exactly_the_ingredients_it_holds():

@@ -60,13 +60,13 @@ from src.Base.pyscf.pyscf_interface import (get_two_electron_integrals_chemist,
                                             get_uhf_spin_orbital_df_factor_blockstacked)
 from src.environments.solvent_screening import (SolventScreening, attach_solvent_screening,
                                                 detach_solvent_screening,
-                                                solvent_static_selfenergy,
                                                 solvent_dielectrics)
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_matrix
 from src.Base.factorization.separable_ri import optimize_atomic_radii
 
+from src.Base.environment_seam import environment_of
 from src.Base.numerics.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
@@ -187,7 +187,7 @@ def check_uhf():
 def check_static_cohsex(mol, mf):
     """The first-order reaction field: image-charge sign structure."""
     attach_solvent_screening(mf, solvent='water')
-    sigma = solvent_static_selfenergy(mf, mol)
+    sigma = environment_of(mf).static_self_energy(mf, mol)
     detach_solvent_screening(mf)
     nocc = mol.nelectron // 2
     diag = np.diag(sigma)

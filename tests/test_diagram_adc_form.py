@@ -1,4 +1,4 @@
-"""ADC-form gates for the diagram-ADC track.
+"""ADC-form gates for the diagram-ADC generator.
 
 1. n=3 identity: the engine's C-class orderings == U1 R C1 R U1 and its
    U-class == the SCW83 (44b)/(45) U^(2)-part, both at machine precision on

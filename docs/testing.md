@@ -38,14 +38,20 @@ export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2
 `tools/ci/`. `fast.txt` (files that take under about a minute) runs on every
 push and pull request, in four shards, on the versions in `tools/ci/pinned.txt`.
 `slow.txt` runs nightly on the newest releases of the dependencies, in six
-shards. `heavy.txt` (hour-long runs, real MPI) does not run on GitHub; run those
-on a cluster. `triage.txt` lists files that fail for a known reason, written
-beside each.
+shards. Also nightly, one job builds pdaggerq, writes the generated ADC(2)-(4)
+runtime with `GenerateRuntime(orders=(2, 3, 4))` (both cached until a generator
+source changes), and four shards run the fast and slow files that read it
+(`run_tier.py fast slow --generated`); the rest of the suite skips those tests
+where the runtime is absent. The ADC(5) runtime takes hours to write, so its
+tests run on a cluster. `heavy.txt` (hour-long runs, real MPI) does not run on
+GitHub; run those on a cluster. `triage.txt` lists files that fail for a known
+reason, written beside each. Every `tests/test_*.py` is in exactly one list.
 
 Run one tier on a single machine the same way CI does:
 
 ```bash
 python tools/ci/run_tier.py fast --shard 1/4
+python tools/ci/run_tier.py fast slow --generated   # after GenerateRuntime
 ```
 
 ## On a cluster

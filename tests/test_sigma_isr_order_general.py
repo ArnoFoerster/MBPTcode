@@ -1,6 +1,6 @@
 """Gate for the ORDER-GENERAL ISR wiring (tests/u_isr_oracle.u_dot_orb_isr): the
-Loewdin/ISR layer from isr_engine.py -- previously validated ONLY against
-synthetic blocks (see its docstring) -- driving REAL generated ADC blocks.
+Loewdin/ISR layer from isr_engine.py -- whose own tests use synthetic blocks
+(see its docstring) -- driving REAL generated ADC blocks.
 
     U^(n) = sum_{p+q=n} Y^(p).T @ raw^(q)     (Loewdin, isr_engine)
             - sum_{m>=2} N^(m) raw^(n-m)       (GS normalization)
@@ -24,7 +24,7 @@ s2r = lazy('adc4_c2_s2c_apply_restricted_blocks')
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
 from tests.generated_runtime import requires_runtime
 
-pytestmark = requires_runtime(4)
+pytestmark = requires_runtime(5)
 
 def main():
     all_ok = True

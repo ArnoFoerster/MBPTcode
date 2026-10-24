@@ -18,7 +18,8 @@ the regeneration that brings them in line also has to drop them from the list.
 The comparison is byte for byte, so it holds only on the pdaggerq build the
 committed files were recorded with: the workstation's conda env py310 (Python
 3.10, pdaggerq 0.0.1, macOS arm64). Other builds order the factors of a term
-differently (a cluster's py311 build writes t1 before l1, and reorders terms); there
+differently (a Python 3.11 build on a Linux cluster writes t1 before l1, and
+reorders terms); there
 the base generators miss the same files, so this is a build pin, not a defect.
 _recording_build() checks pdaggerq's factor order on one small density term and
 skips the test on any other build.

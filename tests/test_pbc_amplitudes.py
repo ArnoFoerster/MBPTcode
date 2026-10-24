@@ -118,7 +118,7 @@ if __name__ == '__main__':
     map_ok = True
     for q in range(nk_prim):
         for kp in range(nk_prim):
-            km = pa.kpoint_minus_q(dfints3, q, kp)
+            km = dfints3.kpoint_minus_q(q, kp)
             if dfints3.kconserv_pair[q, km] != kp:
                 map_ok = False
     print(f"2. k-q momentum helper consistent for all (q,kp): {'OK' if map_ok else 'FAIL'}")

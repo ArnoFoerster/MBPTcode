@@ -25,7 +25,9 @@ from src.Base.numerics.constants import INT32_MAX, MPI_COUNT_MAX
 # diagonalization never initializes MPI, so it cannot abort. Code that DOES
 # cross the ELPA threshold still gets ELPA automatically.
 # Set MBPT_USE_ELPA=0 to force the scipy path even above the threshold (useful
-# on a machine with a broken interconnect, where MPI_Init would abort).
+# on a machine with a broken interconnect, where MPI_Init would abort). ELPA and
+# LAPACK agree to round-off, not to the bit, and this environment choice is not
+# part of the run's `Numerics` identity: a run that must reproduce bits fixes it.
 MPI = None
 ElpaEigensolver = None
 HAS_MPI = False

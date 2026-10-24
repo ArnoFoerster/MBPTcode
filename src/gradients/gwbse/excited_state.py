@@ -18,7 +18,7 @@ positions, the contour-deformation quadrature, the residue backend, the
 degenerate blocks and quasiparticle-Hamiltonian groups, and the scissor the
 orbitals OUTSIDE the set carry -- because each is a discontinuity in the
 surface otherwise. They live in ONE object, `self.conventions`
-(`gradients.conventions.FrozenConventions`), keyed by orbital identity: each
+(`gradients.gwbse.conventions.FrozenConventions`), keyed by orbital identity: each
 forward resolves them at its geometry by orbital overlap, a near-degenerate
 group by its span, and refuses where an orbital has left its unit; the
 kernels read them as `self.resolved`, in that geometry's indices. The frame
@@ -100,6 +100,7 @@ import numpy as np
 
 from src.Base.numerics.constants import KAPPA, CD_NFREQ
 from src.gradients.rpa.chain_settings import CarriedGrids, chain_setting
+from src.gradients.gwbse.diagnostics import chain_diagnostics
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
                                         stamp_of)
 from src.Base.declaration import Excitation, SurfacePhysics
@@ -112,12 +113,12 @@ from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.LinearResponse.casida import solver_choice
 from src.SingleReference.LinearResponse.davidson import DavidsonWarmStart
-from src.SingleReference.LinearResponse.rpa_energy import (declared_ground_state,
-                                                           xc_hybrid_coeff)
+from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.gradients.evaluation import GeometryCache
 from src.gradients.surface import PotentialEnergySurface
-from src.gradients.surface_identity import force_identity
+from src.gradients.surface_identity import chain_identity, force_identity
 from src.gradients.rpa.factor_chain import (FactorChain, FrozenFactorization,
                                             OrbitalCapture)
 from src.gradients.gwbse.reaction_field_adjoint import (added_reaction_field_adjoint,
@@ -125,9 +126,9 @@ from src.gradients.gwbse.reaction_field_adjoint import (added_reaction_field_adj
                                                         reaction_field_shift,
                                                         static_screening)
 from src.gradients.isdf_derivatives import GaugeAdjoint
-from src.gradients.mean_field_response import (qp_xc_correction_Y,
-                                               qp_xc_correction_skeleton,
-                                               relaxed_density_mo)
+from src.gradients.mean_field_response import relaxed_density_mo
+from src.gradients.gwbse.static_correction import (qp_xc_correction_Y,
+                                                   qp_xc_correction_skeleton)
 from src.gradients.gwbse.conventions import FrozenConventions, ResolvedConventions
 from src.gradients.surface import followed_root
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time
@@ -232,15 +233,15 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
     of them. Over ranks the static-W adjoint (`chi0_backward_rows`) and
     the quasiparticle reverse sweep run tile-major instead: every rank
     sweeps every tau point for its grid tiles and holds the factors'
-    adjoints by those tiles alone (`_adjoint_rows`).
+    adjoints by those tiles alone (`adjoint_rows`).
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
-    INGREDIENTS = frozenset({'conventions', 'energy', 'excitation',
-                             'excited_states', 'mean_field', 'phase',
-                             'physics', 'shared_forward', 'solver_used',
-                             'spin', 'spin_view', 'state_specific_correction',
-                             'to_record'})
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
+    INGREDIENTS = frozenset({'conventions', 'diagnostics', 'energy',
+                             'excitation', 'excited_states', 'mean_field',
+                             'phase', 'physics', 'scf_flags', 'shared_forward',
+                             'solver_used', 'spin', 'spin_view',
+                             'state_specific_correction', 'to_record'})
 
     #: The root index (`surface.root_attribute`).
     ROOT_ATTR = 'state'
@@ -292,22 +293,24 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             key_mol=self.mol0, key_mo=np.asarray(self.mf0.mo_coeff, float),
             nocc=self.nocc, outside_scissor=numerics.qp.outside_scissor)
         # the conventions in the indices of the geometry being evaluated
-        self._rv = None
-        self._followed = None          # (mol, mo_coeff, X, Y) last committed
-        self._anchor = None            # ... and of the first, for drift
+        self.resolved_view = None
+        self.followed = None          # (mol, mo_coeff, X, Y) last committed
+        self.anchor = None            # ... and of the first, for drift
         # what this chain computed at the last geometries (`Evaluation`),
         # with the state matched at each until one is committed
-        self._evaluations = GeometryCache()
+        self.evaluations = GeometryCache()
         self.follow_log = []
         # each quasiparticle root kept on its branch while the largest weight
-        # was elsewhere, by orbital and geometry (`_log_qp_branches`)
+        # was elsewhere, by orbital and geometry
+        # (`QuasiparticleSet._log_qp_branches`)
         self.qp_branch_log = []
         # each quasiparticle-Hamiltonian group kept with Z outside (0, 1] or
         # carried on short of self-consistency, by group and geometry
-        # (`_log_qp_hamiltonian`)
+        # (`QuasiparticleSet._log_qp_hamiltonian`)
         self.qp_hamiltonian_log = []
         # each matrix-free Casida solve whose roots the force reads were left
-        # above read_tol or unconfirmed, kept as solved (`_flag_casida`)
+        # above read_tol or unconfirmed, kept as solved
+        # (`StateFollower._flag_casida`)
         self.casida_log = []
         # where each entry of `follow_log` was evaluated (`followed_root`)
         self.follow_coords = []
@@ -315,11 +318,11 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # each Davidson's {'stats', 'timings'}, kept while a stage timer is set
         self.davidson_solves = []
         # the roots of the last geometry a walk committed, which the next
-        # matrix-free Casida solve starts from (`_casida`), shared with the
+        # matrix-free Casida solve starts from (`StateFollower._casida`), shared with the
         # spin views; None solves every geometry cold
         self.davidson_warm_start = DavidsonWarmStart()
         # None: a set with a state on the quadrature takes CD_NFREQ and a
-        # pole-model set CD_NFREQ_SOP (`_fix_cd_grid`); a size asked for is a
+        # pole-model set CD_NFREQ_SOP (`fix_cd_grid`); a size asked for is a
         # floor under both
         carried = CarriedGrids() if carried is None else carried
         asked = (numerics.quadrature.nfreq_cd if carried.nfreq_cd is None
@@ -332,7 +335,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         gap = eps[virt].min() - eps[occ].max()
         e_max = eps[virt].max() - eps[occ].min()
         self.gap = gap
-        self.quasiparticles._build_cd_grid(self.conventions.nfreq_cd, eps)
+        self.quasiparticles.build_cd_grid(self.conventions.nfreq_cd, eps)
         ntau_w = (numerics.quadrature.ntau_w if carried.ntau_w is None
                   else carried.ntau_w)
         self.conventions.ntau_w = (
@@ -342,7 +345,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         self.w_grid = TimeFrequencyGrid.minimax_split(
             self.ntau_w, gap, e_max, [0.0], [1.0],
             with_sine=False, with_inverse=False)
-        self.conventions.qp_set = self.quasiparticles._qp_set(
+        self.conventions.qp_set = self.quasiparticles.resolve_qp_set(
             eps, self.nocc,
             numerics.qp.window if carried.window is None else carried.window,
             numerics.qp.degeneracy_tol)
@@ -352,8 +355,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # refines the selection it shares, and the state matched in a held
         # evaluation, so copies sharing the cache never adopt each other's;
         # a freed chain's identity, reused by another object, claims neither.
-        self._owner = object()
-        self.selection._init_adaptive(numerics.qp.select, qp_partition)
+        self.selection_owner = object()
+        self.selection.init_adaptive(numerics.qp.select, qp_partition)
 
     @property
     def follower(self):
@@ -438,29 +441,34 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         """The frozen conventions in the orbital indices of the geometry
         evaluated last (`ResolvedConventions`), the stored ones before any:
         what every kernel of the forward and the reverse pass reads."""
-        view = self.__dict__.get('_rv')
+        view = self.__dict__.get('resolved_view')
         return view if view is not None else self.conventions.live()
 
-    def _resolve_at(self, mol, mf):
+    def diagnostics(self, mol, mf=None, posteriori=False):
+        """This chain's bookkeeping of its state at `mol`, the record fields
+        beside the energies (`diagnostics.chain_diagnostics`)."""
+        return chain_diagnostics(self, mol, mf, posteriori)
+
+    def resolve_at(self, mol, mf):
         """Resolve the conventions at (mol, mf) for the passes that follow."""
-        self._rv = self.conventions.at(mol, mf)
-        return self._rv
+        self.resolved_view = self.conventions.at(mol, mf)
+        return self.resolved_view
 
     def __copy__(self):
         """A shallow copy that owns no selection and no match: every
-        attribute shared by reference, its own `_owner`, and once the
+        attribute shared by reference, its own `selection_owner`, and once the
         conventions are anchored its own keys (`keyed_copy`), so walking one
         copy (a spin view, a root, a walk's surface) re-keys no other; before
         that the copies share them whole, so what the first forward freezes
         is every copy's."""
         out = type(self).__new__(type(self))
         out.__dict__.update(self.__dict__)
-        out._owner = object()
+        out.selection_owner = object()
         if self.conventions.anchored:
             out.conventions = self.conventions.keyed_copy()
-            view = self.__dict__.get('_rv')
+            view = self.__dict__.get('resolved_view')
             if view is not None:
-                out._rv = ResolvedConventions(out.conventions, view.perm,
+                out.resolved_view = ResolvedConventions(out.conventions, view.perm,
                                               view.rotations, view.mol)
         return out
 
@@ -489,8 +497,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                 if np.ndim(self.qp_window) == 1 else None),
             'ntau_w': self.ntau_w, 'w_grid': self.w_grid, 'gap': self.gap,
             'scf_layout': self.scf_layout(),
-            'followed': followed(self._followed),
-            'anchor': followed(self._anchor),
+            'followed': followed(self.followed),
+            'anchor': followed(self.anchor),
             'follow_log': copy.deepcopy(self.follow_log),
             'follow_coords': list(self.follow_coords),
             'qp_branch_log': copy.deepcopy(self.qp_branch_log),
@@ -500,6 +508,11 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             # read back (a resumed walk) solves as this one would
             'davidson_warm_start': (None if warm is None
                                     else warm.to_record())}
+
+    def identity(self):
+        """What a force of this chain is a force of, its frozen conventions
+        included (`surface_identity.chain_identity`)."""
+        return chain_identity(self, self.conventions)
 
     def settings_record(self):
         """The physics and the `Numerics` as asked, and the records
@@ -538,15 +551,15 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         chain.conventions.ntau_w = record['ntau_w']
         chain.w_grid = record['w_grid']
         chain.gap = record['gap']
-        chain._scf_layout = {'layout': record['scf_layout']}
+        chain.hold_scf_layout(record['scf_layout'])
 
         def followed(held):
             if held is None:
                 return None
             coords, mo, xn, yn = held
             return (molecule_at(mol, coords), mo, xn, yn)
-        chain._followed = followed(record['followed'])
-        chain._anchor = followed(record['anchor'])
+        chain.followed = followed(record['followed'])
+        chain.anchor = followed(record['anchor'])
         chain.follow_log = list(record['follow_log'])
         chain.follow_coords = list(record['follow_coords'])
         chain.qp_branch_log = list(record.get('qp_branch_log', []))
@@ -614,9 +627,9 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         """
         if self.solver != 'auto':
             return self.solver
-        return solver_choice(n_ov, self.bse_tda)
+        return solver_choice(n_ov)
 
-    def _xc_chain(self, mf, weights):
+    def xc_chain(self, mf, weights):
         """(Y_extra, skeleton) of sum_p w_p <p|Sigma_x - v_xc|p>, or (None,
         zero) on Hartree-Fock, where the operator vanishes identically.
 
@@ -657,7 +670,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                 mf, mf.mol, states, exchange='mf',
                 reaction_field_after_solve=reaction_field is not None)
 
-    def _factors_for(self, mol, mf):
+    def factors_for(self, mol, mf):
         """(X_mo, D, eps, mu, auxmol, coords, X_ao, D_bare) at one geometry.
 
         D_bare is None in the gas phase; where it is not, it is what the
@@ -668,7 +681,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         return (x_mo, d, eps, mu, auxmol, crd, x_ao,
                 self.bare_factor(mol, auxmol, crd))
 
-    def _reaction_field(self, x_mo, d, d_bare, eps, screening=None):
+    def reaction_field(self, x_mo, d, d_bare, eps, screening=None):
         """(Eq. (18) on this geometry's factors, the static screening it was
         built from), or (None, None) in the gas phase.
 
@@ -719,8 +732,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         view.spin = spin
         view.state = self.state if state is None else int(state)
         view.track = self.track if track is None else track
-        view._followed = view._anchor = None
-        view._evaluations = GeometryCache()
+        view.followed = view.anchor = None
+        view.evaluations = GeometryCache()
         view.follow_log = []
         view.follow_coords = []
         view.casida_log = []
@@ -747,7 +760,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
     def energy(self, mol=None, mf=None):
         """(E_ex, E_0, Omega) in Hartree, with E_ex = E_0 + Omega."""
         mol, mf = self.mean_field(mol, mf)
-        root, _, solution = self.follower._tracked(mol, mf)
+        root, _, solution = self.follower.tracked(mol, mf)
         om = float(solution.omega[root])
         return mf.e_tot + om, mf.e_tot, om
 
@@ -757,8 +770,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         self.require_differentiable_environment()
         mol, mf = self.mean_field(mol, mf)
         self.require_scf_quality(mf, 'excitation_gradient')
-        root, shared, solution = self.follower._tracked(mol, mf)
-        held = self.follower._held(mol, mf)
+        root, shared, solution = self.follower.tracked(mol, mf)
+        held = self.follower.held(mol, mf)
         if held is not None and ('omega', root) in held.forces:
             return held.forces[('omega', root)]
         out = self.reverse.root_gradient(shared, solution, root)
@@ -789,7 +802,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         mol, mf = self.mean_field(mol, mf)
         if relaxed:
             self.flag_scf_quality(mf, 'excitation_density(relaxed=True)')
-        root, shared, solution = self.follower._tracked(mol, mf)
+        root, shared, solution = self.follower.tracked(mol, mf)
         C = np.asarray(mf.mo_coeff, float)
         nocc = self.nocc
         if not relaxed:
@@ -811,7 +824,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         gammas = [np.diag(e) if e.ndim == 1 else e for e, _ in capture]
         p_mo, _ = relaxed_density_mo(mf, sum(gammas), nocc,
                                      Y_extra=sum(y for _, y in capture),
-                                     environment=not frozen_field)
+                                     environment=not frozen_field,
+                                     numerics=self.settings)
         return C @ p_mo @ C.T
 
     def state_specific_correction(self, mol=None, mf=None):
@@ -820,26 +834,26 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         omega_B + E_SS, in Hartree, with the density's dipole change.
 
         E_SS is taken in the optical continuum (vertical) or its static
-        partner (equilibrium), as the environment declares. Refused on any
-        other environment: the Duchemin scheme carries its state-specific
-        part inside omega already.
+        partner (equilibrium), as the environment declares. Refused on a
+        medium with no classical state-specific term (`state_specific_term`
+        None), whose excitation carries its state-specific part already.
         """
         mol, mf = self.mean_field(mol, mf)
         env = self.environment_at(mol)
-        if getattr(env, 'scheme', None) != 'classical-ss':
+        term = env.state_specific_term()
+        if term is None:
             raise ValueError(
-                f'a classical state-specific term belongs to scheme B '
-                f'(environment.solvent_scheme(env, "classical-ss")); this '
-                f'chain stands in {environment_label(env)}, whose excitation '
-                f'carries its state-specific part already')
+                f'this chain stands in {environment_label(env)}, which has no '
+                f'classical state-specific term (state_specific_term); its '
+                f'excitation carries its state-specific part already')
         omega = float(self.excitation(mol, mf))
         drho = self.excitation_density(mol, mf,
-                                       relaxed=env.ss_density == 'relaxed')
-        e_ss, _ = env.ss_continuum().state_specific_energy(mol, drho)
+                                       relaxed=term.ss_density == 'relaxed')
+        e_ss, _ = term.ss_continuum().state_specific_energy(mol, drho)
         dip = dipole_change(mol, drho)
         return {'omega_B': omega, 'E_SS': e_ss, 'E_B': omega + e_ss,
-                'ss_density': env.ss_density,
-                'ss_equilibrium': env.ss_equilibrium,
+                'ss_density': term.ss_density,
+                'ss_equilibrium': term.ss_equilibrium,
                 'delta_dipole': dip.tolist()}
 
     def interstate_gradient(self, m, n, mol=None, mf=None):
@@ -881,16 +895,16 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         other then looks exactly like a 10% gradient error.
         """
         self._refuse_split_ion(mol)
-        self.follower._anchored_first(mol, lambda: self._quasiparticle_solve(
+        self.follower.anchored_first(mol, lambda: self._quasiparticle_solve(
             offset, self.mol0, self.mf0, False))
-        self._resolve_at(mol, mf)
-        x_mo, d, eps, mu, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
-        shift, screening = self._reaction_field(x_mo, d, d_bare, eps)
+        self.resolve_at(mol, mf)
+        x_mo, d, eps, mu, auxmol, crd, _, d_bare = self.factors_for(mol, mf)
+        shift, screening = self.reaction_field(x_mo, d, d_bare, eps)
         orb = self.nocc - 1 + offset
         d_sigma = d if d_bare is None else d_bare
         # the grid is the set's, widened by the orbital asked for, so a chain
         # reaches the same quadrature through a BSE excitation or one state
-        self.quasiparticles._fix_cd_grid(np.union1d(self.resolved.qp_set, [orb]), eps)
+        self.quasiparticles.fix_cd_grid(np.union1d(self.resolved.qp_set, [orb]), eps)
         xc_orb = float(self.xc_correction(mf, [orb], shift)[0])
         while True:
             qp_out = {}
@@ -899,8 +913,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                 out = qp_gradient_space_time(
                     x_mo, d_sigma, eps, self.nocc, grid.gw_grid, grid.nu,
                     grid.wt, orb, mu=mu, want_grad=want_grad,
-                    xc_correction=xc_orb, route_out=qp_out, **self.quasiparticles._qp_kw())
-            if not self.quasiparticles._freeze_qp_branch(qp_out, eps, xc_orb, [orb]):
+                    xc_correction=xc_orb, route_out=qp_out, **self.quasiparticles.qp_kw())
+            if not self.quasiparticles.freeze_qp_branch(qp_out, eps, xc_orb, [orb]):
                 break
         # Eq. (18) whole, on the root solved without it
         out = (float(add_reaction_field(out[0], shift, orb)),) + tuple(out[1:])
@@ -943,11 +957,11 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         if shift is not None:
             # Sigma screened bare, so the adjoint above is on the BARE factor;
             # the dressed one is reached only through Eq. (18).
-            block = self.reverse._adjoint_rows(x_mo)
+            block = self.reverse.adjoint_rows(x_mo)
             d_bar_bare, d_bar = d_bar, self.zero_adjoint(d, block)
             if block is not None:
-                x_bar = self.reverse._as_rows(x_bar, block)
-                d_bar_bare = self.reverse._as_rows(d_bar_bare, block)
+                x_bar = self.reverse.as_rows(x_bar, block)
+                d_bar_bare = self.reverse.as_rows(d_bar_bare, block)
             with self.phase('t_reaction_field_backward'):
                 eps_bar = added_reaction_field_adjoint(
                     eps_bar, x_bar, d_bar, d_bar_bare,
@@ -955,7 +969,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                         w_env, x_mo, d, d_bare, eps, self.nocc,
                         grid=self.w_grid, screening=screening, block=block))
         with self.one_fit_adjoint(mf):
-            y_xc, g_xc = self._xc_chain(mf, w_corr)
+            y_xc, g_xc = self.xc_chain(mf, w_corr)
             grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 eps_bar, x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,
@@ -978,7 +992,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                 "the equilibrium shift of a charged state reads its three "
                 "gauges as whole factors; build the factorization unsliced "
                 "with fit='replicated' for it")
-        x_mo, d, eps, _, auxmol, crd, _, d_bare = self._factors_for(mol, mf)
+        x_mo, d, eps, _, auxmol, crd, _, d_bare = self.factors_for(mol, mf)
         if d_bare is None:
             raise ValueError(
                 'equilibrium solvation needs a continuum that dresses the '
@@ -1054,8 +1068,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         mol, mf = self.mean_field(mol, mf)
         self.require_differentiable_environment()
         self.require_scf_quality(mf, 'total_gradient')
-        root, shared, solution = self.follower._tracked(mol, mf)
-        held = self.follower._held(mol, mf)
+        root, shared, solution = self.follower.tracked(mol, mf)
+        held = self.follower.held(mol, mf)
         if held is not None and ('total', root) in held.forces:
             return held.forces[('total', root)]
         # one fit adjoint for both: the mean field's exchange skeleton rides

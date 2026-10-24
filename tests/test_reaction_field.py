@@ -35,6 +35,7 @@ from src.environments.environment import dresses_interaction
 from src.Base.environment_seam import attach_environment
 from src.environments.solvent_screening import (SolventScreening,
                                                 detach_solvent_screening)
+from src.SingleReference.GW import reaction_field
 from src.SingleReference.GW.reaction_field import (
     bare_gauge_transform, environment_quasiparticle_shift)
 from src.SingleReference.BSE.solve import isdf_bse_factors
@@ -223,7 +224,7 @@ def check_a_second_environment_gets_its_own_reaction_field():
 
     # each side below is built afresh (the cache was dropped), so the two are
     # two computations: to a few ulp, not bitwise
-    del mf._reaction_field_shift
+    del reaction_field._SHIFTS[mf]
     ok &= check(matches(s2, environment_quasiparticle_shift(mf),
                         RECORDING_BLAS),
                 'the cached array is what the uncached route returns')

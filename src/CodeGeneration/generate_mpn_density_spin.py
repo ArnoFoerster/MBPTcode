@@ -39,10 +39,7 @@ three-operand contractions (_stage_three_operand_einsums).
 """
 import os
 import re
-import sys
 from dataclasses import dataclass
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum, raw_terms_to_term_list
 from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
@@ -364,11 +361,6 @@ def t_numerator_terms_restricted(rank, order, block):
     return t_numerator_terms(RESTRICTED, rank, order, block)
 
 
-def t_numerator_terms_u(rank, order, block):
-    """t_numerator_terms of the unrestricted model."""
-    return t_numerator_terms(UNRESTRICTED, rank, order, block)
-
-
 def t_numerator_terms_stored(rank, order, block):
     """Restricted t_numerator_terms for any spin block of the rank: a block
     whose numerator is not stored (the all-beta bb..b) is its closed-shell
@@ -599,11 +591,6 @@ def cross_density_terms(block, spin, bra_ranks, ket_ranks):
 def cross_density_terms_restricted(block, bra_ranks, ket_ranks):
     """cross_density_terms on the alpha channel (the restricted density block)."""
     return cross_density_terms(block, 'a', bra_ranks, ket_ranks)
-
-
-def cross_density_terms_u(block, spin, bra_ranks, ket_ranks):
-    """cross_density_terms of the unrestricted model."""
-    return cross_density_terms(block, spin, bra_ranks, ket_ranks)
 
 
 def generate_density_pieces(model, pieces):

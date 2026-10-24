@@ -55,7 +55,7 @@ def restricted_channel_shifts(dress, B_aa, g_oooo, g_vvvv, O, vidx_abs,
     Engel Eq. 20 with a MINUS sign per (particle,hole) pair:
         Delta^EN = <ij||ij> + <ab||ab> - <ai||ai> - <aj||aj> - <bi||bi> - <bj||bj>
     with the antisymmetrized or plain integral chosen per pair by its spins
-    (EpsteinNesbetDenominators._delta does that bookkeeping)."""
+    (EpsteinNesbetDenominators.shift does that bookkeeping)."""
     # spin_adapted=True is the only mode a CSF solver can represent: it averages the two
     # spin cases into ONE shift per channel, so D_same == D_opp and the dressed
     # amplitudes stay spin-pure. False gives the determinant-wise (Jiang & Engel) shifts,
@@ -184,7 +184,7 @@ class EpsteinNesbetDenominators:
             s[ax] = self.V
         return tuple(s)
 
-    def _delta(self, layout, spin):
+    def shift(self, layout, spin):
         """Jiang & Engel's Delta for one spin case:
             same: Delta = <h0 h1||h0 h1> + <p0 p1||p0 p1> - sum_{4 pairs} <p h||p h>
             opp : hh/pp use the no-exchange <..|..>; of the 4 hp pairs only
@@ -212,7 +212,7 @@ class EpsteinNesbetDenominators:
         D = self._bare(layout)
         if not self.dressed:
             return D
-        return D - self._LAYOUTS[layout][2] * self._delta(layout, spin)
+        return D - self._LAYOUTS[layout][2] * self.shift(layout, spin)
 
     @property
     def spin_adapted(self):
@@ -314,8 +314,8 @@ def build_dressed_e_ai(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
         W_aux = static_screened_coulomb_aux(eps, B_aa, O) if singles == 'screened' else None
         direct_hp, exchange_hp = hp_diagonals_df(B_aa, O, np.arange(O, O + V), W_aux=W_aux)
     else:
-        # (aa|ii) and (ai|ai) gathered without the O(V*O) python loop this
-        # used to run (~110k iterations at hexacene/cc-pVQZ scale).
+        # (aa|ii) and (ai|ai) gathered without an O(V*O) python loop
+        # (~110k iterations at hexacene/cc-pVQZ scale).
         vsl = slice(O, O + V)
         if singles == 'screened':
             W = static_screened_coulomb_chemist(eps, eri_chemist, O)
@@ -362,7 +362,7 @@ def build_dressed_e_abij(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None)
         # D_bare here is (holes - particles) in [a,b,i,j] order, i.e. exactly
         # EpsteinNesbetDenominators' 'abkl' layout (particles @ (0,1), holes @ (2,3),
         # bare_sign = +1 -> D = D_bare - Delta).
-        return dens._delta('abkl', spin)
+        return dens.shift('abkl', spin)
 
     if not dens.dressed:
         return 1.0 / D_bare, 1.0 / D_bare
@@ -464,12 +464,9 @@ def build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bbb
         shift_abab -= d_hp_ab_aj.reshape(Va, 1, 1, Ob)
     custom_denom['abab'] = D_bare_abab - shift_abab
 
-    # 4/5. aa/bb sectors (singles): 'singles' was previously read nowhere in
-    # this function -- the <ia||ia> shift was added UNCONDITIONALLY whenever
-    # u2_denom_dress was not None, regardless of the hh/pp/hp/singles keys
-    # actually passed. Now gated like every other channel (default True,
-    # matching build_dressed_e_ai's restricted-branch convention) so
-    # singles=False genuinely turns it off instead of silently no-op'ing.
+    # 4/5. aa/bb sectors (singles): the <ia||ia> shift is gated on 'singles'
+    # like every other channel (default True, matching build_dressed_e_ai's
+    # restricted-branch convention), so singles=False turns it off.
     singles = u2_denom_dress.get('singles', True)
     D_bare_aa = orbital_denominator(ea[:Oa], ea[Oa:], 1)
     D_bare_bb = orbital_denominator(eb[:Ob], eb[Ob:], 1)

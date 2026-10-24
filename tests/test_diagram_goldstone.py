@@ -1,4 +1,4 @@
-"""Gates for the diagram-primary Goldstone engine (diagram-ADC track).
+"""Gates for the diagram-primary Goldstone engine (diagram-ADC generator).
 
 Three layers, in the order they were built:
   1. n=2 vs the textbook closed-form 2nd-order self-energy, per sector, on

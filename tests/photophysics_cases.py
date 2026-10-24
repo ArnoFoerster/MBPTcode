@@ -181,11 +181,14 @@ class GroundWell:
                 g[i, k] = (well_energy(xp) - well_energy(xm)) / (2 * FD)
         return g, well_energy(x), {'omega': 0.1}
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
         return self
 
     def label(self):
         return 'double well'
+
+    def identity(self):
+        return None
 
 
 class DoubleWell(GroundWell):

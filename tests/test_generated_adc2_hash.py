@@ -3,24 +3,21 @@
 Generated ADC modules are not part of the repository (src/SingleReference/ADC/
 generatedADC/ is ignored), so the reproducibility record is the generator plus
 these hashes: generate_adc2 and generate_adc2_restricted write into a temporary
-directory, and the SHA-256 of each module must match the value recorded when the
-generators were ported (2026-10-19, pdaggerq f3a1f29). A change of the emitted
+directory, and the SHA-256 of each module must match the recorded value (pdaggerq
+commit f3a1f29). A change of the emitted
 text, from the generator or from pdaggerq, fails here; re-record only after
 checking the new modules against the old ones.
 
-At recording, both bodies were identical to the modules the same generator had
-produced before the port; only the header line naming the generator's path and
-the einsum import (cached_einsum) differed. The same two hashes came out of
-a second pdaggerq build (a cluster, Python 3.11). Larger modules do not: the ADC(4)
+The same two hashes came out of a second pdaggerq build (Python 3.11 on a
+Linux cluster). Larger modules do not: the ADC(4)
 l3 Laplace module's term list differs between those two builds while every
 block agrees with its dense twin to 1.6e-11, so a text hash there would pin the
 build, not the physics; tests/test_l3_laplace.py checks it numerically instead.
 
-Re-recorded 2026-10-22 (one block emitter for the spin-orbital and
-restricted twins, the codegen_common header): the new modules are the old ones
-up to the header comment, the docstrings and the order of the functions -- every
-function has the same name and the same AST body (as checked for the
-record), and the old hashes still came out of the base generators.
+The hashes were re-recorded when the spin-orbital and restricted twins moved to
+one block emitter with the codegen_common header: the new modules are the old
+ones up to the header comment, the docstrings and the order of the functions --
+every function has the same name and the same AST body.
 """
 import hashlib
 import os

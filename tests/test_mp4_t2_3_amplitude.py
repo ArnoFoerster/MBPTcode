@@ -1,11 +1,11 @@
 """GATE for the Laplace-fused order-3 doubles amplitude T2^(3)/L2^(3):
 MPnDensityDriverRestricted.compute_t2_3_laplace and the ADC provider
-BuildSuperMatrixADCnRestricted._amps_order_lowrank_laplace, which build t2_3 with
+BuildSuperMatrixADCnRestricted.amps_order_lowrank_laplace, which build t2_3 with
 NONE of the O(no^3 nv^3) t3_2 / O(no^4 nv^4) t4_2 tensors materialized.
 
   * compute_t2_3_laplace == the materialized compute_order3_amplitudes' t2_3, to
     the ntau minimax accuracy (converges: ntau=6 ~1e-9, ntau=10 ~1e-13).
-  * _amps_order_lowrank_laplace(ntau)['L2_3'] == _amps_order(3)['L2_3'] (the
+  * amps_order_lowrank_laplace(ntau)['L2_3'] == amps_order(3)['L2_3'] (the
     exact provider) -- i.e. the ADC-side amplitude the U^(4) low-rank structures
     consume is Laplace-correct, and the provider carries NO rank>=3 key.
 
@@ -79,17 +79,17 @@ def main():
 
     # --- ADC provider level: L2_3 correct + no rank>=3 key ---
     r = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, nocc)
-    lap = r._amps_order_lowrank_laplace(6)
-    exact = r._amps_order(max_order=3)
+    lap = r.amps_order_lowrank_laplace(6)
+    exact = r.amps_order(max_order=3)
     bad = [k for k in lap if any(k.startswith(p) for p in _RANK_GE3)]
     all_ok &= _check(not bad,
-                     f"_amps_order_lowrank_laplace carries NO rank>=3 key "
+                     f"amps_order_lowrank_laplace carries NO rank>=3 key "
                      f"(keys={sorted(lap)})")
     for key in ('L2_3', 'T2_3'):
         worst = max(float(np.abs(lap[key][leaf] - exact[key][leaf]).max())
                     for leaf in lap[key])
         all_ok &= _check(worst < 1e-8,
-                         f"provider {key} == _amps_order(3) {key} ({worst:.2e})")
+                         f"provider {key} == amps_order(3) {key} ({worst:.2e})")
 
     print('\nALL OK' if all_ok else '\nFAILURES')
     return 0 if all_ok else 1

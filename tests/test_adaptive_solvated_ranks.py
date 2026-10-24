@@ -31,7 +31,7 @@ from src.Base.utils.parallel.mpi_grid import distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.qp_states import resolve_qp_states
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.excitations import adaptive_check
+from src.gradients.gwbse.diagnostics import adaptive_check
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
 

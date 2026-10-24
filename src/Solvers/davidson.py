@@ -1,8 +1,9 @@
-"""Symmetric Davidson eigensolver: the single iterative core behind both ADC
-routes -- charged (IP/EA, root-following) and neutral (ee, lowest-k).
+"""The one symmetric Davidson eigensolver: both ADC routes -- charged (IP/EA,
+root-following) and neutral (ee, lowest-k) --, the Tamm-Dancoff BSE and the
+(A - B) probe of the Casida problem.
 
 The iteration itself is pyscf's lib.davidson1. What lives here is the
-problem-agnostic setup the two routes were duplicating: the Jacobi-Davidson
+problem-agnostic setup its callers would otherwise duplicate: the Jacobi-Davidson
 preconditioner, the overlap `pick` that root-follows a reference vector, the
 lowest-diagonal seeding, and one tolerance contract.
 
@@ -15,10 +16,13 @@ them. This is deliberately NOT pyscf's own convention, where `tol` is the
 eigenvalue tolerance and the residual tolerance is its SQUARE ROOT, so
 conv_tol=1e-6 there silently means |r| <= 1e-3.
 
-Not the solver for the other two eigenproblems in this tree: the Casida form
-is non-Hermitian and paired (LinearResponse/davidson.py, pyscf real_eig) and
-EOM-CC is non-Hermitian and biorthogonal (CC/eom.py, pyscf davidson_nosym1).
-Neither reduces to this one.
+Not the solver for the eigenproblems that are not symmetric, each of which
+keeps its own loop: the full Casida/BSE problem (LinearResponse/davidson.py) is
+paired, its symmetric forms need (A - B)^1/2, which a matrix-free action does
+not give, and its trial space is split by pair rows over the ranks; the
+upfolded BSE (BSE/bse_upfolded.py) is non-symmetric with possibly complex
+roots; EOM-CC (CC/eom.py, pyscf davidson_nosym1) is non-Hermitian
+biorthogonal.
 """
 import warnings
 
@@ -28,7 +32,12 @@ from pyscf.lib.linalg_helper import LinearDependenceError
 
 from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
                                          DAVIDSON_DENOMINATOR_FLOOR,
-                                         DAVIDSON_FOLLOW_OVERLAP_TIE)
+                                         DAVIDSON_FOLLOW_OVERLAP_TIE,
+                                         DAVIDSON_LINDEP_CEILING,
+                                         DAVIDSON_LINDEP_FLOOR,
+                                         DAVIDSON_MAX_CYCLE,
+                                         DAVIDSON_NULL_DIRECTION,
+                                         DAVIDSON_TOL_RESIDUAL)
 
 
 def jacobi_davidson_precond(diag, floor=DAVIDSON_DENOMINATOR_FLOOR):
@@ -144,7 +153,8 @@ def _default_subspace(nroots):
     return max(10 * nroots + 30, 60)
 
 
-def _lindep_for(tol_residual, floor=1e-22, ceiling=1e-14):
+def _lindep_for(tol_residual, floor=DAVIDSON_LINDEP_FLOOR,
+                ceiling=DAVIDSON_LINDEP_CEILING):
     """davidson1's linear-dependence threshold, scaled to the residual asked
     for.
 
@@ -167,7 +177,8 @@ def _lindep_for(tol_residual, floor=1e-22, ceiling=1e-14):
 
 
 def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
-                    tol_residual=1e-6, tol_eig=None, max_cycle=200,
+                    tol_residual=DAVIDSON_TOL_RESIDUAL, tol_eig=None,
+                    max_cycle=DAVIDSON_MAX_CYCLE,
                     max_subspace=None, precond=None, lindep=None, verbose=0,
                     warn_unconverged=True, label='Davidson', max_memory=None,
                     complete_lowest=True):
@@ -344,7 +355,8 @@ def _off(V, X):
     V = V - X @ (X.T @ V)
     V = V - X @ (X.T @ V)
     nrm = np.linalg.norm(V, axis=0)
-    return V[:, nrm > 1e-8] / nrm[nrm > 1e-8]
+    keep = nrm > DAVIDSON_NULL_DIRECTION
+    return V[:, keep] / nrm[keep]
 
 
 def _complete_lowest(matvec, block, diag, e, X, warn, opts):

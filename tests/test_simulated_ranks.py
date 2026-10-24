@@ -133,7 +133,7 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
 from src.gradients.gwbse.qp_space_time import (qp_gradient_space_time,
                                                qp_set_gradient)
-from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+from src.gradients.gwbse.reaction_field_adjoint import static_screening
 from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
                                                   rpa_energy_and_adjoint,
                                                   selfenergy_block_backward,
@@ -201,7 +201,7 @@ def water():
                                   grid.omega_points, mu=mu)
     return dict(mf=mf, mol=mol, nocc=nocc, factors=factors, X=X, D=D, eps=eps,
                 grid=grid, nu=nu, wt=wt, mu=mu, states=states,
-                transforms=transforms, w_grid=static_grid(eps, nocc),
+                transforms=transforms, w_grid=static_screening_grid(eps, nocc),
                 sigma_states=states[1:3],
                 weights=np.array([0.3, -1.1, 0.8, 0.45]))
 

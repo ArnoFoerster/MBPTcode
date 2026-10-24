@@ -69,7 +69,6 @@ keeps meaning a root of the chain's own spin.
 """
 import copy
 import dataclasses
-import warnings
 
 import numpy as np
 
@@ -78,7 +77,9 @@ from src.Base.numerics.numerics import Stamped, numerics_identity
 from src.Base.pyscf.pyscf_interface import occupied_count
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.gradients.surface_identity import FirstPoint
-from src.gradients.reference_mean_field import check_scf_quality, scf_force_tol
+from src.gradients.gwbse.derivative_coupling import evaluated_coupling
+from src.gradients.reference_mean_field import (check_scf_quality, require_run,
+                                               scf_quality_flags)
 from src.gradients.surface import (driven_chain, own_root_attribute,
                                    provides, root_attribute)
 
@@ -127,6 +128,9 @@ class StateEvaluation:
     `mf` (None until measured). `numerics_identity` names the `Numerics` the
     whole evaluation stands on, and stamps every spectrum in it."""
 
+    #: The ingredients an evaluation provides (`surface.INGREDIENT_DOCS`).
+    INGREDIENTS = frozenset({'coupling', 'scf_flags'})
+
     def __init__(self, mol, mf, numerics_identity=None):
         self.mol, self.mf = mol, mf
         self.numerics_identity = numerics_identity
@@ -148,30 +152,20 @@ class StateEvaluation:
 
     def require_scf_quality(self, where='evaluation'):
         """The flags (`scf_flags`) a force or coupling read off this
-        evaluation carries: one when its mean field's |F_ia| exceeds
-        `scf_force_tol`, warned about once, as the chain's own
-        `require_scf_quality` flags one taken directly; the run carries on
-        (refuse inputs, warn numerics). A mean
-        field that was never run is an input and is refused."""
-        if getattr(self.mf, 'mo_coeff', None) is None:
-            raise ValueError(f'{where}: the mean field of this evaluation was '
-                             f'never run (no mo_coeff)')
+        evaluation carries (`reference_mean_field.scf_quality_flags`): its
+        mean field is flagged once, the first entry standing for every
+        later one."""
+        require_run(self.mf, where)
         if self.scf_residual is None:
-            nocc = occupied_count(self.mf)
-            self.scf_residual = check_scf_quality(self.mf, nocc)
-        tol = scf_force_tol(self.mf)
+            self.scf_residual = check_scf_quality(self.mf, occupied_count(self.mf))
         # an evaluation made before the list existed
-        flags = self.__dict__.setdefault('scf_flags', [])
-        if self.scf_residual > tol and not flags:
-            flags.append({'where': where, 'residual': float(self.scf_residual),
-                          'tol': float(tol), 'coords': np.array(
-                              self.mol.atom_coords(), float)})
-            warnings.warn(
-                f'{where}: the mean field carries |F_ia| = '
-                f'{self.scf_residual:.2e}, above the {tol:.0e} a force on it '
-                f'may carry (`scf_force_tol`); the gradient Lagrangian '
-                f'assumes the block vanishes', RuntimeWarning, stacklevel=3)
-        return [dict(f) for f in flags]
+        return scf_quality_flags(self.__dict__.setdefault('scf_flags', []), self.mf,
+                                 self.scf_residual, where, once=True, stacklevel=4)
+
+    def coupling(self, m, n):
+        """(d_mn (natm, 3) in 1/Bohr, diagnostics) between two of this
+        evaluation's states (`derivative_coupling.evaluated_coupling`)."""
+        return evaluated_coupling(self, m, n)
 
     def first_point(self, key):
         """The `FirstPoint` of force target `key`: this geometry, its spin
@@ -580,14 +574,15 @@ class StateManifold:
                                                      release_tape=False)
         return view.composed_total(mf, ev.g0, g_om, diags)
 
-    def refreeze(self, mol):
-        """The whole manifold with the chain's frozen conventions rebuilt at `mol`.
+    def refreeze(self, mol, mf=None):
+        """The whole manifold with the chain's frozen conventions rebuilt at
+        `mol`, on `mf` where given.
 
         One refreeze for all roots, so they keep sharing the quadratures and the
         window -- refreezing each surface separately is how a manifold stops
         being one solve.
         """
-        return type(self)(self.chain.refreeze(mol), states=self.states)
+        return type(self)(self.chain.refreeze(mol, mf=mf), states=self.states)
 
     def label(self):
         """The method and the root set, for a log line."""

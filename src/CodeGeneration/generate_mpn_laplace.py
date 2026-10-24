@@ -42,8 +42,6 @@ the dense twin to ~1e-17 (H2O/6-31g, naux = norb^2).
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
 from src.CodeGeneration import codegen_common
 from src.CodeGeneration.codegen_common import (
     eri_leaves, R_DIMS, U_DIMS, LAPLACE_IMPORTS, generated_header, write_module)

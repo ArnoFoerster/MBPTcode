@@ -106,6 +106,11 @@ class SplitEquilibrium:
         """The optical continuum, which a correlation energy reads in any mode."""
         return self.optical
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
     def for_geometry(self, mol):
         """The split around the atoms of `mol`."""
         if mol is self.optical.mol:
@@ -206,6 +211,11 @@ class ClassicalStateSpecific(SplitEquilibrium):
         """The continuum E_SS is taken in: optical (vertical) or static."""
         return self.static if self.ss_equilibrium else self.optical
 
+    def state_specific_term(self):
+        """This medium: scheme B's classical state-specific term E_SS, taken
+        of the density `ss_density` names in `ss_continuum()`."""
+        return self
+
     def for_geometry(self, mol):
         if mol is self.optical.mol:
             return self
@@ -265,6 +275,11 @@ class LinearResponseOnly(ClassicalStateSpecific):
             raise ValueError('inside a solvation loop the mean field carries '
                              "the loop's charges, not a continuum of its own")
         return mf
+
+    def state_specific_term(self):
+        """None: inside a solvation loop the state-specific field is the
+        loop's, and there is no first-order E_SS."""
+        return None
 
     def for_geometry(self, mol):
         if mol is self.optical.mol:

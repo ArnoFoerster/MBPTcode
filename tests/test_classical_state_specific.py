@@ -255,7 +255,7 @@ def test_scheme_b_in_a_vacuum_continuum_is_the_gas_phase(mol):
 
 def test_another_environment_refuses_the_classical_term(mol, schemes):
     chain_a, _, mf, _, _ = schemes
-    with pytest.raises(ValueError, match='scheme B'):
+    with pytest.raises(ValueError, match='no classical state-specific term'):
         chain_a.state_specific_correction(mol, mf)
     with pytest.raises(ValueError, match='scheme'):
         solvent_scheme(SolventScreening(mol, solvent='toluene'), 'pte')

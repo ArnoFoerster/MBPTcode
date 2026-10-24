@@ -138,8 +138,8 @@ def build_reference(mol, args, env, out_dir, root):
     mf = factory(mol) if env is None else env.mean_field(mol, factory)
     if not mf.converged:
         # a numerical event: warned about, flagged in the record's 'scf'
-        # (converged false) and the run carries on
-        # (refuse inputs, warn numerics)
+        # (converged false) and the run carries on (inputs are refused,
+        # numerical events are warned about)
         warnings.warn('the SCF did not converge; every number of this run is '
                       'flagged (record scf.converged)', RuntimeWarning)
     lockstep_mean_field(mf)

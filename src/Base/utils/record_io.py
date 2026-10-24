@@ -196,8 +196,8 @@ def _encode(value, arrays, where):
             'state': _encode(dict(vars(value)), arrays, f'{where}.__dict__')}
 
 
-#: Where the classes a record written before the module moves names live now (the moves changed
-#: modules): {'old.module:Class': 'new.module:Class'},
+#: Where the classes an older record names live now, after modules moved:
+#: {'old.module:Class': 'new.module:Class'},
 #: generated from the move map. Read only here, by `record_class`: no module
 #: of the old name exists.
 RECORD_NAMES = pathlib.Path(__file__).with_name('record_names.json')
@@ -206,7 +206,7 @@ _renamed = None
 
 def current_record_name(name):
     """The 'module:qualname' a record name stands for in this tree: a name
-    from before the module moves through `RECORD_NAMES` (its top-level class), any other
+    of a moved class through `RECORD_NAMES` (its top-level class), any other
     name as it is."""
     global _renamed
     if _renamed is None:

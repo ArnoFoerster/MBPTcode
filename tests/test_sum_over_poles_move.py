@@ -55,7 +55,8 @@ from src.Base.numerics.constants import (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import sum_over_poles as prod
 from src.SingleReference.GW.contour_deformation import residue_set, wc_explicit
-from src.SingleReference.GW.real_screening import ov_energies, screening_aux
+from src.SingleReference.GW.real_screening import screening_aux
+from src.Base.orbital_spaces import ov_energies
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Solvers.qp_equation import solve_qp_equation_scan
 from src.gradients.gwbse import sum_over_poles_adjoint as adjoint

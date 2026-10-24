@@ -42,7 +42,7 @@ from src.Base.numerics.constants import (HARTREE_TO_MEV, QP_BLOCK_CORRECTION_TOL
                                          QP_DEGENERACY_TOL)
 from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.excitations import qp_bookkeeping
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
 from src.SingleReference.GW.qp_selection import ac_quasiparticle_shifts
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit_differentiable_checked
@@ -132,7 +132,7 @@ def bare_chain(**kw):
 def test_an_accidental_near_degeneracy_keeps_its_own_corrections():
     ch = bare_chain()
     ws = SYNTHETIC_EPS + ACCIDENTAL
-    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws)
+    out = ch.quasiparticles.block_shared(SYNTHETIC_EPS, ws)
     assert np.abs(out - ws).max() < ROUND_OFF
     assert ch.resolved.qp_blocks[1] == ()
     rec = ch.conventions.qp_block_record
@@ -145,14 +145,14 @@ def test_an_accidental_near_degeneracy_keeps_its_own_corrections():
     # with the correction gate off, the old rule averages them
     off = bare_chain()
     with correction_gate(NO_GATE):
-        shared = off.quasiparticles._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
+        shared = off.quasiparticles.block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
     assert np.ptp(shared[[1, 2]]) < ROUND_OFF
 
 
 def test_a_true_degeneracy_shares_one_correction():
     ch = bare_chain()
     ws = SYNTHETIC_EPS + DEGENERATE
-    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
+    out = ch.quasiparticles.block_shared(SYNTHETIC_EPS, ws) - SYNTHETIC_EPS
     assert ch.resolved.qp_blocks[1] == ((1, 2),)
     assert np.ptp(out[[1, 2]]) < ROUND_OFF
     assert abs(out[1] - DEGENERATE[[1, 2]].mean()) < ROUND_OFF
@@ -165,7 +165,7 @@ def test_a_true_degeneracy_shares_one_correction():
 def test_a_candidate_splits_into_the_members_whose_corrections_agree():
     ch = bare_chain()
     ws = TRIPLE_EPS + TRIPLE
-    out = ch.quasiparticles._block_shared(TRIPLE_EPS, ws) - TRIPLE_EPS
+    out = ch.quasiparticles.block_shared(TRIPLE_EPS, ws) - TRIPLE_EPS
     assert ch.resolved.qp_blocks[1] == ((1, 2),)
     assert np.ptp(out[[1, 2]]) < ROUND_OFF
     assert abs(out[3] - TRIPLE[3]) < ROUND_OFF
@@ -178,7 +178,7 @@ def test_the_quasiparticle_hamiltonian_rejects_every_block():
     ch = bare_chain()
     ch.qp_hamiltonian = True
     ws = SYNTHETIC_EPS + DEGENERATE
-    out = ch.quasiparticles._block_shared(SYNTHETIC_EPS, ws)
+    out = ch.quasiparticles.block_shared(SYNTHETIC_EPS, ws)
     assert np.abs(out - ws).max() < ROUND_OFF
     rej = ch.conventions.qp_block_record['rejected']
     assert [r['members'] for r in rej] == [[1, 2]]

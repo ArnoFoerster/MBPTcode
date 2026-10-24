@@ -155,7 +155,7 @@ the same inputs without it, as their added lines check.
       layout's, on one slab, on three of width 2 that the budget _STREAM_GB sets,
       and on those three with two in flight; the folded singlets with and without
       it agree to 1e-9 Ha; a singles vector with a flip parity raises
-      NotImplementedError; a slab holds at most _K_LIVE slab blocks per slab index
+      NotImplementedError; a slab holds at most EE_COUPLING_SLAB_BLOCKS slab blocks per slab index
       (the slope of tracemalloc's peak from width 1 to 2, water cc-pVTZ).
       Check 10 takes dict(P, K=None), the generic path, as its baseline; check 28
       runs its derivative test on both.
@@ -177,6 +177,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df, ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
@@ -263,7 +264,7 @@ def check_folded_operator(mf, eps, B, no):
     n_s = 2 * no * nv
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
     # the full solve's lowest singlet: Davidson, since the channel (6365) is far
-    # above DENSE_LIMIT; its residual 1e-10 sits well under every tolerance here
+    # above EE_ADC_DENSE_LIMIT; its residual 1e-10 sits well under every tolerance here
     e_full, Z = solve_ee_adc(mf, level='adc2', nroots=1, df=True, spin='singlet',
                              conv_tol=1e-10)
     w = float(e_full[0])
@@ -1247,8 +1248,8 @@ def check_dense_default():
 
 
 def check_warning_paths(eps, B, no):
-    """The count's paths that warn, flag and return what was found
-    (refuse inputs, warn numerics) or fall back: a surplus of
+    """The count's paths that warn, flag and return what was found (a
+    numerical event is warned about, not refused) or fall back: a surplus of
     unconverged roots, an index solve that lands on a found root, the round
     limit, the index solve's bisection, and a missing group re-solved per
     branch."""
@@ -2274,7 +2275,8 @@ def check_streamed_kernel(eps, B, no):
     0.3 Ha, powers (1, 2) and (), to 1e-12 relative per block, its doubles norm
     against the flat layout's; on one slab, on three of width 2 from the budget, and
     on those three two at a time; the folded roots with and without K to 1e-9 Ha; a
-    y1 with a flip parity refused; at most _K_LIVE slab blocks per slab index."""
+    y1 with a flip parity refused; at most EE_COUPLING_SLAB_BLOCKS slab blocks per
+    slab index."""
     from src.SingleReference.ADC.eeADC import ee_fold
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     ok = True
@@ -2286,7 +2288,7 @@ def check_streamed_kernel(eps, B, no):
     def rel(a, b):
         return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
 
-    per, live = no * nv * nv, ee_r_sigma_df._K_LIVE
+    per, live = no * nv * nv, EE_COUPLING_SLAB_BLOCKS
 
     def budget(fit):
         # the _STREAM_GB that holds `fit` indices of the doubles in flight
@@ -2350,7 +2352,7 @@ def check_streamed_kernel(eps, B, no):
             sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
     slope = (held[2] - held[1]) / (8 * per3)
     ok &= check(slope <= live,
-                f"adc2: a slab of pieces['K'] holds at most _K_LIVE = {live} slab "
+                f"adc2: a slab of pieces['K'] holds at most EE_COUPLING_SLAB_BLOCKS = {live} slab "
                 'blocks per slab index', f'{slope:.2f}, water cc-pVTZ')
     return ok
 

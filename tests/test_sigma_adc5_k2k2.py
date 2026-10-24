@@ -1,7 +1,7 @@
 """Gate for the ADC(5) (2,2) block: matrix-free + spin-restricted + DF/RI.
 
-Every emitted block must be spin-restricted, Laplace-transformed, DF/RI
-and matrix-free -- "a block that has only three of the four is NOT done". For
+Every emitted block is to be spin-restricted, Laplace-transformed, DF/RI and
+matrix-free -- a block that has only three of the four is NOT done. For
 the k=2 class-class self-coupling the matrix-free property is not a performance
 tier but the ONLY viable representation: the dense twin is a 10-index
 (no^3 nv^2)^2 tensor, already ~2 GB at H2O/sto-3g. It exists purely as the
@@ -94,7 +94,7 @@ def main():
         so = BuildSuperMatrixADCn(get_orbital_energies(mf, representation='spin'),
                                  g, nocc_so)
         dfi = DFIntegrals.from_scf(mol, mf, exact=True)
-        pool = dict(r._rargs)
+        pool = dict(r.rargs)
         pool_df = dict(pool, B_aa=dfi.B_aa, B_bb=dfi.B_aa)
         so_args = (so.f, g, so.kd, so.o, so.v, so.no, so.nv)
         rng = np.random.default_rng(11)
@@ -115,7 +115,7 @@ def main():
                              f"({worst:.1e}, n_k2={dense_so.shape[0]})")
 
             # 2/3. restricted (and DF) matrix-free == spin-orbital dense
-            cfg = r._kconfigs(sec, 2)
+            cfg = r.kconfigs(sec, 2)
             cols = class_configs(nocc_so, 2 * len(eps_sp), 2, sec)
             idx = _alpha_to_class_k2(cfg, cols, nocc_so)
             dense = dense_so[np.ix_(idx, idx)]

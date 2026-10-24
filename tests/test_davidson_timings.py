@@ -40,7 +40,7 @@ transform is fitted over. Two later changes of the physics are handed to it
 rather than compared: the interpolation points (the radii table was recut on
 2026-10-14, so the pinned tree's default grid is another grid; it gets this
 tree's G1 radii) and the BSE kernel's static W (built eta-free on its own
-time grid, which moves water's roots by 1.1e-8 Ha; it gets this
+time grid in this tree, which moves water's roots by 1.1e-8 Ha; it gets this
 tree's W). Its Davidson is not this tree's (it has changed since, and the
 two stop 1e-14 Ha apart even at a residual of 1e-10), so the roots and vectors
 are gated by this tree's Davidson run again on the pinned tree's quasiparticle
@@ -345,9 +345,9 @@ def test_evgw_qp_stage_sums_over_cycles(water):
     (max |delta eps| 4.6e-2 then 3.4e-3 Ha), so the count is deterministic."""
     w = water
     _, _, _, info = solve_bse_isdf(
-        w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': NROOTS}), probe=False,
-        progress=False, factors=w['factors'], self_consistency='evGW',
-        gw_kwargs=dict(max_cycle=2, tol=1e-2))
+        w['mf'], w['mol'], w['nocc'],
+        numerics=Numerics(bse={'nroots': NROOTS}, evgw={'max_cycle': 2, 'tol': 1e-2}),
+        probe=False, progress=False, factors=w['factors'], self_consistency='evGW')
     t = info['timings']
     assert info['evgw']['cycles'] == 2
     assert info['evgw']['converged']

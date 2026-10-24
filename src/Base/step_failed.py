@@ -1,7 +1,7 @@
 """The one failure a geometry walk answers with a shorter step.
 
 An evaluation at a trial geometry can fail because the step carried a solve
-off the branch it was frozen on: the quasiparticle Newton loses its root, the
+off the branch it was frozen on: the quasiparticle root finder loses its root, the
 Casida problem loses positive-definiteness or its Davidson stops short of the
 residual a force needs, or the followed state leaves the solved roots. Each is
 a statement about the distance from the last accepted geometry, so the walk

@@ -6,7 +6,7 @@ The derivative tensor dX/dR is never formed, only its contraction against a
 given adjoint.
 
 On the row-distributed fit both parts run in the fit's own tiles
-(`row_fit_adjoint` over `separable_ri.fit_rows_adjoints`, and X_mo^T X_bar by
+(`row_fit_adjoint` over `isdf_fit_adjoint.fit_rows_adjoints`, and X_mo^T X_bar by
 `orbital_rotation_rows`), so no rank forms an array of the grid by a factor's
 or the fit's width, and the result is the same bits at every rank count. The
 whole forms (`dfactor_adjoint_gauges`, `collocation_adjoint`) serve the
@@ -56,21 +56,18 @@ from pyscf import df as pyscf_df
 from src.Base.factorization.distributed_df import distributed_handles
 from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
 from src.environments.environment import dresses_interaction
-from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid, range_coulomb
-from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY,
-                                                 AdjointSeeds, GaugeSeeds, ao_l_labels,
-                                                 content_key,
-                                                 atomic_frames, atomic_points,
-                                                 fit_settings,
-                                                 aux_metric_sqrt, fit_M_stable,
-                                                 metric_eigensystem,
-                                                 fit_rows_adjoints,
-                                                 rows_transpose_product, screened_layout,
-                                                 test_set_D, test_set_layout)
-from src.gradients.skeleton_tiles import isdf_exchange_seeds
+from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid
+from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, ao_l_labels,
+                                                 content_key, atomic_frames, atomic_points,
+                                                 fit_settings, aux_metric_sqrt, fit_M_stable,
+                                                 metric_eigensystem, rows_transpose_product,
+                                                 screened_layout, fit_test_set_D,
+                                                 fit_test_set_layout)
+from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds, fit_rows_adjoints
+from src.gradients.skeleton_tiles import isdf_exchange_seeds, shell_runs
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
-from src.SingleReference.LinearResponse.rpa_energy import exchange_channels
+from src.Base.pyscf.pyscf_interface import exchange_channels
 
 #: The row-fit adjoint pending on this thread (`one_fit_adjoint`): each
 #: simulated rank is a thread assembling its own force.
@@ -81,7 +78,7 @@ class FitKey:
     """What a row fit's adjoint is a function of, by content: the molecule,
     the auxiliary basis, the points, the pair layout, the tile edge and the
     estimator's settings. Seeds of one key share one
-    `separable_ri.fit_rows_adjoints` call (`contract`)."""
+    `isdf_fit_adjoint.fit_rows_adjoints` call (`contract`)."""
 
     def __init__(self, mol, auxmol, coords, layout, block, numerics=None):
         l_max_second, regularization, block_memory_gb = fit_settings(
@@ -156,7 +153,7 @@ class PendingFitAdjoint:
     its own fit adjoint (`contract`, from `row_fit_adjoint`) in one
     `fit_rows_adjoints` call per fit: deposits on the same fit and point chain
     pool into one target, their seeds summed in deposit order
-    (`separable_ri.summed_seeds`), the chain's own first where its points
+    (`isdf_fit_adjoint.summed_seeds`), the chain's own first where its points
     close the same way; the rest (the chain's frozen frames against the mean
     field's turning ones, and the mean field's own force, reported apart)
     ride the same call as targets of their own, sharing every seed-free part.
@@ -445,7 +442,7 @@ def fit_adjoint(D, F, M_bar, numerics=None):
         G_bar = -G^-1 A^T B_bar G^-1 = -B^T A_bar,
 
     low rank and formed from those two single solves -- the row fit's
-    G_bar = -W Z^T (`separable_ri.fit_rows_adjoints`). No dM/dR is ever
+    G_bar = -W Z^T (`isdf_fit_adjoint.fit_rows_adjoints`). No dM/dR is ever
     formed, and G is the matrix the forward pass already factorized.
 
     Nothing here forms G^-1. G is floored by `regularization` and reaches a
@@ -513,7 +510,7 @@ def sqrtm_adjoint(V, Vh_bar, tol=AUX_METRIC_ROOT_FLOOR):
     the eigenbasis it is the Hadamard multiplier 1/(sqrt(w_i) + sqrt(w_j)).
     That multiplier is symmetric, hence the map is self-adjoint and the reverse
     pass is the same operation. The truncation is the forward's
-    (`separable_ri._metric_spectrum`, which drops eigenvalues below
+    (`separable_ri.metric_spectrum`, which drops eigenvalues below
     AUX_METRIC_ROOT_FLOOR x max before taking the root), so energy and force
     keep one spectrum.
     """
@@ -544,27 +541,6 @@ def two_centre_adjoint(auxmol, V_bar, omega=0.0):
     return grad
 
 
-def shell_blocks(mol, per_ao_bytes, max_bytes):
-    """Shell ranges whose slab, `per_ao_bytes` for each AO in it, fits the cap.
-
-    Always yields at least one shell, so a single shell wider than the cap is
-    still attempted rather than silently skipped.
-    """
-    ao_loc = mol.ao_loc_nr()
-    blocks, sh0 = [], 0
-    while sh0 < mol.nbas:
-        sh1 = sh0 + 1
-        # int() because ao_loc_nr() is int32 while a slab is nao*naux*8 bytes or
-        # more. The product wraps negative on a large system, the test then
-        # passes for every block, and the loop asks for the whole tensor.
-        while (sh1 < mol.nbas
-               and int(ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao_bytes <= max_bytes):
-            sh1 += 1
-        blocks.append((sh0, sh1))
-        sh0 = sh1
-    return blocks
-
-
 def three_centre_adjoint(mol, auxmol, G3, omega=0.0, max_bytes=THREE_CENTER_BLOCK_BYTES):
     """(natm, 3) gradient of sum_{mn P} G3[m,n,P] (mn|P).
 
@@ -583,7 +559,7 @@ def three_centre_adjoint(mol, auxmol, G3, omega=0.0, max_bytes=THREE_CENTER_BLOC
     t_aux = np.zeros((3, naux))
     per_ao = 3 * int(nao) * int(naux) * 8
     with mol.with_range_coulomb(omega), auxmol.with_range_coulomb(omega):
-        for sh0, sh1 in shell_blocks(mol, per_ao, max_bytes):
+        for sh0, sh1 in shell_runs(mol.ao_loc_nr(), max_bytes // int(per_ao)):
             a0, a1 = ao_loc[sh0], ao_loc[sh1]
             sl = (sh0, sh1, 0, mol.nbas, 0, auxmol.nbas)
             d1 = pyscf_df.incore.aux_e2(
@@ -634,7 +610,9 @@ def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
                     atom_of_point, frames=None, decay=FRAME_DECAY,
                     numerics=None, with_frames=True,
                     environment=None, body=None):
-    """(natm, 3) gradient of sum_{gP} D_bar[g,P] D[g,P], D = M^T V_env^(1/2)."""
+    """(natm, 3) gradient of sum_{gP} D_bar[g,P] D[g,P], D = M^T V_env^(1/2):
+    one gauge of `dfactor_adjoint_gauges`. A test gate, read by no
+    production route."""
     return dfactor_adjoint_gauges(mol, auxmol, coords,
                                   [(D_bar, environment)], layout, pts_local,
                                   atom_of_point, frames=frames, decay=decay,
@@ -644,12 +622,12 @@ def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
 
 def product_pairs(mol, numerics=None):
     """(mu, nu, weight) of every pair of the test set's product basis, (all
-    AOs) x (AOs with l <= l_max_second), in `test_set_layout`'s order.
+    AOs) x (AOs with l <= l_max_second), in `fit_test_set_layout`'s order.
 
     These are the columns the Gram matrix of `fit_M_streaming` and
     `fit_rows` sums over, screened or not: S = (A A^T) o (B B^T) is the
     product form of D D^T over all of them, while F D^T keeps the screened
-    ones. A frozen `test_set_layout` is a subsequence of this list.
+    ones. A frozen `fit_test_set_layout` is a subsequence of this list.
     """
     l_max_second, = fit_settings(numerics, 'l_max_second')
     l_ao = ao_l_labels(mol)
@@ -685,7 +663,7 @@ def require_whole_fit_adjoint(nao, naux, npoint, ngram, what):
             f"the row fit, fit='rows' (a FrozenFactorization with "
             f"sliced=True, fit='rows'; the default of the exchange "
             f'skeletons), whose adjoint runs in the grid-row tiles of '
-            f'`separable_ri.fit_rows_adjoint`.')
+            f'`isdf_fit_adjoint.fit_rows_adjoint`.')
     return gb
 
 
@@ -745,7 +723,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     F[:, len(gmu):] = np.eye(naux)
     del F_pairs
     ngram = len(gmu)
-    D_test = test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
+    D_test = fit_test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
     M = fit_M_stable(D_test, F, numerics)
 
     V_bar = np.zeros_like(V)
@@ -827,11 +805,11 @@ def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
     d_bar is the BARE gauge's adjoint (None where no target reads it);
     gauges: `GaugeAdjoint`s of dressed factors on the same fit, each with
     the environment that dresses its metric root, which ride the same call
-    as `separable_ri.GaugeSeeds` -- `dfactor_adjoint_gauges`' gauges, in
+    as `isdf_fit_adjoint.GaugeSeeds` -- `dfactor_adjoint_gauges`' gauges, in
     the fit's tiles. A gauge whose environment dresses nothing belongs in
     d_bar and is refused here.
 
-    `separable_ri.fit_rows_adjoints` runs both in the fit's tiles and
+    `isdf_fit_adjoint.fit_rows_adjoints` runs both in the fit's tiles and
     returns their centre terms and point adjoints, the same bits on every
     rank at every rank count; the point and frame chain closes them here, on
     the (nk, 3) point adjoints, which are not grid-by-width.
@@ -944,15 +922,14 @@ def isdf_fock_partial_exchange(mf, gamma, channels=None, fit=None):
                                   prefactor=2.0, channels=channels, fit=fit)
 
 
-def exchange_fit(mf, fit=None):
+def exchange_fit(fit=None):
     """The realization of the fit an ISDF exchange skeleton differentiates,
     both of the SCF's estimator: `fit` as given, else 'rows', the row fit's
-    tiles on any rank count (the distributed ISDF-K SCF's own where the mean
-    field carries its handle). The whole form ('replicated') differentiates
-    the same estimator through the dense Gram matrix, whose conditioning
-    holds it to 1e-8 of the SCF energy's derivative on ethylene/cc-pVDZ
-    PBE0 (one reassociation of it moves the force 2.1e-8) where the rows
-    reach 5e-10."""
+    tiles on any rank count (the distributed ISDF-K SCF's own). The whole form
+    ('replicated') differentiates the same estimator through the dense Gram
+    matrix, whose conditioning holds it to 1e-8 of the SCF energy's derivative
+    on ethylene/cc-pVDZ PBE0 (one reassociation of it moves the force 2.1e-8)
+    where the rows reach 5e-10."""
     if fit is None:
         return 'rows'
     if fit not in FIT_REALIZATIONS:
@@ -984,7 +961,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     `WHOLE_FIT_ADJOINT_MAX_GB`; 'rows' is `_exchange_skeleton_rows`, in the
     row fit's grid-row tiles over the ranks; None is `exchange_fit`'s choice.
     """
-    fit = exchange_fit(mf, fit)
+    fit = exchange_fit(fit)
     dm = mf.make_rdm1() if dm is None else np.asarray(dm)
     channels = exchange_channels(mf) if channels is None else list(channels)
     if fit == 'rows':
@@ -1010,10 +987,10 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     # the pair columns the SCF's fit kept: a walk's frozen layout, else the
     # screen at these points
     layout = (with_df.pair_layout if with_df.pair_layout is not None else
-              test_set_layout(mol, crd, numerics=with_df.numerics))
+              fit_test_set_layout(mol, crd, numerics=with_df.numerics))
     mu, nu, wc = layout
     cols = pair_positions(layout, gram, nao)
-    D_test = test_set_D(mol, auxmol, crd, gram)
+    D_test = fit_test_set_D(mol, auxmol, crd, gram)
     V = auxmol.intor('int2c2e', aosym='s1')
     e3c = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e',
                                  aosym='s1').reshape(nao, nao, naux)
@@ -1037,7 +1014,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
         if omega == 0.0:
             V_w = V
         else:
-            with range_coulomb(mol, auxmol, omega):
+            with mol.with_range_coulomb(omega), auxmol.with_range_coulomb(omega):
                 V_w = auxmol.intor('int2c2e', aosym='s1')
         xb, Z_bar = isdf_exchange_adjoints(X, M.T @ (V_w @ M), dm,
                                            prefactor * weight, dm_other)
@@ -1139,7 +1116,7 @@ def _exchange_rows_fit(mf):
                                   with_df.grid_origins)
     else:
         coords, radii, origins = lockstep(isdf_grid(
-            mol, counts=with_df.counts if with_df._named_counts else None,
+            mol, counts=with_df.counts if with_df.named_counts else None,
             radii=with_df.radii, auxbasis=with_df.auxbasis,
             n_start=with_df.n_start, return_info=True,
             frames=with_df.frozen_frames,

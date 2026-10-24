@@ -22,8 +22,8 @@ from src.SingleReference.GW.reaction_field import (bare_gauge_transform,
                                                    separable_quasiparticle_shift)
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
-                                                        reaction_field_shift,
-                                                        static_grid)
+                                                        reaction_field_shift)
+from src.SingleReference.LinearResponse.space_time import static_screening_grid
 from tests.isdf_test_grid import g1
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
@@ -49,7 +49,7 @@ def setup():
     assert np.abs(x_dr - x_mo).max() < 1e-12, 'the fit must not see the cavity'
 
     eps = np.asarray(mf.mo_energy, float)
-    grid = static_grid(eps, nocc)
+    grid = static_screening_grid(eps, nocc)
     return dict(mol=mol, mf=mf, env=env, nocc=nocc, eps=eps, x_mo=x_mo,
                 d_dressed=d_dressed, d_bare=d_bare, grid=grid)
 

@@ -1,11 +1,11 @@
 """One Pade node rule, one node count, every route passing its nodes explicitly.
 
 The space-time route samples Sigma_c(i omega) at 16 Gauss-Legendre nodes on
-w0 = 1.0 (`constants.DEFAULT_NPADE` and `GL_FREQUENCY_SCALE`, the defaults of
-`QuadratureNumerics`), the imaginary-frequency route at its 20 minimax W nodes,
-scGW at its first 30 Matsubara points. `analyticalContinuation.pade_nodes` is
-the one rule, on those two constants; the space-time default is pinned to it
-here, and the imaginary-frequency route takes it through pade_freq.
+w0 = 1.0 (`QuadratureNumerics.npade` and `w0_gl`), the imaginary-frequency
+route at its 20 minimax W nodes, scGW at its first 30 Matsubara points.
+`analytic_continuation.pade_nodes` is the one rule on that section; the
+space-time route builds its nodes with it, and the imaginary-frequency route
+takes it through pade_freq.
 """
 import os
 import sys
@@ -24,12 +24,14 @@ from tests.pins import assert_same
 
 
 def test_the_space_time_default_is_the_rule():
-    """The space-time route's default Pade nodes are `pade_nodes()`."""
+    """The space-time route's default Pade nodes are `pade_nodes` of the
+    default quadrature."""
     quadrature = Numerics().quadrature
     assert DEFAULT_NPADE == quadrature.npade
     assert GL_FREQUENCY_SCALE == quadrature.w0_gl
     assert_same(gauss_legendre_grid(quadrature.npade, w0=quadrature.w0_gl)[0],
-                pade_nodes(), unit='1', quantity='root', label='Pade nodes')
+                pade_nodes(quadrature), unit='1',
+                quantity='root', label='Pade nodes')
 
 
 def test_the_imaginary_frequency_route_samples_the_nodes_it_is_given(
@@ -47,10 +49,8 @@ def test_the_imaginary_frequency_route_samples_the_nodes_it_is_given(
 
     monkeypatch.setattr(ia, 'imaginary_axis_sample_points', spy)
     nocc = mol.nelectron // 2
-    ia.solve_qp_energy_imaginary_axis(mf, mol, nocc, nocc - 1,
-                                      pade_freq=pade_nodes())
+    nodes = pade_nodes(Numerics().quadrature)
+    ia.solve_qp_energy_imaginary_axis(mf, mol, nocc, nocc - 1, pade_freq=nodes)
     ia.solve_qp_energy_imaginary_axis(mf, mol, nocc, nocc - 1)
-    assert_same(seen[0], pade_nodes(), unit='1', quantity='root',
-                label='sampled nodes')
-    assert len(seen[1]) == 20 and not np.array_equal(seen[1][:DEFAULT_NPADE],
-                                                     pade_nodes())
+    assert_same(seen[0], nodes, unit='1', quantity='root', label='sampled nodes')
+    assert len(seen[1]) == 20 and not np.array_equal(seen[1][:DEFAULT_NPADE], nodes)

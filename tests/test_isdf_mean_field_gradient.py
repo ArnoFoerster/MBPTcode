@@ -26,11 +26,12 @@ import pytest
 from pyscf import df, dft, gto, scf
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM, ISDF_FIT_REGULARIZATION
-from src.Base.factorization.isdf_jk import ISDFJK, exchange_free_reference
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.gradients.isdf_mean_field import exchange_free_reference
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.numerics.numerics import Numerics
 from src.gradients.mean_field_response import fock_partial_skeleton_df
-from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient,
                                            require_isdf_gradient_support)

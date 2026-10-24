@@ -178,7 +178,7 @@ def array_expr(name, idxs):
     (unsuffixed) pipeline.
 
     B (DF/RI 3-index factor, plain or spin-blocked B_aa/B_bb -- see
-    src/CodeGeneration/SingleReference/df_codegen.py::dress_integral_factor)
+    src/CodeGeneration/df_codegen.py::dress_integral_factor)
     is norb/nv-scale on its LAST two axes only; its first axis is the
     auxiliary (naux) index and must never be o/v-sliced -- unlike g/kd/f/d,
     which are norb/nv-scale on every axis.

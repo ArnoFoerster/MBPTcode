@@ -57,6 +57,7 @@ import numpy as np
 import pytest
 
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
                                          REFREEZE_TOL_MEV, ROOT_FOLLOW_WEIGHT_MIN)
 from src.Base.geometry.geometry import molecule_at
@@ -179,5 +180,6 @@ def test_a_defect_in_the_quasiparticle_solve_leaves_the_production_walk(
 
     chain.quasiparticles.qp_set_solve = at_the_start_only
     with pytest.raises(NotImplementedError, match='no pole model'):
-        relax(surface, run.mol_in, engine='cartesian', max_cycle=3,
+        relax(surface, run.mol_in, engine='cartesian',
+              numerics=derived_walk(surface, 'a capped test walk', max_cycle=3),
               verbose=False)

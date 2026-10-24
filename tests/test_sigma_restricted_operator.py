@@ -50,14 +50,14 @@ def main():
         eps_sp = get_orbital_energies(mf, representation='spatial')
         g_aaaa, g_bbbb, g_abab = get_antisymmetrized_spin_block_eri(mol, mf)
         r = BuildSuperMatrixADCnRestricted(eps_sp, g_aaaa, g_abab, g_bbbb, nocc_sp)
-        pool = {**r._rargs, **r._amplitude_pool()}
+        pool = {**r.rargs, **r.amplitude_pool()}
         n2 = r.n2_norm()
         norb, no, nv = r.norb, r.nocc, r.nvir
         rng = np.random.default_rng(0)
 
         print(f"\n=== {label} ===")
         for sector, tag in (('IP', '2h1p'), ('EA', '2p1h')):
-            cfg = r._sector_configs(sector)
+            cfg = r.sector_configs(sector)
             ncfg = len(cfg['K'])
 
             # -- gate 1: assembled C^(2) matvec == dense c2_block_generated --

@@ -1,5 +1,5 @@
 """k-point density-fitted 3-center MO integrals -- the periodic analog of
-Base/pyscf_interface.get_density_fitting_coefficients + DFIntegrals.
+Base/pyscf/pyscf_interface.get_density_fitting_coefficients + DFIntegrals.
 
 Builds the complex 3-center MO tensors organized by momentum transfer q, plus
 the k-point occ/virt bookkeeping and momentum-conservation maps that every
@@ -108,7 +108,7 @@ def gdf_pair_factors(mydf, kpts, pairs):
 
 class PBCDFIntegrals:
     """k-point DF 3-center MO tensors L^q, container parallel to the molecular
-    DFIntegrals (Base/pyscf_interface.py).
+    DFIntegrals (Base/pyscf/pyscf_interface.py).
 
     Attributes
     ----------
@@ -227,7 +227,7 @@ class PBCDFIntegrals:
         (q = k2 - k1) automatically. Downstream A/B assembly slices this by
         occ/virt to get ov/oo/vv blocks at arbitrary momentum transfer.
         """
-        q = self._pair_to_q(k1, k2)
+        q = self.pair_to_q(k1, k2)
         return self.L[q][k1]
 
     def eri_block(self, k1, k2, k3, k4, s1, s2, s3, s4):
@@ -248,15 +248,24 @@ class PBCDFIntegrals:
         DFIntegrals.reconstruct_g. Requires momentum conservation
         k1 - k2 + k3 - k4 = 0; picks the q-slices that realize the two pairs.
         """
-        q12 = self._pair_to_q(k1, k2)
-        q34 = self._pair_to_q(k3, k4)
+        q12 = self.pair_to_q(k1, k2)
+        q34 = self.pair_to_q(k3, k4)
         L12 = self.L[q12][k1]
         L34 = self.L[q34][k3]
         return np.einsum('Lij,Lkl->ijkl', L12, L34)
 
-    def _pair_to_q(self, ki, kj):
+    def pair_to_q(self, ki, kj):
         """Transfer index q with kconserv_pair[q, ki] == kj."""
         matches = np.where(self.kconserv_pair[:, ki] == kj)[0]
         if len(matches) != 1:
             raise RuntimeError(f"no unique momentum transfer for pair ({ki},{kj})")
         return matches[0]
+
+    def kpoint_minus_q(self, q, kp):
+        """Index km with kpts[km] = kpts[kp] - kpts[q] (mod G), i.e.
+        kconserv_pair[q, km] == kp: the transfers ARE k-points, so km is
+        recovered by inverting kconserv_pair along its other axis."""
+        matches = np.where(self.kconserv_pair[q] == kp)[0]
+        if len(matches) != 1:
+            raise RuntimeError(f"no unique k - q for kp={kp}, q={q}")
+        return int(matches[0])

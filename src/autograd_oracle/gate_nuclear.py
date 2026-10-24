@@ -23,7 +23,7 @@ if MBPTCODE_ROOT not in sys.path:
     sys.path.insert(0, MBPTCODE_ROOT)
 
 import numpy as np
-from pyscf import gto, scf
+from pyscf import gto
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.data import radii as pyscf_radii
 
@@ -35,6 +35,7 @@ from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_FIT_REGULARIZATION,
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.autograd_oracle.gate_factors import df_rhf_factory
 from src.autograd_oracle.frozen import (dump, frozen_conventions_of,
                                         shell_table_arrays)
 
@@ -84,13 +85,7 @@ def main(argv=None):
     BASIS = args.basis
     AUX = args.auxbasis or paired_auxbasis(BASIS)
 
-    def scf_factory(mol):
-        mf = scf.RHF(mol).density_fit(auxbasis=AUX)
-        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
-        mf.kernel()
-        assert mf.converged
-        return mf
-
+    scf_factory = df_rhf_factory(AUX)
     t0 = time.perf_counter()
     mol = gto.M(atom=args.atom, basis=BASIS, verbose=0)
     env = None if args.gas else SolventScreening(mol, solvent=args.solvent)
@@ -152,7 +147,7 @@ def main(argv=None):
             extra[k] = np.zeros(0)
         extra.update(eps_opt=1.0, eps_static=1.0, pcm_method='IEF-PCM')
     else:
-        pcm = env._pcm
+        pcm = env.pcm
         surf = pcm.surface
         owner = np.concatenate([np.full(p1 - p0, ia) for ia, (p0, p1) in enumerate(surf['gslice_by_atom'])])
         rad = env.cavity_settings['vdw_scale'] * pyscf_pcm.modified_Bondi + env.cavity_settings['r_probe'] / pyscf_radii.BOHR

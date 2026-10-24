@@ -28,6 +28,7 @@ from pyscf import gto, scf, dft
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
@@ -77,7 +78,7 @@ def run_case(atom, basis, xc, which, nfreqs):
 
     ref = float(np.atleast_1d(
         calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True, state=p_state))[0])
-    qps = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=n) * HARTREE_TO_EV
+    qps = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, numerics=Numerics(imagfreq={'nfreq': n})) * HARTREE_TO_EV
            for n in nfreqs]
     return ref, qps, min_abs_eps
 

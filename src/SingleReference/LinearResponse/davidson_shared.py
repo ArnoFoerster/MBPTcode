@@ -23,8 +23,7 @@ def guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
     DAVIDSON_GUESS_FACTOR for
     what one guess per root costs. A guess cut inside a degenerate cluster
     is warned about and named in `counters['guess_truncated']`, which the
-    solve's `timings` carry as 'davidson_guess_truncated'
-    (refuse inputs, warn numerics).
+    solve's `timings` carry as 'davidson_guess_truncated' (refuse inputs, warn numerics).
     """
     d = diag_d.ravel()
     n_pair = d.size

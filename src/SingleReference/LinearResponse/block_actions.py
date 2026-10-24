@@ -10,16 +10,16 @@ import time
 
 import numpy as np
 
+from src.Base.orbital_spaces import ov_energies
 from src.Base.numerics.constants import BYTES_PER_GB, DAVIDSON_DIAGONAL_TILE, ISDF_TILE_GB, KAPPA
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import (allgather_blocks, contiguous_block,
-                                              current_comm, lockstep,
+                                              current_comm, exchange_blocks, lockstep,
                                               ordered_chain_sum, reduce_scatter_rows,
                                               reduce_sum)
 from src.Base.utils.parallel.threads import openmp_threads, row_map
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.factorization.sliced_factors import unpack_factors
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import GridTiles
 
 
 #: The collectives of a distributed block action, each timed apart as
@@ -112,9 +112,7 @@ def bse_pair_diagonal(eps, nocc):
     The split is by index (`get_occ_virt_indices`), so a quasiparticle array
     whose entries do not ascend still pairs occupied i with virtual a.
     """
-    eps = np.asarray(eps, float)
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    return eps[virt][None, :] - eps[occ][:, None]
+    return ov_energies(np.asarray(eps, float), nocc).reshape(nocc, -1)
 
 
 def df_block_action(lr_solver, nocc, lBSE, W_aux,
@@ -513,7 +511,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
     # Its transpose is the (n_occ, M) operand every contraction below reads.
     zXv_rows = np.empty((npts, no)) if nranks > 1 else None
 
-    # Zt = D W_aux D^T is `screened_interaction_imaginary_time`'s per-tau step,
+    # Zt = D W_aux D^T is `imaginary_time.screened_interaction_tau`'s per-tau step,
     # wanted once and statically here. W_aux = None is TDHF, where the exchange
     # kernel is the bare Coulomb, i.e. Zt = Z = D D^T. Only the rows this rank
     # owns are ever formed, and under a rank count so is its inner product
@@ -714,3 +712,98 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
                                       + (nmine * nv if factor else 0)
                                       + (0 if nranks > 1 else 2 * no * npts)))
     return apply_AB, diag_d
+
+
+class GridTiles:
+    """Fixed tiles of the grid index and the rank that computes each: the one
+    whose `contiguous_block` holds the tile's first row.
+
+    bounds: [start, stop) of every tile; owner: its rank; mine: this rank's
+    tiles, consecutive; rows: this rank's block of the grid.
+    """
+
+    def __init__(self, npts, edge, comm):
+        self.comm = comm
+        self.size = 1 if comm is None else comm.Get_size()
+        self.rank = 0 if comm is None else comm.Get_rank()
+        self.npts = int(npts)
+        self.bounds = [(t0, min(t0 + int(edge), self.npts))
+                       for t0 in range(0, self.npts, int(edge))]
+        self.blocks = [contiguous_block(self.npts, r, self.size)
+                       for r in range(self.size)]
+        self.owner = [next(r for r, (b0, b1) in enumerate(self.blocks)
+                           if b0 <= t0 < b1) for t0, _ in self.bounds]
+        self.mine = [t for t, r in enumerate(self.owner) if r == self.rank]
+        self.rows = self.blocks[self.rank]
+
+    def owned(self, rank):
+        """[start, stop) of every tile `rank` computes, in order."""
+        return [self.bounds[t] for t, r in enumerate(self.owner) if r == rank]
+
+    def tile_rows(self, rows):
+        """{tile: its rows} for this rank's tiles out of this rank's block
+        `rows`: a view where the tile lies inside the block, else a new array
+        completed with the rows other ranks hold."""
+        r0, r1 = self.rows
+        out = {}
+        for t in self.mine:
+            t0, t1 = self.bounds[t]
+            if t1 <= r1:
+                out[t] = rows[t0 - r0:t1 - r0]
+            else:
+                out[t] = np.empty((t1 - t0,) + rows.shape[1:])
+                out[t][:r1 - t0] = rows[t0 - r0:]
+        self._move([rows], [[b] for b in self.blocks],
+                   [out[t] for t in self.mine],
+                   [self.owned(r) for r in range(self.size)], rows.shape[1:])
+        return out
+
+    def block_rows(self, tiles, block):
+        """Fill this rank's `block` rows from the tiles every rank computed:
+        a tile inside its owner's block is already a view of it, the rest of
+        a tile's rows travel to the ranks whose blocks hold them."""
+        r0, r1 = self.rows
+        for t in self.mine:
+            t0, t1 = self.bounds[t]
+            if t1 > r1:
+                block[t0 - r0:] = tiles[t][:r1 - t0]
+        self._move([tiles[t] for t in self.mine],
+                   [self.owned(r) for r in range(self.size)], [block],
+                   [[b] for b in self.blocks], block.shape[1:])
+
+    def _move(self, src, have, dst, want, tail):
+        """The rows of `dst` held in another rank's `src`, verbatim, in one
+        `exchange_blocks`: src[i] holds rows have[rank][i], dst[j] wants
+        want[rank][j]; the lists are the same on every rank."""
+        if self.size == 1:
+            return
+        rank = self.rank
+        send, shapes = [], []
+        for peer in range(self.size):
+            pieces = [] if peer == rank else [
+                src[i][lo - have[rank][i][0]:hi - have[rank][i][0]]
+                for i, _, lo, hi in _overlaps(have[rank], want[peer])]
+            send.append(np.concatenate(pieces) if pieces
+                        else np.empty((0,) + tuple(tail)))
+            n = 0 if peer == rank else sum(
+                hi - lo for _, _, lo, hi in _overlaps(have[peer], want[rank]))
+            shapes.append((n,) + tuple(tail))
+        got = exchange_blocks(send, shapes, self.comm)
+        for peer in range(self.size):
+            if peer == rank:
+                continue
+            at = 0
+            for _, j, lo, hi in _overlaps(have[peer], want[rank]):
+                w0 = want[rank][j][0]
+                dst[j][lo - w0:hi - w0] = got[peer][at:at + hi - lo]
+                at += hi - lo
+
+
+def _overlaps(have, want):
+    """(i, j, lo, hi) for every pair of ranges have[i], want[j] sharing rows
+    [lo, hi), in the order of `have`, then of `want`."""
+    for i, (h0, h1) in enumerate(have):
+        for j, (w0, w1) in enumerate(want):
+            lo, hi = max(h0, w0), min(h1, w1)
+            if hi > lo:
+                yield i, j, lo, hi

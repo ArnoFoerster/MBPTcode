@@ -58,7 +58,7 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
+from src.Base.numerics.constants import (HARTREE_TO_EV, QP_ROOT_TOL,  # noqa: E402
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates
@@ -311,7 +311,7 @@ def test_an_inside_scissor_state_sits_on_the_untiered_root(column):
     inside = [p for p, r in s0['routes'].items() if r == 'scissor']
     assert inside
     off = max(abs(s0['eps_qp'][p] - plain['eps_qp'][p]) for p in inside)
-    assert off < QP_CD_NEWTON_TOL, off * HARTREE_TO_EV
+    assert off < QP_ROOT_TOL, off * HARTREE_TO_EV
 
 
 def test_the_adaptive_selection_freezes_a_partition(column):
@@ -335,7 +335,7 @@ def test_one_quasiparticle_alone_is_the_set_root(column):
         p = chain.nocc - 1 + offset
         assert s0['routes'][p] in ('sop', 'scissor')
         off = chain.quasiparticle(offset) - s0['eps_qp'][p]
-        assert abs(off) < QP_CD_NEWTON_TOL, (offset, off * HARTREE_TO_EV)
+        assert abs(off) < QP_ROOT_TOL, (offset, off * HARTREE_TO_EV)
 
 
 def test_hartree_fock_gas_stores_what_it_always_stored(column):

@@ -222,51 +222,6 @@ def _id2name(group, ir_id):
 # labelling a whole set of roots
 # ----------------------------------------------------------------------
 
-def label_states(energies_ev, vecs, no, nv, level, info, spin,
-                 degeneracy_tol=1e-3, topgroup=None, layout='spinfree',
-                 mult=None):
-    """Attach (irrep, index-within-block, label) to a set of roots of ONE
-    spin channel, in ascending energy order.
-
-    `mult` overrides the multiplicity that `spin` would imply. It may be a
-    single int, or one value per root in the order of `energies_ev` -- the
-    open-shell case, where a single solve returns both 2S+1 and 2S+3 states
-    (the Delta-Ms = 0 sector holds an Ms component of each) and they have to
-    be counted in separate index blocks."""
-    if mult is None:
-        mult = {'singlet': 1, 'triplet': 3}[spin]
-    mult_of = ((lambda k: int(mult)) if np.isscalar(mult)
-               else (lambda k: None if mult[k] is None else int(mult[k])))
-    topgroup = topgroup or info.get('topgroup', info['group'])
-    out = []
-    order = np.argsort(energies_ev)
-    counter = {}
-    for k in order:
-        rec = analyze(vecs[:, k] if vecs.ndim == 2 else vecs[k], no, nv,
-                      level, info, layout=layout)
-        rec['energy_ev'] = float(energies_ev[k])
-        rec['spin'] = spin
-        rec['mult'] = mult_of(k)
-        rec['sub_irrep'] = rec['irrep']
-        out.append(rec)
-    out = merge_degenerate(out, degeneracy_tol)
-    # true-group labels, then index within (mult, true irrep)
-    counter = {}
-    for rec in out:
-        span = sorted({rec['sub_irrep'], *rec['degenerate_with']})
-        rec['irrep'] = true_irrep(topgroup, span) or rec['sub_irrep']
-        if not rec['degenerate_first']:
-            continue
-        key = (rec['mult'], rec['irrep'])
-        counter[key] = counter.get(key, 0) + 1
-        rec['index_in_block'] = counter[key]
-        rec['label'] = f"^{rec['mult']}{rec['irrep']}"
-    for rec in out:
-        rec.setdefault('index_in_block', 0)
-        rec.setdefault('label', f"^{rec['mult']}{rec['irrep']}")
-    return out
-
-
 def merge_degenerate(records, tol=1e-3):
     """Tag roots that are degenerate but sit in different Abelian irreps --
     the components of an E / Pi / Delta level in the full point group. The

@@ -52,7 +52,7 @@ within a few reassociation responses (`FIT_REASSOCIATION_K`) of the
 replicated fit's.
 
 The row fit's nuclear assembly runs in the same tiles (`row_fit_branches`,
-`separable_ri.fit_rows_adjoint`), the same bits at every rank count. Per rank
+`isdf_fit_adjoint.fit_rows_adjoint`), the same bits at every rank count. Per rank
 it peaks in its three-centre pass (the Gram tiles' kept factor, the metric's
 LU, three (rows, naux) arrays and one block's broadcast coefficients) beside
 X_bar, D_bar and the factor rows; rank 0 alone holds four metric-sized arrays
@@ -79,6 +79,7 @@ from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.body_frame import BodyFrame
 from src.Base.factorization.isdf_jk import ISDFJK
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.gradients.surface_identity import chain_identity
 from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
                                          EVALUATION_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS,
@@ -92,7 +93,7 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  fit_M_streaming, fit_M_whole, fit_settings,
                                                  refuse_unrepresented_factors,
                                                  resolve_isdf_grid, runtime_atomic_radii,
-                                                 subshells, test_set_layout)
+                                                 subshells, fit_test_set_layout)
 from src.Base.factorization.separable_ri import require_grid
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
@@ -107,9 +108,9 @@ from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             product_pairs,
                                             require_whole_fit_adjoint,
                                             row_fit_adjoint)
-from src.gradients.mean_field_response import (eps_chain_gradient,
-                                               exx_double_counting_Y,
-                                               exx_double_counting_skeleton)
+from src.gradients.mean_field_response import eps_chain_gradient
+from src.gradients.rpa.exchange_double_counting import (exx_double_counting_Y,
+                                                        exx_double_counting_skeleton)
 from src.gradients.reference_mean_field import ReferenceMeanField
 
 #: What `FrozenFactorization.to_record` keeps beside the body frame.
@@ -287,7 +288,7 @@ class FrozenFactorization:
         require_grid(counts, radii, 'FrozenFactorization')
         self.counts = counts
         self.n_start = n_start
-        # Explicit radii -- `separable_ri.tailor_grid`'s, say -- replace the
+        # Explicit radii replace the
         # per-element atomic optimization. They are frozen here like every other
         # discrete choice, so a grid tailored at the reference geometry is the
         # one the whole walk uses.
@@ -356,7 +357,7 @@ class FrozenFactorization:
         # 0's placed points, locked too: a rank whose threshold kept another
         # column set raises on every rank (the shapes disagree).
         t0 = time.perf_counter()
-        self.layout = lockstep(test_set_layout(mol, self.coords(mol)))
+        self.layout = lockstep(fit_test_set_layout(mol, self.coords(mol)))
         self.seconds['layout'] = time.perf_counter() - t0
 
     def _open_caches(self, numerics):
@@ -728,6 +729,12 @@ class FactorChain(ReferenceMeanField):
     def _refrozen(self, mol, factorization, mf, walked, qp_floor):
         """The chain's own rebuild at `mol` on `factorization` (`refreeze`)."""
         raise NotImplementedError(f'{type(self).__name__} cannot refreeze')
+
+    def identity(self):
+        """What a force of this chain is a force of
+        (`surface_identity.chain_identity`); a chain with frozen
+        conventions names them."""
+        return chain_identity(self)
 
     def settings_record(self):
         """The chain's choices besides its factorization and conventions, for
@@ -1193,7 +1200,7 @@ class FactorChain(ReferenceMeanField):
                     return None, {}
             with self.phase('t_orbital'):
                 g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc,
-                                                  Y_extra=y)
+                                                  Y_extra=y, numerics=self.settings)
             if g_extra is not None:
                 g_orb = g_orb + g_extra
             held = None

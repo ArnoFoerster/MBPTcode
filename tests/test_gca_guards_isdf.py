@@ -9,8 +9,8 @@ from src.environments.environment import PointCharges
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
-from src.gradients.mean_field_response import (fock_partial_skeleton,
-                                               qp_xc_correction_skeleton)
+from src.gradients.mean_field_response import fock_partial_skeleton
+from src.gradients.gwbse.static_correction import qp_xc_correction_skeleton
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            mean_field_exchange_wanted)

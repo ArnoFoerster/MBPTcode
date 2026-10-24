@@ -14,8 +14,8 @@ Sigma).  The order-n coefficient is the exact diagrammatic M(omega; n) the
 Goldstone engine must reproduce.
 
 Self-contained on purpose (Slater-Condon rules included): this file is the
-committed arbiter for the diagrammatic track, independent of the ISR
-machinery and of the gitignored validation/ scripts.  Validation scale only
+reference for the diagram-ADC generator, independent of the ISR
+machinery.  Validation scale only
 (dense sector diagonalization per lambda grid point).
 """
 import itertools

@@ -59,7 +59,7 @@ def require_positive_e_min(e_min, e_max, who):
     exactly zero gap divides by zero. None of those announce themselves.
 
     At finite temperature the low-energy scale is the temperature, not the gap:
-    pass e_min = utils.matsubara.thermal_e_min(beta, gap) instead, or use the
+    pass e_min = utils.grids.matsubara.thermal_e_min(beta, gap) instead, or use the
     intermediate representation there, which has no gap in its construction.
     """
     if not e_min > 0:
@@ -158,7 +158,7 @@ def minimax_time_grid(ntau, e_min, e_max):
     return tau_point, tau_weight
 
 
-def gauss_legendre_grid(nfreq, w0=0.5):
+def gauss_legendre_grid(nfreq, w0):
     """Modified Gauss-Legendre grid on [0,infty) (eqs 85-87, Erhard, Fauser, Tuchin, Goerling, JCP 157, 114105 (2022)).
 
     w0 sets the grid's characteristic energy scale; see gap_scaled_w0 for a system-specific choice.
@@ -170,15 +170,16 @@ def gauss_legendre_grid(nfreq, w0=0.5):
     return freq_point, freq_weight
 
 
-def gap_scaled_w0(eps, nocc, scale=0.5, gap=None):
+def gap_scaled_w0(eps=None, nocc=None, scale=0.5, gap=None):
     """w0 = scale * (eps_LUMO - eps_HOMO): scales the grid to the gap instead of using one fixed w0 for every system.
 
-    gap: a gap to scale instead, such as the thermally floored one of
-    `matsubara.thermal_e_min`.
+    gap: a gap to scale instead (eps and nocc then unread), such as the
+    thermally floored one of `matsubara.thermal_e_min` or a periodic
+    system's smallest transition.
 
     Raises for a vanishing or inverted gap rather than returning a w0 that
     would silently collapse the grid -- see require_positive_e_min, and
-    utils.matsubara for the finite-temperature replacement.
+    utils.grids.matsubara for the finite-temperature replacement.
     """
     w0 = scale * (eps[nocc] - eps[nocc - 1] if gap is None else gap)
     require_positive_e_min(w0, None, 'gap_scaled_w0')

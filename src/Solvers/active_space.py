@@ -14,25 +14,22 @@ the many-body solver backends:
                              subprocess, not safe after another backend has
                              already run in the same process.
 
-'pyhast' (external UCC), 'pdaggerq' (generated CCSD/UCC3/UCC4) and 'ccsdt'
-(spin-orbital CCSDT) are recognized but not available through this driver:
-each needs a separate, sizeable dependency (an external UCC package, or the
-CCSDT subsystem) and none has an end-to-end test here.
+Any other name is refused (`SOLVERS`).
 
 The first two adapters, and 'dmrg', are all over the ActiveSpaceSolver
 interface of active_space_solver.py.
 """
 import numpy as np
 
+from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL, DMRG_BOND_DIM,
+                                         DMRG_N_SWEEPS)
 from src.Solvers.active_space_solver import (Block2DMRGSolver,
                                              ExactDiagonalizationSolver,
                                              PyscfFCISolver)
 from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
-_UNAVAILABLE_SOLVERS = ('pyhast', 'pdaggerq', 'ccsdt', 'CCSDT')
-# |element| below which a vertex counts as absent, or a spin/Hermiticity
-# residual as round-off
-_VERTEX_TOL = 1e-10
+#: The backends `solve` dispatches to; any other name is refused.
+SOLVERS = ('openfermion', 'pyscf_fci', 'dmrg')
 
 
 def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
@@ -50,7 +47,7 @@ def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
     determinant-basis solver does."""
     for k in sorted(k for k in g_eff if isinstance(k, int) and k >= 3):
         biggest = float(np.max(np.abs(g_eff[k]))) if np.size(g_eff[k]) else 0.0
-        if biggest > _VERTEX_TOL:
+        if biggest > ACTIVE_SPACE_VERTEX_TOL:
             raise ValueError(
                 f"solver={solver!r} takes a one- and two-body Hamiltonian, but "
                 f"g_eff[{k}] has elements up to {biggest:.2e}; build g_eff with "
@@ -70,7 +67,7 @@ def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
         folded = spatial_to_spin_orbitals({1: h1_spatial, 2: g2_ab}, norb)
         residual = max(float(np.max(np.abs(folded[1] - g_eff[1]))),
                        float(np.max(np.abs(folded[2] - g_eff[2]))))
-        if residual > _VERTEX_TOL * max(1.0, float(np.max(np.abs(g_eff[2])))):
+        if residual > ACTIVE_SPACE_VERTEX_TOL * max(1.0, float(np.max(np.abs(g_eff[2])))):
             raise ValueError(
                 f"solver={solver!r} works on spatial orbitals, but this "
                 f"spin-orbital g_eff is not spin-adapted (it differs from the "
@@ -89,7 +86,7 @@ def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
     else:
         asym = max(float(np.max(np.abs(h1_spatial - h1_spatial.T))),
                    float(np.max(np.abs(eri_spatial - eri_spatial.transpose(1, 0, 3, 2)))))
-        if asym > _VERTEX_TOL:
+        if asym > ACTIVE_SPACE_VERTEX_TOL:
             raise ValueError(
                 f"solver={solver!r} needs a Hermitian Hamiltonian, and this "
                 f"g_eff is not (anti-Hermitian part up to {asym:.2e}); pass "
@@ -101,7 +98,7 @@ def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
 
 def solve(solver, g_eff, n_spin_orbs, n_elec_active, act_idx, act_occ_idx,
          act_vir_idx, symmetrize=True, spin_free=False, nroots=1,
-         dmrg_bond_dim=500, dmrg_n_sweeps=20):
+         dmrg_bond_dim=DMRG_BOND_DIM, dmrg_n_sweeps=DMRG_N_SWEEPS):
     """
     Unified solver interface for downfolded effective Hamiltonians.
 
@@ -114,21 +111,15 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, act_idx, act_occ_idx,
     dmrg_bond_dim, dmrg_n_sweeps: Block2DMRGSolver knobs, used only when
     solver='dmrg'.
     """
-    if solver in _UNAVAILABLE_SOLVERS:
-        raise NotImplementedError(
-            f"solver={solver!r} is not available through this driver (it "
-            "needs an external UCC package or the CCSDT subsystem); use "
-            "'pyscf_fci', 'dmrg', or the default exact-diagonalization solver.")
+    if solver not in SOLVERS:
+        raise ValueError(f"solver={solver!r} is not a backend of this driver; "
+                         f"choose one of {SOLVERS}.")
 
     if spin_free and solver != 'pyscf_fci' and solver != 'dmrg':
         # Map spatial to spin-orbitals, then use the standard spin-orbital solvers.
         n_spatial_orbs = n_spin_orbs
         g_eff = spatial_to_spin_orbitals(g_eff, n_spatial_orbs)
         n_spin_orbs = 2 * n_spatial_orbs
-
-        act_idx = np.arange(n_spin_orbs)
-        act_occ_idx = np.arange(n_elec_active)
-        act_vir_idx = np.arange(n_elec_active, n_spin_orbs)
 
     if solver == 'pyscf_fci':
         h1_spatial, eri_spatial, norb, nelec = _spatial_active_hamiltonian(
@@ -150,6 +141,6 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, act_idx, act_occ_idx,
             spin=nocca - noccb)
         return g_eff.get(0, 0.0) + e_act
 
-    else:
+    else:                                   # 'openfermion'
         return ExactDiagonalizationSolver(symmetrize=symmetrize).spectrum(
             g_eff, n_spin_orbs, n_elec_active)[0]

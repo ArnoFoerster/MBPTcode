@@ -36,8 +36,7 @@ from src.gradients.isdf_derivatives import (auxmol_of,
                                             isdf_fock_partial_exchange)
 from src.gradients.mean_field_response import (fock_partial_skeleton,
                                                fock_partial_skeleton_df)
-from src.SingleReference.LinearResponse.rpa_energy import (exchange_channels,
-                                                           xc_hybrid_coeff)
+from src.Base.pyscf.pyscf_interface import exchange_channels, xc_hybrid_coeff
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
@@ -198,7 +197,7 @@ def test_the_double_counting_follows_its_own_energy(reference):
     the interpolation, which is a different function and shows here as a
     residual that does not fall.
     """
-    from src.gradients.mean_field_response import exx_double_counting_skeleton
+    from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
 
     mf, _, _, dm = reference
     a_x = xc_hybrid_coeff(mf)[1]
@@ -217,7 +216,7 @@ def test_the_double_counting_sums_to_zero_over_atoms(reference):
     """Both members are translationally invariant, so their difference is too
     -- and to machine precision, because the two ISDF gradients share one fit
     and cancel term by term rather than nearly."""
-    from src.gradients.mean_field_response import exx_double_counting_skeleton
+    from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
 
     mf = reference[0]
     g = np.asarray(exx_double_counting_skeleton(mf))

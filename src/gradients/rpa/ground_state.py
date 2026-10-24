@@ -59,8 +59,10 @@ class RPAGroundStateChain(FactorChain, PotentialEnergySurface):
     dispersion term -- enough to leave water DESTABILIZED by toluene.
     Excitation energies, quasiparticle levels and any difference taken at a
     FIXED geometry are free of it, as is every gas-phase total energy.
-    `fold=True` restores it (`src/SingleReference/LinearResponse/
-    solvated_rpa_energy.py`), on the cavity the caller gives: on the
+    `fold=True` restores it (the solvated dRPA energy of
+    `src/SingleReference/LinearResponse/solvated_rpa_energy.py`, whose
+    gradient is `gradients.rpa.solvated_energy`), on the cavity the caller
+    gives: on the
     electrostatic one the term is several times too large, and it belongs on
     the solvent-accessible surface.
 
@@ -70,9 +72,9 @@ class RPAGroundStateChain(FactorChain, PotentialEnergySurface):
     an excitation's response.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'energy', 'mean_field', 'phase', 'physics',
-                             'to_record'})
+                             'scf_flags', 'to_record'})
 
     READS_SLICED_FACTORS = True
 
@@ -300,7 +302,7 @@ class RPAGroundStateChain(FactorChain, PotentialEnergySurface):
                         record['factorization']) if factorization is None
                         else factorization),
                     numerics=record['numerics'], carried=record.get('carried'))
-        chain._scf_layout = {'layout': record['scf_layout']}
+        chain.hold_scf_layout(record['scf_layout'])
         return chain
 
     def label(self):

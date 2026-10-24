@@ -464,6 +464,11 @@ class PolarizableSites:
     def nsites(self):
         return len(self.coords)
 
+    def state_specific_term(self):
+        """None: this medium carries no classical state-specific term; what a
+        state's density does to it is inside its excitation energy."""
+        return None
+
     def for_geometry(self, mol):
         """The same sites: an environment does not ride the atoms it surrounds."""
         return self

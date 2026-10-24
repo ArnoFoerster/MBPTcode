@@ -12,7 +12,8 @@ down to Bp, chi0 or C_ov is the one that route already owns.
 import numpy as np
 
 from src.Base.numerics.constants import SOP_FIT_RCOND
-from src.SingleReference.GW.real_screening import ov_energies, screening_aux
+from src.SingleReference.GW.real_screening import screening_aux
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.GW.sum_over_poles import (
     denominators, pole_pseudoinverse, subspace_self_energy_jacobian)
 from src.Base.orbital_spaces import get_occ_virt_indices
@@ -86,6 +87,8 @@ def subspace_residues_backward(amp_bar, poles, nu_points, pairs):
 def sop_partials(omega, amplitudes, poles, eps, nocc, nu_points, Bp, C_ov,
                  sigma_bar=1.0):
     """(eps_bar, Bp_bar, Cov_bar) of sigma_bar * Sigma^c_pp, all the way down.
+    A test gate, read by no production route: the whole-chain reference the
+    production adjoint of the pole model is checked against.
 
     `sigma_sop_backward` stops at wc, and wc enters the screening exactly as
     the integral term's own weights do -- both terms are

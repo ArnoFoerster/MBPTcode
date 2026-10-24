@@ -54,12 +54,12 @@ import src.Base.pyscf.pyscf_interface as production_interface
 import src.gradients.isdf_derivatives as derivatives
 import src.gradients.isdf_mean_field as mean_field_module
 import src.gradients.mean_field_response as response
-from src.Base.factorization.isdf_jk import exchange_free_reference
+from src.gradients.isdf_mean_field import exchange_free_reference
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.pyscf.pyscf_interface import (fock_mo,
                                             response_kernel)
 from src.Base.factorization.separable_ri import atomic_frames, molecular_points_covariant
-from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.isdf_derivatives import (continued_frames,
                                             isdf_exchange_skeleton,
                                             isdf_fock_partial_exchange,

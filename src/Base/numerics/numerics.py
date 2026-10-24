@@ -11,7 +11,7 @@ written down where it happens and nowhere else.
 
 What is NOT here: physics constants and the bars runs are judged by
 (`src.Base.numerics.constants`), and the frozen RESULTS of a calculation at its
-reference geometry (`gradients.conventions.FrozenConventions`: the resolved
+reference geometry (`gradients.gwbse.conventions.FrozenConventions`: the resolved
 grids, the explicit set, the scissor), which are derived from these numerics
 and the reference, not chosen.
 
@@ -31,7 +31,7 @@ The fields:
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
-(`properties.surfaces.excited_kwargs`). A section may be given as a dict of
+(`gradients.gwbse.surface_factory.excited_kwargs`). A section may be given as a dict of
 its fields, `Numerics(bse={'solver': 'dense'})`, which the constructor turns
 into the section's record.
 """
@@ -43,7 +43,12 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          BSE_SOLVERS, CD_NTAU, CPHF_MAX_CYCLE,
                                          CPHF_REFINEMENTS, CPHF_TOL,
                                          DAVIDSON_GUESS_FACTOR,
+                                         DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
+                                         EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
+                                         EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ,
+                                         QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE, QSGW_DM_TOL,
+                                         QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
                                          GL_FREQUENCY_SCALE,
                                          DAVIDSON_PRECONDITIONER,
                                          DAVIDSON_PRECONDITIONERS,
@@ -61,6 +66,10 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          SOP_N_POLES, WALK_MAX_CYCLE, WALK_TRUST_BOHR,
                                          WALK_TRUST_MAX_BOHR, WALK_TRUST_MIN_BOHR,
                                          XC_GRID_LEVEL, XC_GRID_LEVEL_UNRECORDED)
+from src.Base.numerics.constants import (WALK_GROUND_MAX_CYCLE, WALK_GROUND_TRUST_BOHR)
+from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
+                                         ORBITAL_MULTIPLIER_RESIDUAL_TOL,
+                                         ORBITAL_MULTIPLIER_TOL)
 from src.Base.utils.record_io import record_hash
 
 
@@ -116,7 +125,11 @@ class ScfNumerics:
     the orbital response of that mean field (`src.Base.pyscf.cphf.solve`):
     the true residual its solution reaches (cphf_tol), the Krylov cycles of
     one solve (cphf_max_cycle) and the rounds of solving again for the
-    residual left (cphf_refinements)."""
+    residual left (cphf_refinements); and the orbital-response (Z-vector)
+    solve of every gradient (`src.gradients.multipliers`): its lgmres
+    tolerance (multiplier_tol), iteration ceiling (multiplier_max_iter) and
+    the true residual it must reach (multiplier_residual_tol), each relative
+    to max(1, |rhs|)."""
     route: Optional[str] = None
     auxbasis: Optional[str] = None
     grid_level: Optional[str] = None
@@ -128,6 +141,9 @@ class ScfNumerics:
     cphf_tol: float = CPHF_TOL
     cphf_max_cycle: int = CPHF_MAX_CYCLE
     cphf_refinements: int = CPHF_REFINEMENTS
+    multiplier_tol: float = ORBITAL_MULTIPLIER_TOL
+    multiplier_max_iter: int = ORBITAL_MULTIPLIER_MAX_ITER
+    multiplier_residual_tol: float = ORBITAL_MULTIPLIER_RESIDUAL_TOL
 
 
 @dataclass(frozen=True)
@@ -284,12 +300,16 @@ class SolventNumerics:
 
 @dataclass(frozen=True)
 class WalkNumerics:
-    """The geometry optimizer and the finite-difference steps."""
+    """The geometry optimizer and the finite-difference steps; ground_*:
+    the step cap and first trust radius of a mean-field ground state's own
+    relaxation (`optimize.relax_ground_state`)."""
     max_cycle: int = WALK_MAX_CYCLE
     trust: float = WALK_TRUST_BOHR
     trust_max: float = WALK_TRUST_MAX_BOHR
     trust_min: float = WALK_TRUST_MIN_BOHR
     fd_step: float = NUCLEAR_FD_STEP
+    ground_max_cycle: int = WALK_GROUND_MAX_CYCLE
+    ground_trust: float = WALK_GROUND_TRUST_BOHR
 
 
 @dataclass(frozen=True)
@@ -309,11 +329,61 @@ class LayoutNumerics:
     block: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class EvGWNumerics:
+    """The eigenvalue-self-consistent loop (`GW.evGW.evgw_eigenvalues`).
+
+    tol: convergence on max |delta eps| over the tested orbitals, Hartree;
+    max_cycle: cycles before the last iterate is returned, warned and
+    flagged; diis_size: DIIS subspace, 0 for linear mixing by `damping`
+    (eps <- (1 - d) eps_new + d eps_old); diis_start: the cycle DIIS starts on.
+    """
+    tol: float = EVGW_TOL
+    max_cycle: int = EVGW_MAX_CYCLE
+    diis_size: int = EVGW_DIIS_SIZE
+    diis_start: int = EVGW_DIIS_START
+    damping: float = EVGW_DAMPING
+
+
+@dataclass(frozen=True)
+class QsGWNumerics:
+    """The quasiparticle-self-consistent loop (`GW.qsGW.qsgw_eigenvalues`).
+
+    tol: HOMO/LUMO movement, Hartree; dm_tol: density change ||D' - D||_F /
+    nmo; max_cycle; diis_size; mixing_lambda: the new Hamiltonian's weight in
+    linear mixing; flow: the SRG flow parameter s, Hartree^-2; block_elems:
+    the static self-energy builder's buffer size, in doubles; eta: the
+    broadening of its denominators, Hartree.
+    """
+    tol: float = EVGW_TOL
+    max_cycle: int = EVGW_MAX_CYCLE
+    dm_tol: float = QSGW_DM_TOL
+    diis_size: int = QSGW_DIIS_SIZE
+    mixing_lambda: float = QSGW_MIXING_LAMBDA
+    flow: float = QSGW_SRG_FLOW
+    block_elems: int = QSGW_BLOCK_ELEMS
+    eta: float = DEFAULT_BROADENING_ETA
+
+
+@dataclass(frozen=True)
+class ImagFreqNumerics:
+    """The O(N^4) imaginary-frequency GW route (`GW.imaginary_axis`): nfreq
+    points of its W(i omega) quadrature."""
+    nfreq: int = IMAGFREQ_NFREQ
+
+
 #: The sections of `Numerics`, by field name.
 SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'qp': QPNumerics, 'quadrature': QuadratureNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
-            'walk': WalkNumerics, 'layout': LayoutNumerics}
+            'walk': WalkNumerics, 'layout': LayoutNumerics,
+            'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
+            'imagfreq': ImagFreqNumerics}
+
+#: Sections added after records and identities were first written: a record
+#: without one reads its defaults, and one at its defaults leaves the identity
+#: what it was before the section existed.
+LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq')
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -452,11 +522,9 @@ def numerics_or_default(numerics):
 
 #: The keywords of the ISDF forward (`space_time.separable_factors`, the BSE
 #: and QP drivers built on it) and the `Numerics` field each one names.
-ISDF_REQUEST_FIELDS = {
-    'auxbasis': 'isdf.auxbasis', 'radii': 'isdf.radii',
-    'counts': 'isdf.counts', 'n_start': 'isdf.n_start',
-    'grid_accuracy': 'isdf.level', 'fit': 'isdf.fit',
-    'sliced': 'layout.sliced', 'fit_block': 'layout.fit_block'}
+ISDF_REQUEST_FIELDS = {k: FLAT_FIELDS[k] for k in (
+    'auxbasis', 'radii', 'counts', 'n_start', 'grid_accuracy', 'fit', 'sliced',
+    'fit_block')}
 
 #: The same for the ISDF-K mean field (`isdf_jk.ISDFJK`, `isdf_jk.isdf_jk`).
 ISDF_JK_REQUEST_FIELDS = {
@@ -502,13 +570,6 @@ def requested(numerics, where, fields=ISDF_REQUEST_FIELDS, **given):
     return out
 
 
-def field_of(numerics, where):
-    """The value `numerics` holds at `where`, 'section.name' (the values of
-    `FLAT_FIELDS`)."""
-    section, name = where.split('.')
-    return getattr(getattr(numerics, section), name)
-
-
 def numerics_of(choices):
     """The `Numerics` holding `choices`, a mapping of `FLAT_FIELDS` names to
     values, every other field at its default: what a driver that collected
@@ -550,6 +611,9 @@ class Numerics:
     solvent: SolventNumerics = field(default_factory=SolventNumerics)
     walk: WalkNumerics = field(default_factory=WalkNumerics)
     layout: LayoutNumerics = field(default_factory=LayoutNumerics)
+    evgw: EvGWNumerics = field(default_factory=EvGWNumerics)
+    qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
+    imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None
@@ -577,7 +641,8 @@ class Numerics:
         """The object `to_record` wrote. A record whose scf section names no
         xc_grid was written before the field existed, on pyscf's default
         grid (XC_GRID_LEVEL_UNRECORDED), and is read as that."""
-        sections = {name: dict(record[name]) for name in SECTIONS}
+        sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
+                    else dict(record[name]) for name in SECTIONS}
         sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
         return cls(**{name: SECTIONS[name](**sections[name])
                       for name in SECTIONS},
@@ -592,7 +657,9 @@ class Numerics:
         values = self.values()
         for section, name in IDENTITY_EXCLUDED:
             values[section].pop(name)
-        return record_hash({name: values[name] for name in IDENTITY_FIELDS})
+        return record_hash({name: values[name] for name in IDENTITY_FIELDS
+                            if name not in LATER_SECTIONS
+                            or values[name] != asdict(SECTIONS[name]())})
 
     def derive(self, reason, **sections):
         """Other numerics for another task, written down: `sections` maps a

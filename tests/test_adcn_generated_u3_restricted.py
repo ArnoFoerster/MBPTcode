@@ -30,6 +30,7 @@ from src.SingleReference.ADC.precursor_classes import class_configs
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri, get_antisymmetrized_spin_block_eri)
+from tests.adc_common import alpha_to_class_index
 from tests.generated_runtime import requires_runtime
 
 pytestmark = requires_runtime(4)
@@ -39,22 +40,6 @@ def check(label, diff, tol=1e-11):
     ok = diff < tol
     print(f"[{'OK' if ok else 'FAIL'}] {label}: {diff:.3e}")
     return ok
-
-
-def _alpha_to_class_index(cfg, sector, cols, nocc):
-    idx = []
-    for c in range(len(cfg['K'])):
-        hs, ps, sp = cfg['hole_sp'][c], cfg['part_sp'][c], cfg['spins'][c]
-        if sector == 'IP':
-            hso = sorted([2 * hs[0] + sp[0], 2 * hs[1] + sp[1]])
-            pso = [nocc + 2 * ps[0] + sp[2]]
-            m = np.where((cols[0] == hso[0]) & (cols[1] == hso[1]) & (cols[2] == pso[0]))[0]
-        else:
-            hso = [2 * hs[0] + sp[0]]
-            pso = sorted([nocc + 2 * ps[0] + sp[1], nocc + 2 * ps[1] + sp[2]])
-            m = np.where((cols[0] == hso[0]) & (cols[1] == pso[0]) & (cols[2] == pso[1]))[0]
-        idx.append(m[0])
-    return np.array(idx)
 
 
 def main():
@@ -83,8 +68,8 @@ def main():
             U3r = r.u3_generated(sector)
             U3so = so.u3_generated(sector)[:, 0::2]   # alpha orbital columns
             cols = class_configs(nocc, len(eps), 1, sector)
-            cfg = r._sector_configs(sector)
-            idx = _alpha_to_class_index(cfg, sector, cols, nocc)
+            cfg = r.sector_configs(sector)
+            idx = alpha_to_class_index(cfg, sector, cols, nocc)
             diff = np.abs(U3r - U3so[idx]).max()
             all_ok &= check(f"U^(3) {sector} restricted == spin-orbital generated", diff)
 

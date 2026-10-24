@@ -9,6 +9,7 @@ eigenvalue map, in one step. The two mixings land on one fixed point.
 
 Run: python tests/test_qsgw.py
 """
+import dataclasses
 import os
 import sys
 import types
@@ -20,9 +21,10 @@ import numpy as np
 import scipy.linalg
 from pyscf import df, dft, gto, scf
 
-from src.Base.numerics.constants import (EVGW_TOL, HARTREE_TO_EV, HARTREE_TO_MEV,
-                                         QSGW_DM_TOL, QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL,
-                                         get_method_info)
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (EVGW_TOL, HARTREE_TO_EV, HARTREE_TO_MEV, QSGW_DM_TOL,
+                                         QSGW_SRG_FLOW, QSGW_SRG_QUAD_TOL)
+from src.SingleReference.GW.self_energy import get_method_info
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies)
 from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
@@ -327,8 +329,7 @@ def check_the_two_mixings_land_on_one_fixed_point(mf):
     ok = True
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        e_one, _, one = qsgw_eigenvalues(mf, mixing='linear', mixing_lambda=0.3,
-                                         max_cycle=1)
+        e_one, _, one = qsgw_eigenvalues(mf, mixing='linear', numerics=Numerics(qsgw={'mixing_lambda': 0.3, 'max_cycle': 1}))
     ovlp = mf.get_ovlp()
     dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
     cs0 = ovlp @ mf.mo_coeff
@@ -340,8 +341,7 @@ def check_the_two_mixings_land_on_one_fixed_point(mf):
                 f'max |d eps| {d_one:.1e} Ha')
     for screening in ('updated', 'fixed'):
         e_d, _, d = qsgw_eigenvalues(mf, screening=screening, mixing='diis')
-        e_l, _, l = qsgw_eigenvalues(mf, screening=screening, mixing='linear',
-                                     max_cycle=60)
+        e_l, _, l = qsgw_eigenvalues(mf, screening=screening, mixing='linear', numerics=Numerics(qsgw={'max_cycle': 60}))
         delta = np.abs(e_d[[nocc - 1, nocc]] - e_l[[nocc - 1, nocc]]).max()
         ok &= check(d['converged'] and l['converged'] and delta < 10 * EVGW_TOL,
                     f"{screening}: DIIS and linear mixing agree on HOMO and LUMO",
@@ -396,6 +396,10 @@ def check_a_mean_field_without_density_fitting(mf):
     return ok
 
 
+#: The settings the loop reads from numerics.qsgw rather than as keywords.
+LOOP_FIELDS = {f.name for f in dataclasses.fields(Numerics().qsgw)}
+
+
 def check_the_refusals(mf):
     """Bad input and unsupported branches are named, not silently served."""
     ok = True
@@ -408,7 +412,10 @@ def check_the_refusals(mf):
                      ({'diis_size': 0}, 'diis_size'),
                      ({'flow': float('nan')}, 'flow')):
         try:
-            qsgw_eigenvalues(mf, **{'max_cycle': 1, **kw})
+            loop = {k: v for k, v in kw.items() if k in LOOP_FIELDS}
+            call = {k: v for k, v in kw.items() if k not in LOOP_FIELDS}
+            qsgw_eigenvalues(mf, numerics=Numerics(qsgw={'max_cycle': 1, **loop}),
+                             **call)
             ok &= check(False, f'{kw} is refused')
         except ValueError as e:
             ok &= check(text in str(e), f'{kw} is refused with ValueError')
@@ -417,7 +424,7 @@ def check_the_refusals(mf):
     swapped.mo_occ = mf.mo_occ.copy()
     swapped.mo_occ[[nocc - 1, nocc]] = swapped.mo_occ[[nocc, nocc - 1]]
     try:
-        qsgw_eigenvalues(swapped, max_cycle=1)
+        qsgw_eigenvalues(swapped, numerics=Numerics(qsgw={'max_cycle': 1}))
         ok &= check(False, 'a closed-shell but non-aufbau occupation is refused')
     except NotImplementedError as e:
         ok &= check('aufbau' in str(e),
@@ -430,14 +437,14 @@ def check_the_refusals(mf):
     # its fixed point is gated in tests/test_qsgw_continuum.py)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        u_eps, u_mo, _ = qsgw_eigenvalues(umf, max_cycle=1)
+        u_eps, u_mo, _ = qsgw_eigenvalues(umf, numerics=Numerics(qsgw={'max_cycle': 1}))
     ok &= check(u_eps.shape == (2, mol.nao) and u_mo.shape == (2, mol.nao, mol.nao),
                 'an unrestricted reference runs per spin')
     romf = dft.ROKS(mol)
     romf.xc = 'pbe0'
     romf.kernel()
     try:
-        qsgw_eigenvalues(romf, max_cycle=1)
+        qsgw_eigenvalues(romf, numerics=Numerics(qsgw={'max_cycle': 1}))
         ok &= check(False, 'an open-shell restricted (ROKS) reference is refused')
     except NotImplementedError as e:
         ok &= check('closed-shell' in str(e),
@@ -447,7 +454,7 @@ def check_the_refusals(mf):
     lmf.xc = 'pbe0'
     lmf.kernel()
     try:
-        qsgw_eigenvalues(lmf, max_cycle=1)
+        qsgw_eigenvalues(lmf, numerics=Numerics(qsgw={'max_cycle': 1}))
         ok &= check(False, 'a mean field with fewer MOs than AOs is refused')
     except NotImplementedError as e:
         ok &= check('AO space' in str(e) and lmf.mo_coeff.shape[1] < mf.mol.nao,
@@ -464,7 +471,7 @@ def check_the_refusals(mf):
             ('an environment with no dressed interaction',
              lambda: qsgw_eigenvalues(solvated), NotImplementedError,
              'without dressing'),
-            ('a negative flow', lambda: qsgw_eigenvalues(mf, flow=-1.0, max_cycle=1),
+            ('a negative flow', lambda: qsgw_eigenvalues(mf, numerics=Numerics(qsgw={'flow': -1.0, 'max_cycle': 1})),
              ValueError, 'flow')):
         try:
             call()
@@ -473,7 +480,7 @@ def check_the_refusals(mf):
             ok &= check(text in str(e), f'{label} is refused with {exc.__name__}')
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        _, _, info = qsgw_eigenvalues(mf, max_cycle=1)
+        _, _, info = qsgw_eigenvalues(mf, numerics=Numerics(qsgw={'max_cycle': 1}))
     ok &= check(not info['converged'] and any('did not converge' in str(w.message)
                                               for w in caught),
                 'a capped loop warns and returns the last iterate')
@@ -549,9 +556,7 @@ def check_the_converged_point_is_a_fixed_point_of_the_evgw0_map(mf):
     for screening in ('updated', 'fixed'):
         # converged two orders tighter than the check, so the check reads the
         # fixed point and not the last step of the loop
-        eps_qs, c_qs, info = qsgw_eigenvalues(mf, screening=screening,
-                                              keep_spectrum=True, tol=1e-7,
-                                              dm_tol=1e-8)
+        eps_qs, c_qs, info = qsgw_eigenvalues(mf, screening=screening, keep_spectrum=True, numerics=Numerics(qsgw={'tol': 1e-7, 'dm_tol': 1e-8}))
         view = rotated_mean_field(mf, eps_qs, c_qs)
         anchor = kohn_sham_fock_diagonal(mf, c_qs)
         step_kw = {'eps_anchor': anchor}
@@ -629,7 +634,7 @@ def check_qsgw_forgets_its_starting_point():
     for xc in ('pbe', 'pbe0'):
         mf = build_reference(xc)
         nocc = mf.mol.nelectron // 2
-        ends[xc] = {'updated': qsgw_eigenvalues(mf, tol=1e-7, dm_tol=1e-8),
+        ends[xc] = {'updated': qsgw_eigenvalues(mf, numerics=Numerics(qsgw={'tol': 1e-7, 'dm_tol': 1e-8})),
                     'fixed': qsgw_eigenvalues(mf, screening='fixed')}
     e_pbe, c_pbe, i_pbe = ends['pbe']['updated']
     e_pbe0, c_pbe0, i_pbe0 = ends['pbe0']['updated']
@@ -687,8 +692,7 @@ def check_the_boundaries(mf):
         c_mf = np.asarray(small.mo_coeff, float).copy()
         for screening in ('updated', 'fixed'):
             e, _, info = qsgw_eigenvalues(small, screening=screening)
-            e_one, _, i_one = qsgw_eigenvalues(small, screening=screening,
-                                               block_elems=1, n_workers=1)
+            e_one, _, i_one = qsgw_eigenvalues(small, screening=screening, n_workers=1, numerics=Numerics(qsgw={'block_elems': 1}))
             d_one = np.abs(e_one - e).max()
             kept = (np.array_equal(small.mo_energy, eps_mf)
                     and np.array_equal(small.mo_coeff, c_mf))

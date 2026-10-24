@@ -68,8 +68,8 @@ def test_one_root_routes_refuse_nroots(opts):
 
 @pytest.mark.parametrize('level', ['adc4', 'adc4t2', 'adc5'])
 def test_adc4_and_higher_name_their_construction(level):
-    # From ADC(4) on the constructions differ and none
-    # is the default
+    # from ADC(4) on the constructions differ and none is the default: a run
+    # names its construction
     with pytest.raises(ValueError, match='needs construction='):
         _toy_restricted(pdaggerq=True, level=level)
     with pytest.raises(ValueError, match='needs construction='):

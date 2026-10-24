@@ -3,7 +3,7 @@
 
 The surface is G_eq of src.environments.solvation_loop: at every geometry a medium
 (src.environments.reaction_field) and a state model (src.gradients.state_models,
-eeADC.ee_state_model) are built by the caller's factories, the loop
+src.gradients.adc.ee_state_model) are built by the caller's factories, the loop
 equilibrates the state with its own relaxed density, and the force is
 solvation_loop.force. A minimum of this surface is the solvated structure an
 emission (solvation_loop.vertical_energies there) or an adiabatic energy
@@ -25,11 +25,11 @@ returns the names logged at one geometry, so a record built on a walk's last
 geometry says which caveats it stands on.
 
 A state model whose surface is fixed by an object it carries (`surface_key`,
-a GW-BSE model's chain: gradients.gwbse_state_model) must stay on that one
+a GW-BSE model's chain: gradients.gwbse.state_model) must stay on that one
 surface: make_state then moves the first model
 (`reference.at(mol, make_scf, field.transition_environment())`)
 and a model on another surface is refused before its loop runs. The walkers'
-accepted steps (properties.surface.commit) reach the model's own
+accepted steps (gradients.surface.commit) reach the model's own
 `commit(mol)`, which moves a chain's conventions and followed state there.
 
 Refreeze (`refreeze(mol)`, the outer loop of `optimize.relax(...,
@@ -50,7 +50,7 @@ from src.gradients.surface import PotentialEnergySurface
 class SolvatedSurface(PotentialEnergySurface):
     """See the module docstring. loop_kw go to solvation_loop.equilibrate."""
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field'})
 
     def __init__(self, mol0, make_field, make_state, label='solvated state',
@@ -127,7 +127,7 @@ class SolvatedSurface(PotentialEnergySurface):
         return mol, hf.mf
 
     def commit(self, mol):
-        """A walk accepted `mol` (properties.surface.commit): the state model
+        """A walk accepted `mol` (gradients.surface.commit): the state model
         built last hears it (module docstring); one that follows nothing has
         no commit."""
         state = None if self.last is None else self.last['state']
@@ -135,10 +135,11 @@ class SolvatedSurface(PotentialEnergySurface):
         if accept is not None:
             accept(mol)
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
         """This surface with its model's frozen conventions rebuilt at `mol`
         (module docstring); a surface not yet evaluated is evaluated at `mol`
-        first, to learn which model it is on."""
+        first, to learn which model it is on. mf: not read; the loop
+        converges its own mean field in its field."""
         if self.last is None:
             self._solve(mol)
         state = self.last['state']
@@ -158,6 +159,11 @@ class SolvatedSurface(PotentialEnergySurface):
         # one flag log for the walk and its refreezes (flags_at reads both)
         out.flags = self.flags
         return out
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         return self._label

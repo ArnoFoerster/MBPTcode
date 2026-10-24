@@ -12,11 +12,10 @@ and the relaxed densities built on it reach the finite field.
      scf.cphf.solve in its place it misses by more than 1e-8.
   3. UHF, NH2 6-31G: solve_cphf_relaxation_uhf of random blocks satisfies
      its equation to 1e-9, with and without the preconditioner's level shift,
-     which leaves the solution unchanged to 1e-12. (The scipy gmres it used
-     before printed a warning at max_cycle and returned the vector anyway.)
+     which leaves the solution unchanged to 1e-12.
   4. a solve that cannot reach tol warns (CphfNotConverged) and flags
-     'cphf_not_converged' inside cphf.collecting
-     (refuse inputs, warn numerics).
+     'cphf_not_converged' inside numerical_flags.collecting (a numerical
+     event is warned about, not refused).
 
 Run: python tests/test_cphf_residual.py
 """
@@ -31,6 +30,7 @@ from pyscf import gto, mp, scf
 from pyscf.scf import cphf as pyscf_cphf
 
 from src.Base.numerics.numerics import Numerics
+from src.Base import numerical_flags
 from src.Base.pyscf import cphf
 from src.SingleReference.DensityMatrix import density_matrix as dmm
 from tests.adc_common import WATER_C2V, check, converge_newton
@@ -171,7 +171,7 @@ def check_unreachable_tol():
     mf = tight_rhf(mol)
     fvind, e_ai, _ = rhf_equation(mf)
     flags = []
-    with warnings.catch_warnings(record=True) as caught, cphf.collecting(flags):
+    with warnings.catch_warnings(record=True) as caught, numerical_flags.collecting(flags):
         warnings.simplefilter('always')
         x = cphf.solve(fvind, e_ai, np.ones_like(e_ai), numerics=Numerics(
             scf={'cphf_tol': 1e-30, 'cphf_max_cycle': 2, 'cphf_refinements': 2}))

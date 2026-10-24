@@ -13,7 +13,7 @@ Analogous to how src/SingleReference/CC/restricted_solver.py wires together
 generated_restricted/*.py -- this module is plain Python, not generated
 output, and is safe to hand-edit.
 
-Scope: n=2, n=3, and now n=4. n=5 needs more work (rank-5 amplitudes, letter budget).
+Scope: n=2, n=3 and n=4. n=5 needs more work (rank-5 amplitudes, letter budget).
 
 n=4 additionally needs the E^(k) energy-correction term in the amplitude
 recursion (T_rank^(order) = [numerator - sum_k E^(k) T_rank^(order-k)] / D),
@@ -104,11 +104,11 @@ class MPnDensityDriver:
         self.nv = self.norb - nocc_spin
         self.kd = np.eye(self.norb)
 
-    def _args(self):
+    def kernel_args(self):
         return dict(g=self.g, kd=self.kd, o=self.o, v=self.v, nv=self.nv, no=self.no)
 
     def compute_t2_1(self):
-        num = gen.t2_1_numerator(**self._args())
+        num = gen.t2_1_numerator(**self.kernel_args())
         return num / orbital_denominator(self.eps[self.o], self.eps[self.v], 2)
 
     def compute_t2_1_custom_denom(self, D):
@@ -118,7 +118,7 @@ class MPnDensityDriver:
         from EpsteinNesbet.epstein_nesbet_denominator. Reuses the SAME
         numerator as compute_t2_1, so this is a strict denominator swap, not an
         independent amplitude construction."""
-        num = gen.t2_1_numerator(**self._args())
+        num = gen.t2_1_numerator(**self.kernel_args())
         return num / D
 
     def compute_order2_amplitudes(self, t2_1=None, max_rank=4):
@@ -130,7 +130,7 @@ class MPnDensityDriver:
         is for callers that genuinely need it (e.g. compute_delta_gamma4)."""
         if t2_1 is None:
             t2_1 = self.compute_t2_1()
-        args = self._args()
+        args = self.kernel_args()
         d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
         t1_2 = gen.t1_2_numerator(**args, t2_1=t2_1) / d1
         t2_2 = t3_2 = t4_2 = None
@@ -154,7 +154,7 @@ class MPnDensityDriver:
         """T2^(3) needs the -E^(2)*T2^(1) correction (nonzero starting here,
         see module docstring); T1^(3)/T3^(3)/T4^(3) don't (their own
         E^(2)*T_rank^(1) term vanishes since T_rank^(1)=0 for rank!=2)."""
-        args = self._args()
+        args = self.kernel_args()
         if E2 is None:
             E2 = self.compute_E(t2_1)
         d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
@@ -166,14 +166,14 @@ class MPnDensityDriver:
         return t1_3, t2_3, t3_3
 
     def compute_t1_3(self, t1_2, t2_2, t3_2):
-        args = self._args()
+        args = self.kernel_args()
         d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
         num = gen.t1_3_numerator(**args, t1_2=t1_2, t2_2=t2_2, t3_2=t3_2)
         return num / d1
 
     def compute_t1_4(self, t1_3, t2_3, t3_3, t1_2, E2=None):
         """T1^(4) needs the -E^(2)*T1^(2) correction (see module docstring)."""
-        args = self._args()
+        args = self.kernel_args()
         if E2 is None:
             E2 = self.compute_E(self.compute_t2_1())
         d1 = orbital_denominator(self.eps[self.o], self.eps[self.v], 1)
@@ -283,7 +283,7 @@ class MPnDensityDriver:
             if not allow_rank_truncation:
                 raise RuntimeError(msg)
             warnings.warn(msg, stacklevel=2)
-        args = self._args()
+        args = self.kernel_args()
         amps, Es = {}, {}
         for o in range(1, max_order + 1):
             for k in range(2, o):
@@ -309,7 +309,7 @@ class MPnDensityDriver:
         return amps
 
     def compute_delta_gamma2(self):
-        args = self._args()
+        args = self.kernel_args()
         t2_1 = self.compute_t2_1()
         t1_2, _, _, _ = self.compute_order2_amplitudes(t2_1, max_rank=1)
 
@@ -330,7 +330,7 @@ class MPnDensityDriver:
         return blocks['oo'], blocks['ov'], blocks['vv']
 
     def compute_delta_gamma3(self, t2_1=None, t1_2=None, t2_2=None, t3_2=None, t4_2=None):
-        args = self._args()
+        args = self.kernel_args()
         if t2_1 is None:
             t2_1 = self.compute_t2_1()
         if t1_2 is None:
@@ -370,7 +370,7 @@ class MPnDensityDriver:
         here -- the first order where it survives (see module docstring's
         general recursion  for the
         physical adjacency argument for which M^(n)/N^(n) pieces exist)."""
-        args = self._args()
+        args = self.kernel_args()
         t2_1 = self.compute_t2_1()
         t1_2, t2_2, t3_2, t4_2 = self.compute_order2_amplitudes(t2_1)
         E2 = self.compute_E(t2_1)

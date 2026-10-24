@@ -1,4 +1,4 @@
-"""Gates for the delta = diagram - ISR extraction (diagram-ADC track, order 4).
+"""Gates for the delta = diagram - ISR extraction (diagram-ADC, order 4).
 
 Fast gates (no pdaggerq streams: diagram side = the EMITTED m{2,3,4}_blocks,
 ISR side = isr_reference.ISRBlocks from the generated supermatrix blocks):

@@ -23,22 +23,20 @@ order, but for these shapes the difference is not measurable and "finishes
 at all" dominates.
 
 Path search uses the standalone opt_einsum package's contract_path, NOT
-numpy's own built-in einsum_path -- found (profiling DF-ADC(2)-x
-MP3-density rollout on CO/aug-cc-pvdz) that numpy's own 'optimal' path
+numpy's own built-in einsum_path: numpy's own 'optimal' path
 search silently returns a badly wrong (non-optimal, despite the name) path
 for "triangle"-connectivity contractions: three operands where each PAIR
 shares exactly one summed index but no single index is shared by all three
 (e.g. 'Qac,Qbd,cdij->abij', the DF-dressed vvvv-type term df_codegen.py
 produces -- two B-factors sharing the auxiliary axis Q, each also sharing a
 different axis with the amplitude). Measured on that exact term
-(naux=144, nv=39, no=7): numpy's own optimizer reports "Optimized scaling"
+(CO/aug-cc-pvdz, naux=144, nv=39, no=7): numpy's own optimizer reports "Optimized scaling"
 identical to "Naive scaling" (no improvement found at all) and picks a
 single 5e10-FLOP direct contraction, timing at 12+ seconds; opt_einsum's
 own contract_path finds the correct 2-step factorization (8.9e8 FLOPs, a
-measured 55x reduction) in milliseconds. This pattern never arose before
-the DF rewrite (a dense g_xxxx factor was always a single
-pre-formed operand, never two separately-contracted DF factors sharing an
-auxiliary axis), so it was never exercised by earlier CC/CCSD(T) profiling.
+measured 55x reduction) in milliseconds. The pattern arises only with DF
+factors (a dense g_xxxx factor is a single pre-formed operand, never two
+separately-contracted DF factors sharing an auxiliary axis).
 opt_einsum.contract_path's returned path is a bare list of index-pair
 tuples (NOT numpy's own ['einsum_path', ...]-prefixed format) -- prepend
 'einsum_path' before handing it to np.einsum(optimize=path); verified this

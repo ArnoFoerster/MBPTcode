@@ -531,8 +531,7 @@ class IRBasis:
         """
         if rank >= self.size:
             cond = float(sv[0] / sv[self.size - 1])
-            # the last fit's conditioning, a flag a record copies
-            # (refuse inputs, warn numerics)
+            # the last fit's conditioning, a flag a record copies (refuse inputs, warn numerics)
             self.last_fit = {'condition': cond,
                              'ill_conditioned': bool(cond > _COND_WARN)}
             if cond > _COND_WARN:

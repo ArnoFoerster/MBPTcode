@@ -1,5 +1,6 @@
 """
-Regression tests for the spin-orbital Dyson IP/EA-ADC(3) supermatrix (src/SingleReference/ADC3.py),
+Regression tests for the Dyson IP/EA-ADC(3) supermatrix (src.SingleReference.ADC: ADCSolver,
+ADCSolverRestricted, ADCSolverUnrestricted).
 """
 import os
 import sys

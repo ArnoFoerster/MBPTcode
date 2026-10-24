@@ -51,31 +51,6 @@ def angle(mol, i, j, k):
     return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
 
 
-def dihedral(mol, i, j, k, l):
-    """Signed i-j-k-l dihedral in degrees."""
-    x = coordinates(mol)
-    b0, b1, b2 = x[i] - x[j], x[k] - x[j], x[l] - x[k]
-    b1 = b1 / np.linalg.norm(b1)
-    v = b0 - (b0 @ b1) * b1
-    w = b2 - (b2 @ b1) * b1
-    return float(np.degrees(np.arctan2(np.cross(b1, v) @ w, v @ w)))
-
-
-def out_of_plane(mol, c, m, s1, s2):
-    """Angle in degrees between the c-m bond and the plane through (c, s1, s2).
-
-    Zero for a planar centre. This is the coordinate an n -> pi* excitation
-    pyramidalizes along, so it is what separates the excited-state minimum of a
-    carbonyl from its ground state.
-    """
-    x = coordinates(mol)
-    n = np.cross(x[s1] - x[c], x[s2] - x[c])
-    n /= np.linalg.norm(n)
-    d = x[m] - x[c]
-    d /= np.linalg.norm(d)
-    return float(90.0 - np.degrees(np.arccos(np.clip(abs(n @ d), -1.0, 1.0))))
-
-
 def pyramidalize(mol, c, m, s1, s2, degrees):
     """Tilt the c-m bond `degrees` out of the (c, s1, s2) plane; a new Mole.
 

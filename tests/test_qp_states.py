@@ -4,7 +4,7 @@ subsumes.
 `SingleReference/GW/qp_states.py` is where a `QPStates` declaration becomes the
 orbitals a surface solves explicitly. Two incompatible windows exist under the
 name `qp_window` -- an integer half-width around the Fermi level widened over
-degenerate blocks (`ExcitedStateChain._qp_set`) and the valence occupied plus
+degenerate blocks (`QuasiparticleSet.resolve_qp_set`) and the valence occupied plus
 ten virtuals of the dense route (`dense_surfaces.qp_window`) -- so the gates
 here are `array_equal` against those two functions, not tolerances: a surface
 whose quasiparticle set moved is a different surface and its energies are not
@@ -128,7 +128,7 @@ def test_frontier_is_the_chains_window(spectra, name, half_width):
     """The production function and the chain's staticmethod, index for index."""
     _, eps, nocc = spectra[name]
     got = prod.frontier_qp_states(eps, nocc, half_width, DEGENERACY_TOL)
-    assert np.array_equal(got, QuasiparticleSet._qp_set(eps, nocc, half_width,
+    assert np.array_equal(got, QuasiparticleSet.resolve_qp_set(eps, nocc, half_width,
                                                         DEGENERACY_TOL))
     assert np.array_equal(got, _old_qp_set(eps, nocc, half_width,
                                            DEGENERACY_TOL))
@@ -151,7 +151,7 @@ def test_frontier_takes_all_when_asked(spectra):
     assert np.array_equal(prod.frontier_qp_states(eps, nocc, 'all',
                                                   DEGENERACY_TOL),
                           np.arange(len(eps)))
-    assert np.array_equal(QuasiparticleSet._qp_set(eps, nocc, 'all',
+    assert np.array_equal(QuasiparticleSet.resolve_qp_set(eps, nocc, 'all',
                                                     DEGENERACY_TOL),
                           np.arange(len(eps)))
 
@@ -161,7 +161,7 @@ def test_resolve_frontier_matches_the_chain(spectra):
     spec = QPStates(kind='frontier', half_width=2)
     got = prod.resolve_qp_states(spec, eps, nocc, degeneracy_tol=DEGENERACY_TOL)
     assert np.array_equal(got.explicit,
-                          QuasiparticleSet._qp_set(eps, nocc, 2, DEGENERACY_TOL))
+                          QuasiparticleSet.resolve_qp_set(eps, nocc, 2, DEGENERACY_TOL))
     assert got.reach == {}, 'reach is the admitted criterion and nothing else'
 
 
@@ -233,7 +233,7 @@ def test_admitted_holds_the_frontier_and_excludes_the_oxygen_core(spectra):
     _, eps, nocc = spectra['water']
     resolved = prod.resolve_qp_states(QPStates(kind='admitted'), eps, nocc,
                                       degeneracy_tol=DEGENERACY_TOL)
-    frontier = QuasiparticleSet._qp_set(eps, nocc, 2, DEGENERACY_TOL)
+    frontier = QuasiparticleSet.resolve_qp_set(eps, nocc, 2, DEGENERACY_TOL)
     assert set(frontier) <= set(resolved.explicit)
     assert 0 in resolved.outside
     assert resolved.reach[0] > 1.0

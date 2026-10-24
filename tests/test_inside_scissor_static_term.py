@@ -30,7 +30,7 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
+from src.Base.numerics.constants import (HARTREE_TO_EV, QP_ROOT_TOL,  # noqa: E402
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.numerics.numerics import Numerics  # noqa: E402
@@ -112,7 +112,7 @@ def test_an_inside_scissor_state_sits_on_its_explicit_root(case):
             f'orbital {p} sits {off * HARTREE_TO_EV:+.3f} eV off the root '
             f'it was calibrated on')
         off = at_r0.eps_qp[p] - explicit[p]
-        assert abs(off) < QP_CD_NEWTON_TOL, (
+        assert abs(off) < QP_ROOT_TOL, (
             f'orbital {p} sits {off * HARTREE_TO_EV:+.3f} eV off its root '
             f'with every state solved')
 

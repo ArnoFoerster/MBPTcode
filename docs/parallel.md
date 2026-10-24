@@ -118,8 +118,9 @@ the region the script opens once:
 from pyscf import dft, gto
 
 from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 
 comm = grid_comm()[0]                  # COMM_WORLD, or None without mpi4py
 with distributed(comm):
@@ -127,7 +128,8 @@ with distributed(comm):
                 basis='cc-pvdz')
     mf = dft.RKS(mol, xc='pbe0').density_fit()
     distributed_mean_field(mf)         # J/K and the xc grid split over ranks
-    omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2, nroots=5)
+    omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2,
+                                       numerics=Numerics(bse={'nroots': 5}))
     if comm is None or comm.Get_rank() == 0:
         print(omega)                   # the same bits on every rank
 ```

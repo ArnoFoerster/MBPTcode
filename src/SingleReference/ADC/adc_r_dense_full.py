@@ -112,7 +112,7 @@ def assemble(s, nocc, static_correction, blk):
     #   'ackl' [a,c,k,l] = eps_a+eps_c-eps_k-eps_l
     #   'abkl' [a,b,k,l] = eps_k+eps_l-eps_a-eps_b
     _deltas = (None, None, None)
-    if s.u2_denom_dress and not s._is_adc2x:
+    if s.u2_denom_dress and not s.is_adc2x:
         _deltas = restricted_channel_shifts(
             s.u2_denom_dress, s.B_aa,
             g_oooo_bare, g_vvvv_bare, O, vidx_abs,
@@ -126,7 +126,7 @@ def assemble(s, nocc, static_correction, blk):
     # --- U_I: Type I (i,a), dim nI = O*V ---
     u_I = g_ii_U[:, :, O:].copy()  # (O,norb,V) = g[i,i,p,a] -- 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         # i=j slice: the same-spin amplitude is antisymmetric in its
         # occupied pair and vanishes identically here, so this is PURELY
         # opposite-spin -- and its hh shift is the <ii|ii> diagonal.
@@ -153,7 +153,7 @@ def assemble(s, nocc, static_correction, blk):
 
     u_II = s32 * (g_ijpa - g_ijap_T)  # bare 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         # pure opposite-spin (v/D), so only that denominator is built
         X_ijcd = g_oovv / dens.denom('ijcd', 'opp')  # (O,O,V,V)
         u_II -= s32 * (np.einsum('ijcd,cdpa->ijpa', X_ijcd, g_vv_pv, optimize=True)
@@ -176,7 +176,7 @@ def assemble(s, nocc, static_correction, blk):
     # --- U_III: Type III (i<j,a), dim nIII = nP_o*V, factor sqrt(1/2) ---
     u_III = s12 * (g_ijpa + g_ijap_T)  # bare 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         u_III -= s12 * (np.einsum('ijcd,cdpa->ijpa', X_ijcd, g_vv_pv, optimize=True)
                         + np.einsum('ijcd,cdap->ijpa', X_ijcd, g_vv_vp, optimize=True))
 
@@ -199,7 +199,7 @@ def assemble(s, nocc, static_correction, blk):
     # --- U_Ip: Type I' (i,a), dim nIp = O*V ---
     u_Ip = g_aa_U[:, :, :O].transpose(2, 1, 0).copy()  # (O,norb,V) = g[a,a,p,i] at [i,p,a] -- 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         # a=b slice: mirror of X_icd -- purely opposite-spin, pp shift is
         # the <aa|aa> diagonal.
         g_aakl = g_aa[:, :O, :O]     # (V,O,O) = g[a,a,k,l]
@@ -227,7 +227,7 @@ def assemble(s, nocc, static_correction, blk):
 
     u_IIp_full = s32 * (g_abpi - g_abip_T)  # bare 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         X_abkl = g_vvoo / dens.denom('abkl', 'opp')   # pure opposite-spin
         g_klpi_anti = g_oo_po - g_oo_op.transpose(0, 1, 3, 2)
         u_IIp_full += s32 * np.einsum('abkl,klpi->abpi', X_abkl, g_klpi_anti, optimize=True)
@@ -249,7 +249,7 @@ def assemble(s, nocc, static_correction, blk):
     # --- U_IIIp: Type III' (i,a<b), dim nIIIp = O*nP_v, factor sqrt(1/2) ---
     u_IIIp_full = s12 * (g_abpi + g_abip_T)  # bare 1st-order piece
 
-    if not s._is_adc2x:
+    if not s.is_adc2x:
         g_klpi_sym = g_oo_po + g_oo_op.transpose(0, 1, 3, 2)  # g[k,l,p,i]+g[k,l,i,p]
         u_IIIp_full += s12 * np.einsum('abkl,klpi->abpi', X_abkl, g_klpi_sym, optimize=True)
         u_IIIp_full += s12 * np.einsum('bcki,kapc->bapi', W1p, g_ovpv, optimize=True).transpose(1, 0, 2, 3)

@@ -6,6 +6,7 @@ pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
 pytest test_adc3_restricted.py
+pytest test_adc_numerical_flags.py
 pytest test_allocation_memory.py
 script test_amplitudes_consistency.py
 script test_analytical_continuation.py
@@ -86,7 +87,9 @@ pytest test_isdf_fit_two_realizations.py
 pytest test_isdf_force_hook.py
 pytest test_isdf_grid_keywords.py
 pytest test_isdf_jk_gradient_guard.py
+pytest test_isdf_one_grid_call.py
 pytest test_isdf_pcm_force.py
+pytest test_isdf_refuses_cartesian.py
 pytest test_legacy_defaults_and_aliases.py
 pytest test_matsubara_ir.py
 pytest test_metallic_grid_wiring_quick.py
@@ -206,6 +209,7 @@ pytest test_tadf_rate_table_labels.py
 pytest test_tadf_refreeze.py
 pytest test_tadf_saddle_check.py
 pytest test_tadf_walk_surface.py
+pytest test_text_names_resolve.py
 pytest test_thc_metallic_frequency_grid.py
 pytest test_time_frequency_grid.py
 script test_uhf_mp2_relaxed_finite_field.py
@@ -294,6 +298,7 @@ pytest test_gw_entry_points_read_numerics.py
 pytest test_hessian_cache.py
 pytest test_isdf_builders_read_numerics.py
 pytest test_marcus_lambda_refusal.py
+pytest test_numerical_flags.py
 pytest test_numerics.py
 pytest test_numerics_not_in_signatures.py
 pytest test_one_degeneracy_tolerance.py
@@ -409,7 +414,7 @@ pytest test_generated_runtime_refusals.py
 pytest test_generated_runtime_flags.py
 # checkpoint restart of the solvation loop (HF, MP2, ADC(2)): 19 s on the workstation
 pytest test_solvation_loop_checkpoint.py
-pytest test_adcfold_r2_refusals.py
+pytest test_adc_fold_refusals.py
 pytest test_ao_collocation_linear_dependence.py
 pytest test_cd_root_beside_an_orbital_energy.py
 pytest test_chain_numerical_flags.py
@@ -427,3 +432,8 @@ pytest test_vibrational_modes.py
 pytest test_davidson_flags_reach_records.py
 pytest test_photophysics_walk_again.py
 pytest test_unhooked_flags_recorded.py
+pytest test_isr_operator.py
+pytest test_nondyson_restricted.py
+pytest test_qp_scan_weight_sum.py
+pytest test_isdf_fit_ranks.py
+pytest test_solvated_ground_surface.py

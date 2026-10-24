@@ -97,10 +97,13 @@ not assemble the force it does not need.
 
 Every surface derives from one abstract class,
 `PotentialEnergySurface` in `src/gradients/surface.py`: it gives the total
-energy and gradient at a geometry, its mean field, a label, and `refreeze`
-(see [properties](properties.md)). A surface also declares the further
-ingredients it provides (its excitation energy, every excited state solved
-at a geometry, ...; `INGREDIENTS` in the same module lists them). A property
+energy and gradient at a geometry, its mean field, a label, `refreeze`
+(see [properties](properties.md)) and `identity()`, the record of what the
+surface computes, which checkpoints and force caches are stamped with. A
+surface also declares the further ingredients it provides (its excitation
+energy, every excited state solved at a geometry, ...): its class attribute
+`INGREDIENTS` names them, and `INGREDIENT_DOCS` in the same module lists
+every ingredient a surface may provide. A property
 asks for the ingredients it needs, so it works with any surface that
 provides them, whatever method is behind it, and a surface that lacks one is
 refused at the call with `MissingIngredient`, naming what is missing.

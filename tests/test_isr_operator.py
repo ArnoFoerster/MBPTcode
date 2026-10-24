@@ -24,7 +24,7 @@ from src.SingleReference.ADC.adc_order_rule import block_order
 from src.SingleReference.ADC.isr_assembly import isr_effective_blocks
 from src.SingleReference.ADC.isr_operator import OperatorISR
 from src.SingleReference.ADC.nondyson_isr import MAX_NONDYSON_ORDER, NonDysonISR
-from tests.generated_runtime import requires_runtime
+from tests.generated_runtime import requires_mp_numerators, requires_runtime
 from tests.test_nondyson_adc import _spinorb
 
 TOL = 1e-12
@@ -86,6 +86,7 @@ def test_synthetic_series(dense_max):
 
 
 @requires_runtime(MAX_NONDYSON_ORDER)
+@requires_mp_numerators(MAX_NONDYSON_ORDER)
 @pytest.mark.parametrize('atom', ['Li 0 0 0; H 0 0 1.6', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0'])
 @pytest.mark.parametrize('sector', ['IP', 'EA'])
 @pytest.mark.parametrize('dense_max', NONDYSON_DENSE_MAX)

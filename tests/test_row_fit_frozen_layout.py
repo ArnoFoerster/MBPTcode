@@ -46,7 +46,7 @@ def test_the_row_fit_keeps_the_reference_pairs_at_a_displaced_geometry():
                                             layout={'sliced': True}))
     chain = RPAGroundStateChain(mol, _rhf, factorization=fac)
     m = _displaced(mol, 2, 1, 0.1)
-    here = separable_ri.test_set_layout(m, fac.coords(m))
+    here = separable_ri.fit_test_set_layout(m, fac.coords(m))
     # the case is only a test if the geometry's own screen differs
     assert len(here[0]) != len(fac.layout[0])
     mf = chain.mean_field(m)[1]

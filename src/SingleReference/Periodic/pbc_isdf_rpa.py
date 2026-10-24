@@ -24,24 +24,26 @@ with
 so the conjugate sits on the FIRST index. Pi is Hermitian either way, which is
 exactly why getting it backwards would not announce itself.
 
-Three routes to the same Pi, each validating the next:
+Three routes to the same Pi, each validating the next, all on the
+occupation-weighted transition space of `pbc_occupations` (a gap is its
+integer-occupation case):
 
-  * `polarizability_q_frequency` -- the definition, O(Nk N_mu^2 n_o n_v) per
+  * `polarizability_q_frequency` -- the definition, O(Nk N_mu^2 n_pairs) per
     (q, w). No factorization exploited, no time grid, nothing to converge. It
     exists to be right, not to be fast, and it is the reference the other two
     are held to.
-  * `polarizability_tau` -- the cubic route. In imaginary time the ov sum
-    factorizes into an occupied and a virtual Green's function at the
+  * `polarizability_tau` -- the cubic route. In imaginary time the pair sum
+    factorizes into a hole and a particle Green's function at the
     interpolation points and Pi is their elementwise product,
     Pi^q(tau) = sum_k Go^k(tau) * Gv^{k+q}(tau).
   * `polarizability_tau_all_q_fft` -- the same, with the k-sum done as an FFT
     over the mesh, O(Nk ln Nk) instead of O(Nk^2) for the whole q-set. This is
     the only genuinely new algorithmic step on the consumer side.
 
-GAPPED SYSTEMS ONLY. Every route here splits orbitals with a single integer
-`nocc` applied at every k-point. `require_integer_occupation` refuses anything
-else rather than returning a plausible wrong number -- see its docstring for
-why no pointwise test can catch the metallic case.
+The time route at T = 0 (a minimax half-line grid) holds for integer
+occupations only; `require_integer_occupation` refuses anything else there
+rather than returning a plausible wrong number. A metal takes a bosonic IR
+grid at its temperature.
 """
 import hashlib
 import json
@@ -50,7 +52,8 @@ import os
 import numpy as np
 
 from src.Base.factorization.separable_ri import write_json_atomic
-from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.numerics.constants import PBC_OCCUPATION_THRESHOLD, PBC_RPA_NFREQ
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.matsubara import beta_from_mf, thermal_e_min
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
@@ -59,32 +62,24 @@ from src.SingleReference.Periodic.pbc_isdf import (build_isdf_kpts,
                                                    resolve_grid,
                                                    resolve_npoints)
 from src.SingleReference.Periodic.pbc_occupations import (
-    DEFAULT_OCCUPATION_THRESHOLD, is_integer_occupation,
+    is_integer_occupation,
     split_transition_window, transition_pairs, transition_window)
-from src.SingleReference.Periodic.pbc_rpa import rpa_log_determinant
+from src.SingleReference.LinearResponse.space_time import dielectric_log_determinant
 from src.SingleReference.Periodic.pbc_rpa_damping import kmesh_from_kpts
 
 
 def require_integer_occupation(mo_occ, who='THC-RPA'):
-    """Refuse a partially occupied or ragged k-point occupation.
+    """Refuse a partially occupied or ragged k-point occupation, and return
+    the one occupied count.
 
-    EVERYTHING in this module splits orbitals with ONE integer `nocc` applied
-    at every k-point -- `X[k][:, :nocc]` / `X[k][:, nocc:]` in the pair-density
-    factor, and the same split in `green_functions_tau`. For a gapped
-    insulator that is exact. For a metal it is simply wrong, and, worse, wrong
-    without complaining: measured per-k occupied counts are [8, 9, 11] for a
-    Li monolayer (gth-dzvp, 3x3, sigma = 0.02) and
-    [3, 4, 4, 6, 4, 6, 6, 8] for bulk BCC Li at 2x2x2, so a single count taken
-    from k-point 0 is wrong at every k but one.
-
-    The correct object weights each transition by (f_i - f_a) over a RAGGED,
-    per-k pair list rather than slicing a rectangle -- `pbc_occupations`
-    has that machinery, and folding sqrt(f_i - f_a) into the pair factor
-    leaves Pi's formula, its conjugation convention and the k -> R FFT
-    identity untouched. That is the occupation-weighted section further down
-    (`polarizability_q_frequency_occ` and its tau counterpart); the integer
-    routes here do not do it, and this guard makes calling them on a metal
-    loud instead of silent.
+    The T = 0 routes (the minimax time grid here, `pbc_isdf_gw.sigma_c_diag_thc`)
+    use ONE integer `nocc` applied at every k-point for their grid window and
+    the HOMO/LUMO split. For a gapped insulator that is exact. For a metal it is
+    simply wrong, and, worse, wrong without complaining: measured per-k
+    occupied counts are [8, 9, 11] for a Li monolayer (gth-dzvp, 3x3,
+    sigma = 0.02) and [3, 4, 4, 6, 4, 6, 6, 8] for bulk BCC Li at 2x2x2, so a
+    single count taken from k-point 0 is wrong at every k but one. A metal
+    takes the finite-temperature grids instead.
 
     Why a guard and not a warning: the failure is a CONTINUITY failure across
     a parameter, not a pointwise one. Every pointwise check -- reduction to
@@ -111,57 +106,6 @@ def require_integer_occupation(mo_occ, who='THC-RPA'):
             f"filling is not k-independent, so one nocc cannot describe every "
             f"k-point. Same remedy as above.")
     return int(counts[0])
-
-
-def _energies(mo_energy, nocc):
-    e = np.asarray(mo_energy)
-    return e[:, :nocc], e[:, nocc:]
-
-
-def chemical_potential(mo_energy, nocc):
-    """Midgap, used only to keep the imaginary-time exponentials bounded."""
-    e_o, e_v = _energies(mo_energy, nocc)
-    return 0.5 * (e_o.max() + e_v.min())
-
-
-def polarizability_q_frequency(X, mo_energy, nocc, kplus, q, freqs):
-    """Pi^q(i.omega) by the definition, shape (nfreq, npts, npts).
-
-    kplus[q, k] = index of k + q (pbc_integrals.get_momentum_transfer_map).
-    """
-    nkpts = len(X)
-    npts = X[0].shape[0]
-    e = np.asarray(mo_energy)
-    Pi = np.zeros((len(freqs), npts, npts), dtype=np.complex128)
-    for k in range(nkpts):
-        kq = kplus[q, k]
-        B = np.einsum('mi,ma->mia', X[k][:, :nocc].conj(), X[kq][:, nocc:],
-                      optimize=True).reshape(npts, -1)
-        eia = (e[k][:nocc, None] - e[kq][None, nocc:]).ravel()      # < 0
-        for w, omega in enumerate(freqs):
-            chi = 2.0 * eia / (omega ** 2 + eia ** 2)
-            Pi[w] += (2.0 / nkpts) * (B.conj() * chi) @ B.T
-    return Pi
-
-
-def green_functions_tau(X, mo_energy, nocc, tau, mu):
-    """(Go, Gv) at one imaginary time, each (nkpts, npts, npts).
-
-        Go^k_{nu mu} = sum_{i occ}  X^k_{i nu}  X^{k*}_{i mu} e^{+(eps_i - mu) tau}
-        Gv^k_{nu mu} = sum_{a virt} X^{k*}_{a nu} X^k_{a mu}  e^{-(eps_a - mu) tau}
-
-    Both exponents are negative for tau > 0, which is the only reason mu is
-    here.
-    """
-    e = np.asarray(mo_energy)
-    Go, Gv = [], []
-    for k in range(len(X)):
-        Xo, Xv = X[k][:, :nocc], X[k][:, nocc:]
-        wo = np.exp((e[k][:nocc] - mu) * tau)
-        wv = np.exp(-(e[k][nocc:] - mu) * tau)
-        Go.append((Xo * wo) @ Xo.conj().T)
-        Gv.append((Xv.conj() * wv) @ Xv.T)
-    return np.asarray(Go), np.asarray(Gv)
 
 
 def polarizability_tau(Go, Gv, kplus, q):
@@ -194,29 +138,6 @@ def polarizability_tau_all_q_fft(Go, Gv, kmesh):
     return (np.fft.fftn(h, axes=axes) / nk).reshape(nk, *Go.shape[1:])
 
 
-def polarizability_all_q_imaginary_time(X, mo_energy, nocc, grid, kmesh,
-                                        mu=None, kplus=None, use_fft=True):
-    """Pi^q(i.omega) for every q, shape (nkpts, nfreq, npts, npts).
-
-    The tau -> omega map is the grid's cosine transform, and the leading -2
-    is the sign of chi_ia = -2 Delta/(Delta^2 + w^2) against the transform of
-    e^{-Delta tau} = +2 Delta/(Delta^2 + w^2) -- the same convention as
-    LinearResponse/space_time.py, kept identical on purpose.
-    """
-    mu = chemical_potential(mo_energy, nocc) if mu is None else mu
-    nk, npts = len(X), X[0].shape[0]
-    Pi = np.zeros((nk, grid.nfreq, npts, npts), dtype=np.complex128)
-    for t, tau in enumerate(grid.tau_points):
-        Go, Gv = green_functions_tau(X, mo_energy, nocc, tau, mu)
-        if use_fft:
-            Pi_tau = polarizability_tau_all_q_fft(Go, Gv, kmesh)
-        else:
-            Pi_tau = np.asarray([polarizability_tau(Go, Gv, kplus, q)
-                                 for q in range(nk)])
-        Pi += (-2.0 / nk) * grid.cosft_wt[None, :, t, None, None] * Pi_tau[:, None]
-    return Pi
-
-
 def rpa_ecorr_from_pi(Pi_all_q, V, omega_weights, flags=None):
     """E_c = (1/Nq) sum_q (1/2pi) int dw [logdet(1 - V^q Pi^q) + Tr(V^q Pi^q)].
 
@@ -236,14 +157,14 @@ def ecorr_q_from_pi(Pi_block, Vq, weights_block, q=0, flags=None):
     Pulled out of `rpa_ecorr_from_pi` so the streaming route can call it on a
     BLOCK of frequencies and then discard them; the all-q function is a thin
     loop over this. A det(1 - V Pi) that is not positive is warned and
-    flagged, not refused (`pbc_rpa.rpa_log_determinant`; w counts within the
+    flagged, not refused (`space_time.dielectric_log_determinant`; w counts within the
     block).
     """
     eye = np.eye(Vq.shape[0])
     acc = 0.0
     for w, Pi in enumerate(Pi_block):
         M = Vq @ Pi
-        logdet = rpa_log_determinant(eye - M, q, w, flags)
+        logdet = dielectric_log_determinant(eye - M, (int(q), int(w)), flags)
         acc += weights_block[w] * (logdet.real + np.trace(M).real)
     return acc / (2.0 * np.pi)
 
@@ -300,7 +221,7 @@ def _run_signature(npoints, freqs, mesh, nkpts, mo_energy, mo_occ, coulG_fn):
     return h.hexdigest()[:32]
 
 
-def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
+def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=PBC_RPA_NFREQ,
                             freq_block=None, q_list=None, mesh=None,
                             ke_cutoff=None, coulG_fn=None, threshold=None,
                             checkpoint_dir=None, return_per_q=False,
@@ -343,7 +264,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
     # grid; beta=0 forces the old unfloored grid.
     if beta is None:
         beta = beta_from_mf(mf)
-    freqs, wts, _, _ = frequency_grid_occ(mo_energy, mo_occ, nw,
+    freqs, wts, _, _ = frequency_grid(mo_energy, mo_occ, nw,
                                           beta=beta, threshold=threshold)
     nq = len(kpts)
     q_list = list(range(nq)) if q_list is None else list(q_list)
@@ -385,7 +306,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
             acc = 0.0
             for lo in range(0, nw, blk):                 # omega block
                 hi = min(lo + blk, nw)
-                Pi = polarizability_q_frequency_occ(X, mo_energy, mo_occ,
+                Pi = polarizability_q_frequency(X, mo_energy, mo_occ,
                                                     kplus, q, freqs[lo:hi],
                                                     **kw)
                 acc += ecorr_q_from_pi(Pi, Vq, wts[lo:hi], q=q, flags=flags)
@@ -401,7 +322,7 @@ def rpa_ecorr_thc_streaming(cell, mf, npoints=None, alpha=None, nw=32,
     return e_c
 
 
-def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
+def rpa_ecorr_thc(cell, mf, npoints=None, nw=PBC_RPA_NFREQ, kmesh=None, mesh=None,
                   coulG_fn=None, route='frequency', ntau=None, beta=None,
                   threshold=None, ke_cutoff=None, alpha=None):
     """dRPA correlation energy from a converged KRHF/KRKS, through THC.
@@ -452,22 +373,22 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
         # for the T = 0 grid.
         if beta is None:
             beta = beta_from_mf(mf)
-        freqs, wts, e_min, e_max = frequency_grid_occ(
+        freqs, wts, e_min, e_max = frequency_grid(
             mo_energy, mo_occ, nw, beta=beta, threshold=threshold)
-        Pi = [polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q,
+        Pi = [polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q,
                                              freqs, **kw)
               for q in range(len(kpts))]
     elif route == 'time':
         if beta is not None:
             e_min, e_max = transition_window(mo_energy, mo_occ, **kw)
             grid = TimeFrequencyGrid.ir(beta, 1.5 * e_max, statistics='boson')
-            Pi = polarizability_all_q_imaginary_time_occ(
+            Pi = polarizability_all_q_imaginary_time(
                 X, mo_energy, mo_occ, grid, kmesh, kplus=kplus)
         else:
             nocc = require_integer_occupation(mo_occ, who="rpa_ecorr_thc(route='time')")
             grid = TimeFrequencyGrid.minimax(
                 ntau or 18, *split_transition_window(mo_energy, nocc))
-            Pi = polarizability_all_q_imaginary_time(X, mo_energy, nocc, grid,
+            Pi = polarizability_all_q_imaginary_time(X, mo_energy, mo_occ, grid,
                                                     kmesh, kplus=kplus)
         freqs, wts = grid.omega_points, grid.omega_weights
     else:
@@ -480,13 +401,12 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
 
 
 # ---------------------------------------------------------------------------
-# Occupation-weighted response (metals)
+# The occupation-weighted response
 # ---------------------------------------------------------------------------
 #
-# The integer routes above split orbitals with one nocc at every k-point. This
-# section replaces that with the ragged, occupation-weighted transition space
-# of `pbc_occupations`, which is correct for a metal and reduces to the
-# integer answer for a gap.
+# Every route here uses the ragged, occupation-weighted transition space of
+# `pbc_occupations`, which is correct for a metal and gives the integer answer
+# for a gap.
 #
 # THE WEIGHT IS NOT THE SAME OBJECT IN THE TWO DOMAINS, and conflating them is
 # a 1e12 error, not a factor of two. Measured on a 4-level Fermi-Dirac model
@@ -512,16 +432,16 @@ def rpa_ecorr_thc(cell, mf, npoints=None, nw=32, kmesh=None, mesh=None,
 # thermal_e_min fixes the grid's SCALE; only the beta-periodic structure fixes
 # its EXTENT and its WEIGHT.
 #
-# THE FACTOR OF TWO. The integer routes carry (2/N_k). That 2 is NOT a spin
-# factor -- it is the occupation difference itself, f_m - f_n = 2 - 0 for a
-# restricted gapped calculation. Folding sqrt(f_m - f_n) into the pair factor
-# therefore moves it out of the prefactor, which becomes (1/N_k). Derived from
-# the integer limit here; the GDF route reaches the same displacement
-# independently by matching spectral W against (1 - Pi0)^-1.
+# THE FACTOR OF TWO. An integer-occupation Pi carries (2/N_k). That 2 is NOT a
+# spin factor -- it is the occupation difference itself, f_m - f_n = 2 - 0 for
+# a restricted gapped calculation. Folding sqrt(f_m - f_n) into the pair factor
+# therefore moves it out of the prefactor, which becomes (1/N_k). The GDF route
+# reaches the same displacement independently by matching spectral W against
+# (1 - Pi0)^-1.
 
 
 def pair_factor_q(X, mo_energy, mo_occ, kplus, q, k,
-                  threshold=DEFAULT_OCCUPATION_THRESHOLD):
+                  threshold=PBC_OCCUPATION_THRESHOLD):
     """(B, gap) for one (q, k): B[mu, t] = sqrt(f_m - f_n) X^{k*}_{m mu} X^{k+q}_{n mu}.
 
     Folding sqrt(f_m - f_n) into the pair factor is what keeps the weighting
@@ -542,13 +462,12 @@ def pair_factor_q(X, mo_energy, mo_occ, kplus, q, k,
     return B, gap
 
 
-def polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q, freqs,
-                                   threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Pi^q(i.omega), occupation-weighted. Correct for a metal AND for a gap.
+def polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q, freqs,
+                                   threshold=PBC_OCCUPATION_THRESHOLD):
+    """Pi^q(i.omega) by the definition, shape (nfreq, npts, npts),
+    occupation-weighted. Correct for a metal AND for a gap.
 
-    Reduces to `polarizability_q_frequency` exactly when the occupations are
-    integer and k-independent -- that is the T -> 0 limit, and it is asserted
-    rather than assumed (tests/test_pbc_isdf_rpa.py).
+    kplus[q, k] = index of k + q (pbc_integrals.get_momentum_transfer_map).
     """
     nkpts, npts = len(X), X[0].shape[0]
     Pi = np.zeros((len(freqs), npts, npts), dtype=np.complex128)
@@ -562,7 +481,7 @@ def polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q, freqs,
     return Pi
 
 
-def frequency_grid_occ(mo_energy, mo_occ, nw, beta=None, threshold=None):
+def frequency_grid(mo_energy, mo_occ, nw, beta=None, threshold=None):
     """Gauss-Legendre frequency grid scaled by the occupation-weighted window.
 
     The scale is floored at the first Matsubara frequency, pi/beta, whenever
@@ -579,20 +498,19 @@ def frequency_grid_occ(mo_energy, mo_occ, nw, beta=None, threshold=None):
     e_min, e_max = transition_window(mo_energy, mo_occ, **kw)
     if beta is not None and beta > 0:
         e_min = thermal_e_min(beta, e_min)
-    freqs, wts = gauss_legendre_grid(nw, w0=0.5 * e_min)
+    freqs, wts = gauss_legendre_grid(nw, w0=gap_scaled_w0(gap=e_min))
     return freqs, wts, e_min, e_max
 
 
-def green_functions_tau_occ(X, mo_energy, mo_occ, tau, mu):
+def green_functions_tau(X, mo_energy, mo_occ, tau, mu):
     """(Go, Gv) with occupation weights, summed over ALL orbitals.
 
         Go^k_{nu mu}(tau) = sum_m      f_m  X^k_{m nu}  X^{k*}_{m mu} e^{+(eps_m - mu) tau}
         Gv^k_{nu mu}(tau) = sum_n (2 - f_n) X^{k*}_{n nu} X^k_{n mu}  e^{-(eps_n - mu) tau}
 
     A SINGLE product of these is the correct imaginary-time object -- see the
-    section note. Both sums run over every orbital, not over a slice, which is
-    the whole difference from `green_functions_tau` and also why the result is
-    only bounded on [0, beta]: for a state well above mu, f_m ~ e^{-beta(eps_m-mu)}
+    section note. Both sums run over every orbital, not over an occupied or a
+    virtual slice, which is why the result is only bounded on [0, beta]: for a state well above mu, f_m ~ e^{-beta(eps_m-mu)}
     so the summand goes as e^{(eps_m - mu)(tau - beta)}.
 
     FORMED IN LOG SPACE, which is not optional. The product f_m e^{(eps_m-mu)tau}
@@ -617,7 +535,7 @@ def green_functions_tau_occ(X, mo_energy, mo_occ, tau, mu):
     return np.asarray(Go), np.asarray(Gv)
 
 
-def polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ, grid, kmesh,
+def polarizability_all_q_imaginary_time(X, mo_energy, mo_occ, grid, kmesh,
                                             mu=None, kplus=None, use_fft=True,
                                             symmetrize=False):
     """Pi^q(i.omega) for every q, occupation-weighted, via imaginary time.
@@ -651,25 +569,33 @@ def polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ, grid, kmesh,
     which is the check that this is a projection and not a fudge
     (`symmetrize=True` below).
     """
-    mu = chemical_potential_occ(mo_energy, mo_occ) if mu is None else mu
-    if grid.method != 'IR' or grid.meta.get('statistics') != 'boson':
+    mu = chemical_potential(mo_energy, mo_occ) if mu is None else mu
+    nk, npts = len(X), X[0].shape[0]
+    bosonic = grid.method == 'IR' and grid.meta.get('statistics') == 'boson'
+    if bosonic:
+        beta = grid.meta['beta']
+        taus = [(tau, beta - tau) if symmetrize else (tau,)
+                for tau in grid.tau_points]
+        scale = -0.5 / nk if symmetrize else -1.0 / nk
+    elif grid.method == 'minimax' and not symmetrize and is_integer_occupation(mo_occ):
+        # T = 0 half line: Go and Gv are twice the occupied and the virtual
+        # sums, and -2/Nk Go_occ * Gv_virt is the zero-temperature product
+        taus = [(tau,) for tau in grid.tau_points]
+        scale = -0.5 / nk
+    else:
         raise ValueError(
             f"occupation-weighted imaginary time needs a bosonic IR grid; got "
             f"method={grid.method!r}, statistics={grid.meta.get('statistics')!r}. "
-            f"A T = 0 half-line grid (minimax) is wrong here for three separate "
-            f"reasons -- see this function's docstring. Build it with "
+            f"A T = 0 half-line grid (minimax) holds only for integer "
+            f"occupations and is wrong for a metal for three separate reasons "
+            f"-- see this function's docstring. Build it with "
             f"TimeFrequencyGrid.ir(beta, omega_max, statistics='boson').")
 
-    beta = grid.meta['beta']
-    nk, npts = len(X), X[0].shape[0]
     Pi = np.zeros((nk, grid.nfreq, npts, npts), dtype=np.complex128)
-    taus = [(tau, beta - tau) if symmetrize else (tau,)
-            for tau in grid.tau_points]
-    scale = -0.5 / nk if symmetrize else -1.0 / nk
     for t, ts in enumerate(taus):
         P = None
         for tau in ts:
-            Go, Gv = green_functions_tau_occ(X, mo_energy, mo_occ, tau, mu)
+            Go, Gv = green_functions_tau(X, mo_energy, mo_occ, tau, mu)
             Pt = (polarizability_tau_all_q_fft(Go, Gv, kmesh) if use_fft else
                   np.asarray([polarizability_tau(Go, Gv, kplus, q)
                               for q in range(nk)]))
@@ -678,7 +604,7 @@ def polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ, grid, kmesh,
     return Pi
 
 
-def chemical_potential_occ(mo_energy, mo_occ, threshold=0.5):
+def chemical_potential(mo_energy, mo_occ, threshold=0.5):
     """Midpoint of the partially occupied band, for the tau exponentials only.
 
     Uses the occupations rather than an integer split, so it is defined for a

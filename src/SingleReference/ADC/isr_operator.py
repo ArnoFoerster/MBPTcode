@@ -22,7 +22,7 @@ families are {class: vector series}; the same series arithmetic runs on matrices
 dense_max (matrix elements) trades memory for the recursion: raw blocks within
 it are held as arrays, and the lowest classes whose diagonal blocks fit get
 their effective states eff_c precomputed as dense series, so the Gram-Schmidt
-and Loewdin series of those classes are no longer re-run inside every
+and Loewdin series of those classes are not re-run inside every
 application of a higher class. dense_max = 0 keeps everything matrix-free.
 """
 import numpy as np
@@ -220,14 +220,6 @@ class OperatorISR:
         return self._lowdin(c, self._x_adj(c, G, cap), cap)
 
     # ----- the ISR matrix --------------------------------------------------
-    def block_series(self, ci, cj, x):
-        """{m: (block (ci, cj))^(m) x} for m <= top(ci, cj)."""
-        t = self.top[(ci, cj)]
-        if t < 0:
-            return {}
-        HF = self._apply('H', self.eff_fwd(cj, {0: x}, t), t)
-        return {m: y for m, y in self.eff_adj(ci, HF, t).items() if m <= t}
-
     def matvec(self, x):
         x = np.asarray(x, dtype=float).reshape(-1)
         y = np.zeros(self.size)

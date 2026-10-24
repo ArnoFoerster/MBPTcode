@@ -1,7 +1,6 @@
 """The vertical ADC(2) run (`python -m src.SingleReference.ADC.eeADC`,
 eeADC/vertical.py) carries on past an SCF that did not converge, warned and
-flagged (refuse inputs, warn numerics):
-the record's scf.converged is False, each channel's flags and
+flagged (a numerical event is warned about, not refused): the record's scf.converged is False, each channel's flags and
 dEST_flags name 'scf_not_converged'. Water STO-3G, an SCF asked for an
 orbital gradient it cannot reach in its 200 cycles. The module runs from the
 command line.

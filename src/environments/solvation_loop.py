@@ -60,16 +60,16 @@ the structure an emission or an adiabatic energy starts from.
 The loop. q from the state's gas-phase density; then the state in the field of
 q, its relaxed density, the medium's answer; DIIS on q; stop when the largest
 change of a charge and of G are below their tolerances. A loop that reaches
-loop_max_cycle first is a numerical event (refuse
-inputs, warn numerics): it warns (SolvationNotConverged, a RuntimeWarning) and
+loop_max_cycle first is a numerical event (the policy: refuse inputs, warn
+numerics): it warns (SolvationNotConverged, a RuntimeWarning) and
 returns its last cycle -- G at the charges the state was last solved in --
 with converged False and the flag 'solvation_loop_not_converged' in its
 `flags`, beside the state model's own flags of that cycle (info['flags']); a
 force taken on it warns again and is computed there. A state model that
 returns no number (a NaN energy: a root the solve did not return,
 ee_follow.root_missing) stops the loop at once: the result is NaN, converged
-False, with the model's flags and 'solvation_loop_stopped',
-and its force is NaN; a walk rejects that step
+False, with the model's flags and 'solvation_loop_stopped', and its force is
+NaN; a walk rejects that step
 (properties.optimize.NonFiniteEvaluation). A state model with a linear-response term (its lr_environment) must read
 the field's own transition_environment(), the same object: the loop refuses
 any other (another cavity or eps_inf would answer the transition density).

@@ -31,11 +31,9 @@ Gated here, on water/cc-pVDZ BSE@HF at 2, 3 and 8 simulated ranks:
     that one repair on exactly that rank -- the block action handed the
     perturbed batch directly, and a whole solve with the perturbation planted
     in the driver's own buffer in one iteration;
-  * the probe's Lanczos, which replaces ARPACK over ranks (eigsh holds one
-    process-wide lock across its whole iteration, matvecs included, so rank
-    threads cannot all be inside it), meets dense eigenvalues through thick
-    restarts, a degenerate lowest one included, and ARPACK's value and sign
-    certificate on the BSE;
+  * the probe, the one symmetric Davidson serially and over ranks alike,
+    meets dense eigenvalues on model spectra, a degenerate lowest one
+    included, and the serial value and sign certificate on the BSE;
   * kernels called with no comm inside a `distributed` region follow it, and
     the DF route, whose action is not divided, runs whole on every rank:
     `solve_bse_df` in a region at 2 and 3 ranks returns rank 0's roots and
@@ -71,8 +69,8 @@ from src.SingleReference.LinearResponse.space_time import static_screening_matri
 from src.SingleReference.BSE.solve import (
     isdf_bse_factors, solve_bse_df, solve_bse_isdf)
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
-from src.SingleReference.LinearResponse.probe import (_lanczos_lowest,
-                                                      lowest_amb_eigenvalue)
+from src.SingleReference.LinearResponse.probe import (lowest_amb_eigenvalue,
+                                                      lowest_amb_from_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.test_distributed_fit_mpi import relative, roots_resolution
 from tests.isdf_test_grid import g1
@@ -87,12 +85,11 @@ SPLIT_TILE = 8
 #: Ha. The row split sums the ranks' partials in rank order instead of inside
 #: one GEMM; measured 9.7e-14 at 2 ranks, 9.5e-14 at 3, 7.6e-14 at 8.
 ROOT_TOL = 1e-11
-#: Ha. The replicated probe's Lanczos against the serial ARPACK value, 6.2e-14
-#: at every size: ARPACK sits 6.6e-14 from the dense eigenvalue, the Lanczos
-#: 3.4e-15.
+#: Ha. The replicated probe against the serial one: the same Davidson on an
+#: action whose row split re-associates its sums.
 PROBE_TOL = 1e-12
-#: Relative to the largest eigenvalue: the Lanczos against dense eigh on model
-#: spectra, which it meets at 7.6e-15 of max|lambda| = 30.
+#: Relative to the largest eigenvalue: the probe against dense eigh on model
+#: spectra, its residual tol^2 / gap far below this.
 DENSE_REL = 1e-13
 #: The action application the solve-level perturbation is planted in: the
 #: second iteration's X block, past the guess.
@@ -313,30 +310,31 @@ def test_one_ulp_planted_in_one_iteration_moves_no_bit(water, ranks,
 
 @pytest.mark.parametrize('n,degenerate,k', [(150, False, 1), (150, False, 3),
                                             (150, True, 1), (400, False, 1),
-                                            (400, False, 3)])
-def test_the_lanczos_meets_dense_eigenvalues(n, degenerate, k):
-    """Model spectra wider than one Lanczos basis, so the thick restart runs;
-    a doubly degenerate lowest eigenvalue among them, asked for alone: one
-    start vector spans one direction of a degenerate eigenspace, so a second
-    copy of it is not a Krylov method's to find, ARPACK's included."""
+                                            (400, False, 2)])
+def test_the_probe_meets_dense_eigenvalues(n, degenerate, k):
+    """Model spectra for (A - B) = a, B = 0, as a block action on n pairs
+    (one occupied row), a doubly degenerate lowest eigenvalue among them:
+    the k lowest come back to DENSE_REL of the largest."""
     rng = np.random.default_rng(n + k)
     q, _ = np.linalg.qr(rng.normal(size=(n, n)))
     lam = np.sort(rng.uniform(0.1, 30.0, n))
     if degenerate:
         lam[1] = lam[0]
     a = (q * lam) @ q.T
-    theta, x = _lanczos_lowest(lambda v: a @ v, np.ones(n), k,
-                               np.sqrt(np.finfo(float).eps))
-    assert theta.shape == (k,) and x.shape == (k, n)
+
+    def apply_AB(Z):
+        Z = Z.reshape(Z.shape[0], -1)
+        return (Z @ a).reshape(Z.shape[0], 1, n), np.zeros((Z.shape[0], 1, n))
+    theta = lowest_amb_from_action(apply_AB, np.diag(a).reshape(1, n), k=k,
+                                   tol=1e-7)
+    assert theta.shape == (k,)
     assert np.abs(theta - lam[:k]).max() <= DENSE_REL * lam.max()
-    resid = np.linalg.norm(x @ a - theta[:, None] * x, axis=1)
-    assert np.all(resid <= np.sqrt(np.finfo(float).eps) * np.abs(theta))
 
 
 @pytest.mark.parametrize('size', [2, 3])
-def test_the_replicated_probe_proves_arpacks_sign(water, size):
+def test_the_replicated_probe_proves_the_serial_sign(water, size):
     """The sign-only probe over ranks: the same certificate on every rank,
-    and the value ARPACK's serial probe proves positive."""
+    and the value the serial probe proves positive."""
     w = water
     lr = LinearResponseSolver(w['eps'], spin_mode='restricted')
     ref = lowest_amb_eigenvalue(lr, w['nocc'], 'BSE', w['W_aux'], w['factors'])

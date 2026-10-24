@@ -1,4 +1,4 @@
-"""GATE for the auto-Laplace block-routing DRIVER (Phase 2a) on the U^(4)
+"""GATE for the auto-Laplace block-routing DRIVER on the U^(4)
 rank>=3 family -- sigma_driver._LAP_RANK3_ROUTE + _lap_rank3_stitch, wired into
 _assemble_raw_S(laplace_ntau=...).
 
@@ -84,7 +84,7 @@ def main():
     eps = get_orbital_energies(mf, representation='spatial')
     ga, gb, gab = get_antisymmetrized_spin_block_eri(mol, mf)
     r = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, mol.nelectron // 2)
-    A = r._amps_order(max_order=4)
+    A = r.amps_order(max_order=4)
     print(f"\nH4/sto-3g norb={r.norb}")
     mx3 = max(float(np.abs(v).max()) for v in A['T3_2'].values())
     mx4 = max(float(np.abs(v).max()) for v in A['T4_2'].values())
@@ -95,8 +95,8 @@ def main():
     def matz(name, kind, amps):
         res = _resolve_struct(name, '2h1p', kind)
         p = f'{kind}{res[1]}_2h1p'
-        return r._stitch_k1r(res[0], f'{p}_occ_{name}', f'{p}_vir_{name}', 'IP',
-                             {**r._rargs, **amps})
+        return r.stitch_k1r(res[0], f'{p}_occ_{name}', f'{p}_vir_{name}', 'IP',
+                             {**r.rargs, **amps})
 
     # (name, kind, l_ord, t_ord, materialized amps for that assignment)
     cases = [

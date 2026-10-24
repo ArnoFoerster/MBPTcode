@@ -1,12 +1,46 @@
+"""The Lehmann self-energy of a Casida solution: GW and its vertex corrections
+(GWGammaInf, PSDn), chosen by method name (`METHOD_REGISTRY`)."""
 import numpy as np
 from src.Base.utils.parallel.threads import blas_single_threaded, row_map
 from src.Base.pyscf.pyscf_interface import spin_index
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
-                                         METHOD_REGISTRY, QSGW_BLOCK_ELEMS,
-                                         QSGW_SRG_QUAD_TOL,
+                                         QSGW_BLOCK_ELEMS, QSGW_SRG_QUAD_TOL,
                                          UHF_PSD_CHARGE_AMPLITUDE_MIN)
+
+#: The self-energy methods by name: the vertex each applies, whether its
+#: screening is forced to the RPA Casida spectrum, and whether it needs the
+#: vertex amplitudes and the triplet channel.
+METHOD_REGISTRY = {
+    'GW':         {'vertex_mode': 'GW',         'force_rpa_casida': True,  'needs_vertex': False, 'needs_triplet': False},
+    'GW@RPA':     {'vertex_mode': 'GW',         'force_rpa_casida': True,  'needs_vertex': False, 'needs_triplet': False},
+    'GW@BSE':     {'vertex_mode': 'GW',         'force_rpa_casida': False, 'needs_vertex': False, 'needs_triplet': False},
+    'GW@TDHF':    {'vertex_mode': 'GW',         'force_rpa_casida': False, 'needs_vertex': False, 'needs_triplet': False},
+    'GWGammaInf': {'vertex_mode': 'GWGammaInf', 'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD1':       {'vertex_mode': 'PSD1',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD2':       {'vertex_mode': 'PSD2',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD4':       {'vertex_mode': 'PSD4',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD5':       {'vertex_mode': 'PSD5',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD6':       {'vertex_mode': 'PSD6',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD7':       {'vertex_mode': 'PSD7',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD8':       {'vertex_mode': 'PSD8',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD9':       {'vertex_mode': 'PSD9',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+}
+
+
+def get_method_info(method):
+    """
+    Looks up `method` (case-insensitive) in METHOD_REGISTRY
+    """
+    key = method.upper()
+    for registered_key, info in METHOD_REGISTRY.items():
+        if registered_key.upper() == key:
+            return info
+    raise ValueError(
+        f"Unknown self-energy method '{method}'. Available: {sorted(METHOD_REGISTRY)}"
+    )
+
 
 # The registry's vertex modes; 'PSD3' is absent from it, unimplemented, and
 # raises ValueError rather than silently falling back to plain GW.
@@ -83,7 +117,6 @@ def _combine_vertex(mode, sums, prefactor, scales, triplet):
     if triplet == 'unrestricted':
         return k * val + w_unrestricted * s_t
     return k * val + w_restricted * ((0.5 * prefactor) * s_t)
-
 
 
 def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
@@ -390,6 +423,9 @@ class SelfEnergySolver(AmplitudeGenerator):
         chiXYa, chiXYb: (nexciton, norb, nmo). The modes without a triplet-exciton
         sum; unrestricted (one spin channel's amplitudes, nocc and eigenvalues)
         GW and GWGammaInf only.
+
+        Read by the tests alone: the dense matrix is the oracle of the static
+        self-energy builders.
         """
         _require_vertex_inputs(vertex_mode, chiXYb)
         if vertex_mode in TRIPLET_VERTEX_MODES:
@@ -570,6 +606,8 @@ class SelfEnergySolver(AmplitudeGenerator):
         """Vectorized batch counterpart to calculate_self_energy: Sigma_pp(freq[p]) for every p at once (freq is length-norb).
 
         Restricted spin and the vertex modes without a triplet-exciton sum only.
+
+        Read by the tests alone: the vectorized oracle of the per-state scan.
         """
         if self.spin_mode != 'restricted':
             raise NotImplementedError('the batch self-energy is restricted-spin only')

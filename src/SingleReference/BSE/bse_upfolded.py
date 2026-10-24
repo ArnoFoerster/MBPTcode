@@ -64,6 +64,7 @@ from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                             get_two_electron_integrals_chemist)
 from src.Base.step_failed import StepFailed
 from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
+from src.SingleReference.common.eri_blocks import as_blocks, g_slice_df
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 
 SQRT2 = np.sqrt(2.0)
@@ -76,8 +77,8 @@ class UpfoldedBSERefusal(StepFailed):
 
 def _complex_roots(theta, imag, imag_tol, scale, X, flags, what):
     """Set the roots whose imaginary part exceeds imag_tol * scale to NaN
-    (value and vector), warn and flag 'upfolded_bse_complex_roots':
-    the dynamical BSE has no real root there, and the
+    (value and vector), warn and flag 'upfolded_bse_complex_roots': the
+    dynamical BSE has no real root there, and the
     real part is not one, so no number is returned in its place."""
     theta = np.array(theta, float)
     bad = np.abs(np.asarray(imag)) > imag_tol * scale
@@ -109,22 +110,22 @@ def _slices(d):
 
 
 def eri_blocks(eri_chemist, no, norb):
-    """The five chemist blocks the equations touch, (pq|rs) ordering."""
-    o, v = slice(0, no), slice(no, norb)
-    return {
-        'ovov': eri_chemist[o, v, o, v],      # (ia|jb) and (kc|ia)
-        'oovv': eri_chemist[o, o, v, v],      # (ij|ab)
-        'ooov': eri_chemist[o, o, o, v],      # (il|kc)
-        'ovvv': eri_chemist[o, v, v, v],      # (kc|ad)
-    }
+    """The four chemist blocks the equations touch, (pq|rs) ordering:
+    (ia|jb) and (kc|ia), (ij|ab), (il|kc) and (kc|ad), read off the route's
+    one block set (`common.eri_blocks`): ooov and ovvv are slices of its
+    (pq|ia)."""
+    b = as_blocks(eri_chemist, no)
+    return {'ovov': b.ovov, 'oovv': b.oovv, 'ooov': b.pqov[:no, :no],
+            'ovvv': b.pqov[no:norb, no:norb].transpose(2, 3, 0, 1)}
 
 
 def df_eri_blocks(B, no, norb):
-    """The same four blocks from a three-index factor, (pq|rs) = sum_P B[P,p,q] B[P,r,s]."""
+    """The same four blocks from a three-index factor, (pq|rs) = sum_P
+    B[P,p,q] B[P,r,s]: `g_slice_df`'s <pr|qs>, transposed."""
     o, v = slice(0, no), slice(no, norb)
 
     def blk(a, b, c, d):
-        return np.einsum('Ppq,Prs->pqrs', B[:, a, b], B[:, c, d], optimize=True)
+        return g_slice_df(B, a, c, b, d).transpose(0, 2, 1, 3)
 
     return {'ovov': blk(o, v, o, v), 'oovv': blk(o, o, v, v),
             'ooov': blk(o, o, o, v), 'ovvv': blk(o, v, v, v)}
@@ -449,8 +450,8 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
     returned as NaN (value and vector), warned about and flagged
     'upfolded_bse_complex_roots': the dynamical BSE has no real root there, so
     no number stands in its place. A loop that ends on max_cycle or on
-    a linearly dependent correction above tol is a numerical event
-    (refuse inputs, warn numerics): its Ritz pairs are
+    a linearly dependent correction above tol is a numerical event (refuse
+    inputs, warn numerics): its Ritz pairs are
     returned with a RuntimeWarning and the flag 'upfolded_bse_not_converged'
     appended to `flags` (a list, when given); refuse_unconverged=True refuses
     instead."""

@@ -6,11 +6,11 @@ modules GenerateRuntime writes on each machine).
 
     solver = ADCSolver(mf, level='adc3', df=True, ...)
     e, Z = solver.solve(static_correction=sc)
-    solver = ADCSolver(mf, level='adc4', pdaggerq=True, ntau=12)
+    solver = ADCSolver(mf, level='adc4', pdaggerq=True, ntau=12,
+                       construction='diagrammatic')
 """
 import inspect
 import math
-import warnings
 import numpy as np
 from itertools import combinations
 
@@ -59,27 +59,26 @@ def _refuse_dense_threshold(threshold, route):
 
 
 # the Davidson residual norm of solve(tol=None), per route: the hand-written
-# operators' and the generated ones' historical defaults
+# operators' and the generated ones' defaults
 HANDWRITTEN_TOL = 1e-6
 GENERATED_TOL = 1e-8
 
 
 class _DysonADCEntry:
     """solve() and the Lanczos spectral solve, shared by both solver classes.
-    A class supplies _solve_generated (pdaggerq=True), _handwritten_operator
+    A class supplies _solve_generated (pdaggerq=True), handwritten_operator
     (aop, diag, nH) and _lanczos_operator (op, diag)."""
 
     def solve(self, static_correction=None, nroots=1, homo_index=None,
               ref_vec=None, tol=None, threshold=5000, verbose=0,
-              method='davidson', omega_range=None, max_cycle=200, conv_tol=None):
+              method='davidson', omega_range=None, max_cycle=200):
         """(e, Z) for the configured route; vectors and the convergence flag
         'conv' on self.last_result. Dense routes return all poles; matrix-free
         routes the nroots root-followed ones (Koopmans guess at homo_index,
         default the HOMO, or ref_vec), at most max_cycle Davidson iterations
         each. tol is the Davidson residual norm (default HANDWRITTEN_TOL or
         GENERATED_TOL by route); an unconverged root or outer omega iteration
-        warns and last_result['conv'] is False. conv_tol is the old name of
-        the hand-written route's tol (deprecated).
+        warns and last_result['conv'] is False.
 
         method='lanczos': matrix-free Lanczos/continued-fraction spectral
         solve instead of Davidson root-following -- needs matrix_free=True
@@ -97,12 +96,6 @@ class _DysonADCEntry:
         if self.nocc is None:
             raise ValueError("solve() needs nocc (constructed without it -- "
                              "from_arrays(nocc=...), or use the mid-level API)")
-        if conv_tol is not None:
-            warnings.warn("solve(conv_tol=) is deprecated: pass tol=, the Davidson "
-                          "residual norm of every route", DeprecationWarning, stacklevel=2)
-            if tol is not None:
-                raise ValueError("pass tol= only (conv_tol is its deprecated name)")
-            tol = conv_tol
         if tol is None:
             tol = GENERATED_TOL if self.pdaggerq else HANDWRITTEN_TOL
         if method == 'lanczos':
@@ -318,7 +311,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
         self.norb = len(self.eps)
         self._cache = {}
 
-    def _require_dense_g(self, what):
+    def require_dense_g(self, what):
         """Raise a clear error when a dense-only code path is entered on a
         g-free (B_spin-only) solver instead of failing with an opaque
         'NoneType is not subscriptable' deep inside an einsum."""
@@ -349,7 +342,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
                 "the generated BuildSuperMatrixADCn / ADCSolverRestricted routes.")
         self._u2_denom_dress = value
 
-    def _g_proxy(self):
+    def g_proxy(self):
         """GProxy wrapping self.g/self.B_spin -- see GProxy's docstring."""
         return GProxy(self.B_spin, self.g)
 
@@ -379,7 +372,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
         d['nH_adc4'] = d['nH'] + n3h2p + n3p2h
         return d
 
-    def _configs_3h2p(self, nocc):
+    def configs_3h2p(self, nocc):
         """3h2p configuration index arrays (i<j<k occ, a<b virt), flattened in
         occ-triple-outer / virt-pair-inner order (mirrors the 2h1p (i<j,a)
         ordering in build_supermatrix). Returns (i, j, k, a, b), each 1D of
@@ -398,7 +391,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
         b = np.tile(pairs[:, 1], ntrip)
         return i, j, k, a, b
 
-    def _configs_3p2h(self, nocc):
+    def configs_3p2h(self, nocc):
         """3p2h configuration index arrays (i<j occ, a<b<c virt), flattened in
         occ-pair-outer / virt-triple-inner order (mirrors the 2p1h (i,a<b)
         ordering in build_supermatrix). Returns (i, j, a, b, c), each 1D of
@@ -418,7 +411,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
         return i, j, a, b, c
 
 
-    def _configs_2h1p(self, nocc):
+    def configs_2h1p(self, nocc):
         """2h1p configuration index arrays (i<j occ, a virt), in the same
         outer-pair/inner-virt order used inline in build_supermatrix."""
         norb = self.norb
@@ -432,7 +425,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
         a = np.tile(virt, npair_o)
         return i, j, a
 
-    def _configs_2p1h(self, nocc):
+    def configs_2p1h(self, nocc):
         """2p1h configuration index arrays (i occ, a<b virt), in the same
         outer-occ/inner-pair order used inline in build_supermatrix."""
         norb = self.norb
@@ -450,7 +443,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
     def _sigma_mod(self):
         return adc_u_sigma_df if self.B_spin is not None else adc_u_sigma_full
 
-    def _u2_denominators(self, nocc):
+    def u2_denominators(self, nocc):
         return adc_u_utils.u2_denominators(self.eps, nocc)
 
     def u1_dressing_shift(self, nocc, t2_ijcd):
@@ -459,15 +452,15 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
     def dressed_t2_amplitudes(self, nocc, u2_denom_dress):
         return adc_u_utils.dressed_t2_amplitudes(self, nocc, u2_denom_dress)
 
-    def _build_matrix_free_ingredients(self, nocc):
+    def matrix_free_ingredients(self, nocc):
         return self._cached(
-            '_build_matrix_free_ingredients', nocc,
+            'matrix_free_ingredients', nocc,
             lambda: adc_u_utils.build_matrix_free_ingredients(self, nocc))
 
-    def _C_2h1p_block(self, nocc, ket_idx, bra_idx=None):
+    def C_2h1p_block(self, nocc, ket_idx, bra_idx=None):
         return adc_u_dense_full.C_2h1p_block(self, nocc, ket_idx, bra_idx)
 
-    def _C_2p1h_block(self, nocc, ket_idx, bra_idx=None):
+    def C_2p1h_block(self, nocc, ket_idx, bra_idx=None):
         return adc_u_dense_full.C_2p1h_block(self, nocc, ket_idx, bra_idx)
 
     def apply_U_2h1p(self, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
@@ -516,9 +509,9 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
                 u2_denom_dress=self._en_channels(),
                 delta_u3_dress=self.delta_u3_dress, construction=self.construction)
             return op.matvec, diag, op.shape[0]
-        return self._handwritten_operator(nocc, static_correction)
+        return self.handwritten_operator(nocc, static_correction)
 
-    def _handwritten_operator(self, nocc, static_correction=None):
+    def handwritten_operator(self, nocc, static_correction=None):
         """(aop, diag, nH) of the hand-written matrix-free route, with the
         EN-dressed T2^(1) threaded when en_dress is set."""
         t2 = None
@@ -639,7 +632,7 @@ class ADCSolverUnrestricted(_DysonADCEntry, NoccCache):
                                                delta_u3_dress=self.delta_u3_dress,
                                                construction=self.construction)
             return op, diag
-        aop, diag, _ = self._handwritten_operator(self.nocc, sc)
+        aop, diag, _ = self.handwritten_operator(self.nocc, sc)
         return aop, diag
 
 
@@ -833,7 +826,7 @@ class ADCSolverRestricted(_DysonADCEntry):
         self.W_chemist = W_chemist
         self.W_aux = W_aux
         self.screen_coupling = screen_coupling
-        self._is_adc2x = (level == 'adc2x')
+        self.is_adc2x = (level == 'adc2x')
         self.pair_route = pair_route
         self.eh_triplet = eh_triplet
         self.eh_kernel = eh_kernel
@@ -857,9 +850,9 @@ class ADCSolverRestricted(_DysonADCEntry):
         eps = get_orbital_energies(mf, representation='spatial')
         B_aa = DFIntegrals.from_scf(mol, mf).B_aa if self.df else None
         # the hand-written DF routes never need dense integrals; the generated
-        # branch needs them at every level EXCEPT the DF matrix-free ADC(3)
-        # with foreign amplitudes, whose blocks all have *_df twins taking the
-        # 3-index B factor instead (norb^4 is 15-115 GB at aug-cc-pVQZ)
+        # branch needs them except on the g-free routes (_generated_is_g_free),
+        # whose blocks and amplitudes all have *_df twins taking the 3-index B
+        # factor instead (norb^4 is 15-115 GB at aug-cc-pVQZ)
         eri = None
         if (self.pdaggerq and not self._generated_is_g_free()) or not self.df:
             eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
@@ -867,11 +860,17 @@ class ADCSolverRestricted(_DysonADCEntry):
 
     def _generated_is_g_free(self):
         """True when the generated branch can run entirely off the DF factor:
-        matrix-free ADC(3) with foreign amplitudes. The MBPT amplitude pool
-        and the EN dressing both read dense g slices, so anything else still
-        needs the 4-index tensors."""
-        return (self.df and self.level == 'adc3' and self.matrix_free
-                and self.amplitudes is not None and self.en_dress is None)
+        matrix-free ADC(3) with foreign amplitudes, and the exact matrix-free
+        ADC(4) downfold with the Laplace-fused U^(3) (ntau), whose MBPT
+        amplitude pool comes from the DF numerators. The EN dressing reads
+        dense g slices, and the materialized rank >= 3 amplitudes (ADC(4)
+        without ntau) and the diagonal downfold need the 4-index tensors."""
+        if not (self.df and self.matrix_free and self.en_dress is None):
+            return False
+        if self.level == 'adc3':
+            return self.amplitudes is not None
+        return (self.level in ('adc4', 'adc4t2') and self.ntau is not None
+                and not self.diagonal)
 
     @classmethod
     def from_arrays(cls, eps, eri_chemist=None, B_aa=None, nocc=None,
@@ -912,18 +911,18 @@ class ADCSolverRestricted(_DysonADCEntry):
         self._csf_adapter = None
         if self.pdaggerq and self.eri is None and not self._generated_is_g_free():
             raise ValueError("pdaggerq=True needs dense integrals "
-                             "(eri_chemist), except for the g-free DF ADC(3) "
-                             "route (df=True, matrix_free=True, amplitudes=, "
-                             "no en_dress)")
+                             "(eri_chemist), except on the g-free DF routes "
+                             "(df=True, matrix_free=True, no en_dress; ADC(3) "
+                             "with amplitudes=, or ADC(4)/ADC(4)t2 with ntau=)")
         if share_caches_with is not None:
             if (share_caches_with.norb != self.norb
                     or not np.allclose(share_caches_with.eps, self.eps)):
                 raise ValueError("share_caches_with: solvers must be built from the "
                                   "same orbital energies/integrals")
-            self._spin_solver = share_caches_with._get_spin_orbital_solver()
-            self._csf_adapter = share_caches_with._get_csf_adapter()
+            self._spin_solver = share_caches_with.spin_orbital_solver()
+            self._csf_adapter = share_caches_with.csf_adapter()
 
-    def _get_spin_orbital_solver(self):
+    def spin_orbital_solver(self):
         """Lazily build & cache the spin-orbital solver backing the generated
         ADC(4)+ path -- eps/g expand from the RHF spatial-MO quantities by
         the standard interleaved convention (np.repeat(eps, 2), no exchange
@@ -936,7 +935,7 @@ class ADCSolverRestricted(_DysonADCEntry):
                 eps_spin, g_anti_spin, B_spin=B_spin, nocc=2 * self.nocc)
         return self._spin_solver
 
-    def _get_csf_adapter(self):
+    def csf_adapter(self):
         """Lazily build & cache the spin-adapted (doublet-CSF-basis) front-end
         for the wrapped spin-orbital solver -- see ADCSolverCSF in
         spin_adapt.py. Genuinely ~4x smaller per configuration dimension and
@@ -945,11 +944,11 @@ class ADCSolverRestricted(_DysonADCEntry):
         than a re-derived CSF formula."""
         if getattr(self, '_csf_adapter', None) is None:
             self._csf_adapter = spin_adapt.ADCSolverCSF(
-                self._get_spin_orbital_solver())
+                self.spin_orbital_solver())
         return self._csf_adapter
 
     @staticmethod
-    def _embed_static_correction_spin(static_correction):
+    def embed_static_correction_spin(static_correction):
         """Expand a spatial-MO static_correction (norb,norb) into its
         interleaved spin-orbital block-diagonal form (2*norb,2*norb): the
         same value at both spin-diagonal blocks, zero for spin-off-diagonal
@@ -1014,7 +1013,7 @@ class ADCSolverRestricted(_DysonADCEntry):
         H = self.build_supermatrix(nocc, static_correction=static_correction)
         return diag_dense(H, self.norb, threshold=threshold)
 
-    def _handwritten_operator(self, nocc, static_correction=None):
+    def handwritten_operator(self, nocc, static_correction=None):
         """(aop, diag, nH) of the hand-written matrix-free route."""
         aop, diag, dims = self.build_matrix_free_operator(nocc, static_correction)
         return aop, diag, dims['nH']
@@ -1034,7 +1033,7 @@ class ADCSolverRestricted(_DysonADCEntry):
                                              f_orb=f_orb, laplace_ntau=self.ntau,
                                              u3_matrix_free=True,
                                              construction=self.construction)
-        aop, diag, _ = self._handwritten_operator(self.nocc, sc)
+        aop, diag, _ = self.handwritten_operator(self.nocc, sc)
         return aop, diag
 
     def _generated(self):

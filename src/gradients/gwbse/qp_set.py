@@ -30,7 +30,7 @@ from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               frontier_qp_states,
                                               is_quasiparticle_root,
                                               nearest_probe)
-from src.gradients.mean_field_response import qp_xc_correction_matrix
+from src.gradients.gwbse.static_correction import qp_xc_correction_matrix
 from src.SingleReference.GW.reaction_field import (offdiagonal_reaction_field,
                                                    pair_densities)
 from src.SingleReference.GW.sum_over_poles import (pole_denominators,
@@ -114,7 +114,7 @@ class QuasiparticleSet:
         self.chain = chain
 
     # ------------------------------------------------------------------ setup
-    def _build_cd_grid(self, nfreq_cd, eps):
+    def build_cd_grid(self, nfreq_cd, eps):
         """The contour-deformation quadrature and the imaginary-time grid whose
         frequency axis it is, at `nfreq_cd` points.
 
@@ -136,7 +136,7 @@ class QuasiparticleSet:
             eps, self.chain.nocc, ntau=self.chain.ntau_gw, nfreq_cd=grid.nfreq_cd,
             e_min_below_gap=self.chain.e_min_below_gap)
 
-    def _fix_cd_grid(self, states, eps):
+    def fix_cd_grid(self, states, eps):
         """Fix the contour-deformation grid for the set, once: `CD_NFREQ_SOP`
         points when the pole model carries it whole, `CD_NFREQ` otherwise,
         never below an `nfreq_cd` the caller asked for (a refrozen chain does
@@ -152,18 +152,18 @@ class QuasiparticleSet:
         """
         if self.chain.conventions.cd_sized:
             return
-        kw = self._qp_kw()
+        kw = self.qp_kw()
         analytic = carried_analytically(
             states, eps, self.chain.nocc, kw['residue_route'], kw['scissor'],
             kw['w0'], kw['sop_poles'])
         nfreq = max(CD_NFREQ_SOP if analytic else CD_NFREQ,
                     self.chain.conventions.nfreq_cd_floor)
         if self.chain.conventions.nfreq_cd != nfreq:
-            self._build_cd_grid(nfreq, eps)
+            self.build_cd_grid(nfreq, eps)
         self.chain.conventions.cd_sized = True
 
     @staticmethod
-    def _qp_set(eps, nocc, window, tol):
+    def resolve_qp_set(eps, nocc, window, tol):
         """The quasiparticle set: a SEQUENCE of orbital indices -- the set a
         `QPStates` declaration resolved to -- taken as given, else the
         frontier set of half-width `window` (or 'all') widened over
@@ -210,7 +210,7 @@ class QuasiparticleSet:
                 + f' (geometry {str(view.geometry)[:12]}). The walk goes on '
                   f'on this branch.', RuntimeWarning, stacklevel=3)
 
-    def _qp_kw(self):
+    def qp_kw(self):
         # plain dicts: the kernels audit their inputs across ranks
         view = self.chain.resolved
         kw = {'residue_route': self.chain.residue_route,
@@ -225,7 +225,7 @@ class QuasiparticleSet:
             kw['tile_gb'] = self.chain.tile_gb
         return kw
 
-    def _freeze_qp_branch(self, route_out, eps, xc_correction, states):
+    def freeze_qp_branch(self, route_out, eps, xc_correction, states):
         """Keep the root, its pole strength, its pole labels and the pole
         set each quasiparticle solve resolved to, once. True when the solve
         has to be repeated: a root was frozen here for the first time, or a
@@ -291,15 +291,15 @@ class QuasiparticleSet:
         set whose pole strength Z lies outside (0, 1] (`is_quasiparticle_root`).
 
         Such a root is KEPT: it is neither refused nor moved to the scissor
-        (it can happen, rarely, and is often harmless; a
-        warning, not a refusal -- the one exception to refusing every shortfall).
+        (it can happen, rarely, and is often harmless; a numerical event,
+        warned about, not refused).
         A declaration names the orbitals before anything is solved, so Z is
         first known here; the reference geometry's flagged roots go to
         `qp_z_outside` with the orbital's Z, root and route, frozen with the
         rest of the conventions, and a displaced geometry warns on its own
         roots. The pole strengths are rank 0's on every rank (`lockstep`).
         Members of a quasiparticle-Hamiltonian group are judged on their
-        group's eigenvectors (`_qp_hamiltonian`) instead.
+        group's eigenvectors (`qp_hamiltonian`) instead.
 
         Z is read off a continuous self-energy: the Lorentzian a pole of G
         puts beside an orbital energy is integrated in closed form
@@ -437,7 +437,7 @@ class QuasiparticleSet:
                 'dropped': dropped})
         return self.chain.resolved.qp_subspaces[1]
 
-    def _qp_hamiltonian(self, mf, eps, ws, route_out, continuum=None):
+    def qp_hamiltonian(self, mf, eps, ws, route_out, continuum=None):
         """The `QPHamiltonian` of this forward, or None where the set has no
         group of two: each frozen group's H solved to self-consistency
         (`subspace_hamiltonian`) on the group's common poles.
@@ -527,7 +527,7 @@ class QuasiparticleSet:
             z = subspace_pole_strengths(hg, amp, d_x)
             if not all(is_quasiparticle_root(zk) for zk in z):
                 # kept as solved, as a diagonal root of Z outside (0, 1] is
-                # (refuse inputs, warn numerics)
+                # (the policy: refuse inputs, warn numerics)
                 self._log_qp_hamiltonian(
                     'z_outside', b, f, z=[float(v) for v in z], newton_steps=it)
             h[np.ix_(idx, idx)] = hg + env_g
@@ -548,8 +548,8 @@ class QuasiparticleSet:
         on one side of the drop and the diagonal one on the other, as at a
         drop at the freeze: a numerical event, warned about and flagged in the
         record (`qp_subspace_drops`, `qp_bookkeeping`'s 'dropped_here'), the
-        run carries on (refuse inputs, warn
-        numerics); a diagonal root with Z outside (0, 1] is kept and flagged
+        run carries on (the policy: refuse inputs, warn numerics); a diagonal
+        root with Z outside (0, 1] is kept and flagged
         ('z_outside' on its entry) as well."""
         remaining = {p: b for _, b in kept for p in b}
         z_of = route_out.get('z')
@@ -642,7 +642,7 @@ class QuasiparticleSet:
         """A group's Newton that ended above QP_SUBSPACE_TOL: on a finite H a
         numerical event, warned about and logged (`qp_hamiltonian_log`, with
         the size of one more Newton step), the run carrying on with that H
-        (refuse inputs, warn numerics); on a
+        (the policy: refuse inputs, warn numerics); on a
         non-finite one there is no H to carry on with and the step is
         refused (`QuasiparticleRootLost`)."""
         if not np.all(np.isfinite(h)):
@@ -684,7 +684,7 @@ class QuasiparticleSet:
             + f': {detail} (geometry {str(geometry)[:12]})',
             RuntimeWarning, stacklevel=3)
 
-    def _one_body_seed(self, shared, solution, n, m=None):
+    def one_body_seed(self, shared, solution, n, m=None):
         """(norb, norb) adjoint of Omega_n (of <m|dH|n>) on the quasiparticle
         Hamiltonian's off-diagonal elements, symmetric, or None without one:
         dOmega = sum C^A dA with C^A = x x^T + y y^T, through
@@ -710,10 +710,10 @@ class QuasiparticleSet:
             coupled[p, q] = coupled[q, p] = True
         return np.where(coupled, 0.5 * (out + out.T), 0.0)
 
-    def _qp_hamiltonian_backward(self, qp_h, h_bar, eqp_bar, eps):
+    def qp_hamiltonian_backward(self, qp_h, h_bar, eqp_bar, eps):
         """(positions of the groups' members in the set, eps_bar, pair
         adjoints for `qp_set_gradient`, Lambda) of the BSE's adjoints on the
-        groups: eqp_bar on each H's diagonal and h_bar (`_one_body_seed`, or
+        groups: eqp_bar on each H's diagonal and h_bar (`one_body_seed`, or
         None) on its off-diagonal elements.
 
         Through each group's fixed point (`subspace_hamiltonian_backward`):
@@ -744,7 +744,7 @@ class QuasiparticleSet:
             members += list(g.positions)
         return members, eps_bar, pairs, lam
 
-    def _block_shared(self, eps, ws):
+    def block_shared(self, eps, ws):
         """eps^QP over the set with ONE correction per truly degenerate block.
 
         Each member keeps its own eps_p and takes the mean of the block's
@@ -762,7 +762,7 @@ class QuasiparticleSet:
             out[b] = eps[states[b]] + np.mean(out[b] - eps[states[b]])
         return out
 
-    def _block_seeds(self, eqp_bar):
+    def block_seeds(self, eqp_bar):
         """(seed on the set's roots, seed on eps) of an adjoint on eps^QP.
 
         eps^QP_p = eps_p + mean_q (w_q - eps_q) over p's block, so every root
@@ -784,7 +784,7 @@ class QuasiparticleSet:
                       states=None, tape=None, rows_block=None, pairs=()):
         """((eps^QP values, adjoints), route_out) for a quasiparticle set, on
         the contour-deformation grid fixed for it before the first pass
-        (`_fix_cd_grid`), never resized against the roots.
+        (`fix_cd_grid`), never resized against the roots.
 
         tape: an earlier solve's `QPSetTape` on the same factors, and each
         repeat reads the one before it, so proj(tau) and the slices are
@@ -800,7 +800,7 @@ class QuasiparticleSet:
         """
         whole_set = states is None
         states = self.chain.resolved.qp_set if whole_set else states
-        self._fix_cd_grid(states, eps)
+        self.fix_cd_grid(states, eps)
         while True:
             route_out = {}
             grid = self.chain.conventions
@@ -809,13 +809,13 @@ class QuasiparticleSet:
                 grid.wt, states, weights, mu=mu,
                 xc_correction=xc_correction, route_out=route_out,
                 tape=tape, rows_block=rows_block, timer=self.chain.timer,
-                pairs=pairs, **self._qp_kw())
+                pairs=pairs, **self.qp_kw())
             tape = route_out.get('tape', tape)
             if whole_set:
                 self._flag_z_outside(route_out, states)
             # A root frozen here, or a calibrated shift, is read by the solve
             # AFTER the one that froze it, so either triggers one repeat.
-            if not self._freeze_qp_branch(route_out, eps, xc_correction,
+            if not self.freeze_qp_branch(route_out, eps, xc_correction,
                                           states):
                 break
         if whole_set:
@@ -833,7 +833,7 @@ class QuasiparticleSet:
             {int(p): float(z) for p, z in zip(states, z_of)}}
         return out, route_out
 
-    def _tile_kw(self):
+    def tile_kw(self):
         return {} if self.chain.tile_gb is None else {'tile_gb': self.chain.tile_gb}
 
     # -------------------------------------------------------- forward/reverse
@@ -844,7 +844,7 @@ class QuasiparticleSet:
         mask[self.chain.resolved.qp_set] = False
         return mask
 
-    def _freeze_outside_shift(self, eps, ws, env=None):
+    def freeze_outside_shift(self, eps, ws, env=None):
         """Calibrate the scissor the orbitals outside the set carry, once.
 
         `calibrate_scissor` gives every outside orbital the quasiparticle
@@ -868,7 +868,7 @@ class QuasiparticleSet:
         IN A CONTINUUM THE SHIFT IS THE PROBE'S GW CORRECTION ALONE. The
         probe's root is w' + Sigma^env_qq, w' solving w' = eps_q + <q|Sigma_x
         - v_xc|q> + Sigma_c,qq(w'), and every orbital outside the set gets its
-        own Sigma^env_pp on the diagonal (`_env_static_outside`), so the
+        own Sigma^env_pp on the diagonal (`env_static_outside`), so the
         scissor transfers w - eps_q - Sigma^env_qq = w' - eps_q, exactly the
         gas-like GW correction, never the probe's reaction field
         on top of the orbital's own (Duchemin, Jacquemin and Blase, J. Chem.
@@ -879,7 +879,7 @@ class QuasiparticleSet:
         if self.chain.resolved.outside_shift is not None:
             return
         roots = {int(p): float(w) for p, w in zip(self.chain.resolved.qp_set, ws)}
-        free = self.chain.selection._env_free(roots, env)
+        free = self.chain.selection.env_free(roots, env)
         outside = np.flatnonzero(self.outside_window(len(eps)))
         on_curve = {int(p) for c in self.chain.resolved.outside_curve.values()
                     for p in c.members} if self.chain.outside_scissor == 'curve' \
@@ -905,7 +905,7 @@ class QuasiparticleSet:
         shift.update(calibrate_scissor_tiers(eps, free, holes))
         self.chain.conventions.freeze_outside_shift(self.chain.resolved, shift, probes)
 
-    def _freeze_outside_curve(self, mol, mf, x_mo, d_sigma, eps, eps_qp,
+    def freeze_outside_curve(self, mol, mf, x_mo, d_sigma, eps, eps_qp,
                               env):
         """Place the frozen `OutsideCurve` of each side, once, at the first
         forward: the continuation on every orbital (one self-energy, every
@@ -932,10 +932,10 @@ class QuasiparticleSet:
         a, z, failed = self.continuation_shifts(mol, mf, x_mo, d_sigma,
                                        np.arange(len(eps)), env,
                                        'qp_outside_curve.ac')
-        free = self.chain.selection._env_free({p: v for p, v in a.items()}, env)
+        free = self.chain.selection.env_free({p: v for p, v in a.items()}, env)
         for side, (edge, members) in sides.items():
             mine = set(members)
-            edge_shift = self.chain.selection._env_free(
+            edge_shift = self.chain.selection.env_free(
                 {edge: float(eps_qp[edge]) - float(eps[edge])}, env)[edge]
             curves[side] = fit_outside_curve(
                 eps, side, edge, edge_shift, members,
@@ -963,7 +963,7 @@ class QuasiparticleSet:
                                            reaction_field=env)
             return lockstep((a, z, failed))
 
-    def _curve_at(self, eps):
+    def curve_at(self, eps):
         """[(members, Delta, dDelta/deps)] of each frozen curve at `eps`;
         none unless outside_scissor='curve'."""
         out = []
@@ -976,7 +976,7 @@ class QuasiparticleSet:
             out.append((idx, delta, slope))
         return out
 
-    def _env_static_outside(self, shift, norb):
+    def env_static_outside(self, shift, norb):
         """<p|Sigma^env|p> on the orbitals the quasiparticle window LEFT OUT,
         zero on the ones inside it (whose roots already carry it whole).
 

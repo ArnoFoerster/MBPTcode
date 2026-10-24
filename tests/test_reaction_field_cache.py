@@ -20,6 +20,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.environment_seam import attach_environment
 from src.environments.solvent_screening import (SolventScreening,
                                                 detach_solvent_screening)
+from src.SingleReference.GW import reaction_field
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from tests.pins import assert_same
 
@@ -45,12 +46,12 @@ def gap_shift_ev(shift, nocc):
 
 def _uncached(mf, **kwargs):
     """Eq. (18) built afresh, the resident entry set aside and put back."""
-    resident = mf.__dict__.pop('_reaction_field_shift', None)
+    resident = reaction_field._SHIFTS.pop(mf, None)
     try:
         return environment_quasiparticle_shift(mf, **kwargs)
     finally:
         if resident is not None:
-            mf._reaction_field_shift = resident
+            reaction_field._SHIFTS[mf] = resident
 
 
 def test_another_auxiliary_basis_is_not_served_the_cached_shift(mf):
@@ -80,7 +81,10 @@ def test_another_occupation_is_not_served_the_cached_shift(mf):
 
 def test_another_geometry_is_not_served_the_cached_shift(mf):
     """A copy that carries the cache to new orbitals at a displaced geometry,
-    with the eigenvalues left as they were, rebuilds."""
+    with the eigenvalues left as they were, rebuilds.
+
+    The cache is held per mean field, so a copy starts without one; handing
+    it the original's entries is the case the key has to catch."""
     attach_environment(mf, SolventScreening(mf.mol, eps=1.78))
     resident = environment_quasiparticle_shift(mf)
     moved = mf.mol.set_geom_('O 0 0 0.127; H 0 0.767 -0.478; H 0 -0.767 -0.478',
@@ -89,7 +93,8 @@ def test_another_geometry_is_not_served_the_cached_shift(mf):
     displaced.kernel()
     copy = mf.copy()
     copy.mol, copy.mo_coeff = moved, displaced.mo_coeff
-    assert copy._reaction_field_shift is mf._reaction_field_shift
+    assert copy not in reaction_field._SHIFTS
+    reaction_field._SHIFTS[copy] = reaction_field._SHIFTS[mf]
     shift = environment_quasiparticle_shift(copy)
     expected = _uncached(copy)
     assert np.abs(expected - resident).max() > 1e-6

@@ -65,9 +65,8 @@ from src.Base.declaration import Excitation, GroundState, QPStates
 from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
 from src.Base.factorization.isdf_jk import isdf_grid
 from src.gradients.isdf_mean_field import isdf_jk_with_force
-from src.Base.factorization.separable_ri import (AdjointSeeds, fit_M_streaming,
-                                                 fit_rows_adjoint, fit_rows_adjoints,
-                                                 resolve_isdf_grid)
+from src.Base.factorization.separable_ri import fit_M_streaming, resolve_isdf_grid
+from src.gradients.isdf_fit_adjoint import AdjointSeeds, fit_rows_adjoint, fit_rows_adjoints
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed, partition
 from src.Base.utils.parallel.simulated_comm import run_simulated
@@ -167,7 +166,7 @@ def kernel_case(name):
     mol = molecule(name)
     aux = separable_ri.df.addons.make_auxmol(mol, auxbasis=AUX)
     crd = np.asarray(isdf_grid(mol, auxbasis=AUX, counts=g1(mol)))
-    layout = separable_ri.test_set_layout(mol, crd)
+    layout = separable_ri.fit_test_set_layout(mol, crd)
     nk, nao, naux = len(crd), mol.nao_nr(), aux.nao_nr()
     rng = np.random.default_rng(11)
     vbar = rng.standard_normal((naux, naux))

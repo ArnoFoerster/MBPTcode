@@ -10,7 +10,7 @@ itself (exact through lambda^4, no 1/E_6f anywhere), construction=
 'diagrammatic' adds its decoupled image; this module is kept as the
 diagram-side validation identity of that image.
 
-THE ORDER-4 DEFECT THEOREM (diagram-ADC track, machine-gated at two H4
+THE ORDER-4 DEFECT THEOREM (diagram-ADC, checked to machine precision at two H4
 geometries): at every k1 pole the ISR-ADC(4) defect
 delta4 = diagram-M4 - ISR-M4 is the residue of the [3w|6f|4f] Goldstone
 orderings -- an uncontracted 3p3h intermediate between the two external

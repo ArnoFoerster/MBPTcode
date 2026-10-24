@@ -13,8 +13,8 @@ from src.SingleReference.ADC.sigma_driver import u_raw_series
 def u_dot_orb_isr(rsolver, sector, p_orb, n, s2cr_module, extra_leaves=None,
                   strict=True, laplace_ntau=None):
     """ORDER-GENERAL U^(n) with the ISR/Loewdin layer taken from isr_engine
-    (previously only validated against synthetic blocks -- this is the wiring
-    to real generated blocks). p_orb=None returns the full (n_k1, norb) U^(n)
+    (whose own tests use synthetic blocks; this is the wiring to real
+    generated blocks). p_orb=None returns the full (n_k1, norb) U^(n)
     MATRIX. It forms the (n_k1, n_k1) class overlap Delta S and its Loewdin
     series densely: the validation oracle of the matrix-free order-general
     layer (sigma_driver._un_apply_fwd/_bwd), never a production route.
@@ -37,7 +37,7 @@ def u_dot_orb_isr(rsolver, sector, p_orb, n, s2cr_module, extra_leaves=None,
     never materialized in those blocks (the auto-fusion DRIVER). The
     ISR/Loewdin layer (Delta S order<=n-1, N^(m)) is rank<=2 and unchanged. NB
     the low-rank order>=3 amplitudes the rank<=2 structures still consume
-    (T1^(3)/L1^(3)/L2^(3)/L1^(4)) come from _amps_order and still materialize
+    (T1^(3)/L1^(3)/L2^(3)/L1^(4)) come from amps_order and still materialize
     their t3/t4 RSPT intermediates -- the order-4 rank<=2 Laplace amplitude
     chain is the remaining production-floor piece (see _assemble_raw_S).
 
@@ -52,9 +52,9 @@ def u_dot_orb_isr(rsolver, sector, p_orb, n, s2cr_module, extra_leaves=None,
             f"through n = 4 only; use u_dot_orb_order / _un_apply_fwd for U^({n}).")
     tag = '2h1p' if sector == 'IP' else '2p1h'
     eps, no, nv = rsolver.eps, rsolver.nocc, rsolver.nvir
-    cfg = rsolver._sector_configs(sector)
+    cfg = rsolver.sector_configs(sector)
     ncfg = len(cfg['K'])
-    pool = {**rsolver._rargs, **rsolver._amplitude_pool(), **(extra_leaves or {})}
+    pool = {**rsolver.rargs, **rsolver.amplitude_pool(), **(extra_leaves or {})}
 
     raws, Ss = u_raw_series(rsolver, sector, n, strict=strict,
                             laplace_ntau=laplace_ntau, extra_leaves=extra_leaves)

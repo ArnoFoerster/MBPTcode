@@ -19,7 +19,7 @@ from src.Base.geometry.body_frame import centred, kabsch_rotation
 from src.Base.numerics.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
 from src.Base.declaration import PhysicsMismatch
 from src.Base.geometry.geometry import molecule_at
-from src.Base.factorization.isdf_jk import refuse_isdf_jk_gradient
+from src.gradients.isdf_mean_field import refuse_isdf_jk_gradient
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
                                         stamp_of)
 from src.properties.optimize import (cartesian_hessian, relax,

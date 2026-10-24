@@ -58,7 +58,7 @@ KERNEL_MODULES = frozenset({'src/gradients/gwbse/qp_space_time.py',
 
 #: Distributed kernels and state models that live under src/gradients:
 #: the tiled
-#: skeleton and correlation forces and the state models of the solvation
+#: skeleton and correlation forces, the ISDF fit adjoint, and the state models of the solvation
 #: loop, moved in from Base and SingleReference. They split their work over
 #: the ranks themselves, so they may take `comm` and use any primitive of
 #: mpi_grid, broadcast included; a serve loop or a replicate* stays
@@ -68,7 +68,11 @@ DISTRIBUTED_MODULES = frozenset({'src/gradients/skeleton_tiles.py',
                                  'src/gradients/df_correlation_force_tiled.py',
                                  'src/gradients/state_models.py',
                                  'src/gradients/adc/ee_gradient.py',
-                                 'src/gradients/adc/ee_state_model.py'})
+                                 'src/gradients/adc/fold_factors.py',
+                                 'src/gradients/df_factors.py',
+                                 'src/gradients/adc/ee_state_model.py',
+                                 'src/gradients/isdf_fit_adjoint.py',
+                                 'src/gradients/gwbse/isdf_bse_adjoint.py'})
 
 #: The module the distribution primitives live in.
 MPI_GRID = 'src.Base.utils.parallel.mpi_grid'

@@ -1,8 +1,9 @@
-"""Occupation-weighted response for a metal: (f_m - f_n) and smearing.
+"""Occupations and the occupation-weighted transition space: (f_m - f_n) and
+smearing.
 
-Everything in Periodic/ builds its transition space from an INTEGER occupied
-count -- `PBCDFIntegrals.nocc` is `(mo_occ > 1e-8).sum(axis=1)`, and
-pbc_casida's layout is the rectangle nocc[ki] x nvirt[ki]. For a metal that is
+An INTEGER occupied count -- `PBCDFIntegrals.nocc` is
+`(mo_occ > 1e-8).sum(axis=1)` -- gives the rectangle nocc[ki] x nvirt[ki] of
+transitions. For a metal that is
 the wrong object, and not by a little: on a Li monolayer with 0.5 eV Fermi
 smearing the collapsed count comes out as 8, 9, 10 or 12 depending on the
 k-point, so the rectangle is not even the same shape at every k, and every
@@ -47,29 +48,19 @@ produce a negative A - B, which the solver would then clip into nonsense.
 Conventions
 -----------
 pyscf's `mo_occ` runs 0..2 for a restricted calculation, i.e. it already
-carries the spin factor, so no separate factor of two appears below. Both
-builders reduce EXACTLY to their integer-occupation counterparts in
-pbc_casida when the occupations are 0 or 2 -- that equality is the main test.
-"""
-import warnings
+carries the spin factor, so no separate factor of two appears below. With
+occupations of 0 or 2 every pair is an occupied-virtual one with weight 2, so a
+gapped system needs no separate integer route.
 
+This module holds the occupations and the transition space; the response built
+on it is in pbc_casida (Pi0, the Casida blocks, W) and the self-energy in
+pbc_self_energy.
+"""
 import numpy as np
 
-from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.Periodic.pbc_amplitudes import get_chi_a
-from src.Base.numerics.constants import PBC_QP_Z_MIN
-from src.Solvers.qp_equation import SampledEquation, find_qp_root
-from src.SingleReference.Periodic.pbc_self_energy import (qp_energy_linearized,
-                                                          spectral_sigma)
+from src.Base.numerics.constants import (INTEGER_OCCUPATION_TOL,
+                                         PBC_OCCUPATION_THRESHOLD)
 
-#: Pairs whose occupation difference falls below this carry no useful weight
-#: and would contribute a zero row to A - B (0/0 for a degenerate pair), so
-#: they are dropped. Measured cost on a Li monolayer: 0.0008% of the weight.
-DEFAULT_OCCUPATION_THRESHOLD = 1e-4
-
-#: Occupations are treated as integer, and the cheaper pbc_casida path is
-#: exactly equivalent, when every mo_occ is within this of 0 or 2.
-INTEGER_OCCUPATION_TOL = 1e-8
 
 
 def fermi_level(mo_energy, sigma, nelectron, nkpts=None, method='fermi'):
@@ -82,7 +73,7 @@ def fermi_level(mo_energy, sigma, nelectron, nkpts=None, method='fermi'):
 
       * `mf.get_fermi()` is off by **0.1 to 1.5 eV** at every point tested. It
         is not the smearing chemical potential and must not be used as one.
-      * `chemical_potential_occ`'s heuristic -- the mean of the partially
+      * `chemical_potential`'s heuristic -- the mean of the partially
         occupied eigenvalues, falling back to midgap -- is excellent while
         NOTHING is partially occupied (<= 7 meV, since a Fermi-Dirac mu does
         sit in the gap there) and degrades precisely in the regime it exists
@@ -183,7 +174,7 @@ def check_occupation_monotonic(mo_energy, mo_occ, tol=1e-9, raise_on_fail=True):
 
 
 def transition_pairs(mo_energy, mo_occ, ki, ka,
-                     threshold=DEFAULT_OCCUPATION_THRESHOLD):
+                     threshold=PBC_OCCUPATION_THRESHOLD):
     """Ordered transitions (m @ ki -> n @ ka) with f_m > f_n, above threshold.
 
     Returns (m_idx, n_idx, weight, gap) with weight = f_m - f_n > 0 and
@@ -201,11 +192,10 @@ def transition_pairs(mo_energy, mo_occ, ki, ka,
 
 
 def transition_layout(dfints, kconserv, mo_energy=None, mo_occ=None,
-                      threshold=DEFAULT_OCCUPATION_THRESHOLD):
+                      threshold=PBC_OCCUPATION_THRESHOLD):
     """Per-k transition lists and flat offsets for one momentum transfer.
 
-    The occupation-weighted analogue of pbc_casida.transition_layout. The
-    space is ragged -- a different number of transitions survives at each k --
+    The space is ragged -- a different number of transitions survives at each k --
     which is the point: with a metal the integer nocc is not even the same at
     every k-point.
     """
@@ -227,7 +217,7 @@ def transition_layout(dfints, kconserv, mo_energy=None, mo_occ=None,
 
 
 def stacked_Lw(dfints, kconserv, mo_energy=None, mo_occ=None,
-               threshold=DEFAULT_OCCUPATION_THRESHOLD, sqrt_weight=True):
+               threshold=PBC_OCCUPATION_THRESHOLD, sqrt_weight=True):
     """Mtilde[L, t] = sqrt(f_m - f_n) L^{ki,ka}[L, m, n], stacked over k.
 
     Folding sqrt(w) into the three-center factor is what makes the whole
@@ -257,162 +247,6 @@ def stacked_Lw(dfints, kconserv, mo_energy=None, mo_occ=None,
     return M, pairs, offsets, N, weight, gap
 
 
-def build_chi0_aux_occ(dfints, kconserv, omega, mo_energy=None, mo_occ=None,
-                       imaginary=True, eta=0.0,
-                       threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Occupation-weighted Pi0^q(omega) in the auxiliary basis.
-
-        Pi0 = (2/nk) sum_t (f_m - f_n) * g(omega, -gap_t) * L_t L_t^*
-
-    summed over ORDERED pairs with f_m > f_n, which is half the pairs; the
-    reversed pair contributes identically, hence the 2. With integer
-    occupations f_m - f_n = 2 and this is exactly pbc_casida.build_chi0_aux's
-    (4/nk) sum over occ-virt, which the tests pin to machine precision.
-
-    g is d/(omega^2 + d^2) on the imaginary axis with d = e_m - e_n = -gap
-    (negative, as there), or the real-axis form otherwise.
-    """
-    M, pairs, offsets, N, weight, gap = stacked_Lw(
-        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
-    if N == 0:
-        naux = dfints.Lblock(0, kconserv[0]).shape[0]
-        return np.zeros((naux, naux), dtype=np.complex128)
-    d = -gap                                     # e_m - e_n < 0
-    if imaginary:
-        g = d / (omega ** 2 + d * d)
-    else:
-        g = 1.0 / (omega - d + 1j * eta) - 1.0 / (omega + d + 1j * eta)
-    # sqrt(w) sits in M on both sides, so M diag(g) M^H already carries w.
-    return (2.0 / dfints.nkpts) * (M * g[None]) @ M.conj().T
-
-
-def build_rpa_matrices_occ(dfints, kconserv, mo_energy=None, mo_occ=None,
-                           threshold=DEFAULT_OCCUPATION_THRESHOLD,
-                           check_monotonic=True):
-    """Occupation-weighted Kresse RPA Casida blocks A(q), B(q).
-
-        A = diag(gap_t) + (1/nk) Mtilde^H Mtilde ,   B = (1/nk) Mtilde^H Mtilde
-
-    with Mtilde carrying sqrt(f_m - f_n). A - B = diag(e_n - e_m) stays
-    diagonal and, by the monotonicity checked above, positive -- so the
-    CasidaSolver squaring trick applies unchanged, which is the whole reason
-    the ordered-pair formulation was chosen over a non-Hermitian one.
-
-    Integer occupations give f_m - f_n = 2, hence Mtilde^H Mtilde = 2 V_dir and
-    A = diag + (2/nk) V_dir: pbc_casida.build_rpa_matrices exactly.
-    """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    if mo_occ is None:
-        mo_occ = dfints.mo_occ
-    if check_monotonic:
-        check_occupation_monotonic(mo_energy, mo_occ)
-    M, pairs, offsets, N, weight, gap = stacked_Lw(
-        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
-    V = M.conj().T @ M
-    A = np.diag(gap).astype(np.complex128) + V / dfints.nkpts
-    B = V / dfints.nkpts
-    return A, B
-
-
-def solve_rpa_spectral_occ(dfints, kconserv, mo_energy=None, mo_occ=None,
-                           threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """(Omega, rho) at one transfer, occupation-weighted.
-
-    rho[P, S] = sum_t Mtilde[P, t] (X + Y)_S[t]. Because Mtilde carries
-    sqrt(w), the spectral W built from these amplitudes takes the constant
-    2/nk rather than build_W_aux_spectral's 4/nk -- with integer occupations
-    Mtilde = sqrt(2) M, so rho is larger by sqrt(2) and rho rho^H by 2. Use
-    `build_W_aux_spectral_occ`, which carries that constant.
-    """
-    M, pairs, offsets, N, weight, gap = stacked_Lw(
-        dfints, kconserv, mo_energy, mo_occ, threshold, sqrt_weight=True)
-    A, B = build_rpa_matrices_occ(dfints, kconserv, mo_energy, mo_occ,
-                                  threshold=threshold)
-    Omega, X, Y = CasidaSolver(A, B).solve()
-    return Omega, M @ (X + Y)
-
-
-def build_W_aux_spectral_occ(dfints, Omega, rho, omega=0.0, imaginary=True,
-                             eta=0.0):
-    """Screened interaction from occupation-weighted eigenpairs.
-
-    Identical to pbc_casida.build_W_aux_spectral except for the constant, which
-    is 2/nk here because sqrt(f_m - f_n) is folded into rho -- see
-    `solve_rpa_spectral_occ`. Validated the same way, against the direct
-    (1 - Pi0)^{-1} inversion.
-    """
-    naux = rho.shape[0]
-    c = 2.0 / dfints.nkpts
-    if imaginary:
-        denom = Omega / (omega ** 2 + Omega ** 2)
-    else:
-        denom = 0.5 * (1.0 / (Omega - omega - 1j * eta)
-                       + 1.0 / (Omega + omega + 1j * eta))
-    return np.eye(naux, dtype=np.complex128) - c * (rho * denom[None]) @ rho.conj().T
-
-
-def solve_rpa_all_q_occ(dfints, mo_energy=None, mo_occ=None,
-                        threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """(Omega, X, Y) at every momentum transfer, occupation-weighted.
-
-    The counterpart of pbc_self_energy.solve_rpa_all_q. The eigenvectors live
-    on the ragged occupation-weighted transition space, so they belong with
-    `stacked_Lw`'s Mtilde and with `sigma_c_diag_occ`, not with the integer-
-    occupation amplitudes.
-    """
-    out = []
-    for q in range(dfints.nkpts):
-        A, B = build_rpa_matrices_occ(dfints, dfints.kconserv_pair[q],
-                                      mo_energy=mo_energy, mo_occ=mo_occ,
-                                      threshold=threshold)
-        out.append(CasidaSolver(A, B).solve())
-    return out
-
-
-def sigma_c_diag_occ(dfints, eig_all_q, kn, n, freq, mo_energy=None,
-                     mo_occ=None, eta=1e-3,
-                     threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Occupation-weighted diagonal correlation self-energy Sigma_c^{n,kn}(freq).
-
-    pbc_self_energy.sigma_c_diag splits the internal orbital m by a BINARY
-    label, s_m = +1 if m is occupied at km and -1 otherwise, which is the same
-    integer-occupation assumption the response carried. With smearing the
-    spectral weight splits continuously instead: an orbital of occupation f_m
-    contributes to the hole branch with weight f_m/2 and to the particle branch
-    with 1 - f_m/2,
-
-        Sigma_c = sum_q w_q/nk sum_S sum_m |chi_a|^2
-                  [ (f_m/2) D(w - e_m + Omega_S)
-                    + (1 - f_m/2) D(w - e_m - Omega_S) ] ,
-
-    with D(x) = x/(x^2 + eta^2). At f_m = 2 the first term survives alone and
-    at f_m = 0 the second does, reproducing s_m = +1 and -1 exactly.
-
-    The prefactor is 1/nk rather than sigma_c_diag's 2/nk because the
-    amplitudes here are built from Mtilde, which carries sqrt(f_m - f_n): with
-    integer occupations that makes |chi_a|^2 larger by exactly two, and the two
-    factors cancel. Reduction to sigma_c_diag is pinned in the tests.
-    """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    if mo_occ is None:
-        mo_occ = dfints.mo_occ
-    mo_energy = np.asarray(mo_energy)
-    mo_occ = np.asarray(mo_occ, dtype=float)
-
-    def amp2(q, X, Y):
-        M = stacked_Lw(dfints, dfints.kconserv_pair[q], mo_energy, mo_occ,
-                       threshold, sqrt_weight=True)[0]
-        chi_a = get_chi_a(dfints, q, M @ (X + Y), kn)  # (nstates, nmo, nmo)
-        return np.abs(chi_a[:, n, :]) ** 2             # (nstates, nmo)
-
-    # weight f_m/2 on the +Omega (hole) branch
-    return spectral_sigma(dfints, eig_all_q, kn, freq, amp2,
-                          lambda km: mo_occ[km] / 2.0, scale=1.0,
-                          mo_energy=mo_energy, eta=eta)
-
-
 def split_transition_window(mo_energy, occupied):
     """(e_min, e_max) of the transitions across a FIXED occupied/virtual split,
     over all k-points: smallest virtual minus largest occupied (the
@@ -429,11 +263,11 @@ def split_transition_window(mo_energy, occupied):
     return e_vir.min() - e_occ.max(), e_vir.max() - e_occ.min()
 
 
-def transition_window(mo_energy, mo_occ, threshold=DEFAULT_OCCUPATION_THRESHOLD):
+def transition_window(mo_energy, mo_occ, threshold=PBC_OCCUPATION_THRESHOLD):
     """(e_min, e_max) over the OCCUPATION-WEIGHTED transition set, all k-pairs.
 
     The window an imaginary-frequency grid should be scaled by. Every grid in
-    `Base/utils/grids.py` is keyed on e_min, and without `mo_occ` that comes
+    `Base/utils/grids/grids.py` is keyed on e_min, and without `mo_occ` that comes
     from `split_transition_window`, which applies ONE integer occupied count
     at every k-point. For a metal that boundary is an artifact, and it fails in
     two different ways depending on how ragged the collapse happens to be.
@@ -470,125 +304,3 @@ def transition_window(mo_energy, mo_occ, threshold=DEFAULT_OCCUPATION_THRESHOLD)
             "system has no partially occupied states and every band is full, "
             "or the threshold is too large.")
     return lo, hi
-
-
-def qp_energy_g0w0_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
-                       eta=1e-3, de=1e-3, exchange_minus_vxc=0.0,
-                       threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Linearized G0W0 QP energy on the occupation-weighted self-energy.
-
-        QP = eps + Z (Sigma_c(eps) + (Sigma_x - v_xc)_nn),
-        Z  = 1 / (1 - dSigma_c/domega|eps),
-
-    `pbc_self_energy.qp_energy_linearized`, the linearization
-    `qp_energy_g0w0` also uses, on `sigma_c_diag_occ`. It is a separate entry
-    point rather than a flag because the integer one reaches `sigma_c_diag`,
-    which splits the internal orbital by a BINARY occupied/virtual label, so
-    pointing a metal at it yields a number rather than an error.
-
-    `exchange_minus_vxc` must be supplied for a DFT starting point exactly as
-    in the integer routine. The derivative is a forward difference at `de`,
-    which is what makes Z sensitive to `eta`: a broadening comparable to `de`
-    smooths the very slope being measured, so both are the caller's to
-    converge together, not independently.
-
-    Returns (QP, Z), a PAIR -- unlike the integer routine, which returns the
-    energy alone. Z is not a diagnostic afterthought here: see below. Z
-    outside (0, 1] is returned with a RuntimeWarning.
-
-    For a metal, note what the linearization assumes rather than what it
-    computes: a single well-separated pole near eps. That is a statement about
-    the spectral function, not about occupations, and it degrades where the
-    quasiparticle is short-lived -- which is more common at a metallic Fermi
-    level than in the gapped case the integer routine was written for. A root
-    solve on the full Sigma_c(omega) is the check when Z drifts far from 1.
-    """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    kw = dict(mo_energy=mo_energy, mo_occ=mo_occ, eta=eta, threshold=threshold)
-    return qp_energy_linearized(
-        lambda w: sigma_c_diag_occ(dfints, eig_all_q, kn, n, w, **kw),
-        mo_energy[kn][n].real, de, exchange_minus_vxc)
-
-
-def qp_energy_root_occ(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
-                       eta=1e-3, exchange_minus_vxc=0.0, half_width=0.5,
-                       npts=81, z_min=PBC_QP_Z_MIN,
-                       threshold=DEFAULT_OCCUPATION_THRESHOLD):
-    """Solve the QP equation w = eps + Sigma_c(w) + dVxc by the one root finder
-    (`Solvers.qp_equation.find_qp_root`): a scan of eps +/- half_width on
-    `npts` points, every sign change bisected and weighed.
-
-    `qp_energy_g0w0_occ` LINEARIZES about eps, which presumes one
-    well-separated pole there. On a metal that presumption fails visibly --
-    measured Z = -0.18 for a virtual band of bulk Al at 2x2x2, meaning
-    dSigma_c/domega > 1 and the linearization has inverted. No amount of
-    k-refinement repairs that, because it is a property of the spectral
-    function; the fix is to stop linearizing.
-
-    Returns a dict rather than a scalar, because on a metal the useful output
-    is not only where the root is but HOW MANY there are. The keys are the
-    same on every path:
-
-        qp            `find_qp_root`'s root: the largest weight Z in (0, 1]
-                      (the rule of every quasiparticle equation in the code
-                      base), the root nearest eps if no Z is in (0, 1], NaN if
-                      the window holds no root
-        Z             1/(1 - dSigma_c/domega) evaluated AT that root, not at eps
-        quasiparticle False when Z <= z_min (or Z outside (0, 1]): the root is
-                      kept and flagged, with a RuntimeWarning
-        bracketed     False if the window caught no sign change at all
-        nroots        roots with |Z| >= z_min
-        n_small_z     roots with |Z| < z_min (pole artifacts, Z ~ 0)
-        roots         the roots with |Z| >= z_min, ascending
-        all_roots     every (root, Z) found, ascending
-
-    `nroots > 1` means the spectral weight is split and there is no single
-    quasiparticle to converge -- report it rather than silently taking one
-    root and calling it converged. `bracketed=False` means the root is
-    outside eps +/- half_width, which is itself information: widen the window
-    deliberately rather than trusting an extrapolation.
-
-    A root sitting ON a pole of Sigma_c has dSigma/domega -> -inf and so
-    Z -> 0: it solves the equation and carries no spectral weight -- measured
-    Z = -3.2e-06 for bulk Al at 6x6x6, on a case that reported a single
-    bracketed root and looked clean in every other column. PBC_QP_Z_MIN is
-    this scan's own artifact floor, not the molecular QP_WINDOW_Z_MIN, and it
-    is what `quasiparticle` is judged by.
-
-    The scan costs `npts` self-energy evaluations, but `sigma_c_diag_occ`
-    accepts a frequency ARRAY, so it is one call, not npts of them.
-    """
-    if mo_energy is None:
-        mo_energy = dfints.mo_energy
-    mo_energy = np.asarray(mo_energy)
-    ep = mo_energy[kn][n].real
-    kw = dict(mo_energy=mo_energy, mo_occ=mo_occ, eta=eta, threshold=threshold)
-
-    def residual(w):
-        sig = np.real(np.asarray(sigma_c_diag_occ(dfints, eig_all_q, kn, n, w,
-                                                  **kw)))
-        return w - ep - sig - exchange_minus_vxc
-
-    # the one root finder on this window: every sign change bisected, a pole
-    # of Sigma_c told from a root, every root weighed, the largest weight kept
-    # and judged against z_min
-    source = SampledEquation(residual, vectorized=True, n_omega=npts,
-                             tol=1e-10,
-                             windows=[(ep - half_width, ep + half_width)])
-    got = find_qp_root(source, ep, z_min=z_min,
-                       label=f'the QP equation of state {n} at k-point {kn}')
-    found = sorted((float(r), float(z)) for r, z in got.found)
-    keep = [r for r, z in found if abs(z) >= z_min]
-    if found and not got.quasiparticle:
-        warnings.warn(
-            f"state {n} at k-point {kn}: the QP root kept, {got.w:.6f} Ha, has "
-            f"Z = {got.z:.4g}, not in ({z_min}, 1]: no quasiparticle in the "
-            f"window ({len(found)} root(s)). The root is returned and flagged "
-            f"(quasiparticle=False); widen eta or refine the grid.",
-            RuntimeWarning, stacklevel=2)
-    return dict(qp=float(got.w), Z=float(got.z),
-                quasiparticle=bool(got.quasiparticle), bracketed=bool(found),
-                nroots=len(keep), n_small_z=len(found) - len(keep),
-                roots=keep, all_roots=found)

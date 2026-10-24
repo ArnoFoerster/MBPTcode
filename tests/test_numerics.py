@@ -68,6 +68,8 @@ def test_every_choice_moves_the_identity(section, name):
         other = 'bare'
     if (section, name) == ('qp', 'scissor'):
         other = 'calibrate'
+    if (section, name) == ('evgw', 'damping'):
+        other = 0.5
     if (section, name) == ('qp', 'select'):
         other = QPStates('adaptive')
     changed = base.derive('test', **{section: {name: other}})

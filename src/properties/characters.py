@@ -39,7 +39,6 @@ from pyscf import lo, scf as pyscf_scf, symm
 
 from src.Base.numerics.constants import (CHARACTER_WINDOW, LOCALIZED_ASSIGNMENT_FLOOR,
                                          PURITY_FLOOR, QP_ORDER_SEARCH)
-from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.gradients.state_identity import (frontier_window, localized_window,
                                           orbital_channel)
 from src.gradients.surface import require
@@ -229,38 +228,32 @@ def quasiparticle_character(mf, orbital, fragments, window=CHARACTER_WINDOW,
                             if r['population'] < LOCALIZED_ASSIGNMENT_FLOOR])
 
 
-def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
-                        spin_channel='alpha', **route):
+def quasiparticle_order(mf, orbital, energies, window=QP_ORDER_SEARCH,
+                        spin_channel='alpha'):
     """Whether `orbital` is the lowest-energy removal or attachment, in eV.
 
-    Solves the quasiparticle energies of the `window` orbitals nearest the
-    frontier on the orbital's side of the gap (and the orbital itself) through
-    `calc_qp_energy(**route)` -- by default the space-time route, whose ISDF
-    grid `route` must name (`counts=` or `grid_accuracy=`) -- and warns
-    when another orbital is the easier electron to remove (a higher occupied
-    quasiparticle energy) or to add (a lower virtual one). G0W0 reorders
-    states relative to the mean field, so a surface that follows a canonical
-    index can be following the second-lowest process.
+    `energies(mf, states, spin_channel) -> ({orbital: eV}, reference
+    diagnostics or None)` is the method's removal and attachment energies of
+    `states` on `mf` (`gradients.gwbse.diagnostics.gw_qp_energies` for
+    G0W0); they are asked for the `window` orbitals nearest the frontier on
+    the orbital's side of the gap and the orbital itself. Warns when another
+    orbital is the easier electron to remove (a higher occupied energy) or to
+    add (a lower virtual one): G0W0 reorders states relative to the mean
+    field, so a surface that follows a canonical index can be following the
+    second-lowest process.
 
     Returns {'orbital', 'energies' {orbital: eV}, 'lowest_process',
-    'reordered', 'reference_diagnostics'} -- the last the unrestricted
-    reference's spin contamination and stability flags (`calc_qp_energy(out=)`),
-    None for a restricted one.
+    'reordered', 'reference_diagnostics'} -- the last what `energies` said of
+    the reference (an unrestricted one's spin contamination and stability
+    flags), None for none.
     """
     unrestricted = isinstance(mf, pyscf_scf.uhf.UHF)
     spin = (0 if spin_channel == 'alpha' else 1) if unrestricted else None
     coeff, nocc = orbital_channel(mf, spin, None)
     start, stop = frontier_window(int(orbital), nocc, coeff.shape[1], int(window))
     states = sorted(set(range(start, stop)) | {int(orbital)})
-    route = dict({'mode': 'space-time'}, **route)
-    if unrestricted:
-        route['spin_channel'] = spin_channel
-    seen = {}
-    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=states,
-                         out=seen, **route)
-    if isinstance(out, dict):
-        out = [out[p]['GW'] for p in states]
-    energies = dict(zip(states, (float(e) for e in out)))
+    found, diagnostics = energies(mf, states, spin_channel if unrestricted else None)
+    energies = {p: float(found[p]) for p in states}
     pick = max if int(orbital) < nocc else min
     lowest = pick(energies, key=energies.get)
     if lowest != int(orbital):
@@ -273,17 +266,18 @@ def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
             stacklevel=2)
     return dict(orbital=int(orbital), energies=energies,
                 lowest_process=lowest, reordered=lowest != int(orbital),
-                reference_diagnostics=seen.get('reference_diagnostics'))
+                reference_diagnostics=diagnostics)
 
 
-def surface_order(surface, mol=None, window=QP_ORDER_SEARCH, **route):
+def surface_order(surface, energies, mol=None, window=QP_ORDER_SEARCH):
     """`quasiparticle_order` for a charged-excitation surface at `mol`.
 
     The surface's own mean field -- through its environment, so a solvated
     surface is audited in its continuum -- and the orbital its declared
-    `ChargedExcitation` names. Run it at the reference geometry before an
-    optimization or a scan follows that orbital.
+    `ChargedExcitation` names; `energies` the method's (`quasiparticle_order`).
+    Run it at the reference geometry before an optimization or a scan follows
+    that orbital.
     """
     _, mf = surface.mean_field(mol)
-    return quasiparticle_order(mf, surface.physics_excitation.orbital, window,
-                               **route)
+    return quasiparticle_order(mf, surface.physics_excitation.orbital, energies,
+                               window)

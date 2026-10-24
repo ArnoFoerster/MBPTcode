@@ -435,7 +435,7 @@ def test_kept_integrals_are_the_whole_block_bits(atom, basis):
     grid = separable_ri.molecular_points_covariant(
         mol, {el: row[0] for el, row in rows.items()},
         origin_by_element={el: row[1] for el, row in rows.items()})
-    mu_all, nu_all, _ = separable_ri.test_set_layout(mol, grid)
+    mu_all, nu_all, _ = separable_ri.fit_test_set_layout(mol, grid)
     ao_loc = mol.ao_loc_nr()
     integrals = KeptIntegrals(mol, auxmol)
     naux = auxmol.nao_nr()
@@ -507,7 +507,7 @@ def test_shell_block_holds_the_kept_pairs(ethylene, size):
             return fit.held['shell_block']
 
         coords = one_rank(mol, mf)[3]
-        mu, _, _ = separable_ri.test_set_layout(mol, coords,
+        mu, _, _ = separable_ri.fit_test_set_layout(mol, coords,
                                                 numerics=numerics)
         held = run_simulated(rank, size)
         # ethylene is one shell block of every AO, and rank 0 computes it; a
@@ -585,7 +585,7 @@ def test_an_indefinite_dressed_root_is_refused_on_every_rank(water):
 
 @pytest.mark.parametrize('size', [1, 3])
 def test_a_frozen_layout_replaces_the_screen(ethylene, size):
-    """A frozen `test_set_layout` in place of the screen: the geometry's own
+    """A frozen `fit_test_set_layout` in place of the screen: the geometry's own
     layout gives the screened fit's rows bitwise at every rank, and a layout
     holding other pairs gives another D. The replicated fit reads the layout
     the same way: its own layout gives the screened M bitwise, the other
@@ -593,7 +593,7 @@ def test_a_frozen_layout_replaces_the_screen(ethylene, size):
     mol, mf, _ = ethylene
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
     coords = one_rank(mol, mf)[3]
-    own = separable_ri.test_set_layout(mol, coords)
+    own = separable_ri.fit_test_set_layout(mol, coords)
     other = tuple(a[::2] for a in own)
     root = aux_metric_sqrt(auxmol)
 

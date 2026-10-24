@@ -1,13 +1,20 @@
 """Nuclear force of a density-fitted correlated energy on an RHF reference,
-tiled and distributed: the production route of src.SingleReference
+tiled and distributed: the production route of src.gradients
 .df_correlation_force (the dense reference, whose formulas are used here
 unchanged), for molecules where no MO factor, two-particle density or
 derivative-integral tensor fits whole.
 
+The factor provider. The force reads the RI factors of the correlation fit
+(B = X J, X = L^-1, V = L L^T) through one object, which the method hands
+over (`gradients.adc.fold_factors` for MP2 and ADC(2)): `f` the factors
+(`L`, `LT`, `BooP`, `bvv(chunk, p0, p1)`, `eo`, `ev`, `naux`), `no` and `nv`,
+`comm`, the auxiliary `chunks` with this rank's `my_chunks`, their `owners`
+and `chunk_ranges`, `ints(k0, k1)` the (ia|jb) of an occupied tile, and
+`core_factors(mol, mf, frozen, auxbasis)` the frozen core's.
+
 The factored densities. The correlation fit enters through the derivatives
-Gamma^P_pq = dE_c/dB^P_pq of the folded ADC(2) operator's factors
-(src.SingleReference.ADC.eeADC.ee_ri_fold, B = X J, X = L^-1, V = L L^T),
-nonzero in three active blocks, each held as an (n_occ n, naux) array:
+Gamma^P_pq = dE_c/dB^P_pq of the provider's factors, nonzero in three active
+blocks, each held as an (n_occ n, naux) array:
 
     Gamma[o, v] = GL,   Gamma[o, o] = Goo,   Gamma^P_ab = sum_k y_ka X^P_kb
 
@@ -18,7 +25,7 @@ The orbital gradient. YG_rp = sum_qP Gs2^P_pq B^P_rq (Gs2 = Gamma + Gamma^T)
 needs B^P_rq of every row r against the active columns: L, B_oo and the core
 factors are held whole, B_vv in the fold's auxiliary chunks; each chunk's
 owner adds its chunk's share, summed in chunk order. The Z-vector and W are
-df_correlation_force.relax_gradient's.
+df_correlation_force.relax_gradient's, solved on rank 0.
 
 The correlation-fit skeleton, 2 sum Gamma3 dJ - sum Gamma2 dV with Gamma3 =
 (1/4) (Gamma + Gamma^T) X in the raw auxiliary basis and Gamma2 = K^T Gamma3:
@@ -34,11 +41,9 @@ against one auxiliary chunk from the X-transformed factored arrays,
 
 contracted with the derivative integrals of that block alone.
 
-The JK-fit skeleton, sum Dc G'[D_HF], D_HF = 2 C_o C_o^T: Gamma3 = (1/2)(Dc
-c_P + D_HF c_D) - (1/4)(ex + ex^T), c_D = V^-1 (J . Dc), ex^Q = 2 (Dc W^Q)
-C_o^T with W^Q = sum_R J^R C_o V^-1_RQ, and Gamma2 = (1/2)(c_D c_P^T + c_P
-c_D^T) - W . (Dc W)^T. W and Dc W (nao nocc naux each) are the only
-intermediates held whole, as in any density-fitted exchange gradient.
+The JK-fit skeleton, sum Dc G'[D_HF] with D_HF = 2 C_o C_o^T, is the fitted
+Fock skeleton every gradient shares (`skeleton_tiles.fitted_fock_skeleton`,
+the SCF's auxiliary basis cut into fixed tiles over the ranks).
 
 Distribution. Every collective runs on the fold's communicator. A sum over
 occupied tiles, auxiliary chunks or AO shell blocks is taken in tile, chunk or
@@ -49,7 +54,6 @@ tile size and one chunk width the force has the same bits on every rank and at
 every rank count.
 """
 import numpy as np
-import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf.gto.moleintor import getints, make_cintopt
 
@@ -57,15 +61,15 @@ from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FO
                                          DF_FORCE_BLOCK_GB, DF_FORCE_MP2_TILE_ARRAYS,
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
-                                              lockstep, lockstep_mean_field, ordered_chain_sum,
-                                              ordered_sum, reduce_sum)
+                                              distributed, lockstep, lockstep_mean_field,
+                                              ordered_chain_sum, ordered_sum, reduce_sum)
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
-from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
-from src.SingleReference.ADC.eeADC import ee_ri_fold
-from src.SingleReference.ADC.eeADC.ee_ri_density import Pass, tile_ranges
 from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.skeleton_tiles import fitted_fock_skeleton, shell_runs
 
 
 
@@ -80,8 +84,9 @@ class FactoredDerivatives:
         self.Goo, self.X, self.y = Goo, X, y
 
     def plus(self, t1, pc):
-        """self + t1 x the ADC(2) Pieces pc (ee_relaxed_density); self is the
-        MP2 part, which has no oo or vv derivative blocks of its own."""
+        """self + t1 x an excitation's factored pieces pc (its g_oo, g_vv, GL,
+        Goo, Xvv and y; ADC(2)'s are ee_relaxed_density's); self is the MP2
+        part, which has no oo or vv derivative blocks of its own."""
         assert self.Goo is None and self.X is None
         return FactoredDerivatives(self.g_oo + t1 * pc.g_oo, self.g_vv + t1 * pc.g_vv,
                                    self.GL + t1 * pc.GL, t1 * pc.Goo, t1 * pc.Xvv,
@@ -99,7 +104,7 @@ def estimate(mol, nfrozen, auxbasis, jk_auxbasis, ranks=1, tile_gb=EE_RI_TILE_GB
     (flop). Held throughout: the fold's factors and amplitude cache, the core
     factors and the SCF's JK tensor (pyscf keeps it in memory when it fits);
     on top, the largest of the ADC(2) pieces, the force's own arrays (the
-    factored densities, the JK exchange intermediates, one derivative unit)
+    factored densities, the JK fit's exchange tiles, one derivative unit)
     and the correlation fit's AO tensor while a factor is built."""
     nocc = mol.nelectron // 2
     no, nv, nao = nocc - nfrozen, mol.nao - nocc, mol.nao
@@ -119,15 +124,17 @@ def estimate(mol, nfrozen, auxbasis, jk_auxbasis, ranks=1, tile_gb=EE_RI_TILE_GB
     # GL, Xvv, the running GL sum, one tile's term, the dressed factor twice,
     # rho_o L, B_oo-shaped Goo; MP2 alone: GL
     pieces = (7.0 * A + no * no * naux * gb if excited else A) + tile
-    # GL, X and their raw-basis copies; the JK fit's W and Dc W
-    exchange = 2.0 * nao * nocc * naux_jk * gb
+    # GL, X and their raw-basis copies; the fitted Fock skeleton's exchange
+    # tiles (L, g L, Kt, then g Kt over this rank's auxiliary tiles) and its
+    # metric inverse, T and one tile's V^-1 T V^-1 rows
+    exchange = 3.0 * nao * nocc * naux_jk * gb / ranks + 3.0 * naux_jk * naux_jk * gb
     engine = (4.0 if excited else 2.0) * A + exchange + block_gb
     held = factors + amplitudes + core + cderi_jk
     peak = held + max(pieces, engine, cderi_ri)
     flop = (2.0 * nao * nao * (nmo + no) * naux                 # Gamma3 blocks
             + 6.0 * no * nv * naux * naux                       # X transforms, N
-            + 8.0 * nao * nao * nocc * naux_jk                  # J C_o, Dc W, ex
-            + 4.0 * nao * nocc * naux_jk * naux_jk              # W, Gamma2_jk
+            + 8.0 * nao * nao * nocc * naux_jk                  # J C_o, g Kt, S_x
+            + 4.0 * nao * nocc * naux_jk * naux_jk              # Kt, T
             + (16.0 if excited else 4.0) * (no * nv) ** 2 * naux)   # the pieces
     return dict(nocc_active=no, nvir=nv, nao=nao, naux=naux, naux_jk=naux_jk,
                 ranks=ranks, factors_gb=factors, amplitudes_gb=amplitudes,
@@ -151,53 +158,64 @@ def refuse_over(est, max_memory_mb):
 # MP2
 # ----------------------------------------------------------------------
 
-def mp2_pieces(op, tile_gb=EE_RI_TILE_GB):
-    """(e_mp2, FactoredDerivatives) of closed-shell DF-MP2 on the fold's
+def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB):
+    """(e_mp2, FactoredDerivatives) of closed-shell DF-MP2 on the provider's
     factors (df_correlation_force.mp2_pieces one occupied tile at a time);
-    a collective over op's ranks."""
-    f, no, nv, naux = op.f, op.no, op.nv, op.f.naux
-    comm = op.comm
+    a collective over its ranks."""
+    f, no, nv, naux = factors.f, factors.no, factors.nv, factors.f.naux
+    comm = factors.comm
     ranks = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
     L = f.L
-    tiles = tile_ranges(no, 8.0 * nv * no * nv * DF_FORCE_MP2_TILE_ARRAYS, tile_gb, ranks)
+    # occupied tiles of at most tile_gb, and no more than gives every rank one
+    k = tile_width(8.0 * nv * no * nv * DF_FORCE_MP2_TILE_ARRAYS, -(-no // ranks),
+                   Numerics(layout={'tile_gb': tile_gb}))
+    tiles = [(k0, min(k0 + k, no)) for k0 in range(0, no, k)]
     GL = np.zeros((no * nv, naux))
-    acc = Pass(op, {'e': (1,), 'g_oo': (no, no), 'g_vv': (nv, nv)})
+    # e, g_oo and g_vv of each tile, flat, summed in tile order
+    size = 1 + no * no + nv * nv
+    parts = []
     for t, (k0, k1) in enumerate(tiles):
         if t % ranks != rank:
             continue
-        I = op._ints(k0, k1)
+        I = factors.ints(k0, k1)
         D = dfa.doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
         tau = (2.0 * I - I.transpose(dfa.PAIR)) / D
         oo, vv = dfa.tile_amplitude_fock(-I / D, tau)
         e = -float(np.sum(I * tau))
         del I, D
         GL[k0 * nv:k1 * nv] = -4.0 * (tau.reshape((k1 - k0) * nv, -1) @ L)
-        acc.add(t, {'e': [e], 'g_oo': oo, 'g_vv': vv})
+        flat = np.zeros(size)
+        flat[0] = e
+        flat[1:1 + no * no] = np.asarray(oo).ravel()
+        flat[1 + no * no:] = np.asarray(vv).ravel()
+        parts.append((t, flat))
     # every row of GL from one tile, the rest zeros: exact in any order
     reduce_sum(GL, comm)
-    tot = acc.total()
-    return float(tot['e'][0]), FactoredDerivatives(erd.symmetrize(tot['g_oo']),
-                                                   erd.symmetrize(tot['g_vv']), GL)
+    tot = ordered_sum(parts, comm, shape=(size,), onto=np.zeros(size))
+    g_oo = tot[1:1 + no * no].reshape(no, no)
+    g_vv = tot[1 + no * no:].reshape(nv, nv)
+    return float(tot[0]), FactoredDerivatives(0.5 * (g_oo + g_oo.T),
+                                              0.5 * (g_vv + g_vv.T), GL)
 
 
 # ----------------------------------------------------------------------
 # the orbital gradient and the correlation fit's metric density
 # ----------------------------------------------------------------------
 
-def orbital_gradient(op, d, nf, Bc=None):
+def orbital_gradient(factors, d, nf, Bc=None):
     """YG (nmo, nmo), YG_rp = sum_qP Gs2^P_pq B^P_rq over every row r
     (frozen core, active occupied, virtual), from the fold's factors chunk by
     chunk; Bc the core factors (ee_relaxed_density.core_factors) when nf."""
-    f, no, nv = op.f, op.no, op.nv
+    f, no, nv = factors.f, factors.no, factors.nv
     nmo = nf + no + nv
     c, o, v = slice(0, nf), slice(nf, nf + no), slice(nf + no, nmo)
     GL3 = d.GL.reshape(no, nv, -1)
     X3 = None if d.X is None else d.X.reshape(no, nv, -1)
     y = d.y
     terms = {}
-    for ch in op.my_chunks:
-        p0, p1 = op.chunks[ch]
+    for ch in factors.my_chunks:
+        p0, p1 = factors.chunks[ch]
         Lc = f.LT[p0:p1]                                      # B^P_kb [P, k, b]
         Bo = f.BooP[p0:p1]                                    # B^P_kj
         Bv = f.bvv(ch, p0, p1).transpose(1, 0, 2)             # B^P_db [P, d, b]
@@ -225,17 +243,17 @@ def orbital_gradient(op, d, nf, Bc=None):
                 yB = np.einsum('mb,Prb->Pmr', y, Brv, optimize=True)
                 Y[r, v] += XB.T @ y + np.einsum('Pmr,Pma->ra', yB, Xc, optimize=True)
         terms[ch] = Y
-    return ordered_chain_sum(terms, op.owners, op.comm, np.zeros((nmo, nmo)))
+    return ordered_chain_sum(terms, factors.owners, factors.comm, np.zeros((nmo, nmo)))
 
 
-def metric_density(op, d, Xw):
+def metric_density(factors, d, Xw):
     """Gamma2 (naux, naux) of the correlation fit, raw basis, symmetrized:
     X^T N X, N_SP = (1/2) sum_pq B^S_pq Gamma^P_pq, each chunk's rows from its
     owner."""
-    f, no, nv, naux = op.f, op.no, op.nv, op.f.naux
+    f, no, nv, naux = factors.f, factors.no, factors.nv, factors.f.naux
     N = np.zeros((naux, naux))
-    for ch in op.my_chunks:
-        p0, p1 = op.chunks[ch]
+    for ch in factors.my_chunks:
+        p0, p1 = factors.chunks[ch]
         pc = p1 - p0
         n = f.LT[p0:p1].reshape(pc, -1) @ d.GL
         if d.Goo is not None:
@@ -245,21 +263,21 @@ def metric_density(op, d, Xw):
             yB = (d.y @ f.bvv(ch, p0, p1).reshape(nv, -1)).reshape(no, pc, nv)
             n += yB.transpose(1, 0, 2).reshape(pc, -1) @ d.X
         N[p0:p1] = 0.5 * n
-    allgather_ranges(N, op.chunk_ranges, op.comm)
+    allgather_ranges(N, factors.chunk_ranges, factors.comm)
     G2 = Xw.T @ N @ Xw
     return 0.5 * (G2 + G2.T)
 
 
-def raw_basis(op, A, Xw):
+def raw_basis(factors, A, Xw):
     """(A Xw)^T (naux, rows), auxiliary-major, each chunk of columns from its
     owner: a factored Gamma (rows, naux) taken to the raw auxiliary basis."""
     naux = Xw.shape[0]
     out = np.zeros((naux, A.shape[0]))
-    for ch in op.my_chunks:
-        p0, p1 = op.chunks[ch]
+    for ch in factors.my_chunks:
+        p0, p1 = factors.chunks[ch]
         # X = L^-1 is lower triangular
         out[p0:p1] = (A[:, p0:] @ Xw[p0:, p0:p1]).T
-    return allgather_ranges(out, op.chunk_ranges, op.comm)
+    return allgather_ranges(out, factors.chunk_ranges, factors.comm)
 
 
 # ----------------------------------------------------------------------
@@ -284,16 +302,9 @@ def _int3c(mol, auxmol, intor):
 
 def shell_blocks(ao_loc, width):
     """(s0, s1, p0, p1) runs of consecutive shells of at most `width`
-    functions each (at least one shell)."""
-    out, s0 = [], 0
-    nsh = len(ao_loc) - 1
-    while s0 < nsh:
-        s1 = s0 + 1
-        while s1 < nsh and ao_loc[s1 + 1] - ao_loc[s0] <= width:
-            s1 += 1
-        out.append((s0, s1, int(ao_loc[s0]), int(ao_loc[s1])))
-        s0 = s1
-    return out
+    functions each (`skeleton_tiles.shell_runs`) with their function ranges."""
+    return [(s0, s1, int(ao_loc[s0]), int(ao_loc[s1]))
+            for s0, s1 in shell_runs(ao_loc, width)]
 
 
 def _owners(n, size):
@@ -311,7 +322,7 @@ def on_root(fn, shapes, comm):
     (lockstep); shapes theirs. For the replicated pyscf pieces: once instead
     of on every rank, and never concurrently on one molecule (pyscf's
     one-electron derivatives move its rinv origin). A raise in fn() on rank 0
-    (an unconverged CPHF) is broadcast and raised on every rank, so the other
+    (a refused input) is broadcast and raised on every rank, so the other
     ranks do not wait in the lockstep for ever."""
     rank = 0 if comm is None else comm.Get_rank()
     if rank != 0:
@@ -329,75 +340,27 @@ def on_root(fn, shapes, comm):
 
 
 # ----------------------------------------------------------------------
-# the JK fit's exchange intermediates
-# ----------------------------------------------------------------------
-
-def jk_intermediates(mol, auxmol, Dc, Co, comm, width=DF_FORCE_AUX_CHUNK):
-    """(c_D, c_P, Dc W (naux, nao, nocc), Gamma2) of sum Dc G'[D_HF] in the
-    JK fit (module docstring), Co every occupied orbital; a collective."""
-    size = 1 if comm is None else comm.Get_size()
-    rank = 0 if comm is None else comm.Get_rank()
-    nao, nocc, naux = mol.nao, Co.shape[1], auxmol.nao
-    Dhf = 2.0 * Co @ Co.T
-    chunks = shell_blocks(auxmol.ao_loc, width)
-    owners = _owners(len(chunks), size)
-    ranges = _ranges(chunks, owners, size)
-    mine = [b for b, o in zip(chunks, owners) if o == rank]
-    get = _int3c(mol, auxmol, 'int3c2e')
-    JCo = np.zeros((naux, nao, nocc))
-    jd = np.zeros((naux, 2))
-    for a0, a1, q0, q1 in mine:
-        J = get(0, mol.nbas, a0, a1)                          # J^Q [Q, nu, mu]
-        JCo[q0:q1] = J @ Co
-        J2 = J.reshape(q1 - q0, -1)
-        jd[q0:q1, 0] = J2 @ Dc.ravel()
-        jd[q0:q1, 1] = J2 @ Dhf.ravel()
-        del J, J2
-    allgather_ranges(JCo, ranges, comm)
-    allgather_ranges(jd, ranges, comm)
-    V = auxmol.intor('int2c2e')
-    Vinv = scipy.linalg.cho_solve(scipy.linalg.cho_factor(V), np.eye(naux))
-    lockstep(Vinv, comm)
-    cD, cP = Vinv @ jd[:, 0], Vinv @ jd[:, 1]
-    W = np.zeros_like(JCo)
-    for a0, a1, q0, q1 in mine:
-        W[q0:q1] = (Vinv[q0:q1] @ JCo.reshape(naux, -1)).reshape(q1 - q0, nao, nocc)
-    del JCo
-    allgather_ranges(W, ranges, comm)
-    DcW = np.zeros_like(W)
-    for a0, a1, q0, q1 in mine:
-        DcW[q0:q1] = np.matmul(Dc, W[q0:q1])
-    allgather_ranges(DcW, ranges, comm)
-    G2 = np.zeros((naux, naux))
-    for a0, a1, q0, q1 in mine:
-        G2[q0:q1] = (0.5 * (np.outer(cD[q0:q1], cP) + np.outer(cP[q0:q1], cD))
-                     - W[q0:q1].reshape(q1 - q0, -1) @ DcW.reshape(naux, -1).T)
-    allgather_ranges(G2, ranges, comm)
-    return cD, cP, DcW, 0.5 * (G2 + G2.T)
-
-
-# ----------------------------------------------------------------------
 # the derivative-integral pass
 # ----------------------------------------------------------------------
 
 class _RIFit:
     """Gamma3 blocks of the correlation fit from the raw factored arrays."""
 
-    def __init__(self, auxmol, C, nf, no, d, Xw, op):
+    def __init__(self, auxmol, C, nf, no, d, Xw, factors):
         nocc = nf + no
         self.auxmol = auxmol
         naux = Xw.shape[0]
         nv = C.shape[1] - nocc
         self.Co, self.Cv = C[:, nf:nocc], C[:, nocc:]
-        self.GL = raw_basis(op, d.GL, Xw).reshape(naux, no, nv)
+        self.GL = raw_basis(factors, d.GL, Xw).reshape(naux, no, nv)
         self.Goo = None
         if d.Goo is not None:
-            G = raw_basis(op, d.Goo.reshape(no * no, -1), Xw).reshape(naux, no, no)
+            G = raw_basis(factors, d.Goo.reshape(no * no, -1), Xw).reshape(naux, no, no)
             self.Goo = G + G.transpose(0, 2, 1)
         self.X = None
         parts = [self.Co, self.Cv]
         if d.X is not None:
-            self.X = raw_basis(op, d.X, Xw).reshape(naux, no, nv)
+            self.X = raw_basis(factors, d.X, Xw).reshape(naux, no, nv)
             self.Cy = self.Cv @ d.y.T
             parts.append(self.Cy)
         self.Cbig = np.ascontiguousarray(np.hstack(parts))
@@ -417,24 +380,6 @@ class _RIFit:
             parts.append(np.matmul(Cvm, Xq.transpose(0, 2, 1)))
         Lcat = np.concatenate(parts, axis=2)
         return 0.25 * np.matmul(self.Cbig, Lcat.transpose(0, 2, 1))
-
-
-class _JKFit:
-    """Gamma3 blocks of sum Dc G'[D_HF] in the JK fit (module docstring)."""
-
-    def __init__(self, auxmol, Dc, Co, cD, cP, DcW):
-        self.auxmol = auxmol
-        self.Dc, self.Dhf = Dc, 2.0 * Co @ Co.T
-        self.Co, self.cD, self.cP, self.DcW = Co, cD, cP, DcW
-
-    def block(self, m0, m1, q0, q1):
-        DcW = self.DcW[q0:q1]
-        G = (0.5 * self.cP[q0:q1, None, None] * self.Dc[None, :, m0:m1]
-             + 0.5 * self.cD[q0:q1, None, None] * self.Dhf[None, :, m0:m1])
-        # (ex + ex^T)[nu, mu] / 4, ex = 2 Dc W C_o^T
-        G -= 0.5 * np.matmul(self.Co, DcW[:, m0:m1].transpose(0, 2, 1))
-        G -= 0.5 * np.matmul(DcW, self.Co[m0:m1].T)
-        return G
 
 
 def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
@@ -502,28 +447,33 @@ def metric_force(auxmol, G2):
 # the force
 # ----------------------------------------------------------------------
 
-def correlation_force(mol, mf, op, auxmol, d, nf, Bc=None, Y_extra=None,
-                      block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK):
+def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
+                      block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK,
+                      numerics=None, flags=None):
     """(force (natm, 3) of E_c, gamma (MO, relaxed), max |Y - Y^T|): the
-    tiled df_correlation_force.correlation_force, a collective over op's
-    ranks; auxmol the correlation fit of op's factors."""
-    comm = op.comm
+    tiled df_correlation_force.correlation_force, a collective over the
+    provider's ranks; auxmol the correlation fit of its factors."""
+    comm = factors.comm
     C = np.asarray(mf.mo_coeff)
     nocc = mol.nelectron // 2
-    nmo, no = C.shape[1], op.no
-    if auxmol.nao != op.f.naux:
-        raise ValueError(f'the factors hold {op.f.naux} auxiliary functions, the fit '
+    nmo, no = C.shape[1], factors.no
+    if auxmol.nao != factors.f.naux:
+        raise ValueError(f'the factors hold {factors.f.naux} auxiliary functions, the fit '
                          f'{auxmol.nao}: a linearly dependent metric was pruned')
-    if nmo != nf + op.no + op.nv:
+    if nmo != nf + factors.no + factors.nv:
         raise ValueError('the operator does not span the mean field\'s orbitals')
-    YG = orbital_gradient(op, d, nf, Bc)
+    YG = orbital_gradient(factors, d, nf, Bc)
     if Y_extra is not None:
         YG = YG + Y_extra
     gamma0 = np.zeros((nmo, nmo))
     o, v = slice(nf, nocc), slice(nocc, nmo)
     gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
-    gamma, Y = on_root(lambda: dcf.relax_gradient(mf, mol, YG, gamma0, nf),
-                       [(nmo, nmo)] * 2, comm)
+
+    def relaxed():
+        # rank 0 alone: its Z-vector solve is serial
+        with distributed(None):
+            return dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
+    gamma, Y = on_root(relaxed, [(nmo, nmo)] * 2, comm)
     asym = float(np.max(np.abs(Y - Y.T)))
     W = 0.25 * (Y + Y.T)
     gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
@@ -532,26 +482,15 @@ def correlation_force(mol, mf, op, auxmol, d, nf, Bc=None, Y_extra=None,
     # the correlation fit
     _, Xw = dcf.whitening(auxmol)
     lockstep(Xw, comm)
-    G2ri = metric_density(op, d, Xw)
-    ri = _RIFit(auxmol, C, nf, no, d, Xw, op)
+    G2ri = metric_density(factors, d, Xw)
+    ri = _RIFit(auxmol, C, nf, no, d, Xw, factors)
+    f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + metric_force(auxmol, G2ri)
     # the SCF's JK fit
-    auxjk = pyscf_df.addons.make_auxmol(mol, mf.with_df.auxbasis)
+    auxjk = pyscf_df.addons.make_auxmol(mol, dcf.jk_fit(mf))
     Co = np.ascontiguousarray(C[:, :nocc])
-    cD, cP, DcW, G2jk = jk_intermediates(mol, auxjk, gamma_ao, Co, comm, width)
-    jk = _JKFit(auxjk, gamma_ao, Co, cD, cP, DcW)
-    f2 = skeleton_pass(mol, [ri, jk], comm, block_gb, width)
-    f2 += metric_force(auxmol, G2ri) + metric_force(auxjk, G2jk)
+    f2 += fitted_fock_skeleton(mol, auxjk, gamma_ao, 2.0 * Co @ Co.T,
+                               occ=np.sqrt(2.0) * Co, exchange=1.0, comm=comm)
     return lockstep(f1 + f2, comm), gamma, asym
-
-
-def ground_operator(mol, mf, frozen, auxbasis, tile_gb=EE_RI_TILE_GB, comm=None,
-                    aux_chunk=None):
-    """The fold's factors, tiles and chunks without a root (ADC(1) setup):
-    what the tiled MP2 force runs on."""
-    f = ee_ri_fold.bare_factors(mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm,
-                                aux_chunk=aux_chunk)
-    return ee_ri_fold.RIFoldADC2(f, 'singlet', level='adc1', tile_gb=tile_gb,
-                                 comm=comm, aux_chunk=aux_chunk)
 
 
 def prepare(mf, mol, frozen, auxbasis, excited, tile_gb=EE_RI_TILE_GB,
@@ -564,7 +503,7 @@ def prepare(mf, mol, frozen, auxbasis, excited, tile_gb=EE_RI_TILE_GB,
         raise ValueError('the tiled force needs the correlation fit by name (auxbasis)')
     comm = current_comm() if comm is None else comm
     ranks = 1 if comm is None else comm.Get_size()
-    est = estimate(mol, frozen, auxbasis, mf.with_df.auxbasis, ranks, tile_gb,
+    est = estimate(mol, frozen, auxbasis, dcf.jk_fit(mf), ranks, tile_gb,
                    excited=excited, block_gb=block_gb)
     refuse_over(est, mol.max_memory if max_memory is None else max_memory)
     # every rank's partials are of rank 0's orbitals
@@ -572,34 +511,39 @@ def prepare(mf, mol, frozen, auxbasis, excited, tile_gb=EE_RI_TILE_GB,
     return comm, est
 
 
-def force(mf, mol, op, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_GB,
-          block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK):
-    """df_correlation_force.mp2_force on the fold's tiles and ranks, a
-    collective over op's communicator with the same bits on every rank;
+def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_GB,
+          block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK, numerics=None,
+          flags=None):
+    """df_correlation_force.mp2_force on the provider's tiles and ranks, a
+    collective over its communicator with the same bits on every rank;
     excited(d, C, nocc, nmo) -> (d plus the excitation's factored derivatives,
     Y_extra, extra)."""
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
-    e2, d = mp2_pieces(op, tile_gb)
+    e2, d = mp2_pieces(factors, tile_gb)
     Y_extra = extra = None
     if excited is not None:
         d, Y_extra, extra = excited(d, C, nocc, nmo)
-    Bc = erd.core_factors(mol, mf, frozen, auxbasis) if frozen else None
+    Bc = factors.core_factors(mol, mf, frozen, auxbasis) if frozen else None
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis)
-    fc, gam, asym = correlation_force(mol, mf, op, auxmol, d, frozen, Bc,
-                                      Y_extra, block_gb, width)
-    F = on_root(lambda: (dcf.hf_force(mf),), [(mol.natm, 3)], op.comm)[0] + fc
+    fc, gam, asym = correlation_force(mol, mf, factors, auxmol, d, frozen, Bc,
+                                      Y_extra, block_gb, width, numerics, flags)
+    F = on_root(lambda: (dcf.hf_force(mf),), [(mol.natm, 3)], factors.comm)[0] + fc
     return F, (e2, gam, asym, extra)
 
 
-def mp2_force_tiled(mf, mol, frozen=0, auxbasis=None, tile_gb=EE_RI_TILE_GB,
+def mp2_force_tiled(mf, mol, factors, frozen=0, auxbasis=None, tile_gb=EE_RI_TILE_GB,
                     max_memory=None, block_gb=DF_FORCE_BLOCK_GB,
-                    width=DF_FORCE_AUX_CHUNK, comm=None, aux_chunk=None):
+                    width=DF_FORCE_AUX_CHUNK, comm=None, aux_chunk=None,
+                    numerics=None, flags=None):
     """(dE/dR, (e_mp2, gamma, max |Y - Y^T|, estimate)) of E_HF + E_MP2 on the
-    tiled route over comm's ranks (prepare)."""
+    tiled route over comm's ranks (prepare); factors(mol, mf, frozen,
+    auxbasis, tile_gb, comm, aux_chunk) -> the factor provider (module
+    docstring), built once the memory estimate has passed
+    (`gradients.adc.fold_factors.ground_factors`)."""
     comm, est = prepare(mf, mol, frozen, auxbasis, False, tile_gb, block_gb,
                         max_memory, comm)
-    op = ground_operator(mol, mf, frozen, auxbasis, tile_gb, comm, aux_chunk)
-    F, (e2, gam, asym, _) = force(mf, mol, op, frozen, auxbasis, None, tile_gb,
-                                  block_gb, width)
+    provider = factors(mol, mf, frozen, auxbasis, tile_gb, comm, aux_chunk)
+    F, (e2, gam, asym, _) = force(mf, mol, provider, frozen, auxbasis, None, tile_gb,
+                                  block_gb, width, numerics, flags)
     return F, (e2, gam, asym, est)

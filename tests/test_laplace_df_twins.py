@@ -57,8 +57,8 @@ def pool():
     ga, gb, gab = get_antisymmetrized_spin_block_eri(mol, mf)
     B = get_density_fitting_coefficients(mol, mf)
     r = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, mol.nelectron // 2)
-    A = r._amps_order(max_order=2)
-    p = dict(r._rargs)
+    A = r.amps_order(max_order=2)
+    p = dict(r.rargs)
     p.update({'B_aa': B, 'B_bb': B, 'eps_a': r.eps, 'ntau': NTAU,
               't2_1_aaaa': A['T2_1']['t2_aaaa'], 't2_1_abab': A['T2_1']['t2_abab'],
               'l2_1_aaaa': A['L2_1']['l2_aaaa'], 'l2_1_abab': A['L2_1']['l2_abab']})

@@ -3,7 +3,7 @@
 `ExcitedStateChain.tracked_state` logs a root at every evaluation, and an
 optimizer evaluates the steps it then rejects: after a trust radius collapses
 the last entry of `follow_log` is the root of a geometry the walk did not stay
-at. `followed_root`, which `refreeze` and `excitations.adaptive_check` read,
+at. `followed_root`, which `refreeze` and `diagnostics.adaptive_check` read,
 takes the entry evaluated at the returned geometry.
 
 The surface here is a stub that logs as a tracked chain does: root 0 at the

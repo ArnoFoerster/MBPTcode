@@ -12,7 +12,7 @@ References
 ----------
 Vidberg and Serene, J. Low Temp. Phys. 29, 179 (1977) -- Pade continuation of
 a function sampled on the imaginary axis via Thiele's continued fraction, the
-algorithm behind `Base/utils/analyticalContinuation.thiele_coefficients`.
+algorithm behind `Base.utils.grids.analytic_continuation.thiele_coefficients`.
 """
 import hashlib
 import threading
@@ -24,7 +24,8 @@ from pyscf import df as _pyscf_df, gto as _pyscf_gto, scf as _pyscf_scf
 from pyscf.df import incore as _df_incore
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import BYTES_PER_GB
+from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_METRIC_FLOOR,
+                                         DF_EXCHANGE_OCCUPATION_FLOOR)
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import environment_of
 from src.Base.utils.grids.analytic_continuation import PadeFit
@@ -53,7 +54,7 @@ def static_exchange_mean_field_matrix(mf, mol, dm_correction=None,
     comm: defaults to `current_comm()`. Over more than one rank the matrix
         is rank 0's bit for bit on every rank, whichever way it is built.
         Through the slices a distributed SCF left on the mean field
-        (`Base.distributed_df.distributed_fock`) every rank makes the same
+        (`Base.factorization.distributed_df.distributed_fock`) every rank makes the same
         three pyscf calls it makes serially, each a collective that locksteps
         the density and adds every rank's rows of the fitted tensor and block
         of the grid. Without those handles, or for another `exchange`, it is
@@ -228,7 +229,7 @@ def refuse_unshifted_environment(mf, mol, where):
         f'The '
         f'static COHSEX operator `cohsex_correction` is not that shift and is '
         f'not added here. A route that forms no W reads '
-        f'`solvent_static_selfenergy` itself; the environment-free matrix is '
+        f'the environment\'s `static_self_energy` itself; the environment-free matrix is '
         f'`static_exchange_mean_field_matrix`.')
 
 
@@ -403,12 +404,12 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
         del ints
         sh0 = sh1
     n, v = np.linalg.eigh(dm)
-    keep = n > 1e-10 * n.max()
+    keep = n > DF_EXCHANGE_OCCUPATION_FLOOR * n.max()
     B = np.einsum('Ppn,nk->Ppk', T, v[:, keep] * np.sqrt(n[keep]), optimize=True)
     del T
     V = auxmol.intor('int2c2e', aosym='s1')
     w, u = np.linalg.eigh(V)
-    kp = w > 1e-12 * w.max()
+    kp = w > DF_EXCHANGE_METRIC_FLOOR * w.max()
     B = np.einsum('PQ,Qpk->Ppk', (u[:, kp] / np.sqrt(w[kp])) @ u[:, kp].T, B,
                   optimize=True)
     return np.einsum('Ppk,Ppk->p', B, B)
@@ -555,6 +556,20 @@ def solve_qp_from_imaginary_axis(eps, p_state, xc_correction, z_fit, sigma_iw,
     if not with_z:
         return root
     return root, float(pole_strength(residual, root))
+
+
+def channel_anchor(eps_anchor, nmo, spin=None):
+    """The anchor spectrum of one channel: `eps_anchor` as given on a
+    restricted reference (spin None), its row `spin` on an unrestricted one,
+    where it must be one spectrum per spin, shape (2, nmo)."""
+    anchor = np.asarray(eps_anchor, float)
+    if spin is None:
+        return anchor
+    if anchor.shape != (2, nmo):
+        raise ValueError(
+            f'an unrestricted eps_anchor is one spectrum per spin, shape '
+            f'(2, {nmo}); got {anchor.shape}')
+    return anchor[spin]
 
 
 def finish_qp(sigma, eps, nocc, p_state, mu, pade_freq, mf, mol,

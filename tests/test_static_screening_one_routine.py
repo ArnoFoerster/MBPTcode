@@ -40,8 +40,8 @@ from src.SingleReference.GW.space_time import (separable_factors,
 from src.SingleReference.BSE.solve import solve_bse
 from src.SingleReference.BSE.solve import isdf_bse_factors
 from src.SingleReference.LinearResponse.space_time import (
-    minimax_points_for_bse, static_screening_grid, static_screening_matrix)
-from src.gradients.gwbse.reaction_field_adjoint import static_grid, static_screening
+    static_screening_grid, static_screening_matrix)
+from src.gradients.gwbse.reaction_field_adjoint import static_screening
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
 
@@ -76,35 +76,18 @@ def test_the_entry_points_return_one_matrix(water):
     """Same W, to a few ulp, on the shared default grid and on a fixed one."""
     w = water
     _, w_rf = static_screening(w['X'], w['D'], w['eps'], w['nocc'],
-                               static_grid(w['eps'], w['nocc']))
+                               static_screening_grid(w['eps'], w['nocc']))
     w_bse = isdf_bse_factors(w['mf'], w['mol'], w['nocc'],
                              factors=w['factors'])[2]
     assert_same(w_rf, w_bse, quantity='root', label='default grid')
 
     _, w_rf12 = static_screening(w['X'], w['D'], w['eps'], w['nocc'],
-                                 static_grid(w['eps'], w['nocc'],
+                                 static_screening_grid(w['eps'], w['nocc'],
                                              ntau=NTAU_FIXED))
     w_bse12 = isdf_bse_factors(w['mf'], w['mol'], w['nocc'],
                                factors=w['factors'], numerics=Numerics(quadrature={'ntau_w': NTAU_FIXED}))[2]
     assert_same(w_rf12, w_bse12, quantity='root', label='fixed grid')
     assert not np.array_equal(w_rf, w_rf12), 'ntau must reach the grid'
-
-
-def test_the_grids_are_one_object(water):
-    """`static_grid` is `static_screening_grid`: the same axis, not a copy of
-    its construction."""
-    w = water
-    a = static_grid(w['eps'], w['nocc'])
-    b = static_screening_grid(w['eps'], w['nocc'])
-    assert a.ntau == b.ntau == minimax_points_for_bse(w['eps'], w['nocc'])[0]
-    assert a.nfreq == b.nfreq == 1
-    for name in ('tau_points', 'tau_weights', 'omega_points', 'omega_weights',
-                 'cosft_wt'):
-        assert_same(getattr(a, name), getattr(b, name), unit='1',
-                    quantity='root', label=name)
-    # a single input frequency cannot constrain the omega -> tau fit
-    assert a.cosft_tw is None and b.cosft_tw is None
-    assert np.array_equal(a.omega_points, np.zeros(1))
 
 
 def test_static_screening_still_returns_the_orbital_densities(water):
@@ -117,7 +100,7 @@ def test_static_screening_still_returns_the_orbital_densities(water):
                 label='orbital densities')
     assert mat.shape == (w['D'].shape[1], w['D'].shape[1])
     assert_same(mat, static_screening_matrix(
-        w['X'], w['D'], w['eps'], w['nocc'], static_grid(w['eps'], w['nocc'])),
+        w['X'], w['D'], w['eps'], w['nocc'], static_screening_grid(w['eps'], w['nocc'])),
         quantity='root', label='W')
 
 
@@ -127,7 +110,7 @@ def test_the_entry_points_agree_under_ranks(water, size):
     to a few ulp, and each sits at the re-associated sum's distance from
     serial."""
     w = water
-    grid = static_grid(w['eps'], w['nocc'])
+    grid = static_screening_grid(w['eps'], w['nocc'])
     a0, w_serial = static_screening(w['X'], w['D'], w['eps'], w['nocc'], grid)
 
     ranks_rf = run_simulated(

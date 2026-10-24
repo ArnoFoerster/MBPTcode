@@ -346,15 +346,15 @@ def test_the_default_quasiparticle_set_is_the_admitted_one(mol):
 def test_an_integer_window_still_gives_the_set_it_always_gave(mol):
     """The additive `qp_window` sequence must not move the int branch.
 
-    `_qp_set` is the frozen convention every existing surface was built on, so
+    `resolve_qp_set` is the frozen convention every existing surface was built on, so
     a sequence being accepted has to leave a half-width bitwise where it was.
     """
     eps = np.asarray(rhf_tight(mol).mo_energy, float)
-    by_width = QuasiparticleSet._qp_set(eps, 5, 2, 1e-4)
+    by_width = QuasiparticleSet.resolve_qp_set(eps, 5, 2, 1e-4)
     assert np.array_equal(by_width, np.arange(3, 7))
-    by_sequence = QuasiparticleSet._qp_set(eps, 5, (6, 3, 5, 4), 1e-4)
+    by_sequence = QuasiparticleSet.resolve_qp_set(eps, 5, (6, 3, 5, 4), 1e-4)
     assert np.array_equal(by_sequence, by_width)
-    assert np.array_equal(QuasiparticleSet._qp_set(eps, 5, 'all', 1e-4),
+    assert np.array_equal(QuasiparticleSet.resolve_qp_set(eps, 5, 'all', 1e-4),
                           np.arange(len(eps)))
 
 

@@ -35,8 +35,9 @@ answer to the transition density: `lr_environment` is the medium's
 `split_equilibrium.LinearResponseOnly` (exchange at eps_inf, Eq. (18) and the
 direct W on the bare interaction); at eps_inf = 1 it answers nothing and the
 BSE is the gas phase's. The state-specific part is the loop's, so this is
-scheme B made self-consistent; its first loop cycle in the ground
-state's equilibrium charges is the relaxed first-order term.
+scheme B (classical state-specific, `split_equilibrium.ClassicalStateSpecific`)
+made self-consistent; its first loop cycle in the ground state's equilibrium
+charges is scheme B's relaxed first-order term.
 
 `state.force(h, e)` -> (F, info): the nuclear force in the fixed charges, the
 external operator's own derivative left to the medium
@@ -56,14 +57,14 @@ does any model's and the model refuses unless it is the chain's continuum
 afresh at each geometry freezes its own conventions and is another surface
 (3.8e-5 Ha/Bohr off the force of water's T1 in toluene), so a walk takes
 `at` and `surface_key` (the chain) tells a walker which surface a model is
-on (`properties.solvated_surface.SolvatedSurface` refuses a second one).
+on (`gradients.solvated_surface.SolvatedSurface` refuses a second one).
 `commit(mol)` is a walk's accepted step: the chain's conventions and its
 followed state move there (`ExcitedStateChain.commit`).
 
 Refreeze. `refrozen(mol, lr_environment)` is this state on the surface a
 chain built afresh at `mol` freezes, as a vertical energy's model does: a
 model with no chain, whose first call builds one on the mean field it is
-handed at `mol` (`properties.solvated_surface.SolvatedSurface.refreeze`
+handed at `mol` (`gradients.solvated_surface.SolvatedSurface.refreeze`
 hands it the zero-charge one, as the loop of a vertical does). The physics,
 the kernel, the root and the Numerics are this model's; a chain following its
 state (`bse.track`) hands the followed state over, its index at `mol`

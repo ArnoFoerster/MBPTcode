@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.numerics.constants import get_method_info
+from src.SingleReference.GW.self_energy import get_method_info
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_density_fitting_coefficients)
 from src.SingleReference.GW.qp_energy import casida_spectrum, _self_energy_amplitudes

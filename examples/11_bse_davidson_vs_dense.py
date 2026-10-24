@@ -9,6 +9,8 @@
 
 Five of those six combinations run; Davidson with full ERIs is the exception.
 
+It runs for more than five minutes on two threads.
+
 Both three-index routes are fitted in a COULOMB-fitting auxiliary basis rather
 than the MP2 correlation-fitting <basis>-ri, because the BSE direct term
 contracts (ij|ab), a contraction that does not appear in MP2. With the -ri

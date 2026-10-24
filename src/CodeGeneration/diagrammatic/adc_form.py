@@ -1,4 +1,4 @@
-"""ADC-form objects and matching for the diagram-ADC track (numerical layer).
+"""ADC-form objects and matching for the diagram-ADC generator (numerical layer).
 
 Determinant-basis (string-phase-aligned) builders for the ADC configuration
 spaces and the low-order objects, all validated against the Goldstone engine
@@ -16,13 +16,6 @@ and the exact oracle:
 Sector-II conventions (SCW83 Eq. 45): resolvents 1/(omega + K-bar), C blocks
 enter as -C-bar, U2 as U1 - U2-bar (the minus signs are folded in here so
 callers see uniform expressions).
-
-Status note (2026-08-06): the k2-coupling candidates below (u2_k2_gs) are
-NOT the correct ADC-convention 3p2h couplings -- an overdetermined
-out-of-sample fit on H4 leaves a ~5e-3 residual with or without them.  The
-correct k2 objects must be extracted from the diagram stream's 3p2h-pole
-residues (partial-fraction matcher; next milestone).  The k1-side objects
-and the H2 closure are exact.
 """
 import numpy as np
 
@@ -183,7 +176,7 @@ class SectorSpaces:
 
     def known_m4_k1(self, omega):
         """All PURE-k1 4th-order ADC-form terms from validated objects
-        (U1/C11/U2 only; no k2 content -- see the module status note)."""
+        (U1/C11/U2 only; no k2 content)."""
         s = 1.0 if self.sector == +1 else -1.0
         R1 = 1.0 / (omega - s * self.K1)
         C11 = self.C11 if self.sector == +1 else -self.C11

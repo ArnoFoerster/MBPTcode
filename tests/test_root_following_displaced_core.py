@@ -51,8 +51,8 @@ def follower(mol):
     chain.conventions = FrozenConventions()
     chain.track, chain.state, chain.nroots = 'overlap', 0, NROOTS
     chain.nocc = mol.nelectron // 2
-    chain._followed = chain._anchor = None
-    chain._evaluations, chain._owner = GeometryCache(), object()
+    chain.followed = chain.anchor = None
+    chain.evaluations, chain.selection_owner = GeometryCache(), object()
     chain.follow_log, chain.follow_coords = [], []
     chain.timer = None
     return chain

@@ -89,7 +89,7 @@ def test_every_route_solves_through_the_one_finder(monkeypatch):
     solve_qp_equation_scan(f, lambda w: 1.0 + float(
         np.sum(amp.T / (w - d) ** 2)), EPS[2])
     assert calls == ['PoleSum'] * 3 + ['SampledEquation'] * 2
-    for name in ('largest_weight_root', 'ranked_root', 'bracketed_root'):
+    for name in ('largest_weight_root', 'bracketed_root'):
         assert getattr(qb, name) is getattr(qpe, name), name
     assert 'solve_qp_equation_scan' in inspect.getsource(cd.qp_energy_cd)
     assert 'bracketed_root' in inspect.getsource(qb.qp_energy_general)
@@ -97,10 +97,12 @@ def test_every_route_solves_through_the_one_finder(monkeypatch):
 
 def test_no_second_root_finder_is_left():
     """The seeded and guarded Newtons, the nearest-root scan, the fixed
-    bracket, the batch scan and the arrowhead eigensolve are gone."""
+    bracket, the batch scan, the rank follower and the arrowhead eigensolve
+    are gone."""
     for name in ('solve_qp_equation_newton_guarded', 'newton_seed',
                  'solve_qp_equation_graphical', 'solve_qp_equation_bisection',
-                 'solve_qp_equation_pole_strength_batch', 'PoleGuardRefusal'):
+                 'solve_qp_equation_pole_strength_batch', 'PoleGuardRefusal',
+                 'ranked_root'):
         assert not hasattr(qpe, name), name
     src = inspect.getsource(qpe)
     assert 'eigvals' not in src and 'np.linalg.eig' not in src

@@ -18,7 +18,7 @@ s2r = lazy('adc4_c2_s2c_apply_restricted_blocks')
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
 from tests.generated_runtime import requires_runtime
 
-pytestmark = requires_runtime(4)
+pytestmark = requires_runtime(5)
 
 def main():
     all_ok = True

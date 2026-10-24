@@ -2,8 +2,7 @@
 pdaggerq and emitted as NumPy modules.
 
 Every raw secular-matrix block is a SUPEROPERATOR (anticommutator-metric)
-element -- the resolution of the Phase-2 open question, verified
-numerically against the hand-written spin-orbital ADC's first-order blocks
+element, verified numerically against the hand-written spin-orbital ADC's first-order blocks
 on H2/sto-3g + H2O/sto-3g:
 
     M_IJ  = <Phi0| {C_I^dag, [H, C_J]} |Phi0>      (K + C blocks)
@@ -39,13 +38,9 @@ generated block matches the hand-written spin-orbital ADC's convention at
 +1 exactly (no residual per-class signs).
 """
 import importlib
-import os
-import sys
 from itertools import product
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
-from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum
+from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum, raw_terms_to_term_list
 from src.CodeGeneration.codegen_common import (
     OCC_LETTERS, VIR_LETTERS, ADC_DIMS, r_leaves, shape_expr, amp_leaves, pq_terms,
     generated_header, write_adc_module)
@@ -276,7 +271,7 @@ def dressing(spec):
 
 
 def assemble_block(func_name, out_shape_expr, raw_terms, out_indices, doc,
-                   extra_args=(), restricted=False, df=False):
+                   extra_args=(), restricted=False, df=False, terms=False):
     """One dense block function. Spin-orbital leaves (f, g, kd), or with
     restricted=True the spin-blocked leaves (f_aa, ..., g_aaaa, ..., d_aa, d_bb);
     raw_terms_to_einsum parses the '_aaaa'/'_abab' factor suffixes, dead leaf
@@ -285,22 +280,31 @@ def assemble_block(func_name, out_shape_expr, raw_terms, out_indices, doc,
     df=True (restricted only) composes the DF/RI term rewrite before emission:
     each <pq||rs> becomes a pair of 3-index B factors and the signature takes
     B_aa/B_bb in place of g_aaaa/g_abab/g_bbbb (dress_integral_factor returns
-    pdaggerq-format terms; array_expr leaves B's auxiliary axis un-sliced)."""
+    pdaggerq-format terms; array_expr leaves B's auxiliary axis un-sliced).
+
+    terms=True returns the block as its term table instead of forming it:
+    [(coef, ((subscript, operand), ...))] over the output letters out_indices
+    (pdaggerq_interface.raw_terms_to_term_list), for a runtime that contracts
+    it in slices of an output index."""
     if df:
         raw_terms = dress_integral_factor(raw_terms)
     leaves = r_leaves(df) if restricted else ['f', 'g', 'kd']
     args = leaves + list(extra_args) + ADC_DIMS
     src = [f"def {func_name}({', '.join(args)}):"]
     src.append(f'    """{doc}"""')
-    src.append(f"    out = np.zeros({out_shape_expr})")
-    src.extend(raw_terms_to_einsum(raw_terms, 'out', out_indices))
+    if terms:
+        src.append("    out = []")
+        src.extend(raw_terms_to_term_list(raw_terms, 'out', out_indices))
+    else:
+        src.append(f"    out = np.zeros({out_shape_expr})")
+        src.extend(raw_terms_to_einsum(raw_terms, 'out', out_indices))
     src.append("    return out")
     src.append("")
     return "\n".join(src)
 
 
 def emit_blocks(name, term_fn, out_idx, doc, extra_args=(), restricted=False, df=False,
-                census=None, key=None):
+                census=None, key=None, terms=False):
     """The block functions of one element: term_fn(spin_labels) -> raw terms.
     Spin-orbital: one function `name` (spin_labels None) taking `extra_args`;
     its term count goes into census[key or name] when a census dict is given.
@@ -309,27 +313,28 @@ def emit_blocks(name, term_fn, out_idx, doc, extra_args=(), restricted=False, df
     Ms-violating assignments give no terms and no function), whose amplitude
     arguments are detected from the terms (a spin pattern's leaf set is
     pdaggerq's decision; the runtime introspects the signature). A pruned
-    element (no terms) emits nothing."""
+    element (no terms) emits nothing. terms: emit term tables (assemble_block)."""
     if not restricted:
-        terms = term_fn(None)
-        print(f"{name}: {len(terms)} terms, out={out_idx}", flush=True)
+        raw = term_fn(None)
+        print(f"{name}: {len(raw)} terms, out={out_idx}", flush=True)
         if census is not None:
-            census[key or name] = len(terms)
-        if not terms:
+            census[key or name] = len(raw)
+        if not raw:
             return []
-        return [assemble_block(name, shape_expr(out_idx), terms, out_idx, doc,
-                               extra_args=extra_args)]
+        return [assemble_block(name, shape_expr(out_idx), raw, out_idx, doc,
+                               extra_args=extra_args, terms=terms)]
     funcs = []
     for spins in product('ab', repeat=len(out_idx)):
-        terms = term_fn(dict(zip(out_idx, spins)))
-        if not terms:
+        raw = term_fn(dict(zip(out_idx, spins)))
+        if not raw:
             continue
         suffix = ''.join(spins)
-        amps = amp_leaves(terms)
-        print(f"{name}_{suffix}: {len(terms)} terms, out={out_idx}, amps={amps}", flush=True)
+        amps = amp_leaves(raw)
+        print(f"{name}_{suffix}: {len(raw)} terms, out={out_idx}, amps={amps}", flush=True)
         funcs.append(assemble_block(
-            f'{name}_{suffix}', shape_expr(out_idx), terms, out_idx,
-            f"{doc} Spin block {suffix}.", extra_args=amps, restricted=True, df=df))
+            f'{name}_{suffix}', shape_expr(out_idx), raw, out_idx,
+            f"{doc} Spin block {suffix}.", extra_args=amps, restricted=True, df=df,
+            terms=terms))
     return funcs
 
 
@@ -511,7 +516,7 @@ def generate_adc_class_pair(order, pair='k1k1', restricted=False, df=False, kind
 
 
 def generate_adc4_base_k2(restricted=False):
-    """The ADC(4)-base blocks involving the k=2 classes (3h2p/3p2h):
+    """The ADC(4) blocks involving the k=2 classes (3h2p/3p2h):
 
     1. the first-order k=1 <-> k=2 coupling c1_{tag1}_{tag2}
        <{C_k1^dag, [C_k2, H]}> (IP) / [H, C_k2] (EA);
@@ -591,7 +596,7 @@ def generate_adc_u_k2(orders, fname=None):
     u1_..u3_ when orders go above 3) is skipped and reused by the runtime at
     the higher amplitude orders. orders (1, 2, 3) is ADC(5)'s U^(3)_k2
     (adc5_u3_k2_blocks: block_order(5, 0, 2) == 3). Consumed through
-    Sz-block-diagonal gathering (adc_autogenerated._k2_raw_S).
+    Sz-block-diagonal gathering (adc_autogenerated.k2_raw_S).
 
     Census (both sectors, row-asymmetric as usual at k=2) of (1, 2, 3): kept
     u: l1v, l3v, l2vt2, l2ft1, l3ft2, l4ft2 (rank-4 lambda survives at k=2
@@ -648,8 +653,8 @@ def generate_adc5_s_k1k2():
     l1^(3) at order 3), l2t1, l3t2; the rest prune. Function names are
     ORDER-AGNOSTIC (s_{tag1}_{tag2}_{structure}): amplitude order is the
     driver's choice (adc_autogenerated.cross_class_overlap). Raw precursor
-    orientation on both classes, no _K2_CLASS_SIGN (the consumers mixing this
-    with adc4_base-convention k=2 objects apply it)."""
+    orientation on both classes, no K2_CLASS_SIGN (the consumers mixing this
+    with k=2 objects in the K2_CLASS_SIGN convention apply it)."""
     funcs = []
     for sector in SECTORS:
         tag1, tag2 = CLASS_TAGS[1][sector], CLASS_TAGS[2][sector]
@@ -747,7 +752,7 @@ def cross_structures(order, pair, max_rank=4):
 
 
 def generate_adc_cross_pair(order, pair='k1k1', restricted=False, df=False, max_rank=4,
-                            fname=None):
+                            fname=None, terms=False):
     """D x C cross block at `order`: the union-space Hamiltonian block
     X = (D_kI|H^|C_kJ) = <Phi0|{E, [H, C]}|Phi0> between the (kI+1)h kI
     p-dagger class and the (kJ+1)p kJ h class, which the two-sector convention
@@ -759,7 +764,14 @@ def generate_adc_cross_pair(order, pair='k1k1', restricted=False, df=False, max_
     derived too and must give no terms (it vanishes identically), and orders
     0 and 1 give no terms either -- both are recorded in the module's TERMS
     census, so 'pruned' and 'ungenerated' stay distinct. restricted/df as in
-    emit_blocks. Validation scale: the (2h1p) x (2p1h) block is dense here."""
+    emit_blocks. Validation scale: the (2h1p) x (2p1h) block is dense here.
+    terms=True (restricted) writes the same functions as term tables
+    (cross_module_name(..., terms=True)), which the runtime contracts in
+    slices of the ket hole (sigma_driver.decoupling_rows_streamed) so that
+    neither the six-index tensor nor the block is ever formed whole."""
+    if terms and not restricted:
+        raise ValueError("generate_adc_cross_pair: the term tables are written "
+                         "for the restricted (spin-blocked) blocks")
     check_df(restricted, df, 'generate_adc_cross_pair')
     k_i, k_j, tagb, tagk, conv = cross_pair_layout(pair)
     refuse_above_max_order(order + k_i + k_j, 'generate_adc_cross_pair')
@@ -778,7 +790,8 @@ def generate_adc_cross_pair(order, pair='k1k1', restricted=False, df=False, max_
             f"structure {nm}: <Phi0| {lo or ''} {{E, [{spec[1]}, C]}} {kd or ''} |Phi0>, raw "
             f"(no normalization, no class-GS; both first act at order 3). Axes = bra "
             f"({', '.join(conv['bra_letters'])}) x ket ({', '.join(conv['ket_letters'])}).",
-            extra_args=amps, restricted=restricted, df=df, census=census['u'], key=nm)
+            extra_args=amps, restricted=restricted, df=df, census=census['u'], key=nm,
+            terms=terms)
     if not restricted:
         for nm, j, k, a, b in s_order_terms(order, max_rank=max_rank):
             if nm in census['s']:
@@ -793,7 +806,11 @@ def generate_adc_cross_pair(order, pair='k1k1', restricted=False, df=False, max_
                     f"operator vanishes identically, so this is an emitter defect")
         funcs.insert(0, f"ORDER = {order}\nPAIR = {pair!r}\nBRA = {tagb!r}\nKET = {tagk!r}\n"
                         f"TERMS = {census!r}")
-    _write(fname or cross_module_name(order, pair, restricted=restricted, df=df), funcs,
+    if terms:
+        funcs.insert(0, f"OUT = {''.join(out_idx)!r}    # output letters: bra holes, particles; "
+                        f"ket holes, particles")
+    _write(fname or cross_module_name(order, pair, restricted=restricted, df=df, terms=terms),
+           funcs,
            f'generate_adc_cross_pair({order}, {pair!r})',
            f'Order-{order} union-space D x C cross block {tagb} x {tagk}.')
     return census

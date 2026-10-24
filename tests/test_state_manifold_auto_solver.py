@@ -27,7 +27,7 @@ def chain(solver, nroots=2):
     out.bse_tda = False
     out.nocc = NOCC
     out.mf0 = SimpleNamespace(mo_energy=np.zeros(NMO))
-    out._owner = object()
+    out.selection_owner = object()
     return out
 
 

@@ -53,6 +53,7 @@ from src.Base.factorization.separable_ri import (aux_metric_sqrt,
                                                  refuse_unrepresented_factors,
                                                  resolve_grid)
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
+from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
                                         minimax_supported_sizes)
 from src.Base.utils.parallel.mpi_grid import (agreement,
@@ -69,7 +70,7 @@ from src.SingleReference.GW.imaginary_time import (
     screened_interaction_rows, screened_interaction_tau_blocked,
     minimax_points_for_gw, minimax_points_for_gw_unrestricted,
     unrestricted_fit_ranges, unrestricted_screening_frequency_grid)
-from src.SingleReference.GW.qp_solve import finish_qp
+from src.SingleReference.GW.qp_solve import channel_anchor, finish_qp
 from src.SingleReference.GW.reaction_field import (
     separable_gauge_transform, separable_quasiparticle_shift,
     shift_after_solve)
@@ -410,7 +411,7 @@ def _dyson_owned(chi0, transform=None):
     `_dyson_in_place` inverts it, in the bare gauge when `transform` is set,
     so each W is the serial inversion of its chi0, bitwise.
     """
-    size, rank = chi0._size_rank()
+    size, rank = chi0.size_rank()
     return {k: dyson_screening(c, transform, correlation=True)
             for k, c in chi0.gather_slices(partition(chi0.shape[0], rank,
                                                      size))}
@@ -573,7 +574,8 @@ def _space_time_grids(spectra, noccs, anchors, sizes, w0, timings):
     channels `spectra`/`noccs` (one channel: restricted, two: unrestricted):
     {'ntau', 'grid', 'freq_points', 'freq_weights', 'pade_freq',
     'tau_points', 'ranges'}. sizes: the driver's quadrature, {'ntau',
-    'nfreq', 'npade', 'tau_target'} (read off its Numerics).
+    'nfreq', 'pade_freq', 'tau_target'} (read off its Numerics; pade_freq
+    `pade_nodes` of it).
 
     ntau None or 'auto' is sized from `anchors` (the spectra the equation is
     anchored on: an evGW iterate opens the gap cycle by cycle, and a grid
@@ -588,7 +590,7 @@ def _space_time_grids(spectra, noccs, anchors, sizes, w0, timings):
     (rW, rS) of the self-energy's fit (`sigma_fit_ranges`), the tau axis
     half rS's minimax points.
     """
-    ntau, nfreq, npade = sizes['ntau'], sizes['nfreq'], sizes['npade']
+    ntau, nfreq = sizes['ntau'], sizes['nfreq']
     tau_target = sizes['tau_target']
     restricted = len(spectra) == 1
     if restricted:
@@ -624,9 +626,19 @@ def _space_time_grids(spectra, noccs, anchors, sizes, w0, timings):
             'grid': TimeFrequencyGrid.minimax_split(ntau, e_min, e_max,
                                                     freq_points, freq_weights),
             'freq_points': freq_points, 'freq_weights': freq_weights,
-            'pade_freq': gauss_legendre_grid(npade, w0=w0)[0],
+            'pade_freq': sizes['pade_freq'],
             'tau_points': 0.5 * minimax_time_grid(ntau, *ranges[1])[0],
             'ranges': ranges}
+
+
+def _continuum_shift(X_mos, D, w_static, transform, noccs):
+    """(shifts, D): each channel's Eq. (18) shift from the static W, and the
+    factor taken to the bare gauge the self-energy screens in; (None, D)
+    without a continuum (`transform` None)."""
+    if transform is None:
+        return None, D
+    return (np.array([separable_quasiparticle_shift(X, D, w_static, transform, n)
+                      for X, n in zip(X_mos, noccs)]), D @ transform)
 
 
 def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
@@ -681,7 +693,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                  (naux, naux) slices or AO self-energy on any rank. proj(tau)
                  and the self-energy's branch sums are reduced and
                  re-associate; every other step is an output partition. The
-                 window's per-state Pade and Newton split over the states
+                 window's per-state Pade and root search split over the states
                  (`qp_solve.finish_qp`), with no reduction and bitwise. With
                  freq_block or scratch_dir the tau partition moves inside
                  each frequency block and Wt is held rows-per-rank
@@ -740,7 +752,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     """
     numerics = numerics_or_default(numerics)
     q = numerics.quadrature
-    ntau, nfreq, npade = q.ntau_st, q.nfreq_st, q.npade
+    ntau, nfreq, pade_freq = q.ntau_st, q.nfreq_st, pade_nodes(q)
     w0, tau_target = q.w0_gl, q.tau_target
     tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None
                else numerics.layout.tile_gb)
@@ -761,7 +773,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                              "reference")
         return _space_time_unrestricted(
             mf, mol, nocc, p_state, spin_index(spin_channel), ntau, nfreq,
-            npade, w0, auxbasis, radii, factors, greedy,
+            pade_freq, w0, auxbasis, radii, factors, greedy,
             dm_correction, timings, (mpi_comm, rank, nranks), freq_block,
             scratch_dir, tau_target, extras, screen_r_cut, sigma_x,
             eps_anchor, sigma_x_matrix, tile_gb, counts, grid_accuracy,
@@ -771,7 +783,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     axes = _space_time_grids(
         [eps], [nocc], [eps if eps_anchor is None
                         else np.asarray(eps_anchor, float)],
-        dict(ntau=ntau, nfreq=nfreq, npade=npade, tau_target=tau_target), w0,
+        dict(ntau=ntau, nfreq=nfreq, pade_freq=pade_freq, tau_target=tau_target), w0,
         timings)
     ntau, grid, tau_points = axes['ntau'], axes['grid'], axes['tau_points']
     freq_points, pade_freq = axes['freq_points'], axes['pade_freq']
@@ -840,11 +852,9 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     w_static = (_static_screening(X_mo, D, eps, nocc, extras)
                 if want_static else None)
 
-    reaction_field = None
-    if transform is not None:
-        reaction_field = separable_quasiparticle_shift(X_mo, D, w_static,
-                                                       transform, nocc)
-        D = D @ transform
+    reaction_field, D = _continuum_shift([X_mo], D, w_static, transform,
+                                         [nocc])
+    reaction_field = None if reaction_field is None else reaction_field[0]
     if timings is not None:
         timings['t_dyson'] = _time.time() - _t
         timings['dyson_frequencies'] = len(rows)
@@ -866,7 +876,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                       after_solve=shift_after_solve(eps_anchor))
 
 
-def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
+def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, pade_freq,
                              w0, auxbasis, radii, factors, greedy,
                              dm_correction, timings, mpi, freq_block,
                              scratch_dir, tau_target, extras, screen_r_cut,
@@ -917,14 +927,11 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
     if eps_anchor is None:
         anchors = spectra
     else:
+        channel_anchor(eps_anchor, eps.size, spin)          # refused if malformed
         anchors = np.asarray(eps_anchor, float)
-        if anchors.shape != (2, eps.size):
-            raise ValueError(
-                f'an unrestricted eps_anchor is one spectrum per spin, shape '
-                f'(2, {eps.size}); got {anchors.shape}')
     axes = _space_time_grids(
         spectra, noccs, anchors,
-        dict(ntau=ntau, nfreq=nfreq, npade=npade, tau_target=tau_target), w0,
+        dict(ntau=ntau, nfreq=nfreq, pade_freq=pade_freq, tau_target=tau_target), w0,
         timings)
     ntau, grid, tau_points = axes['ntau'], axes['grid'], axes['tau_points']
     freq_points, pade_freq = axes['freq_points'], axes['pade_freq']
@@ -980,12 +987,7 @@ def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, npade,
             extras['w_static'] = w_static
             extras['w_static_ntau'] = max(
                 minimax_points_for_bse(e, n)[0] for e, n in zip(spectra, noccs))
-    reaction_field = None
-    if transform is not None:
-        reaction_field = np.array([
-            separable_quasiparticle_shift(X, D, w_static, transform, n)
-            for X, n in zip(X_mos, noccs)])
-        D = D @ transform
+    reaction_field, D = _continuum_shift(X_mos, D, w_static, transform, noccs)
     if timings is not None:
         timings['t_dyson'] = _time.time() - _t
         timings['dyson_frequencies'] = n_dyson

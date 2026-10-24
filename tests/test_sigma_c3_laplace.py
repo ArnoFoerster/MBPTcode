@@ -1,19 +1,18 @@
 """GATE for the PRODUCTION-FLOOR C^(3) amplitude route
 (assembled_c3_matvec_restricted(laplace_ntau=...)).
 
-The exact C^(3) matvec pulls its amplitudes from _amps_order(3), which builds
+The exact C^(3) matvec pulls its amplitudes from amps_order(3), which builds
 the rank>=3 RSPT intermediates t3_2 (O(no^3 nv^3)) and t4_2 (O(no^4 nv^4), ~30
 TB at CO2/aug-cc-pVTZ) -- purely as recursion by-products, because C^(3)'s only
 order-3 dependence, the singles T1^(3), enters through the f-contracted `ft1`
 structure whose Fock factor lands in the off-diagonal f[o,v] slice and VANISHES
 by Brillouin on the class blocks. So C^(3) needs
 NO block Laplace fusion -- only that the provider stop materializing amplitudes
-it never multiplies. laplace_ntau routes to _u3_amps_laplace (rank<=2 order<=2,
+it never multiplies. laplace_ntau routes to u3_amps_laplace (rank<=2 order<=2,
 plus a Laplace T1^(3) that C^(3) does not use), which never forms a rank>=3
 array. The result is therefore BIT-EXACT, not ntau-approximate.
 
-THE ZERO-COMPARISON TRAP:
-LiH/H2O/H4 have t3_aaaaaa == 0, so on them the two providers agree
+THE ZERO-COMPARISON TRAP: LiH/H2O/H4 have t3_aaaaaa == 0, so on them the two providers agree
 trivially -- "two zeros compared, not a real check". The PRIMARY system here is
 NH3/sto-3g (5 occ / 3 vir), the smallest with t3_2 AND t4_2 genuinely nonzero;
 the test ASSERTS they are nonzero before trusting the agreement, and asserts the
@@ -64,10 +63,10 @@ def main():
     eps = get_orbital_energies(mf, representation='spatial')
     ga, gb, gab = get_antisymmetrized_spin_block_eri(mol, mf)
     r0 = BuildSuperMatrixADCnRestricted(eps, ga, gab, gb, mol.nelectron // 2)
-    lap_keys = set(r0._u3_amps_laplace(6))
+    lap_keys = set(r0.u3_amps_laplace(6))
     bad = [k for k in lap_keys if any(k.startswith(p) for p in _RANK_GE3)]
     all_ok &= _check(not bad,
-                     f"_u3_amps_laplace carries NO rank>=3 key (keys={sorted(lap_keys)})")
+                     f"u3_amps_laplace carries NO rank>=3 key (keys={sorted(lap_keys)})")
 
     for label, atom, t3_nonzero in SYSTEMS:
         mol = gto.M(atom=atom, basis='sto-3g', verbose=0)
@@ -78,7 +77,7 @@ def main():
         print(f"\n=== {label} (norb={r.norb}, nocc={r.nocc}, nvir={r.nvir}) ===")
 
         if t3_nonzero:
-            A = r._amps_order(max_order=3)
+            A = r.amps_order(max_order=3)
             mx3 = max(float(np.abs(v).max()) for v in A['T3_2'].values())
             mx4 = max(float(np.abs(v).max()) for v in A['T4_2'].values())
             all_ok &= _check(mx3 > 1e-8 and mx4 > 1e-8,

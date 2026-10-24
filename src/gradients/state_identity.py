@@ -248,8 +248,8 @@ def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None,
     with: a best score below ROOT_FOLLOW_WEIGHT_MIN is an orbital not among
     the candidates, and two best closer than ROOT_FOLLOW_MARGIN_MIN are a
     guess -- a displaced geometry that picks the other one puts a step in the
-    surface. Both are warned about and kept (refuse
-    inputs, warn numerics); `out`, a dict, receives 'lost' (the candidate and
+    surface. Both are warned about and kept (the policy: refuse inputs, warn
+    numerics); `out`, a dict, receives 'lost' (the candidate and
     its score) and 'ambiguous' (the two candidates and their margin) for the
     caller's record.
 

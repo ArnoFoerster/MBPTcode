@@ -181,7 +181,7 @@ class UDFVvvvKernels(_eq.VvvvKernels):
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------
-    def _ldir(self, Y, sa, sb):
+    def ladder_direct(self, Y, sa, sb):
         """sum_cd (sum_Q B_sa[Q,a,c] B_sb[Q,b,d]) Y[i,j,c,d], c of spin sa
         and d of spin sb."""
         no2 = Y.shape[0] * Y.shape[1]
@@ -213,7 +213,7 @@ class UDFVvvvKernels(_eq.VvvvKernels):
         for key, blk in X.items():
             if key in derived and derived[key][0] in X.keys():
                 continue
-            L[key] = self._ldir(blk, key[2], key[3])
+            L[key] = self.ladder_direct(blk, key[2], key[3])
         for key, (base, perm, sign) in derived.items():
             if base in L:
                 L[key] = sign * L[base].transpose(perm)

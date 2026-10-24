@@ -194,7 +194,7 @@ class EOMCC:
 
     mf : converged closed-shell spin-restricted pyscf mean-field.
     level : 'ccsdt' only (singles+doubles+triples manifold). EOM-CCSD is
-        retired here: use pyscf (pyscf.cc.eom_rccsd / eom_gccsd).
+        not implemented here: use pyscf (pyscf.cc.eom_rccsd / eom_gccsd).
     t_amps : optional (t1, t2, t3) to skip the amplitude solve.
     t_diis_size : DIIS subspace for the ground-state T solve (0 disables it and
         restores plain fixed-point iteration). DIIS holds 2*t_diis_size flat
@@ -219,7 +219,7 @@ class EOMCC:
         self.norb = self.nocc + self.nvir
         o, v = slice(None, self.nocc), slice(self.nocc, None)
 
-        # convergence flags (warn numerics and flag them);
+        # convergence flags (numerical events are warned about and flagged);
         # True when the amplitudes were handed in
         self.t_converged = True
         self.lambda_converged = None
@@ -361,7 +361,7 @@ class EOMCC:
 
         max_imag = float(np.max(np.abs(es.imag))) if np.iscomplexobj(es) else 0.0
         if max_imag > EOM_IMAG_TOL:
-            # Refuse inputs, warn numerics; the
+            # a numerical event: warned about, not refused; the
             # result says so (`EOMResult.complex_eigenvalues`)
             warnings.warn(f'EOM-{sector} eigenvalues have |Im| up to '
                           f'{max_imag:.2e}; their real parts are returned',

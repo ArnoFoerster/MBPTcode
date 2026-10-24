@@ -1,7 +1,6 @@
-# Diagram-primary ADC generator (diagram-ADC track)
+# Diagram-primary ADC generator
 
-Derives ADC the way Schirmer/Cederbaum/Walter 1983 (PRA 28, 1237)
-did — from the
+Derives ADC the way Schirmer/Cederbaum/Walter 1983 (PRA 28, 1237) did — from the
 Goldstone-diagram expansion of the dynamic self-energy M(ω) — instead of the
 ISR route. Motivation: the ISR-ADC(4) hierarchy carries an intrinsic
 t3-gated λ⁴ representation deficiency whose
@@ -38,7 +37,7 @@ skeleton (graph; h/p-typed internal lines) + a vertex linear order.
 - `emit.py` — emits generated numpy modules (one term per Goldstone
   diagram) into `src/SingleReference/ADC/generatedADC/diagrammatic/`.
 
-## Validation state (2026-08-06)
+## Validation
 
 - n=2: engine == textbook closed form, both sectors, H2+H4, ≤1e-14.
   (H4 is mandatory: H2's vv/sector-I and oo/sector-II entries vanish by
@@ -67,7 +66,7 @@ Gates: `tests/test_diagram_goldstone.py`, `tests/test_diagram_emitted.py`.
   λ-oracle; the machine-extracted objects supersede them.
 - H4 (3p2h space active): the pure-k1 model does NOT close (out-of-sample
   ~5e-3), and two candidate picture-derivations of the 3p2h couplings were
-  falsified the same way (repeating the n=3 lesson: only diagram-extraction
+  falsified the same way (as at n=3: only diagram-extraction
   yields correct couplings, never wave-function-picture shortcuts).
 
 ## Quartet class (`quartet_pf.py`)

@@ -68,11 +68,12 @@ chain ('s1_start_chain') is the far start's and stays.
 Under ranks (`with distributed(comm):` around `run_tadf`) every rank runs
 the stages in lockstep and rank 0 writes; no stage takes a communicator.
 
-NUMERICAL FLAGS (refuse inputs, warn numerics). A
+NUMERICAL FLAGS (the policy: refuse inputs, warn numerics). A
 numerical event does not stop the run: it is warned about and named in the
 stage record's `numerical_flags` ({flag: what it says}, empty when clean):
 'walk_not_converged' and 'refreeze_not_converged' of a walk (`relaxation_flags`),
 'saddle_check' where the saddle check did not end on a minimum,
+'hessian_asymmetric' where one of its finite-difference Hessians was,
 'scf_not_converged' (the count of SCFs the stage built that stopped short)
 and 'isdf_df_check_failed' (vert, s1, t1). The rate table gathers them under
 `numerical_flags` by stage, beside its own ('fc_integrand_not_decayed'), so
@@ -108,8 +109,8 @@ from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
                                       refreeze_summary, walk_fields)
-from src.properties.excitations import (grid_record, qp_bookkeeping,
-                                        relaxation_flags,
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from src.properties.excitations import (grid_record, relaxation_flags,
                                         saddle_check, saddle_verdict,
                                         surface_of)
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
@@ -459,8 +460,8 @@ class Run:
         """Warn about a walk whose last pass did not converge or whose
         refreeze drift stayed above REFREEZE_TOL_MEV, and name it in
         `info['numerical_flags']` (`relaxation_flags`), which the stage
-        record carries; the stage goes on where the walk stopped
-        (refuse inputs, warn numerics)."""
+        record carries; the stage goes on where the walk stopped (the policy:
+        refuse inputs, warn numerics)."""
         flags = relaxation_flags(stage, info)
         info['numerical_flags'] = dict(info.get('numerical_flags') or {},
                                        **flags)
@@ -569,7 +570,9 @@ class Run:
         (`escape_saddle`). A check that does not end on a minimum (a second
         saddle, an escape walk that did not converge) is warned about and
         flagged ('saddle_check' in the escape walk's `numerical_flags`), and
-        the stage goes on where the escape walk stopped; a walk that did not
+        the stage goes on where the escape walk stopped; an asymmetric
+        Hessian is flagged ('hessian_asymmetric') on whichever walk the stage
+        keeps; a walk that did not
         relax is not checked (its 6N forces would test a point with a
         residual force). Without the policy the walk's own, and no record."""
         if not self.declaration.policies.saddle_check:
@@ -602,6 +605,8 @@ class Run:
             f'{first["lowest_curvature"]:.3e} Ha/Bohr^2 (saddle below '
             f'{first["tolerance"]:.1e}): {record["status"]}', t0)
         if again is None:
+            info = dict(info, numerical_flags=dict(
+                info.get('numerical_flags') or {}, **saddle_verdict(stage, record)))
             return mol, info, root, final, record
         again.pop('final_surface', None)
         record['saddle_walk'] = walk_fields(info)
@@ -609,7 +614,7 @@ class Run:
             f'mode, {record["step_bohr"]} Bohr; the new minimum lies '
             f'{record.get("energy_drop", float("nan")) * HARTREE_TO_MEV:.2f}'
             f' meV below it')
-        # Refuse inputs, warn numerics
+        # the policy: refuse inputs, warn numerics
         again['numerical_flags'] = dict(
             relaxation_flags(f'{stage} escape', again),
             **saddle_verdict(stage, record))
@@ -887,7 +892,7 @@ def resume_point(run, stage, start, progress=True):
     return walked, held
 
 
-def walked_minimum(run, stage, surface, start, resume, t0, hess_init=None):
+def walked_minimum(run, stage, surface, start, resume, hess_init=None):
     """(minimum, info, root, surface) of the walk of `stage` on `surface`
     from `start`, flagged where it did not relax (`Run.flag_unrelaxed`),
     and kept as '<stage>_walked'."""
@@ -972,7 +977,7 @@ def s1_minimum(run):
             f'{surface.label()}'
             + ('' if d.handover
                else f', start nudged by {d.policies.nudge_bohr} Bohr'))
-        walked = walked_minimum(run, 's1', surface, start, resume, t0)
+        walked = walked_minimum(run, 's1', surface, start, resume)
 
     def extra(info):
         return {'hessian': info.get('hessian'),
@@ -1023,8 +1028,7 @@ def t1_minimum(run):
             + ('' if hess_init is None else ' on the S1 walk\'s Hessian')
             + ('' if d.handover
                else f', start nudged by {d.policies.nudge_bohr} Bohr'))
-        walked = walked_minimum(run, 't1', surface, mol_s1, resume, t0,
-                                hess_init=hess_init)
+        walked = walked_minimum(run, 't1', surface, mol_s1, resume, hess_init=hess_init)
     return finish_minimum(run, 't1', walked, t0, lambda info: {})
 
 
@@ -1043,8 +1047,9 @@ class RateRules(NamedTuple):
     printer: Callable
 
 
-def tadf_table(run, minima, records):
-    """The TADF table (`rate_models.tadf_rate_table`)."""
+def tadf_table(run, minima, _records):
+    """The TADF table (`rate_models.tadf_rate_table`); the stage records are
+    not read (the call shape of `uisc_table`)."""
     d = run.declaration
     return rate_models.tadf_rate_table(*minima, run.mol_in, d.temperature,
                                        d.lambda_env_ev, d.manifold_gaps)
@@ -1088,7 +1093,7 @@ def rates(run):
     failed = sorted(k for k, v in checks.items()
                     if v is not None and v != 'pass')
     if failed:
-        # Refuse inputs, warn numerics
+        # the policy: refuse inputs, warn numerics
         warnings.warn(f'the ISDF-vs-DF acceptance check failed at '
                       f'{", ".join(failed)} ({checks}); see '
                       f'isdf_df_check_<stage> in {run.store.dir}. The rates '

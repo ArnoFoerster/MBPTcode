@@ -27,7 +27,7 @@ wc[k, q] = Bp[:,q]^T [W(i.nu_k) - I] Bp[:,q], which the integral term already
 builds, so it costs no screening evaluation of its own. With the Om_m FROZEN
 after `fit_poles`, A = F^+ wc is a fixed LINEAR map of that data, which is what
 makes the adjoint of the whole route that map transposed
-(`gradients.sum_over_poles_adjoint`).
+(`gradients.gwbse.sum_over_poles_adjoint`).
 
 THE WALL. Eq. (27) of the pole paper: the denominators stay bounded away from
 zero only while |eps_q - omega| < Om_1, the lowest true neutral excitation, for
@@ -46,12 +46,14 @@ import warnings
 import numpy as np
 import scipy.linalg
 
-from src.Base.numerics.constants import (QP_CD_NEWTON_TOL,
+from src.Base.numerical_flags import flag
+from src.Base.numerics.constants import (QP_ROOT_TOL,
                                          QP_SUBSPACE_MAX_ITER, QP_SUBSPACE_TOL,
                                          SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
                                          SOP_FIT_STRIDE, SOP_N_POLES,
                                          SOP_POLE_MERGE_TOL)
-from src.SingleReference.GW.real_screening import ov_energies, residue_set
+from src.SingleReference.GW.real_screening import residue_set
+from src.Base.orbital_spaces import ov_energies
 from src.Solvers.qp_equation import (solve_qp_equation_poles,
                                      solve_qp_hamiltonian)
 
@@ -99,6 +101,10 @@ def pole_amplitudes(wc, poles, nu_points, rcond=SOP_FIT_RCOND):
     return pole_pseudoinverse(nu_points, poles, rcond) @ np.asarray(wc, float)
 
 
+class VectorFitFallback(RuntimeWarning):
+    """The vector-fitting least squares fell back to another LAPACK driver."""
+
+
 def _vector_fit_lstsq(block, rhs):
     """The vector-fitting least squares, by LAPACK gelsd; by gelss where
     gelsd's SVD does not converge, which it can on finite, well-scaled
@@ -110,9 +116,10 @@ def _vector_fit_lstsq(block, rhs):
     # numpy's rcond=None cut, so a rank-deficient block keeps its rank
     cut = np.finfo(float).eps * max(block.shape)
     for driver, what in (('gelss', 'QR-iteration SVD'), ('gelsy', 'pivoted QR')):
-        warnings.warn(f'vector fitting: the least squares failed on a '
-                      f'{block.shape} block ({failed}); solved by {driver} '
-                      f'({what}) instead', RuntimeWarning, stacklevel=3)
+        flag('vector_fit_lstsq_fallback',
+             f'vector fitting: the least squares failed on a {block.shape} '
+             f'block ({failed}); solved by {driver} ({what}) instead',
+             VectorFitFallback, stacklevel=3)
         try:
             return scipy.linalg.lstsq(block, rhs, cond=cut,
                                       lapack_driver=driver)[0]
@@ -273,10 +280,13 @@ def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True, out=None):
            (`compressible`) and the near-resonant models `pole_clearance`
            catches. Beyond the wall the error scatters with M rather than
            falling, so a converged-looking value at one M means nothing.
-    out: a dict that receives each warned condition by name
-         (refuse inputs, warn numerics): 'compression_excluded'
+    out: a dict that receives each warned condition by name (refuse inputs,
+    warn numerics): 'compression_excluded'
          (the reach, in gaps) and 'resonant' (the clearance), for the
          caller's record; the value returned does not depend on it.
+
+    Read by the tests alone: the closed form the pole-model route and its
+    adjoint are gated against.
     """
     if check:
         ok, reach = compressible(omega, eps, nocc)
@@ -306,13 +316,15 @@ def sigma_sop_slope(omega, amplitudes, poles, eps, nocc):
 
     Contour deformation pays a W build and a solve per residue for this; here
     it is the same sum with squared denominators.
+
+    Read by the tests alone, beside `sigma_sop`.
     """
     return -float(np.sum(np.asarray(amplitudes, float).T
                          / denominators(omega, poles, eps, nocc) ** 2))
 
 
 def qp_energy_sop(p, amplitudes, poles, eps, nocc, xc_correction=0.0,
-                  tol=QP_CD_NEWTON_TOL, follow=None, branch=None):
+                  tol=QP_ROOT_TOL, follow=None, branch=None):
     """(eps^QP_p, Z_p) from w = eps_p + <Sigma_x - v_xc> + Sigma^c(w).
 
     The model's Sigma^c is a sum of known poles (`pole_denominators`), so

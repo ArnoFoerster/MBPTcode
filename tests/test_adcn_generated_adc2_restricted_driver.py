@@ -1,13 +1,12 @@
-"""Increment 2 gate of the spin-free ADC(2)-(5) plan
-the restricted
+"""Spin-free ADC(2) generator check: the restricted
 (spin-blocked, RHF) BuildSuperMatrixADCnRestricted assembles the alpha-Dyson
 sector purely from SPATIAL spin-block tensors, and must reproduce the
 spin-orbital BuildSuperMatrixADCn's physics:
 
 1. Self-energy oracle (config-ordering-free): the spatial ADC(2) self-energy
    Sigma_alpha(omega) equals the alpha-spatial block Sigma_spin[0::2, 0::2]
-   of the spin-orbital self-energy at arbitrary omega. This is the
-   MP2 self-energy oracle in spatial form.
+   of the spin-orbital self-energy at arbitrary omega (the ADC(2) == MP2
+   self-energy check in spatial form).
 
 2. Poles: every eigenvalue of the alpha-sector spatial supermatrix is an
    eigenvalue of the full spin-orbital ADC(2) supermatrix (the alpha-Dyson

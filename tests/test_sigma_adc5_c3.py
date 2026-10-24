@@ -7,7 +7,7 @@ is itself gated (n=2 bit-exact vs c2_block_generated; n=3 == spin-orbital twin,
 tests/test_adcn_generated_c3*.py), so this closes the chain
 dense-spin-orbital == dense-restricted == MATRIX-FREE-restricted.
 
-Primary gate (task spec): LiH/sto-3g and H2O/sto-3g, BOTH sectors, 3 random
+Primary gate: LiH/sto-3g and H2O/sto-3g, BOTH sectors, 3 random
 trial vectors each: max |matvec - dense @ x| < 1e-11.
 
 The matvec deliberately OMITS N^(3) (it cancels identically in the class-class
@@ -18,7 +18,7 @@ mismatch (~1e-5), 6 orders above the tolerance.
 
 Guards baked in (known traps):
   * the dense C^(3) is asserted NONZERO first -- a matvec check against a zero
-    block proves nothing (section 19's Laplace lesson);
+    block proves nothing;
   * DF/RI secondary check with an EXACT RI factor (naux = norb^2,
     DFIntegrals.from_scf(exact=True)): the *_df apply modules + B leaves must
     match the same dense reference, so any deviation is codegen/plumbing, not
@@ -48,7 +48,7 @@ c2df = lazy('adc4_c2_apply_restricted_df_blocks')
 s2cdf = lazy('adc4_c2_s2c_apply_restricted_df_blocks')
 c3df = lazy('adc5_c3_apply_restricted_df_blocks')
 
-TOL = 1e-11          # primary gate (task spec)
+TOL = 1e-11          # primary gate
 TOL_DF = 1e-8        # DF with an EXACT B factor -- plumbing, not fitting
 
 SYSTEMS = [('LiH/sto-3g', 'Li 0 0 0; H 0 0 1.6'),

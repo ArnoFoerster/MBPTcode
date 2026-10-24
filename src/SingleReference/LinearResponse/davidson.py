@@ -295,8 +295,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     (`check_residual_floor`).
     refuse_unconverged: False by default: a root left above conv_tol is
     returned as solved with a RuntimeWarning and flagged in `timings`
-    (`davidson_flags`), which the caller copies into its record
-    (refuse inputs, warn numerics).
+    (`davidson_flags`), which the caller copies into its record (refuse inputs, warn numerics).
     True raises `DavidsonNotConverged`, since its energy and eigenvector are
     wrong by its residual.
     read_roots, read_tol: with refuse_unconverged, the lowest `read_roots`
@@ -718,8 +717,7 @@ def run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
 
     refuse_unconverged: False by default: a root left above conv_tol is
     returned as solved with a RuntimeWarning, and `timings` names it
-    (`davidson_flags` reads them into a record's flags;
-    refuse inputs, warn numerics). True raises
+    (`davidson_flags` reads them into a record's flags; refuse inputs, warn numerics). True raises
     `DavidsonNotConverged` naming the roots, their residuals and conv_tol, on
     every rank, since every rank holds rank 0's `converged`. Either way
     `timings` carries `davidson_residuals`, every root's |r| recomputed from
@@ -936,8 +934,7 @@ def davidson_flags(timings):
     recorded. 'davidson_not_converged': {roots, residuals (|r| recomputed
     from the returned vectors), verdict}; 'davidson_unconfirmed': {roots}, the
     roots an extra Ritz pair still unsettled at the stop may lie below. What
-    a caller copies into its record where the roots were kept as solved.
-    """
+    a caller copies into its record where the roots were kept as solved."""
     if not timings:
         return {}
     flags = {}

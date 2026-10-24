@@ -10,9 +10,8 @@ test_adc5_union_poles):
   2. the coupling rows from the quadrature converge to the exact (dense) rows:
      at the widest tabulated grid they agree to TOL_ROWS relative, and the
      smallest grid is no closer;
-  3. the operator with the quadrature rows has the oracle's diagrammatic ADC(5)
-     poles (reads the git-ignored lambda oracle and skips without it; 1 and 2
-     do not).
+  3. the operator with the quadrature rows has the diagrammatic ADC(5) poles of
+     the union-space oracle (tests/union_space_oracle.py).
 """
 import os
 import sys
@@ -29,8 +28,8 @@ from src.SingleReference.ADC.sigma_driver import (
     s1_k2_dot_orb, u2_k2_dot_orb)
 from tests.generated_runtime import requires_runtime
 from tests.test_adc5_archive_pins import H4, LIH, _solver
-from tests.test_adcn_generated_x2 import _oracle, _build_system
 from tests.test_adc5_poles import _production
+from tests import union_space_oracle as CB
 from tests.test_adc5_union_poles import (SYSTEMS, TOL, TOL_SYM, _dense, _diff, _oracle_poles,
                                          _principal)
 
@@ -52,10 +51,9 @@ def _columns(apply, n_in, n_out):
 
 
 def _system(name):
-    CB = _oracle()
-    sysd = _build_system(CB, name)
+    sysd = CB.build_system(name)
     r, f_orb = _production(sysd)
-    return CB, sysd, r, f_orb
+    return sysd, r, f_orb
 
 
 # the folds and the rows need only the solver; the poles test reads the oracle
@@ -75,7 +73,7 @@ FOLDS = {'S1_k2': (s1_k2_dot_orb, orb_dot_s1_k2), 'U2_k2': (u2_k2_dot_orb, orb_d
 def test_k2_orbital_fold_adjoint(name, sector, fold):
     r = _solver(SOLVERS[name])
     forward, adjoint = FOLDS[fold]
-    n2 = len(r._kconfigs(sector, 2)['K'])
+    n2 = len(r.kconfigs(sector, 2)['K'])
     fwd = _columns(lambda p: forward(r, sector, p, u2r_module), r.norb, n2)
     adj = _columns(lambda v: adjoint(r, sector, v, u2r_module), n2, r.norb)
     scale = float(np.max(np.abs(fwd)))
@@ -103,13 +101,13 @@ def test_rows_converge_to_exact(name):
 
 @pytest.mark.parametrize('name', SYSTEMS)
 def test_laplace_poles_match_oracle(name):
-    CB, sysd, r, f_orb = _system(name)
+    sysd, r, f_orb = _system(name)
     us = CB.UnionSpace(sysd)
-    ref = _oracle_poles(CB, us, 'diagrammatic')
+    ref = _oracle_poles(us, 'diagrammatic')
     M = _dense(restricted_dyson_operator(r, 'adc5', f_orb=f_orb, construction='diagrammatic',
                                          decoupling_ntau=NTAU_MAX)[0])
     asym = float(np.max(np.abs(M - M.T)))
-    mine = _principal(M, len(f_orb), CB)
+    mine = _principal(M, len(f_orb))
     d = _diff(mine, ref)
     print(f"{name} diagrammatic ADC(5), Laplace decoupling ntau={NTAU_MAX}: "
           f"|production - oracle| {d:.2e}; symmetry {asym:.1e}")

@@ -113,7 +113,6 @@ def test_one_evaluated_coupling(monkeypatch):
     num = ev.interstate[(s0, s1)][0]
     assert np.array_equal(d01, num / (0.27 - 0.20) + 0.5)
     assert diags['gap'] == 0.27 - 0.20
-    assert spin_vibronic.evaluated_coupling is dc.evaluated_coupling
     d10, diags = dc.evaluated_coupling(ev, s1, s0)
     assert np.array_equal(d10, num / (0.20 - 0.27) + 0.5)
     assert diags['gap'] == 0.20 - 0.27

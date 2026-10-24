@@ -457,7 +457,7 @@ def import_closure(path, seen=None):
 
 @pytest.mark.parametrize('module', [
     'src/gradients/gwbse/qp_space_time.py',
-    'src/SingleReference/LinearResponse/isdf_bse_adjoint.py',
+    'src/gradients/gwbse/isdf_bse_adjoint.py',
     'src/gradients/rpa/space_time_adjoint.py',
     'src/gradients/gwbse/bse_isdf.py'])
 def test_reverse_chain_does_not_import_the_selection(module):

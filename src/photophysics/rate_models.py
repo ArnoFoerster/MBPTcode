@@ -1,5 +1,6 @@
 """Rate models: a rate table from the S0 modes and three `StateMinimum`
-records (R0, the S1 minimum, the T1 minimum), on `properties.rates`.
+records (R0, the S1 minimum, the T1 minimum), on `photophysics.rates` and
+`properties.franck_condon`.
 
 `tadf_rate_table` is the TADF table of the staged run: every Huang-Rhys
 factor (measured in curvilinear coordinates, `properties.curvilinear`),

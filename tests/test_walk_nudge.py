@@ -18,6 +18,7 @@ Every check asserts: pytest discards a returned verdict and passes on False.
 import numpy as np
 import pytest
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.constants import (SADDLE_CURVATURE_TOL, START_NUDGE_BOHR,
                                          START_NUDGE_SEED)
 from src.properties.hessian import surface_hessian
@@ -36,7 +37,9 @@ def pyramidal_minimum():
     x = PLANAR.copy()
     x[0, 2] = 0.4
     surface = DoubleWell(molecule(x))
-    mol, info = optimize(surface, surface.mol0, max_cycle=200, verbose=False,
+    mol, info = optimize(surface, surface.mol0,
+                         numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
+                         verbose=False,
                          nudge=0, conv={'opt_grad_max': 1e-6,
                                         'grad_rms': 1e-6})
     assert info['converged']
@@ -83,7 +86,9 @@ def test_the_nudge_is_recorded_and_excited_only(planar_start):
 
 
 @pytest.mark.parametrize('walk', [
-    lambda s, m, **kw: optimize(s, m, max_cycle=200, verbose=False, **kw),
+    lambda s, m, **kw: optimize(s, m,
+                                numerics=derived_walk(s, 'a capped test walk', max_cycle=200),
+                                verbose=False, **kw),
     lambda s, m, **kw: optimize_geometric(s, m, verbose=False, **kw)],
     ids=['cartesian', 'geometric'])
 def test_a_symmetric_start_reaches_the_broken_minimum(planar_start, walk,
@@ -127,14 +132,17 @@ def test_a_planted_negative_mode_is_found():
 def walk_without_nudge(calls):
     def walk(surface, start):
         calls.append(start)
-        return optimize(surface, start, max_cycle=200, verbose=False, nudge=0)
+        return optimize(surface, start,
+                        numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
+                        verbose=False, nudge=0)
     return walk
 
 
 def test_a_saddle_is_left_and_the_new_minimum_checked(planar_start,
                                                       pyramidal_minimum):
     surface = DoubleWell(planar_start)
-    saddle, info = optimize(surface, planar_start, max_cycle=200,
+    saddle, info = optimize(surface, planar_start,
+                            numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
                             verbose=False, nudge=0)
     hess = surface_hessian(surface, saddle)
     calls = []
@@ -160,7 +168,9 @@ def test_a_saddle_is_left_and_the_new_minimum_checked(planar_start,
 
 def test_a_true_minimum_passes_unchanged(planar_start):
     surface = DoubleWell(planar_start)
-    minimum, _ = optimize(surface, planar_start, max_cycle=200, verbose=False)
+    minimum, _ = optimize(surface, planar_start,
+                          numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
+                          verbose=False)
     hess = surface_hessian(surface, minimum)
     calls = []
     same, again, kept, record = escape_saddle(
@@ -172,7 +182,9 @@ def test_a_true_minimum_passes_unchanged(planar_start):
 
 def test_a_second_saddle_stops_the_check(planar_start):
     surface = DoubleWell(planar_start)
-    saddle, _ = optimize(surface, planar_start, max_cycle=200, verbose=False,
+    saddle, _ = optimize(surface, planar_start,
+                         numerics=derived_walk(surface, 'a capped test walk', max_cycle=200),
+                         verbose=False,
                          nudge=0)
     hess = surface_hessian(surface, saddle)
     calls = []

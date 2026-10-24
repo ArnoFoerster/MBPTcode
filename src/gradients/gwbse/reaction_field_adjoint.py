@@ -27,22 +27,11 @@ import numpy as np
 
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
 from src.Base.utils.parallel.mpi_grid import agreement, current_comm, lockstep
-from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
 from src.SingleReference.GW.reaction_field import (
     density_projection, pair_densities, projected_quasiparticle_shift)
 from src.SingleReference.LinearResponse.space_time import (
     static_screening_grid, static_screening_matrix)
 from src.gradients.rpa.space_time_adjoint import chi0_backward, chi0_backward_rows
-
-
-def static_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
-    """The one-point (omega = 0) minimax grid Delta W is built on.
-
-    `LinearResponse.space_time.static_screening_grid` itself, under this
-    package's name for it, so a chain that builds the reaction field and the
-    BSE kernel screens them on ONE axis and the two cannot drift apart.
-    """
-    return static_screening_grid(eps, nocc, ntau=ntau, tau_target=tau_target)
 
 
 def static_screening(x_mo, d, eps, nocc, grid=None, mu=None, comm=None,
@@ -78,7 +67,7 @@ def static_screening(x_mo, d, eps, nocc, grid=None, mu=None, comm=None,
         eps = lockstep(np.asarray(eps, float), comm)
         agreement((x_mo.coords if sliced else x_mo, d), comm, audit_only=True,
                   label='static_screening inputs')
-    grid = static_grid(eps, nocc) if grid is None else grid
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
     if densities and not sliced:
         a = d.T @ (x_mo ** 2)
     out = (a, static_screening_matrix(x_mo, d, eps, nocc, grid, mu=mu,
@@ -100,7 +89,7 @@ def reaction_field_shift(x_mo, d_dressed, d_bare, eps, nocc, grid=None,
     screening: ((A, W) dressed, (A, W) bare) already built by the caller
                (`static_screening`) on this same grid.
     """
-    grid = static_grid(eps, nocc) if grid is None else grid
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
     if screening is None:
         screening = (static_screening(x_mo, d_dressed, eps, nocc, grid, mu),
                      static_screening(x_mo, d_bare, eps, nocc, grid, mu))
@@ -127,7 +116,7 @@ def reaction_field_backward(weights, x_mo, d_dressed, d_bare, eps, nocc,
            grid), added to this one's before the sweep: chi0's adjoint is
            linear in its seed, so one sweep carries both.
     """
-    grid = static_grid(eps, nocc) if grid is None else grid
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
     if screening is None:
         screening = (static_screening(x_mo, d_dressed, eps, nocc, grid, mu),
                      static_screening(x_mo, d_bare, eps, nocc, grid, mu))
@@ -184,7 +173,7 @@ def offdiagonal_reaction_field_backward(weights, pairs, x_mo, d_dressed,
     densities take t W a_pq, the pair density t W (a_p + a_q), and chi0 the
     symmetric part of t W (a_p + a_q) a_pq^T W.
     """
-    grid = static_grid(eps, nocc) if grid is None else grid
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
     if screening is None:
         screening = (static_screening(x_mo, d_dressed, eps, nocc, grid, mu),
                      static_screening(x_mo, d_bare, eps, nocc, grid, mu))

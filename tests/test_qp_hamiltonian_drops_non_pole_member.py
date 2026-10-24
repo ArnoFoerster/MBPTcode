@@ -24,7 +24,7 @@ import warnings
 
 import pytest
 
-from src.properties.excitations import qp_bookkeeping
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
 from tests.test_qp_hamiltonian import chain, displaced, pbe0
 
 CARRIED = (9, 10, 11)

@@ -29,6 +29,7 @@ import numpy as np
 import torch
 
 from src.autograd_oracle import torch_chain as tc
+from src.autograd_oracle.frozen import load
 
 torch.set_num_threads(1)
 
@@ -57,7 +58,7 @@ def main():
     ap.add_argument('--newton-steps', type=int, default=3)
     args = ap.parse_args()
 
-    x_mo, d, d_bare, eps, fz, extra = tc.load(args.inp)
+    x_mo, d, d_bare, eps, fz, extra = load(args.inp)
     target = str(extra['target'])
     qp_orb = int(extra['qp_orb'])
     t0 = time.perf_counter()

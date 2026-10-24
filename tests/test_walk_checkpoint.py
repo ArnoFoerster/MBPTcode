@@ -39,7 +39,7 @@ from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.photophysics_cases import run_of
 
 #: The walk's thresholds: GEOM_OPT_CONV ten times looser.
-LOOSE = {k: 10.0 * v for k, v in GEOM_OPT_CONV.items() if k != 'grad_max'}
+LOOSE = {k: 10.0 * v for k, v in GEOM_OPT_CONV.items()}
 #: Accepted cycles before the kill (the start is the first checkpoint).
 KILLED_AFTER = 2
 #: Bohr / Ha: how close the resumed walk must land.

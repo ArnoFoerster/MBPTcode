@@ -91,8 +91,8 @@ def csf_isometry(sr, so, nocc):
     n = sr.norb
     nv = n - nocc
     d, ds = sr.dimensions(nocc), so.dimensions(2 * nocc)
-    i1, j1, a1 = so._configs_2h1p(2 * nocc)
-    i2, a2, b2 = so._configs_2p1h(2 * nocc)
+    i1, j1, a1 = so.configs_2h1p(2 * nocc)
+    i2, a2, b2 = so.configs_2p1h(2 * nocc)
     idx1 = {c: k for k, c in enumerate(zip(i1, j1, a1))}
     idx2 = {c: k for k, c in enumerate(zip(i2, a2, b2))}
     o1, o2 = 2 * n, 2 * n + ds['n2h1p']
@@ -157,8 +157,8 @@ def check_spin_orbital_reference(so, nocc):
            'hh': {'T': ch1['hh']['T'], 'dH': -Cpp, 'dN': np.eye(len(Cpp))}}
     dHI, _, dHII, _ = FU.correction_blocks(eps, nocc, chP)
     dd = so.dimensions(nocc)
-    i2, j2, a2 = so._configs_2h1p(nocc)
-    i3, a3, b3 = so._configs_2p1h(nocc)
+    i2, j2, a2 = so.configs_2h1p(nocc)
+    i3, a3, b3 = so.configs_2p1h(nocc)
     KI = np.diag(eps[i2] + eps[j2] - eps[a2])
     KII = np.diag(eps[a3] + eps[b3] - eps[i3])
     CI = C_2h1p_block(so, nocc, np.arange(dd['n2h1p']))

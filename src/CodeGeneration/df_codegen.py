@@ -3,8 +3,7 @@ integral factor <p,q||r,s>(_ssss) in a pdaggerq raw-term list with its RI
 expansion in terms of a 3-index auxiliary factor B_Q,pq, so the resulting
 terms feed unmodified into src/CodeGeneration/pdaggerq_interface.py::raw_terms_to_einsum
 -- exactly the "no new codegen logic downstream" pattern
-laplace_codegen.py::fuse_amplitude_into_consumer uses for the amplitude side
-(Phase 0 of the DF rewrite).
+laplace_codegen.py::fuse_amplitude_into_consumer uses for the amplitude side.
 
 Physics: <pq||rs> = <pq|rs> - <pq|sr>, and each Coulomb-type piece factors
 over the RI auxiliary index Q as a simple product of two 2-index B slices:
@@ -29,8 +28,7 @@ relies on cached_einsum.py's existing 'optimal' path search (<=4 operands)
 to pick the low-storage contraction order automatically -- no separate
 batching logic needed for terms with <=2 other (non-bracket) factors, which
 covers MP2/MP3-density-scale equations. Terms needing an explicit vvvv-shaped
-intermediate (batching) are a later-phase concern
-and are NOT handled specially here.
+intermediate (batching) are NOT handled specially here.
 """
 import re
 from itertools import product

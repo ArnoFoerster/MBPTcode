@@ -11,13 +11,14 @@ quasiparticle root after the solve, whole. Inside the G0W0 equation the fixed
 Sigma_c(w) renormalizes it to Z x shift, while the reaction-field dressing of
 the BSE direct kernel, which Eqs. (18)-(20) of the paper pair it with, enters
 whole: the (1 - Z)(P_e + P_h) left over is a spurious blue shift of 130-550 meV
-in any continuum (2026-10-19). On an evGW cycle (an `eps_anchor` handed
+in any continuum. On an evGW cycle (an `eps_anchor` handed
 to the route) the shift stays inside the equation, as in the paper: G and W
 are rebuilt on levels that already carry it, so Sigma_c moves with them and
 the fixed point realizes the whole shift. Adding it after the solve there as
 well would count it again, once through the levels and once on top.
 """
 import hashlib
+import weakref
 from contextlib import contextmanager
 
 import numpy as np
@@ -36,8 +37,12 @@ from src.Base.factorization.separable_ri import (aux_metric_sqrt,
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.orbital_spaces import get_occ_virt_indices
+from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.space_time import dyson_screening
 
+#: Each mean field's Eq. (18) shifts by (inputs, continuum), held weakly so an
+#: entry dies with its mean field (`environment_quasiparticle_shift`).
+_SHIFTS = weakref.WeakKeyDictionary()
 
 def shift_after_solve(eps_anchor):
     """Whether a quasiparticle route adds Eq. (18) to its roots after the
@@ -169,7 +174,7 @@ def projected_quasiparticle_shift(a_dressed, w_dressed, a_bare, w_bare, nocc):
     How the BARE partner is reached is the caller's: by congruence from one
     chi0 (`separable_quasiparticle_shift`, a forward pass's cheapest route) or
     by screening a second factorization
-    (`gradients.reaction_field_adjoint.reaction_field_shift`, whose D branch
+    (`gradients.gwbse.reaction_field_adjoint.reaction_field_shift`, whose D branch
     carries a nuclear derivative that a pseudo-inverse of a metric root does
     not). The two agree to the ISDF reproducibility floor and differ nowhere
     else, because the contraction below is the same object for both.
@@ -274,16 +279,10 @@ def environment_quasiparticle_shift(mf, mol=None, nocc=None, auxbasis=None,
     # of one mean field are asked for side by side (`equilibrium_level_shift`),
     # and a single resident entry would rebuild each on every alternation.
     key = (_shift_key(mf, mol, nocc, auxmol), id(environment))
-    cache = mf.__dict__.get('_reaction_field_shift')
-    if not isinstance(cache, dict):
-        cache = mf._reaction_field_shift = {}
+    cache = _SHIFTS.setdefault(mf, {})
     hit = cache.get(key)
     if hit is not None and hit[0] is environment:
         return hit[1]
-
-    # cycle: LinearResponseSolver reaches back into this package's screening
-    from src.SingleReference.LinearResponse.linear_response import \
-        LinearResponseSolver
 
     # B = Vt^(1/2) V^-1 (P|pq): the Coulomb-metric fit, dressed in the gauge
     # where the interaction is B^T B and the bare partner is T^T B. Only two

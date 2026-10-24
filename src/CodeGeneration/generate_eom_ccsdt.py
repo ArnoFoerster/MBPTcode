@@ -21,10 +21,6 @@ both bra and ket (self-dual in pdaggerq's convention).
 """
 import os
 
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
 from src.CodeGeneration.pdaggerq_interface import pq_helper, assemble_function, infer_output_order
 from src.CodeGeneration.codegen_common import (
     CC_OUT_DIR, DENSITY_BLOCKS, density_insert, density_out_idx, density_shape, generated_header, write_module)
@@ -153,7 +149,7 @@ def generate_sector(name):
 
 # ---------------------------------------------------------------------------
 # EE transition densities (for polarizabilities / G0W@CC, see
-# src/SingleReference/GW/gw_cc.py). CC 1-body density matrices never
+# src/SingleReference/GW/cc_polarizability.py). CC 1-body density matrices never
 # involve f/g at all (only t/l amplitudes + the identity 'kd') -- the density
 # operator is transformed by the T-similarity transform alone, unlike the
 # sigma-vector equations above which sandwich the full Hamiltonian.

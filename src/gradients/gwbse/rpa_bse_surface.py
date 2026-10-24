@@ -41,6 +41,7 @@ from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.state_identity import orbital_fingerprint, track_orbital
 from src.gradients.surface import PotentialEnergySurface
+from src.gradients.surface_identity import composed_identity
 
 
 def _halves(mol, scf_factory, mf, environment, numerics, ground,
@@ -96,7 +97,7 @@ class _FollowsOrbital:
         if mol is self.mol0:
             return self.state
         # an ambiguous match is warned about by track_orbital and flagged in
-        # the entry (refuse inputs, warn numerics)
+        # the entry (the policy: refuse inputs, warn numerics)
         seen = {}
         orbital, score = track_orbital(self._fingerprint, mf, out=seen)
         entry = {'orbital': int(orbital), 'reference': reference,
@@ -138,8 +139,10 @@ class ComposedSurface:
     every composed surface, which says only what it carries besides its
     halves (`carried`)."""
 
-    #: The half that owns the spectrum (`surface.driven_chain`).
+    #: The half that owns the spectrum (`surface.driven_chain`) and the
+    #: ground-state half (`surface.ground_half`).
     DRIVEN_HALF = 'excited'
+    GROUND_HALF = 'ground'
     #: The outer root index the composition keeps beside its half's.
     ROOT_ATTR = 'state'
 
@@ -166,8 +169,11 @@ class ComposedSurface:
         return cls(ground.mol0, scf_factory, factorization=ground.factorization,
                    ground=ground, excited=excited, **record['carried'])
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
         """Both halves rebuilt at `mol` on ONE NEW factorization.
+
+        mf: the mean field at `mol` the ground half stands on, where the
+        caller holds one; else the ground half converges it.
 
         A factorization is frozen AT a geometry, so refreezing must build a new
         one -- carrying the old object forward would keep the old geometry's
@@ -187,11 +193,16 @@ class ComposedSurface:
         """
         fac = self.ground.factorization.rebuilt_at(mol)
         walked = self.ground.mean_field(mol)[1]
-        ground = self.ground.refreeze(mol, factorization=fac)
+        ground = self.ground.refreeze(mol, factorization=fac, mf=mf)
         excited = self.excited.refreeze(mol, factorization=fac, mf=ground.mf0,
                                         walked=walked)
         return type(self)(mol, self._scf, factorization=fac, ground=ground,
                           excited=excited, **self.carried_at(mol))
+
+    def identity(self):
+        """Both halves' identities under the surface's class
+        (`surface_identity.composed_identity`)."""
+        return composed_identity(self, ground=self.ground, excited=self.excited)
 
     def carried_at(self, mol):
         """What the surface refrozen at `mol` carries: `carried`, unless a
@@ -236,7 +247,7 @@ class RPAQPSurface(ComposedSurface, _FollowsOrbital, PotentialEnergySurface):
     (`_FollowsOrbital`).
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'energy', 'mean_field', 'physics', 'to_record'})
 
     def __init__(self, mol, scf_factory, state=0, mf=None, environment=None,
@@ -370,7 +381,7 @@ class MeanFieldQPSurface(_FollowsOrbital, PotentialEnergySurface):
     there.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'energy', 'mean_field', 'physics', 'to_record'})
 
     #: The half that owns the spectrum, and the outer root index
@@ -455,12 +466,18 @@ class MeanFieldQPSurface(_FollowsOrbital, PotentialEnergySurface):
                 mf.e_tot + self.sign * qp,
                 dict(d1, e_0=mf.e_tot, qp=qp, charge_change=self.charge_change))
 
-    def refreeze(self, mol):
-        """The same surface with the chain's frozen conventions rebuilt at `mol`."""
+    def refreeze(self, mol, mf=None):
+        """The same surface with the chain's frozen conventions rebuilt at
+        `mol`, on `mf` where given."""
         return type(self)(mol, self._scf,
-                          state=self.offset_at(*self.mean_field(mol)),
-                          excited=self.excited.refreeze(mol),
+                          state=self.offset_at(*self.mean_field(mol, mf)),
+                          excited=self.excited.refreeze(mol, mf=mf),
                           equilibrium=self.equilibrium, track=self.track)
+
+    def identity(self):
+        """The chain's identity under the surface's class
+        (`surface_identity.composed_identity`)."""
+        return composed_identity(self, excited=self.excited)
 
     def carried(self):
         """What the surface is built with besides its chain."""
@@ -509,7 +526,7 @@ class RPABSESurface(ComposedSurface, PotentialEnergySurface):
     equilibrium environment it was given.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'composed', 'energy', 'excitation', 'mean_field',
                              'physics', 'spin', 'to_record'})
 

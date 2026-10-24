@@ -30,7 +30,7 @@ the point set at the reference geometry; see `frozen_surface`.
 """
 import numpy as np
 from pyscf import df as pyscf_df
-from pyscf import gto, lib
+from pyscf import gto
 from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 

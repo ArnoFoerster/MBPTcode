@@ -3,29 +3,26 @@ at order n, and to what order each supermatrix block is carried.
 
 Why this test exists
 --------------------
-`adc_order_rule` was order-general along the amplitude/dressing axis only. The
-class axis was hand-wired per level -- the generated-ADC runtime selected blocks
-with string comparisons
-(`has_c2 = level in ('adc4_base','adc4')`), i.e. every new order needs a human to
-add its manifolds. That is exactly the failure mode that makes "validated at
-2..6 therefore correct at 7..25" unsound: an order rule that EMITS the
-manifolds generalizes, a hand-maintained list does not.
+The order rule emits the class manifolds of each order instead of a per-level
+hand-maintained list: an order rule that EMITS the manifolds generalizes from
+the orders it was validated at (2..6) to 7..25, a hand-maintained list does
+not.
 
 The rule under test is Schirmer's: block(mu_I, mu_J) is carried through order
 n - mu_I - mu_J, and class mu is present iff 2*mu <= n.
 
-Every assertion below is a fact that already existed in the codebase BEFORE the
-rule was written, so this is a reproduction test, not a restatement:
+Every assertion below is a fact stated independently of the rule, so this is a
+reproduction test, not a restatement:
 
   * ADC(3) == "K + first-order C^(1) + order-2 U, NO C^(2)/3h2p"
     (restricted_dyson_operator docstring, level 'adc3')
   * ADC(4) carries U^(3) (orb-2h1p), C^(2) (2h1p-2h1p), U^(2)_3h2p (orb-3h2p),
-    C^(1) 2h1p-3h2p coupling (_coupling_2h1p_3h2p), and K ONLY on 3h2p-3h2p
+    C^(1) 2h1p-3h2p coupling, and K ONLY on 3h2p-3h2p
   * "U order = n-1, C order = n-2"
   * the 3h2p-3h2p block is order 0 at ADC(4) -- which is WHY
     solve_dyson_adc4_downfold's Schur complement over the 3-particle manifold
-    is exact rather than approximate -- and order 1 at ADC(5), which is the
-    "3h2p x 3h2p self-coupling ... the last matrix-free gate" of section 6.
+    is exact rather than approximate -- and order 1 at ADC(5), the
+    3h2p x 3h2p self-coupling.
 """
 import os
 import sys

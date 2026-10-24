@@ -349,7 +349,8 @@ def gram_schmidt_rows(rows, V, W, X_new, Y_new, count, m1, lindep):
     `warm_trial_space` does): a correction that lies almost wholly inside the
     held space keeps, after one projection, the round-off of the part
     removed, and the combination that normalizes it multiplies that
-    round-off by up to lindep^-1/2. Projected once, formaldehyde/G1 BSE in
+    round-off by up to lindep^-1/2. Projected once, formaldehyde BSE on the
+    ISDF level-G1 grid in
     toluene (240 pairs, 4 roots at 1e-9, the Eq. (18) after-solve QP
     energies) drifted from orthonormality by 2.5e-4 at 112 held pairs and
     0.4 at 232, until V - W lost rank and the projected (A-B) block broke
@@ -737,7 +738,7 @@ def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
         # solve: a correction from |r| above the sizing threshold keeps its
         # raw length r / (d - omega), and one too short for DAVIDSON_LINDEP is
         # dropped however much of it lies outside the space (benzene/cc-pVDZ
-        # BSE on the G1 grid, bare preconditioner: root 3 of 12 at
+        # BSE on the ISDF level-G1 grid, bare preconditioner: root 3 of 12 at
         # |r| = 1.5e-5, a correction 6.3e-6 long with 0.1 of it outside). Only
         # where the pair space has not run out, whose stop the dense
         # completion owns; a solve that keeps a direction every cycle never

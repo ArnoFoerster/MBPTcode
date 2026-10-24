@@ -40,6 +40,12 @@ def current_memory_mb():
     return psutil.Process().memory_info().rss / 1e6
 
 
+def left_mb(max_memory):
+    """MB of a whole-process budget `max_memory` (MB, pyscf's convention)
+    this process has not spent yet; negative when it is over."""
+    return max_memory - current_memory_mb()
+
+
 def allocation_max_memory_mb(fraction=ALLOCATION_MEMORY_FRACTION, default=None):
     """The MB pyscf's `max_memory` should target on this job, or `default` off one.
 

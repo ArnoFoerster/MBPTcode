@@ -31,7 +31,7 @@ C_ov by `wc_explicit` it is O(naux^2 nocc nvirt) per frequency.
 
 WHAT MAKES IT WRONG. A residue frequency landing on a particle-hole transition
 sits on a real pole of chi0, and W and its frequency derivative there are
-arbitrarily large: `residue_pole_distance` reports how close.
+arbitrarily large.
 
 OMEGA = EPS_Q IS NOT A POLE. Sigma_c has its poles at eps_q -/+ Omega_s, but
 the split above has a step at eps_q: the integral term jumps by W^c_pq,qp(0)
@@ -45,7 +45,7 @@ The residue SET is a discrete choice, and the total is analytic where it
 changes -- the integral term compensates the jump -- so a gradient freezes the
 set at the reference geometry and differentiates one fixed branch; re-deciding
 it per geometry would put a step in the surface. The adjoints themselves live
-in `gradients.contour_deformation_adjoint`.
+in `gradients.gwbse.contour_deformation_adjoint`.
 
 `solve_qp_energy_contour` is the driver `calc_qp_energy(mode='space-time',
 continuation='cd'|'laplace'|'sop')` enters: one ISDF factorization, one
@@ -67,15 +67,15 @@ both residue backends and the pole fit read the bare factor D T, and the shift
 comes from the dressed static screening W(0) of the same factors. The factors
 handed in stay dressed, which is what the BSE kernel screens with.
 """
-import warnings
 from collections import OrderedDict
 
 import numpy as np
 import scipy.linalg
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (CD_NFREQ, CD_NTAU, HARTREE_TO_EV,
-                                         ISDF_TILE_GB, QP_CD_NEWTON_MAX_ITER,
-                                         QP_CD_NEWTON_TOL,
+                                         ISDF_TILE_GB, QP_ROOT_MAX_ITER,
+                                         QP_ROOT_TOL,
                                          RESIDUE_FREQ_MARGIN, RESIDUE_ON_CONTOUR_TOL,
                                          SOP_FIT_STRIDE)
 from pyscf import scf as pyscf_scf
@@ -88,16 +88,14 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.Base.orbital_spaces import particle_hole_window
-from src.SingleReference.GW.qp_solve import (add_reaction_field,
+from src.SingleReference.GW.qp_solve import (add_reaction_field, channel_anchor,
                                              static_exchange_diagonal)
 from src.SingleReference.GW.reaction_field import (
     separable_gauge_transform, separable_quasiparticle_shift,
     shift_after_solve)
-from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   LaplaceRealScreening,
-                                                   ResidueRefused,
-                                                   ov_energies, residue_set,
-                                                   screening_aux)
+from src.SingleReference.GW.real_screening import (ExplicitRealScreening, LaplaceRealScreening,
+                                                   ResidueRefused, residue_set, screening_aux)
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                   qp_energy_sop, sop_from_wc)
@@ -147,18 +145,6 @@ class _PointApplies:
 
     def slope(self, freq, y):
         return self.backend.slope(freq, y)
-
-
-def residue_pole_distance(eps, nocc, omega, residues):
-    """How close each residue frequency sits to a particle-hole transition.
-
-    The residue term evaluates W at REAL frequencies, where chi0 has a pole at
-    every eps_a - eps_i. A residue landing near one makes both W and its
-    derivative large. This returns the distances so a caller can see which
-    regime it is in rather than discover it in the gradient.
-    """
-    d = ov_energies(eps, nocc)
-    return np.array([np.abs(d - abs(eps[q] - omega)).min() for q, _ in residues])
 
 
 def cd_integral_weights(de, nu_points, nu_weights):
@@ -216,6 +202,10 @@ def cd_integral_weights(de, nu_points, nu_weights):
     return c, dc
 
 
+class ScreeningNotPositive(RuntimeWarning):
+    """1 - chi0(i.nu) refused by Cholesky, solved by LU."""
+
+
 def screening_solver(eps_mat):
     """x -> [1 - chi0(i.nu)]^-1 x, factorized once: Cholesky, else LU.
 
@@ -227,10 +217,10 @@ def screening_solver(eps_mat):
     try:
         cho = scipy.linalg.cho_factor(eps_mat)
     except np.linalg.LinAlgError:
-        warnings.warn('1 - chi0(i.nu) is not positive definite, which no '
-                      'real symmetric gauge of the imaginary-axis chi0 '
-                      'allows; solved by LU instead of Cholesky',
-                      RuntimeWarning, stacklevel=2)
+        flag('screening_not_positive_definite',
+             '1 - chi0(i.nu) is not positive definite, which no real '
+             'symmetric gauge of the imaginary-axis chi0 allows; solved by LU '
+             'instead of Cholesky', ScreeningNotPositive)
         lu = scipy.linalg.lu_factor(eps_mat)
         return lambda b: scipy.linalg.lu_solve(lu, b)
     return lambda b: scipy.linalg.cho_solve(cho, b)
@@ -255,18 +245,6 @@ def wc_explicit(Bp, C_ov, d, nu_points):
                                optimize=True) for nu in nu_points])
 
 
-def cd_screening_contraction(proj_tau, cosft_wt, Bp, tile_gb=ISDF_TILE_GB):
-    """wc[k, q] = Bp[:,q]^T [W(i.nu_k) - I] Bp[:,q] from proj(tau), streamed.
-
-    chi0(i.nu) comes out of proj(tau) one frequency block at a time; one
-    factorization (`screening_solver`) and one norb-column solve per
-    frequency, W never formed, no frequency outliving its block.
-    `cd_screening_contraction_multi` does the same for several bra states at
-    once and should be preferred when there is more than one.
-    """
-    return cd_screening_contraction_multi(proj_tau, cosft_wt, [Bp],tile_gb=tile_gb)[0]
-
-
 def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
                                    tile_gb=ISDF_TILE_GB, freq_indices=None):
     """`cd_screening_contraction` for a LIST of bra slices, sharing the work.
@@ -287,17 +265,9 @@ def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
     (`owned_frequency_blocks`), so the sum over ranks, which adds exact
     zeros, is the serial wc bitwise. Serial (None) is bitwise unchanged.
     """
-    nfreq, naux = cosft_wt.shape[0], proj_tau.shape[-1]
-    eye = np.eye(naux)
-    out = [np.zeros((nfreq, B.shape[1])) for B in Bps]
-    for ks, blk in owned_frequency_blocks(proj_tau, cosft_wt, tile_gb,
-                                          freq_indices):
-        for m, k in enumerate(ks):
-            solve = screening_solver(eye - blk[m])
-            for B, wc in zip(Bps, out):
-                WtB = solve(B)
-                wc[k] = np.einsum('Pq,Pq->q', B, WtB - B)
-    return out
+    return cd_pair_contraction_multi(proj_tau, cosft_wt, Bps,
+                                     [(i, i) for i in range(len(Bps))],
+                                     tile_gb=tile_gb, freq_indices=freq_indices)
 
 
 def cd_pair_contraction_multi(proj_tau, cosft_wt, Bps, pairs,
@@ -404,7 +374,7 @@ def sigma_cd_slope(p, omega, Bp, eps, nocc, nu_points, nu_weights, residues, wc,
 
 
 def qp_energy_cd(p, Bp, eps, nocc, nu_points, nu_weights, xc_correction=0.0,
-                 tol=QP_CD_NEWTON_TOL, max_iter=QP_CD_NEWTON_MAX_ITER,
+                 tol=QP_ROOT_TOL, max_iter=QP_ROOT_MAX_ITER,
                  follow=None, wbp=None, wc=None, C_ov=None,
                  eta=0.0, real_screening=None, branch=None, rescan=True):
     """(eps^QP_p, Z_p, residues) from w = eps_p + <Sigma_x - v_xc> + Sigma^c(w).
@@ -536,7 +506,7 @@ def cd_frequency_grid(eps, nocc, ntau=CD_NTAU, nfreq_cd=CD_NFREQ, w0_cd=None,
 def qp_starts(eps, nocc, states):
     """The start point (`qp_start`) of each state of a fresh solve: eps_p
     pushed QP_POLE_OFFSET toward the chemical potential, where Eq. (27) of
-    the pole model is read before any root is known. `gradients.qp_space_time`
+    the pole model is read before any root is known. `gradients.gwbse.qp_space_time`
     reads the same point for a state it has frozen nothing for."""
     return np.array([qp_start(eps, int(p), nocc)
                      for p in np.atleast_1d(states)])
@@ -551,7 +521,7 @@ def static_term(xc_correction, si):
 
 def contour_state_root(route, p, Bp, wc, eps, nocc, nu_points, nu_weights,
                        xc_correction, real_screening=None, pole_model=None,
-                       tol=QP_CD_NEWTON_TOL, follow=None, branch=None,
+                       tol=QP_ROOT_TOL, follow=None, branch=None,
                        rescan=True):
     """(root, Z, residues swept) of orbital p on one contour grid: the pole
     model's roots on pole_model = (poles, amplitudes) for route 'sop', the
@@ -790,13 +760,8 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
         reaction_field=None if after else reaction_field, spin=spin,
         reaction_field_after_solve=after)
     if eps_anchor is not None:
-        anchor = np.asarray(eps_anchor, float)
-        if unrestricted:
-            if anchor.shape != (2, eps.size):
-                raise ValueError(
-                    f'an unrestricted eps_anchor is one spectrum per spin, '
-                    f'shape (2, {eps.size}); got {anchor.shape}')
-            anchor = anchor[spin]
+        anchor = channel_anchor(eps_anchor, eps.size,
+                                spin if unrestricted else None)
         xc_correction = xc_correction + (anchor[states] - eps[states])
 
     # The residue term's backend, built only where a residue can ask for it:
@@ -853,8 +818,3 @@ def solve_qp_energy_contour(mf, mol, nocc, states, continuation='cd',
                                            else continuation),
                    'states': records}
     return roots * HARTREE_TO_EV, pole_strengths, diagnostics
-
-
-# The old private name, read by the gradients layer until it imports the
-# public one; nothing in this layer reads it.
-_need = require_three_index

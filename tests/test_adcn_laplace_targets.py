@@ -10,12 +10,11 @@ that is large.
 
 THE BRILLOUIN MECHANISM. The class-class C blocks force their Fock factor into
 the OFF-DIAGONAL occ-virt slice f[o,v], which vanishes in canonical HF. This is
-STRUCTURAL here, not an input coincidence: BuildSuperMatrixADCnRestricted._rargs
+STRUCTURAL here, not an input coincidence: BuildSuperMatrixADCnRestricted.rargs
 sets f_aa = diag(eps) unconditionally, and the `f_orb` hook (non-canonical /
 QP-consistent Fock) is applied only to the ORBITAL block matvec in
 sigma_driver, never to the class blocks. So every f[o,v]-only structure is
-identically zero on this code path. The same mechanism holds for
-t2_2/l2ft2.
+identically zero on this code path (the same mechanism as for t2_2/l2ft2).
 
 CONSEQUENCE, measured below on NH3/sto-3g (5 occ / 3 vir -- chosen because it
 is the smallest system here where t3 AND t4 are genuinely nonzero; LiH and H2O
@@ -92,14 +91,14 @@ def main():
     print(f"NH3/sto-3g: {ns} occ / {len(eps) - ns} vir")
 
     # the structural reason the f-family vanishes
-    f = r._rargs['f_aa']
+    f = r.rargs['f_aa']
     off = np.max(np.abs(f - np.diag(np.diag(f))))
     all_ok &= _check(off == 0.0,
                      f"class-block Fock is diagonal ({off:.1e}) => f[o,v] == 0 "
                      f"identically; `f_orb` never reaches the class blocks")
 
-    A = r._amps_order(max_order=4)
-    pool = dict(r._rargs)
+    A = r.amps_order(max_order=4)
+    pool = dict(r.rargs)
     for v in A.values():
         pool.update(v)
 

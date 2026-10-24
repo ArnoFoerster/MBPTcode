@@ -62,8 +62,8 @@ orbitals before anything is solved, so it cannot know that the root the solve
 converges on has a pole strength outside (0, 1] (`is_quasiparticle_root`).
 The surface that solves the set keeps such a root as solved, warns, and
 records it at the reference geometry (`qp_z_outside`); it neither refuses it
-nor moves the orbital to the scissor (rare and often
-harmless).
+nor moves the orbital to the scissor: such roots are rare and often
+harmless.
 """
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -240,7 +240,7 @@ def valence_qp_states(mol, norb, nocc, extra_virtuals=10, filter_z=False,
 
     filter_z: keep only the orbitals whose pole strength exceeds
               QP_WINDOW_Z_MIN. A root below it is a satellite, and the state is
-              better served by the frozen scissor than by the number the Newton
+              better served by the frozen scissor than by the number the root search
               converged on.
     """
     ncore = chemcore(mol)
@@ -342,7 +342,7 @@ def scissor_route(scissor, p, eps, nocc, start):
     A MAPPING is the frozen tier assignment and is authoritative -- a state in
     it is shifted whatever its reach, so the tier cannot move between
     geometries. That matters at the boundary: benzene's orbital 9 reads reach
-    1.04 at the Newton start and 0.87 at its converged root, because the
+    1.04 at the search start and 0.87 at its converged root, because the
     quasiparticle correction lifts it 2.2 eV, so a per-geometry test puts it on
     either side depending on where the iteration began.
 

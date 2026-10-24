@@ -64,8 +64,8 @@ def test_adc5_level_consumers_do_not_raise_on_beh2(beh2):
     gen = BuildSuperMatrixADCn(beh2['eps'], beh2['g'], beh2['nocc'])
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        assert gen._amp_at(2, 4) is not None
-        assert gen._amp_at(4, 3) is not None
+        assert gen.amp_at(2, 4) is not None
+        assert gen.amp_at(4, 3) is not None
         n5 = gen.n_norm_order(5)
         assert np.isfinite(n5) and abs(n5) > 0
         c3 = gen.c_block_generated('IP', 3)
@@ -74,4 +74,4 @@ def test_adc5_level_consumers_do_not_raise_on_beh2(beh2):
         H, S, dims, norm = collect_spinorbital_raw(gen, 'IP')
         assert 3 in H[(1, 1)] and 3 in H[(0, 2)] and set(norm) >= {2, 3, 4, 5}
     with pytest.raises(RuntimeError, match='rank truncation'):
-        gen._amp_at(3, 4)          # what no ADC(5) accessor asks for: refused, not truncated
+        gen.amp_at(3, 4)          # what no ADC(5) accessor asks for: refused, not truncated

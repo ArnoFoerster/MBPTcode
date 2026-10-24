@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
 from src.Base.numerics.numerics import Numerics  # noqa: E402
-from src.Base.numerics.constants import (QP_CD_NEWTON_TOL,  # noqa: E402
+from src.Base.numerics.constants import (QP_ROOT_TOL,  # noqa: E402
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates  # noqa: E402
@@ -59,7 +59,7 @@ def factory(mol):
 
 def set_solve(chain, mol, mf):
     """(roots, routes) of one solve of the chain's set at `mol`."""
-    x_mo, d, eps, mu = chain._factors_for(mol, mf)[:4]
+    x_mo, d, eps, mu = chain.factors_for(mol, mf)[:4]
     out, _ = chain.quasiparticles.qp_set_solve(
         x_mo, d, eps, mu, chain.xc_correction(mf, chain.resolved.qp_set),
         np.zeros(len(chain.resolved.qp_set)))
@@ -95,7 +95,7 @@ def test_the_reference_geometry_repeats_its_routes_and_roots(solved):
     chain, roots, routes, _ = solved
     again, routes_again = set_solve(chain, chain.mol0, chain.mf0)
     assert routes_again == routes
-    np.testing.assert_allclose(again, roots, rtol=0, atol=QP_CD_NEWTON_TOL)
+    np.testing.assert_allclose(again, roots, rtol=0, atol=QP_ROOT_TOL)
 
 
 def test_a_displaced_geometry_keeps_the_reference_routes(solved):

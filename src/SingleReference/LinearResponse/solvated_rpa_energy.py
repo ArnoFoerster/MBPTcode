@@ -136,7 +136,7 @@ def solute_solvent_dispersion_energy(traces, grid, omega_p):
     Omega_p (Hartree). Negative, and vanishing as Omega_p -> 0 because a
     solvent with no oscillator strength cannot disperse. It is a property of
     the coupled response and not of the solute's own density, so it is a
-    different quantity from the empirical D3/D4 `Base.dispersion` correction,
+    different quantity from the empirical D3/D4 `Base.pyscf.dispersion` correction,
     which no continuum enters.
     """
     g = dynamic_screening_factor(grid.omega_points, omega_p)

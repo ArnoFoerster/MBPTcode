@@ -1,6 +1,5 @@
-"""Increment 5 gate of the spin-free ADC(2)-(5) plan
-wire the restricted
-(spin-blocked, spatial) ADC blocks into spin_adapt.py's NUMERICAL
+"""CSF route of the spin-free ADC generator: the restricted
+(spin-blocked, spatial) ADC blocks go into spin_adapt.py's NUMERICAL
 doublet-CSF isometry T (no hand CSF formulas). The restricted alpha-Dyson
 sector configs ARE the kept-Sz rows T touches, so
 BuildSuperMatrixADCnRestricted.build_csf_supermatrix sandwiches the spatial
@@ -13,11 +12,10 @@ Two checks:
    validation of the wiring against the shipped code.
 2. The CSF C^(2) and U^(3) arbiter blocks built from the restricted spatial
    blocks equal the spin-orbital GENERATED C^(2)/U^(3) lifted through the
-   SAME T. This is the payoff: the CSF route now carries the lambda-oracle-
-   validated GENERATED arbiter blocks (not the rejected SCW83 B7/B3 that
-   ADCSolverCSF's wrapped spin-orbital solver still uses) -- so
-   build_csf_supermatrix('adc4_base'/'adc4') deliberately DIFFERS from
-   ADCSolverCSF's _M_SD_* there.
+   SAME T. The CSF route carries the lambda-oracle-validated GENERATED
+   blocks (not the SCW83 B7/B3, which fail the lambda oracle) -- so
+   build_csf_supermatrix('adc4') deliberately DIFFERS from ADCSolverCSF's
+   wrapped spin-orbital solver there.
 
 LiH/sto-3g and H2O/sto-3g.
 """

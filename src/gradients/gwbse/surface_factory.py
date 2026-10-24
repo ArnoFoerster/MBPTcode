@@ -503,10 +503,10 @@ def build_dense_bse(row, setup):
 
     `filter_z=False` keeps the set this entry point resolved: the
     surface's own Z > 0.5 filter would re-decide it and the two routes would
-    then be compared on two different quasiparticle sets. qp_root='weight':
-    every orbital of it carries the root of largest pole strength at the
-    reference geometry, followed by Newton everywhere else, never a satellite
-    nearer the mean-field level and never the mean-field level itself.
+    then be compared on two different quasiparticle sets. Every orbital of
+    it carries the root of largest pole strength at the reference geometry,
+    followed through its bracket everywhere else, never a satellite nearer
+    the mean-field level and never the mean-field level itself.
     """
     variant = 'BSEtda@GW' if setup.excitation.kernel == 'bse-tda' else 'BSE@GW'
     kw = {} if 'eri_blocks' not in setup.options else {
@@ -516,8 +516,7 @@ def build_dense_bse(row, setup):
         kw['auxbasis'] = setup.numerics.isdf.auxbasis
     surface = row.cls(setup.mol, variant, setup.excitation.root - 1,
                       qp_orbs=setup.qp_explicit, filter_z=False,
-                      scf=setup.scf_factory, spin=setup.excitation.spin,
-                      qp_root='weight', **kw)
+                      scf=setup.scf_factory, spin=setup.excitation.spin, **kw)
     return surface, {}
 
 
@@ -799,7 +798,7 @@ def resolve_solver(solver, row, mf, excitation):
     nocc = occupied_count(mf)
     n_ov = nocc * (len(eps) - nocc)
     tda = isinstance(excitation, Excitation) and excitation.kernel == 'bse-tda'
-    return solver_choice(n_ov, tda) if solver == 'auto' else solver
+    return solver_choice(n_ov) if solver == 'auto' else solver
 
 
 def resolve_residues(residues, row):

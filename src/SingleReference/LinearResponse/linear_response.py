@@ -1,4 +1,5 @@
 import numpy as np
+from src.Base.orbital_spaces import ov_energies
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (CASIDA_NORM_TOL,
                                          DEFAULT_BROADENING_ETA)
@@ -26,13 +27,6 @@ def gram_product(C, block_elems=2**27):
         i1 = min(i0 + rows, n)
         np.matmul(C[:, i0:i1].T, C, out=V[i0:i1])
     return V
-def static_pair_resolvent(a_plus_b):
-    """(A + B)^-1 of the RPA pair problem: THE static response of every
-    four-index W(0), chi(0) = -2g (A + B)^-1 and W(0) = v + v chi(0) v, with
-    g = 2 for a restricted singlet and 1 per spin channel unrestricted."""
-    return np.linalg.inv(a_plus_b)
-
-
 class LinearResponseSolver:
     """RPA and BSE linear response solver, restricted (RHF/singlet/triplet) or unrestricted (UHF), DF or full 4-center ERIs."""
     def __init__(self, eps, coeff_df=None, eri_chemist=None, spin_mode='restricted', eta=DEFAULT_BROADENING_ETA,
@@ -81,7 +75,7 @@ class LinearResponseSolver:
     def construct_4d_w_rpa(self, nocc, spin_channel='alpha'):
         """
         Full-ERI (non-DF) counterpart to solve_rpa_screening: the static 4D
-        W_rpa = v - 2g v (A + B)^-1 v (`static_pair_resolvent`), the
+        W_rpa = v - 2g v (A + B)^-1 v, the
         vertex-correction screened interaction when df=False.
         """
         if self.spin_mode == 'unrestricted':
@@ -89,7 +83,7 @@ class LinearResponseSolver:
             eri = (self.eri_a, self.eri_b, self.eri_ab)
 
             A_rpa, B_rpa = self.build_casida_matrices(nocc, lBSE=False)
-            R = static_pair_resolvent(A_rpa + B_rpa)
+            R = np.linalg.inv(A_rpa + B_rpa)
 
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(eps[0], nocc_a)
@@ -120,7 +114,7 @@ class LinearResponseSolver:
             occ, virt = self._get_occ_virt_indices(eps, nocc)
             n_pair = len(occ) * len(virt)
             V_matrix = eri[np.ix_(occ, virt)].reshape(n_pair, -1)
-            screened = 4.0 * V_matrix.T @ static_pair_resolvent(A_rpa + B_rpa) @ V_matrix
+            screened = 4.0 * V_matrix.T @ np.linalg.inv(A_rpa + B_rpa) @ V_matrix
             W_rpa = eri - screened.reshape(eri.shape)
             eri_w_singlet = W_rpa
             eri_w_triplet = W_rpa
@@ -132,9 +126,6 @@ class LinearResponseSolver:
         auxiliary basis: the full screened Coulomb is W_pqrs = B_pq . W_aux . B_rs with
         B = coeff_df. The omega=0 point of solve_rpa_screening on the imaginary axis."""
         return self.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
-
-    def _get_f_rpa(self, d, w, is_imaginary):
-        return imaginary_frequency.f_rpa(self, d, w, is_imaginary)
 
     def build_casida_matrices(self, nocc, lBSE=False, W_aux=None, triplet=False,
                               eps_screen=None):
@@ -280,14 +271,13 @@ class LinearResponseSolver:
         B[n_ab:, :n_ab] = B_x.T
         return A, B
 
-
     def _build_block_df(self, eps, occ, virt, lBSE, W_aux, factor, coeff_all, spin_channel):
         nocc = len(occ)
         nvirt = len(virt)
         n_pair = nocc * nvirt
         naux = coeff_all.shape[0]
 
-        diag_d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
+        diag_d = ov_energies(eps, len(occ))
 
         # Optimize indexing with 3D advanced indexing
         C_ov_flat = coeff_all[:, occ[:, None], virt].reshape(naux, n_pair)
@@ -407,7 +397,7 @@ class LinearResponseSolver:
         nvirt_val = len(virt)
         n_pair = nocc_val * nvirt_val
         
-        diag_d = (eps[virt][None, :] - eps[occ][:, None]).ravel()
+        diag_d = ov_energies(eps, len(occ))
 
         # Optimize indexing with np.ix_
         V_iajb_4d = eri_all[np.ix_(occ, virt, occ, virt)]
@@ -447,7 +437,7 @@ class LinearResponseSolver:
                     
                     V_trans = np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
                     
-                    chi_trans = -2.0 * static_pair_resolvent(
+                    chi_trans = -2.0 * np.linalg.inv(
                         np.diag(np.concatenate([d_a, d_b])) + 2.0 * V_trans)
                     
                     if spin_channel == 'a':
@@ -490,7 +480,7 @@ class LinearResponseSolver:
                     eps_scr = eps if eps_screen is None else eps_screen
                     diag_scr = (eps_scr[virt][None, :]
                                 - eps_scr[occ][:, None]).ravel()
-                    chi = -4.0 * static_pair_resolvent(np.diag(diag_scr)
+                    chi = -4.0 * np.linalg.inv(np.diag(diag_scr)
                                                        + 4.0 * V_iajb)
                     
                     V_ijkc = eri_all[np.ix_(occ, occ, occ, virt)]
@@ -530,12 +520,6 @@ class LinearResponseSolver:
         constructions of the same object.
         """
         return imaginary_frequency.solve_rpa_screening(self, omega_grid, nocc, is_imaginary)
-
-    def solve_rpa_screening_df(self, omega_grid, nocc, is_imaginary=False):
-        return imaginary_frequency.solve_rpa_screening_df(self, omega_grid, nocc, is_imaginary)
-
-    def solve_rpa_screening_full(self, omega_grid, nocc, is_imaginary=False):
-        return imaginary_frequency.solve_rpa_screening_full(self, omega_grid, nocc, is_imaginary)
 
     def solve_rpa_spectral(self, omega_grid, nocc, eigenvalues_casida, X_plus_Y, is_imaginary=False):
         """Spectral representation of screened potential W (dispatches to DF or full ERI version)."""
@@ -604,7 +588,7 @@ def static_screened_coulomb_chemist(eps, eri_chemist, nocc, coeff_df=None):
     """Static (omega=0) RPA screened Coulomb W as a spatial-MO chemist (pq|rs) 4-index
     tensor, same layout as `eri_chemist`. Restricted/RHF.
 
-    W = v - 4 v (A + B)^-1 v (construct_4d_w_rpa, `static_pair_resolvent`).
+    W = v - 4 v (A + B)^-1 v (construct_4d_w_rpa).
     coeff_df: optional DF factor (naux, norb, norb); when given the RPA Casida solve uses
     the DF path (the returned W is still a dense 4-index tensor)."""
     lr = LinearResponseSolver(eps, coeff_df=coeff_df, eri_chemist=eri_chemist,

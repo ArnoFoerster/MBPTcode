@@ -14,7 +14,7 @@ repeated combinatoric axis (ascending, via itertools.combinations(occ, nh)),
 particles are always the inner/tiled axis (ascending, via
 itertools.combinations(virt, np)) -- regardless of whether holes or
 particles are the "k+1" (majority) role. This matches
-_configs_2h1p/_configs_3h2p (holes outer) AND _configs_2p1h/_configs_3p2h
+configs_2h1p/configs_3h2p (holes outer) AND configs_2p1h/configs_3p2h
 (holes still outer, even though particles are the majority there).
 """
 import math
@@ -32,11 +32,12 @@ def _label_pool(base, n=64):
     pdaggerq accepts numbered labels and preserves them ('a*(i1) a(i2)' ->
     'd(i1,i2)'), treats 'i' and 'i1' as DISTINCT, classifies by the LEADING
     letter, and handles them in pq.strings(spin_labels=...) -- all verified
-    empirically. So the historic 6-letter budget was never a pdaggerq limit;
-    it was this pool.
+    empirically. So a 6-letter budget is not a pdaggerq limit, only the
+    size of this pool.
 
-    The first len(base) entries are UNCHANGED, so every module generated to
-    date regenerates byte-identically (verified: 30/30).
+    The first len(base) entries are the single letters, so a module that
+    needs no more than those generates byte-identically to a single-letter
+    pool.
 
     Note the einsum SUBSCRIPT layer is separately bounded (24 occ / 22 vir per
     term) -- see pdaggerq_interface._subscript_map, which maps these labels to
@@ -77,16 +78,20 @@ def nondyson_apply_module_name(order, k_i, k_j, df=False):
     return nondyson_module_name(order, k_i, k_j).replace('_blocks.py', tail)
 
 
-def cross_module_name(order, pair, restricted=False, df=False, apply=False):
+def cross_module_name(order, pair, restricted=False, df=False, apply=False, terms=False):
     """Module basename of the D x C cross block at `order`: adc{N}_x{order}_{pair}
     with N = order + k_i + k_j the ADC order at which the block first enters
     (k1k1 at order 2 -> adc4_x2_k1k1_blocks). Suffixes follow the other
     families: _restricted[_df] for the dense spin-blocked twins,
-    _apply_restricted[_df]_blocks for the sigma-vector form. Shared by the
-    emitters (generate_adcn, sigma_codegen) and the runtime resolver
-    (the generated-ADC runtime's cross-block resolver)."""
+    _apply_restricted[_df]_blocks for the sigma-vector form,
+    _terms_restricted[_df] for the operand-level term tables (contracted by
+    the runtime in chunks, never formed whole). Shared by the emitters
+    (generate_adcn, sigma_codegen) and the runtime resolver (the
+    generated-ADC runtime's cross-block resolver)."""
     k_i, k_j = CROSS_PAIRS[pair]
     stem = f'adc{order + k_i + k_j}_x{order}_{pair}'
+    if terms:
+        return f'{stem}_terms{"_restricted" if restricted else ""}{"_df" if df else ""}.py'
     if apply:
         return f'{stem}_apply_restricted{"_df" if df else ""}_blocks.py'
     return f'{stem}_blocks{"_restricted" if restricted else ""}{"_df" if df else ""}.py'
@@ -107,10 +112,10 @@ def class_configs(nocc, norb, k, sector='IP'):
     class_dimension(nocc, norb-nocc, k, sector).
 
     Reproduces (byte-for-byte, see tests/test_precursor_classes.py):
-      class_configs(nocc, norb, 1, 'IP')  == base.py's _configs_2h1p(nocc)
-      class_configs(nocc, norb, 2, 'IP')  == base.py's _configs_3h2p(nocc)
-      class_configs(nocc, norb, 1, 'EA')  == base.py's _configs_2p1h(nocc)
-      class_configs(nocc, norb, 2, 'EA')  == base.py's _configs_3p2h(nocc)
+      class_configs(nocc, norb, 1, 'IP')  == base.py's configs_2h1p(nocc)
+      class_configs(nocc, norb, 2, 'IP')  == base.py's configs_3h2p(nocc)
+      class_configs(nocc, norb, 1, 'EA')  == base.py's configs_2p1h(nocc)
+      class_configs(nocc, norb, 2, 'EA')  == base.py's configs_3p2h(nocc)
     """
     nh, np_ = nh_np(k, sector)
     # Spin-orbital indices are < norb, so a narrow int dtype suffices and keeps
@@ -162,7 +167,7 @@ def dimensions_adcn(nocc, norb, n, max_k=None):
 
 
 def _check_letter_budget(nh, np_, occ_offset=0, vir_offset=0):
-    """Bounds check against the LABEL POOL (now unbounded-by-construction, so
+    """Bounds check against the LABEL POOL (unbounded by construction, so
     this only fires if someone asks for more than _label_pool() pre-built).
 
     It is NOT a pdaggerq limit -- pdaggerq handles numbered labels fine -- so
@@ -232,12 +237,6 @@ def union_operator_string(k, sector='IP', occ_offset=0, vir_offset=0):
     if sector == 'EA':
         return precursor_ket_string(k, sector, occ_offset, vir_offset)
     return precursor_bra_string(k, sector, occ_offset, vir_offset)
-
-
-def union_bra_string(k, sector='IP', occ_offset=0, vir_offset=0):
-    """X^dag of the union-space operator X of class k (bra tokens): for an
-    IP class this is the precursor operator E itself."""
-    return adjoint_string(union_operator_string(k, sector, occ_offset, vir_offset))
 
 
 def pair_index_convention(bra_k, bra_sector, ket_k, ket_sector):

@@ -97,7 +97,7 @@ def test_orders_up_to_three_are_the_hand_chain(name, tmp_path, monkeypatch):
     o2 = mpn.compute_order2_amplitudes(t2_1)
     E2 = mpn.compute_E(t2_1)
     o3 = mpn.compute_order3_amplitudes(*o2, t2_1, E2=E2)
-    t4_3 = gen.t4_3_numerator(**mpn._args(), t2_2=o2[1], t3_2=o2[2],
+    t4_3 = gen.t4_3_numerator(**mpn.kernel_args(), t2_2=o2[1], t3_2=o2[2],
                               t4_2=o2[3]) / orbital_denominator(mpn.eps[mpn.o], mpn.eps[mpn.v], 4)
     legacy = {(2, 1): t2_1,
               (1, 2): o2[0], (2, 2): o2[1], (3, 2): o2[2], (4, 2): o2[3],

@@ -108,8 +108,8 @@ def ccsdt_ao_density(geometry, basis, charge=0, **kwargs):
 
 
 def _flag_ccsd_convergence(mycc, who, out):
-    """pyscf CC that stopped unconverged: warn and flag, keep
-    its last amplitudes."""
+    """pyscf CC that stopped unconverged: warn and flag, keep its last
+    amplitudes."""
     if out is not None:
         out['converged'] = bool(mycc.converged)
     if not mycc.converged:

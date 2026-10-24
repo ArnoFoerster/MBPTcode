@@ -48,10 +48,10 @@ In the row fit's tiles (tile t rank t % size's) each column tile's owner
 broadcasts [X_j | M^T_j | X_j dm | X_j dm_other] in tile order; every rank
 forms the (tile, tile) blocks of W1, W2 and Zs for its row tiles and
 accumulates A_i = sum_j H_ij M^T_j and X_bar_i; M H M^T = sum_i M^T_i^T A_i
-reaches rank 0 tile by tile in tile order. `separable_ri.fit_rows_adjoint`
+reaches rank 0 tile by tile in tile order. `isdf_fit_adjoint.fit_rows_adjoint`
 carries MT_bar and X_bar to the nuclei in the same tiles; `isdf_exchange_seeds`
 stops before it, so a force contracts every skeleton's seeds with its own in
-one `separable_ri.fit_rows_adjoints` call. Nothing is summed across ranks, so
+one `isdf_fit_adjoint.fit_rows_adjoints` call. Nothing is summed across ranks, so
 the result is the same bits at every rank count, one rank included. The
 estimator is the row fit's, the one the distributed ISDF-K SCF minimized; its
 M^T and collocation tiles are reused when they are handed in.
@@ -93,10 +93,9 @@ from pyscf.dft import gen_grid, numint, radi
 
 from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, SKELETON_AUX_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
-from src.Base.factorization.separable_ri import (AdjointSeeds,
-                                                 tile_collocation, tiles_at_root,
-                                                 two_centre_rows_adjoint, fit_rows,
-                                                 fit_rows_adjoint)
+from src.Base.factorization.separable_ri import tile_collocation, fit_rows
+from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
+                                            fit_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
                                               current_comm, lockstep, ordered_sum,
                                               partition)
@@ -127,7 +126,8 @@ class FittedFockSkeleton:
         self.Cdt = (None if occ is None
                     else np.ascontiguousarray(np.asarray(occ, float).T))
         self.max_bytes = int(max_bytes)
-        self.tiles = aux_tiles(auxmol, tile)
+        self.tiles = shell_runs(auxmol.ao_loc_nr(),
+                                SKELETON_AUX_TILE if tile is None else tile)
         self.aux_loc = auxmol.ao_loc_nr()
         self.ao_loc = mol.ao_loc_nr()
         self.ao_slices = [(int(p0), int(p1))
@@ -152,7 +152,7 @@ class FittedFockSkeleton:
         """AO shell slabs of tile t's `comp`-component block under the cap."""
         p0, p1 = self.functions(t)
         per_ao = comp * self.mol.nao_nr() * (p1 - p0) * 8
-        return ao_slabs(self.mol, per_ao, self.max_bytes)
+        return shell_runs(self.ao_loc, self.max_bytes // int(per_ao))
 
     def _block(self, intor, comp, s0, s1, t):
         """(comp, a, nao, n_t) of `intor` on AO shells [s0, s1) and tile t."""
@@ -297,34 +297,19 @@ class FittedFockSkeleton:
         return out
 
 
-def aux_tiles(auxmol, width=None):
-    """(k0, k1) runs of consecutive auxiliary shells of at most `width`
-    functions (`SKELETON_AUX_TILE`), one shell where a shell alone is wider:
-    fixed by the basis, never by the rank count."""
-    width = SKELETON_AUX_TILE if width is None else int(width)
-    loc = auxmol.ao_loc_nr()
-    out, k0 = [], 0
-    while k0 < auxmol.nbas:
-        k1 = k0 + 1
-        while (k1 < auxmol.nbas
-               and int(loc[k1 + 1]) - int(loc[k0]) <= width):
-            k1 += 1
-        out.append((k0, k1))
-        k0 = k1
-    return out
-
-
-def ao_slabs(mol, per_ao_bytes, max_bytes):
-    """(s0, s1) runs of consecutive AO shells whose block, `per_ao_bytes` for
-    each AO in it, fits `max_bytes`; at least one shell each."""
-    loc = mol.ao_loc_nr()
+def shell_runs(ao_loc, width):
+    """(s0, s1) runs of consecutive shells of at most `width` functions each
+    (`ao_loc` the shells' offsets), at least one shell per run, so a shell
+    wider than `width` is still a run of its own: fixed by the basis, never by
+    the rank count. A byte budget is a width: max_bytes // per-function
+    bytes."""
     out, s0 = [], 0
-    while s0 < mol.nbas:
+    nsh = len(ao_loc) - 1
+    width = int(width)
+    while s0 < nsh:
         s1 = s0 + 1
-        # int(): ao_loc is int32 and a block's bytes are not
-        while (s1 < mol.nbas
-               and (int(loc[s1 + 1]) - int(loc[s0])) * int(per_ao_bytes)
-               <= max_bytes):
+        # int(): ao_loc is int32, and a block's bytes are not
+        while s1 < nsh and int(ao_loc[s1 + 1]) - int(ao_loc[s0]) <= width:
             s1 += 1
         out.append((s0, s1))
         s0 = s1
@@ -387,12 +372,12 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
                         prefactor=1.0, channels=((0.0, 1.0),), mt=None,
                         X=None, block=None, numerics=None, comm=None):
     """(seeds, centre, held): what d/dR E_K^ISDF of `isdf_exchange_rows`
-    hands the row fit's adjoint -- `separable_ri.AdjointSeeds` with MT_bar
+    hands the row fit's adjoint -- `isdf_fit_adjoint.AdjointSeeds` with MT_bar
     and X_bar on this rank's tiles and the bare metric's V_bar on rank 0 --
     and the (natm, 3) of the attenuated metrics, which reach the nuclei
     outside the fit. The fit adjoint is linear in the seeds, so a force
     gathering several of these contracts their sum once
-    (`separable_ri.fit_rows_adjoints`)."""
+    (`isdf_fit_adjoint.fit_rows_adjoints`)."""
     comm = current_comm() if comm is None else comm
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))

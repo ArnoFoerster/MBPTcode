@@ -9,32 +9,23 @@ Periodic: the exciton S carries momentum transfer q, so the amplitude connects
 p @ kp to m @ km = kp - q,
     chi_a^{S,q}_{p kp, m km} = sum_P rho^{S,q}_P L^{kp,km}_{p,m},
 with rho^{S,q} the aux-basis projection of the transfer-q eigenvectors
-(pbc_casida.solve_rpa_spectral's rho, or project_XpY here for BSE vectors).
+(pbc_casida.solve_rpa_spectral's rho, which carries sqrt(f_m - f_n), or
+project_XpY here for BSE vectors on the occupied-virtual rectangle).
 The (transfer-q) rho contracts directly with the (transfer -q) L^{kp,km} block
 via the same aux-index contraction as PBCDFIntegrals.eri_block.
 """
 import numpy as np
 from pyscf.pbc.lib.kpts_helper import conj_mapping
-from src.SingleReference.Periodic.pbc_casida import (screened_block, stacked_Lov,
-                                                     transition_layout)
-
-
-def kpoint_minus_q(dfints, q, kp):
-    """Index km with kpts[km] = kpts[kp] - kpts[q] (mod G), i.e. kconserv_pair[q, km] = kp.
-
-    The transfers ARE k-points, so km is recovered by inverting kconserv_pair.
-    """
-    matches = np.where(dfints.kconserv_pair[q] == kp)[0]
-    if len(matches) != 1:
-        raise RuntimeError(f"no unique k - q for kp={kp}, q={q}")
-    return int(matches[0])
+from src.SingleReference.Periodic.pbc_casida import (ov_layout, screened_block,
+                                                     stacked_Lov)
 
 
 def project_XpY(dfints, kconserv, X, Y):
     """Aux-basis projection rho[P, S] = sum_{ki,ia} L_ov(ki->ka)[P,ia] (X+Y)^S_{ki,ia}.
 
-    Same object as pbc_casida.solve_rpa_spectral's rho, but for an arbitrary set
-    of eigenvectors (e.g. the BSE X, Y at transfer q). kconserv = kconserv_pair[q].
+    For eigenvectors on the occupied-virtual rectangle of `pbc_casida.ov_layout`
+    (the BSE X, Y at transfer q); unlike pbc_casida.solve_rpa_spectral's rho it
+    carries no sqrt(f_m - f_n). kconserv = kconserv_pair[q].
     """
     M, offsets, N, nocc, nvirt = stacked_Lov(dfints, kconserv)
     return M @ (X + Y)
@@ -47,7 +38,7 @@ def get_chi_a(dfints, q, rho, kp):
     or solve_rpa_spectral). Returns (nstates, nmo, nmo), the amplitude over all
     orbitals p @ kp (rows) and m @ km (cols).
     """
-    km = kpoint_minus_q(dfints, q, kp)
+    km = dfints.kpoint_minus_q(q, kp)
     L = dfints.Lblock(kp, km)                       # (naux, nmo, nmo)
     return np.einsum('PS,Ppm->Spm', rho, L)
 
@@ -76,9 +67,9 @@ def get_chi_b_vertex(dfints, q, W_all, X, Y, kp):
     """
     nmo = dfints.nmo
     kconserv = dfints.kconserv_pair[q]
-    kr = kpoint_minus_q(dfints, q, kp)            # internal k
+    kr = dfints.kpoint_minus_q(q, kp)            # internal k
     cmap = conj_mapping(dfints.cell, dfints.kpts)
-    offsets, N, nocc, nvirt = transition_layout(dfints, kconserv)
+    offsets, N, nocc, nvirt = ov_layout(dfints, kconserv)
     nstates = X.shape[1]
     allp = slice(0, nmo)
     o_r, v_r = slice(0, nocc[kr]), slice(nocc[kr], nmo)

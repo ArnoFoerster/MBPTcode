@@ -27,9 +27,9 @@ import numpy as np
 from src.Base.numerics.constants import LAPLACE_SCREENING_TOL
 from src.SingleReference.GW.contour_deformation import (require_three_index,
                                                         cd_integral_weights)
-from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   LaplaceRealScreening,
-                                                   ov_energies, screening_aux)
+from src.SingleReference.GW.real_screening import (ExplicitRealScreening, LaplaceRealScreening,
+                                                   screening_aux)
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.Base.orbital_spaces import get_occ_virt_indices
@@ -196,7 +196,7 @@ def pair_term_backward(Bi, Bj, WtBi, WtBj, weights):
     return bi_bar, bj_bar, 0.5 * (half + half.T)
 
 
-def residue_terms_backward(p, omega, Bp, eps, nocc, residues, sigma_bar,
+def residue_terms_backward(p, omega, Bp, eps, _nocc, residues, sigma_bar,
                            real_screening):
     """(eps_bar, Bp_bar, omega_bar) of sigma_bar * Sigma^res, through a backend.
 
@@ -206,7 +206,8 @@ def residue_terms_backward(p, omega, Bp, eps, nocc, residues, sigma_bar,
     adjoint on chi0(freq) is rank one, c y y^T with y = W Bp[:,q], and is
     PUSHED into the backend, which chains it onto its own variables -- (C_ov, d)
     for the explicit one, proj(tau) for the Laplace one; the caller reads
-    `real_screening.adjoints()` afterwards.
+    `real_screening.adjoints()` afterwards. `_nocc` is not read (the call
+    shape of `sigma_cd_backward`).
     """
     eps_bar = np.zeros_like(eps)
     Bp_bar = np.zeros_like(Bp)

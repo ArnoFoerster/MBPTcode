@@ -64,12 +64,12 @@ from src.SingleReference.LinearResponse.block_actions import (block_action,
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.space_time import (
     RPAEnergyTape, polarizability_projected_sweep,
-    rpa_correlation_energy_space_time)
+    rpa_correlation_energy_space_time, static_screening_grid)
 from src.gradients.gwbse.bse_isdf import bse_blocks
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time
 from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_shift,
-                                                        static_grid, static_screening)
+                                                        static_screening)
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.rpa.space_time_adjoint import rpa_energy_and_adjoint
 from tests.isdf_test_grid import g1, g1_numerics
@@ -132,7 +132,7 @@ def solvated():
     eps = np.asarray(mf.mo_energy, float)
     return dict(mol=mol, mf=mf, env=env, nocc=nocc, eps=eps, x_mo=x_mo,
                 d_dressed=d_dressed, d_bare=d_bare,
-                grid=static_grid(eps, nocc))
+                grid=static_screening_grid(eps, nocc))
 
 
 # ----------------------------------------------------------------- seam (a)

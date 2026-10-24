@@ -2,12 +2,15 @@
 
 Spin orbitals interleaved (2p=alpha, 2p+1=beta), energy-sorted, so
 o = slice(None, nocc), v = slice(nocc, None) is valid. The spatial->spin
-expansion uses openfermion/openfermionpyscf rather than a hand-rolled one,
-since that pipeline is independently validated against NWChem's CCSDT.
+expansion of pySCF's MO integrals uses openfermion's spinorb_from_spatial
+rather than a hand-rolled one, since that pipeline is independently validated
+against NWChem's CCSDT.
 """
+import functools
+
 import numpy as np
 import pyscf
-from pyscf import scf
+from pyscf import ao2mo, scf
 from src.Base.environment_seam import environment_of
 from src.Base.pyscf.pyscf_interface import (
     get_effective_one_electron_integrals,
@@ -41,6 +44,16 @@ def refuse_environment(mf, who):
             f'{who}: this mean field converged inside a pyscf PCM, which the '
             f'coupled-cluster integrals would keep on some paths and rebuild '
             f'away on others; run CC on the gas-phase reference.')
+
+
+def _spatial_integrals(mol, mf):
+    """(h, v) over the MOs: h[p,q] = <p|h|q> and v[p,q,r,s] = (ps|qr), the
+    order openfermion's spinorb_from_spatial reads."""
+    C = mf.mo_coeff
+    n = C.shape[1]
+    h = functools.reduce(np.dot, (C.T, mf.get_hcore(), C)).reshape(n, n).astype(float)
+    eri = ao2mo.restore(1, ao2mo.kernel(mol, C), n)
+    return h, np.asarray(eri.transpose(0, 2, 3, 1), order='C')
 
 
 def build_spinorbital_integrals_from_mf(mf):
@@ -90,11 +103,9 @@ def build_spinorbital_integrals_from_mf(mf):
         # call-time import: optional (docs/installation.md) and slow to load
         try:
             from openfermion.chem.molecular_data import spinorb_from_spatial
-            from openfermionpyscf._run_pyscf import compute_integrals
         except ImportError as exc:
-            raise ImportError("the restricted path needs openfermion and "
-                              "openfermionpyscf (pip install openfermion "
-                              "openfermionpyscf)") from exc
+            raise ImportError("the restricted path needs openfermion "
+                              "(pip install openfermion)") from exc
 
         mo_occ = np.asarray(mf.mo_occ)
         if mo_occ.ndim != 1 or not np.all(np.isin(mo_occ, (0.0, 2.0))):
@@ -102,7 +113,7 @@ def build_spinorbital_integrals_from_mf(mf):
                 "CCSDT integrals need a spin-restricted closed-shell reference "
                 "or a UHF reference.")
 
-        oei, tei = compute_integrals(mol, mf)
+        oei, tei = _spatial_integrals(mol, mf)
         nele = int(round(mo_occ.sum()))
         nocc = nele          # spin orbitals
         nvir = 2 * oei.shape[0] - nocc

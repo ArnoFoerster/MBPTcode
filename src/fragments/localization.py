@@ -6,7 +6,7 @@ occupied and its virtual canonical orbitals are rotated, separately, into
 orbitals that each belong to one fragment. An electron-hole configuration
 (i, a) is then LOCAL when i and a sit on the same fragment and CHARGE
 TRANSFER when they do not, and the BSE matrix in this basis splits into the
-blocks `src.properties.fragment_bse` partitions.
+blocks `src.gradients.gwbse.fragment_bse` partitions.
 
 THE FUNCTIONAL IS PIPEK-MEZEY OVER FRAGMENT POPULATIONS. Each orbital's
 population on a fragment is the sum of its populations on that fragment's

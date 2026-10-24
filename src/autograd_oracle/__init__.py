@@ -15,9 +15,8 @@ autograd and compared with the hand-written adjoints entry by entry:
                     the .npz the two processes exchange
     pin_integrals   the integral engine against pyscf at one geometry
 
-TWO PROCESSES, ONE TORCH THREAD. This package is deliberately not under
-`src.gradients`, whose `__init__` imports pyscf: the torch half must import
-without it. On this machine's x86_64 torch under Rosetta the backward pass
+TWO PROCESSES, ONE TORCH THREAD. The torch half must import without pyscf.
+On a workstation's x86_64 torch under Rosetta the backward pass
 segfaults with two intra-op threads and a process that ran pyscf's integrals
 and torch deadlocks at exit, so the production side never imports torch and
 the torch side never imports pyscf. This `__init__` imports nothing for the

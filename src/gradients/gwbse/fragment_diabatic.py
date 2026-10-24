@@ -2,7 +2,7 @@
 
 The diabats, the effective matrix and the resolvent vectors are
 `src.gradients.gwbse.fragment_bse`; the finite-difference reference this module
-reproduces is `src.properties.diabatic`. Omega_0 is held fixed.
+reproduces is the finite-difference oracle `tests/fragment_diabatic_fd.py`. Omega_0 is held fixed.
 
 TAMM-DANCOFF OR FULL. Everything is written for the symmetric pencil
 K v = Omega S v of `fragment_bse` -- K = A, S = 1 in the Tamm-Dancoff
@@ -62,7 +62,7 @@ terms, none optional:
    derivative enters only through the moving basis and through S^1/2.
 
 Only Loewdin populations are differentiated here (`scheme='lowdin'`); the IAO
-populations are a finite-difference cross-check (`fragment_localization`).
+populations are a finite-difference cross-check (`fragments.localization`).
 
 GATED (tests/test_fragment_diabatic.py, offset ethylene dimer, cc-pVDZ), in
 both kernels: a root's gradient through the partition equals the
@@ -116,11 +116,11 @@ from src.gradients.gwbse.bse_isdf import bse_backward, bse_cache, interstate_bac
 from src.gradients.surface import PotentialEnergySurface
 from src.gradients.gwbse.derivative_coupling import (configuration_coupling,
                                                      ov_coupling, sigma_contraction)
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.gradients.gwbse.fragment_bse import (BSEOperator, FragmentCanonical,
                                          FragmentPartition, dense_limit,
-                                         to_canonical, to_local)
+                                         flag_numerics, to_canonical, to_local)
 
 
 # ---------------------------------------------------------------- helpers
@@ -171,6 +171,8 @@ class _PMResponse:
             self.l.append((self.x * pi[None, :]) @ self.x)
         self.m = [self.c.T @ lk @ self.c for lk in self.l]
         self.q = [np.diag(mk).copy() for mk in self.m]
+        # the last solve's relative residual and verdict (`solve`)
+        self.residual, self.converged = None, True
 
     def _b(self, z_anti):
         zz = z_anti - z_anti.T
@@ -236,10 +238,8 @@ class _PMResponse:
         sol, info = minres(op, rhs, rtol=tol, maxiter=20000)
         resid = float(np.abs(full_mv(sol) - rhs).max())
         self.residual = resid / scale
-        if resid > 1e3 * tol * scale:
-            raise RuntimeError(f'localization response did not converge '
-                               f'(relative residual {resid / scale:.2e}, '
-                               f'info={info})')
+        # a solve that stops short keeps its last iterate (`converged`)
+        self.converged = resid <= 1e3 * tol * scale
         return unpack(sol)
 
     def s_bar_from_l_bar(self, l_bars):
@@ -256,8 +256,10 @@ class _PMResponse:
         return self.sv @ sb @ self.sv.T
 
 
-def _localization_term(mol, mf, orbitals, d_occ, d_vir):
-    """(natm, 3) sum D_anti (.) theta, theta the local orbitals' own rotation."""
+def _localization_term(mol, mf, orbitals, d_occ, d_vir, flags=None):
+    """(natm, 3) sum D_anti (.) theta, theta the local orbitals' own rotation;
+    a localization response that stops short keeps its last iterate and is
+    flagged 'localization_response_not_converged' in `flags`."""
     nocc = orbitals.nocc
     c = np.asarray(mf.mo_coeff, float)
     c_o, c_v = c[:, :nocc], c[:, nocc:]
@@ -276,9 +278,15 @@ def _localization_term(mol, mf, orbitals, d_occ, d_vir):
         if not np.any(d_anti):
             continue
         pm = _PMResponse(mol, c_loc, rows)
-        # MINRES on rank 0 alone, with its stop and refusal
-        # (`root_driven_solve`)
-        z = root_driven_solve(lambda act: pm.solve(d_anti, labels))
+        # MINRES on rank 0 alone, with its stop (`root_driven_solve`); its
+        # solution and verdict are rank 0's on every rank
+        z, converged, residual = root_driven_solve(
+            lambda act: (pm.solve(d_anti, labels), pm.converged, pm.residual))
+        if not converged:
+            flag_numerics(flags, 'localization_response_not_converged',
+                          f'the {tag} localization response did not converge '
+                          f'(relative residual {residual:.2e}); its last '
+                          f'iterate is kept', space=tag, residual=residual)
         cbar = pm.c_bar(z)
         # (a) occupied-virtual mixing of this space
         if tag == 'occ':
@@ -327,6 +335,8 @@ class DiabaticGradient:
         self.dressed = bool(dressed)
         # wall seconds per stage, summed over calls
         self.timings = {}
+        # the numerical flags of its response solves (`flag_numerics`)
+        self.flags = {}
         # `progress`, a callable taking one string, hears each stage begin
         self.progress = progress
         with self._timed('mean_field'):
@@ -428,12 +438,18 @@ class DiabaticGradient:
             sol, info = minres(op, -gb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
                                maxiter=5000)
             resid = np.abs(mv(sol) + gb).max()
-            if resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(), 1e-300):
-                raise RuntimeError(f'diabat response for {part.labels[c]} did '
-                                   f'not converge (info={info}, residual '
-                                   f'{resid:.2e})')
-            return sol
-        sol = root_driven_solve(solve, block, dim)
+            short = resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(),
+                                                           1e-300)
+            return sol, (float(resid) if short else None)
+        # a response that stops short keeps its last iterate; the solution and
+        # the verdict are rank 0's on every rank
+        sol, residual = root_driven_solve(solve, block, dim)
+        if residual is not None:
+            flag_numerics(self.flags, 'diabat_response_not_converged',
+                          f'the diabat response for {part.labels[c]} did not '
+                          f'converge (residual {residual:.2e}); its last '
+                          f'iterate is kept', diabat=part.labels[c],
+                          residual=residual)
         b[rows] = project(sol[:, None])[:, 0]
         return lockstep(b, check=True)
 
@@ -476,7 +492,7 @@ class DiabaticGradient:
         kw = dict(spin=chain.spin, bse_tda=self.operator.tda)
         cache = self._cache
         if not grid and not cache:
-            cache.update(bse_cache(x_mo, d, eps_qp, w_aux, chain.nocc, **kw))
+            cache.update(bse_cache(x_mo, d, eps_qp, chain.nocc, **kw))
         total = None
         for s, t, wgt in pairs:
             xs, ys = self.partition.xy(to_canonical(o, np.column_stack([s, t])))
@@ -526,7 +542,7 @@ class DiabaticGradient:
         if self.localization == 'frozen':
             return canon, np.zeros_like(canon)
         with self._timed('localization_response'):
-            loc = _localization_term(self.mol, self.mf, o, d_o, d_v)
+            loc = _localization_term(self.mol, self.mf, o, d_o, d_v, self.flags)
         return canon, loc
 
     def gradient(self, w):
@@ -543,7 +559,8 @@ class DiabaticGradient:
             tuple(np.ascontiguousarray(a, dtype=float)
                   for a in (chain + canon + loc, chain, canon, loc)),
             check=True)
-        return total, dict(chain=chain, canonical=canon, localization=loc)
+        return total, dict(chain=chain, canonical=canon, localization=loc,
+                           flags=dict(self.flags))
 
     def matrix(self):
         """The matrix being differentiated: A_eff(Omega_0), or A_PP undressed."""
@@ -606,7 +623,7 @@ class DiabaticSurface(PotentialEnergySurface):
     orbitals, so the diabat keeps its identity.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field'})
 
     def __init__(self, chain, fragments, sites, state, ct=None, omega0=None,
@@ -644,11 +661,17 @@ class DiabaticSurface(PotentialEnergySurface):
         return grad, e, dict(diags, omega=float(g.matrix()[c, c]),
                              omega0=self.omega0)
 
-    def refreeze(self, mol):
-        return DiabaticSurface(self.chain.refreeze(mol), self.fragments,
+    def refreeze(self, mol, mf=None):
+        """The diabat on its chain refrozen at `mol` (on `mf` where given)."""
+        return DiabaticSurface(self.chain.refreeze(mol, mf=mf), self.fragments,
                                self.sites, self.state, self.ct,
                                omega0=self.omega0, dressed=self.dressed,
                                route=self.route)
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         kind = 'A_eff' if self.dressed else 'A_PP'

@@ -54,16 +54,16 @@ def _alpha_idx(cfg, sector, cols, nocc):
 
 
 def _inject_l3_t3(so, r, eps, g, eps_sp, ga, gab, gbb, nsp):
-    """Add l3/t3 leaves (absent from _amplitude_pool) to both drivers' cached
+    """Add l3/t3 leaves (absent from amplitude_pool) to both drivers' cached
     pools, from their own order-2 MP amplitudes -- consistent by construction."""
     mpn = MPnDensityDriver(eps, g, 2 * nsp)
     _, _, t3_2, _ = mpn.compute_order2_amplitudes(mpn.compute_t2_1())
-    so._amplitude_pool(); so._amp_pool.update({'l3': to_l(t3_2, 3), 't3': t3_2})
+    so.amplitude_pool(); so._amp_pool.update({'l3': to_l(t3_2, 3), 't3': t3_2})
     mr = MPnDensityDriverRestricted(np.diag(eps_sp), ga, gab, gbb, nsp)
     t2a, t2b = mr.compute_t2_1()
     o2 = mr.compute_order2_amplitudes(t2a, t2b, max_rank=3)
     t3a, t3ab, t3abb = o2[3], o2[4], o2[5]
-    r._amplitude_pool(); r._amp_pool.update({
+    r.amplitude_pool(); r._amp_pool.update({
         'l3_aaaaaa': to_l(t3a, 3, 'aaaaaa'), 'l3_aabaab': to_l(t3ab, 3, 'aabaab'),
         'l3_abbabb': to_l(t3abb, 3, 'abbabb'), 'l3_bbbbbb': to_l(t3a, 3, 'aaaaaa'),
         't3_aaaaaa': t3a, 't3_aabaab': t3ab, 't3_abbabb': t3abb, 't3_bbbbbb': t3a})
@@ -87,7 +87,7 @@ def main():
         for sector in ('IP', 'EA'):
             tag = '2h1p' if sector == 'IP' else '2p1h'
             cols = class_configs(nocc, len(eps), 1, sector)
-            idx = _alpha_idx(r._sector_configs(sector), sector, cols, nocc)
+            idx = _alpha_idx(r.sector_configs(sector), sector, cols, nocc)
             C3r = r._class_block_sum(genc3r, f'c3_{tag}_', sector)
             C3so = so._sum_gathered(genc3so, f'c3_{tag}_', sector)
             d = np.abs(C3r - C3so[np.ix_(idx, idx)]).max()

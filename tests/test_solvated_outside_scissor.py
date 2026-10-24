@@ -35,7 +35,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV  # noqa: E402
 from src.Base.numerics.numerics import Numerics  # noqa: E402
 from src.environments.solvent_screening import SolventScreening  # noqa: E402
 from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
-from src.properties.excitations import qp_bookkeeping  # noqa: E402
+from src.gradients.gwbse.diagnostics import qp_bookkeeping  # noqa: E402
 from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
 BASIS = 'cc-pvdz'

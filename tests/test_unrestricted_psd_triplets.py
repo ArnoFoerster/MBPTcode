@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.numerics.constants import METHOD_REGISTRY
+from src.SingleReference.GW.self_energy import METHOD_REGISTRY
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_eri,
                                             get_two_electron_integrals_chemist)
 from src.SingleReference.GW import qp_energy

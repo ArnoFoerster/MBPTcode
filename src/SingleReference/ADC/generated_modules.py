@@ -71,6 +71,8 @@ RUNTIME_MODULES = {
     'adc4_x2_k1k1_blocks_restricted_df': (4, _p('generate_adcn.generate_adc_cross_pair', order=2, pair='k1k1', restricted=True, df=True)),
     'adc4_x2_k1k1_apply_restricted_blocks': (4, _p('sigma_codegen.generate_adc_cross_pair_apply_restricted', order=2, pair='k1k1', df=False)),
     'adc4_x2_k1k1_apply_restricted_df_blocks': (4, _p('sigma_codegen.generate_adc_cross_pair_apply_restricted', order=2, pair='k1k1', df=True)),
+    'adc4_x2_k1k1_terms_restricted': (4, _p('generate_adcn.generate_adc_cross_pair', order=2, pair='k1k1', restricted=True, df=False, terms=True)),
+    'adc4_x2_k1k1_terms_restricted_df': (4, _p('generate_adcn.generate_adc_cross_pair', order=2, pair='k1k1', restricted=True, df=True, terms=True)),
     # ---- ADC(4): Goldstone-diagram modules (construction='diagrammatic', delta_u3_dress) ----
     'diagrammatic.m2_blocks': (4, _p('diagrammatic.emit.emit_order', order=2)),
     'diagrammatic.m3_blocks': (4, _p('diagrammatic.emit.emit_order', order=3)),

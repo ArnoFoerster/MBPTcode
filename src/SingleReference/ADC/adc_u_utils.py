@@ -100,18 +100,59 @@ def u1_shift_terms_2p1h(norb, nocc, z_p, Vfull, u1_shift):
     return dy_shift, dy_p_shift
 
 
+def assemble_operator(s, nocc, static_correction, t2_ijcd, u1_shift, apply_C_2h1p,
+                      apply_C_2p1h, apply_U_2h1p, apply_U_2p1h):
+    """(aop, diag, dims): the matrix-free spin-orbital ADC(3) operator from a
+    route's C and U block applications (adc_u_sigma_full, dense integrals;
+    adc_u_sigma_df, DF), with the amplitude t2_ijcd and its u1 shift."""
+    ing = s.matrix_free_ingredients(nocc)
+    norb = s.norb
+    eps = s.eps
+    d = ing['d']
+    nH = d['nH']
+    npair_o, npair_v = ing['npair_o'], ing['npair_v']
+    off_2h1p, off_2p1h = ing['off_2h1p'], ing['off_2p1h']
+    K_2h1p, K_2p1h = ing['K_2h1p'], ing['K_2p1h']
+    iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
+
+    if static_correction is None:
+        F = np.diag(eps)
+    else:
+        F = np.diag(eps) + static_correction
+
+    def aop(z):
+        z_p = z[:norb]
+        z_2h1p = z[off_2h1p:off_2p1h].reshape(npair_o, -1)
+        z_2p1h = z[off_2p1h:nH].reshape(nocc, npair_v)
+
+        Vfull_2h1p, c_2h1p = apply_C_2h1p(s, nocc, z_2h1p)
+        Vfull_2p1h, c_2p1h = apply_C_2p1h(s, nocc, z_2p1h)
+        u2h1p_full, u_from_2h1p = apply_U_2h1p(s, nocc, z_p, Vfull_2h1p, t2_ijcd,
+                                               u1_shift=u1_shift)
+        u2p1h_full, u_from_2p1h = apply_U_2p1h(s, nocc, z_p, Vfull_2p1h, t2_ijcd,
+                                               u1_shift=u1_shift)
+
+        y_p = F @ z_p + u_from_2h1p + u_from_2p1h
+        y_2h1p = u2h1p_full[iu, ju, :].reshape(-1) + K_2h1p * z_2h1p.reshape(-1) + c_2h1p.reshape(-1)
+        y_2p1h = u2p1h_full[:, au, bu].reshape(-1) + K_2p1h * z_2p1h.reshape(-1) + c_2p1h.reshape(-1)
+        return np.concatenate([y_p, y_2h1p, y_2p1h])
+
+    diag = np.concatenate([np.diag(F), K_2h1p, K_2p1h])
+    return aop, diag, d
+
+
 def build_matrix_free_ingredients(s, nocc):
     """Uncached ingredient set (dims/config indices/K diagonals + the
     B-factor slices in DF mode, dense g slices otherwise); rank<=3 only
-    in DF mode. Cache through s._build_matrix_free_ingredients."""
+    in DF mode. Cache through s.matrix_free_ingredients."""
     eps = s.eps
     norb = s.norb
     occ, virt = slice(0, nocc), slice(nocc, norb)
     nvirt = norb - nocc
 
     d = s.dimensions(nocc)
-    i_2h, j_2h, a_2h = s._configs_2h1p(nocc)
-    i_2p, a_2p, b_2p = s._configs_2p1h(nocc)
+    i_2h, j_2h, a_2h = s.configs_2h1p(nocc)
+    i_2p, a_2p, b_2p = s.configs_2p1h(nocc)
     iu, ju = np.triu_indices(nocc, k=1)
     au, bu = np.triu_indices(nvirt, k=1)
     npair_o, npair_v = len(iu), len(au)

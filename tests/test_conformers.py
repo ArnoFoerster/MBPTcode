@@ -36,6 +36,7 @@ from src.properties.conformers import (Conformer, Torsion, bond_in_ring,
                                        torsion_starts, torsion_values)
 from src.Base.step_failed import StepFailed
 from src.properties import conformers
+from src.properties.optimize import derived_walk
 from src.gradients.mean_field_surface import MeanFieldSurface
 
 # s-trans 1,3-butadiene, idealized and planar: C=C 1.34, C-C 1.46, CCC 122.8 deg.
@@ -84,8 +85,9 @@ def cyclohexane():
 def butadiene_search(butadiene):
     """The full search on the HF/STO-3G ground state, run once."""
     surface = MeanFieldSurface(butadiene, scf_factory)
+    capped = derived_walk(surface, 'a capped conformer walk', max_cycle=60)
     return surface, search_conformers(surface, engine='cartesian',
-                                      max_cycle=60, verbose=False)
+                                      numerics=capped, verbose=False)
 
 
 def test_rotatable_bond_is_the_single_bond_only(butadiene):

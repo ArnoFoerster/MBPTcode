@@ -5,7 +5,7 @@ owns and the results are added: no halo, no ordering constraint, and the answer
 is bit-comparable to the serial one up to summation order.
 
 mpi4py is imported ON DEMAND, never at module import time -- the same rule
-`linearAlgebra/diagonalization.py` documents at length: `from mpi4py import MPI`
+`linear_algebra/diagonalization.py` documents at length: `from mpi4py import MPI`
 runs MPI_Init at import, and on a node whose interconnect is unusable MPI aborts
 the process from C rather than raising, so an import at module scope kills jobs
 that never wanted MPI at all.

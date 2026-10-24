@@ -6,9 +6,10 @@ import weakref
 
 import numpy as np
 from pyscf import scf, ao2mo, lib
+from pyscf import df as pyscf_df
 from pyscf.scf import stability as scf_stability
 
-from src.Base.numerics.constants import UHF_SPIN_CONTAMINATION_WARN
+from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import environment_of
 
@@ -170,8 +171,8 @@ def unrestricted_reference_diagnostics(mf, who):
     s = 0.5 * mf.mol.spin
     exact = s * (s + 1.0)
     _, stable = scf_stability.uhf_internal(mf, return_status=True, verbose=0)
-    # the named flags a record copies (refuse
-    # inputs, warn numerics): 'stable' False, 'spin_contaminated' True
+    # the named flags a record copies (refuse inputs, warn numerics): 'stable'
+    # False, 'spin_contaminated' True
     out = {'s2': float(s2), 's2_exact': float(exact), 'stable': bool(stable),
            'spin_contaminated': bool(s2 - exact
                                      > UHF_SPIN_CONTAMINATION_WARN)}
@@ -257,6 +258,53 @@ def get_orbital_energies(mf, representation='spatial'):
         else:
             return mo_energy
 
+def auxmol_of(mf, mol=None):
+    """The auxiliary Mole behind `mf.with_df`: the one the fit holds, or built
+    from its auxiliary basis on `mol` (default the mean field's) where pyscf
+    has not made it yet. A mean field without `with_df` is refused."""
+    with_df = getattr(mf, 'with_df', None)
+    if with_df is None:
+        raise ValueError('the mean field carries no with_df: there is no '
+                         'auxiliary basis')
+    if getattr(with_df, 'auxmol', None) is not None:
+        return with_df.auxmol
+    return pyscf_df.addons.make_auxmol(mf.mol if mol is None else mol,
+                                       auxbasis=with_df.auxbasis)
+
+
+def spin_orbital_one_body(h_a, h_b=None):
+    """(2n, 2n) one-body operator over interleaved alpha/beta spin orbitals
+    from the spatial (n, n) blocks; h_b None (a restricted reference) is h_a."""
+    n = h_a.shape[0]
+    out = np.zeros((2 * n, 2 * n), dtype=np.result_type(h_a, h_a if h_b is None else h_b))
+    out[0::2, 0::2] = h_a
+    out[1::2, 1::2] = h_a if h_b is None else h_b
+    return out
+
+
+def spin_orbital_chemist(eri_aa, eri_ab=None, eri_bb=None):
+    """Chemist (PQ|RS) over interleaved alpha/beta spin orbitals from the
+    spatial (aa|aa), (aa|bb) and (bb|bb) blocks, the spin-forbidden ones zero;
+    one tensor alone (a restricted reference) stands for all three."""
+    norb = eri_aa.shape[0]
+    out = np.zeros((2 * norb,) * 4)
+    out[0::2, 0::2, 0::2, 0::2] = eri_aa
+    out[0::2, 0::2, 1::2, 1::2] = eri_aa if eri_ab is None else eri_ab
+    out[1::2, 1::2, 0::2, 0::2] = (eri_aa if eri_ab is None
+                                   else eri_ab.transpose(2, 3, 0, 1))
+    out[1::2, 1::2, 1::2, 1::2] = eri_aa if eri_bb is None else eri_bb
+    return out
+
+
+def mo_factor_block(ao_3c, left, right):
+    """(nb, nl, nr) block B_Q,pq of a DF chunk (nb, nao, nao) in the orbitals
+    `left` (nao, nl) and `right` (nao, nr): two GEMMs, left first."""
+    nb, nao = ao_3c.shape[0], ao_3c.shape[1]
+    t = (ao_3c.reshape(-1, nao) @ left).reshape(nb, nao, left.shape[1])
+    t = t.transpose(0, 2, 1).reshape(-1, nao)
+    return (t @ right).reshape(nb, left.shape[1], right.shape[1])
+
+
 def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
     """(pq|rs) in chemist order.
 
@@ -285,12 +333,7 @@ def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
             eri_bb = eri_bb + environment.kernel_mo(mol, mo_b, mo_b)
 
         if representation == 'spin':
-            eri_spin = np.zeros((2*norb, 2*norb, 2*norb, 2*norb))
-            eri_spin[0::2, 0::2, 0::2, 0::2] = eri_aa
-            eri_spin[0::2, 0::2, 1::2, 1::2] = eri_ab
-            eri_spin[1::2, 1::2, 0::2, 0::2] = eri_ab.transpose(2, 3, 0, 1)
-            eri_spin[1::2, 1::2, 1::2, 1::2] = eri_bb
-            return eri_spin
+            return spin_orbital_chemist(eri_aa, eri_ab, eri_bb)
         else:
             return eri_aa, eri_ab, eri_bb
     else:
@@ -301,12 +344,7 @@ def get_two_electron_integrals_chemist(mol, mf, representation='spatial'):
         if kernel is not None:
             eri_chemist = eri_chemist + kernel
         if representation == 'spin':
-            eri_spin = np.zeros((2*norb, 2*norb, 2*norb, 2*norb))
-            eri_spin[0::2, 0::2, 0::2, 0::2] = eri_chemist
-            eri_spin[0::2, 0::2, 1::2, 1::2] = eri_chemist
-            eri_spin[1::2, 1::2, 0::2, 0::2] = eri_chemist
-            eri_spin[1::2, 1::2, 1::2, 1::2] = eri_chemist
-            return eri_spin
+            return spin_orbital_chemist(eri_chemist)
         else:
             return eri_chemist
 
@@ -349,7 +387,7 @@ def get_coulomb_exchange_diagonals_df(B_block):
     exchange = np.einsum('Qpq,Qpq->pq', B_block, B_block, optimize=True)
     return direct, exchange
 
-def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
+def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=DF_MO_BLOCK,
                            mo_coeff=None):
     """The occupied-virtual block of B_Q,pq, and optionally whole rows B_Q,p:.
 
@@ -369,7 +407,6 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
     unrestricted reference, whose occupied and virtual indices are that spin's.
     """
     mo = mf.mo_coeff if mo_coeff is None else mo_coeff
-    norb = mo.shape[1]
     mo_o = np.ascontiguousarray(mo[:, occ])
     mo_v = np.ascontiguousarray(mo[:, virt])
     mo_r = np.ascontiguousarray(mo[:, np.atleast_1d(rows)]) if rows is not None else None
@@ -377,17 +414,11 @@ def get_df_coefficients_ov(mol, mf, occ, virt, rows=None, blksize=200,
     ov_parts, row_parts = [], []
     for chunk in mf.with_df.loop(blksize=blksize):
         ao_3c = lib.unpack_tril(chunk)
-        nb, nao = ao_3c.shape[0], ao_3c.shape[1]
-        flat = ao_3c.reshape(-1, nao)
-        t = (flat @ mo_o).reshape(nb, nao, mo_o.shape[1])
-        t = t.transpose(0, 2, 1).reshape(-1, nao)          # (nb*nocc, nao)
-        ov_parts.append((t @ mo_v).reshape(nb, -1))        # (nb, nocc*nvirt)
+        nb = ao_3c.shape[0]
+        ov_parts.append(mo_factor_block(ao_3c, mo_o, mo_v).reshape(nb, -1))
         if mo_r is not None:
-            r = (flat @ mo_r).reshape(nb, nao, mo_r.shape[1])
-            r = r.transpose(0, 2, 1).reshape(-1, nao)
-            row_parts.append((r @ mo).reshape(nb, mo_r.shape[1], norb))
-            del r
-        del ao_3c, flat, t
+            row_parts.append(mo_factor_block(ao_3c, mo_r, mo))
+        del ao_3c
     C_ov = np.concatenate(ov_parts, axis=0)
     del ov_parts
     C_rows = np.concatenate(row_parts, axis=0) if mo_r is not None else None
@@ -427,22 +458,10 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
         if has_df:
             coeff_a_list = []
             coeff_b_list = []
-            for chunk in mf.with_df.loop(blksize=200):
+            for chunk in mf.with_df.loop(blksize=DF_MO_BLOCK):
                 ao_3c = lib.unpack_tril(chunk)
-                naux_block = ao_3c.shape[0]
-                nao = ao_3c.shape[1]
-                nmo_a = mo_a.shape[1]
-                nmo_b = mo_b.shape[1]
-                    
-                tmp_a = (ao_3c.reshape(-1, nao) @ mo_a).reshape(naux_block, nao, nmo_a)
-                tmp_t_a = tmp_a.transpose(0, 2, 1).reshape(-1, nao)
-                mo_3c_a = (tmp_t_a @ mo_a).reshape(naux_block, nmo_a, nmo_a)
-                coeff_a_list.append(mo_3c_a)
-                    
-                tmp_b = (ao_3c.reshape(-1, nao) @ mo_b).reshape(naux_block, nao, nmo_b)
-                tmp_t_b = tmp_b.transpose(0, 2, 1).reshape(-1, nao)
-                mo_3c_b = (tmp_t_b @ mo_b).reshape(naux_block, nmo_b, nmo_b)
-                coeff_b_list.append(mo_3c_b)
+                coeff_a_list.append(mo_factor_block(ao_3c, mo_a, mo_a))
+                coeff_b_list.append(mo_factor_block(ao_3c, mo_b, mo_b))
             coeff_a = np.concatenate(coeff_a_list, axis=0)
             coeff_b = np.concatenate(coeff_b_list, axis=0)
         if not has_df:
@@ -475,11 +494,7 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
         if representation == 'spin':
             # One shared naux for both spin blocks (see the fallback comment
             # above).
-            naux = coeff_a.shape[0]
-            coeff_spin = np.zeros((naux, 2*norb, 2*norb))
-            coeff_spin[:, 0::2, 0::2] = coeff_a
-            coeff_spin[:, 1::2, 1::2] = coeff_b
-            return coeff_spin
+            return get_df_spin_orbital_factor(coeff_a, coeff_b)
         else:
             return coeff_a, coeff_b
     else:
@@ -490,17 +505,12 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             # would hold the naux nmo^2 factor twice
             coeff = np.empty((mf.with_df.get_naoaux(), norb, norb))
             p0 = 0
-            for chunk in mf.with_df.loop(blksize=200):
+            for chunk in mf.with_df.loop(blksize=DF_MO_BLOCK):
                 ao_3c = lib.unpack_tril(chunk)
                 naux_block = ao_3c.shape[0]
-                nao = ao_3c.shape[1]
-                nmo = mo.shape[1]
-                    
-                tmp = (ao_3c.reshape(-1, nao) @ mo).reshape(naux_block, nao, nmo)
-                tmp_t = tmp.transpose(0, 2, 1).reshape(-1, nao)
-                coeff[p0:p0 + naux_block] = (tmp_t @ mo).reshape(naux_block, nmo, nmo)
+                coeff[p0:p0 + naux_block] = mo_factor_block(ao_3c, mo, mo)
                 p0 += naux_block
-                del ao_3c, tmp, tmp_t
+                del ao_3c
         if not has_df:
             eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
             w, v = np.linalg.eigh(eri_chemist.reshape(norb*norb, norb*norb))
@@ -512,11 +522,7 @@ def get_density_fitting_coefficients(mol, mf, representation='spatial'):
             coeff = np.tensordot(transform, coeff, axes=(1, 0))
 
         if representation == 'spin':
-            naux = coeff.shape[0]
-            coeff_spin = np.zeros((naux, 2*norb, 2*norb))
-            coeff_spin[:, 0::2, 0::2] = coeff
-            coeff_spin[:, 1::2, 1::2] = coeff
-            return coeff_spin
+            return get_df_spin_orbital_factor(coeff)
         else:
             return coeff
 
@@ -704,14 +710,9 @@ def embed_spatial_eri_in_spin_orbitals(eri_physicist):
     not antisymmetrized. Only the four spin-allowed blocks are nonzero; the exchange
     integral <p_a q_b|s_a r_b> vanishes by spin orthogonality, so antisymmetrizing the
     result (get_antisymmetrized_integrals) gives the correct spin selection rules."""
-    norb = eri_physicist.shape[0]
-    n_spin = 2 * norb
-    phys_spin = np.zeros((n_spin, n_spin, n_spin, n_spin))
-    phys_spin[0::2, 0::2, 0::2, 0::2] = eri_physicist
-    phys_spin[0::2, 1::2, 0::2, 1::2] = eri_physicist
-    phys_spin[1::2, 0::2, 1::2, 0::2] = eri_physicist
-    phys_spin[1::2, 1::2, 1::2, 1::2] = eri_physicist
-    return phys_spin
+    # <PQ|RS> = (PR|QS): the chemist interleave of the transposed tensor
+    chemist = spin_orbital_chemist(eri_physicist.transpose(0, 2, 1, 3))
+    return np.ascontiguousarray(chemist.transpose(0, 2, 1, 3))
 
 def get_spin_orbital_eri_physicist(eri_chemist):
     """<PQ|RS> restricted-reference spin-orbital ERI (interleaved alpha/beta), not
@@ -723,9 +724,10 @@ def get_antisymmetrized_spin_eri(eri_chemist):
     """<pq||rs> restricted-reference spin-orbital antisymmetrized ERI (interleaved alpha/beta) from spatial chemist ERI."""
     return get_antisymmetrized_integrals(get_spin_orbital_eri_physicist(eri_chemist))
 
-def get_df_spin_orbital_factor(B_aa):
+def get_df_spin_orbital_factor(B_aa, B_bb=None):
     """Spin-orbital (interleaved alpha/beta) DF factor B_spin (naux, 2*norb,
-    2*norb) from the RHF spatial factor B_aa (naux, norb, norb), the
+    2*norb) from the spatial factors B_aa and B_bb (naux, norb, norb) on one
+    auxiliary basis; B_bb None (a restricted reference) is B_aa. The
     spin-orbital analog of get_antisymmetrized_spin_eri.
     Block-diagonal in spin (B_spin[Q,p,r]
     nonzero only when spin(p)==spin(r)), so
@@ -738,7 +740,7 @@ def get_df_spin_orbital_factor(B_aa):
     n_spin = 2 * norb
     B_spin = np.zeros((naux, n_spin, n_spin))
     B_spin[:, 0::2, 0::2] = B_aa
-    B_spin[:, 1::2, 1::2] = B_aa
+    B_spin[:, 1::2, 1::2] = B_aa if B_bb is None else B_bb
     return B_spin
 
 def g_elem_df(B_spin, p, q, r, s):
@@ -839,3 +841,51 @@ def get_system_data_spatial(mol=None, mf=None, n_occ_spatial=0, n_act_spatial=2,
     virt_idx = np.arange(n_occ_spatial + n_act_spatial, norb, dtype=int)
     eri_spatial_phys = eri_chemist.transpose(0, 2, 1, 3)
     return eri_spatial_phys, h1_mo, eps, occ_idx, act_idx, virt_idx
+
+
+def xc_hybrid_coeff(mf):
+    """(is_ks, a_x): the exact-exchange fraction the reference's Fock carries.
+
+    ONE scalar, so this describes a GLOBAL hybrid and nothing else. On a
+    range-separated hybrid it returns alpha, the long-range fraction, and says
+    nothing about the erf-screened term that carries beta -- see `rsh_split`,
+    and `require_no_range_separation` for the refusal that keeps that silence
+    from reaching a gradient.
+    """
+    if not hasattr(mf, 'xc'):
+        return False, 1.0
+    return True, float(mf._numint.hybrid_coeff(mf.xc, spin=mf.mol.spin))
+
+
+def rsh_split(mf):
+    """(omega, alpha, beta) of the reference's exchange; omega = 0 if global.
+
+    pyscf's convention is K = alpha K_full + beta K_lr(omega), so the
+    short-range fraction is alpha + beta: CAM-B3LYP is
+    (0.33, 0.65, -0.46) and wB97X (0.30, 1.00, -0.842).
+    """
+    if not hasattr(mf, 'xc'):
+        return 0.0, 1.0, 0.0
+    omega, alpha, beta = mf._numint.rsh_coeff(mf.xc)
+    return float(omega), float(alpha), float(beta)
+
+
+def exchange_channels(mf):
+    """[(omega, weight)] with the reference's exact exchange = sum w K(omega).
+
+    pyscf builds K_eff = hyb K_full + (alpha - hyb) K_lr(omega) and its
+    `rsh_coeff` reports (omega, alpha, beta) with hyb = alpha + beta, so the
+    channels are (0, alpha + beta) and (omega, -beta). Checked against
+    `get_veff`'s own operator to machine precision on B3LYP, PBE0, CAM-B3LYP,
+    wB97X and LRC-wPBEh.
+
+    `xc_hybrid_coeff` IS NOT THIS and must not be used for a skeleton on a
+    range-separated hybrid: it returns alpha, which for a global hybrid happens
+    to be the full-range weight and for an RSH is the LONG-range one. On
+    LRC-wPBEh it gives 1.0 where the full-range weight is 0.2, so a skeleton
+    built on it is wrong in the term it keeps as well as in the one it drops.
+    """
+    omega, alpha, beta = rsh_split(mf)
+    if omega == 0.0 or beta == 0.0:
+        return [(0.0, alpha)]
+    return [(0.0, alpha + beta), (float(omega), -beta)]

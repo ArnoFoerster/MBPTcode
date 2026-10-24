@@ -2,15 +2,14 @@
 rule (`pade_nodes`), greedy ordering and the continued fraction."""
 import numpy as np
 
-from src.Base.numerics.constants import DEFAULT_NPADE, GL_FREQUENCY_SCALE
 from src.Base.utils.grids.grids import gauss_legendre_grid
 
 
-def pade_nodes():
+def pade_nodes(quadrature):
     """The imaginary frequencies Sigma_c(i omega) is sampled at for its Pade
-    continuation: DEFAULT_NPADE Gauss-Legendre nodes of the half axis scaled
-    by GL_FREQUENCY_SCALE, `QuadratureNumerics`' npade and w0_gl."""
-    return gauss_legendre_grid(DEFAULT_NPADE, w0=GL_FREQUENCY_SCALE)[0]
+    continuation: `quadrature.npade` Gauss-Legendre nodes of the half axis
+    scaled by `quadrature.w0_gl` (a run's `QuadratureNumerics`)."""
+    return gauss_legendre_grid(quadrature.npade, w0=quadrature.w0_gl)[0]
 
 
 def thiele_coefficients(z, f):
@@ -48,12 +47,7 @@ def greedy_pade_order(z, f):
         best_j, best_score = None, np.inf
         for j in remaining:
             trial_order = order + [j]
-            zt, ft = z[trial_order], f[trial_order]
-            g = np.zeros((len(trial_order), len(trial_order)), dtype=complex)
-            g[:, 0] = ft
-            for i in range(1, len(trial_order)):
-                g[i:, i] = (g[i - 1, i - 1] - g[i:, i - 1]) / ((zt[i:] - zt[i - 1]) * g[i:, i - 1])
-            score = abs(g[-1, -1])
+            score = abs(thiele_coefficients(z[trial_order], f[trial_order])[-1])
             if np.isfinite(score) and score < best_score:
                 best_score, best_j = score, j
         if best_j is None:

@@ -15,13 +15,14 @@ from types import SimpleNamespace
 import pytest
 
 import src.properties.excitations as excitations
+from src.Base.numerics.numerics import Numerics
 from src.properties.excitations import WalkNotRelaxed, saddle_checked_state
 from src.properties.vibronic import relax_state
 from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
                                       pyramidalization)
 
-WALK = {'engine': 'cartesian', 'max_cycle': 200, 'verbose': False,
-        'refreeze': 1}
+WALK = {'engine': 'cartesian', 'numerics': Numerics(walk={'max_cycle': 200}),
+        'verbose': False, 'refreeze': 1}
 
 
 class Relaxable(DoubleWell):
@@ -100,7 +101,7 @@ def test_an_unconverged_walk_is_flagged_before_its_hessian(monkeypatch):
     x[0, 2] = 0.4
     surface = Relaxable(molecule(x))
     relaxed = relax_state(surface, surface.mol0, nudge=0,
-                          **dict(WALK, max_cycle=1))
+                          **dict(WALK, numerics=Numerics(walk={'max_cycle': 1})))
     assert not relaxed['info']['converged']
     calls = []
     monkeypatch.setattr(excitations, 'surface_hessian',

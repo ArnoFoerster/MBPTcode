@@ -9,12 +9,12 @@ then probes min eig(A-B) on the same action, in tiers:
         theta - r > 0 (or theta + r < 0) certifies the sign -- of an
         eigenvalue the span reaches, not of the minimum over pair irreps
         no root lies in;
-  (ii)  otherwise a Lanczos started from the lowest root's X - Y plus
+  (ii)  otherwise the symmetric Davidson started from the lowest root's X - Y plus
         PROBE_START_MIX of the cold start 1/d at 1e-2;
-  (iii) otherwise the Lanczos from 1/d, which has weight in every pair
+  (iii) otherwise the Davidson from 1/d, which has weight in every pair
         irrep, at escalating tolerances.
 
-`probe=True` converges the Lanczos from 1/d, the general probe, to a few ulp
+`probe=True` converges the Davidson from 1/d, the general probe, to a few ulp
 the value it had before the probe moved. Nothing the probe computes reaches the
 roots.
 
@@ -25,23 +25,23 @@ as the oracle:
   * the certificate on water, ethylene and benzene: the roots' span proves
     the sign, `probe_matvecs` one per root and `probe_source` 'roots'; theta
     is at most the lowest root's own quotient omega / |X - Y|^2; the sign is
-    the converged Lanczos's and the dense minimum's; and the minimum lies
+    the converged probe's and the dense minimum's; and the minimum lies
     within r of theta. On benzene the lowest root alone could not bracket
     it: its X - Y lies along the (A - B) eigenvector at 0.26695 Ha (overlap
     0.9998), in another irrep than the minimum at 0.23880, which only the
     fourth root reaches (overlap 0.9958);
   * `probe=True` converges from 1/d to the dense minimum within the
-    Lanczos's own tolerance, recorded 'lanczos-cold', serially to a few ulp
+    probe's own tolerance, recorded 'davidson-cold', serially to a few ulp
     the standalone probe's value;
   * 90-degree twisted ethene, whose TDHF (A - B) is indefinite (-0.0053 Ha):
     refused by the Davidson's own breakdown at 1, 2 and 3 ranks, the
     breakdown's probe carrying the dense minimum; and with the BSE solved and
     the probe handed that TDHF (A - B), the span of the BSE roots does NOT
-    certify, the warm Lanczos proves the negative sign, and the driver
+    certify, the warm pass proves the negative sign, and the driver
     refuses the roots on every rank;
   * planted fall-throughs: a lowest root contaminated by the highest pair
     fails tier (i) and tier (ii) certifies, from exactly the warm start; a
-    Lanczos stalled at its first pass escalates to 1e-3 from 1/d; stalled at
+    pass stalled at its first pass escalates to 1e-3 from 1/d; stalled at
     every pass, the sign is reported unproven;
   * the roots and vectors of the whole solve, those of the same solve with
     no probe to a few ulp, serially, 'sign' and True, water and ethylene; at
@@ -104,12 +104,10 @@ MOLECULES = {'water': (WATER, 3), 'ethylene': (ETHYLENE, 5),
              'benzene': (BENZENE, 12)}
 SIZES = [2, 3, 8]
 CONV_TOL = 1e-5
-#: ARPACK's relative tolerance in `lowest_amb_eigenvalue`, whose residual
-#: bounds the converged value's distance from the eigenvalue it found.
-ARPACK_TOL = 1e-6
-#: The replicated Lanczos's relative residual, which `_lowest_amb_local`
-#: tightens the converged probe to.
-REPLICATED_TOL = float(np.sqrt(np.finfo(float).eps))
+#: Ha: the probe's residual in `lowest_amb_eigenvalue`, serially and over
+#: ranks alike, which bounds the converged value's distance from the
+#: eigenvalue it found.
+PROBE_TOL = 1e-6
 #: Ha. The row split re-associates the action's reduced sums, which moves a
 #: distributed root and the certificate from the serial ones in the last bits
 #: (1e-13 measured, the bar of tests/test_davidson_lockstep.py).
@@ -264,11 +262,11 @@ def test_the_roots_certify_the_sign(systems, name):
     assert (theta <= (om[0] + np.sqrt(2.0) * CONV_TOL * np.linalg.norm(xmy))
             / (xmy @ xmy))
     lam = dense_amb(s, s['W_aux'])
-    lanczos = float(lowest_amb_eigenvalue(
+    probe = float(lowest_amb_eigenvalue(
         LinearResponseSolver(s['eps'], spin_mode='restricted'), s['nocc'],
         'BSE', s['W_aux'], s['factors'])[0])
-    assert abs(lanczos - lam[0]) <= ARPACK_TOL * abs(lanczos) + DENSE_TOL
-    assert theta - r > 0.0 and lanczos > 0.0 and lam[0] > 0.0
+    assert abs(probe - lam[0]) <= PROBE_TOL + DENSE_TOL
+    assert theta - r > 0.0 and probe > 0.0 and lam[0] > 0.0
     assert theta >= lam[0] - DENSE_TOL                 # a Rayleigh quotient
     assert theta - lam[0] <= r                         # the minimum bracketed
 
@@ -276,17 +274,16 @@ def test_the_roots_certify_the_sign(systems, name):
 @pytest.mark.parametrize('size', [1, 2])
 @pytest.mark.parametrize('name', list(MOLECULES))
 def test_the_converged_probe_starts_cold(systems, name, size):
-    """`probe=True` is the general probe, the Lanczos from 1/d: the dense
-    minimum within its own residual bound, ARPACK's tolerance serially and
-    sqrt(eps) replicated, and serially the standalone probe's value to a few
-    ulp, on an action of its own."""
+    """`probe=True` is the general probe, the Davidson from 1/d: the dense
+    minimum within its own residual bound, serially and replicated, and
+    serially the standalone probe's value to a few ulp, on an action of its
+    own."""
     s = systems[name]
     _, _, _, info = ranks(lambda comm: solve(s, comm, probe=True), size)[0]
     lam = dense_amb(s, s['W_aux'])
     value = info['min_eig_amb']
-    assert info['stats']['probe_source'] == 'lanczos-cold'
-    tol = ARPACK_TOL if size == 1 else REPLICATED_TOL
-    assert abs(value - lam[0]) <= tol * abs(value) + DENSE_TOL
+    assert info['stats']['probe_source'] == 'davidson-cold'
+    assert abs(value - lam[0]) <= PROBE_TOL + DENSE_TOL
     if size == 1:
         assert_same(value, float(lowest_amb_eigenvalue(
             LinearResponseSolver(s['eps'], spin_mode='restricted'),
@@ -319,7 +316,7 @@ def test_twisted_ethene_tdhf_is_refused_by_the_davidson(twisted, size):
         message, amb = verdict
         assert 'singlet/triplet unstable' in message
         assert amb == out[0][1]
-        assert abs(amb - lam) <= ARPACK_TOL * abs(amb) + DENSE_TOL
+        assert abs(amb - lam) <= PROBE_TOL + DENSE_TOL
 
 
 @pytest.mark.parametrize('size', [1, 2, 3])
@@ -327,7 +324,7 @@ def test_twisted_ethene_falls_through_and_is_refused(twisted, monkeypatch,
                                                     size):
     """The BSE of twisted ethene converges (its (A - B) is positive); its probe
     is handed the TDHF (A - B) of the same reference instead: the span of the
-    BSE roots fails tier (i), the warm Lanczos proves the sign negative, and
+    BSE roots fails tier (i), the warm pass proves the sign negative, and
     the driver refuses the roots on every rank."""
     s = twisted
     lam = dense_amb(s, None)[0]
@@ -355,7 +352,7 @@ def test_twisted_ethene_falls_through_and_is_refused(twisted, monkeypatch,
         assert message.startswith('BSE refused before the solve'), message
         st = record({'stats': records[rank]})
         assert st == record({'stats': records[0]})
-        assert st['probe_source'] == 'lanczos-warm' and st['probe_sign_proven']
+        assert st['probe_source'] == 'davidson-warm' and st['probe_sign_proven']
         assert st['probe_tol_used'] == 1e-2 and st['probe_matvecs'] > 2
     # the message prints the value to 1e-6 Ha
     value = float(out[0].split('min eig(A-B) = ')[1].split(' Ha')[0])
@@ -364,7 +361,7 @@ def test_twisted_ethene_falls_through_and_is_refused(twisted, monkeypatch,
 
 
 def cold_and_warm(s, start):
-    """The Lanczos starts the probe builds: 1/d, and `start` with
+    """The start vectors the probe builds: 1/d, and `start` with
     PROBE_START_MIX of it, each normalized."""
     cold = 1.0 / block_actions.bse_pair_diagonal(s['eps'], s['nocc']).ravel()
     cold /= np.linalg.norm(cold)
@@ -372,45 +369,34 @@ def cold_and_warm(s, start):
     return cold, warm / np.linalg.norm(warm)
 
 
-class _Lanczos:
-    """The probe's Lanczos, serial (eigsh) or replicated (`_lanczos_lowest`),
+class _Probe:
+    """The probe's Davidson (`solve_symmetric` as the probe calls it),
     recording each rank thread's start vectors, and on its first `stalls`
     calls returning the `stalled` vector as the Ritz pair instead."""
 
     def __init__(self, stalls=0, stalled=None):
         self.stalls, self.stalled = stalls, stalled
         self.local = threading.local()
-        self.real_eigsh = amb_probe.eigsh
-        self.real_lanczos = amb_probe._lanczos_lowest
+        self.real = amb_probe.solve_symmetric
 
     def starts(self):
         """This rank thread's start vectors, in call order."""
         return getattr(self.local, 'starts', [])
 
-    def _stall(self, v0):
+    def solve_symmetric(self, op, diag, nroots=1, x0=None, **kwargs):
+        v0 = np.asarray(x0).reshape(len(diag), -1)[:, 0]
         self.local.starts = self.starts() + [np.array(v0, copy=True)]
-        return len(self.local.starts) <= self.stalls
-
-    def eigsh(self, op, k, which, tol, v0, return_eigenvectors):
-        if not self._stall(v0):
-            return self.real_eigsh(op, k=k, which=which, tol=tol, v0=v0,
-                                   return_eigenvectors=return_eigenvectors)
+        if len(self.local.starts) > self.stalls:
+            return self.real(op, diag, nroots=nroots, x0=x0, **kwargs)
         x = self.stalled / np.linalg.norm(self.stalled)
-        theta = np.array([x @ op.matvec(x)])
-        return (theta, x[:, None]) if return_eigenvectors else theta
-
-    def lanczos(self, matvec, v0, k, tol):
-        if not self._stall(v0):
-            return self.real_lanczos(matvec, v0, k, tol)
-        x = self.stalled / np.linalg.norm(self.stalled)
-        return np.array([x @ matvec(x)]), x[None, :]
+        return np.array([x @ op.matvec(x)]), x[:, None], np.array([True])
 
 
 @pytest.mark.parametrize('size', [1, 2, 3])
 def test_a_root_that_does_not_certify_falls_through(systems, monkeypatch,
                                                     size):
     """The lowest root planted with the highest pair: tier (i) fails, and the
-    Lanczos from exactly that root plus PROBE_START_MIX of 1/d certifies at
+    Davidson from exactly that root plus PROBE_START_MIX of 1/d certifies at
     its first tolerance."""
     s = systems['water']
     _, X, Y, _ = solve(s, probe=False)
@@ -419,22 +405,21 @@ def test_a_root_that_does_not_certify_falls_through(systems, monkeypatch,
     assert theta - r <= 0.0, 'the plant does not defeat tier (i)'
     lam = dense_amb(s, s['W_aux'])
     _, warm = cold_and_warm(s, start)
-    lanczos = _Lanczos()
-    monkeypatch.setattr(amb_probe, 'eigsh', lanczos.eigsh)
-    monkeypatch.setattr(amb_probe, '_lanczos_lowest', lanczos.lanczos)
+    stub = _Probe()
+    monkeypatch.setattr(amb_probe, 'solve_symmetric', stub.solve_symmetric)
 
     def one_rank(comm):
         stats = {}
         value = lowest_amb_from_action(*action(s, comm), sign_only=True,
                                         stats=stats, comm=comm, start=start)
-        return float(value[0]), stats, lanczos.starts()
+        return float(value[0]), stats, stub.starts()
 
     out = ranks(one_rank, size)
     for value, stats, starts in out:
         assert value == out[0][0]
-        assert stats['probe_source'] == 'lanczos-warm'
+        assert stats['probe_source'] == 'davidson-warm'
         assert stats['probe_sign_proven'] and stats['probe_tol_used'] == 1e-2
-        assert stats['probe_matvecs'] > 2          # tier (i), Lanczos, residual
+        assert stats['probe_matvecs'] > 2          # tier (i), Davidson, residual
         assert len(starts) == 1
         assert np.abs(starts[0] - warm).max() <= 1e-15
         resid = stats['probe_residual']
@@ -444,30 +429,29 @@ def test_a_root_that_does_not_certify_falls_through(systems, monkeypatch,
 
 @pytest.mark.parametrize('size', [1, 2, 3])
 @pytest.mark.parametrize('stalls', [1, 4])
-def test_a_lanczos_that_does_not_certify_escalates(systems, monkeypatch,
+def test_a_probe_pass_that_does_not_certify_escalates(systems, monkeypatch,
                                                    size, stalls):
-    """Tier (i) planted to fail and the warm Lanczos stalled on the planted
-    vector: the Lanczos from 1/d at the next tolerance, 1e-3, certifies.
+    """Tier (i) planted to fail and the warm pass stalled on the planted
+    vector: the Davidson from 1/d at the next tolerance, 1e-3, certifies.
     Stalled at all four passes, the sign is reported unproven at the probe's
     own tolerance."""
     s = systems['water']
     _, X, Y, _ = solve(s, probe=False)
     start = planted_start(s, X, Y)
     cold, warm = cold_and_warm(s, start)
-    lanczos = _Lanczos(stalls, stalled=start)
-    monkeypatch.setattr(amb_probe, 'eigsh', lanczos.eigsh)
-    monkeypatch.setattr(amb_probe, '_lanczos_lowest', lanczos.lanczos)
+    stub = _Probe(stalls, stalled=start)
+    monkeypatch.setattr(amb_probe, 'solve_symmetric', stub.solve_symmetric)
 
     def one_rank(comm):
         stats = {}
         value = lowest_amb_from_action(*action(s, comm), sign_only=True,
                                         stats=stats, comm=comm, start=start)
-        return float(value[0]), record({'stats': stats}), lanczos.starts()
+        return float(value[0]), record({'stats': stats}), stub.starts()
 
     out = ranks(one_rank, size)
     for value, stats, starts in out:
         assert value == out[0][0] and stats == out[0][1]
-        assert stats['probe_source'] == 'lanczos-cold'
+        assert stats['probe_source'] == 'davidson-cold'
         assert len(starts) == (2 if stalls == 1 else 4)
         assert np.abs(starts[0] - warm).max() <= 1e-15
         assert all(matches(v0, cold, RECORDING_BLAS, unit='1', quantity='root')
@@ -517,10 +501,10 @@ def test_the_roots_are_bitwise_the_parents(systems, parents, name, probe,
     VECTOR_TOL.
 
     The parents were once an archived commit from before the probe moved
-    behind the Davidson (8b5d282). Its grid (the radii recut) and its
-    static W (eta-free) are not this tree's, so it sat 7e-5 to
-    1.5e-4 Ha from these roots: a comparison of two grids, not of where the
-    probe runs."""
+    behind the Davidson. Its grid (from before the radii table was recut) and
+    its static W (from before W was built eta-free) are not this tree's, so it
+    sat 7e-5 to 1.5e-4 Ha from these roots: a comparison of two grids, not of
+    where the probe runs."""
     s = systems[name]
     if size > 1:
         monkeypatch.setattr(trial_space, 'DAVIDSON_PAIR_TILE', SPLIT_TILE)
@@ -601,7 +585,7 @@ def test_ranks_that_own_no_grid_row(systems):
 def test_one_ranks_drifted_certificate_is_rank_zeros(systems, size):
     """The last rank's tier (i) action output moved by 1e3 Ha on one element
     that the lowest root hardly touches: alone it would not certify and would
-    enter the Lanczos while the others returned. The certificate's lockstep
+    enter the Davidson while the others returned. The certificate's lockstep
     hands it rank 0's, so every rank certifies from the roots with rank 0's
     value, and the audit counts that one repair on that one rank."""
     s = systems['water']

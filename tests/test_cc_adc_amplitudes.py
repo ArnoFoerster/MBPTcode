@@ -34,6 +34,7 @@ from src.SingleReference.ADC.cc_adc_amplitudes import (
 from src.SingleReference.ADC.cc_amplitudes import run_cc
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted)
+from tests.adc_common import water_df  # noqa: F401  (fixture)
 
 EXACT_DF_TOL = 1e-10     # exact DF factor: a pure plumbing check
 RI_MIN = 1e-8            # a real auxiliary basis must differ by more than round-off
@@ -105,17 +106,6 @@ def test_missing_amplitude_tag_raises_with_a_diagnosis(water):
     assert pool['t2'] is not None
     with pytest.raises(NotImplementedError, match='t3'):
         pool['t3']
-
-
-@pytest.fixture(scope='module')
-def water_df():
-    """DF mean field: the production route's starting point."""
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
-                basis='cc-pvdz', verbose=0)
-    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    mf.conv_tol = 1e-12
-    mf.run()
-    return mf
 
 
 def test_ccd_is_pyscfs_ccd_and_follows_the_mean_field_into_df(water, water_df):

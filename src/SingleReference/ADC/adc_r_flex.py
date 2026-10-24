@@ -33,12 +33,14 @@ Faddeev operator with only that pair on, or in closed form (pp_term='poles'):
 that operator is block-diagonal in the spectator, so one pair
 diagonalization per spin gives all its poles and residues.
 """
+import warnings
+
 import numpy as np
 import scipy.linalg as la
 
 from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC.second_order import sigma2_poles
-from src.SingleReference.ADC.solve import LanczosState, lanczos_extend
+from src.SingleReference.ADC.solve import ADCNotConverged, LanczosState, lanczos_extend
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.pp_rpa import (
@@ -60,13 +62,16 @@ class _Resolvent:
     pairs of the tridiagonal. Extended in blocks until Sigma(w) at the w asked
     for stops changing. The recurrence is solve.lanczos_extend without
     reorthogonalization or stored vectors: loss of orthogonality only
-    duplicates converged Ritz values, which the quadrature tolerates."""
+    duplicates converged Ritz values, which the quadrature tolerates. A
+    Sigma(w) not settled in LANCZOS_MAX_STEPS warns (ADCNotConverged), the
+    last value is used and `settled` turns False."""
 
     def __init__(self, matvec, u):
         self.matvec = matvec
         self.norm2 = float(u @ u)
         self.state = LanczosState(u, keep_vectors=False)
         self._ritz_cache = {}
+        self.settled = True
 
     def _extend(self, nsteps):
         lanczos_extend(self.matvec, self.state, nsteps, reorth=False)
@@ -109,8 +114,11 @@ class _Resolvent:
             if abs(s1 - s0) < SIGMA_CF_TOL:
                 return s1, d1
             if n >= LANCZOS_MAX_STEPS:
-                raise RuntimeError(f"_Resolvent: Sigma({w}) not settled in "
-                                   f"{n} Lanczos steps (last change {abs(s1 - s0):.2e})")
+                warnings.warn(f"FLEX resolvent: Sigma({w}) not settled in {n} Lanczos "
+                              f"steps (last change {abs(s1 - s0):.2e}); the last value "
+                              f"is used (converged=False)", ADCNotConverged, stacklevel=3)
+                self.settled = False
+                return s1, d1
             self._extend(LANCZOS_BLOCK)
 
 
@@ -386,34 +394,15 @@ class FlexSelfEnergy:
         s2, ds2 = self._sigma2(p, w)
         return se + sp - 2 * s2, dse + dsp - 2 * ds2
 
-    def sigma_poles(self, p, which='flex', eh_triplet='rpa'):
-        """(residues, poles) of Sigma_pp, for scanning the QP equation for all
-        its roots: exact for the eh and Sigma(2) terms, and for the operator
-        term (pp pair, or the full Faddeev operator) the Ritz representation of
-        its Lanczos run as far as it has been extended, i.e. converged at the
-        energies evaluated so far (start one at the HF eigenvalue first)."""
-        if which == 'flex':
-            key = 'pp'
-            re, pe = self.eh_poles(p, eh_triplet)
-            r2, p2 = self.sigma2_poles(p)
-            if self.pp_term == 'poles':
-                wt, th = self.ladder_poles(p)
-                return np.concatenate([re, wt, -2 * r2]), np.concatenate([pe, th, p2])
-        else:
-            key = ('faddeev', eh_triplet)
-        self.sigma_operator(key, p, self.eps[p])
-        th, wt = self._resolvents[(key, p)].ritz()
-        if which == 'flex':
-            return np.concatenate([re, wt, -2 * r2]), np.concatenate([pe, th, p2])
-        return wt, th
-
     def solve_qp(self, p, which='flex', static=0.0, eh_triplet='rpa',
                  tol=QP_NEWTON_TOL, max_iter=QP_NEWTON_MAX_ITER, w0=None):
         """Diagonal QP w = eps_p + static + Sigma_pp(w) by the one root finder
         of `Solvers.qp_equation`: bracketed about eps_p + static, refined on
         the closed-form slope, the largest Z kept; with w0, the root that
         follows it. which='flex' or 'faddeev'. Returns {'e', 'Z',
-        'converged', 'niter'}, niter the self-energy evaluations."""
+        'converged', 'niter'}, niter the self-energy evaluations; converged is
+        False when no root was found or a Lanczos resolvent of orbital p did
+        not settle."""
         if which == 'flex':
             sig = lambda q, x: self.sigma_flex(q, x, eh_triplet)
         else:
@@ -432,5 +421,6 @@ class FlexSelfEnergy:
                                       float(self.eps[p] + static),
                                       follow=w0, tol=tol, max_iter=max_iter,
                                       label=f'FLEX orbital {p}')
-        return {'e': w, 'Z': z, 'converged': bool(np.isfinite(w)),
+        settled = all(r.settled for (_, q), r in self._resolvents.items() if q == p)
+        return {'e': w, 'Z': z, 'converged': bool(np.isfinite(w)) and settled,
                 'niter': calls[0]}

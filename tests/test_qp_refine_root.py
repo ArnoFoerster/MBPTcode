@@ -6,7 +6,7 @@ sys.path.insert(
 
 import numpy as np
 
-from src.Solvers.qp_equation import _refine_root, solve_qp_equation
+from src.Solvers.qp_equation import _refine_root, solve_qp_equation_pole_strength
 
 
 def check(ok, label, detail=''):
@@ -56,7 +56,7 @@ if __name__ == '__main__':
     # with two poles
     sigma = lambda w: 0.05 / (w + 0.8) + 0.01 / (w - 0.9)
     g = Counted(lambda w: w + 0.2 - sigma(w))
-    root = solve_qp_equation(g, -0.2, method='pole_strength')
+    root = solve_qp_equation_pole_strength(g, -0.2)
     all_ok &= check(
         abs(g(root)) < 1e-7, 'pole_strength root satisfies f(root) ~ 0',
         f'{g(root):.1e}')

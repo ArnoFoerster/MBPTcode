@@ -157,6 +157,7 @@ tests here run on; a pyscf that renames one fails at import, not in a result.
 """
 import contextlib
 import time
+import weakref
 
 import numpy as np
 import scipy.linalg
@@ -169,7 +170,7 @@ from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 from pyscf.lib import logger
 
 from src.Base.numerics.constants import BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION
-from src.Base.factorization.isdf_jk import ISDFJK, range_coulomb
+from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
@@ -605,7 +606,34 @@ def _builds_no_grid(mf):
     return initialize_grids
 
 
-class DistributedDF(df.df.DF):
+class InstalledWithDF:
+    """`install` / `uninstall` of a distributed `with_df` handle.
+
+    A rank's share is not the whole: a downstream caller that reads
+    `mf.with_df` (iterates `loop()` for the GW fit or the solvent screening,
+    takes the grid a gradient differentiates) would read one rank's rows or
+    tiles and call them the tensor. So the handle answers J/K only while a
+    distributed stage is running; `uninstall` puts the caller's own object
+    back and keeps this rank's share.
+    """
+
+    def install(self, mf):
+        """Answer this mean field's J/K until `uninstall`."""
+        if mf.with_df is not self:
+            self._replaced = (mf, mf.with_df)
+            mf.with_df = self
+        return self
+
+    def uninstall(self):
+        """Put the mean field's own `with_df` back, keeping this rank's share."""
+        pair, self._replaced = self._replaced, None
+        if pair is not None:
+            mf, with_df = pair
+            mf.with_df = with_df
+        return self
+
+
+class DistributedDF(InstalledWithDF, df.df.DF):
     """A `with_df` holding one contiguous block of the auxiliary index.
 
     Subclasses pyscf's DF for the plumbing `_DFHF` expects and for `DF.loop`,
@@ -654,8 +682,7 @@ class DistributedDF(df.df.DF):
             return self
         # The attenuated operator is read from both molecules' environments
         # while the integrals are evaluated, and from nowhere after.
-        with (range_coulomb(self.mol, None, self.omega) if self.omega
-              else contextlib.nullcontext()):
+        with self.mol.with_range_coulomb(self.omega or None):
             return self._build()
 
     def _build(self):
@@ -672,7 +699,7 @@ class DistributedDF(df.df.DF):
         self.row_slice = (start, stop)
         nao = mol.nao_nr()
         nao_pair = nao * (nao + 1) // 2
-        left = self.max_memory - memory.current_memory_mb()
+        left = memory.left_mb(self.max_memory)
         need = (stop - start) * nao_pair * 8 / 1e6
         peak = need * (1 + DF_EXCHANGE_TRANSIENT_FRACTION)
         whole = naux * nao_pair * 8 / 1e6
@@ -713,7 +740,7 @@ class DistributedDF(df.df.DF):
         `omega`, one object per omega, built on the first request -- which
         every rank makes at the same point of its SCF, since the build is
         collective."""
-        key = '%.6f' % omega
+        key = omega_key(omega)
         rows = self._range_separated.get(key)
         if rows is None:
             rows = DistributedDF(self.mol, auxbasis=self.auxbasis,
@@ -774,30 +801,6 @@ class DistributedDF(df.df.DF):
                                   if want], self.comm))
         add_seconds(self.timings, 'scf_reduce', t0)
         return (next(out) if with_j else None), (next(out) if with_k else None)
-
-    # -- installation --------------------------------------------------------
-
-    def install(self, mf):
-        """Answer this mean field's J/K until `uninstall`."""
-        if mf.with_df is not self:
-            self._replaced = (mf, mf.with_df)
-            mf.with_df = self
-        return self
-
-    def uninstall(self):
-        """Put the mean field's own DF object back, keeping the slice.
-
-        A row slice is not a cderi: a downstream caller that iterates
-        `mf.with_df.loop()` (the GW fit, the solvent screening) would read
-        one rank's rows and call them the tensor. So this object answers J/K
-        only while a distributed stage is running, and what is left on the
-        mean field between stages is the DF the caller handed in.
-        """
-        pair, self._replaced = self._replaced, None
-        if pair is not None:
-            mf, with_df = pair
-            mf.with_df = with_df
-        return self
 
     def release(self):
         """Drop this rank's rows of every tensor it holds, the attenuated
@@ -1167,6 +1170,24 @@ def distributed_handles(mf, comm=None):
     return handles if handles[2] is comm else None
 
 
+def share_distributed(source, *targets):
+    """Hand `source`'s distributed handles (`distributed_handles`) to each of
+    `targets` that holds none: mean fields on the same fit, so a stage that
+    differences two of them reads the one distributed SCF's slices."""
+    handles = getattr(source, '_distributed', None)
+    if handles is None:
+        return
+    for target in targets:
+        if getattr(target, '_distributed', None) is None:
+            target._distributed = handles
+
+
+def distributed_timings(mf):
+    """The stage clock a distributed SCF left on `mf` (`TIMING_KEYS`, on every
+    rank), or None where the mean field did not run over ranks."""
+    return getattr(mf, '_distributed_timings', None)
+
+
 def release_distributed(mf):
     """Drop `mf`'s handles and the slices they hold.
 
@@ -1184,6 +1205,11 @@ def release_distributed(mf):
             part.release()
     del mf._distributed
     return mf
+
+
+#: The continua whose calls answer rank 0's numbers (`_lock_solvent`), held
+#: weakly: the mark dies with the solvent object, which is pyscf's.
+_RANK_LOCKED = weakref.WeakSet()
 
 
 def _lock_solvent(mf, comm, timings):
@@ -1206,7 +1232,7 @@ def _lock_solvent(mf, comm, timings):
     locked it.
     """
     solvent = getattr(mf, 'with_solvent', None)
-    if solvent is None or getattr(solvent, '_rank_locked', False):
+    if solvent is None or solvent in _RANK_LOCKED:
         return None
     saved = []
     for name in _SOLVENT_CALLS:
@@ -1215,7 +1241,7 @@ def _lock_solvent(mf, comm, timings):
         saved.append((name, solvent.__dict__.get(name)))
         setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
                                             timings))
-    solvent._rank_locked = True
+    _RANK_LOCKED.add(solvent)
     return solvent, saved
 
 
@@ -1225,7 +1251,7 @@ def _unlock_solvent(locked):
         return
     solvent, saved = locked
     _restore_methods(solvent, saved)
-    del solvent._rank_locked
+    _RANK_LOCKED.discard(solvent)
 
 
 def _locked_call(func, comm, timings):
@@ -1310,7 +1336,7 @@ def distributed_fock(mf, comm=None, split_grid=True, timings=None, build=True):
 def distributed_df_storage(mf, comm=None):
     """What one rank holds of the fitted tensor under this split, in GB.
 
-    `Base.utils.memory.describe_df_storage` reads the mean field's own DF
+    `Base.utils.parallel.memory.describe_df_storage` reads the mean field's own DF
     object, which is the whole tensor and is not what a rank stores here; and
     after `distributed_mean_field` has put that object back, unbuilt, there is
     nothing resident for it to read. This answers the same question for

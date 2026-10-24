@@ -41,9 +41,9 @@ class QuasiparticleSelection:
 
     def _owns_selection(self, sel):
         """Whether the selection state `sel` was started by this chain."""
-        return sel is not None and sel['owner'] is self.chain._owner
+        return sel is not None and sel['owner'] is self.chain.selection_owner
 
-    def _init_adaptive(self, qp_select, qp_partition):
+    def init_adaptive(self, qp_select, qp_partition):
         """The adaptive explicit set's state: what selects, what was selected.
 
         qp_partition, when given, is the set already: `qp_set` becomes its
@@ -58,7 +58,7 @@ class QuasiparticleSelection:
         # the record of how the partition was chosen (`selection_record`)
         self.chain.conventions.qp_selection = None
         # the selection's working state at the reference geometry
-        self.chain._selecting = None
+        self.chain.selecting = None
         if qp_select is None and qp_partition is None:
             return
         if qp_partition is not None:
@@ -133,7 +133,7 @@ class QuasiparticleSelection:
         return ADAPTIVE_QP_TOL_MEV
 
     @staticmethod
-    def _env_free(values, env):
+    def env_free(values, env):
         """{p: v_p - <p|Sigma^env|p>}: a shift without its orbital's own
         Eq. (18) term, which every orbital outside the set gets on its own."""
         if env is None:
@@ -196,7 +196,7 @@ class QuasiparticleSelection:
                 'added': sorted(explicit - set(floor)),
                 'not_explicit': sorted(set(floor) - explicit)}
 
-    def _select_qp_set(self, mol, mf, x_mo, d, d_sigma, eps, w_aux, shift):
+    def select_qp_set(self, mol, mf, x_mo, d, d_sigma, eps, w_aux, shift):
         """Choose the explicit set out of the candidates, before any root.
 
         One analytic-continuation GW over the window on this chain's own
@@ -205,7 +205,7 @@ class QuasiparticleSelection:
         of every target (and of every root within ADAPTIVE_ROOT_MIX_EV of
         one), then the greedy rule on the raw AC shifts to
         ADAPTIVE_SELECT_MARGIN of the budget. `qp_set` becomes that set; the
-        roots solved next calibrate the continuation (`_refine_selection`).
+        roots solved next calibrate the continuation (`refine_selection`).
         """
         cands = np.asarray(self.chain.resolved.qp_set, int)
         a, z, failed = self.chain.quasiparticles.continuation_shifts(mol, mf, x_mo, d_sigma, cands, shift,
@@ -230,7 +230,7 @@ class QuasiparticleSelection:
                 x_mo, d, eps, eps_ac, w_aux, cands,
                 tuple(dict.fromkeys(t[0] for t in targets)))
         targets = near_root_targets(omegas, targets, ADAPTIVE_ROOT_MIX_EV)
-        free = self._env_free(a, shift)
+        free = self.env_free(a, shift)
         sel_weights = {t: weights[t] for t in targets if t in weights}
         first = select_explicit(eps, self.chain.nocc, cands, free, sel_weights,
                                 self._tol_mev() * ADAPTIVE_SELECT_MARGIN,
@@ -245,8 +245,8 @@ class QuasiparticleSelection:
         # a carried state's degenerate partners, if its block widened here
         for p in first.explicit:
             why.setdefault(int(p), 'carried')
-        self.chain._selecting = {
-            'owner': self.chain._owner, 'candidates': tuple(int(p) for p in cands),
+        self.chain.selecting = {
+            'owner': self.chain.selection_owner, 'candidates': tuple(int(p) for p in cands),
             'ac': a, 'z': z, 'ac_free': free, 'unjudgeable': bad, 'why': why,
             'targets': targets, 'weights': sel_weights, 'omegas': omegas,
             'window_bse': unstable, 'rounds': 0, 'fell_back': None,
@@ -257,7 +257,7 @@ class QuasiparticleSelection:
         self.chain.conventions.set_explicit(self.chain.resolved,
                                       np.asarray(first.explicit, int))
 
-    def _refine_selection(self, eps, ws, shift):
+    def refine_selection(self, eps, ws, shift):
         """After a solve of the selected set at the reference geometry:
         calibrate the continuation on the explicit roots and either grow the
         set (True: solve again) or freeze the partition (False).
@@ -265,7 +265,7 @@ class QuasiparticleSelection:
         A frontier residual beyond ADAPTIVE_AC_CALIBRATION_MAX_EV means the
         continuation is unfit to select, and the whole window is solved.
         """
-        sel = self.chain._selecting
+        sel = self.chain.selecting
         if (self.chain.resolved.qp_partition is not None
                 or not self._owns_selection(sel)):
             return False
@@ -273,7 +273,7 @@ class QuasiparticleSelection:
         explicit = [int(p) for p in self.chain.resolved.qp_set]
         edge = set(sel['edge_holes'])
         roots = {p: float(w) for p, w in zip(explicit, ws)}
-        s_free = self._env_free({p: roots[p] - float(eps[p])
+        s_free = self.env_free({p: roots[p] - float(eps[p])
                                  for p in explicit}, shift)
         tol = self._tol_mev()
         # the production eigenvectors' weights once a check has read them
@@ -332,7 +332,7 @@ class QuasiparticleSelection:
         A warm repeat would put the earlier roots' last bits into this one,
         and the surface would then depend on how many rounds selected it."""
         self.chain.conventions.reopen(self.chain.resolved, explicit)
-        self.chain.quasiparticles._build_cd_grid(self.chain.conventions.nfreq_cd_asked,
+        self.chain.quasiparticles.build_cd_grid(self.chain.conventions.nfreq_cd_asked,
                             np.asarray(self.chain.mf0.mo_energy, float))
 
     def verify_selection(self, shared, solved):
@@ -347,7 +347,7 @@ class QuasiparticleSelection:
         recorded. A target over ADAPTIVE_QP_TOL_MEV adds the blocks that
         break it, at most ADAPTIVE_MAX_ROUNDS times, then the whole window.
         """
-        sel = self.chain._selecting
+        sel = self.chain.selecting
         if not self._owns_selection(sel) or not sel.get('verify_pending'):
             return False
         with self.chain.phase('qp_select.verify'):
@@ -423,7 +423,7 @@ class QuasiparticleSelection:
         why each member is in it, the holes with their probes, the
         continuation and its calibration, every target's budget, and the
         fallback, energies in eV and errors in meV. None for another set."""
-        sel, part = self.chain._selecting, self.chain.resolved.qp_partition
+        sel, part = self.chain.selecting, self.chain.resolved.qp_partition
         if sel is None:
             return self.chain.conventions.qp_selection
         ev, mev = HARTREE_TO_EV, HARTREE_TO_MEV
@@ -538,16 +538,16 @@ class QuasiparticleSelection:
                                'first')
         eps, eps_qp, env = last['eps'], last['eps_qp'], last['shift']
         cands = np.asarray(part.candidates, int)
-        x_mo, d, _, _, _, _, _, d_bare = self.chain._factors_for(mol, mf)
+        x_mo, d, _, _, _, _, _, d_bare = self.chain.factors_for(mol, mf)
         d_sigma = d if d_bare is None else d_bare
         a, z, _ = self.chain.quasiparticles.continuation_shifts(mol, mf, x_mo, d_sigma, cands, env,
                                   'qp_select.ac')
         explicit = [int(p) for p in self.chain.resolved.qp_set]
         # an explicit root carries its Eq. (18) term once, whole, added
         # after its solve
-        s_free = self._env_free({q: float(eps_qp[q] - eps[q])
+        s_free = self.env_free({q: float(eps_qp[q] - eps[q])
                                  for q in explicit}, env)
-        cal = calibrate_ac(eps, self.chain.nocc, self._env_free(a, env), s_free,
+        cal = calibrate_ac(eps, self.chain.nocc, self.env_free(a, env), s_free,
                            cands)
         gate = frontier_residual(cal, eps, self.chain.nocc, explicit,
                                  self.chain.degeneracy_tol) * HARTREE_TO_EV

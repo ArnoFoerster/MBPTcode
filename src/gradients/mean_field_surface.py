@@ -23,7 +23,7 @@ from src.gradients.surface import PotentialEnergySurface
 def mean_field_force(mf):
     """dE/dR of the energy this mean field reported, whatever built its exchange.
 
-    The definition is `isdf_jk.mean_field_skeleton_force`, which keeps
+    The definition is `isdf_mean_field.mean_field_skeleton_force`, which keeps
     `grid_response`: pyscf defaults it to False, dropping d(becke weights)/dR,
     and that force breaks translational invariance by 8.1e-06 Ha/Bohr on
     water/cc-pVDZ/B3LYP against 4.2e-15 with it.
@@ -59,7 +59,7 @@ class MeanFieldSurface(PotentialEnergySurface):
     correlated surface reaches.
     """
 
-    #: The ingredients this surface provides (`surface.INGREDIENTS`).
+    #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field', 'physics'})
 
     def __init__(self, mol, scf_factory, mf=None, environment=None,
@@ -157,8 +157,16 @@ class MeanFieldSurface(PotentialEnergySurface):
         mf = mf or self._mean_field(mol)
         return np.asarray(mean_field_force(mf)), float(mf.e_tot), {}
 
-    def refreeze(self, mol):
+    def refreeze(self, mol, mf=None):
+        """The surface at `mol`; nothing is frozen on it.
+
+        mf: not read; the surface converges its own mean field at `mol`."""
         return MeanFieldSurface(mol, self._scf, environment=self.environment)
+
+    def identity(self):
+        """None: this surface freezes nothing that its forces could be told
+        apart by (`surface_identity`)."""
+        return None
 
     def label(self):
         return 'mean-field ground state'

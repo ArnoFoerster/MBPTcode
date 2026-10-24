@@ -64,6 +64,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import dataclasses
 from dataclasses import fields
 
 import pytest
@@ -71,6 +72,7 @@ from pyscf import gto
 
 from tests.pins import assert_same
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   PhysicsMismatch, QPStates)
 from src.properties.excitations import (SurfaceSpec, calc_adiabatic_excitation,
@@ -106,7 +108,12 @@ MEAN_FIELD = SurfaceSpec(GroundState('dft', 'hf'))
 #: instead -- so a machine with geomeTRIC on its path would otherwise be
 #: running a different optimization from the one these numbers came off. Both
 #: engines write the same record fields, which test_optimize_refreeze gates.
-LOOSE = dict(engine='cartesian', trust=0.05, trust_max=0.1, verbose=False)
+LOOSE = dict(engine='cartesian', verbose=False)
+
+
+def loose_walk(max_cycle):
+    """The walk at half the default trust radius, at most `max_cycle` steps."""
+    return Numerics(walk={'trust': 0.05, 'trust_max': 0.1, 'max_cycle': max_cycle})
 
 
 def water():
@@ -143,7 +150,7 @@ def dense_record(mol):
     """
     # nudge=0: the dissociative S1 holds its shoulder only from the exact start
     return calc_adiabatic_excitation(DENSE, SINGLET, mol, rhf_tight, refreeze=1,
-                                     max_cycle=40, nudge=0, **LOOSE)
+                                     nudge=0, numerics=loose_walk(40), **LOOSE)
 
 
 @pytest.fixture(scope='module')
@@ -155,8 +162,10 @@ def isdf_record(mol):
     -- which is a second full optimization -- is not asked for. The record says
     both things about itself.
     """
-    return calc_adiabatic_excitation(ISDF, SINGLET, mol, rhf_tight, refreeze=0,
-                                     max_cycle=10, **LOOSE)
+    # the cubic surface walks on its own numerics, which carry the walk
+    spec = dataclasses.replace(ISDF, numerics=loose_walk(10))
+    return calc_adiabatic_excitation(spec, SINGLET, mol, rhf_tight, refreeze=0,
+                                     **LOOSE)
 
 
 def test_the_emission_energy_is_the_gap_at_the_relaxed_geometry(dense_record):
@@ -319,7 +328,7 @@ def test_a_singlet_and_a_triplet_on_one_spec_are_what_a_gap_is(mol):
     and the realization list is empty, since both states are on one route.
     """
     gap = calc_adiabatic_gap(DENSE, SINGLET, DENSE, TRIPLET, mol, rhf_tight,
-                             refreeze=0, max_cycle=2, **LOOSE)
+                             refreeze=0, numerics=loose_walk(2), **LOOSE)
     assert gap['realization_differs'] == []
     assert gap['physics']['record'][0].excitation == SINGLET
     assert gap['physics']['record'][1].excitation == TRIPLET

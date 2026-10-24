@@ -32,9 +32,7 @@ from pyscf import dft, gto
 
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.mean_field_response import exchange_channel_skeleton
-from src.SingleReference.LinearResponse.rpa_energy import (exchange_channels,
-                                                           rsh_split,
-                                                           xc_hybrid_coeff)
+from src.Base.pyscf.pyscf_interface import exchange_channels, rsh_split, xc_hybrid_coeff
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
 from tests.isdf_test_grid import g1

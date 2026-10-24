@@ -1,4 +1,4 @@
-"""ISR-side reference for the delta = diagram - ISR track.
+"""ISR-side reference for the delta = diagram - ISR comparison.
 
 Analytic lambda-order coefficients M(omega; n), n = 2..4, of the PRODUCTION
 ISR-ADC(4) content: resolvent expansion of the generated-supermatrix fold
@@ -18,8 +18,7 @@ both sides go through machine precision there, which pins the mapping
 before order 4 is trusted).
 
 Validated against the numerical lambda-fold of the full generated adc4
-supermatrix at the Taylor-fit floor (scripts/diagram_adc/isr_m4.py G3) and
-self-contained on purpose.
+supermatrix at the Taylor-fit floor and self-contained on purpose.
 """
 import numpy as np
 

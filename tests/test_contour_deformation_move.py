@@ -51,8 +51,8 @@ import pytest
 from src.Base.numerics.constants import QP_POLE_OFFSET, QP_WINDOW_Z_MIN
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import contour_deformation as prod
-from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   ov_energies)
+from src.SingleReference.GW.real_screening import ExplicitRealScreening
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.LinearResponse.imaginary_frequency import (
     f_rpa, frequency_factor)
 from src.SingleReference.LinearResponse import space_time as ls_space_time
@@ -299,7 +299,7 @@ def test_the_rpa_frequency_factor_is_untouched():
 
 def assert_same_root(new, ref, where):
     """The production root is the reference loop's where that one is a
-    quasiparticle: both converged to QP_CD_NEWTON_TOL on one equation, from
+    quasiparticle: both converged to QP_ROOT_TOL on one equation, from
     different paths, and the same residue set frozen at it."""
     (w_new, z_new, res_new), (w_ref, z_ref, res_ref) = new, ref
     assert z_ref > QP_WINDOW_Z_MIN, (where, z_ref)

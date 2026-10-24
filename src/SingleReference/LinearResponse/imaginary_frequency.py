@@ -34,7 +34,7 @@ def frequency_factor(d, w, imaginary, eta=0.0, slopes=False):
     eta > 0 broadens them to a/(a^2 + eta^2) - b/(b^2 + eta^2) with a = w - d,
     b = w + d: biased, and off by default. It exists because a residue
     frequency landing on top of a transition makes W and its derivative
-    arbitrarily large -- see `GW.contour_deformation.residue_pole_distance`.
+    arbitrarily large.
 
     slopes=True returns (f, df/dd, df/dw); the contour deformation needs both,
     the screening builds need only f.

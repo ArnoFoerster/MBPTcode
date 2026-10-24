@@ -34,7 +34,7 @@ thioformaldehyde 114 of 1764.
         may be one ulp out: the audit chain starts the pole model's Newton at
         the contour root, production at eps_p pushed off its own pole; both
         reach the same fixed point, and the last accepted step (|step| <
-        QP_CD_NEWTON_TOL) rounds differently from the two starts. Seeding
+        QP_ROOT_TOL) rounds differently from the two starts. Seeding
         production from the contour root would cost a full O(N^4) contour
         solve per state, the expense the pole model exists to avoid.
         `SOP_SEED_TOL_EV` covers the difference.
@@ -478,15 +478,18 @@ def test_validity_table_refuses_and_admits_each_pair():
                         (dict(continuation='sop'), 'accepts')):
         with pytest.raises(ValueError, match=expect):
             calc_qp_energy(mf, state=rec['orbital'], **bad)
-    for keyword in ('w0_cd', 'ntau', 'counts', 'numerics'):
+    for keyword in ('w0_cd', 'counts'):
         with pytest.raises(TypeError, match=f"'spectral'.*{keyword}"):
             calc_qp_energy(mf, state=rec['orbital'], **{keyword: 1})
+    # a grid size is a Numerics setting on every route, refused by name
+    with pytest.raises(TypeError, match='Numerics settings'):
+        calc_qp_energy(mf, state=rec['orbital'], ntau=1)
 
     # the imaginary-frequency realization continues by Pade and refuses the
     # two continuations that read proj(tau), which it never builds
-    assert np.isfinite(calc_qp_energy(mf, state=rec['orbital'],
-                                      mode='imagfrequency', nfreq=20,
-                                      grid='minimax', greedy=True))
+    assert np.isfinite(calc_qp_energy(mf, state=rec['orbital'], mode='imagfrequency',
+                                      grid='minimax', greedy=True,
+                                      numerics=Numerics(imagfreq={'nfreq': 20})))
     with pytest.raises(NotImplementedError, match='solve_rpa_screening_df'):
         calc_qp_energy(mf, state=rec['orbital'], mode='imagfrequency',
                        continuation='cd')
@@ -515,8 +518,7 @@ def test_validity_table_refuses_and_admits_each_pair():
                                       mode='space-time', continuation='sop',
                                       **dict(isdf, numerics=poles),
                                       counts=g1(mf)))
-    for keyword, continuation in (('npade', 'cd'), ('npade', 'laplace'),
-                                  ('nfreq', 'sop'),
+    for keyword, continuation in (('w0', 'cd'), ('grid', 'laplace'),
                                   ('greedy', 'sop')):
         with pytest.raises(TypeError, match=f"'{continuation}'.*{keyword}"):
             calc_qp_energy(mf, state=rec['orbital'], mode='space-time',

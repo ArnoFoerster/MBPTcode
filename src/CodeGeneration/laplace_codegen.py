@@ -1,8 +1,7 @@
 """Generic (rank-agnostic) Laplace-quadrature term-fusion code generator.
 
 Generalizes the hand-derivation in mpn_density_driver_restricted.py's
-_laplace_aaaaaa_contribution (itself ported from density_matrix.py's
-_laplace_aaa_contribution) into an automatic transformation, so the same
+laplace_aaaaaa_contribution into an automatic transformation, so the same
 trick applies to doubles now and to quadruples/quintuples later without
 re-deriving anything by hand per rank/equation.
 
@@ -74,7 +73,7 @@ _FRESH_VIR_POOL = _fresh_pool('ghuvwxyzGHUVWXYZ', VIR_SUBSCRIPTS)
 def lambda_canonical_and_sign(rank):
     """Occ-first external-index orders + signs for fusing a lambda (l{rank})
     amplitude's numerator, one entry per (same-spin, mixed-spin) case, matching
-    mpn_density_driver_restricted._to_l_restricted's signed transpose
+    common/mp_amplitudes.to_l's signed transpose
     l = sign * t.transpose(axes). RANK-GENERAL -- the same rule gives l2, l3,
     l4 (the O(N^8) MP4/ADC5 denominators), l5, ... so a higher-order U-coupling
     that consumes l4/l5 fuses through fuse_amplitude_into_consumer with exactly
@@ -197,10 +196,10 @@ def fuse_amplitude_into_consumer(inner_terms, inner_rank, outer_terms, amp_tag,
     vir-first storage order of a `t{rank}` factor. Supply an explicit order
     when the outer factor is a DIFFERENTLY-laid-out relabel of the same
     numerator, e.g. a lambda `l{rank}` factor (occ-first, per
-    mpn_density_driver_restricted._to_l_restricted's transpose): then
+    common/mp_amplitudes.to_l's transpose): then
     `inner_terms` must be the numerator whose external legs, listed in THIS
     order, correspond position-by-position to the outer l-factor's indices
-    (apply the _to_l sign to the term coefficients yourself before calling).
+    (apply the to_l sign to the term coefficients yourself before calling).
     """
     if canonical is None:
         canonical = amp_out_indices(inner_rank)
@@ -509,8 +508,8 @@ def assemble_laplace_fused(func_name, params, aliases, out_var, out_shape_expr,
 # NESTED fusion: an OUTER amplitude whose OWN numerator carries rank>=3 leaves
 # (e.g. l3^(3), whose order-3 numerator has t3^(2)/t4^(2) leaves). Fusing it
 # without materializing anything rank>=3 needs a fusion NESTED inside a fusion,
-# and two things the flat (uniform-order) fuser never had to track. Resolved
-# 2026-07-23 to machine precision on l3ft2/l3t2 (3,1).
+# and two things the flat (uniform-order) fuser never had to track. Checked
+# to machine precision on l3ft2/l3t2 (3,1).
 # ---------------------------------------------------------------------------
 
 _HR_TAG_RE = re.compile(r'^([lt])([3-9])_([ab]+)\(')       # rank>=3 l/t leaf
@@ -567,7 +566,7 @@ def fuse_nested_numerator(numerator_fn, rank, order, block, _depth=0):
 
     Inner leaves are ALWAYS fused in the pure T-frame (amp_out_indices, sign
     +1): t_numerator_terms_restricted returns T-frame numerators, so the leaf
-    amplitudes are genuine t-amplitudes. The _to_l transpose+sign of an OUTER
+    amplitudes are genuine t-amplitudes. The to_l transpose+sign of an OUTER
     lambda consumer is applied ONLY when that consumer fuses the l-tag (by the
     caller, via fuse_amplitude_into_consumer(..., canonical=lambda_canonical_
     and_sign(...))); it then transposes the leaf's SHARED (external) legs while

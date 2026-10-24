@@ -35,7 +35,6 @@ import numpy as np
 import torch
 
 from src.Base.numerics.constants import RESIDUE_ON_CONTOUR_TOL
-from src.autograd_oracle.frozen import FrozenConventions, dump, load  # noqa: F401
 
 torch.set_default_dtype(torch.float64)
 

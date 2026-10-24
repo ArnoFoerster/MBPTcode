@@ -57,14 +57,12 @@ def test_quasiparticle_order_returns_the_diagnostics(monkeypatch):
     held = {'s2': 0.76, 's2_exact': 0.75, 'stable': True,
             'spin_contaminated': False}
 
-    def energies(mf, out=None, state=None, **kw):
-        out['reference_diagnostics'] = held
-        return {p: {'GW': -10.0 - p} for p in state}
+    def energies(mf, states, spin_channel):
+        return {p: -10.0 - p for p in states}, held
 
-    monkeypatch.setattr(characters, 'calc_qp_energy', energies)
     mol = gto.M(atom='He 0 0 0', basis='6-31g', verbose=0)
     mf = scf.RHF(mol).run()
-    out = characters.quasiparticle_order(mf, 0)
+    out = characters.quasiparticle_order(mf, 0, energies)
     assert out['reference_diagnostics'] is held
 
 
@@ -74,7 +72,7 @@ def test_a_quasi_boson_root_off_its_branch_is_logged(monkeypatch):
     eri = ao2mo.restore(1, ao2mo.kernel(mol, mf.mo_coeff), mf.mo_coeff.shape[1])
     qp = quasi_boson.QPqb(mf.mo_energy, eri, 1)
 
-    def flipped(num, pol, a, w0, out=None):
+    def flipped(num, pol, a, w0, labels=None, out=None):
         out.update(labels=None, largest=(0.1, 0.9), followed=True,
                    flipped=True)
         return -0.55, 0.3
@@ -94,11 +92,8 @@ def test_the_spin_vibronic_coupling_returns_the_couplings_scf_flags(
     monkeypatch.setattr(spin_vibronic, 'occupied_count', lambda mf: 1)
     monkeypatch.setattr(spin_vibronic, 'check_normalization',
                         lambda *a: None)
-    monkeypatch.setattr(spin_vibronic, 'soc_vector',
+    monkeypatch.setattr(spin_vibronic, 'soc_vectors',
                         lambda *a: np.ones(3))
-    monkeypatch.setattr(spin_vibronic, 'evaluated_coupling',
-                        lambda ev, m, n: (np.zeros((natm, 3)),
-                                          {'scf_flags': [dict(flag)]}))
     s1, s2, t1, t2 = (('singlet', 0), ('singlet', 1), ('triplet', 0),
                       ('triplet', 1))
     x = np.eye(2)
@@ -106,6 +101,8 @@ def test_the_spin_vibronic_coupling_returns_the_couplings_scf_flags(
         mf=None, target={k: (k[0], k[1]) for k in (s1, s2, t1, t2)},
         root={k: k[1] for k in (s1, s2, t1, t2)},
         spectrum={'singlet': (np.array([0.1, 0.2]), x, 0 * x),
-                  'triplet': (np.array([0.05, 0.15]), x, 0 * x)})
+                  'triplet': (np.array([0.05, 0.15]), x, 0 * x)},
+        coupling=lambda m, n: (np.zeros((natm, 3)),
+                               {'scf_flags': [dict(flag)]}))
     out = spin_vibronic.spin_vibronic_coupling(ev, None, s1, t1, (s2,), (t2,))
     assert out['scf_flags'] == [flag]

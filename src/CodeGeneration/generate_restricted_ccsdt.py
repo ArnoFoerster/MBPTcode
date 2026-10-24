@@ -70,10 +70,6 @@ import math
 import os
 from itertools import combinations_with_replacement
 
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
 from src.CodeGeneration.pdaggerq_interface import pq_helper, assemble_function, VIR_LETTERS
 from src.CodeGeneration.codegen_common import (
     CC_OUT_DIR, DENSITY_BLOCKS, EINSUM_IMPORTS, density_insert, density_out_idx, density_shape,
@@ -197,8 +193,7 @@ def _lambda_residual_terms(proj, spin_labels, l_ops=('l1', 'l2', 'l3'), rank=Non
     (Lambda3) projector does folding it into add_st_operator's target list
     make the combined target >2-body, which is where add_st_operator's own
     4th-order truncation starts silently dropping T3-dependent diagrams.
-    For rank 1/2 this function is otherwise byte-identical to before
-    (plain add_st_operator, already validated) -- l_ops now defaults to
+    For rank 1/2 this is plain add_st_operator -- l_ops defaults to
     including l3 (for Lambda3 feedback into Lambda1/Lambda2), which changes
     nothing structurally since l3 simply may or may not appear as a leaf in
     the resulting terms depending on what the diagrams actually connect to.

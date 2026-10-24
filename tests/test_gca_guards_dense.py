@@ -10,6 +10,7 @@ from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface
 from src.properties.hessian import surface_hessian
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.gwbse.surface_factory import compare_surfaces
+from src.gradients.surface_identity import composed_identity, grid_record
 
 
 def test_write_record_keeps_arrays_of_a_dotted_sibling_stem(tmp_path):
@@ -65,6 +66,9 @@ class Half:
     def to_record(self):
         return self.record
 
+    def identity(self):
+        return {'class': type(self).__name__, 'record': self.record}
+
 
 class Composed:
     """A ground half and an excited half, as `RPABSESurface` holds them."""
@@ -75,6 +79,9 @@ class Composed:
 
     def total_gradient(self, mol=None, mf=None):
         return self.surface.total_gradient(mol)
+
+    def identity(self):
+        return composed_identity(self, ground=self.ground, excited=self.excited)
 
 
 def test_force_cache_tells_two_composed_surfaces_apart(h2, tmp_path):
@@ -107,6 +114,10 @@ class Single:
 
     def total_gradient(self, mol=None, mf=None):
         return self.surface.total_gradient(mol)
+
+    def identity(self):
+        return {'class': type(self).__name__,
+                'grid': grid_record(self.factorization)}
 
 
 def test_force_cache_tells_two_single_chain_surfaces_apart(h2, tmp_path):

@@ -138,3 +138,15 @@ pytest test_sigma_u4_laplace.py
 # GW-BSE state model in the solvation loop: 11 min on the workstation (2 threads), slow by the 60 s rule
 pytest test_gwbse_solvation_loop.py
 pytest test_generated_committed.py   # regenerates the committed CC, MPn and QDPT modules (pdaggerq; ~8 min)
+# Faddeev-ADC(4): slow by the 60 s rule (cluster wall times: test_faddeev_adc4 254 s, test_adc4_scale_walls 971 s; test_faddeev_adc4_restricted ~40 min on the workstation)
+pytest test_faddeev_adc4.py
+pytest test_faddeev_adc4_restricted.py
+pytest test_adc4_scale_walls.py
+pytest test_distributed_fit.py
+pytest test_tadf_rank_paths.py
+pytest test_isdf_mean_field_gradient.py
+pytest test_one_fit_adjoint.py
+pytest test_adc5_archive_pins.py  # needs the ADC(5) runtime; skips without it
+pytest test_adc5_decoupling_laplace.py  # needs the ADC(5) runtime; skips without it
+pytest test_adc5_union_poles.py  # needs the ADC(5) runtime; skips without it; about 35 minutes with it
+pytest test_laplace_amplitudes.py  # needs the ADC(5) runtime; skips without it

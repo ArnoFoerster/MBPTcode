@@ -1,4 +1,4 @@
-"""The grid BSE adjoint (`LinearResponse.isdf_bse_adjoint`) distributed over
+"""The grid BSE adjoint (`gradients.gwbse.isdf_bse_adjoint`) distributed over
 simulated ranks (`run_simulated`), RHF/cc-pVDZ at 148 points per atom, on the
 chain's own roots and vectors, the factors cut by `SlicedFactors.from_whole`:
 
@@ -31,8 +31,8 @@ from src.Base.numerics.constants import BSE_ADJOINT_TILE_ROWS
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
 from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.SingleReference.LinearResponse import isdf_bse_adjoint
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse import isdf_bse_adjoint
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
 from src.gradients.gwbse import state_following
 from src.gradients.gwbse.excited_state import ExcitedStateChain
@@ -310,7 +310,7 @@ def traced_grid_forces(comm, factory_of):
         numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid'},
                                            layout={'sliced': True})))
     calls = []
-    seeds_of, fold = chain.follower._casida_seeds, chain.reverse.fold_to_nuclei
+    seeds_of, fold = chain.follower.casida_seeds, chain.reverse.fold_to_nuclei
 
     def seeds(shared, solution, n, m=None):
         out = seeds_of(shared, solution, n, m)
@@ -338,7 +338,7 @@ def traced_grid_forces(comm, factory_of):
         calls[-1]['refold'] = refold
         return result
 
-    chain.follower._casida_seeds, chain.reverse.fold_to_nuclei = seeds, folded
+    chain.follower.casida_seeds, chain.reverse.fold_to_nuclei = seeds, folded
     here = gto.M(atom=H2O_DISPLACED, basis=BASIS, verbose=0)
     g_ex, d_ex = chain.excitation_gradient(here)
     g_st, _ = chain.interstate_gradient(0, 1)

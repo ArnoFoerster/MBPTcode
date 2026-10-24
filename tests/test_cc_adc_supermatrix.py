@@ -32,6 +32,7 @@ from src.SingleReference.ADC.cc_adc_amplitudes import (
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted)
 from src.Base.numerics.constants import HARTREE_TO_EV, QP_WINDOW_Z_MIN
+from tests.adc_common import water_df  # noqa: F401  (fixture)
 from tests.generated_runtime import requires_runtime
 
 pytestmark = requires_runtime(4)
@@ -78,7 +79,7 @@ def test_restricted_and_spinorbital_hooks_give_the_same_ip(water):
     gen = BuildSuperMatrixADCn(np.repeat(eps, 2), get_antisymmetrized_spin_eri(eri),
                                2 * nocc, amplitudes=cc_amplitudes_spinorbital(mf))
     H = gen.build_supermatrix_adc3(
-        static_correction=ADCSolverRestricted._embed_static_correction_spin(sc))
+        static_correction=ADCSolverRestricted.embed_static_correction_spin(sc))
     w, v = np.linalg.eigh(H)
     Z = np.sum(v[:2 * len(eps), :] ** 2, axis=0)
     ip_spinorbital = min(-x for x, z in zip(w, Z) if -x > 0 and z > QP_WINDOW_Z_MIN) * HARTREE_TO_EV
@@ -110,18 +111,6 @@ def test_inapplicable_combinations_raise(water, opts, match):
         ADCSolver(water, amplitudes=cc_amplitudes_restricted(water), **opts)
 
 
-@pytest.fixture(scope='module')
-def water_df():
-    """DF mean field: the production route's starting point (and the only one
-    that can reach aug-cc-pVQZ)."""
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
-                basis='cc-pvdz', verbose=0)
-    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    mf.conv_tol = 1e-12
-    mf.run()
-    return mf
-
-
 def test_gfree_df_route_equals_the_dense_route_on_the_same_integrals(water_df):
     """The g-free DF CC-ADC(3) -- the only route that fits aug-cc-pVQZ, where
     the dense spin-block ERI is 15-115 GB. Compared against the DENSE route
@@ -149,13 +138,17 @@ def test_gfree_df_route_equals_the_dense_route_on_the_same_integrals(water_df):
 
 
 def test_gfree_construction_refuses_what_it_cannot_do(water_df):
-    """g-free means no MBPT amplitude pool and no EN dressing (both read dense
-    g slices) -- both must raise at construction, not compute something else."""
+    """g-free means no EN dressing (the EN shifts read dense g slices): it must
+    raise at construction, not compute something else. The MBPT amplitude
+    pool is no longer refused: a g-free solver builds it from the DF
+    numerators."""
     eps = get_orbital_energies(water_df, representation='spatial')
     B = DFIntegrals.from_scf(water_df.mol, water_df).B_aa
     nocc = water_df.mol.nelectron // 2
-    with pytest.raises(ValueError, match='amplitudes='):
-        BuildSuperMatrixADCnRestricted(eps, None, None, None, nocc, B_aa=B)
+    BuildSuperMatrixADCnRestricted(eps, None, None, None, nocc, B_aa=B)
+    with pytest.raises(ValueError, match='no EN hook'):
+        BuildSuperMatrixADCnRestricted(eps, None, None, None, nocc, B_aa=B,
+                                       u2_denom_dress={'hh': True})
     with pytest.raises(ValueError, match='pass one'):
         BuildSuperMatrixADCnRestricted(
             eps, None, None, None, nocc, B_aa=B,

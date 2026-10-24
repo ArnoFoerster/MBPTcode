@@ -254,30 +254,6 @@ def minimax_points_for_ranges(ratios, target=DEFAULT_TAU_TARGET,
     return npoints, worst
 
 
-def resolve_grid_size(value, ratios, target=DEFAULT_TAU_TARGET,
-                      npoints_max=34):
-    """An explicit point count, or resolve the 'auto'/None SENTINEL.
-
-    The space-time route carries sentinels -- `GW.space_time.DEFAULT_NTAU` and
-    `DEFAULT_NFREQ` -- and a sentinel forwarded into a grid constructor
-    produces garbage rather than an error. Resolving them is therefore a
-    shared concern and gets one entry point.
-
-    Returns (npoints, worst_error), with worst_error None when an explicit
-    count was passed and nothing was measured.
-
-    NOT covered here, deliberately: a size defined by RELATION to another
-    grid rather than by accuracy -- `DEFAULT_NFREQ = 'auto'` resolves to the
-    already-resolved ntau. That is a one-line rule belonging to the caller
-    that knows both grids, and folding it in here would make this function
-    silently order-dependent.
-    """
-    if value is None or (isinstance(value, str) and value.lower() == 'auto'):
-        return minimax_points_for_ranges(ratios, target=target,
-                                         npoints_max=npoints_max)
-    return int(value), None
-
-
 def _psi_and_matrix(kind, tau, omega, i, x):
     """GreenX calculate_psi_and_mat_A: the fit target psi(x) and design matrix.
 
@@ -436,7 +412,7 @@ def sigma_fit_ranges(eps, nocc, mu=None, intermediate=None):
       |eps_m - mu| + Omega_S and reach far beyond either factor's range.
     """
     eps = np.asarray(eps)
-    # occ/virt taken by plain slicing, not `SingleReference.base.get_occ_virt_indices`:
+    # occ/virt taken by plain slicing, not `Base.orbital_spaces.get_occ_virt_indices`:
     # importing that package back into Base would close an import cycle, since
     # GW.imaginary_time imports this module.
     occ, virt = eps[:nocc], eps[nocc:]
@@ -470,20 +446,6 @@ def sigma_transforms(eps, nocc, tau_points, omega_in, omega_out, mu=None,
     C = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS)[0]
     S = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS)[0]
     return Ctw, C, S
-
-
-def sigma_transform_error(eps, nocc, tau_points, omega_out, mu=None,
-                          intermediate=None):
-    """(worst Remez residual, e_max/e_min) of the two tau -> omega fits.
-
-    The measurable a caller guards a hand-set grid size on: point count alone
-    does not say whether a grid resolves a system, since the accuracy is set
-    by the interplay of ntau with rS, the self-energy's range.
-    """
-    rS = sigma_fit_ranges(eps, nocc, mu=mu, intermediate=intermediate)[1]
-    worst = max(minimax_transform_weights(kind, tau_points, omega_out, *rS)[1]
-                for kind in (COSINE_TW, SINE_TW))
-    return worst, rS[1] / rS[0]
 
 
 class TimeFrequencyGrid:

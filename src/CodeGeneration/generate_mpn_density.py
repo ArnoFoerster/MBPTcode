@@ -61,23 +61,16 @@ rank suffices at n=4 (T1^(4) only).
 
 Energy-correction term: T_rank^(order)'s "- sum_k E^(k) T_rank^(order-k)"
 piece (see the recursion above) is bare amplitude reuse, no Wick contraction
-needed -- but it was harmlessly always zero for order<=3 (T_rank^(1)=0 for
-rank!=2, and the order<=3 sum only ever multiplies E^(2) by T_rank^(1)), so
-no earlier version of this module or its driver actually computed it. It
-stops being zero at order=4 in two places this module's own n=2/3-validated
-equations had NEVER exercised: T2^(3) (needs -E^(2)*T2^(1), since order=3's
-sum is E^(2)*T2^(order-2)=E^(2)*T2^(1) which is nonzero) and T1^(4) (needs
--E^(2)*T1^(2)). T2^(3) was silently missing this term all along -- harmless
-for n<=3 density (T2^(3) is never itself consumed there) but NOT harmless
-for n=4, where M^(4)'s <Psi1|op|Psi3> term consumes T2^(3) as a bra. See
-mpn_density_driver.py's compute_E/MP4 methods for where this is now applied.
+needed. T_rank^(1)=0 for rank!=2, so for order<=3 the sum only multiplies
+E^(2) by T_rank^(1); the term is nonzero in T2^(3) (needs -E^(2)*T2^(1),
+since order=3's sum is E^(2)*T2^(order-2)=E^(2)*T2^(1)) and T1^(4) (needs
+-E^(2)*T1^(2)). The n<=3
+density never consumes T2^(3) itself, but at n=4 M^(4)'s <Psi1|op|Psi3> term
+consumes T2^(3) as a bra. mpn_density_driver.py's compute_E/MP4 methods
+apply the term.
 """
 import os
 import re
-
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.CodeGeneration.pdaggerq_interface import raw_terms_to_einsum, raw_terms_to_einsum_freeing
 from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
@@ -361,7 +354,7 @@ def generate_amplitude_numerator_module(orders, basename, extra_connect_by_order
     The module carries a RANKS_PRESENT manifest ({order: [ranks]}, the
     pdaggerq survival census at generation time) so the RUNTIME can
     distinguish 'pruned by pdaggerq' from 'never generated' without importing
-    pdaggerq (the l3f lesson: a missing function is ambiguous by itself).
+    pdaggerq (a missing function is ambiguous by itself).
     Complete-per-order: every rank in ranks_present(order) is emitted even if
     another module already carries one of them (derivation is deterministic,
     so the duplicate is byte-identical content, and per-order completeness is
@@ -420,10 +413,8 @@ _ADJ_BOUND = 1  # e1(...) density insertion is 1-body: bridges ph-rank by <=1
 
 
 def density_pieces_for_order(order, extra_ranks_by_order=None):
-    """General M^(n) cross-density-term piece list for ANY order -- replaces
-    the per-order hand-typed piece lists this module's __main__ used to carry
-    (m2_*/m3_*/m4_*): a per-order term list is exactly the anti-pattern to
-    avoid.
+    """General M^(n) cross-density-term piece list for ANY order (no
+    per-order hand-typed piece lists m2_*/m3_*/m4_*).
 
     Enumerates every bra/ket order split a+b=order (a,b>=0; a==b==0 skipped,
     that's gamma_HF, added by the driver, not a cross term), using
@@ -431,14 +422,11 @@ def density_pieces_for_order(order, extra_ranks_by_order=None):
     1-body e1(...) insertion can actually connect: |bra_rank - ket_rank| <=
     _ADJ_BOUND. a==0 or b==0 means that side is literally Phi0 (rank 0), so
     the filter automatically reduces to "only the rank-1 component of the
-    other side survives" -- this is what m2_20/m4_40's existing hand
-    restriction to bra_ranks=[1] already encoded matches by hand, now a
-    consequence of one rule instead of a per-order judgment call. Verified
-    (when the per-order lists were replaced) to reproduce every existing
-    order-2/3/4 piece's raw pdaggerq terms exactly, with m3_12/m3_21 (drop
-    the rank-4 side) and m3_30/m3_03 (drop ranks 2,3) losing only
-    already-proven-unused parameters (see mpn_density_driver.py's
-    compute_delta_gamma3 comments) -- never previously-kept content.
+    other side survives" (for m2_20/m4_40 this is bra_ranks=[1]), one rule
+    instead of a per-order judgment call. It reproduces every order-2/3/4
+    piece's raw pdaggerq terms exactly, with m3_12/m3_21 (drop the rank-4
+    side) and m3_30/m3_03 (drop ranks 2,3) losing only parameters proven
+    unused (see mpn_density_driver.py's compute_delta_gamma3 comments).
 
     extra_ranks_by_order: optional {order: [ranks]} of rank > MAX_RANK
     content independently known nonzero via its own pdaggerq census --
@@ -486,10 +474,10 @@ def density_pieces_for_order(order, extra_ranks_by_order=None):
 def generate():
     """Write OUT_DIR/mpn_density_pieces.py."""
 
-    # --- amplitude numerators: T2^(1); T1^(2),T2^(2),T3^(2),T4^(2) (T4^(2) new
-    # for MP4's N^(4)/M^(4)); T1^(3),T2^(3),T3^(3) (T2^(3) now gets its
-    # previously-missing -E^(2)*T2^(1) correction applied numerically in the
-    # driver, see module docstring); T1^(4) (new, MP4's M^(4) boundary term).
+    # --- amplitude numerators: T2^(1); T1^(2),T2^(2),T3^(2),T4^(2) (T4^(2)
+    # for MP4's N^(4)/M^(4)); T1^(3),T2^(3),T3^(3) (T2^(3) gets its
+    # -E^(2)*T2^(1) correction applied numerically in the driver, see module
+    # docstring); T1^(4) (MP4's M^(4) boundary term).
     # Calling generate_amplitude_numerators([1,2,3]) under MAX_RANK=4 would
     # also derive ranks_present(3)'s rank-4 member (T4^(3)) as an unwanted
     # side effect of that blanket loop (see module docstring's scheduling

@@ -20,7 +20,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.properties.optimize import relax
+from src.properties.optimize import derived_walk, relax
 from src.gradients.mean_field_surface import MeanFieldSurface  # noqa: E402
 
 DISTORTED = 'O 0 0 0.25; H 0 0.92 -0.40; H 0 -0.70 -0.52'
@@ -43,11 +43,12 @@ def water():
 
 def walk(mol, engine, hess_init=None):
     """(minimum, info) of the Hartree-Fock relaxation from `mol`."""
+    surface = MeanFieldSurface(mol, factory)
     extra = {} if hess_init is None else {'hess_init': hess_init}
     if engine == 'cartesian':
-        extra.update(max_cycle=60)
-    return relax(MeanFieldSurface(mol, factory), mol, engine=engine,
-                 verbose=False, **extra)
+        extra.update(numerics=derived_walk(surface, 'a capped test walk',
+                                           max_cycle=60))
+    return relax(surface, mol, engine=engine, verbose=False, **extra)
 
 
 @pytest.mark.parametrize('engine', ['cartesian', 'geometric'])

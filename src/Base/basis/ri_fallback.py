@@ -83,12 +83,6 @@ def element_auxbasis(element, basis, auxbasis):
     return ISDF_AUX_FALLBACK.get((element, basis), paired_auxbasis(basis))
 
 
-def atomic_auxbasis(element, basis):
-    """Auxiliary set `element`'s atomic grid is fitted in at `basis`: the substitute or `<basis>-ri`."""
-    basis = str(basis).lower()
-    return ISDF_AUX_FALLBACK.get((element, basis), paired_auxbasis(basis))
-
-
 def fallback_auxbasis(basis):
     """Register the composite auxiliary set of `basis` in this process and return its name."""
     basis = str(basis).lower()

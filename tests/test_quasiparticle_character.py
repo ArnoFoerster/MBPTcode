@@ -36,6 +36,7 @@ from src.gradients.gwbse.conventions import ConventionsWriteRefused
 from src.gradients.gwbse.rpa_bse_surface import MeanFieldQPSurface
 from src.properties.characters import (quasiparticle_character,
                                        quasiparticle_order, surface_order)
+from src.gradients.gwbse.diagnostics import gw_qp_energies
 from src.gradients.state_identity import orbital_fingerprint, track_orbital
 from src.Base.numerics.numerics import numerics_of
 from tests.blas_bar import assert_same
@@ -101,14 +102,14 @@ def test_order_audit():
     nocc = mol.nelectron // 2
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        lumo = quasiparticle_order(mf, nocc, counts=g1(mf))
-        homo = quasiparticle_order(mf, nocc - 1, counts=g1(mf))
+        lumo = quasiparticle_order(mf, nocc, gw_qp_energies(counts=g1(mf)))
+        homo = quasiparticle_order(mf, nocc - 1, gw_qp_energies(counts=g1(mf)))
     assert not lumo['reordered'] and not homo['reordered']
     with pytest.warns(RuntimeWarning, match='not the lowest-energy attachment'):
-        second = quasiparticle_order(mf, nocc + 1, counts=g1(mf))
+        second = quasiparticle_order(mf, nocc + 1, gw_qp_energies(counts=g1(mf)))
     assert second['reordered'] and second['lowest_process'] == nocc
     with pytest.warns(RuntimeWarning, match='not the lowest-energy removal'):
-        quasiparticle_order(mf, nocc - 2, counts=g1(mf))
+        quasiparticle_order(mf, nocc - 2, gw_qp_energies(counts=g1(mf)))
 
     class Surface:
         """The two things `surface_order` reads of a charged surface."""
@@ -118,7 +119,7 @@ def test_order_audit():
             return mol, mf
 
     with pytest.warns(RuntimeWarning, match='not the lowest-energy attachment'):
-        assert surface_order(Surface(), counts=g1(mf))['lowest_process'] == nocc
+        assert surface_order(Surface(), gw_qp_energies(counts=g1(mf)))['lowest_process'] == nocc
 
 
 def test_unrestricted_and_refusals():

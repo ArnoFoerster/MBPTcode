@@ -172,7 +172,7 @@ def test_un_apply_equals_the_dense_u4(system):
     label, r, pieces, dense, _ = system
     rng = np.random.default_rng(5)
     for sec in ('IP', 'EA'):
-        n1 = len(r._sector_configs(sec)['K'])
+        n1 = len(r.sector_configs(sec)['K'])
         for _ in range(2):
             p, w = rng.standard_normal(r.norb), rng.standard_normal(n1)
             f_new = _un_apply_fwd(r, sec, pieces[sec], s2r, p)
@@ -202,7 +202,7 @@ def test_un_apply_equals_engine_orders_2_to_4(system):
              (0, 1): {m: Ss[m].T for m in Ss if Ss[m] is not None},
              (1, 1): {0: np.eye(n1)}}
         for m in (2, 3):
-            _, S_m = r._class_raw_S(sec, m)
+            _, S_m = r.class_raw_S(sec, m)
             if S_m is not None:
                 S[(1, 1)][m] = S_m
         blk, _ = isr_effective_blocks(H, S, {0: norb, 1: n1}, 4, norm=normr)
@@ -217,7 +217,7 @@ def test_un_apply_equals_engine_orders_2_to_4(system):
 def test_u_dot_orb_order_is_u4_at_order4(system):
     label, r, _, dense, series = system
     rng = np.random.default_rng(9)
-    A = r._amps_order(max_order=4)
+    A = r.amps_order(max_order=4)
     for sec in ('IP', 'EA'):
         p = rng.standard_normal(r.norb)
         got = u_dot_orb_order(r, sec, p, 4, s2r)

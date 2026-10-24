@@ -14,8 +14,7 @@ from src.Solvers.active_space import solve
 
 def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
                                 max_pt_order=2, max_vertex=3,
-                                shift=None, spin_free=False, evaluator='auto',
-                                active_space=None):
+                                shift=None, spin_free=False, active_space=None):
     """Build the QDPT downfolded effective Hamiltonian for an active space. Returns (g_eff, space).
 
     g_eff: dict body-rank n -> rank-n interaction tensor over active orbitals
@@ -24,21 +23,10 @@ def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
     act_vir_idx, spin_free, active_space.
     shift: Brillouin-Wigner energy shift in the PT denominators (None = plain).
 
-    evaluator: 'auto' or 'generated', the generated evaluators (equivalent);
-    'handwritten', the amplitude-form route with Epstein-Nesbet dressing, is
-    not available in this code base and raises.
     active_space: an src.SingleReference.common.active_space.ActiveSpace in place of the two
     contiguous window counts; its MOs are permuted to match, which is the only
     way to downfold onto a window the energy ordering does not produce.
     """
-    if evaluator not in ('auto', 'generated', 'handwritten'):
-        raise ValueError(f"evaluator={evaluator!r}; expected 'auto', "
-                         "'generated' or 'handwritten'")
-    if evaluator == 'handwritten':
-        raise NotImplementedError(
-            "the hand-written amplitude-form downfolding (with Epstein-Nesbet "
-            "dressing) is not available; use evaluator='generated'.")
-
     if spin_free:
         g_ints, h1, eps, occ_idx, act_idx, virt_idx = get_system_data_spatial(
             mol, mf, n_occ_spatial, n_act_spatial, active_space=active_space)
@@ -90,7 +78,7 @@ def _get_evaluator(max_pt_order, max_vertex, spin_free):
 def run_pipeline(max_pt_order=2, max_vertex=3, symmetrize=True, mol=None,
                  mf=None, n_occ_spatial=0, n_act_spatial=2,
                  solver='openfermion', shift=None,
-                 spin_free=False, evaluator='auto', nroots=1,
+                 spin_free=False, nroots=1,
                  active_space=None, dmrg_bond_dim=500, dmrg_n_sweeps=20):
     """Downfold and solve in one call (build_effective_hamiltonian +
     src.Solvers.active_space.solve).
@@ -100,7 +88,7 @@ def run_pipeline(max_pt_order=2, max_vertex=3, symmetrize=True, mol=None,
     g_eff, space = build_effective_hamiltonian(
         mol, mf, n_occ_spatial=n_occ_spatial, n_act_spatial=n_act_spatial,
         max_pt_order=max_pt_order, max_vertex=max_vertex, shift=shift,
-        spin_free=spin_free, evaluator=evaluator, active_space=active_space)
+        spin_free=spin_free, active_space=active_space)
 
     return solve(solver, g_eff, space['n_orbs'], space['n_elec_active'],
                  space['act_idx'], space['act_occ_idx'], space['act_vir_idx'],

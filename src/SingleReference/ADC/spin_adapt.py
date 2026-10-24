@@ -24,7 +24,7 @@ the subspace-invariance identity ||H T - T (T^T H T)|| ~ 0 (see tests).
 
 Convention notes (locked in by the invariance test, not by trust):
 - interleaved spin orbitals, alpha=even (Sz=+1/2), beta=odd -- matching
-  ADCSolverRestricted._get_spin_orbital_solver's np.repeat embedding.
+  ADCSolverRestricted.spin_orbital_solver's np.repeat embedding.
 - config -> Fock-state map (operator strings applied right-to-left to
   |HF>): 2h1p (i<j, a): a+_a a_j a_i; 2p1h (i, a<b): a+_a a+_b a_i;
   3h2p (i<j<k, a<b): a+_a a+_b a_k a_j a_i; 3p2h (i<j, a<b<c):
@@ -137,13 +137,13 @@ def _class_configs(solver, nocc, cls):
     """The solver's config list for `cls` as an (ncfg, k) int array of spin
     orbital indices, in the solver's own ordering."""
     if cls == '2h1p':
-        return np.stack(solver._configs_2h1p(nocc), axis=1)
+        return np.stack(solver.configs_2h1p(nocc), axis=1)
     if cls == '2p1h':
-        return np.stack(solver._configs_2p1h(nocc), axis=1)
+        return np.stack(solver.configs_2p1h(nocc), axis=1)
     if cls == '3h2p':
-        return np.stack(solver._configs_3h2p(nocc), axis=1)
+        return np.stack(solver.configs_3h2p(nocc), axis=1)
     if cls == '3p2h':
-        return np.stack(solver._configs_3p2h(nocc), axis=1)
+        return np.stack(solver.configs_3p2h(nocc), axis=1)
     raise ValueError(cls)
 
 
@@ -221,7 +221,7 @@ def build_class_T(solver, nocc, cls, memoize=True):
     starts = np.where(newgrp)[0]
     ends = np.append(starts[1:], len(gorder))
     groups_list = [gorder[s:e] for s, e in zip(starts, ends)]
-    groups_list.sort(key=lambda m: m[0])   # legacy order: by smallest member
+    groups_list.sort(key=lambda m: m[0])   # order: by smallest member
 
     # K (orbital-energy sum) per config -- same for all members of a group
     if cls == '2h1p':
@@ -446,7 +446,7 @@ class ADCSolverCSF(NoccCache):
         # direction (unit z_p at each alpha orbital), norb (spatial) calls
         # total -- this is the dense/validation seed path, not the hot
         # matrix-free one.
-        ing = self.spin._build_matrix_free_ingredients(nocc)
+        ing = self.spin.matrix_free_ingredients(nocc)
         iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
         nvirt = ing['nvirt']
         alpha_orbs = np.arange(0, self.spin.norb, 2)
@@ -502,7 +502,7 @@ class ADCSolverCSF(NoccCache):
         T = self._T(nocc)
         T_SD = T['SD']
         aop_spin, _, _ = self.spin.build_matrix_free_operator(
-            nocc, static_correction=base.ADCSolverRestricted._embed_static_correction_spin(
+            nocc, static_correction=base.ADCSolverRestricted.embed_static_correction_spin(
                 static_correction))
 
         def aop(z):
@@ -577,7 +577,7 @@ class ADCSolverCSF(NoccCache):
         """First-order C block in the CSF basis (T_cls^T C_spin T_cls),
         cached -- ~16x smaller than the spin-orbital block and assembled
         without ever forming it (build_supermatrix's dense CSF assembly)."""
-        block_fn = (self.spin._C_2h1p_block if cls == '2h1p'
-                    else self.spin._C_2p1h_block)
+        block_fn = (self.spin.C_2h1p_block if cls == '2h1p'
+                    else self.spin.C_2p1h_block)
         return self._cached(f'_C1st_csf_{cls}', nocc,
                             lambda: self._sandwich(nocc, cls, cls, block_fn))

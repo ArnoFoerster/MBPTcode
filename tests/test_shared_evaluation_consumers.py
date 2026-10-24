@@ -26,6 +26,7 @@ from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.properties.optimize import derived_walk
 from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID,
                                          SCF_DIFFERENTIABLE_CONV_TOL,
@@ -221,7 +222,8 @@ def relaxed_before(surface, mol, **kw):
 @pytest.mark.parametrize('spin', ['singlet', 'triplet'])
 def test_relax_state_takes_one_forward_at_the_minimum(spin):
     proto = prototype('hf-davidson-grid', molecule())
-    walk = dict(engine='cartesian', max_cycle=2, verbose=False)
+    walk = dict(engine='cartesian', verbose=False,
+                numerics=derived_walk(proto, 'a two-step walk', max_cycle=2))
     before = relaxed_before(fresh(proto, (spin, 0)), None, **walk)
     chain = fresh(proto, (spin, 0))
     record = relax_state(chain, None, **walk)

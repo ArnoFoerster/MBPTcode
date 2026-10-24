@@ -109,6 +109,7 @@ import numpy as np
 from pyscf import lib
 from pyscf.data import radii as pyscf_radii
 
+from src.Base.numerics.constants import PBC_K_HEAD_TOL
 from src.environments.solvent_screening import resolve_optical_eps
 from src.SingleReference.Periodic.pbc_rpa import (coulomb_metric_inv_sqrt,
                                                   gspace_ri_factors,
@@ -118,8 +119,6 @@ from src.SingleReference.Periodic.pbc_integrals import (
 
 einsum = lib.einsum
 
-#: |k| below which the 2pi/k head is replaced by its Brillouin-zone-cell average.
-_K_HEAD_TOL = 1e-8
 
 
 class SlabDielectricEnvironment:
@@ -209,7 +208,7 @@ class SlabDielectricEnvironment:
         """
         kpar = np.asarray(kpar, dtype=float)
         b_top, b_bot = self.beta
-        small = kpar < _K_HEAD_TOL
+        small = kpar < PBC_K_HEAD_TOL
         safe_k = np.where(small, 1.0, kpar)
         two_pi_over_k = np.where(small, head_value, 2.0 * np.pi / safe_k)
         s = np.exp(-2.0 * kpar * self.z_half_width)
@@ -242,7 +241,7 @@ class SlabDielectricEnvironment:
         out = []
         for sign in (+1, -1):
             denom = kpar - 1j * sign * gz
-            degenerate = np.abs(denom) < _K_HEAD_TOL
+            degenerate = np.abs(denom) < PBC_K_HEAD_TOL
             num = np.exp(-1j * sign * gz * z0) - s * np.exp(1j * sign * gz * z0)
             out.append(np.where(degenerate, 2.0 * z0 + 0j,
                                 num / np.where(degenerate, 1.0, denom)) * phase)
@@ -282,7 +281,7 @@ def reaction_kernel_mixed(env, kpar, z, zp, head_value=None):
     zetap = np.asarray(zp, dtype=float)[None, None, :] - env.z_center
     b_top, b_bot = env.beta
     z0 = env.z_half_width
-    small = kpar < _K_HEAD_TOL
+    small = kpar < PBC_K_HEAD_TOL
     safe = np.where(small, 1.0, kpar)
     two_pi_over_k = (2.0 * np.pi / safe if head_value is None
                      else np.where(small, head_value, 2.0 * np.pi / safe))

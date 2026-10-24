@@ -31,13 +31,14 @@ import contextlib
 import functools
 import itertools
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from src.Base.utils.parallel.threads import (BlasLimit, blas_single_threaded, pool_is_ours,
-                                             row_map)
+                                             resolve_workers, row_map)
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
@@ -67,12 +68,9 @@ _STREAM_LOCK = threading.Lock()
 
 
 def _threads():
-    """The thread pin, OMP_NUM_THREADS, else the cores this process may run on."""
-    pin = os.environ.get('OMP_NUM_THREADS', '')
-    if pin.isdigit() and int(pin) > 0:
-        return int(pin)
-    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') \
-        else (os.cpu_count() or 1)
+    """The thread pin: the process's thread budget (`resolve_workers`), not capped
+    by a count of work items, since it keys row_map's one executor."""
+    return resolve_workers(None, sys.maxsize)
 
 
 def ew(op, a, b, out=None):
@@ -184,7 +182,7 @@ def stream(fn, n, width, workers=None):
     return functools.reduce(_add, parts)
 
 
-# kept for ee_fold/ee_gw_pieces
+# kept for ee_gw_pieces, which imports them from here
 _ew, _ksum, _slab_plan, _stream = ew, ksum, slab_plan, stream
 
 
@@ -293,12 +291,6 @@ class SB:
             return SB({k: ew(np.true_divide, v, arr.get(k))
                        for k, v in self.blocks.items() if arr.get(k) is not None})
         return self._map(lambda v: ew(np.true_divide, v, arr))
-
-    def spin_flip(self):
-        """The closed-shell involution alpha <-> beta."""
-        tr = str.maketrans('ab', 'ba')
-        return SB({k.translate(tr): v for k, v in self.blocks.items()},
-                  parity=self.parity)
 
 
 _FLIP = str.maketrans('ab', 'ba')

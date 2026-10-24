@@ -37,12 +37,13 @@ from src.SingleReference.common.mp_amplitudes import to_l
 
 
 def cc_amplitudes_spinorbital(mf, method='ccsd', frozen=None,
-                              return_energy=False, **cc_opts):
+                              return_energy=False, out=None, **cc_opts):
     """{'t1', 't2', 'l1', 'l2'} for the spin-orbital amplitude pool, from a
     converged RHF-based CCSD/CCD. `l*` are the adjoints of `t*` (see the
     module docstring on Hermiticity), not the CC Lambda amplitudes.
-    return_energy=True gives (pool, e_corr), the CC correlation energy."""
-    mycc = run_cc(mf, method, frozen, **cc_opts)
+    return_energy=True gives (pool, e_corr), the CC correlation energy; out
+    receives 'converged' (run_cc)."""
+    mycc = run_cc(mf, method, frozen, out=out, **cc_opts)
     t1 = _cc_addons.spatial2spin(mycc.t1).T                  # (nv, no)
     t2 = _cc_addons.spatial2spin(mycc.t2).transpose(2, 3, 0, 1)   # (nv,nv,no,no)
     pool = {'t1': t1, 'l1': to_l(t1, 1),
@@ -63,10 +64,10 @@ def _restricted_pool(t1_aa, t2_aaaa, t2_abab):
 
 
 def cc_amplitudes_restricted(mf, method='ccsd', frozen=None,
-                             return_energy=False, **cc_opts):
+                             return_energy=False, out=None, **cc_opts):
     """Spin-block twin of cc_amplitudes_spinorbital, keyed for the restricted
     amplitude pool."""
-    mycc = run_cc(mf, method, frozen, **cc_opts)
+    mycc = run_cc(mf, method, frozen, out=out, **cc_opts)
     t1_aa = np.asarray(mycc.t1).T                            # (nv, no)
     t2_abab = np.asarray(mycc.t2).transpose(2, 3, 0, 1)      # (nv,nv,no,no)
     t2_aaaa = t2_abab - t2_abab.transpose(1, 0, 2, 3)

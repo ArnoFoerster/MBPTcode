@@ -70,7 +70,7 @@ from src.Base.step_failed import StepFailed
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.SingleReference.GW.qp_selection import AdaptivePartition
 from src.gradients.evaluation import geometry_hash
-from src.gradients.state_identity import ORBITAL_IDENTITY, body_overlap
+from src.gradients.state_identity import body_overlap
 
 
 class ConventionsLost(StepFailed):

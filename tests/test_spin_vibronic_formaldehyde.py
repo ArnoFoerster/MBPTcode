@@ -36,8 +36,8 @@ from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.state_manifold import StateManifold
 from src.gradients.state_identity import mo_overlap, state_overlap
-from src.properties.spin_orbit import soc_operator_mo
-from src.properties.spin_vibronic import soc_vector, spin_vibronic_coupling
+from src.properties.spin_orbit import soc_operator_mo, soc_vectors
+from src.properties.spin_vibronic import spin_vibronic_coupling
 from tests.isdf_test_grid import g1_numerics
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -88,9 +88,9 @@ def displaced_elements(man, ev, mol, u, h):
     h_mo = soc_operator_mo(e.mf, m)
     _, xs, ys = e.spectrum['singlet']
     _, xt, yt = e.spectrum['triplet']
-    single = ss * st * soc_vector(h_mo, nocc, (xs[:, js], ys[:, js]),
+    single = ss * st * soc_vectors(h_mo, nocc, (xs[:, js], ys[:, js]),
                                   (xt[:, jt], yt[:, jt]))
-    block = sum(float((soc_vector(h_mo, nocc, (xs[:, 0], ys[:, 0]),
+    block = sum(float((soc_vectors(h_mo, nocc, (xs[:, 0], ys[:, 0]),
                                   (xt[:, j], yt[:, j])) ** 2).sum())
                 for j in (0, 1))
     return single, block

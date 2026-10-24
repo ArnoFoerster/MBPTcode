@@ -9,8 +9,8 @@ numerator / D_R, and 1/D_R = -sum_tau sigma_tau exp(D_R tau) on a minimax
 grid; the generic fuser (laplace_codegen.fuse_amplitude_into_consumer)
 substitutes the amplitude's own numerator into each stitch's contraction,
 dressed by one exp factor per external leg, one tau point at a time. A lambda
-l{r} is a signed axis-transpose of t{r} (_to_l_restricted), so its numerator
-enters relabelled into the occ-first order with the _to_l sign
+l{r} is a signed axis-transpose of t{r} (common/mp_amplitudes.to_l), so its
+numerator enters relabelled into the occ-first order with the to_l sign
 (laplace_codegen.lambda_canonical_and_sign: same-spin i,j,k,c,b,a with sign
 (-1)^(r//2), mixed-spin i,j,k,a,b,c with +1). Validated block by block at
 ntau=6 (the production grid) and at large ntau against the dense
@@ -47,12 +47,8 @@ the fuser's parser and its auxiliary letters are renamed like any dummy.
 Writes generatedADC/adc{N}/<module>[_df].py (generated on the user's machine,
 never committed).
 """
-import os
 import re
-import sys
 from itertools import product
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from src.CodeGeneration.codegen_common import (
     R_LEAVES, R_LEAVES_DF, R_DIMS, LAPLACE_IMPORTS, shape_expr, term_has_factor, signed_terms,
@@ -114,7 +110,7 @@ def highrank_structures(order, kind):
 def _fuse_flat(outer, df=False):
     """Fuse every rank>=3 l/t factor of `outer` at order 2, one tau slot per
     amplitude kind; returns (fused terms, nslots). l-tags fuse through the
-    occ-first canonical and the _to_l sign, t-tags through the vir-first
+    occ-first canonical and the to_l sign, t-tags through the vir-first
     amp_out_indices order with sign +1."""
     if df:
         outer = dress_integral_factor(outer)
@@ -150,7 +146,7 @@ def _fuse_flat(outer, df=False):
 def _fuse_nested(outer, l_order, rank=3):
     """The 'nested' fusion: the outer ket t2 renamed t2out_*, every outer
     l{rank} tag fused with its fuse_nested_numerator numerator at `l_order`
-    through the _to_l canonical (dressing kind l{rank})."""
+    through the to_l canonical (dressing kind l{rank})."""
     terms = [[t[0]] + [re.sub(r'^t2_', 't2out_', f.strip()) for f in t[1:]] for t in outer]
     while True:
         tags = sorted(t for t in highrank_tags(terms) if t.startswith(f'l{rank}_'))

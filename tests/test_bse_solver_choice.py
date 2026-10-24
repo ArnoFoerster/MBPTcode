@@ -61,16 +61,6 @@ def test_the_boundary_is_the_memory_form_of_the_pair_count():
     assert solver_choice(10 * BSE_DENSE_MAX_NOV) == 'davidson'
 
 
-def test_tamm_dancoff_flips_at_the_same_size():
-    """TDA diagonalizes A alone but the dense route BUILDS B with it, so the
-    rule counts the pair for both kernels and they cross over together."""
-    for n_ov in (1, BSE_DENSE_MAX_NOV - 1, BSE_DENSE_MAX_NOV,
-                 BSE_DENSE_MAX_NOV + 1, 10 * BSE_DENSE_MAX_NOV):
-        assert solver_choice(n_ov, tda=True) == solver_choice(n_ov, tda=False)
-    assert solver_choice(BSE_DENSE_MAX_NOV, tda=True) == 'dense'
-    assert solver_choice(BSE_DENSE_MAX_NOV + 1, tda=True) == 'davidson'
-
-
 def test_water_is_dense(water):
     """95 pairs is 144 kB of Casida blocks: the size at which iterating is the
     more expensive way to get three roots."""

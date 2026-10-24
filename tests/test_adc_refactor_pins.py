@@ -337,7 +337,7 @@ def _():
 
 @route('u_hw_adc3_sigma_en_dressed', tol=TOL_ITER)
 def _():
-    # production open-shell EN route (2026-07-31): dressed t2 + automatic
+    # production open-shell EN route: dressed t2 + automatic
     # u1_dressing_shift through the hand-written matrix-free operator
     s = h2o_sto3g()
     solver = ADCSolverUnrestricted.from_arrays(s['eps_spin'], s['g_anti'], nocc=2 * s['nocc'])

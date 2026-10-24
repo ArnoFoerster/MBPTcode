@@ -29,7 +29,7 @@ from src.SingleReference.GW.qp_states import (CurveOvershoots, OutsideCurve,
 from src.gradients.gwbse import qp_set
 from src.gradients.evaluation import GeometryCache
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.properties.excitations import qp_bookkeeping
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
 
 from test_outside_scissor import (FD_STEP, FD_TOL, RECORD, at_coords,
                                   molecule, scf_factory)
@@ -232,9 +232,9 @@ def test_the_slope_term_is_what_the_force_needs(water, curved):
     grad = chain.total_gradient(moved)[0]
     flat = copy.copy(chain)
     # another surface: its own evaluations, not the chain's cached force
-    flat._evaluations = GeometryCache()
-    full = flat.quasiparticles._curve_at
-    flat.quasiparticles._curve_at = lambda eps: [(i, d, 0.0 * s) for i, d, s in full(eps)]
+    flat.evaluations = GeometryCache()
+    full = flat.quasiparticles.curve_at
+    flat.quasiparticles.curve_at = lambda eps: [(i, d, 0.0 * s) for i, d, s in full(eps)]
     missing = np.abs(grad - flat.total_gradient(moved)[0]).max()
     assert missing / np.abs(grad).max() > 10 * FD_TOL
 

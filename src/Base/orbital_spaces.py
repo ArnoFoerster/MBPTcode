@@ -1,3 +1,5 @@
+"""The occupied/virtual split of an orbital spectrum and what follows from it:
+the index sets, the particle-hole energies and their range."""
 import numpy as np
 
 
@@ -24,3 +26,9 @@ def transition_range(spectra, noccs):
     windows = [particle_hole_window(eps, nocc)
                for eps, nocc in zip(spectra, noccs)]
     return min(w[0] for w in windows), max(w[1] for w in windows)
+
+
+def ov_energies(eps, nocc):
+    """d_(i,a) = eps_a - eps_i on the flattened pair index of C_ov."""
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    return (eps[virt][None, :] - eps[occ][:, None]).ravel()

@@ -15,9 +15,9 @@ is asked for: the stop is the dependence test, not the tolerance.
 residual again, the right-hand side scaled to unit norm (krylov's dependence
 test is absolute, so a small residual would otherwise stop it at once),
 until the true residual max |rhs - diag x - coupling(x)| is below tol. A
-solve that ends above tol is a numerical event
-(refuse inputs, warn numerics): it returns its last x, warns
-(CphfNotConverged) and, inside `collecting(flags)`, appends the flag
+solve that ends above tol is a numerical event (refuse inputs, warn numerics):
+it returns its last x, warns
+(CphfNotConverged) and, inside `numerical_flags.collecting(flags)`, appends the flag
 'cphf_not_converged' to that list, which a state model copies into its
 record (src.gradients.state_models).
 
@@ -30,34 +30,17 @@ precond: the denominators of the preconditioner, default diag. A floor on
 small gaps (sign(d) max(|d|, shift)) speeds a hard case up without changing
 the answer: the operator itself always carries the exact diag.
 """
-import contextlib
-import contextvars
-import warnings
 
 import numpy as np
 from pyscf import lib
 
 from src.Base.numerics.constants import CPHF_KRYLOV_LINDEP, CPHF_KRYLOV_TOL
 from src.Base.numerics.numerics import numerics_or_default
-
-# the flag list of the `collecting` block in flight, else None
-_FLAGS = contextvars.ContextVar('cphf_flags', default=None)
-
+from src.Base.numerical_flags import flag
 
 class CphfNotConverged(RuntimeWarning):
     """An orbital-response solve that ended above its true-residual tolerance
     (its last iterate returned)."""
-
-
-@contextlib.contextmanager
-def collecting(flags):
-    """Every `solve` inside the block appends its flags to `flags` (module
-    docstring)."""
-    token = _FLAGS.set(flags)
-    try:
-        yield flags
-    finally:
-        _FLAGS.reset(token)
 
 
 def _krylov(aop, b, scf_numerics):
@@ -119,8 +102,5 @@ def solve(coupling, diag, rhs, numerics=None, precond=None):
     if res >= tol:
         text = (f'CPHF not converged: true residual {res:.1e} after {refinements} '
                 f'refinements (tol {tol:.0e}); its last iterate is returned')
-        warnings.warn(text, CphfNotConverged, stacklevel=2)
-        flags = _FLAGS.get()
-        if flags is not None:
-            flags.append({'flag': 'cphf_not_converged', 'message': text})
+        flag('cphf_not_converged', text, CphfNotConverged)
     return x

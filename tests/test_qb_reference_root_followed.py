@@ -2,15 +2,15 @@
 geometry and followed from there, and a near-degenerate block of the set
 carries one shared correction.
 
-`DenseBSESurface(qp_root='weight')` must not take each orbital's root of
-largest pole strength afresh at every geometry. For a continuum virtual no
+`DenseBSESurface` must not take each orbital's root of largest pole strength
+afresh at every geometry. For a continuum virtual no
 root holds most of the weight, so that root changes branch between
 geometries 1e-3 Bohr apart (formaldehyde/cc-pVDZ T1, orbital 22, Z 0.19:
 +20 mHa), the energy steps and the saddle check's Hessian comes out
 asymmetric. The largest-weight roots are decided at the surface's own
-geometry (and again at each refreeze) and every other geometry follows each
-by its rank among the eigenvalues of the diagonal supermatrix: continuous,
-and the root a Newton from the reference root reaches nearby.
+geometry (and again at each refreeze) and every geometry follows each from
+its frozen root through the interval between the poles that bracket it
+(`QPqb.solve_diag` with a seed, the one root rule of `find_qp_root`).
 
 Orbitals closer than QP_DEGENERACY_TOL at the reference whose own
 corrections agree within QP_BLOCK_CORRECTION_TOL form blocks frozen with
@@ -27,11 +27,10 @@ from pyscf import gto
 
 from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL,
                                          QP_DEGENERACY_TOL)
-from src.SingleReference.GW.quasi_boson import ranked_root
 from src.gradients.gwbse import dense_surfaces
 from src.gradients.gwbse.dense_surfaces import DenseBSESurface
-from src.properties.excitations import qp_bookkeeping
-from tests.blas_bar import assert_same, bar_with_drift
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from tests.blas_bar import bar_with_drift
 
 NEAR_C3V = ('N 0 0 0.1173; H 0 0.9377 -0.2738; H 0.8121 -0.4689 -0.2738; '
             'H -0.8121 -0.4689 -0.2738')
@@ -54,8 +53,7 @@ ROUND_BAR = bar_with_drift(ROUND_OFF)
 def surface(atom):
     mol = gto.M(atom=atom, basis='6-31g', verbose=0)
     return mol, DenseBSESurface(mol, spin='triplet',
-                                qp_orbs=list(range(mol.nao)), filter_z=False,
-                                qp_root='weight')
+                                qp_orbs=list(range(mol.nao)), filter_z=False)
 
 
 def displaced(mol, atom, axis, step):
@@ -69,13 +67,13 @@ def displaced(mol, atom, axis, step):
 
 @pytest.fixture
 def spy(monkeypatch):
-    """Every BSEqb the surface builds, with the root rule and ranks it got."""
+    """Every BSEqb the surface builds, with the seeds it followed."""
     calls = []
 
     class Spy(dense_surfaces.BSEqb):
         def __init__(self, *args, **kw):
             super().__init__(*args, **kw)
-            calls.append((kw.get('qp_root'), kw.get('ranks'), self))
+            calls.append((kw.get('seeds'), self))
 
     monkeypatch.setattr(dense_surfaces, 'BSEqb', Spy)
     return calls
@@ -84,38 +82,40 @@ def spy(monkeypatch):
 def test_the_largest_weight_root_is_decided_at_the_reference_only(spy):
     mol, surf = surface(DISTORTED)
     assert surf.qp_blocks == ()
+    probe_seeds, probe = spy[0]
+    # the set and its roots are decided once, unseeded, at the reference ...
+    assert probe_seeds is None
+    assert surf.seeds == probe.qp_roots
+    for p in surf.qp_set:
+        assert probe.qp_roots[p] == probe.qp.quasiparticle_root(p)[0]
+    # ... and every evaluation follows them, the reference included
     surf.total_energy(mol)
-    rule, ranks, at_ref = spy[-1]
-    assert rule == 'weight' and ranks is None
-    # the reference roots are the largest-weight ones, as before
-    # (the seeds and these roots come from two solves: bitwise on the recording
-    # BLAS, energy class bar on another)
+    seeds, at_ref = spy[-1]
+    assert seeds == surf.seeds
     for p in surf.qp_set:
-        assert_same(at_ref.qp_roots[p], surf.seeds[p], label=p)
+        assert abs(at_ref.qp_roots[p] - surf.seeds[p]) < ROOT_TOL, p
     surf.total_energy(displaced(mol, 1, 2, 1e-3))
-    rule, ranks, there = spy[-1]
-    assert rule == 'rank' and ranks == surf.ranks
+    seeds, there = spy[-1]
+    assert seeds == surf.seeds
     for p in surf.qp_set:
-        # the same eigenvalue of the diagonal supermatrix by rank ...
-        assert there.qp.root_rank(p, there.qp_roots[p]) == ranks[p]
-        # ... which is the root a Newton from the reference root reaches here
         w, _ = there.qp.solve_diag(p, w0=surf.seeds[p])
-        assert abs(w - there.qp_roots[p]) < ROOT_TOL
+        assert w == there.qp_roots[p]
 
 
 def test_a_refreeze_decides_the_roots_again_at_its_geometry(spy):
     mol, surf = surface(DISTORTED)
     moved = displaced(mol, 1, 2, 2e-2)
+    before = len(spy)
     again = surf.refreeze(moved)
-    again.total_energy(moved)
-    rule, ranks, at_ref = spy[-1]
-    assert rule == 'weight' and ranks is None
-    assert again.ranks == {p: at_ref.qp.root_rank(p, at_ref.qp_roots[p])
-                           for p in again.qp_set}
-    # two solves: bitwise on the recording BLAS, energy class bar on another
+    probe_seeds, probe = spy[before]
+    assert probe_seeds is None
+    assert again.seeds == probe.qp_roots
     assert set(again.seeds) == set(again.qp_set)
+    again.total_energy(moved)
+    seeds, at_ref = spy[-1]
+    assert seeds == again.seeds
     for p in again.qp_set:
-        assert_same(again.seeds[p], at_ref.qp_roots[p], label=p)
+        assert abs(at_ref.qp_roots[p] - again.seeds[p]) < ROOT_TOL, p
 
 
 def test_near_degenerate_orbitals_share_one_correction():
@@ -150,26 +150,3 @@ def test_the_force_is_the_derivative_of_the_shared_correction():
             em = surf.total_energy(displaced(mol, atom, axis, -h))
             err.append(abs((ep - em) / (2 * h) - grad[atom, axis]))
         assert max(err) < FD_TOL, (atom, axis, err)
-
-
-@pytest.mark.parametrize('seed', range(3))
-def test_the_ranked_root_is_the_arrowhead_eigenvalue_of_that_rank(seed):
-    """Every rank, with one coupling exactly zero: that pole is an eigenvalue
-    of its own and is refused, every other rank is a root."""
-    rng = np.random.default_rng(seed)
-    n = 40
-    pol = rng.uniform(-2.0, 2.0, n)
-    num = rng.uniform(0.0, 1e-2, n)
-    num[3] = 0.0
-    a = rng.uniform(-0.5, 0.5)
-    h = np.diag(np.concatenate([[a], pol]))
-    h[0, 1:] = h[1:, 0] = np.sqrt(num)
-    vals = np.linalg.eigvalsh(h)
-    loose = int(np.argmin(np.abs(vals - pol[3])))
-    for k, v in enumerate(vals):
-        if k == loose:
-            with pytest.raises(RuntimeError, match='uncoupled'):
-                ranked_root(num, pol, a, k)
-            continue
-        w, _ = ranked_root(num, pol, a, k)
-        assert abs(w - v) < ROOT_TOL, k

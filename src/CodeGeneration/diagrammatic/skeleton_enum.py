@@ -1,4 +1,4 @@
-"""Graph-native skeleton enumeration -- the route-B generator.
+"""Graph-native skeleton enumeration.
 
 Replaces the pdaggerq fixed-end stream (whose internal Wick space cost
 247 GB at order 5) by direct orderly enumeration of
@@ -8,9 +8,8 @@ distinct marked vertices.  The whole downstream engine (orderings, cuts,
 value rule, quartet grouping, atlas) consumes the emitted Skeleton objects
 unchanged.
 
-Structure rules (all measured on the orders 2-4 pdaggerq streams,
-and gated in
-tests/test_diagram_skeleton_enum.py):
+Structure rules (all measured on the orders 2-4 pdaggerq streams and
+gated in tests/test_diagram_skeleton_enum.py):
   * bra external sits in a CREATED pair, ket external in an ANNIHILATED
     pair -- every block, every order;
   * vertices are 2-created/2-annihilated slots; internal edge =
